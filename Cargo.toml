@@ -1,0 +1,28 @@
+[workspace]
+members = ["rust/x-common"]
+
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+authors = ["The Meiosys Project Authors"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+x-common = { path = "./rust/x-common" }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[profile.wasm-release]
+inherits = "release"
+debug = false
+opt-level = "s"
+strip = "debuginfo"

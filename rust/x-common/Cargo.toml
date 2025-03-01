@@ -1,0 +1,9 @@
+[package]
+name = "x-common"
+description = "Shared, stand-alone helpers"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
