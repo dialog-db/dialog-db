@@ -1,5 +1,5 @@
 [workspace]
-members = ["rust/x-common"]
+members = ["rust/x-common", "rust/x-query"]
 
 resolver = "2"
 
@@ -10,6 +10,16 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 x-common = { path = "./rust/x-common" }
+x-query = { path = "./rust/x-query" }
+
+async-stream = "0.3"
+async-trait = "0.1"
+base58 = "0.2"
+blake3 = "1"
+futures-core = "0.3"
+serde = "1"
+thiserror = "2"
+
 
 [profile.dev]
 opt-level = 1

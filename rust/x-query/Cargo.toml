@@ -1,0 +1,16 @@
+[package]
+name = "x-query"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+x-common = { workspace = true }
+
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+futures-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
