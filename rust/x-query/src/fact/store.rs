@@ -60,22 +60,22 @@ pub trait TripleStoreMut: TripleStore {
     async fn assert<A, V>(
         &mut self,
         entity: Entity,
-        attribute: Attribute,
+        attribute: A,
         value: V,
-    ) -> Result<(), std::io::Error>
+    ) -> Result<PrimaryKey, std::io::Error>
     where
-        A: Clone,
+        A: Clone + ConditionalSend,
         Attribute: From<A>,
         V: AsRef<[u8]> + ConditionalSend,
     {
         let owned_value = value.as_ref().to_vec();
-        self.write(
-            PrimaryKey::from((entity.clone(), attribute.clone(), value)),
-            State::Added((entity, attribute.into(), owned_value)),
-        )
-        .await
+        let attribute = Attribute::from(attribute);
+        let key = PrimaryKey::from((entity.clone(), attribute.clone(), value));
+        self.write(key.clone(), State::Added((entity, attribute, owned_value)))
+            .await?;
+        Ok(key)
     }
 
-    /// Given a fact and its key, commit it to the store
+    /// Given a fact state and its key, commit it to the store
     async fn write(&mut self, key: PrimaryKey, state: State) -> Result<(), std::io::Error>;
 }

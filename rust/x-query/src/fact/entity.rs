@@ -6,7 +6,7 @@ use crate::Reference;
 
 use super::make_reference;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Entity(Reference);
 
 impl Entity {

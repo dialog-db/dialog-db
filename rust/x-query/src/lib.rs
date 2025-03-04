@@ -8,3 +8,6 @@ pub use codec::*;
 
 mod error;
 pub use error::*;
+
+mod query;
+pub use query::*;

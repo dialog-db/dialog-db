@@ -1,4 +1,4 @@
-use super::{Attribute, Entity, REFERENCE_MAX, REFERENCE_MIN, Reference};
+use super::{Attribute, Entity, Fragment, REFERENCE_MAX, REFERENCE_MIN, Reference};
 
 /// A trait that is implemented by every index key type in a [TripleStore]. When
 /// constructing indexes, it is useful to be able to lay out the keys in ways
@@ -20,6 +20,16 @@ pub trait IndexKey: Default {
 
     /// Get the value part of the key
     fn get_value_part(&self) -> &Reference;
+
+    /// Get the key fragments as a three-element array in entity-attribute-value
+    /// order
+    fn fragments(&self) -> [Fragment; 3] {
+        [
+            Fragment::Entity(*self.get_entity_part()),
+            Fragment::Attribute(*self.get_attribute_part()),
+            Fragment::Value(*self.get_value_part()),
+        ]
+    }
 
     /// Construct a key of this type at the lowest bound (all bits are zeroes)
     fn min() -> Self {

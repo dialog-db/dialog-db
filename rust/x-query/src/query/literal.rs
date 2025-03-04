@@ -1,7 +1,7 @@
-use super::{Attribute, Entity, Value};
+use crate::{Attribute, Entity, Value};
 
 #[derive(Debug, Clone)]
-pub enum Field {
+pub enum Literal {
     Entity(Entity),
     Attribute(Attribute),
     Value(Value),

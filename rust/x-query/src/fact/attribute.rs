@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use crate::{Reference, XQueryError};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Attribute {
     pub namespace: String,
     pub predicate: String,
@@ -24,6 +24,12 @@ impl FromStr for Attribute {
             namespace,
             predicate,
         })
+    }
+}
+
+impl From<&Attribute> for Attribute {
+    fn from(value: &Attribute) -> Self {
+        value.clone()
     }
 }
 
