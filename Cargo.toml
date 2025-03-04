@@ -1,5 +1,5 @@
 [workspace]
-members = ["rust/x-common", "rust/x-query"]
+members = ["rust/x-common", "rust/x-dbsp", "rust/x-query"]
 
 resolver = "2"
 
@@ -12,13 +12,18 @@ license = "MIT OR Apache-2.0"
 x-common = { path = "./rust/x-common" }
 x-query = { path = "./rust/x-query" }
 
+anyhow = "1"
 async-stream = "0.3"
 async-trait = "0.1"
 base58 = "0.2"
 blake3 = "1"
 futures-core = "0.3"
+futures-util = "0.3"
 serde = "1"
 thiserror = "2"
+tokio = "1"
+ulid = "1"
+wasm-bindgen-test = "0.3"
 
 
 [profile.dev]

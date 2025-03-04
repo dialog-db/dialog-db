@@ -7,18 +7,35 @@ use crate::{Attribute, Codec, Entity, Value, XQueryError};
 
 use super::PrimaryKey;
 
+mod memory;
+pub use memory::*;
+
+#[derive(Debug, Clone)]
+pub enum State {
+    Added(Datum),
+    Removed,
+}
+
 pub type Datum = (Entity, Attribute, Value);
 
 #[async_trait]
 pub trait TripleStore {
-    /// Returns a stream that yields unique entities in the store
-    async fn entities(&self) -> impl TryStream<Item = Result<Entity, XQueryError>>;
+    /// Returns a stream that yields all entities that have a given attribute
+    fn entities_with_attribute<A>(
+        &self,
+        attribute: A,
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>>
+    where
+        A: Into<Attribute> + ConditionalSend;
 
-    /// Returns a stream that yields unique attributes in the store
-    async fn attributes(&self) -> impl TryStream<Item = Result<Attribute, XQueryError>>;
+    /// Returns a stream that yields all attributes associated with a given entity
+    fn attributes_of_entity(
+        &self,
+        entity: &Entity,
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>>;
 
     /// Returns a stream that yields unique keys in the store
-    async fn keys(&self) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>>;
+    fn keys(&self) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>>;
 
     /// Given a key, return that datum associated with the key
     async fn read(&self, key: &PrimaryKey) -> Result<Option<Datum>, XQueryError>;
@@ -44,20 +61,21 @@ pub trait TripleStoreMut: TripleStore {
         &mut self,
         entity: Entity,
         attribute: Attribute,
-        value: Value,
+        value: V,
     ) -> Result<(), std::io::Error>
     where
         A: Clone,
         Attribute: From<A>,
-        V: AsRef<[u8]>,
+        V: AsRef<[u8]> + ConditionalSend,
     {
+        let owned_value = value.as_ref().to_vec();
         self.write(
-            PrimaryKey::from((entity, attribute.clone(), value.clone())),
-            (entity, attribute.into(), value),
+            PrimaryKey::from((entity.clone(), attribute.clone(), value)),
+            State::Added((entity, attribute.into(), owned_value)),
         )
         .await
     }
 
     /// Given a fact and its key, commit it to the store
-    async fn write(&mut self, key: PrimaryKey, datum: Datum) -> Result<(), std::io::Error>;
+    async fn write(&mut self, key: PrimaryKey, state: State) -> Result<(), std::io::Error>;
 }

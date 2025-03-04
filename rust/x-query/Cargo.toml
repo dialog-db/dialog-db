@@ -12,5 +12,12 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 futures-core = { workspace = true }
+futures-util = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+ulid = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+wasm-bindgen-test = { workspace = true }
