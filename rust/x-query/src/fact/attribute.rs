@@ -2,6 +2,8 @@ use std::str::FromStr;
 
 use crate::{Reference, XQueryError};
 
+use super::make_reference;
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Attribute {
     pub namespace: String,
@@ -36,12 +38,8 @@ impl From<&Attribute> for Attribute {
 impl From<Attribute> for (Reference, Reference) {
     fn from(value: Attribute) -> Self {
         (
-            blake3::hash(value.namespace.as_bytes())
-                .as_bytes()
-                .to_owned(),
-            blake3::hash(value.predicate.as_bytes())
-                .as_bytes()
-                .to_owned(),
+            make_reference(value.namespace.as_bytes()),
+            make_reference(value.predicate.as_bytes()),
         )
     }
 }

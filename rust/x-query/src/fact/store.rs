@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use futures_core::TryStream;
 use serde::de::DeserializeOwned;
-use x_common::ConditionalSend;
+use x_common::{ConditionalSend, ConditionalSync};
 
 use crate::{Attribute, Codec, Entity, Value, XQueryError};
 
-use super::PrimaryKey;
+use super::{Fragment, PrimaryKey};
 
 mod memory;
 pub use memory::*;
@@ -19,23 +19,29 @@ pub enum State {
 pub type Datum = (Entity, Attribute, Value);
 
 #[async_trait]
-pub trait TripleStore {
+pub trait TripleStore: Clone + ConditionalSync {
     /// Returns a stream that yields all entities that have a given attribute
-    fn entities_with_attribute<A>(
+    fn entities_with_attribute(
         &self,
-        attribute: A,
-    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>>
-    where
-        A: Into<Attribute> + ConditionalSend;
+        fragment: Fragment,
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend;
+
+    /// Returns a stream that yields all entities that have a given value
+    fn entities_with_value(
+        &self,
+        fragment: Fragment,
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend;
 
     /// Returns a stream that yields all attributes associated with a given entity
     fn attributes_of_entity(
         &self,
-        entity: &Entity,
-    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>>;
+        fragment: Fragment,
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend;
 
     /// Returns a stream that yields unique keys in the store
-    fn keys(&self) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>>;
+    fn keys(
+        &self,
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend;
 
     /// Given a key, return that datum associated with the key
     async fn read(&self, key: &PrimaryKey) -> Result<Option<Datum>, XQueryError>;

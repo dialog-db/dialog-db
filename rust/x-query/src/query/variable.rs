@@ -7,6 +7,22 @@ pub enum VariableAssignment {
     Attribute(PrimaryKey),
 }
 
+impl From<VariableAssignment> for PrimaryKey {
+    fn from(value: VariableAssignment) -> Self {
+        match value {
+            VariableAssignment::Entity(eav_key) => eav_key,
+            VariableAssignment::Value(eav_key) => eav_key,
+            VariableAssignment::Attribute(eav_key) => eav_key,
+        }
+    }
+}
+
+impl From<&VariableAssignment> for PrimaryKey {
+    fn from(value: &VariableAssignment) -> Self {
+        value.clone().into()
+    }
+}
+
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 pub struct Variable(String);
 

@@ -11,3 +11,6 @@ pub use error::*;
 
 mod query;
 pub use query::*;
+
+mod helpers;
+pub use helpers::*;

@@ -1,5 +1,3 @@
-use std::cell::OnceCell;
-
 use crate::{Fragment, XQueryError};
 
 use super::{Literal, Variable};
@@ -14,20 +12,24 @@ pub enum Part {
     Variable(Variable),
 }
 
+#[derive(Debug, Clone)]
 pub enum PatternSlot {
-    Literal(Literal, OnceCell<Fragment>),
+    Literal(Literal, Fragment),
     Variable(Variable),
 }
 
 impl From<Part> for PatternSlot {
     fn from(value: Part) -> Self {
         match value {
-            Part::Literal(literal) => PatternSlot::Literal(literal, OnceCell::new()),
+            Part::Literal(literal) => {
+                PatternSlot::Literal(literal.clone(), Fragment::from(literal))
+            }
             Part::Variable(variable) => PatternSlot::Variable(variable),
         }
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Pattern {
     entity: PatternSlot,
     attribute: PatternSlot,
@@ -47,9 +49,9 @@ impl From<(Part, Part, Part)> for Pattern {
 impl Pattern {
     pub fn entity(&self) -> Result<PatternPart, XQueryError> {
         match &self.entity {
-            PatternSlot::Literal(literal @ Literal::Entity(_), fragment_cache) => Ok(
-                PatternPart::Literal(fragment_cache.get_or_init(|| Fragment::from(literal))),
-            ),
+            PatternSlot::Literal(Literal::Entity(_), fragment) => {
+                Ok(PatternPart::Literal(fragment))
+            }
             PatternSlot::Literal(literal, _) => Err(XQueryError::InvalidPattern(format!(
                 "Expected entity, got {:?}",
                 literal
@@ -60,9 +62,9 @@ impl Pattern {
 
     pub fn attribute(&self) -> Result<PatternPart, XQueryError> {
         match &self.attribute {
-            PatternSlot::Literal(literal @ Literal::Attribute(_), fragment_cache) => Ok(
-                PatternPart::Literal(fragment_cache.get_or_init(|| Fragment::from(literal))),
-            ),
+            PatternSlot::Literal(Literal::Attribute(_), fragment) => {
+                Ok(PatternPart::Literal(fragment))
+            }
             PatternSlot::Literal(literal, _) => Err(XQueryError::InvalidPattern(format!(
                 "Expected attribute, got {:?}",
                 literal
@@ -73,9 +75,7 @@ impl Pattern {
 
     pub fn value(&self) -> Result<PatternPart, XQueryError> {
         match &self.value {
-            PatternSlot::Literal(literal @ Literal::Value(_), fragment_cache) => Ok(
-                PatternPart::Literal(fragment_cache.get_or_init(|| Fragment::from(literal))),
-            ),
+            PatternSlot::Literal(Literal::Value(_), fragment) => Ok(PatternPart::Literal(fragment)),
             PatternSlot::Literal(literal, _) => Err(XQueryError::InvalidPattern(format!(
                 "Expected value, got {:?}",
                 literal

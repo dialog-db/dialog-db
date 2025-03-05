@@ -86,57 +86,12 @@ pub fn match_part(
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
     use crate::{
-        Attribute, Entity, Frame, Literal, MemoryStore, Part, Pattern, PrimaryKey, TripleStore,
-        TripleStoreMut, Value, Variable, VariableAssignment,
+        Frame, Literal, Part, Pattern, TripleStore, Variable, VariableAssignment, make_store,
     };
     use anyhow::Result;
 
     use super::match_single;
-
-    async fn make_store() -> Result<(MemoryStore, Vec<(PrimaryKey, Entity, Attribute, Value)>)> {
-        let mut store = MemoryStore::default();
-
-        let item_name_attribute = Attribute::from_str("item/id")?;
-        let item_id_attribute = Attribute::from_str("item/name")?;
-        let back_reference_attribute = Attribute::from_str("back/reference")?;
-
-        let mut data = vec![];
-
-        for i in 0..8usize {
-            let entity = Entity::new();
-
-            data.push((
-                entity.clone(),
-                item_id_attribute.clone(),
-                i.to_le_bytes().to_vec(),
-            ));
-
-            data.push((
-                entity.clone(),
-                item_name_attribute.clone(),
-                format!("name{i}").as_bytes().to_vec(),
-            ));
-
-            data.push((
-                Entity::new(),
-                back_reference_attribute.clone(),
-                entity.as_ref().to_vec(),
-            ));
-        }
-
-        let mut entries = vec![];
-        for (entity, attribute, value) in data {
-            let key = store
-                .assert(entity.clone(), attribute.clone(), &value)
-                .await?;
-            entries.push((key, entity, attribute, value));
-        }
-
-        Ok((store, entries))
-    }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
@@ -170,7 +125,7 @@ mod tests {
             Part::Variable(Variable::from("foo")),
         ));
 
-        let frame = Frame::default();
+        let frame: Frame = Frame::default();
         let next_frame = match_single(&key, &pattern, frame)?;
 
         assert!(next_frame.is_some());

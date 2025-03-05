@@ -10,4 +10,7 @@ pub enum XQueryError {
 
     #[error("Variable could not be assigned: {0}")]
     InvalidAssignment(String),
+
+    #[error("Reference was not of the expected type: {0}")]
+    InvalidReference(String),
 }

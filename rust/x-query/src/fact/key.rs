@@ -1,4 +1,4 @@
-use super::{Attribute, Entity, Fragment, REFERENCE_MAX, REFERENCE_MIN, Reference};
+use super::{Attribute, Entity, Fragment, REFERENCE_MAX, REFERENCE_MIN, Reference, make_reference};
 
 /// A trait that is implemented by every index key type in a [TripleStore]. When
 /// constructing indexes, it is useful to be able to lay out the keys in ways
@@ -43,7 +43,11 @@ pub trait IndexKey: Default {
 
     /// Create a new key based on this one that is scoped to the specified [Entity]
     fn entity(&self, entity: &Entity) -> Self {
-        Self::create(**entity, *self.get_attribute_part(), *self.get_value_part())
+        self.entity_reference(**entity)
+    }
+
+    fn entity_reference(&self, fragment: Reference) -> Self {
+        Self::create(fragment, *self.get_attribute_part(), *self.get_value_part())
     }
 
     /// Create a new key based on this one that is scoped to the specified [Attribute]
@@ -58,7 +62,11 @@ pub trait IndexKey: Default {
             attribute.1 = self.get_attribute_part().1;
         };
 
-        Self::create(*self.get_entity_part(), attribute, *self.get_value_part())
+        self.attribute_reference(attribute)
+    }
+
+    fn attribute_reference(&self, fragment: (Reference, Reference)) -> Self {
+        Self::create(*self.get_entity_part(), fragment, *self.get_value_part())
     }
 
     /// Create a new key based on this one that is scoped to the specified [Value]
@@ -66,10 +74,14 @@ pub trait IndexKey: Default {
     where
         V: AsRef<[u8]>,
     {
+        self.value_reference(make_reference(value.as_ref()))
+    }
+
+    fn value_reference(&self, fragment: Reference) -> Self {
         Self::create(
             *self.get_entity_part(),
             *self.get_attribute_part(),
-            blake3::hash(value.as_ref()).as_bytes().to_owned(),
+            fragment,
         )
     }
 }
@@ -92,7 +104,7 @@ where
         EavKey {
             entity: *entity,
             attribute: Attribute::from(attribute).into(),
-            value: blake3::hash(value.as_ref()).as_bytes().to_owned(),
+            value: make_reference(value),
         }
     }
 }
@@ -165,7 +177,7 @@ where
         AevKey {
             entity: *entity,
             attribute: Attribute::from(attribute).into(),
-            value: blake3::hash(value.as_ref()).as_bytes().to_owned(),
+            value: make_reference(value),
         }
     }
 }
@@ -218,7 +230,7 @@ where
         VaeKey {
             entity: *entity,
             attribute: Attribute::from(attribute).into(),
-            value: blake3::hash(value.as_ref()).as_bytes().to_owned(),
+            value: make_reference(value),
         }
     }
 }
@@ -293,7 +305,7 @@ mod tests {
 
             for (key, _) in map.range(entity_min..entity_max) {
                 count += 1;
-                assert_eq!(key.get_entity_part(), entity.as_ref());
+                assert_eq!(key.get_entity_part(), &*entity);
             }
 
             assert_eq!(count, 2);
