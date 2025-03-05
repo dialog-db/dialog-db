@@ -14,3 +14,6 @@ pub use query::*;
 
 mod helpers;
 pub use helpers::*;
+
+mod stream;
+pub use stream::*;

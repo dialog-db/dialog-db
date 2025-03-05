@@ -1,6 +1,8 @@
-use crate::{Fragment, XQueryError};
+use async_stream::try_stream;
 
-use super::{Literal, Variable};
+use crate::{Fragment, FrameStream, TripleStore, XQueryError, match_single, query::key_stream};
+
+use super::{Literal, Query, Variable};
 
 pub enum PatternPart<'a> {
     Literal(&'a Fragment),
@@ -90,5 +92,27 @@ impl Pattern {
         let value = self.value()?;
 
         Ok([entity, attribute, value])
+    }
+}
+
+impl Query for Pattern {
+    fn stream<S, F>(self, store: S, frames: F) -> impl FrameStream
+    where
+        S: TripleStore + 'static,
+        F: FrameStream + 'static,
+    {
+        try_stream! {
+            for await frame in frames {
+                let frame = frame?;
+                let stream = key_stream(store.clone(), &self);
+
+                for await item in stream {
+                    let item = item?;
+                    if let Some(frame) = match_single(&item, &self, frame.clone())? {
+                        yield frame;
+                    }
+                }
+            }
+        }
     }
 }
