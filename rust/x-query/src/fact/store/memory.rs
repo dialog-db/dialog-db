@@ -5,9 +5,9 @@ use std::{collections::BTreeMap, sync::Arc};
 use tokio::{join, sync::RwLock};
 use x_common::ConditionalSend;
 
-use crate::{AevKey, EavKey, Fragment, IndexKey, PrimaryKey, VaeKey, XQueryError};
+use crate::{AevKey, EavKey, IndexKey, KeyPart, PrimaryKey, VaeKey, XQueryError};
 
-use super::{Datum, State, TripleStore, TripleStoreMut};
+use super::{Datum, State, TripleStore, TripleStoreMut, TripleStorePull};
 
 /// A [MemoryStore] implements [TripleStore] and [TripleStoreMut] over indexes
 /// built with the standard Rust [BTreeMap]. All facts are held in-memory, and no
@@ -21,80 +21,6 @@ pub struct MemoryStore {
 
 #[async_trait]
 impl TripleStore for MemoryStore {
-    /// Returns a stream that yields all entities that have a given attribute
-    fn entities_with_attribute(
-        &self,
-        fragment: Fragment,
-    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend {
-        let aev = self.aev.clone();
-
-        try_stream! {
-            let attribute = fragment.as_attribute()?;
-
-            let min = <AevKey as IndexKey>::min().attribute_reference(attribute.clone());
-            let max = <AevKey as IndexKey>::max().attribute_reference(attribute.clone());
-            let aev = aev.read().await;
-
-            for (key, _) in aev.range(min..max) {
-                yield key.clone().into()
-            }
-        }
-    }
-
-    /// Returns a stream that yields all entities that have a given attribute
-    fn entities_with_value(
-        &self,
-        fragment: Fragment,
-    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend {
-        let vae = self.vae.clone();
-
-        try_stream! {
-            let value = fragment.as_value()?;
-
-            let min = <VaeKey as IndexKey>::min().value_reference(value.clone());
-            let max = <VaeKey as IndexKey>::max().value_reference(value.clone());
-            let vae = vae.read().await;
-
-            for (key, _) in vae.range(min..max) {
-                yield key.clone().into()
-            }
-        }
-    }
-
-    /// Returns a stream that yields all attributes associated with a given entity
-    fn attributes_of_entity(
-        &self,
-        fragment: Fragment,
-    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend {
-        let eav = self.eav.clone();
-
-        try_stream! {
-            let entity = fragment.as_entity()?;
-
-            let min = <EavKey as IndexKey>::min().entity_reference(entity.clone());
-            let max = <EavKey as IndexKey>::max().entity_reference(entity.clone());
-            let eav = eav.read().await;
-
-            for (key, _) in eav.range(min..max) {
-                yield key.clone().into()
-            }
-        }
-    }
-
-    /// Returns a stream that yields a [PrimaryKey] for every unique [Datum] in the store
-    fn keys(
-        &self,
-    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend {
-        let eav = self.eav.clone();
-
-        try_stream! {
-            let eav = eav.read().await;
-            for key in eav.keys() {
-                yield key.clone()
-            }
-        }
-    }
-
     /// Given a key, return that datum associated with the key
     async fn read(&self, key: &PrimaryKey) -> Result<Option<Datum>, XQueryError> {
         Ok(self
@@ -126,15 +52,90 @@ impl TripleStoreMut for MemoryStore {
     }
 }
 
+impl TripleStorePull for MemoryStore {
+    /// Returns a stream that yields all entities that have a given attribute
+    fn entities_with_attribute(
+        &self,
+        fragment: KeyPart,
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend {
+        let aev = self.aev.clone();
+
+        try_stream! {
+            let attribute = fragment.as_attribute_part()?;
+
+            let min = <AevKey as IndexKey>::min().attribute_part(attribute.clone());
+            let max = <AevKey as IndexKey>::max().attribute_part(attribute.clone());
+            let aev = aev.read().await;
+
+            for (key, _) in aev.range(min..max) {
+                yield key.clone().into()
+            }
+        }
+    }
+
+    /// Returns a stream that yields all entities that have a given attribute
+    fn entities_with_value(
+        &self,
+        fragment: KeyPart,
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend {
+        let vae = self.vae.clone();
+
+        try_stream! {
+            let value = fragment.as_value_part()?;
+
+            let min = <VaeKey as IndexKey>::min().value_part(value.clone());
+            let max = <VaeKey as IndexKey>::max().value_part(value.clone());
+            let vae = vae.read().await;
+
+            for (key, _) in vae.range(min..max) {
+                yield key.clone().into()
+            }
+        }
+    }
+
+    /// Returns a stream that yields all attributes associated with a given entity
+    fn attributes_of_entity(
+        &self,
+        fragment: KeyPart,
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend {
+        let eav = self.eav.clone();
+
+        try_stream! {
+            let entity = fragment.as_entity_part()?;
+
+            let min = <EavKey as IndexKey>::min().entity_part(entity.clone());
+            let max = <EavKey as IndexKey>::max().entity_part(entity.clone());
+            let eav = eav.read().await;
+
+            for (key, _) in eav.range(min..max) {
+                yield key.clone().into()
+            }
+        }
+    }
+
+    /// Returns a stream that yields a [PrimaryKey] for every unique [Datum] in the store
+    fn keys(
+        &self,
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend {
+        let eav = self.eav.clone();
+
+        try_stream! {
+            let eav = eav.read().await;
+            for key in eav.keys() {
+                yield key.clone()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
-    use crate::{Attribute, Entity, Fragment};
+    use crate::{Attribute, Entity, KeyPart, TripleStorePull};
 
-    use super::{MemoryStore, TripleStore, TripleStoreMut};
+    use super::{MemoryStore, TripleStoreMut};
     use anyhow::Result;
-    // use futures_core::{Stream, TryStream};
     use futures_util::{TryStreamExt, pin_mut};
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -156,7 +157,7 @@ mod tests {
         }
 
         // Stream only entities with a "test/name" attribute (100 entities expected)
-        let entity_stream = memory_store.entities_with_attribute(Fragment::from(name_attribute));
+        let entity_stream = memory_store.entities_with_attribute(KeyPart::from(name_attribute));
 
         pin_mut!(entity_stream);
 

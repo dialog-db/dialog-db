@@ -1,24 +1,45 @@
 use async_stream::try_stream;
 use futures_util::{TryStreamExt, stream, stream_select};
 
-use crate::{FrameStream, TripleStore, fork_stream};
+use crate::{FrameStream, Scope, TripleStorePull, Variable, XQueryError, fork_stream};
 
-use super::Query;
+use super::{PullQuery, Query};
 
 #[derive(Clone)]
 pub struct And<L, R>(pub L, pub R)
 where
-    L: Query + 'static,
-    R: Query + 'static;
+    L: PullQuery + 'static,
+    R: PullQuery + 'static;
 
 impl<L, R> Query for And<L, R>
 where
-    L: Query + 'static,
-    R: Query + 'static,
+    L: PullQuery + 'static,
+    R: PullQuery + 'static,
+{
+    fn scope(&self, scope: &Scope) -> Self {
+        Self(self.0.scope(scope), self.1.scope(scope))
+    }
+
+    fn substitute(
+        &self,
+        variable: &Variable,
+        constant: &crate::Value,
+    ) -> Result<Self, XQueryError> {
+        Ok(Self(
+            self.0.substitute(variable, constant)?,
+            self.1.substitute(variable, constant)?,
+        ))
+    }
+}
+
+impl<L, R> PullQuery for And<L, R>
+where
+    L: PullQuery + 'static,
+    R: PullQuery + 'static,
 {
     fn stream<S, F>(self, store: S, frames: F) -> impl FrameStream
     where
-        S: TripleStore + 'static,
+        S: TripleStorePull + 'static,
         F: FrameStream + 'static,
     {
         try_stream! {
@@ -37,17 +58,38 @@ where
 #[derive(Clone)]
 pub struct Or<L, R>(pub L, pub R)
 where
-    L: Query + 'static,
-    R: Query + 'static;
+    L: PullQuery + 'static,
+    R: PullQuery + 'static;
 
 impl<L, R> Query for Or<L, R>
 where
-    L: Query + 'static,
-    R: Query + 'static,
+    L: PullQuery + 'static,
+    R: PullQuery + 'static,
+{
+    fn scope(&self, scope: &Scope) -> Self {
+        Self(self.0.scope(scope), self.1.scope(scope))
+    }
+
+    fn substitute(
+        &self,
+        variable: &Variable,
+        constant: &crate::Value,
+    ) -> Result<Self, XQueryError> {
+        Ok(Self(
+            self.0.substitute(variable, constant)?,
+            self.1.substitute(variable, constant)?,
+        ))
+    }
+}
+
+impl<L, R> PullQuery for Or<L, R>
+where
+    L: PullQuery + 'static,
+    R: PullQuery + 'static,
 {
     fn stream<S, F>(self, store: S, frames: F) -> impl FrameStream
     where
-        S: TripleStore + 'static,
+        S: TripleStorePull + 'static,
         F: FrameStream + 'static,
     {
         try_stream! {
@@ -71,15 +113,32 @@ where
 #[derive(Clone)]
 pub struct Not<Q>(pub Q)
 where
-    Q: Query + 'static;
+    Q: PullQuery + 'static;
 
 impl<Q> Query for Not<Q>
 where
-    Q: Query + 'static,
+    Q: PullQuery + 'static,
+{
+    fn scope(&self, scope: &Scope) -> Self {
+        Self(self.0.scope(scope))
+    }
+
+    fn substitute(
+        &self,
+        variable: &Variable,
+        constant: &crate::Value,
+    ) -> Result<Self, XQueryError> {
+        Ok(Self(self.0.substitute(variable, constant)?))
+    }
+}
+
+impl<Q> PullQuery for Not<Q>
+where
+    Q: PullQuery + 'static,
 {
     fn stream<S, F>(self, store: S, frames: F) -> impl FrameStream
     where
-        S: TripleStore + 'static,
+        S: TripleStorePull + 'static,
         F: FrameStream + 'static,
     {
         try_stream! {

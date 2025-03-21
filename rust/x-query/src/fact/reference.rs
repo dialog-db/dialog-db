@@ -1,6 +1,8 @@
 use base58::ToBase58;
 use std::ops::Deref;
 
+use crate::XQueryError;
+
 /// A type-alias for a 32-byte array
 pub type RawReference = [u8; 32];
 
@@ -9,8 +11,27 @@ pub type RawReference = [u8; 32];
 pub struct Reference(RawReference);
 
 impl Reference {
+    pub const BYTE_LENGTH: usize = 32;
+
+    const RAW_NULL_REFERENCE: [u8; 32] = [0; 32];
+
     pub const fn from_raw(inner: RawReference) -> Self {
         Reference(inner)
+    }
+
+    pub const fn null() -> Self {
+        Self(Self::RAW_NULL_REFERENCE)
+    }
+}
+
+impl TryFrom<&[u8]> for Reference {
+    type Error = XQueryError;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let raw = RawReference::try_from(value).map_err(|error| {
+            XQueryError::InvalidReference(format!("Cannot convert bytes into reference: {}", error))
+        })?;
+        Ok(Self(raw))
     }
 }
 

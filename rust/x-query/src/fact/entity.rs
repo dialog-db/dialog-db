@@ -1,22 +1,15 @@
 use std::ops::Deref;
 
-use ulid::Generator as UlidGenerator;
-
 use crate::Reference;
 
-use super::make_reference;
+use super::{make_reference, make_seed};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Entity(Reference);
 
 impl Entity {
     pub fn new() -> Self {
-        let seed = UlidGenerator::new()
-            .generate()
-            .expect("Random bit overflow!?")
-            .to_bytes();
-
-        Self(make_reference(seed))
+        Self(make_reference(make_seed()))
     }
 }
 

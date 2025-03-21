@@ -12,38 +12,39 @@ mod inner {
     {
         let mut store = MemoryStore::default();
 
-        let item_id_attribute = Attribute::from_str("item:id")?;
-        let item_name_attribute = Attribute::from_str("item:name")?;
-        let back_reference_attribute = Attribute::from_str("back:reference")?;
+        let item_id_attribute = Attribute::from_str("item/id")?;
+        let item_name_attribute = Attribute::from_str("item/name")?;
+        let back_reference_attribute = Attribute::from_str("back/reference")?;
 
         let mut data = vec![];
 
-        for i in 0..8usize {
+        for i in 0..8u128 {
             let entity = Entity::new();
 
             data.push((
                 entity.clone(),
                 item_id_attribute.clone(),
-                i.to_le_bytes().to_vec(),
+                Value::UnsignedInt(i),
             ));
 
             data.push((
                 entity.clone(),
                 item_name_attribute.clone(),
-                format!("name{i}").as_bytes().to_vec(),
+                Value::String(format!("name{i}")),
             ));
 
             data.push((
                 Entity::new(),
                 back_reference_attribute.clone(),
-                entity.as_ref().to_vec(),
+                Value::Entity(entity),
             ));
         }
 
-        let mut entries = vec![];
+        let mut entries: Vec<(crate::EavKey, Entity, Attribute, Value)> = vec![];
         for (entity, attribute, value) in data {
+            let value = Value::from(value);
             let key = store
-                .assert(entity.clone(), attribute.clone(), &value)
+                .assert(entity.clone(), attribute.clone(), value.clone())
                 .await?;
             entries.push((key, entity, attribute, value));
         }

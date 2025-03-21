@@ -1,82 +1,122 @@
-use crate::{Fragment, IndexKey, PrimaryKey, XQueryError};
+use crate::{DataType, IndexKey, KeyPart, PrimaryKey, Value, XQueryError};
 
-use super::{Frame, Pattern, PatternPart, VariableAssignment};
+use super::{Frame, MatchableTerm, Pattern, VariableAssignment};
 
 pub fn match_single(
     key: &PrimaryKey,
     pattern: &Pattern,
     mut frame: Frame,
 ) -> Result<Option<Frame>, XQueryError> {
-    let key_fragments = key.fragments();
+    let key_fragments = key.parts();
     let pattern_parts = pattern.parts()?;
 
+    println!("KEY FRAGMENTS: {:?}", key_fragments);
+    println!("PATTERN PARTS: {:?}", pattern_parts);
     for i in 0..3usize {
-        let Some(next_frame) = match_part(key, &key_fragments[i], &pattern_parts[i], frame)? else {
+        let Some(next_frame) = match_term(key, &key_fragments[i], &pattern_parts[i], frame)? else {
+            println!("NO MATCH!");
             return Ok(None);
         };
         frame = next_frame;
     }
 
+    println!("YES MATCH!");
     Ok(Some(frame))
 }
 
-pub fn match_part(
+pub fn match_term(
     key: &PrimaryKey,
-    fragment: &Fragment,
-    part: &PatternPart,
+    key_part: &KeyPart,
+    pattern_term: &MatchableTerm,
     frame: Frame,
 ) -> Result<Option<Frame>, XQueryError> {
-    Ok(match part {
-        PatternPart::Literal(pattern_fragment) => {
-            if fragment == *pattern_fragment {
-                Some(frame)
-            } else {
-                None
+    Ok(match pattern_term {
+        MatchableTerm::Constant {
+            value,
+            key_part: pattern_key_part,
+            attribute_key_part,
+        } => match (key_part, value, attribute_key_part) {
+            (KeyPart::Attribute(_), _, Some(pattern_key_part)) => {
+                println!(
+                    "COMPARING SYMBOLS: {:?} == {:?}",
+                    key_part, pattern_key_part
+                );
+                if key_part == pattern_key_part {
+                    Some(frame)
+                } else {
+                    None
+                }
             }
-        }
-        PatternPart::Variable(variable) => {
+            (KeyPart::Entity(entity), Value::Entity(pattern_entity), _) => {
+                println!("COMPARING ENTITIES: {:?} == {:?}", entity, pattern_entity);
+                if entity == &**pattern_entity {
+                    Some(frame)
+                } else {
+                    None
+                }
+            }
+            _ => {
+                println!(
+                    "COMPARING CONSTANTS: {:?} == {:?}",
+                    key_part, pattern_key_part
+                );
+                if key_part == pattern_key_part {
+                    Some(frame)
+                } else {
+                    None
+                }
+            }
+        },
+        MatchableTerm::Variable(variable) => {
             if let Some(assignment) = frame.read(variable) {
-                match (fragment, assignment) {
+                println!(
+                    "VARIABLE ASSIGNED ALREADY: {:?} => {:?}",
+                    variable, assignment
+                );
+                match (key_part, assignment) {
                     // Entity == Entity
-                    (Fragment::Entity(left), VariableAssignment::Entity(right))
+                    (KeyPart::Entity(left), VariableAssignment::Entity(right))
                         if left == &right.entity =>
                     {
                         Some(frame)
                     }
                     // Entity == Value
-                    (Fragment::Entity(left), VariableAssignment::Value(right))
-                        if left == &right.value =>
+                    (KeyPart::Entity(left), VariableAssignment::Value(DataType::Entity, right))
+                        if left == &right.value.1 =>
                     {
                         Some(frame)
                     }
                     // Attribute == Attribute
-                    (Fragment::Attribute(left), VariableAssignment::Attribute(right))
+                    (KeyPart::Attribute(left), VariableAssignment::Attribute(right))
                         if left == &right.attribute =>
                     {
                         Some(frame)
                     }
                     // Value == Value
-                    (Fragment::Value(left), VariableAssignment::Value(right))
-                        if left == &right.value =>
+                    (KeyPart::Value(left), VariableAssignment::Value(_, key))
+                        if left == &key.value =>
                     {
                         Some(frame)
                     }
                     // Value == Entity
-                    (Fragment::Value(left), VariableAssignment::Entity(right))
-                        if left == &right.entity =>
+                    (KeyPart::Value(left), VariableAssignment::Entity(right))
+                        if left == &(DataType::Entity.into(), right.entity) =>
                     {
                         Some(frame)
                     }
                     _ => None,
                 }
             } else {
+                println!("ASSIGNMENT: {:?} => {:?}", variable, key_part);
                 let key = key.clone();
                 Some(frame.assign(
                     (*variable).clone(),
-                    match fragment {
-                        Fragment::Entity(_) => VariableAssignment::Entity(key),
-                        Fragment::Attribute(_) => VariableAssignment::Attribute(key),
-                        Fragment::Value(_) => VariableAssignment::Value(key),
+                    match key_part {
+                        KeyPart::Entity(_) => VariableAssignment::Entity(key),
+                        KeyPart::Attribute(_) => VariableAssignment::Attribute(key),
+                        KeyPart::Value((data_type, _)) => {
+                            VariableAssignment::Value(DataType::from(data_type), key)
+                        }
                     },
                 )?)
             }
@@ -87,7 +127,7 @@ pub fn match_part(
 #[cfg(test)]
 mod tests {
     use crate::{
-        Frame, Literal, Part, Pattern, TripleStore, Variable, VariableAssignment, make_store,
+        Frame, Pattern, Term, TripleStore, Value, Variable, VariableAssignment, make_store,
     };
     use anyhow::Result;
 
@@ -99,11 +139,11 @@ mod tests {
         let (_, data) = make_store().await?;
         let (key, entity, attribute, value) = data.get(0).unwrap();
 
-        let pattern = Pattern::from((
-            Part::Literal(Literal::Entity(entity.clone())),
-            Part::Literal(Literal::Attribute(attribute.clone())),
-            Part::Literal(Literal::Value(value.clone())),
-        ));
+        let pattern = Pattern::try_from((
+            Value::Entity(entity.clone()),
+            Value::Symbol(attribute.to_string()),
+            value.clone(),
+        ))?;
 
         let frame = Frame::default();
         let next_frame = match_single(&key, &pattern, frame)?;
@@ -119,11 +159,11 @@ mod tests {
         let (store, data) = make_store().await?;
         let (key, entity, attribute, value) = data.get(0).unwrap();
 
-        let pattern = Pattern::from((
-            Part::Literal(Literal::Entity(entity.clone())),
-            Part::Literal(Literal::Attribute(attribute.clone())),
-            Part::Variable(Variable::from("foo")),
-        ));
+        let pattern = Pattern::try_from((
+            Value::Entity(entity.clone()),
+            Value::Symbol(attribute.to_string()),
+            Variable::from("foo"),
+        ))?;
 
         let frame: Frame = Frame::default();
         let next_frame = match_single(&key, &pattern, frame)?;
@@ -138,7 +178,7 @@ mod tests {
         let foo = foo.unwrap();
 
         match foo {
-            crate::VariableAssignment::Value(key) => {
+            crate::VariableAssignment::Value(_, key) => {
                 let datum = store.read(key).await?;
 
                 assert!(datum.is_some());
@@ -158,11 +198,11 @@ mod tests {
         let (store, data) = make_store().await?;
         let (key, entity, attribute, value) = data.get(0).unwrap();
 
-        let pattern = Pattern::from((
-            Part::Variable(Variable::from("foo")),
-            Part::Variable(Variable::from("bar")),
-            Part::Variable(Variable::from("baz")),
-        ));
+        let pattern = Pattern::try_from((
+            Variable::from("foo"),
+            Variable::from("bar"),
+            Variable::from("baz"),
+        ))?;
 
         let frame = Frame::default();
         let next_frame = match_single(&key, &pattern, frame)?;
@@ -185,7 +225,7 @@ mod tests {
             (
                 VariableAssignment::Entity(entity_key),
                 VariableAssignment::Attribute(attribute_key),
-                VariableAssignment::Value(value_key),
+                VariableAssignment::Value(_, value_key),
             ) => {
                 assert_eq!(entity_key, attribute_key);
                 assert_eq!(entity_key, value_key);

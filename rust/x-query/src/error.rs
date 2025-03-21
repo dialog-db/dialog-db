@@ -13,4 +13,10 @@ pub enum XQueryError {
 
     #[error("Reference was not of the expected type: {0}")]
     InvalidReference(String),
+
+    #[error("Cannot perform a substitution: {0}")]
+    InvalidSubstituion(String),
+
+    #[error("Value could not be decoded from bytes: {0}")]
+    InvalidRawValue(String),
 }
