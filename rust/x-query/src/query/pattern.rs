@@ -1,6 +1,6 @@
 use crate::{Attribute, KeyPart, XQueryError};
 
-use super::{Scope, Value, Variable};
+use super::{Query, Scope, Value, Variable};
 
 #[derive(Clone)]
 pub enum Term {
@@ -23,9 +23,21 @@ impl From<Variable> for Term {
     }
 }
 
+impl From<&Variable> for Term {
+    fn from(value: &Variable) -> Self {
+        Term::Variable(value.clone())
+    }
+}
+
 impl From<Value> for Term {
     fn from(value: Value) -> Self {
         Term::Constant(value)
+    }
+}
+
+impl From<&Value> for Term {
+    fn from(value: &Value) -> Self {
+        Term::Constant(value.clone())
     }
 }
 
@@ -64,6 +76,37 @@ pub struct Pattern {
     pub entity: MatchableTerm,
     pub attribute: MatchableTerm,
     pub value: MatchableTerm,
+}
+
+impl Query for Pattern {
+    fn scope(&self, scope: &Scope) -> Self {
+        Pattern::scope(self, scope)
+    }
+
+    fn substitute(&self, variable: &Variable, alternate: &Term) -> Result<Self, XQueryError> {
+        match &self.entity {
+            MatchableTerm::Variable(entity_variable) if entity_variable == variable => {
+                return self.replace_entity(alternate.clone());
+            }
+            _ => (),
+        };
+
+        match &self.attribute {
+            MatchableTerm::Variable(attribute_variable) if attribute_variable == variable => {
+                return self.replace_attribute(alternate.clone());
+            }
+            _ => (),
+        };
+
+        match &self.value {
+            MatchableTerm::Variable(value_variable) if value_variable == variable => {
+                return self.replace_value(alternate.clone());
+            }
+            _ => (),
+        };
+
+        Ok(self.clone())
+    }
 }
 
 impl<E, A, V> TryFrom<(E, A, V)> for Pattern
@@ -151,11 +194,11 @@ impl Pattern {
                 any @ MatchableTerm::Constant { .. } => any.clone(),
                 MatchableTerm::Variable(variable) => MatchableTerm::Variable(variable.scope(scope)),
             },
-            attribute: match &self.entity {
+            attribute: match &self.attribute {
                 any @ MatchableTerm::Constant { .. } => any.clone(),
                 MatchableTerm::Variable(variable) => MatchableTerm::Variable(variable.scope(scope)),
             },
-            value: match &self.entity {
+            value: match &self.value {
                 any @ MatchableTerm::Constant { .. } => any.clone(),
                 MatchableTerm::Variable(variable) => MatchableTerm::Variable(variable.scope(scope)),
             },

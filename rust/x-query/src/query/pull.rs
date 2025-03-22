@@ -1,8 +1,8 @@
 use async_stream::try_stream;
 
-use crate::{FrameStream, TripleStorePull, Value, XQueryError, match_single};
+use crate::{FrameStream, TripleStorePull, match_single};
 
-use super::{MatchableTerm, Pattern, Query, Scope, Term, Variable};
+use super::{Pattern, Query};
 
 mod compound;
 pub use compound::*;
@@ -18,37 +18,6 @@ pub trait PullQuery: Query {
     where
         S: TripleStorePull + 'static,
         F: FrameStream + 'static;
-}
-
-impl Query for Pattern {
-    fn scope(&self, scope: &Scope) -> Self {
-        Pattern::scope(self, scope)
-    }
-
-    fn substitute(&self, variable: &Variable, constant: &Value) -> Result<Self, XQueryError> {
-        match &self.entity {
-            MatchableTerm::Variable(entity_variable) if entity_variable == variable => {
-                return self.replace_entity(Term::Constant(constant.clone()));
-            }
-            _ => (),
-        };
-
-        match &self.attribute {
-            MatchableTerm::Variable(attribute_variable) if attribute_variable == variable => {
-                return self.replace_entity(Term::Constant(constant.clone()));
-            }
-            _ => (),
-        };
-
-        match &self.value {
-            MatchableTerm::Variable(value_variable) if value_variable == variable => {
-                return self.replace_entity(Term::Constant(constant.clone()));
-            }
-            _ => (),
-        };
-
-        Ok(self.clone())
-    }
 }
 
 impl PullQuery for Pattern {
@@ -75,10 +44,8 @@ impl PullQuery for Pattern {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
     use crate::{
-        Attribute, Frame, Pattern, PrimaryKey, Term, TripleStore, Value, Variable, make_store,
+        Frame, Pattern, PrimaryKey, TripleStore, Value, Variable, make_store,
         pull::{And, Not, Or, PullQuery},
     };
     use anyhow::Result;

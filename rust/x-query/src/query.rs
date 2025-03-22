@@ -19,7 +19,7 @@ pub mod push;
 use crate::{Value, XQueryError};
 use x_common::ConditionalSend;
 
-pub trait Query: Clone + ConditionalSend {
+pub trait Query: Clone + std::fmt::Debug + ConditionalSend {
     fn scope(&self, scope: &Scope) -> Self;
-    fn substitute(&self, variable: &Variable, constant: &Value) -> Result<Self, XQueryError>;
+    fn substitute(&self, variable: &Variable, alternate: &Term) -> Result<Self, XQueryError>;
 }

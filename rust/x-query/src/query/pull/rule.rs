@@ -1,96 +1,95 @@
-/*
-let is_boss = Rule(
-    [Variable::from("person")],
-    Pattern::From(
-        (
-            Part::Variable(Variable::From("person")),
-            Part::Literal(Literal::Attribute(Attribute::from_str("org/supervisorOf"))),
-            Part::Variable(Variable::From("anyone"))
-        )
-    )
-);
-
-let is_parent_of = Rule(
-    [Variable::from("parent"), [Variable::from("child")],
-    Pattern::From(
-        (
-            Part::Variable(Variable::From("parent")),
-            Part::Literal(Literal::Attribute(Attribute::from_str("relationship/parentOf"))),
-            Part::Variable(Variable::From("child"))
-        )
-    )
-);
-
-let is_grandparent_of = Rule(
-    [Variable::from("grandparent"), [Variable::from("child")],
-    And(
-        is_parent_of.query([Variable::from("grandparent"), Variable::from("parent")]),
-        is_parent_of.query([Variable::from("parent"), Variable::from("child")]),
-    )
-);
-*/
-
-use crate::{Frame, Scope, Term, Variable};
+use crate::{Scope, Term, Variable, XQueryError};
 
 use super::PullQuery;
 
-pub struct Rule<const TERMS: usize, Q>
+pub struct Rule<const ARITY: usize, Q>
 where
     Q: PullQuery,
 {
-    pub conclusion: [Variable; TERMS],
+    pub conclusion: [Variable; ARITY],
     pub body: Q,
 }
 
-impl<const TERMS: usize, Q> Rule<TERMS, Q>
+impl<const ARITY: usize, Q> Rule<ARITY, Q>
 where
     Q: PullQuery,
 {
-    pub fn query(&self, terms: [Term; TERMS]) -> RuleQuery<TERMS, Q> {
+    pub fn query(&self, terms: [Term; ARITY]) -> Result<Q, XQueryError> {
         let scope = Scope::new();
-        let conclusion = self
+
+        // Scope variables in the conclusion
+        let conclusion: [Variable; ARITY] = self
             .conclusion
             .iter()
             .map(|variable| variable.scope(&scope))
             .collect::<Vec<Variable>>()
             .try_into()
             .unwrap();
-        let query = self.body.scope(&scope);
 
-        RuleQuery {
-            query,
-            conclusion,
-            terms,
+        // Scope variables in the body
+        let mut query = self.body.scope(&scope);
+
+        // Unify the conclusion and body with the incoming terms
+        for (position, alternate) in terms.iter().enumerate() {
+            query = query.substitute(&conclusion[position], alternate)?;
         }
+
+        Ok(query)
     }
 }
 
-pub struct RuleQuery<const TERMS: usize, Q>
-where
-    Q: PullQuery,
-{
-    query: Q,
-    conclusion: [Variable; TERMS],
-    terms: [Term; TERMS],
-}
+#[cfg(test)]
+mod tests {
+    use crate::{
+        Frame, Pattern, PrimaryKey, TripleStore, Value, Variable, make_store,
+        pull::{And, PullQuery, Rule},
+    };
+    use anyhow::Result;
+    use futures_util::{TryStreamExt, stream};
 
-impl<const TERMS: usize, Q> RuleQuery<TERMS, Q>
-where
-    Q: PullQuery,
-{
-    pub fn unify(&self, frame: &Frame) -> (Frame, Q) {
-        let mut frame = frame.clone();
-        for (index, term) in self.terms.iter().enumerate() {
-            match term {
-                Term::Constant(literal) => {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_can_define_a_rule_and_use_it_in_a_query() -> Result<()> {
+        let (store, _) = make_store().await?;
 
-                    // if let Some(kind) = self.query.variable_kind(&self.conclusion[index]) {
-                    // }
-                    // frame = frame.assign(self.conclusion[index], Varia);
-                }
-                Term::Variable(variable) => todo!(),
-            }
+        let item_name = Rule {
+            conclusion: [Variable::from("id"), Variable::from("name")],
+            body: And(
+                Pattern::try_from((
+                    Variable::from("entity"),
+                    Value::Symbol("item/id".into()),
+                    Variable::from("id"),
+                ))?,
+                Pattern::try_from((
+                    Variable::from("entity"),
+                    Value::Symbol("item/name".into()),
+                    Variable::from("name"),
+                ))?,
+            ),
+        };
+
+        let test_query =
+            item_name.query([Value::UnsignedInt(0).into(), Variable::from("name").into()])?;
+
+        println!("{:#?}", test_query);
+
+        for i in 0..8u128 {
+            let stream = item_name
+                .query([Value::UnsignedInt(i).into(), Variable::from("name").into()])?
+                .stream(store.clone(), stream::once(async { Ok(Frame::default()) }));
+
+            tokio::pin!(stream);
+
+            let frame = stream.try_next().await?.expect("There is an output frame");
+            let key = PrimaryKey::from(
+                frame
+                    .read(&Variable::from("name"))
+                    .expect("A value is assigned to the name variable"),
+            );
+            let (_, _, value) = store.read(&key).await?.expect("A datum exists for the key");
+
+            assert_eq!(value, Value::String(format!("name{i}")));
         }
-        todo!();
+        Ok(())
     }
 }

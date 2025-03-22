@@ -1,11 +1,11 @@
 use async_stream::try_stream;
 use futures_util::{TryStreamExt, stream, stream_select};
 
-use crate::{FrameStream, Scope, TripleStorePull, Variable, XQueryError, fork_stream};
+use crate::{FrameStream, Scope, Term, TripleStorePull, Variable, XQueryError, fork_stream};
 
 use super::{PullQuery, Query};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct And<L, R>(pub L, pub R)
 where
     L: PullQuery + 'static,
@@ -20,14 +20,10 @@ where
         Self(self.0.scope(scope), self.1.scope(scope))
     }
 
-    fn substitute(
-        &self,
-        variable: &Variable,
-        constant: &crate::Value,
-    ) -> Result<Self, XQueryError> {
+    fn substitute(&self, variable: &Variable, alternate: &Term) -> Result<Self, XQueryError> {
         Ok(Self(
-            self.0.substitute(variable, constant)?,
-            self.1.substitute(variable, constant)?,
+            self.0.substitute(variable, alternate)?,
+            self.1.substitute(variable, alternate)?,
         ))
     }
 }
@@ -55,7 +51,7 @@ where
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Or<L, R>(pub L, pub R)
 where
     L: PullQuery + 'static,
@@ -70,14 +66,10 @@ where
         Self(self.0.scope(scope), self.1.scope(scope))
     }
 
-    fn substitute(
-        &self,
-        variable: &Variable,
-        constant: &crate::Value,
-    ) -> Result<Self, XQueryError> {
+    fn substitute(&self, variable: &Variable, alternate: &Term) -> Result<Self, XQueryError> {
         Ok(Self(
-            self.0.substitute(variable, constant)?,
-            self.1.substitute(variable, constant)?,
+            self.0.substitute(variable, alternate)?,
+            self.1.substitute(variable, alternate)?,
         ))
     }
 }
@@ -110,7 +102,7 @@ where
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Not<Q>(pub Q)
 where
     Q: PullQuery + 'static;
@@ -123,12 +115,8 @@ where
         Self(self.0.scope(scope))
     }
 
-    fn substitute(
-        &self,
-        variable: &Variable,
-        constant: &crate::Value,
-    ) -> Result<Self, XQueryError> {
-        Ok(Self(self.0.substitute(variable, constant)?))
+    fn substitute(&self, variable: &Variable, alternate: &Term) -> Result<Self, XQueryError> {
+        Ok(Self(self.0.substitute(variable, alternate)?))
     }
 }
 
