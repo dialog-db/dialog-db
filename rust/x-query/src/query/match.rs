@@ -10,17 +10,13 @@ pub fn match_single(
     let key_fragments = key.parts();
     let pattern_parts = pattern.parts()?;
 
-    println!("KEY FRAGMENTS: {:?}", key_fragments);
-    println!("PATTERN PARTS: {:?}", pattern_parts);
     for i in 0..3usize {
         let Some(next_frame) = match_term(key, &key_fragments[i], &pattern_parts[i], frame)? else {
-            println!("NO MATCH!");
             return Ok(None);
         };
         frame = next_frame;
     }
 
-    println!("YES MATCH!");
     Ok(Some(frame))
 }
 
@@ -37,10 +33,6 @@ pub fn match_term(
             attribute_key_part,
         } => match (key_part, value, attribute_key_part) {
             (KeyPart::Attribute(_), _, Some(pattern_key_part)) => {
-                println!(
-                    "COMPARING SYMBOLS: {:?} == {:?}",
-                    key_part, pattern_key_part
-                );
                 if key_part == pattern_key_part {
                     Some(frame)
                 } else {
@@ -48,7 +40,6 @@ pub fn match_term(
                 }
             }
             (KeyPart::Entity(entity), Value::Entity(pattern_entity), _) => {
-                println!("COMPARING ENTITIES: {:?} == {:?}", entity, pattern_entity);
                 if entity == &**pattern_entity {
                     Some(frame)
                 } else {
@@ -56,10 +47,6 @@ pub fn match_term(
                 }
             }
             _ => {
-                println!(
-                    "COMPARING CONSTANTS: {:?} == {:?}",
-                    key_part, pattern_key_part
-                );
                 if key_part == pattern_key_part {
                     Some(frame)
                 } else {
@@ -69,10 +56,6 @@ pub fn match_term(
         },
         MatchableTerm::Variable(variable) => {
             if let Some(assignment) = frame.read(variable) {
-                println!(
-                    "VARIABLE ASSIGNED ALREADY: {:?} => {:?}",
-                    variable, assignment
-                );
                 match (key_part, assignment) {
                     // Entity == Entity
                     (KeyPart::Entity(left), VariableAssignment::Entity(right))
@@ -107,7 +90,6 @@ pub fn match_term(
                     _ => None,
                 }
             } else {
-                println!("ASSIGNMENT: {:?} => {:?}", variable, key_part);
                 let key = key.clone();
                 Some(frame.assign(
                     (*variable).clone(),

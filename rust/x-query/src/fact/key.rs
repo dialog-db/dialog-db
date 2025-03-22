@@ -155,7 +155,7 @@ pub trait IndexKey: Default {
 
     /// Create a new key based on this one that is scoped to the specified [Value]
     fn value<V>(&self, value: &Value) -> Self {
-        self.value_part((value.data_type().into(), make_reference(value.to_bytes())))
+        self.value_part((value.data_type().into(), Reference::from(value)))
     }
 
     fn value_part(&self, fragment: ValueKeyPart) -> Self {
@@ -218,7 +218,7 @@ macro_rules! index_key {
                 Self {
                     entity: *entity,
                     attribute: Attribute::from(attribute).into(),
-                    value: (value.data_type().into(), make_reference(value.to_bytes())),
+                    value: (value.data_type().into(), Reference::from(value)),
                 }
             }
         }

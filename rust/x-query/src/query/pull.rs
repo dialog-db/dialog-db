@@ -141,7 +141,7 @@ mod tests {
             .await?
             .expect("A datum exists for the queried key");
 
-        let expected_entity = data.get(15).unwrap().0.entity.into();
+        let expected_entity = data.get(19).unwrap().0.entity.into();
 
         assert_eq!(entity, expected_entity);
 

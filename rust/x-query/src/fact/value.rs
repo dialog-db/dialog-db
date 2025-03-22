@@ -50,6 +50,13 @@ impl Value {
     pub fn to_tagged_bytes(&self) -> Vec<u8> {
         [vec![u8::from(self.data_type())], self.to_bytes()].concat()
     }
+
+    pub fn as_unsigned_int(&self) -> Option<u128> {
+        match self {
+            Value::UnsignedInt(unsigned_int) => Some(*unsigned_int),
+            _ => None,
+        }
+    }
 }
 
 impl From<Vec<u8>> for Value {
@@ -168,13 +175,16 @@ impl From<Value> for DataType {
 
 impl From<Value> for Reference {
     fn from(value: Value) -> Self {
-        make_reference(value.to_bytes())
+        Reference::from(&value)
     }
 }
 
 impl From<&Value> for Reference {
     fn from(value: &Value) -> Self {
-        make_reference(value.to_bytes())
+        match value {
+            Value::Entity(entity) => entity.clone().into(),
+            _ => make_reference(value.to_bytes()),
+        }
     }
 }
 

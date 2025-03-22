@@ -15,8 +15,11 @@ mod inner {
         let item_id_attribute = Attribute::from_str("item/id")?;
         let item_name_attribute = Attribute::from_str("item/name")?;
         let back_reference_attribute = Attribute::from_str("back/reference")?;
+        let parent_attribute = Attribute::from_str("relationship/parentOf")?;
 
         let mut data = vec![];
+
+        let mut last_entity = None;
 
         for i in 0..8u128 {
             let entity = Entity::new();
@@ -33,11 +36,21 @@ mod inner {
                 Value::String(format!("name{i}")),
             ));
 
+            if let Some(parent_entity) = last_entity {
+                data.push((
+                    entity.clone(),
+                    parent_attribute.clone(),
+                    Value::Entity(parent_entity),
+                ))
+            }
+
             data.push((
                 Entity::new(),
                 back_reference_attribute.clone(),
-                Value::Entity(entity),
+                Value::Entity(entity.clone()),
             ));
+
+            last_entity = Some(entity);
         }
 
         let mut entries: Vec<(crate::EavKey, Entity, Attribute, Value)> = vec![];
