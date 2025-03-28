@@ -1,0 +1,18 @@
+[package]
+name = "x-storage"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+x-common = { workspace = true }
+
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }

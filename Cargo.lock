@@ -709,6 +709,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "x-storage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "blake3",
+ "thiserror",
+ "tokio",
+ "x-common",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.7.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
