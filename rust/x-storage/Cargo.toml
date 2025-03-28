@@ -12,7 +12,23 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+base58 = { workspace = true }
+tokio = { workspace = true, features = ["sync", "fs"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+js-sys = { workspace = true }
+rexie = { workspace = true }
+wasm-bindgen = { workspace = true }
+
 [dev-dependencies]
 anyhow = { workspace = true }
 blake3 = { workspace = true }
-tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt", "fs"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
+wasm-bindgen-test = { workspace = true }

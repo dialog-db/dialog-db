@@ -10,4 +10,8 @@ pub enum XStorageError {
     /// An error that occurs during block decoding
     #[error("Failed to decode a block: {0}")]
     DecodeFailed(String),
+
+    /// An error that occurs when working with a storage backend
+    #[error("Storage backend error: {0}")]
+    StorageBackend(String),
 }
