@@ -1,5 +1,5 @@
 [workspace]
-members = ["rust/x-common", "rust/x-dbsp", "rust/x-query"]
+members = ["rust/x-common", "rust/x-dbsp", "rust/x-query", "rust/x-storage"]
 
 resolver = "2"
 
