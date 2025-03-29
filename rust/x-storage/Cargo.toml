@@ -9,6 +9,7 @@ license.workspace = true
 x-common = { workspace = true }
 
 async-trait = { workspace = true }
+sieve-cache = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 

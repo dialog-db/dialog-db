@@ -452,6 +452,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
+name = "sieve-cache"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0dd88384b792091868538cf7db314667801ae2a844ab7dac05c4ff2b9546a44f"
+
+[[package]]
 name = "slab"
 version = "0.4.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -830,6 +836,7 @@ dependencies = [
  "getrandom",
  "js-sys",
  "rexie",
+ "sieve-cache",
  "tempfile",
  "thiserror 2.0.12",
  "tokio",
