@@ -1,0 +1,30 @@
+[package]
+name = "x-prolly-tree"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+x-common = { workspace = true }
+x-storage = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+async-stream = { workspace = true }
+base58 = { workspace = true }
+blake3 = { workspace = true }
+futures-core = { workspace = true }
+rand = { workspace = true }
+
+nonempty = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+x-storage = { workspace = true, features = ["helpers"] }
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+futures-util = { workspace = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
+wasm-bindgen-test = { workspace = true }

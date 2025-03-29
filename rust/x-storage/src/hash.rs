@@ -14,7 +14,7 @@ where
 {
     fn bytes(&self) -> [u8; SIZE] {
         let mut bytes = [0u8; SIZE];
-        bytes.copy_from_slice(self.as_ref());
+        bytes.copy_from_slice(&self.as_ref()[..SIZE.min(self.as_ref().len())]);
         bytes
     }
 }

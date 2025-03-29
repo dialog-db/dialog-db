@@ -3,6 +3,10 @@
 //! These traits support writing async code that may target both
 //! `wasm32-unknown-unknown` as well as native targets where it may be the case
 //! that an implementer will be shared across threads.
+//!
+//! On `wasm32-unknown-unknown` targets, the traits effectively represent no
+//! new bound. But, on other targets they represent `Send` or `Send + Sync`
+//! bounds (depending on which one is used).
 
 #[allow(missing_docs)]
 #[cfg(not(target_arch = "wasm32"))]

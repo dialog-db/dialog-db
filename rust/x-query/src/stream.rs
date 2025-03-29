@@ -2,19 +2,31 @@ use async_stream::try_stream;
 use futures_core::TryStream;
 use futures_util::TryStreamExt;
 use tokio::sync::mpsc::unbounded_channel;
-use x_common::ConditionalSend;
 
 use crate::{Frame, PrimaryKey, XQueryError};
 
 pub trait SendStream<T>:
-    TryStream<Ok = T, Error = XQueryError, Item = Result<T, XQueryError>> + ConditionalSend
+    TryStream<Ok = T, Error = XQueryError, Item = Result<T, XQueryError>> + Send
 {
 }
 impl<S, T> SendStream<T> for S where
-    S: TryStream<Ok = T, Error = XQueryError, Item = Result<T, XQueryError>>
-        + 'static
-        + ConditionalSend
+    S: TryStream<Ok = T, Error = XQueryError, Item = Result<T, XQueryError>> + 'static + Send
 {
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn spawn<F>(future: F)
+where
+    F: Future<Output = ()> + 'static,
+{
+    wasm_bindgen_futures::spawn_local(future);
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn<F>(future: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(future);
 }
 
 pub trait FrameStream: SendStream<Frame> {}
@@ -25,13 +37,13 @@ impl<S> KeyStream for S where S: SendStream<PrimaryKey> {}
 
 pub fn fork_stream<S, T>(input: S) -> (impl SendStream<T>, impl SendStream<T>)
 where
-    S: SendStream<T> + 'static,
-    T: Clone + ConditionalSend + 'static,
+    S: SendStream<T> + Send + 'static,
+    T: Clone + Send + 'static,
 {
     let (left_tx, mut left_rx) = unbounded_channel();
     let (right_tx, mut right_rx) = unbounded_channel();
 
-    tokio::spawn(async move {
+    spawn(async move {
         tokio::pin!(input);
 
         while let Ok(Some(item)) = input.try_next().await {

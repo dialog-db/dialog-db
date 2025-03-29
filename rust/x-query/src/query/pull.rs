@@ -16,14 +16,14 @@ pub use rule::*;
 pub trait PullQuery: Query {
     fn stream<S, F>(self, store: S, frames: F) -> impl FrameStream
     where
-        S: TripleStorePull + 'static,
+        S: TripleStorePull + Send + 'static,
         F: FrameStream + 'static;
 }
 
 impl PullQuery for Pattern {
     fn stream<S, F>(self, store: S, frames: F) -> impl FrameStream
     where
-        S: TripleStorePull + 'static,
+        S: TripleStorePull + Send + 'static,
         F: FrameStream + 'static,
     {
         try_stream! {
@@ -50,6 +50,11 @@ mod tests {
     };
     use anyhow::Result;
     use futures_util::{TryStreamExt, stream};
+
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test;
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]

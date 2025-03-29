@@ -28,7 +28,8 @@ where
     Key: AsRef<[u8]>,
     Value: AsRef<[u8]> + From<Vec<u8>>,
 {
-    /// Creates a new [`FileSystemStore`] stored in `root_dir`.
+    /// Creates a new [`FileSystemStorageBackend`] that stores files in
+    /// `root_dir`.
     pub async fn new<Pathlike>(root_dir: Pathlike) -> Result<Self, XStorageError>
     where
         Pathlike: AsRef<Path>,

@@ -65,41 +65,15 @@ mod tests {
     use anyhow::Result;
     use tokio::sync::Mutex;
 
-    use crate::{CachedStorageBackend, MeasuredStorageBackend, StorageBackend};
-
-    #[cfg(not(target_arch = "wasm32"))]
-    use crate::FileSystemStorageBackend;
-
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    use crate::IndexedDbStorageBackend;
+    use crate::{
+        CachedStorageBackend, MeasuredStorageBackend, StorageBackend, make_target_storage,
+    };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     use wasm_bindgen_test::wasm_bindgen_test;
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
-
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    type MakeTargetStorageOutput = (IndexedDbStorageBackend<Vec<u8>, Vec<u8>>, ());
-    #[cfg(not(target_arch = "wasm32"))]
-    type MakeTargetStorageOutput = (
-        FileSystemStorageBackend<Vec<u8>, Vec<u8>>,
-        tempfile::TempDir,
-    );
-
-    async fn make_target_storage() -> Result<MakeTargetStorageOutput> {
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        return Ok((
-            IndexedDbStorageBackend::<Vec<u8>, Vec<u8>>::new("test_db", "test_store").await?,
-            (),
-        ));
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let root = tempfile::tempdir()?;
-            let storage = FileSystemStorageBackend::<Vec<u8>, Vec<u8>>::new(root.path()).await?;
-            Ok((storage, root))
-        }
-    }
 
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
