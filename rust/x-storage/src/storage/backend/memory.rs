@@ -11,23 +11,23 @@ use super::StorageBackend;
 /// A trivial implementation of [StorageBackend] - backed by a [HashMap] - where
 /// all values are kept in memory and never persisted.
 #[derive(Default)]
-pub struct MemoryStorageBackend<K, V>
+pub struct MemoryStorageBackend<Key, Value>
 where
-    K: Eq + std::hash::Hash,
-    V: Clone,
+    Key: Eq + std::hash::Hash,
+    Value: Clone,
 {
-    entries: Arc<Mutex<HashMap<K, V>>>,
+    entries: Arc<Mutex<HashMap<Key, Value>>>,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<K, V> StorageBackend for MemoryStorageBackend<K, V>
+impl<Key, Value> StorageBackend for MemoryStorageBackend<Key, Value>
 where
-    K: Eq + std::hash::Hash + ConditionalSync,
-    V: Clone + ConditionalSend,
+    Key: Eq + std::hash::Hash + ConditionalSync,
+    Value: Clone + ConditionalSend,
 {
-    type Key = K;
-    type Value = V;
+    type Key = Key;
+    type Value = Value;
     type Error = XStorageError;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {

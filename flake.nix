@@ -8,11 +8,10 @@
   };
 
   outputs =
-    {
-      nixpkgs,
-      flake-utils,
-      rust-overlay,
-      ...
+    { nixpkgs
+    , flake-utils
+    , rust-overlay
+    , ...
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -60,28 +59,28 @@
 
         common-build-inputs =
           toolchain:
-          with pkgs;
-          let
-            rust-toolchain = rustToolchain toolchain;
-          in
-          with pkgs;
-          [
-            binaryen
-            gnused
-            pkg-config
-            protobuf
-            rust-toolchain
-            trunk
-            vulkan-loader
-            wasm-bindgen-cli
-            wayland
-            xorg.libX11
-            xorg.libXi
-          ]
-          ++ lib.optionals stdenv.isDarwin [
-            darwin.apple_sdk.frameworks.SystemConfiguration
-            darwin.apple_sdk.frameworks.Security
-          ];
+            with pkgs;
+            let
+              rust-toolchain = rustToolchain toolchain;
+            in
+            with pkgs;
+            [
+              binaryen
+              gnused
+              pkg-config
+              protobuf
+              rust-toolchain
+              trunk
+              vulkan-loader
+              wasm-bindgen-cli
+              wayland
+              xorg.libX11
+              xorg.libXi
+            ]
+            ++ lib.optionals stdenv.isDarwin [
+              darwin.apple_sdk.frameworks.SystemConfiguration
+              darwin.apple_sdk.frameworks.Security
+            ];
 
         common-dev-tools = with pkgs; [
           cargo-nextest
@@ -104,14 +103,8 @@
             mkShell {
               buildInputs = common-build-inputs "stable" ++ interactive-dev-tools;
 
-              env = {
-                WINIT_UNIX_BACKEND = "wayland";
-                # RUSTFLAGS = "-L ${stdenv.cc.cc}/lib";
-              };
-
               shellHook = ''
                 export PATH=$PATH:./node_modules/.bin
-
                 export CHROMEDRIVER="${chromedriver}/bin/chromedriver"
               '';
             };

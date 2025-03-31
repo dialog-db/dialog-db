@@ -27,19 +27,20 @@ pub trait ContentAddressedStorage<const HASH_SIZE: usize> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<const HASH_SIZE: usize, Bl, By, H, Ee, Es, T> ContentAddressedStorage<HASH_SIZE> for T
+impl<const HASH_SIZE: usize, Block, Bytes, Hash, EncoderError, BackendError, T>
+    ContentAddressedStorage<HASH_SIZE> for T
 where
-    H: HashType<HASH_SIZE> + ConditionalSync,
-    Bl: ConditionalSync,
-    By: AsRef<[u8]> + 'static + ConditionalSync,
-    Ee: Into<XStorageError>,
-    Es: Into<XStorageError>,
-    T: Encoder<HASH_SIZE, Block = Bl, Bytes = By, Hash = H, Error = Ee>
-        + StorageBackend<Key = H, Value = By, Error = Es>
+    Hash: HashType<HASH_SIZE> + ConditionalSync,
+    Block: ConditionalSync,
+    Bytes: AsRef<[u8]> + 'static + ConditionalSync,
+    EncoderError: Into<XStorageError>,
+    BackendError: Into<XStorageError>,
+    T: Encoder<HASH_SIZE, Block = Block, Bytes = Bytes, Hash = Hash, Error = EncoderError>
+        + StorageBackend<Key = Hash, Value = Bytes, Error = BackendError>
         + ConditionalSync,
 {
-    type Block = Bl;
-    type Hash = H;
+    type Block = Block;
+    type Hash = Hash;
     type Error = XStorageError;
 
     async fn read(&self, hash: &Self::Hash) -> Result<Option<Self::Block>, Self::Error> {
