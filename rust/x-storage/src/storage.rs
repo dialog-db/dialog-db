@@ -1,10 +1,14 @@
 use async_trait::async_trait;
 use x_common::ConditionalSync;
 
-use crate::Encoder;
-
 mod backend;
 pub use backend::*;
+
+mod cache;
+pub use cache::*;
+
+mod measure;
+pub use measure::*;
 
 mod content_addressed;
 pub use content_addressed::*;
@@ -70,8 +74,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ContentAddressedStorage, Encoder, MemoryStorageBackend, Storage};
     use crate::XStorageError;
+    use crate::{ContentAddressedStorage, Encoder, MemoryStorageBackend, Storage};
     use anyhow::Result;
     use async_trait::async_trait;
 

@@ -84,7 +84,7 @@ where
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         let tx = self
             .db
-            .transaction(&[&self.store_name], TransactionMode::ReadWrite)
+            .transaction(&[&self.store_name], TransactionMode::ReadOnly)
             .map_err(|error| XStorageError::StorageBackend(format!("{error}")))?;
         let store = tx
             .store(&self.store_name)
