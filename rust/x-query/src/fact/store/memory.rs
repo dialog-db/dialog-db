@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use futures_core::TryStream;
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::{join, sync::RwLock};
-use x_common::ConditionalSend;
 
 use crate::{AevKey, EavKey, IndexKey, KeyPart, PrimaryKey, VaeKey, XQueryError};
 
@@ -57,7 +56,7 @@ impl TripleStorePull for MemoryStore {
     fn entities_with_attribute(
         &self,
         fragment: KeyPart,
-    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend {
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + Send {
         let aev = self.aev.clone();
 
         try_stream! {
@@ -77,7 +76,7 @@ impl TripleStorePull for MemoryStore {
     fn entities_with_value(
         &self,
         fragment: KeyPart,
-    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend {
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + Send {
         let vae = self.vae.clone();
 
         try_stream! {
@@ -97,7 +96,7 @@ impl TripleStorePull for MemoryStore {
     fn attributes_of_entity(
         &self,
         fragment: KeyPart,
-    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend {
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + Send {
         let eav = self.eav.clone();
 
         try_stream! {
@@ -114,9 +113,7 @@ impl TripleStorePull for MemoryStore {
     }
 
     /// Returns a stream that yields a [PrimaryKey] for every unique [Datum] in the store
-    fn keys(
-        &self,
-    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend {
+    fn keys(&self) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + Send {
         let eav = self.eav.clone();
 
         try_stream! {
@@ -137,6 +134,11 @@ mod tests {
     use super::{MemoryStore, TripleStoreMut};
     use anyhow::Result;
     use futures_util::{TryStreamExt, pin_mut};
+
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test;
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]

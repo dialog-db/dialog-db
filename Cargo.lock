@@ -288,6 +288,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nonempty"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "549e471b99ccaf2f89101bec68f4d244457d5a95a9c3d0672e9564124397741d"
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -807,6 +813,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "x-prolly-tree"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "base58",
+ "blake3",
+ "futures-core",
+ "futures-util",
+ "getrandom",
+ "nonempty",
+ "rand",
+ "thiserror 2.0.12",
+ "tokio",
+ "wasm-bindgen-test",
+ "x-common",
+ "x-storage",
+]
+
+[[package]]
 name = "x-query"
 version = "0.1.0"
 dependencies = [
@@ -821,6 +848,7 @@ dependencies = [
  "thiserror 2.0.12",
  "tokio",
  "ulid",
+ "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "x-common",
 ]

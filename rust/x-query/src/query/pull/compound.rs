@@ -30,12 +30,12 @@ where
 
 impl<L, R> PullQuery for And<L, R>
 where
-    L: PullQuery + 'static,
-    R: PullQuery + 'static,
+    L: PullQuery + Send + 'static,
+    R: PullQuery + Send + 'static,
 {
     fn stream<S, F>(self, store: S, frames: F) -> impl FrameStream
     where
-        S: TripleStorePull + 'static,
+        S: TripleStorePull + Send + 'static,
         F: FrameStream + 'static,
     {
         try_stream! {
@@ -76,12 +76,12 @@ where
 
 impl<L, R> PullQuery for Or<L, R>
 where
-    L: PullQuery + 'static,
-    R: PullQuery + 'static,
+    L: PullQuery + Send + 'static,
+    R: PullQuery + Send + 'static,
 {
     fn stream<S, F>(self, store: S, frames: F) -> impl FrameStream
     where
-        S: TripleStorePull + 'static,
+        S: TripleStorePull + Send + 'static,
         F: FrameStream + 'static,
     {
         try_stream! {
@@ -122,11 +122,11 @@ where
 
 impl<Q> PullQuery for Not<Q>
 where
-    Q: PullQuery + 'static,
+    Q: PullQuery + Send + 'static,
 {
     fn stream<S, F>(self, store: S, frames: F) -> impl FrameStream
     where
-        S: TripleStorePull + 'static,
+        S: TripleStorePull + Send + 'static,
         F: FrameStream + 'static,
     {
         try_stream! {

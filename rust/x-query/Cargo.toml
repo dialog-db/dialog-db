@@ -19,6 +19,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 ulid = { workspace = true }
 
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen-futures = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }

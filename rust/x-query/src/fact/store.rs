@@ -34,8 +34,8 @@ pub trait TripleStoreMut: TripleStore {
         value: V,
     ) -> Result<PrimaryKey, std::io::Error>
     where
-        A: Clone + ConditionalSend,
-        V: ConditionalSend,
+        A: Clone + Send,
+        V: Send,
         Attribute: From<A>,
         Value: From<V>,
     {
@@ -56,24 +56,22 @@ pub trait TripleStorePull: TripleStore {
     fn entities_with_attribute(
         &self,
         fragment: KeyPart,
-    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend;
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + Send;
 
     /// Returns a stream that yields all entities that have a given value
     fn entities_with_value(
         &self,
         fragment: KeyPart,
-    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend;
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + Send;
 
     /// Returns a stream that yields all attributes associated with a given entity
     fn attributes_of_entity(
         &self,
         fragment: KeyPart,
-    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend;
+    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + Send;
 
     /// Returns a stream that yields all unique keys in the store
-    fn keys(
-        &self,
-    ) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + ConditionalSend;
+    fn keys(&self) -> impl TryStream<Item = Result<PrimaryKey, XQueryError>> + 'static + Send;
 }
 
 pub trait TripleStorePush: TripleStore {

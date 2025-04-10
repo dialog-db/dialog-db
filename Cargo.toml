@@ -1,5 +1,11 @@
 [workspace]
-members = ["rust/x-common", "rust/x-dbsp", "rust/x-query", "rust/x-storage"]
+members = [
+    "rust/x-common",
+    "rust/x-dbsp",
+    "rust/x-prolly-tree",
+    "rust/x-query",
+    "rust/x-storage",
+]
 
 resolver = "2"
 
@@ -10,6 +16,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 x-common = { path = "./rust/x-common" }
+x-prolly-tree = { path = "./rust/x-prolly-tree" }
 x-query = { path = "./rust/x-query" }
 x-storage = { path = "./rust/x-storage" }
 
@@ -22,6 +29,8 @@ futures-core = "0.3"
 futures-util = "0.3"
 getrandom = "0.3"
 js-sys = "0.3"
+nonempty = "0.11"
+rand = "0.9"
 rexie = "0.6"
 serde = "1"
 sieve-cache = "0.2"
@@ -30,6 +39,7 @@ thiserror = "2"
 tokio = "1"
 ulid = "1"
 wasm-bindgen = "=0.2.100"
+wasm-bindgen-futures = "0.4"
 wasm-bindgen-test = "0.3"
 web-sys = "0.3"
 

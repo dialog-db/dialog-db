@@ -4,7 +4,7 @@ use crate::{KeyPart, KeyStream, MatchableTerm, Pattern, TripleStorePull};
 
 pub fn key_stream<T>(store: T, pattern: &Pattern) -> impl KeyStream
 where
-    T: TripleStorePull + 'static,
+    T: TripleStorePull + Send + 'static,
 {
     let pattern = pattern.clone();
 
