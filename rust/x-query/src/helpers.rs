@@ -66,4 +66,5 @@ mod inner {
     }
 }
 
+#[allow(unused)]
 pub use inner::*;

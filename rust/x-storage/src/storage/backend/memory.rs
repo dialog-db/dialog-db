@@ -23,7 +23,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Key, Value> StorageBackend for MemoryStorageBackend<Key, Value>
 where
-    Key: Eq + std::hash::Hash + ConditionalSync,
+    Key: Clone + Eq + std::hash::Hash + ConditionalSync,
     Value: Clone + ConditionalSend,
 {
     type Key = Key;

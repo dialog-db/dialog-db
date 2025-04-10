@@ -1,4 +1,4 @@
-#[repr(C)]
+#[repr(u8)]
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DataType {
     Null = 0,
@@ -38,6 +38,6 @@ impl From<&u8> for DataType {
 
 impl From<DataType> for u8 {
     fn from(value: DataType) -> Self {
-        u8::try_from(value as isize).unwrap_or_default()
+        value as u8
     }
 }

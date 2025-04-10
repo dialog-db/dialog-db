@@ -14,7 +14,7 @@ type MakeTargetStorageOutput<K> = (FileSystemStorageBackend<K, Vec<u8>>, tempfil
 /// Creates a platform-specific persisted [`StorageBackend`], for use in tests
 pub async fn make_target_storage<K>() -> Result<MakeTargetStorageOutput<K>>
 where
-    K: AsRef<[u8]>,
+    K: AsRef<[u8]> + Clone,
 {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     return Ok((

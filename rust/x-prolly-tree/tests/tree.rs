@@ -18,7 +18,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 async fn basic_set_and_get() -> Result<()> {
     let storage = Arc::new(Mutex::new(Storage {
         backend: MemoryStorageBackend::default(),
-        encoder: BasicEncoder,
+        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
     }));
     let mut tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage.clone());
 
@@ -50,11 +50,11 @@ async fn basic_set_and_get() -> Result<()> {
 async fn create_tree_from_set() -> Result<()> {
     let iter_storage = Arc::new(Mutex::new(Storage {
         backend: MemoryStorageBackend::default(),
-        encoder: BasicEncoder,
+        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
     }));
     let collection_storage = Arc::new(Mutex::new(Storage {
         backend: MemoryStorageBackend::default(),
-        encoder: BasicEncoder,
+        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
     }));
     let mut iter_tree =
         Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(iter_storage.clone());
@@ -102,7 +102,7 @@ async fn larger_random_tree() -> Result<()> {
     let mut ledger = vec![];
     let storage = Storage {
         backend: MemoryStorageBackend::default(),
-        encoder: BasicEncoder,
+        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
     };
     let mut tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage);
     for _ in 1..1024 {
@@ -122,7 +122,7 @@ async fn larger_random_tree() -> Result<()> {
 async fn restores_tree_from_hash() -> Result<()> {
     let storage = Arc::new(Mutex::new(Storage {
         backend: MemoryStorageBackend::default(),
-        encoder: BasicEncoder,
+        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
     }));
     let mut tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage.clone());
 
@@ -149,7 +149,7 @@ async fn lru_store_caches() -> Result<()> {
     let root_hash = {
         let storage = Storage {
             backend: backend.clone(),
-            encoder: BasicEncoder,
+            encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
         };
         let mut collection = BTreeMap::default();
         for i in 0..1024u32 {
@@ -167,7 +167,7 @@ async fn lru_store_caches() -> Result<()> {
     let lru = CachedStorageBackend::new(tracking.clone(), 10)?;
     let storage = Storage {
         backend: lru,
-        encoder: BasicEncoder,
+        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
     };
     let mut tree =
         Tree::<32, 32, GeometricDistribution, _, _, _, _>::from_hash(&root_hash, storage).await?;

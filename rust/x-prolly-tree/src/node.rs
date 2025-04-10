@@ -4,10 +4,9 @@ use async_stream::try_stream;
 use base58::ToBase58;
 use futures_core::Stream;
 use nonempty::NonEmpty;
-use x_common::ConditionalSync;
 use x_storage::{ContentAddressedStorage, HashType};
 
-use crate::{Block, Entry, KeyType, Rank, Reference, XProllyTreeError};
+use crate::{Block, Entry, KeyType, Rank, Reference, ValueType, XProllyTreeError};
 
 /// Primary representation of tree nodes.
 ///
@@ -19,8 +18,8 @@ use crate::{Block, Entry, KeyType, Rank, Reference, XProllyTreeError};
 pub struct Node<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Value, Hash>
 where
     Key: KeyType + 'static,
+    Value: ValueType,
     Hash: HashType<HASH_SIZE>,
-    Value: Clone + ConditionalSync,
 {
     block: Block<HASH_SIZE, Key, Value, Hash>,
     /// A [`Reference`] that points to this [`Node`]s own [`Block`]
@@ -31,8 +30,8 @@ impl<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Value, Hash>
     Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>
 where
     Key: KeyType,
+    Value: ValueType,
     Hash: HashType<HASH_SIZE>,
-    Value: Clone + ConditionalSync,
 {
     /// Whether this node is a branch.
     pub fn is_branch(&self) -> bool {
@@ -516,8 +515,8 @@ where
 struct TreeLocation<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Value, Hash>
 where
     Key: KeyType + 'static,
+    Value: ValueType,
     Hash: HashType<HASH_SIZE>,
-    Value: Clone + ConditionalSync,
 {
     pub node: Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>,
     pub index: Option<usize>,

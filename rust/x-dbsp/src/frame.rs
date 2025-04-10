@@ -1,3 +1,4 @@
+#![allow(unused)]
 use crate::{ZSet, ZSetElement};
 
 pub struct Diff<T>

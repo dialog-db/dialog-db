@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use futures_core::TryStream;
 use tokio::sync::mpsc::Receiver;
-use x_common::{ConditionalSend, ConditionalSync};
+use x_common::ConditionalSync;
 
 use crate::{Attribute, Entity, Value, XQueryError};
 

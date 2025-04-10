@@ -1,6 +1,4 @@
-use crate::{
-    Attribute, Entity, REFERENCE_MAX, REFERENCE_MIN, Reference, Value, XQueryError, make_reference,
-};
+use crate::{Attribute, Entity, REFERENCE_MAX, REFERENCE_MIN, Reference, Value, XQueryError};
 
 pub type EntityKeyPart = Reference;
 pub type AttributeKeyPart = (Reference, Reference);

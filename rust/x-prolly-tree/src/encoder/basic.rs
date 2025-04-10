@@ -1,21 +1,47 @@
 mod io;
+use std::{fmt::Display, marker::PhantomData};
+
 pub use io::*;
 
 use async_trait::async_trait;
 use nonempty::NonEmpty;
 use x_storage::{Encoder, XStorageError};
 
-use crate::{Block, BlockType, Entry, Reference};
+use crate::{Block, BlockType, Entry, KeyType, Reference, ValueType};
 
 /// A [`BasicEncoder`] encodes blocks as a compact byte representation. It
 /// includes support for data structures that contain unsigned integers and byte
 /// arrays
-pub struct BasicEncoder;
+#[derive(Clone)]
+pub struct BasicEncoder<Key, Value>(PhantomData<Key>, PhantomData<Value>)
+where
+    Key: KeyType + 'static,
+    <Key as TryFrom<Vec<u8>>>::Error: Display,
+    Value: ValueType,
+    <Value as TryFrom<Vec<u8>>>::Error: Display;
+
+impl<Key, Value> Default for BasicEncoder<Key, Value>
+where
+    Key: KeyType + 'static,
+    <Key as TryFrom<Vec<u8>>>::Error: Display,
+    Value: ValueType,
+    <Value as TryFrom<Vec<u8>>>::Error: Display,
+{
+    fn default() -> Self {
+        Self(PhantomData, PhantomData)
+    }
+}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Encoder<32> for BasicEncoder {
-    type Block = Block<32, Vec<u8>, Vec<u8>, Self::Hash>;
+impl<Key, Value> Encoder<32> for BasicEncoder<Key, Value>
+where
+    Key: KeyType + 'static,
+    <Key as TryFrom<Vec<u8>>>::Error: Display,
+    Value: ValueType,
+    <Value as TryFrom<Vec<u8>>>::Error: Display,
+{
+    type Block = Block<32, Key, Value, Self::Hash>;
     type Bytes = Vec<u8>;
     type Hash = [u8; 32];
     type Error = XStorageError;
@@ -50,7 +76,7 @@ impl Encoder<32> for BasicEncoder {
                 )?;
                 for entry in entries {
                     writer.write(&entry.key.as_ref())?;
-                    writer.write(&entry.value.as_ref())?;
+                    writer.write(&entry.value.to_vec().as_ref())?;
                 }
             }
         }
@@ -71,7 +97,7 @@ impl Encoder<32> for BasicEncoder {
             BlockType::Branch => {
                 let mut children = vec![];
                 for _ in 0..child_count {
-                    let boundary: Vec<u8> = reader
+                    let boundary: Key = reader
                         .read::<Vec<u8>>()?
                         .try_into()
                         .map_err(|error| XStorageError::DecodeFailed(format!("{error}")))?;
@@ -89,11 +115,11 @@ impl Encoder<32> for BasicEncoder {
             BlockType::Segment => {
                 let mut children = vec![];
                 for _ in 0..child_count {
-                    let key: Vec<u8> = reader
+                    let key: Key = reader
                         .read::<Vec<u8>>()?
                         .try_into()
                         .map_err(|error| XStorageError::DecodeFailed(format!("{error}")))?;
-                    let value: Vec<u8> = reader
+                    let value: Value = reader
                         .read::<Vec<u8>>()?
                         .try_into()
                         .map_err(|error| XStorageError::DecodeFailed(format!("{error}")))?;

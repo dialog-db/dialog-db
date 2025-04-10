@@ -14,6 +14,7 @@ use std::{hash::Hash, sync::Arc};
 /// and may be retrieved from there on future reads.
 ///
 /// TODO: Should we also proactively cache writes?
+#[derive(Clone)]
 pub struct CachedStorageBackend<Backend>
 where
     Backend: StorageBackend,

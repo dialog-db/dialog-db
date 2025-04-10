@@ -13,6 +13,7 @@ mod query;
 pub use query::*;
 
 mod helpers;
+#[allow(unused)]
 pub use helpers::*;
 
 mod stream;

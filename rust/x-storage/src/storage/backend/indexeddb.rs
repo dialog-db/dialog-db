@@ -50,8 +50,8 @@ where
 #[async_trait(?Send)]
 impl<Key, Value> StorageBackend for IndexedDbStorageBackend<Key, Value>
 where
-    Key: AsRef<[u8]>,
-    Value: AsRef<[u8]> + From<Vec<u8>>,
+    Key: AsRef<[u8]> + Clone,
+    Value: AsRef<[u8]> + From<Vec<u8>> + Clone,
 {
     type Key = Key;
     type Value = Value;

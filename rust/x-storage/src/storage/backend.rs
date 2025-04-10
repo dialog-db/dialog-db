@@ -23,7 +23,7 @@ pub use fs::*;
 /// is capable of storing and/or retrieving values by some key
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait StorageBackend {
+pub trait StorageBackend: Clone {
     /// The key type used by this [StorageBackend]
     type Key: ConditionalSync;
     /// The value type able to be stored by this [StorageBackend]

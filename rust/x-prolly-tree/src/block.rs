@@ -1,8 +1,7 @@
 use nonempty::NonEmpty;
-use x_common::ConditionalSync;
 use x_storage::{HashType, XStorageError};
 
-use crate::{Entry, KeyType, ReadFrom, Reader, Reference, WriteInto, XProllyTreeError};
+use crate::{Entry, KeyType, ReadFrom, Reader, Reference, ValueType, WriteInto, XProllyTreeError};
 
 /// The serializable construct representing a [`Node`].
 /// A [`Block`] is what is stored in a [`BlockStore`],
@@ -11,7 +10,7 @@ use crate::{Entry, KeyType, ReadFrom, Reader, Reference, WriteInto, XProllyTreeE
 pub enum Block<const HASH_SIZE: usize, Key, Value, Hash>
 where
     Key: KeyType,
-    Value: ConditionalSync,
+    Value: ValueType,
     Hash: HashType<HASH_SIZE>,
 {
     /// A block representing a Branch.
@@ -23,7 +22,7 @@ where
 impl<const HASH_SIZE: usize, Key, Value, Hash> Block<HASH_SIZE, Key, Value, Hash>
 where
     Key: KeyType,
-    Value: ConditionalSync,
+    Value: ValueType,
     Hash: HashType<HASH_SIZE>,
 {
     /// Create a new branch-type block.
@@ -125,7 +124,7 @@ impl<const HASH_SIZE: usize, Key, Value, Hash> From<&Block<HASH_SIZE, Key, Value
     for BlockType
 where
     Key: KeyType + 'static,
-    Value: ConditionalSync,
+    Value: ValueType,
     Hash: HashType<HASH_SIZE>,
 {
     fn from(value: &Block<HASH_SIZE, Key, Value, Hash>) -> Self {

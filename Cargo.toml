@@ -5,6 +5,7 @@ members = [
     "rust/x-prolly-tree",
     "rust/x-query",
     "rust/x-storage",
+    "rust/x-facts",
 ]
 
 resolver = "2"
@@ -19,21 +20,26 @@ x-common = { path = "./rust/x-common" }
 x-prolly-tree = { path = "./rust/x-prolly-tree" }
 x-query = { path = "./rust/x-query" }
 x-storage = { path = "./rust/x-storage" }
+x-facts = { path = "./rust/x-facts" }
 
 anyhow = "1"
+arrayref = "0.3"
 async-stream = "0.3"
 async-trait = "0.1"
 base58 = "0.2"
 blake3 = "1"
+ed25519-dalek = "2"
 futures-core = "0.3"
 futures-util = "0.3"
 getrandom = "0.3"
 js-sys = "0.3"
 nonempty = "0.11"
 rand = "0.9"
+rand_chacha = "0.9"
 rexie = "0.6"
 serde = "1"
 sieve-cache = "0.2"
+static_assertions = "1"
 tempfile = "3"
 thiserror = "2"
 tokio = "1"

@@ -15,8 +15,8 @@ use super::StorageBackend;
 #[derive(Clone)]
 pub struct FileSystemStorageBackend<Key, Value>
 where
-    Key: AsRef<[u8]>,
-    Value: AsRef<[u8]> + From<Vec<u8>>,
+    Key: AsRef<[u8]> + Clone,
+    Value: AsRef<[u8]> + From<Vec<u8>> + Clone,
 {
     root_dir: PathBuf,
     key_type: PhantomData<Key>,
@@ -25,8 +25,8 @@ where
 
 impl<Key, Value> FileSystemStorageBackend<Key, Value>
 where
-    Key: AsRef<[u8]>,
-    Value: AsRef<[u8]> + From<Vec<u8>>,
+    Key: AsRef<[u8]> + Clone,
+    Value: AsRef<[u8]> + From<Vec<u8>> + Clone,
 {
     /// Creates a new [`FileSystemStorageBackend`] that stores files in
     /// `root_dir`.
@@ -56,8 +56,8 @@ where
 #[async_trait]
 impl<Key, Value> StorageBackend for FileSystemStorageBackend<Key, Value>
 where
-    Key: AsRef<[u8]> + ConditionalSync,
-    Value: AsRef<[u8]> + From<Vec<u8>> + ConditionalSync,
+    Key: AsRef<[u8]> + Clone + ConditionalSync,
+    Value: AsRef<[u8]> + Clone + From<Vec<u8>> + ConditionalSync,
 {
     type Key = Key;
     type Value = Value;
