@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "rust/x-common",
-    "rust/x-dbsp",
-    "rust/x-prolly-tree",
-    "rust/x-storage",
-    "rust/x-artifacts",
+    "rust/dialog-common",
+    "rust/dialog-dbsp",
+    "rust/dialog-prolly-tree",
+    "rust/dialog-storage",
+    "rust/dialog-artifacts",
 ]
 
 resolver = "2"
@@ -15,10 +15,10 @@ authors = ["The Meiosys Project Authors"]
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-x-common = { path = "./rust/x-common" }
-x-prolly-tree = { path = "./rust/x-prolly-tree" }
-x-storage = { path = "./rust/x-storage" }
-x-artifacts = { path = "./rust/x-artifacts" }
+dialog-common = { path = "./rust/dialog-common" }
+dialog-prolly-tree = { path = "./rust/dialog-prolly-tree" }
+dialog-storage = { path = "./rust/dialog-storage" }
+dialog-artifacts = { path = "./rust/dialog-artifacts" }
 
 anyhow = "1"
 arrayref = "0.3"

@@ -1,0 +1,41 @@
+[package]
+name = "dialog-artifacts"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+helpers = ["dep:anyhow"]
+
+[dependencies]
+dialog-common = { workspace = true }
+dialog-storage = { workspace = true }
+dialog-prolly-tree = { workspace = true }
+
+anyhow = { workspace = true, optional = true }
+arrayref = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+futures-util = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+static_assertions = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros"] }
+
+[dev-dependencies]
+dialog-storage = { workspace = true, features = ["helpers"] }
+anyhow = { workspace = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }

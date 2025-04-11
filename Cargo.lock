@@ -148,6 +148,83 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
+name = "dialog-artifacts"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrayref",
+ "async-stream",
+ "async-trait",
+ "blake3",
+ "dialog-common",
+ "dialog-prolly-tree",
+ "dialog-storage",
+ "futures-util",
+ "getrandom",
+ "rand",
+ "rand_chacha",
+ "static_assertions",
+ "tempfile",
+ "thiserror 2.0.12",
+ "tokio",
+ "wasm-bindgen-test",
+]
+
+[[package]]
+name = "dialog-common"
+version = "0.1.0"
+
+[[package]]
+name = "dialog-dbsp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dialog-common",
+ "tokio",
+]
+
+[[package]]
+name = "dialog-prolly-tree"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "base58",
+ "blake3",
+ "dialog-common",
+ "dialog-storage",
+ "futures-core",
+ "futures-util",
+ "getrandom",
+ "nonempty",
+ "rand",
+ "thiserror 2.0.12",
+ "tokio",
+ "wasm-bindgen-test",
+]
+
+[[package]]
+name = "dialog-storage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base58",
+ "blake3",
+ "dialog-common",
+ "getrandom",
+ "js-sys",
+ "rexie",
+ "sieve-cache",
+ "tempfile",
+ "thiserror 2.0.12",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -252,9 +329,9 @@ checksum = "875b3680cb2f8f71bdcf9a30f38d48282f5d3c95cbf9b3fa57269bb5d5c06828"
 
 [[package]]
 name = "linux-raw-sys"
-version = "0.9.3"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe7db12097d22ec582439daf8618b8fdd1a7bef6270e9af3b1ebcd30893cf413"
+checksum = "cd945864f07fe9f5371a27ad7b52a172b4b499999f1d97574c9fa68373937e12"
 
 [[package]]
 name = "log"
@@ -763,83 +840,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3268f3d866458b787f390cf61f4bbb563b922d091359f9608842999eaee3943c"
 dependencies = [
  "bitflags",
-]
-
-[[package]]
-name = "x-artifacts"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrayref",
- "async-stream",
- "async-trait",
- "blake3",
- "futures-util",
- "getrandom",
- "rand",
- "rand_chacha",
- "static_assertions",
- "tempfile",
- "thiserror 2.0.12",
- "tokio",
- "wasm-bindgen-test",
- "x-common",
- "x-prolly-tree",
- "x-storage",
-]
-
-[[package]]
-name = "x-common"
-version = "0.1.0"
-
-[[package]]
-name = "x-dbsp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "tokio",
- "x-common",
-]
-
-[[package]]
-name = "x-prolly-tree"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
- "base58",
- "blake3",
- "futures-core",
- "futures-util",
- "getrandom",
- "nonempty",
- "rand",
- "thiserror 2.0.12",
- "tokio",
- "wasm-bindgen-test",
- "x-common",
- "x-storage",
-]
-
-[[package]]
-name = "x-storage"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base58",
- "blake3",
- "getrandom",
- "js-sys",
- "rexie",
- "sieve-cache",
- "tempfile",
- "thiserror 2.0.12",
- "tokio",
- "wasm-bindgen",
- "wasm-bindgen-test",
- "x-common",
 ]
 
 [[package]]
