@@ -7,6 +7,12 @@ use super::{make_reference, make_seed};
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Entity(Reference);
 
+impl Default for Entity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Entity {
     pub fn new() -> Self {
         Self(make_reference(make_seed()))

@@ -30,10 +30,7 @@ where
     /// Look up the multiplicity of an element, defaulting to 0 in cases for as-yet
     /// untracked elements.
     pub fn get(&self, entry: &T) -> isize {
-        self.elements
-            .get(entry)
-            .map(|multiplicity| *multiplicity)
-            .unwrap_or_default()
+        self.elements.get(entry).copied().unwrap_or_default()
     }
 
     /// Adds the given multiplicity to the current multiplicity (or zero, if the entry is not

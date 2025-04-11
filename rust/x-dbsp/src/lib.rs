@@ -8,4 +8,5 @@ mod operator;
 pub use operator::*;
 
 mod channel;
+#[allow(unused)]
 pub use channel::*;

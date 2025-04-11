@@ -19,12 +19,12 @@ async fn create_test_tree<const BRANCH_FACTOR: u32>(
         Vec<u8>,
         Vec<u8>,
         [u8; 32],
-        Storage<32, BasicEncoder, MemoryStorageBackend<[u8; 32], Vec<u8>>>,
+        Storage<32, BasicEncoder<Vec<u8>, Vec<u8>>, MemoryStorageBackend<[u8; 32], Vec<u8>>>,
     >,
 > {
     let storage = Storage {
         backend: MemoryStorageBackend::default(),
-        encoder: BasicEncoder,
+        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
     };
     let mut collection = BTreeMap::default();
     for i in 0..size {
@@ -42,7 +42,7 @@ async fn gets_full_range() -> Result<()> {
     let stream = tree.stream();
     tokio::pin!(stream);
     let mut i = 0u32;
-    while let Some(_) = stream.try_next().await? {
+    while (stream.try_next().await?).is_some() {
         i += 1;
     }
     assert_eq!(i, 1024, "full range yields all nodes");
@@ -53,7 +53,7 @@ async fn gets_full_range() -> Result<()> {
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn stream_range_on_empty_trees() -> Result<()> {
     let storage = Storage {
-        encoder: BasicEncoder,
+        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
         backend: MemoryStorageBackend::default(),
     };
 
@@ -108,7 +108,7 @@ async fn request_out_of_range() -> Result<()> {
     );
 
     let storage = Storage {
-        encoder: BasicEncoder,
+        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
         backend: MemoryStorageBackend::default(),
     };
     let mut tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage);

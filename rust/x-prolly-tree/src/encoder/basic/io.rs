@@ -9,6 +9,12 @@ pub struct Writer {
     cursor: Cursor<Vec<u8>>,
 }
 
+impl Default for Writer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Writer {
     /// Create a new [`Writer`].
     pub fn new() -> Self {
@@ -183,13 +189,11 @@ impl<'a> ReadFrom<'a> for &'a [u8] {
         'r: 'a,
     {
         let length = reader.read_u32()?;
-        reader
-            .read_bytes(
-                length.try_into().map_err(|error| {
-                    XStorageError::DecodeFailed(format!("Slice too long: {error}"))
-                })?,
-            )
-            .map(|array| array.as_ref())
+        reader.read_bytes(
+            length
+                .try_into()
+                .map_err(|error| XStorageError::DecodeFailed(format!("Slice too long: {error}")))?,
+        )
     }
 }
 
@@ -277,7 +281,7 @@ mod tests {
         }
 
         let data = ComplexData {
-            bytes: blake3::hash(&vec![1, 2, 3]).as_bytes().to_owned(),
+            bytes: blake3::hash(&[1, 2, 3]).as_bytes().to_owned(),
             value_8: 123,
             pad_8: 231,
             value_16: 1024,

@@ -20,7 +20,7 @@ async fn platform_specific_storage() -> Result<()> {
     let (backend, _temp) = make_target_storage().await?;
     let storage = Storage {
         backend,
-        encoder: BasicEncoder,
+        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
     };
     let mut tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage);
 

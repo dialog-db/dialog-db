@@ -473,6 +473,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
 name = "syn"
 version = "2.0.98"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -797,6 +803,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3268f3d866458b787f390cf61f4bbb563b922d091359f9608842999eaee3943c"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "x-artifacts"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrayref",
+ "async-stream",
+ "async-trait",
+ "blake3",
+ "futures-util",
+ "getrandom",
+ "rand",
+ "rand_chacha",
+ "static_assertions",
+ "tempfile",
+ "thiserror 2.0.12",
+ "tokio",
+ "wasm-bindgen-test",
+ "x-common",
+ "x-prolly-tree",
+ "x-storage",
 ]
 
 [[package]]

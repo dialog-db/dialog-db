@@ -6,7 +6,7 @@ use crate::{HashType, XStorageError};
 /// An [Encoder] converts to and from content-addressable bytes
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait Encoder<const HASH_SIZE: usize> {
+pub trait Encoder<const HASH_SIZE: usize>: Clone {
     /// The in-memory representation of a block
     type Block: ConditionalSync;
     /// The encoded byte representation of a block

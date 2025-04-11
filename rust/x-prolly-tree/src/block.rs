@@ -1,8 +1,7 @@
 use nonempty::NonEmpty;
-use x_common::ConditionalSync;
 use x_storage::{HashType, XStorageError};
 
-use crate::{Entry, KeyType, ReadFrom, Reader, Reference, WriteInto, XProllyTreeError};
+use crate::{Entry, KeyType, ReadFrom, Reader, Reference, ValueType, WriteInto, XProllyTreeError};
 
 /// The serializable construct representing a [`Node`].
 /// A [`Block`] is what is stored in a [`BlockStore`],
@@ -11,7 +10,7 @@ use crate::{Entry, KeyType, ReadFrom, Reader, Reference, WriteInto, XProllyTreeE
 pub enum Block<const HASH_SIZE: usize, Key, Value, Hash>
 where
     Key: KeyType,
-    Value: ConditionalSync,
+    Value: ValueType,
     Hash: HashType<HASH_SIZE>,
 {
     /// A block representing a Branch.
@@ -23,7 +22,7 @@ where
 impl<const HASH_SIZE: usize, Key, Value, Hash> Block<HASH_SIZE, Key, Value, Hash>
 where
     Key: KeyType,
-    Value: ConditionalSync,
+    Value: ValueType,
     Hash: HashType<HASH_SIZE>,
 {
     /// Create a new branch-type block.
@@ -38,10 +37,7 @@ where
 
     /// Whether this block is a branch.
     pub fn is_branch(&self) -> bool {
-        match self {
-            Block::Branch(_) => true,
-            _ => false,
-        }
+        matches!(self, Block::Branch(_))
     }
 
     /// Whether this block is a segment.
@@ -52,7 +48,7 @@ where
     /// Get the upper bounds that this block represents.
     pub fn upper_bound(&self) -> &Key {
         match self {
-            Block::Branch(data) => &data.last().upper_bound(),
+            Block::Branch(data) => data.last().upper_bound(),
             Block::Segment(data) => &data.last().key,
         }
     }
@@ -64,7 +60,7 @@ where
         &self,
     ) -> Result<&NonEmpty<Reference<HASH_SIZE, Key, Hash>>, XProllyTreeError> {
         match self {
-            Block::Branch(data) => Ok(&data),
+            Block::Branch(data) => Ok(data),
             Block::Segment(_) => Err(XProllyTreeError::IncorrectTreeAccess(
                 "Cannot read references from a segment".into(),
             )),
@@ -93,7 +89,7 @@ where
             Block::Branch(_) => Err(XProllyTreeError::IncorrectTreeAccess(
                 "Cannot read entries from a branch".into(),
             )),
-            Block::Segment(data) => Ok(&data),
+            Block::Segment(data) => Ok(data),
         }
     }
 
@@ -125,7 +121,7 @@ impl<const HASH_SIZE: usize, Key, Value, Hash> From<&Block<HASH_SIZE, Key, Value
     for BlockType
 where
     Key: KeyType + 'static,
-    Value: ConditionalSync,
+    Value: ValueType,
     Hash: HashType<HASH_SIZE>,
 {
     fn from(value: &Block<HASH_SIZE, Key, Value, Hash>) -> Self {

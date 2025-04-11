@@ -16,6 +16,7 @@ pub use content_addressed::*;
 /// A universal envelope for all compatible combinations of [Encoder] and
 /// [StorageBackend] implementations. See the crate documentation for
 /// a practical example of usage.
+#[derive(Clone)]
 pub struct Storage<const HASH_SIZE: usize, Encoder, Backend>
 where
     Encoder: crate::Encoder<HASH_SIZE>,
@@ -89,6 +90,7 @@ mod tests {
         pub value: u32,
     }
 
+    #[derive(Clone)]
     struct TestEncoder;
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

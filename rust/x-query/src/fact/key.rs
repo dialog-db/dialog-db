@@ -1,6 +1,4 @@
-use crate::{
-    Attribute, Entity, REFERENCE_MAX, REFERENCE_MIN, Reference, Value, XQueryError, make_reference,
-};
+use crate::{Attribute, Entity, REFERENCE_MAX, REFERENCE_MIN, Reference, Value, XQueryError};
 
 pub type EntityKeyPart = Reference;
 pub type AttributeKeyPart = (Reference, Reference);
@@ -21,27 +19,27 @@ impl KeyPart {
     pub fn as_entity_part(&self) -> Result<&EntityKeyPart, XQueryError> {
         match self {
             KeyPart::Entity(part) => Ok(part),
-            _ => Err(XQueryError::InvalidReference(format!(
-                "Expected fragment to be an entity reference"
-            ))),
+            _ => Err(XQueryError::InvalidReference(
+                "Expected fragment to be an entity reference".to_string(),
+            )),
         }
     }
 
     pub fn as_attribute_part(&self) -> Result<&AttributeKeyPart, XQueryError> {
         match self {
             KeyPart::Attribute(part) => Ok(part),
-            _ => Err(XQueryError::InvalidReference(format!(
-                "Expected fragment to be an attribute reference"
-            ))),
+            _ => Err(XQueryError::InvalidReference(
+                "Expected fragment to be an attribute reference".to_string(),
+            )),
         }
     }
 
     pub fn as_value_part(&self) -> Result<&ValueKeyPart, XQueryError> {
         match self {
             KeyPart::Value(part) => Ok(part),
-            _ => Err(XQueryError::InvalidReference(format!(
-                "Expected fragment to be a value reference"
-            ))),
+            _ => Err(XQueryError::InvalidReference(
+                "Expected fragment to be a value reference".to_string(),
+            )),
         }
     }
 }

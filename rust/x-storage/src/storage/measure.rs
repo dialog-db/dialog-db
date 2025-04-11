@@ -1,17 +1,21 @@
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use x_common::ConditionalSync;
 
 use super::StorageBackend;
 
 /// A [MeasuredStorageBackend] acts as a proxy over a [StorageBackend]
 /// implementation that measures reads and writes.
+#[derive(Clone)]
 pub struct MeasuredStorageBackend<Backend>
 where
     Backend: StorageBackend,
 {
-    reads: AtomicUsize,
-    writes: AtomicUsize,
+    reads: Arc<AtomicUsize>,
+    writes: Arc<AtomicUsize>,
     backend: Backend,
 }
 
@@ -23,8 +27,8 @@ where
     /// measured.
     pub fn new(backend: Backend) -> Self {
         Self {
-            reads: AtomicUsize::default(),
-            writes: AtomicUsize::default(),
+            reads: Arc::new(AtomicUsize::default()),
+            writes: Arc::new(AtomicUsize::default()),
             backend,
         }
     }

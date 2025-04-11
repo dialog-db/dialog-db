@@ -1,7 +1,6 @@
-use crate::{Block, Entry, KeyType, Node, Reference, XProllyTreeError};
+use crate::{Block, Entry, KeyType, Node, Reference, ValueType, XProllyTreeError};
 use async_trait::async_trait;
 use nonempty::NonEmpty;
-use x_common::ConditionalSync;
 use x_storage::{ContentAddressedStorage, HashType};
 
 /// A helper trait implemented by [`Entry`], [`Reference`] and [`Node`] to
@@ -12,7 +11,7 @@ pub trait Adopter<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Value, 
     Sized
 where
     Key: KeyType,
-    Value: Clone + ConditionalSync,
+    Value: ValueType,
     Hash: HashType<HASH_SIZE>,
 {
     /// Adopt a collection of `children` into a new [`Node`]. Children data must
@@ -33,7 +32,7 @@ impl<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Value, Hash>
     Adopter<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash> for Entry<Key, Value>
 where
     Key: KeyType + 'static,
-    Value: Clone + ConditionalSync,
+    Value: ValueType,
     Hash: HashType<HASH_SIZE>,
 {
     async fn adopt(
@@ -54,7 +53,7 @@ impl<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Value, Hash>
     Adopter<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash> for Reference<HASH_SIZE, Key, Hash>
 where
     Key: KeyType + 'static,
-    Value: Clone + ConditionalSync,
+    Value: ValueType,
     Hash: HashType<HASH_SIZE>,
 {
     async fn adopt(
@@ -76,7 +75,7 @@ impl<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Value, Hash>
     for Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>
 where
     Key: KeyType + 'static,
-    Value: Clone + ConditionalSync,
+    Value: ValueType,
     Hash: HashType<HASH_SIZE>,
 {
     async fn adopt(

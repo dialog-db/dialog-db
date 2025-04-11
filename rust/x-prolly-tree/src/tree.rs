@@ -3,10 +3,9 @@ use std::{collections::BTreeMap, marker::PhantomData, ops::RangeBounds};
 use async_stream::try_stream;
 use futures_core::Stream;
 use nonempty::NonEmpty;
-use x_common::ConditionalSync;
 use x_storage::{ContentAddressedStorage, HashType};
 
-use crate::{Adopter, Block, Entry, KeyType, Node, XProllyTreeError};
+use crate::{Adopter, Block, Entry, KeyType, Node, ValueType, XProllyTreeError};
 
 /// A key-value store backed by a Ranked Prolly Tree with configurable storage,
 /// encoding and rank distribution.
@@ -22,7 +21,7 @@ pub struct Tree<
 > where
     Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash>,
     Key: KeyType + 'static,
-    Value: Clone + ConditionalSync,
+    Value: ValueType,
     Hash: HashType<HASH_SIZE>,
     Storage:
         ContentAddressedStorage<HASH_SIZE, Block = Block<HASH_SIZE, Key, Value, Hash>, Hash = Hash>,
@@ -41,7 +40,7 @@ impl<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Distribution, Key, Value,
 where
     Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash>,
     Key: KeyType,
-    Value: Clone + ConditionalSync,
+    Value: ValueType,
     Hash: HashType<HASH_SIZE>,
     Storage:
         ContentAddressedStorage<HASH_SIZE, Block = Block<HASH_SIZE, Key, Value, Hash>, Hash = Hash>,
@@ -122,9 +121,7 @@ where
     }
 
     /// Returns an async stream over all entries.
-    pub fn stream<'a>(
-        &'a self,
-    ) -> impl Stream<Item = Result<Entry<Key, Value>, XProllyTreeError>> + 'a {
+    pub fn stream(&self) -> impl Stream<Item = Result<Entry<Key, Value>, XProllyTreeError>> + '_ {
         self.stream_range(..)
     }
 

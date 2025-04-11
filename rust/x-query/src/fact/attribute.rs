@@ -18,7 +18,7 @@ impl FromStr for Attribute {
 
         let predicate = parts
             .pop()
-            .ok_or_else(|| XQueryError::InvalidAttribute(format!("{s}")))?
+            .ok_or_else(|| XQueryError::InvalidAttribute(s.to_string()))?
             .to_string();
         let namespace = parts.join("/");
 
@@ -56,12 +56,10 @@ impl TryFrom<&Value> for Attribute {
     fn try_from(value: &Value) -> Result<Self, Self::Error> {
         match value {
             Value::Symbol(value) => Attribute::from_str(value),
-            _ => {
-                return Err(XQueryError::InvalidAttribute(format!(
-                    "Attribute can only be created from a symbol (got {:?})",
-                    value
-                )));
-            }
+            _ => Err(XQueryError::InvalidAttribute(format!(
+                "Attribute can only be created from a symbol (got {:?})",
+                value
+            ))),
         }
     }
 }
