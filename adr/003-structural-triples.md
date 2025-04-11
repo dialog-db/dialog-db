@@ -283,7 +283,6 @@ Ok lets go back and define body for the `track` rule for which we have defined a
   :year uint8)
 ```
 
-Above rule now defines a logic by which `#ba4jcao2nbln4ui7v2ff` can be derived from the `song` records. In this case it a simply renames `title`
 
 > ℹ️ This may not have being obvious but I think this provides an interesting framework that can be used to derive track's from the data stored in the database (kind of like triggers in SQL). This effectively means that we can derive records denotedy by `#ba4jcao2nbln4ui7v2ff` when `track` rule conditions are met then we can query them when `(track :title "Bohemian Rhapsody")` encountered.
 >
