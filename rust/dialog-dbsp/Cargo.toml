@@ -1,0 +1,11 @@
+[package]
+name = "dialog-dbsp"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+dialog-common = { workspace = true }
