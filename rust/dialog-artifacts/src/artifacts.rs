@@ -118,42 +118,39 @@ where
         version: Revision,
         backend: Backend,
     ) -> Result<Self, DialogArtifactsError> {
+        let (entity_index, attribute_index, value_index) = tokio::try_join!(
+            Tree::from_hash(
+                version.entity(),
+                Storage {
+                    encoder: BasicEncoder::<EntityKey, State<ValueDatum>>::default(),
+                    backend: backend.clone(),
+                },
+            ),
+            Tree::from_hash(
+                version.attribute(),
+                Storage {
+                    encoder: BasicEncoder::<AttributeKey, State<ValueDatum>>::default(),
+                    backend: backend.clone(),
+                },
+            ),
+            Tree::from_hash(
+                version.value(),
+                Storage {
+                    encoder: BasicEncoder::<ValueKey, State<EntityDatum>>::default(),
+                    backend: backend.clone(),
+                },
+            )
+        )?;
+
         Ok(Self {
-            entity_index: Arc::new(RwLock::new(
-                Tree::from_hash(
-                    version.entity(),
-                    Storage {
-                        encoder: BasicEncoder::<EntityKey, State<ValueDatum>>::default(),
-                        backend: backend.clone(),
-                    },
-                )
-                .await?,
-            )),
-            attribute_index: Arc::new(RwLock::new(
-                Tree::from_hash(
-                    version.attribute(),
-                    Storage {
-                        encoder: BasicEncoder::<AttributeKey, State<ValueDatum>>::default(),
-                        backend: backend.clone(),
-                    },
-                )
-                .await?,
-            )),
-            value_index: Arc::new(RwLock::new(
-                Tree::from_hash(
-                    version.value(),
-                    Storage {
-                        encoder: BasicEncoder::<ValueKey, State<EntityDatum>>::default(),
-                        backend: backend.clone(),
-                    },
-                )
-                .await?,
-            )),
+            entity_index: Arc::new(RwLock::new(entity_index)),
+            attribute_index: Arc::new(RwLock::new(attribute_index)),
+            value_index: Arc::new(RwLock::new(value_index)),
         })
     }
 
     /// Get the hash that represents the [`FactStore`] at its current version.
-    pub async fn version(&self) -> Option<Revision> {
+    pub async fn revision(&self) -> Option<Revision> {
         let (entity_index, attribute_index, value_index) = tokio::join!(
             self.entity_index.read(),
             self.attribute_index.read(),
@@ -174,6 +171,28 @@ where
             }
             _ => None,
         }
+    }
+
+    async fn reset(&self, revision: Option<Revision>) -> Result<(), DialogArtifactsError> {
+        let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
+            self.entity_index.write(),
+            self.attribute_index.write(),
+            self.value_index.write()
+        );
+
+        let entity_index_hash = revision.as_ref().map(|revision| revision.entity().clone());
+        let attribute_index_hash = revision
+            .as_ref()
+            .map(|revision| revision.attribute().clone());
+        let value_index_hash = revision.as_ref().map(|revision| revision.value().clone());
+
+        tokio::try_join!(
+            entity_index.set_hash(entity_index_hash),
+            attribute_index.set_hash(attribute_index_hash),
+            value_index.set_hash(value_index_hash),
+        )?;
+
+        Ok(())
     }
 }
 
@@ -306,45 +325,57 @@ where
         I: IntoIterator<Item = Instruction> + ConditionalSend,
         I::IntoIter: ConditionalSend,
     {
-        let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
-            self.entity_index.write(),
-            self.attribute_index.write(),
-            self.value_index.write()
-        );
+        let base_revision = self.revision().await;
 
-        for instruction in instructions {
-            match instruction {
-                Instruction::Assert(fact) => {
-                    tokio::try_join!(
-                        entity_index.set(
-                            EntityKey::from(&fact),
-                            State::Added(ValueDatum {
-                                value: fact.is.to_bytes(),
-                            }),
-                        ),
-                        attribute_index.set(
-                            AttributeKey::from(&fact),
-                            State::Added(ValueDatum {
-                                value: fact.is.to_bytes()
-                            })
-                        ),
-                        value_index.set(
-                            ValueKey::from(&fact),
-                            State::Added(EntityDatum { entity: *fact.of })
-                        ),
-                    )?;
-                }
-                Instruction::Retract(fact) => {
-                    tokio::try_join!(
-                        entity_index.set(EntityKey::from(&fact), State::Removed,),
-                        attribute_index.set(AttributeKey::from(&fact), State::Removed),
-                        value_index.set(ValueKey::from(&fact), State::Removed),
-                    )?;
+        let transaction_result = async {
+            let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
+                self.entity_index.write(),
+                self.attribute_index.write(),
+                self.value_index.write()
+            );
+
+            for instruction in instructions {
+                match instruction {
+                    Instruction::Assert(fact) => {
+                        tokio::try_join!(
+                            entity_index.set(
+                                EntityKey::from(&fact),
+                                State::Added(ValueDatum {
+                                    value: fact.is.to_bytes(),
+                                }),
+                            ),
+                            attribute_index.set(
+                                AttributeKey::from(&fact),
+                                State::Added(ValueDatum {
+                                    value: fact.is.to_bytes()
+                                })
+                            ),
+                            value_index.set(
+                                ValueKey::from(&fact),
+                                State::Added(EntityDatum { entity: *fact.of })
+                            ),
+                        )?;
+                    }
+                    Instruction::Retract(fact) => {
+                        tokio::try_join!(
+                            entity_index.set(EntityKey::from(&fact), State::Removed,),
+                            attribute_index.set(AttributeKey::from(&fact), State::Removed),
+                            value_index.set(ValueKey::from(&fact), State::Removed),
+                        )?;
+                    }
                 }
             }
+
+            Ok(()) as Result<(), DialogArtifactsError>
+        }
+        .await;
+
+        if let Err(_) = transaction_result {
+            // Rollback
+            self.reset(base_revision).await?;
         }
 
-        Ok(())
+        transaction_result
     }
 }
 
@@ -483,7 +514,7 @@ mod tests {
 
         facts_two.commit(reordered_data).await?;
 
-        assert_eq!(facts_one.version().await, facts_two.version().await);
+        assert_eq!(facts_one.revision().await, facts_two.revision().await);
 
         Ok(())
     }
@@ -499,12 +530,12 @@ mod tests {
         let mut facts = Artifacts::new(storage_backend.clone()).await?;
 
         facts.commit(data.into_iter().map(into_assert)).await?;
-        let version = facts.version().await.unwrap();
+        let revision = facts.revision().await.unwrap();
 
-        let restored_facts = Artifacts::restore(version.clone(), storage_backend).await?;
-        let restored_version = restored_facts.version().await.unwrap();
+        let restored_facts = Artifacts::restore(revision.clone(), storage_backend).await?;
+        let restored_revision = restored_facts.revision().await.unwrap();
 
-        assert_eq!(version, restored_version);
+        assert_eq!(revision, restored_revision);
 
         let fact_stream = facts.select(FactSelector::default().is(Value::String("name10".into())));
         let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;

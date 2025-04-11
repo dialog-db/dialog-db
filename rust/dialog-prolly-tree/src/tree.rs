@@ -84,6 +84,17 @@ where
         self.root.as_ref()
     }
 
+    /// Changes the root (revision) of the tree to the node identified by the
+    /// given [`HashType`]
+    pub async fn set_hash(&mut self, hash: Option<Hash>) -> Result<(), DialogProllyTreeError> {
+        self.root = if let Some(hash) = hash {
+            Some(Node::from_hash(hash, &self.storage).await?)
+        } else {
+            None
+        };
+        Ok(())
+    }
+
     /// Returns the [`HashType`] representing the root of this tree.
     ///
     /// Returns `None` if the tree is empty.
