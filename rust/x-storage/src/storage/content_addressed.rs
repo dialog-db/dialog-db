@@ -59,7 +59,7 @@ where
         ))
     }
     async fn write(&mut self, block: &Self::Block) -> Result<Self::Hash, Self::Error> {
-        let (hash, encoded_bytes) = self.encode(&block).await.map_err(|error| error.into())?;
+        let (hash, encoded_bytes) = self.encode(block).await.map_err(|error| error.into())?;
         self.set(hash.clone(), encoded_bytes)
             .await
             .map_err(|error| error.into())?;
@@ -101,7 +101,7 @@ where
     }
     async fn write(&mut self, block: &Self::Block) -> Result<Self::Hash, Self::Error> {
         let mut storage = self.lock().await;
-        let (hash, encoded_bytes) = storage.encode(&block).await.map_err(|error| error.into())?;
+        let (hash, encoded_bytes) = storage.encode(block).await.map_err(|error| error.into())?;
         storage
             .set(hash.clone(), encoded_bytes)
             .await

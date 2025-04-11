@@ -8,7 +8,7 @@ pub fn make_reference<B>(bytes: B) -> Blake3Hash
 where
     B: AsRef<[u8]>,
 {
-    blake3::hash(bytes.as_ref()).as_bytes().to_owned().into()
+    blake3::hash(bytes.as_ref()).as_bytes().to_owned()
 }
 
 pub(crate) fn make_seed() -> [u8; 32] {

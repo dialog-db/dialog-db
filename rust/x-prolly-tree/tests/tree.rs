@@ -196,7 +196,7 @@ async fn lru_store_caches() -> Result<()> {
         assert_eq!(tracking.reads(), 3); // reads cached
     }
 
-    let _ = tree.set(key.to_vec(), vec![1]).await?;
+    tree.set(key.to_vec(), vec![1]).await?;
 
     let tracking = tracking.lock().await;
     assert_eq!(tracking.writes(), 3); // 3 writes on insertion

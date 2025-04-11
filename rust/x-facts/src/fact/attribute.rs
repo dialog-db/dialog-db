@@ -20,7 +20,7 @@ impl TryFrom<String> for Attribute {
     type Error = XFactsError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.as_bytes().len() > ATTRIBUTE_LENGTH {
+        if value.len() > ATTRIBUTE_LENGTH {
             return Err(XFactsError::InvalidAttribute(format!(
                 "Attribute \"{value}\" is too long (must be no longer than {} bytes)",
                 ATTRIBUTE_LENGTH

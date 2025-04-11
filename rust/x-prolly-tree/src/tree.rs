@@ -121,9 +121,7 @@ where
     }
 
     /// Returns an async stream over all entries.
-    pub fn stream<'a>(
-        &'a self,
-    ) -> impl Stream<Item = Result<Entry<Key, Value>, XProllyTreeError>> + 'a {
+    pub fn stream(&self) -> impl Stream<Item = Result<Entry<Key, Value>, XProllyTreeError>> + '_ {
         self.stream_range(..)
     }
 

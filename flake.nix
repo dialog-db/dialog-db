@@ -107,6 +107,7 @@
               shellHook = ''
                 export PATH=$PATH:./node_modules/.bin
                 export CHROMEDRIVER="${chromedriver}/bin/chromedriver"
+                export WASM_BINDGEN_TEST_TIMEOUT=180
               '';
             };
         };

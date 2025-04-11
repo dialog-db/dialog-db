@@ -49,6 +49,22 @@ pub struct Fact {
     pub is: Value,
 }
 
+/// An alias type that describes the [`Tree`]-based prolly tree that is
+/// used for each index in [`Facts`]
+pub type Index<Key, Value, Backend> = Arc<
+    RwLock<
+        Tree<
+            BRANCH_FACTOR,
+            HASH_SIZE,
+            GeometricDistribution,
+            Key,
+            State<Value>,
+            Blake3Hash,
+            Storage<HASH_SIZE, BasicEncoder<Key, State<Value>>, Backend>,
+        >,
+    >,
+>;
+
 /// [`Facts`] is an implementor of [`FactStore`] and [`FactStoreMut`].
 /// Internally, [`Facts`] maintains indexes built from [`Tree`]s (that is,
 /// prolly trees). These indexes are built up as new [`Fact`]s are commited,
@@ -68,45 +84,9 @@ where
         + ConditionalSync
         + 'static,
 {
-    entity_index: Arc<
-        RwLock<
-            Tree<
-                BRANCH_FACTOR,
-                HASH_SIZE,
-                GeometricDistribution,
-                EntityKey,
-                State<ValueDatum>,
-                Blake3Hash,
-                Storage<HASH_SIZE, BasicEncoder<EntityKey, State<ValueDatum>>, Backend>,
-            >,
-        >,
-    >,
-    attribute_index: Arc<
-        RwLock<
-            Tree<
-                BRANCH_FACTOR,
-                HASH_SIZE,
-                GeometricDistribution,
-                AttributeKey,
-                State<ValueDatum>,
-                Blake3Hash,
-                Storage<HASH_SIZE, BasicEncoder<AttributeKey, State<ValueDatum>>, Backend>,
-            >,
-        >,
-    >,
-    value_index: Arc<
-        RwLock<
-            Tree<
-                BRANCH_FACTOR,
-                HASH_SIZE,
-                GeometricDistribution,
-                ValueKey,
-                State<EntityDatum>,
-                Blake3Hash,
-                Storage<HASH_SIZE, BasicEncoder<ValueKey, State<EntityDatum>>, Backend>,
-            >,
-        >,
-    >,
+    entity_index: Index<EntityKey, ValueDatum, Backend>,
+    attribute_index: Index<AttributeKey, ValueDatum, Backend>,
+    value_index: Index<ValueKey, EntityDatum, Backend>,
 }
 
 impl<Backend> Facts<Backend>
@@ -202,10 +182,10 @@ where
         + ConditionalSync
         + 'static,
 {
-    fn select<'a>(
-        &'a self,
+    fn select(
+        &self,
         selector: FactSelector,
-    ) -> impl Stream<Item = Result<Fact, XFactsError>> + 'a + ConditionalSend {
+    ) -> impl Stream<Item = Result<Fact, XFactsError>> + '_ + ConditionalSend {
         try_stream! {
             let FactSelector {
                 entity, attribute, value
@@ -275,7 +255,7 @@ where
                 for await item in stream {
                     if let Ok(Entry { key, value: State::Added(datum) }) = item {
                         let key = EntityKey::default()
-                            .set_entity(EntityKeyPart(&*datum))
+                            .set_entity(EntityKeyPart(&datum))
                             .set_attribute(key.attribute())
                             .set_value_type(key.value_type());
 
@@ -407,18 +387,10 @@ mod tests {
         data.sort_by(entity_order);
 
         facts
-            .commit(
-                data.clone()
-                    .into_iter()
-                    .map(|fact| Instruction::Assert(fact)),
-            )
+            .commit(data.clone().into_iter().map(Instruction::Assert))
             .await?;
 
-        let fact_stream = facts.select(FactSelector {
-            entity: None,
-            attribute: None,
-            value: None,
-        });
+        let fact_stream = facts.select(FactSelector::default());
 
         let mut facts: Vec<Fact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
         facts.sort_by(entity_order);
@@ -432,9 +404,7 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_uses_indexes_to_optimize_reads() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
-        let data = generate_data(256)?
-            .into_iter()
-            .map(|fact| Instruction::Assert(fact));
+        let data = generate_data(256)?.into_iter().map(Instruction::Assert);
 
         let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
 

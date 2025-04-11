@@ -37,6 +37,6 @@ where
     }
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         let entries = self.entries.lock().await;
-        Ok(entries.get(key).map(|value| value.clone()))
+        Ok(entries.get(key).cloned())
     }
 }

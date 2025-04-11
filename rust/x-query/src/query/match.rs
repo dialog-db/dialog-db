@@ -11,7 +11,7 @@ pub fn match_single(
     let pattern_parts = pattern.parts()?;
 
     for i in 0..3usize {
-        let Some(next_frame) = match_term(key, &key_fragments[i], &pattern_parts[i], frame)? else {
+        let Some(next_frame) = match_term(key, &key_fragments[i], pattern_parts[i], frame)? else {
             return Ok(None);
         };
         frame = next_frame;
@@ -108,9 +108,7 @@ pub fn match_term(
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        Frame, Pattern, Term, TripleStore, Value, Variable, VariableAssignment, make_store,
-    };
+    use crate::{Frame, Pattern, TripleStore, Value, Variable, VariableAssignment, make_store};
     use anyhow::Result;
 
     use super::match_single;
@@ -124,7 +122,7 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_makes_a_literal_match() -> Result<()> {
         let (_, data) = make_store().await?;
-        let (key, entity, attribute, value) = data.get(0).unwrap();
+        let (key, entity, attribute, value) = data.first().unwrap();
 
         let pattern = Pattern::try_from((
             Value::Entity(entity.clone()),
@@ -133,7 +131,7 @@ mod tests {
         ))?;
 
         let frame = Frame::default();
-        let next_frame = match_single(&key, &pattern, frame)?;
+        let next_frame = match_single(key, &pattern, frame)?;
 
         assert!(next_frame.is_some());
 
@@ -144,7 +142,7 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_makes_a_partially_variable_match() -> Result<()> {
         let (store, data) = make_store().await?;
-        let (key, entity, attribute, value) = data.get(0).unwrap();
+        let (key, entity, attribute, value) = data.first().unwrap();
 
         let pattern = Pattern::try_from((
             Value::Entity(entity.clone()),
@@ -153,7 +151,7 @@ mod tests {
         ))?;
 
         let frame: Frame = Frame::default();
-        let next_frame = match_single(&key, &pattern, frame)?;
+        let next_frame = match_single(key, &pattern, frame)?;
 
         assert!(next_frame.is_some());
 
@@ -183,7 +181,7 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_makes_a_fully_variable_match() -> Result<()> {
         let (store, data) = make_store().await?;
-        let (key, entity, attribute, value) = data.get(0).unwrap();
+        let (key, entity, attribute, value) = data.first().unwrap();
 
         let pattern = Pattern::try_from((
             Variable::from("foo"),
@@ -192,7 +190,7 @@ mod tests {
         ))?;
 
         let frame = Frame::default();
-        let next_frame = match_single(&key, &pattern, frame)?;
+        let next_frame = match_single(key, &pattern, frame)?;
 
         assert!(next_frame.is_some());
 

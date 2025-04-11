@@ -42,7 +42,7 @@ async fn gets_full_range() -> Result<()> {
     let stream = tree.stream();
     tokio::pin!(stream);
     let mut i = 0u32;
-    while let Some(_) = stream.try_next().await? {
+    while (stream.try_next().await?).is_some() {
         i += 1;
     }
     assert_eq!(i, 1024, "full range yields all nodes");

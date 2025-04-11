@@ -27,7 +27,7 @@ impl ValueKey {
         value_reference: ValueReferenceKeyPart,
         attribute: AttributeKeyPart,
     ) -> Self {
-        let mut inner = MINIMUM_VALUE_KEY.clone();
+        let mut inner = MINIMUM_VALUE_KEY;
         inner[VALUE_KEY_VALUE_DATA_TYPE_OFFSET] = value_type.into();
         mutable_slice![
             inner,
@@ -63,7 +63,7 @@ impl ValueKey {
     /// Set the [`AttributeKeyPart`], altering the [`Attribute`] part of this
     /// [`ValueKey`].
     pub fn set_attribute(&self, attribute: AttributeKeyPart) -> Self {
-        let mut inner = self.0.clone();
+        let mut inner = self.0;
         mutable_slice![inner, VALUE_KEY_ATTRIBUTE_OFFSET, ATTRIBUTE_LENGTH]
             .copy_from_slice(attribute.0);
         Self(inner)
@@ -82,7 +82,7 @@ impl ValueKey {
     /// Set the [`ValueReferenceKeyPart`], altering the [`Value`] part of this
     /// [`ValueKey`].
     pub fn set_value_reference(&self, value: ValueReferenceKeyPart) -> Self {
-        let mut inner = self.0.clone();
+        let mut inner = self.0;
         mutable_slice!(
             inner,
             VALUE_KEY_VALUE_REFERENCE_OFFSET,
@@ -99,7 +99,7 @@ impl ValueKey {
 
     /// Set the [`ValueDataType`] that is represented by this [`ValueKey`].
     pub fn set_value_type(&self, value_type: ValueDataType) -> Self {
-        let mut inner = self.0.clone();
+        let mut inner = self.0;
         inner[VALUE_KEY_VALUE_DATA_TYPE_OFFSET] = value_type.into();
         Self(inner)
     }

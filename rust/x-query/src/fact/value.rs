@@ -196,14 +196,15 @@ impl TaggedBytes {
         Self([vec![tag.into()], bytes].concat())
     }
     pub fn data_type(&self) -> DataType {
-        self.0
-            .get(0)
-            .map(|value| DataType::from(value))
-            .unwrap_or_default()
+        self.0.first().map(DataType::from).unwrap_or_default()
     }
 
     pub fn untagged_bytes(&self) -> &[u8] {
-        if self.0.len() > 0 { &self.0[1..] } else { &[] }
+        if !self.0.is_empty() {
+            &self.0[1..]
+        } else {
+            &[]
+        }
     }
 }
 
@@ -220,8 +221,8 @@ impl TryFrom<TaggedBytes> for Value {
             DataType::Boolean => Value::Boolean(
                 value
                     .untagged_bytes()
-                    .get(0)
-                    .map(|value| if *value == 0 { false } else { true })
+                    .first()
+                    .map(|value| *value != 0)
                     .unwrap_or_default(),
             ),
             DataType::String => Value::String(

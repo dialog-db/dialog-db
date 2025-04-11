@@ -62,8 +62,8 @@ impl TripleStorePull for MemoryStore {
         try_stream! {
             let attribute = fragment.as_attribute_part()?;
 
-            let min = <AevKey as IndexKey>::min().attribute_part(attribute.clone());
-            let max = <AevKey as IndexKey>::max().attribute_part(attribute.clone());
+            let min = <AevKey as IndexKey>::min().attribute_part(*attribute);
+            let max = <AevKey as IndexKey>::max().attribute_part(*attribute);
             let aev = aev.read().await;
 
             for (key, _) in aev.range(min..max) {
@@ -82,8 +82,8 @@ impl TripleStorePull for MemoryStore {
         try_stream! {
             let value = fragment.as_value_part()?;
 
-            let min = <VaeKey as IndexKey>::min().value_part(value.clone());
-            let max = <VaeKey as IndexKey>::max().value_part(value.clone());
+            let min = <VaeKey as IndexKey>::min().value_part(*value);
+            let max = <VaeKey as IndexKey>::max().value_part(*value);
             let vae = vae.read().await;
 
             for (key, _) in vae.range(min..max) {
@@ -102,12 +102,12 @@ impl TripleStorePull for MemoryStore {
         try_stream! {
             let entity = fragment.as_entity_part()?;
 
-            let min = <EavKey as IndexKey>::min().entity_part(entity.clone());
-            let max = <EavKey as IndexKey>::max().entity_part(entity.clone());
+            let min = <EavKey as IndexKey>::min().entity_part(*entity);
+            let max = <EavKey as IndexKey>::max().entity_part(*entity);
             let eav = eav.read().await;
 
             for (key, _) in eav.range(min..max) {
-                yield key.clone().into()
+                yield key.clone()
             }
         }
     }

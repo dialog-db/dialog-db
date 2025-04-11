@@ -136,7 +136,7 @@ where
     /// Returns the [`Hash`] for this [`Node`] used to retrieve from
     /// [`ContentAddressedStorage`].
     pub fn hash(&self) -> &Hash {
-        &self.reference.hash()
+        self.reference.hash()
     }
 
     /// Return all [`Entry`]s from this [`Node`] into a [`Entry`] collection.
@@ -409,7 +409,7 @@ where
                         let current = branch_stack.pop().ok_or_else(|| XProllyTreeError::UnexpectedTreeShape("Encountered segment with no ancestors".into()))?;
                         for entry in current.node.into_entries()? {
                             let entry_key = &entry.key;
-                            if range.contains(&entry_key) {
+                            if range.contains(entry_key) {
                                 if !matching {
                                     matching = true;
                                 }
@@ -493,7 +493,7 @@ where
         for (node, rank) in nodes {
             pending.push(node);
             if rank > minimum_rank {
-                let children = NonEmpty::from_vec(std::mem::replace(&mut pending, vec![])).ok_or(
+                let children = NonEmpty::from_vec(std::mem::take(&mut pending)).ok_or(
                     XProllyTreeError::InvalidConstruction(
                         "Cannot adopt an empty child list".into(),
                     ),

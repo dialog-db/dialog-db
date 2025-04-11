@@ -1,0 +1,78 @@
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+name: 'Test'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint_nix:
+    name: 'Lint Nix'
+    runs-on: 'ubuntu-latest'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/flake-checker-action@main
+        with:
+          send-statistics: false
+          ignore-missing-flake-lock: false
+
+  lint_rust:
+      name: 'Lint Rust'
+      needs: ['lint_nix']
+      runs-on: 'ubuntu-latest'
+      steps:
+        - uses: actions/checkout@v4
+        - uses: actions/download-artifact@v4
+        - uses: Swatinem/rust-cache@v2
+        - uses: ./.github/actions/setup-nix
+        - name: "Run lints"
+          shell: bash
+          run: |
+            nix develop --command cargo fmt --all -- --check
+            nix develop --command cargo clippy --all -- -D warnings
+
+  lints:
+    name: 'Lints'
+    needs: ['lint_nix', 'lint_rust']
+    runs-on: 'ubuntu-latest'
+    steps:
+      - run: echo "Lints are good!"
+
+  rust_crates:
+    name: 'Rust Crates'
+    needs: ['lints']
+    runs-on: 'ubuntu-latest'
+    strategy:
+      matrix:
+        include:
+          - flags: ''
+          - flags: '--release'
+          - flags: '--target wasm32-unknown-unknown'
+          - flags: '--target wasm32-unknown-unknown --release'
+    steps:
+      - uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: false
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-nix
+      - name: "Run `cargo test`"
+        shell: bash
+        run: |
+          # Ensure we don't pick up a built-in chrome / chromedriver
+          sudo apt-get remove google-chrome-stable -y
+          sudo rm /usr/bin/chromium /usr/bin/chromium-browser
+
+          nix develop --command cargo test ${{ matrix.flags }}

@@ -19,10 +19,10 @@ where
     /// implementation lazily.
     ///
     /// For additional details, see the documentation for [`FactSelector`].
-    fn select<'a>(
-        &'a self,
+    fn select(
+        &self,
         selector: FactSelector,
-    ) -> impl Stream<Item = Result<Fact, XFactsError>> + 'a + ConditionalSend;
+    ) -> impl Stream<Item = Result<Fact, XFactsError>> + '_ + ConditionalSend;
 }
 
 /// A trait that may be implemented by anything that is capable of

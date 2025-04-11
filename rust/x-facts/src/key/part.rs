@@ -11,7 +11,7 @@ use crate::{
 #[repr(transparent)]
 pub struct EntityKeyPart<'a>(pub &'a [u8; ENTITY_LENGTH]);
 
-impl<'a> EntityKeyPart<'a> {
+impl EntityKeyPart<'_> {
     /// An [`EntityKeyPart`] where all bits are zero
     pub fn min() -> Self {
         Self(&MINIMUM_ENTITY)
@@ -23,7 +23,7 @@ impl<'a> EntityKeyPart<'a> {
     }
 }
 
-impl<'a> AsRef<[u8]> for EntityKeyPart<'a> {
+impl AsRef<[u8]> for EntityKeyPart<'_> {
     fn as_ref(&self) -> &[u8] {
         self.0.as_ref()
     }
@@ -31,7 +31,7 @@ impl<'a> AsRef<[u8]> for EntityKeyPart<'a> {
 
 impl<'a> From<&'a Entity> for EntityKeyPart<'a> {
     fn from(value: &'a Entity) -> Self {
-        Self(&*value)
+        Self(value)
     }
 }
 
@@ -46,7 +46,7 @@ impl<'a> From<EntityKeyPart<'a>> for Entity {
 #[repr(transparent)]
 pub struct AttributeKeyPart<'a>(pub &'a [u8; ATTRIBUTE_LENGTH]);
 
-impl<'a> AttributeKeyPart<'a> {
+impl AttributeKeyPart<'_> {
     /// An [`AttributeKeyPart`] where all bits are zero
     pub fn min() -> Self {
         Self(&MINIMUM_ATTRIBUTE)
@@ -72,7 +72,7 @@ impl<'a> TryFrom<AttributeKeyPart<'a>> for Attribute {
     }
 }
 
-impl<'a> Display for AttributeKeyPart<'a> {
+impl Display for AttributeKeyPart<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let parsed = String::from_utf8_lossy(self.0.as_ref())
             .split('\u{0000}')
@@ -88,7 +88,7 @@ impl<'a> Display for AttributeKeyPart<'a> {
 #[repr(transparent)]
 pub struct ValueReferenceKeyPart<'a>(pub &'a [u8; VALUE_REFERENCE_LENGTH]);
 
-impl<'a> ValueReferenceKeyPart<'a> {
+impl ValueReferenceKeyPart<'_> {
     /// A [`ValueReferenceKeyPart`] where all bits are zero
     pub fn min() -> Self {
         Self(&MINIMUM_VALUE_REFERENCE)

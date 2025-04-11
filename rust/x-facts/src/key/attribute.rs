@@ -28,7 +28,7 @@ impl AttributeKey {
         entity: EntityKeyPart,
         value_type: ValueDataType,
     ) -> Self {
-        let mut inner = MINIMUM_ATTRIBUTE_KEY.clone();
+        let mut inner = MINIMUM_ATTRIBUTE_KEY;
         mutable_slice![inner, ATTRIBUTE_KEY_ATTRIBUTE_OFFSET, ATTRIBUTE_LENGTH]
             .copy_from_slice(attribute.0);
         mutable_slice![inner, ATTRIBUTE_KEY_ENTITY_OFFSET, ENTITY_LENGTH].copy_from_slice(entity.0);
@@ -59,7 +59,7 @@ impl AttributeKey {
     /// Set the [`AttributeKeyPart`], altering the [`Attribute`] part of this
     /// [`AttributeKey`].
     pub fn set_attribute(&self, attribute: AttributeKeyPart) -> Self {
-        let mut inner = self.0.clone();
+        let mut inner = self.0;
         mutable_slice![inner, ATTRIBUTE_KEY_ATTRIBUTE_OFFSET, ATTRIBUTE_LENGTH]
             .copy_from_slice(attribute.0);
         Self(inner)
@@ -78,7 +78,7 @@ impl AttributeKey {
     /// Set the [`EntityKeyPart`], altering the [`Entity`] part of this
     /// [`AttributeKey`].
     pub fn set_entity(&self, entity: EntityKeyPart) -> Self {
-        let mut inner = self.0.clone();
+        let mut inner = self.0;
         mutable_slice![inner, ATTRIBUTE_KEY_ENTITY_OFFSET, ENTITY_LENGTH].copy_from_slice(entity.0);
         Self(inner)
     }
@@ -90,7 +90,7 @@ impl AttributeKey {
 
     /// Set the [`ValueDataType`] that is represented by this [`AttributeKey`].
     pub fn set_value_type(&self, value_type: ValueDataType) -> Self {
-        let mut inner = self.0.clone();
+        let mut inner = self.0;
         inner[ATTRIBUTE_KEY_VALUE_DATA_TYPE_OFFSET] = value_type.into();
         Self(inner)
     }
@@ -120,7 +120,7 @@ impl From<&Fact> for AttributeKey {
     fn from(fact: &Fact) -> Self {
         AttributeKey::default()
             .set_attribute(AttributeKeyPart::from(&fact.the))
-            .set_entity(EntityKeyPart(&*fact.of))
+            .set_entity(EntityKeyPart(&fact.of))
             .set_value_type(fact.is.data_type())
     }
 }

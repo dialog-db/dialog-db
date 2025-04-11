@@ -61,7 +61,7 @@ impl Value {
 
     /// Produce a hash reference to this [`Value`]
     pub fn to_reference(&self) -> Blake3Hash {
-        make_reference(&self.to_bytes())
+        make_reference(self.to_bytes())
     }
 }
 
@@ -82,7 +82,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
                 })?)
             }
             // TODO: How strictly validated must a bool representation be?
-            ValueDataType::Boolean => match value.get(0) {
+            ValueDataType::Boolean => match value.first() {
                 Some(byte) if value.len() == 1 => Value::Boolean(*byte != 0),
                 _ => {
                     return Err(XFactsError::InvalidValue(format!(

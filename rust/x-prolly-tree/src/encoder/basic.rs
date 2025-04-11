@@ -102,7 +102,7 @@ where
                         .try_into()
                         .map_err(|error| XStorageError::DecodeFailed(format!("{error}")))?;
                     let hash: Self::Hash = reader.read::<Vec<u8>>()?.try_into().map_err(|_| {
-                        XStorageError::DecodeFailed(format!("Could not convert bytes to hash",))
+                        XStorageError::DecodeFailed("Could not convert bytes to hash".to_string())
                     })?;
                     children.push(Reference::new(boundary, hash))
                 }

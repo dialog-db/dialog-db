@@ -7,6 +7,12 @@ use crate::{RawEntity, make_reference, make_seed};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Entity(RawEntity);
 
+impl Default for Entity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Entity {
     /// Generate a new, unique [`Entity`].
     pub fn new() -> Self {

@@ -47,7 +47,7 @@ where
         Ok(match first_byte {
             0 => State::Removed,
             1 => State::Added(Datum::try_from(rest.to_vec())?),
-            any @ _ => {
+            any => {
                 return Err(XFactsError::InvalidState(format!(
                     "Unrecognized state variant: {any}"
                 )));

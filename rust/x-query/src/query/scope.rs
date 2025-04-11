@@ -7,6 +7,12 @@ use crate::make_seed;
 #[derive(Clone)]
 pub struct Scope(String);
 
+impl Default for Scope {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Scope {
     pub fn new() -> Self {
         Scope(make_seed().to_base58())

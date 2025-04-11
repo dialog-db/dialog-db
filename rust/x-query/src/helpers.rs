@@ -55,7 +55,7 @@ mod inner {
 
         let mut entries: Vec<(crate::EavKey, Entity, Attribute, Value)> = vec![];
         for (entity, attribute, value) in data {
-            let value = Value::from(value);
+            let value = value;
             let key = store
                 .assert(entity.clone(), attribute.clone(), value.clone())
                 .await?;
