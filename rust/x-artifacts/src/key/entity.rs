@@ -4,8 +4,8 @@ use arrayref::array_ref;
 use x_prolly_tree::KeyType;
 
 use crate::{
-    ATTRIBUTE_LENGTH, AttributeKeyPart, ENTITY_KEY_LENGTH, ENTITY_LENGTH, EntityKeyPart, Fact,
-    ValueDataType, XFactsError, mutable_slice,
+    ATTRIBUTE_LENGTH, Artifact, AttributeKeyPart, ENTITY_KEY_LENGTH, ENTITY_LENGTH, EntityKeyPart,
+    ValueDataType, XArtifactsError, mutable_slice,
 };
 
 const ENTITY_OFFSET: usize = 0;
@@ -16,7 +16,7 @@ const MINIMUM_ENTITY_KEY: [u8; ENTITY_KEY_LENGTH] = [u8::MIN; ENTITY_KEY_LENGTH]
 const MAXIMUM_ENTITY_KEY: [u8; ENTITY_KEY_LENGTH] = [u8::MAX; ENTITY_KEY_LENGTH];
 
 /// A [`KeyType`] that is used when constructing an index of the [`Entity`]s
-/// of [`Fact`]s.
+/// of [`Artifact`]s.
 #[repr(transparent)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct EntityKey([u8; ENTITY_KEY_LENGTH]);
@@ -89,8 +89,8 @@ impl EntityKey {
     }
 }
 
-impl From<&Fact> for EntityKey {
-    fn from(fact: &Fact) -> Self {
+impl From<&Artifact> for EntityKey {
+    fn from(fact: &Artifact) -> Self {
         EntityKey::default()
             .set_entity(EntityKeyPart(&fact.of))
             .set_attribute(AttributeKeyPart::from(&fact.the))
@@ -119,11 +119,14 @@ impl Deref for EntityKey {
 }
 
 impl TryFrom<Vec<u8>> for EntityKey {
-    type Error = XFactsError;
+    type Error = XArtifactsError;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Ok(Self(value.try_into().map_err(|value: Vec<u8>| {
-            XFactsError::InvalidKey(format!("Wrong byte length for entity key: {}", value.len()))
+            XArtifactsError::InvalidKey(format!(
+                "Wrong byte length for entity key: {}",
+                value.len()
+            ))
         })?))
     }
 }

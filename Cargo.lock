@@ -806,20 +806,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "x-common"
-version = "0.1.0"
-
-[[package]]
-name = "x-dbsp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "tokio",
- "x-common",
-]
-
-[[package]]
-name = "x-facts"
+name = "x-artifacts"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -839,6 +826,19 @@ dependencies = [
  "x-common",
  "x-prolly-tree",
  "x-storage",
+]
+
+[[package]]
+name = "x-common"
+version = "0.1.0"
+
+[[package]]
+name = "x-dbsp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "tokio",
+ "x-common",
 ]
 
 [[package]]

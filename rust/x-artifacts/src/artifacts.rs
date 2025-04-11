@@ -1,5 +1,5 @@
-mod version;
-pub use version::*;
+mod revision;
+pub use revision::*;
 
 mod instruction;
 pub use instruction::*;
@@ -9,6 +9,15 @@ pub use selector::*;
 
 mod store;
 pub use store::*;
+
+mod attribute;
+pub use attribute::*;
+
+mod entity;
+pub use entity::*;
+
+mod value;
+pub use value::*;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
@@ -21,36 +30,27 @@ use x_storage::{Storage, StorageBackend, XStorageError};
 
 use crate::{
     AttributeKey, BRANCH_FACTOR, EntityDatum, EntityKey, EntityKeyPart, HASH_SIZE, State,
-    ValueDatum, ValueKey, ValueReferenceKeyPart, XFactsError,
+    ValueDatum, ValueKey, ValueReferenceKeyPart, XArtifactsError,
 };
 
-mod attribute;
-pub use attribute::*;
-
-mod entity;
-pub use entity::*;
-
-mod value;
-pub use value::*;
-
 /// The representation of the hash type (BLAKE3, in this case) that must be used
-/// by a [`StorageBackend`] that may back an instance of [`Facts`].
+/// by a [`StorageBackend`] that may back an instance of [`Artifacts`].
 pub type Blake3Hash = [u8; HASH_SIZE];
 
-/// A [`Fact`] embodies a datum - a semantic triple - that may be stored in or
+/// A [`Artifact`] embodies a datum - a semantic triple - that may be stored in or
 /// retrieved from a [`FactStore`].
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
-pub struct Fact {
-    /// The [`Attribute`] of the [`Fact`]; the predicate of the triple
+pub struct Artifact {
+    /// The [`Attribute`] of the [`Artifact`]; the predicate of the triple
     pub the: Attribute,
-    /// The [`Entity`] of the [`Fact`]; the subject of the triple
+    /// The [`Entity`] of the [`Artifact`]; the subject of the triple
     pub of: Entity,
-    /// The [`Value`] of the [`Fact`]; the object of the triple
+    /// The [`Value`] of the [`Artifact`]; the object of the triple
     pub is: Value,
 }
 
 /// An alias type that describes the [`Tree`]-based prolly tree that is
-/// used for each index in [`Facts`]
+/// used for each index in [`Artifacts`]
 pub type Index<Key, Value, Backend> = Arc<
     RwLock<
         Tree<
@@ -65,20 +65,20 @@ pub type Index<Key, Value, Backend> = Arc<
     >,
 >;
 
-/// [`Facts`] is an implementor of [`FactStore`] and [`FactStoreMut`].
-/// Internally, [`Facts`] maintains indexes built from [`Tree`]s (that is,
-/// prolly trees). These indexes are built up as new [`Fact`]s are commited,
-/// and they are chosen based on [`FactSelector`] shapes when [`Fact`]s are
+/// [`Artifacts`] is an implementor of [`FactStore`] and [`FactStoreMut`].
+/// Internally, [`Artifacts`] maintains indexes built from [`Tree`]s (that is,
+/// prolly trees). These indexes are built up as new [`Artifact`]s are commited,
+/// and they are chosen based on [`FactSelector`] shapes when [`Artifact`]s are
 /// queried.
 ///
-/// [`Facts`] are backed by a concrete implementation of [`StorageBackend`].
+/// [`Artifacts`] are backed by a concrete implementation of [`StorageBackend`].
 /// The user-provided [`StorageBackend`] is paired with a [`BasicEncoder`] to
 /// produce a [`ContentAddressedStorage`] that is suitable for storing and
 /// retrieving facts.
 ///
 /// See the crate-level documentation for an example of usage.
 #[derive(Clone)]
-pub struct Facts<Backend>
+pub struct Artifacts<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = XStorageError>
         + ConditionalSync
@@ -89,14 +89,14 @@ where
     value_index: Index<ValueKey, EntityDatum, Backend>,
 }
 
-impl<Backend> Facts<Backend>
+impl<Backend> Artifacts<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = XStorageError>
         + ConditionalSync
         + 'static,
 {
-    /// Initialize a new [`Facts`] with the provided [`StorageBackend`].
-    pub async fn new(backend: Backend) -> Result<Self, XFactsError> {
+    /// Initialize a new [`Artifacts`] with the provided [`StorageBackend`].
+    pub async fn new(backend: Backend) -> Result<Self, XArtifactsError> {
         Ok(Self {
             entity_index: Arc::new(RwLock::new(Tree::new(Storage {
                 encoder: BasicEncoder::<EntityKey, State<ValueDatum>>::default(),
@@ -113,8 +113,8 @@ where
         })
     }
 
-    /// Attempt to initialize the [`Facts`] at a specific [`Version`].
-    pub async fn at(version: Version, backend: Backend) -> Result<Self, XFactsError> {
+    /// Attempt to initialize the [`Artifacts`] at a specific [`Version`].
+    pub async fn restore(version: Revision, backend: Backend) -> Result<Self, XArtifactsError> {
         Ok(Self {
             entity_index: Arc::new(RwLock::new(
                 Tree::from_hash(
@@ -150,7 +150,7 @@ where
     }
 
     /// Get the hash that represents the [`FactStore`] at its current version.
-    pub async fn version(&self) -> Option<Version> {
+    pub async fn version(&self) -> Option<Revision> {
         let (entity_index, attribute_index, value_index) = tokio::join!(
             self.entity_index.read(),
             self.attribute_index.read(),
@@ -163,7 +163,7 @@ where
             value_index.hash(),
         ) {
             (Some(entity_version), Some(attribute_version), Some(value_version)) => {
-                Some(Version::from((
+                Some(Revision::from((
                     entity_version.to_owned(),
                     attribute_version.to_owned(),
                     value_version.to_owned(),
@@ -176,7 +176,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> FactStore for Facts<Backend>
+impl<Backend> FactStore for Artifacts<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = XStorageError>
         + ConditionalSync
@@ -185,7 +185,7 @@ where
     fn select(
         &self,
         selector: FactSelector,
-    ) -> impl Stream<Item = Result<Fact, XFactsError>> + '_ + ConditionalSend {
+    ) -> impl Stream<Item = Result<Artifact, XArtifactsError>> + '_ + ConditionalSend {
         try_stream! {
             let FactSelector {
                 entity, attribute, value
@@ -207,7 +207,7 @@ where
 
                 for await item in stream {
                     if let Ok(Entry { key, value: State::Added(datum) }) = item {
-                        yield Fact {
+                        yield Artifact {
                             the: Attribute::try_from(key.attribute())?,
                             of: Entity::from(key.entity()),
                             is: Value::try_from((key.value_type(), datum.to_vec()))?
@@ -225,7 +225,7 @@ where
 
                 for await item in stream {
                     if let Ok(Entry { key, value: State::Added(datum) }) = item {
-                        yield Fact {
+                        yield Artifact {
                             the: Attribute::try_from(key.attribute())?,
                             of: Entity::from(key.entity()),
                             is: Value::try_from((key.value_type(), datum.to_vec()))?
@@ -261,10 +261,10 @@ where
 
                         let entity_index = self.entity_index.read().await;
                         let Some(State::Added(datum)) = entity_index.get(&key).await? else {
-                            return Err(XFactsError::MalformedIndex(format!("Missing datum for key {:?}", key)))?;
+                            return Err(XArtifactsError::MalformedIndex(format!("Missing datum for key {:?}", key)))?;
                         };
 
-                        yield Fact {
+                        yield Artifact {
                             the: Attribute::try_from(key.attribute())?,
                             of: Entity::from(key.entity()),
                             is: Value::try_from((key.value_type(), datum.to_vec()))?
@@ -278,7 +278,7 @@ where
 
                 for await item in stream {
                     if let Ok(Entry { key, value: State::Added(datum) }) = item {
-                        yield Fact {
+                        yield Artifact {
                             the: Attribute::try_from(key.attribute())?,
                             of: Entity::from(key.entity()),
                             is: Value::try_from((key.value_type(), datum.to_vec()))?
@@ -292,13 +292,13 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> FactStoreMut for Facts<Backend>
+impl<Backend> FactStoreMut for Artifacts<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = XStorageError>
         + ConditionalSync
         + 'static,
 {
-    async fn commit<I>(&mut self, instructions: I) -> Result<(), XFactsError>
+    async fn commit<I>(&mut self, instructions: I) -> Result<(), XArtifactsError>
     where
         I: IntoIterator<Item = Instruction> + ConditionalSend,
         I::IntoIter: ConditionalSend,
@@ -355,8 +355,8 @@ mod tests {
     use x_storage::{MeasuredStorageBackend, make_target_storage};
 
     use crate::{
-        Attribute, Entity, Fact, FactSelector, FactStore, FactStoreMut, Facts, Instruction, Value,
-        generate_data,
+        Artifact, Artifacts, Attribute, Entity, FactSelector, FactStore, FactStoreMut, Instruction,
+        Value, generate_data,
     };
 
     #[cfg(target_arch = "wasm32")]
@@ -368,16 +368,16 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_commits_and_selects_facts() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
-        let entity_order = |l: &Fact, r: &Fact| l.of.cmp(&r.of);
-        let mut facts = Facts::new(storage_backend).await?;
+        let entity_order = |l: &Artifact, r: &Artifact| l.of.cmp(&r.of);
+        let mut facts = Artifacts::new(storage_backend).await?;
 
         let mut data = vec![
-            Fact {
+            Artifact {
                 the: Attribute::from_str("profile/name")?,
                 of: Entity::new(),
                 is: Value::String("Foo Bar".into()),
             },
-            Fact {
+            Artifact {
                 the: Attribute::from_str("profile/name")?,
                 of: Entity::new(),
                 is: Value::String("Fizz Buzz".into()),
@@ -392,7 +392,7 @@ mod tests {
 
         let fact_stream = facts.select(FactSelector::default());
 
-        let mut facts: Vec<Fact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
+        let mut facts: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
         facts.sort_by(entity_order);
 
         assert_eq!(data, facts);
@@ -408,7 +408,7 @@ mod tests {
 
         let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
 
-        let mut facts = Facts::new(storage_backend.clone()).await?;
+        let mut facts = Artifacts::new(storage_backend.clone()).await?;
 
         facts.commit(data).await?;
 
@@ -418,7 +418,7 @@ mod tests {
         };
 
         let fact_stream = facts.select(FactSelector::default().is(Value::String("name64".into())));
-        let results: Vec<Fact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
+        let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
         assert_eq!(results.len(), 1);
 
@@ -436,7 +436,7 @@ mod tests {
         let fact_stream =
             facts.select(FactSelector::default().the(Attribute::from_str("item/id")?));
 
-        let results: Vec<Fact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
+        let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
         assert_eq!(results.len(), 256);
 
@@ -465,18 +465,18 @@ mod tests {
 
         assert_ne!(data, reordered_data);
 
-        let into_assert = |fact: Fact| Instruction::Assert(fact);
+        let into_assert = |fact: Artifact| Instruction::Assert(fact);
 
         let data = data.into_iter().map(into_assert);
         let reordered_data = reordered_data.into_iter().map(into_assert);
 
         let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
 
-        let mut facts_one = Facts::new(storage_backend.clone()).await?;
+        let mut facts_one = Artifacts::new(storage_backend.clone()).await?;
 
         facts_one.commit(data).await?;
 
-        let mut facts_two = Facts::new(storage_backend.clone()).await?;
+        let mut facts_two = Artifacts::new(storage_backend.clone()).await?;
 
         facts_two.commit(reordered_data).await?;
 
@@ -490,25 +490,25 @@ mod tests {
     async fn it_can_restore_a_previously_commited_version() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let data = generate_data(64)?;
-        let into_assert = |fact: Fact| Instruction::Assert(fact);
+        let into_assert = |fact: Artifact| Instruction::Assert(fact);
         let storage_backend = Arc::new(Mutex::new(storage_backend));
 
-        let mut facts = Facts::new(storage_backend.clone()).await?;
+        let mut facts = Artifacts::new(storage_backend.clone()).await?;
 
         facts.commit(data.into_iter().map(into_assert)).await?;
         let version = facts.version().await.unwrap();
 
-        let restored_facts = Facts::at(version.clone(), storage_backend).await?;
+        let restored_facts = Artifacts::restore(version.clone(), storage_backend).await?;
         let restored_version = restored_facts.version().await.unwrap();
 
         assert_eq!(version, restored_version);
 
         let fact_stream = facts.select(FactSelector::default().is(Value::String("name10".into())));
-        let results: Vec<Fact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
+        let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
         let restored_fact_stream =
             restored_facts.select(FactSelector::default().is(Value::String("name10".into())));
-        let restored_results: Vec<Fact> = restored_fact_stream
+        let restored_results: Vec<Artifact> = restored_fact_stream
             .map(|fact| fact.unwrap())
             .collect()
             .await;

@@ -1,27 +1,27 @@
 use x_prolly_tree::ValueType;
 
-use crate::XFactsError;
+use crate::XArtifactsError;
 
 #[cfg(doc)]
-use crate::{Fact, FactStore};
+use crate::{Artifact, FactStore};
 
-/// A [`State`] represents the presence or absence of a [`Fact`] within a
+/// A [`State`] represents the presence or absence of a [`Artifact`] within a
 /// [`FactStore`]
 #[derive(Clone, Debug)]
 pub enum State<Datum>
 where
     Datum: ValueType,
 {
-    /// A [`Fact`] that has been asserted
+    /// A [`Artifact`] that has been asserted
     Added(Datum),
-    /// A [`Fact`] that has been retracted
+    /// A [`Artifact`] that has been retracted
     Removed,
 }
 
 impl<Datum> ValueType for State<Datum>
 where
     Datum: ValueType,
-    XFactsError: From<<Datum as TryFrom<Vec<u8>>>::Error>,
+    XArtifactsError: From<<Datum as TryFrom<Vec<u8>>>::Error>,
 {
     fn to_vec(&self) -> Vec<u8> {
         match self {
@@ -34,13 +34,13 @@ where
 impl<Datum> TryFrom<Vec<u8>> for State<Datum>
 where
     Datum: ValueType,
-    XFactsError: From<<Datum as TryFrom<Vec<u8>>>::Error>,
+    XArtifactsError: From<<Datum as TryFrom<Vec<u8>>>::Error>,
 {
-    type Error = XFactsError;
+    type Error = XArtifactsError;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         let Some((first_byte, rest)) = value.split_first() else {
-            return Err(XFactsError::InvalidState(
+            return Err(XArtifactsError::InvalidState(
                 "At least one byte is required".into(),
             ));
         };
@@ -48,7 +48,7 @@ where
             0 => State::Removed,
             1 => State::Added(Datum::try_from(rest.to_vec())?),
             any => {
-                return Err(XFactsError::InvalidState(format!(
+                return Err(XArtifactsError::InvalidState(format!(
                     "Unrecognized state variant: {any}"
                 )));
             }

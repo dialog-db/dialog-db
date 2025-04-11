@@ -4,8 +4,8 @@ use arrayref::array_ref;
 use x_prolly_tree::KeyType;
 
 use crate::{
-    ATTRIBUTE_LENGTH, AttributeKeyPart, Fact, VALUE_DATA_TYPE_LENGTH, VALUE_KEY_LENGTH,
-    VALUE_REFERENCE_LENGTH, ValueDataType, ValueReferenceKeyPart, XFactsError, mutable_slice,
+    ATTRIBUTE_LENGTH, Artifact, AttributeKeyPart, VALUE_DATA_TYPE_LENGTH, VALUE_KEY_LENGTH,
+    VALUE_REFERENCE_LENGTH, ValueDataType, ValueReferenceKeyPart, XArtifactsError, mutable_slice,
 };
 
 const VALUE_KEY_VALUE_DATA_TYPE_OFFSET: usize = 0;
@@ -15,7 +15,7 @@ const MINIMUM_VALUE_KEY: [u8; VALUE_KEY_LENGTH] = [u8::MIN; VALUE_KEY_LENGTH];
 const MAXIMUM_VALUE_KEY: [u8; VALUE_KEY_LENGTH] = [u8::MAX; VALUE_KEY_LENGTH];
 
 /// A [`KeyType`] that is used when constructing an index of the [`Value`]s
-/// of [`Fact`]s.
+/// of [`Artifact`]s.
 #[repr(transparent)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ValueKey([u8; VALUE_KEY_LENGTH]);
@@ -125,8 +125,8 @@ impl Deref for ValueKey {
     }
 }
 
-impl From<&Fact> for ValueKey {
-    fn from(fact: &Fact) -> Self {
+impl From<&Artifact> for ValueKey {
+    fn from(fact: &Artifact) -> Self {
         let value_reference = fact.is.to_reference();
         ValueKey::default()
             .set_value_type(fact.is.data_type())
@@ -136,11 +136,11 @@ impl From<&Fact> for ValueKey {
 }
 
 impl TryFrom<Vec<u8>> for ValueKey {
-    type Error = XFactsError;
+    type Error = XArtifactsError;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Ok(Self(value.try_into().map_err(|value: Vec<u8>| {
-            XFactsError::InvalidKey(format!("Wrong byte length for value key: {}", value.len()))
+            XArtifactsError::InvalidKey(format!("Wrong byte length for value key: {}", value.len()))
         })?))
     }
 }

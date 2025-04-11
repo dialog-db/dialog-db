@@ -3,7 +3,7 @@ use std::fmt::Display;
 use crate::{
     ATTRIBUTE_LENGTH, Attribute, ENTITY_LENGTH, Entity, MAXIMUM_ATTRIBUTE, MAXIMUM_ENTITY,
     MAXIMUM_VALUE_REFERENCE, MINIMUM_ATTRIBUTE, MINIMUM_ENTITY, MINIMUM_VALUE_REFERENCE,
-    VALUE_REFERENCE_LENGTH, XFactsError,
+    VALUE_REFERENCE_LENGTH, XArtifactsError,
 };
 
 /// A wrapper around a slice reference that corresponds to the [`Entity`] part
@@ -65,7 +65,7 @@ impl<'a> From<&'a Attribute> for AttributeKeyPart<'a> {
 }
 
 impl<'a> TryFrom<AttributeKeyPart<'a>> for Attribute {
-    type Error = XFactsError;
+    type Error = XArtifactsError;
 
     fn try_from(value: AttributeKeyPart<'a>) -> Result<Self, Self::Error> {
         Attribute::try_from(value.to_string())

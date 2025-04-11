@@ -1,5 +1,5 @@
 [package]
-name = "x-facts"
+name = "x-artifacts"
 edition = "2024"
 version.workspace = true
 authors.workspace = true

@@ -3,26 +3,26 @@ use crate::{Attribute, Entity, Value};
 #[cfg(doc)]
 use crate::FactStore;
 
-/// The basic query system for selecting [`Fact`]s from a [`FactStore`] You can
+/// The basic query system for selecting [`Artifact`]s from a [`FactStore`] You can
 /// assign its fields directly, but for convenience and ergonomics it is also
 /// possible to construct it incrementally with the `the`, `of` and `is`
 /// methods.
 ///
-/// When a field is specified, all [`Fact`]s that are selected will share the
+/// When a field is specified, all [`Artifact`]s that are selected will share the
 /// same field value.
 ///
 /// Note that when all fields of the [`FactSelector`] are `None`, it implies
-/// that all [`Fact`]s in the [`FactStore`] should be selected (this can be very
+/// that all [`Artifact`]s in the [`FactStore`] should be selected (this can be very
 /// slow and is often not what you want). To avoid this, always be sure to
 /// specify at least one field of the [`FactSelector`] before submitting a
 /// query!
 #[derive(Default)]
 pub struct FactSelector {
-    /// The [`Entity`] (or subject) that selected [`Fact`]s should refer to
+    /// The [`Entity`] (or subject) that selected [`Artifact`]s should refer to
     pub entity: Option<Entity>,
-    /// The [`Attribute`] (or predicate) used in any selected [`Fact`]s
+    /// The [`Attribute`] (or predicate) used in any selected [`Artifact`]s
     pub attribute: Option<Attribute>,
-    /// The [`Value`] (or object) that selected [`Fact`]s should refer to.
+    /// The [`Value`] (or object) that selected [`Artifact`]s should refer to.
     pub value: Option<Value>,
 }
 

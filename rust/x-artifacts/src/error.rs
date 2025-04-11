@@ -4,7 +4,7 @@ use x_storage::XStorageError;
 
 /// The common error type used by this crate
 #[derive(Error, Debug, PartialEq)]
-pub enum XFactsError {
+pub enum XArtifactsError {
     /// An error occured in storage-related code
     #[error("Storage operation failed: {0}")]
     Storage(String),
@@ -42,14 +42,14 @@ pub enum XFactsError {
     InvalidEntity(String),
 }
 
-impl From<XStorageError> for XFactsError {
+impl From<XStorageError> for XArtifactsError {
     fn from(value: XStorageError) -> Self {
-        XFactsError::Storage(format!("{value}"))
+        XArtifactsError::Storage(format!("{value}"))
     }
 }
 
-impl From<XProllyTreeError> for XFactsError {
+impl From<XProllyTreeError> for XArtifactsError {
     fn from(value: XProllyTreeError) -> Self {
-        XFactsError::Tree(format!("{value}"))
+        XArtifactsError::Tree(format!("{value}"))
     }
 }

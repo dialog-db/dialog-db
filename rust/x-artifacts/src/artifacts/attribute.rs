@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use crate::{ATTRIBUTE_LENGTH, RawAttribute, XFactsError};
+use crate::{ATTRIBUTE_LENGTH, RawAttribute, XArtifactsError};
 
 /// An [`Attribute`] is the predicate part of a semantic triple. [`Attribute`]s
 /// in this crate may be a maximum of 64 bytes, and must be formated as
@@ -9,19 +9,19 @@ use crate::{ATTRIBUTE_LENGTH, RawAttribute, XFactsError};
 pub struct Attribute(RawAttribute, [u8; ATTRIBUTE_LENGTH]);
 
 impl Attribute {
-    /// A byte representation of this attribute in a format that is suitable
-    /// for use within a [`KeyType`].
+    /// A byte representation of this attribute in a format that is suitable for
+    /// use within a [`KeyType`].
     pub fn key_bytes(&self) -> &[u8; ATTRIBUTE_LENGTH] {
         &self.1
     }
 }
 
 impl TryFrom<String> for Attribute {
-    type Error = XFactsError;
+    type Error = XArtifactsError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         if value.len() > ATTRIBUTE_LENGTH {
-            return Err(XFactsError::InvalidAttribute(format!(
+            return Err(XArtifactsError::InvalidAttribute(format!(
                 "Attribute \"{value}\" is too long (must be no longer than {} bytes)",
                 ATTRIBUTE_LENGTH
             )));
@@ -29,7 +29,7 @@ impl TryFrom<String> for Attribute {
 
         // TODO: Decide if we want to enforce this
         let Some((_namespace, _predicate)) = value.split_once('/') else {
-            return Err(XFactsError::InvalidAttribute(format!(
+            return Err(XArtifactsError::InvalidAttribute(format!(
                 "Attribute format is \"namespace/predicate\", but got \"{value}\""
             )));
         };
@@ -42,7 +42,7 @@ impl TryFrom<String> for Attribute {
 }
 
 impl FromStr for Attribute {
-    type Err = XFactsError;
+    type Err = XArtifactsError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Attribute::try_from(s.to_owned())

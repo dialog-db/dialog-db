@@ -1,6 +1,6 @@
-use crate::{Attribute, Blake3Hash, ENTITY_LENGTH, RawEntity, XFactsError, make_reference};
+use crate::{Attribute, Blake3Hash, ENTITY_LENGTH, RawEntity, XArtifactsError, make_reference};
 
-/// All value type representations that may be stored by [`Facts`]
+/// All value type representations that may be stored by [`Artifacts`]
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub enum Value {
     /// An empty (null) value
@@ -66,7 +66,7 @@ impl Value {
 }
 
 impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
-    type Error = XFactsError;
+    type Error = XArtifactsError;
 
     fn try_from((value_data_type, value): (ValueDataType, Vec<u8>)) -> Result<Self, Self::Error> {
         Ok(match value_data_type {
@@ -74,7 +74,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
             ValueDataType::Bytes => Value::Bytes(value),
             ValueDataType::Entity => {
                 Value::Entity(value.try_into().map_err(|value: Vec<u8>| {
-                    XFactsError::InvalidEntity(format!(
+                    XArtifactsError::InvalidEntity(format!(
                         "Wrong byte length for entity (expected {}, got {})",
                         ENTITY_LENGTH,
                         value.len()
@@ -85,7 +85,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
             ValueDataType::Boolean => match value.first() {
                 Some(byte) if value.len() == 1 => Value::Boolean(*byte != 0),
                 _ => {
-                    return Err(XFactsError::InvalidValue(format!(
+                    return Err(XArtifactsError::InvalidValue(format!(
                         "Wrong byte length for boolean (expected 1, got {})",
                         value.len()
                     )));
@@ -94,7 +94,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
             ValueDataType::String => match String::from_utf8(value) {
                 Ok(value) => Value::String(value),
                 Err(error) => {
-                    return Err(XFactsError::InvalidValue(format!(
+                    return Err(XArtifactsError::InvalidValue(format!(
                         "Not a valid UTF-8 string: {error}"
                     )));
                 }
@@ -103,7 +103,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
             // integer? What about floats?
             ValueDataType::UnsignedInt => Value::UnsignedInt(u128::from_le_bytes(
                 value.try_into().map_err(|value: Vec<u8>| {
-                    XFactsError::InvalidValue(format!(
+                    XArtifactsError::InvalidValue(format!(
                         "Wrong number of bytes for u128 (expected 16, got {})",
                         value.len()
                     ))
@@ -111,7 +111,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
             )),
             ValueDataType::SignedInt => Value::SignedInt(i128::from_le_bytes(
                 value.try_into().map_err(|value: Vec<u8>| {
-                    XFactsError::InvalidValue(format!(
+                    XArtifactsError::InvalidValue(format!(
                         "Wrong number of bytes for i128 (expected 16, got {})",
                         value.len()
                     ))
@@ -119,7 +119,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
             )),
             ValueDataType::Float => Value::Float(f64::from_le_bytes(value.try_into().map_err(
                 |value: Vec<u8>| {
-                    XFactsError::InvalidValue(format!(
+                    XArtifactsError::InvalidValue(format!(
                         "Wrong number of bytes for f64 (expected 16, got {})",
                         value.len()
                     ))
@@ -129,7 +129,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
             ValueDataType::Symbol => match String::from_utf8(value) {
                 Ok(value) => Value::Symbol(Attribute::try_from(value)?),
                 Err(error) => {
-                    return Err(XFactsError::InvalidValue(format!(
+                    return Err(XArtifactsError::InvalidValue(format!(
                         "Not a valid UTF-8 string: {error}"
                     )));
                 }

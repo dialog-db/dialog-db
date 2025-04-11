@@ -2,10 +2,10 @@ use std::ops::Deref;
 
 use x_prolly_tree::ValueType;
 
-use crate::{HASH_SIZE, XFactsError};
+use crate::{HASH_SIZE, XArtifactsError};
 
 #[cfg(doc)]
-use crate::{Attribute, Entity, Facts, Value};
+use crate::{Artifacts, Attribute, Entity, Value};
 
 /// The primitive representation of an [`Entity`]: 32 bytes
 pub type RawEntity = [u8; 32];
@@ -15,7 +15,7 @@ pub type RawValue = Vec<u8>;
 pub type RawAttribute = String;
 
 /// An [`EntityDatum`] is the layout of data stored in the value index of
-/// [`Facts`]
+/// [`Artifacts`]
 #[derive(Clone, Debug)]
 pub struct EntityDatum {
     /// The raw representation of the [`Entity`] associated with this
@@ -38,12 +38,12 @@ impl ValueType for EntityDatum {
 }
 
 impl TryFrom<Vec<u8>> for EntityDatum {
-    type Error = XFactsError;
+    type Error = XArtifactsError;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Ok(Self {
             entity: value.try_into().map_err(|value: Vec<u8>| {
-                XFactsError::InvalidValue(format!(
+                XArtifactsError::InvalidValue(format!(
                     "Wrong byte length for entity; expected {HASH_SIZE}, got {}",
                     value.len()
                 ))
@@ -53,7 +53,7 @@ impl TryFrom<Vec<u8>> for EntityDatum {
 }
 
 /// A [`ValueDatum`] is the layout of data stored in the entity and attribute
-/// indexes of [`Facts`]
+/// indexes of [`Artifacts`]
 #[derive(Clone, Debug)]
 pub struct ValueDatum {
     /// The raw representation of the [`Value`] asscoiated with this [`ValueDatum`]
@@ -67,7 +67,7 @@ impl ValueType for ValueDatum {
 }
 
 impl TryFrom<Vec<u8>> for ValueDatum {
-    type Error = XFactsError;
+    type Error = XArtifactsError;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Ok(Self { value })

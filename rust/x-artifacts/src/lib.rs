@@ -1,39 +1,39 @@
 #![warn(missing_docs)]
 
-//! This package embodies a data storage primitive called [`Facts`]. [`Facts`]
+//! This package embodies a data storage primitive called [`Artifacts`]. [`Artifacts`]
 //! is a triple store backed by indexes that are represented as prolly trees.
 //!
-//! To make use of [`Facts`] via the Rust API:
+//! To make use of [`Artifacts`] via the Rust API:
 //!
 //! ```ignore
 //! use std::str::FromStr;
 //! use x_storage::MemoryStorageBackend;
-//! use x_facts::{Entity, Attribute, Value, Facts, Fact};
+//! use x_facts::{Entity, Attribute, Value, Artifacts, Artifact};
 //!
 //! // Substitute with your storage backend of choice:
 //! let storage_backend = MemoryStorageBackend::default();
-//! let mut facts = Facts::new(storage_backend);
+//! let mut artifacts = Artifacts::new(storage_backend);
 //!
-//! facts.commit([
-//!     Fact {
+//! artifacts.commit([
+//!     Artifact {
 //!         the: Attribute::from_str("profile/name"),
 //!         of: Entity::new(),
 //!         is: Value::String("Foo Bar".into())
 //!     }
 //! ]).await?;
 //!
-//! let fact_stream = facts.select(FactSelector::default()
+//! let artifact_stream = facts.select(FactSelector::default()
 //!     .the(Attribute::from_str("profile/name")));
 //!
-//! let facts = fact_stream.filter_map(|fact| fact.ok())
-//!     .collect::<Vec<Fact>>().await;
+//! let artifacts = fact_stream.filter_map(|fact| fact.ok())
+//!     .collect::earVec<Fact>>().await;
 //! ```
 
 mod data;
 pub use data::*;
 
-mod fact;
-pub use fact::*;
+mod artifacts;
+pub use artifacts::*;
 
 mod reference;
 pub use reference::*;

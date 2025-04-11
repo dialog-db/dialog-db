@@ -1,13 +1,13 @@
 use std::str::FromStr;
 
-use crate::{Attribute, Entity, Fact, Value};
+use crate::{Artifact, Attribute, Entity, Value};
 use anyhow::Result;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 /// Generate deterministic test data consisting of facts that reference a
 /// specified number of [`Entity`]s.
-pub fn generate_data(entity_count: usize) -> Result<Vec<Fact>> {
+pub fn generate_data(entity_count: usize) -> Result<Vec<Artifact>> {
     let item_id_attribute = Attribute::from_str("item/id")?;
     let item_name_attribute = Attribute::from_str("item/name")?;
     let back_reference_attribute = Attribute::from_str("back/reference")?;
@@ -23,27 +23,27 @@ pub fn generate_data(entity_count: usize) -> Result<Vec<Fact>> {
         // println!("{}", entity);
         // let entity = Entity::new();
 
-        data.push(Fact {
+        data.push(Artifact {
             the: item_id_attribute.clone(),
             of: entity.clone(),
             is: Value::UnsignedInt(i as u128),
         });
 
-        data.push(Fact {
+        data.push(Artifact {
             the: item_name_attribute.clone(),
             of: entity.clone(),
             is: Value::String(format!("name{i}")),
         });
 
         if let Some(parent_entity) = last_entity {
-            data.push(Fact {
+            data.push(Artifact {
                 the: parent_attribute.clone(),
                 of: entity.clone(),
                 is: Value::Entity(*parent_entity),
             });
         }
 
-        data.push(Fact {
+        data.push(Artifact {
             the: back_reference_attribute.clone(),
             of: make_entity(),
             is: Value::Entity(*entity),
