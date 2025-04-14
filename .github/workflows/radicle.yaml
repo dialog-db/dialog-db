@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - id: mirror
-        uses: gsaslis/mirror-to-radicle@a73e020d7f4faa8bc7993c59751667f288abcf10
+        uses: gozala/mirror-to-radicle@main
         with:
           radicle-identity-alias: "${{ vars.RADICLE_IDENTITY_ALIAS }}"
           radicle-identity-passphrase: ""
@@ -21,3 +21,4 @@ jobs:
           radicle-identity-public-key: "${{ vars.RADICLE_IDENTITY_PUBLIC_KEY }}"
           radicle-project-name: "${{ vars.RADICLE_PROJECT_NAME }}"
           radicle-repository-id: "${{ vars.RADICLE_REPOSITORY_ID }}"
+          clone-timeout: 300
