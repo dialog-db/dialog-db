@@ -22,3 +22,5 @@ jobs:
           radicle-project-name: "${{ vars.RADICLE_PROJECT_NAME }}"
           radicle-repository-id: "${{ vars.RADICLE_REPOSITORY_ID }}"
           clone-timeout: 300
+          connect-timeout: 180
+          discover-timeout: 180
