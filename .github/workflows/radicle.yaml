@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - id: mirror
-        uses: gsaslis/mirror-to-radicle@v0.1.0
+        uses: gsaslis/mirror-to-radicle@a73e020d7f4faa8bc7993c59751667f288abcf10
         with:
           radicle-identity-alias: "${{ vars.RADICLE_IDENTITY_ALIAS }}"
           radicle-identity-passphrase: ""
