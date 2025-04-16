@@ -70,6 +70,29 @@ describe('artifacts', () => {
         return entityMap;
     }
 
+    it('can restore from a revision', async () => {
+        let artifacts = await Artifacts.open("test");
+        let entityMap = await populateWithHackers(artifacts);
+        let revision = await artifacts.revision();
+
+        let restored_artifacts = await Artifacts.open("test", revision);
+
+        let query = restored_artifacts.select({
+            the: "profile/handle"
+        });
+
+        let count = 0;
+
+        for await (const artifact of query) {
+            let expectedHandle = entityMap.get(encode(artifact.of))?.handle;
+            expect(expectedHandle).to.be.ok;
+            expect(artifact.is.value).to.be.eq(expectedHandle!)
+            count++;
+        }
+
+        expect(count).to.be.eq(5);
+    });
+
     it('can store an artifacts and select them again', async () => {
         let artifacts = await Artifacts.open("test");
         let entityMap = await populateWithHackers(artifacts);

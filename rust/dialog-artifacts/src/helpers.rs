@@ -20,8 +20,6 @@ pub fn generate_data(entity_count: usize) -> Result<Vec<Artifact>> {
 
     for i in 0..entity_count {
         let entity = make_entity();
-        // println!("{}", entity);
-        // let entity = Entity::new();
 
         data.push(Artifact {
             the: item_id_attribute.clone(),

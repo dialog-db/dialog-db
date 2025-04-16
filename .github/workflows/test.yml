@@ -43,6 +43,32 @@ jobs:
     steps:
       - run: echo "Lints are good!"
 
+  npm_packages:
+    name: 'NPM Packages'
+    needs: ['lints']
+    runs-on: 'ubuntu-latest'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+      - uses: ./.github/actions/setup-nix
+      - name: "Run `npm test`"
+        shell: bash
+        run: |
+          nix build .#dialog-artifacts-web
+          cp -r ./result/dialog-artifacts ./rust/dialog-artifacts/pkg
+
+          nix develop --command bash -c "cat << 'EOF' | bash
+          cd rust/dialog-artifacts/javascript_tests
+          npm ci
+          npm test
+          EOF"
+
+          tar -czvf dialog-artifacts.tar.gz -C ./result/dialog-artifacts .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dialog-artifacts
+          path: ./dialog-artifacts.tar.gz
+
   rust_crates:
     name: 'Rust Crates'
     needs: ['lints']
@@ -55,18 +81,8 @@ jobs:
           - flags: '--target wasm32-unknown-unknown'
           - flags: '--target wasm32-unknown-unknown --release'
     steps:
-      - uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: false
-          swap-storage: false
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-      - uses: Swatinem/rust-cache@v2
       - uses: ./.github/actions/setup-nix
       - name: "Run `cargo test`"
         shell: bash
