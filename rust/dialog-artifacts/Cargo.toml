@@ -5,6 +5,9 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [features]
 default = []
 helpers = ["dep:anyhow"]
@@ -18,6 +21,7 @@ anyhow = { workspace = true, optional = true }
 arrayref = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+base58 = { workspace = true }
 blake3 = { workspace = true }
 futures-util = { workspace = true }
 rand = { workspace = true }
@@ -32,6 +36,8 @@ anyhow = { workspace = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { workspace = true, features = ["wasm_js"] }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 wasm-bindgen-test = { workspace = true }

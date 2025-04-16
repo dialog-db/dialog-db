@@ -155,6 +155,7 @@ dependencies = [
  "arrayref",
  "async-stream",
  "async-trait",
+ "base58",
  "blake3",
  "dialog-common",
  "dialog-prolly-tree",
@@ -167,6 +168,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.12",
  "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wasm-bindgen-test",
 ]
 

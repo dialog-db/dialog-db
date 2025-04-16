@@ -1,0 +1,18 @@
+{
+    "name": "@dialogdb/javascript-tests",
+    "version": "0.1.0",
+    "private": true,
+    "scripts": {
+        "test": "web-test-runner *.test.ts --node-resolve"
+    },
+    "dependencies": {
+        "dialog-artifacts": "file:../pkg"
+    },
+    "devDependencies": {
+        "@open-wc/testing": "^4.0.0",
+        "@types/mocha": "^10.0.10",
+        "@web/dev-server-esbuild": "^1.0.4",
+        "@web/test-runner": "^0.20.1",
+        "typescript": "^5.8.3"
+    }
+}

@@ -16,7 +16,7 @@ use crate::FactStore;
 /// slow and is often not what you want). To avoid this, always be sure to
 /// specify at least one field of the [`FactSelector`] before submitting a
 /// query!
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct FactSelector {
     /// The [`Entity`] (or subject) that selected [`Artifact`]s should refer to
     pub entity: Option<Entity>,

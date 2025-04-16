@@ -96,8 +96,8 @@ where
         + 'static,
 {
     /// Initialize a new [`Artifacts`] with the provided [`StorageBackend`].
-    pub async fn new(backend: Backend) -> Result<Self, DialogArtifactsError> {
-        Ok(Self {
+    pub fn new(backend: Backend) -> Self {
+        Self {
             entity_index: Arc::new(RwLock::new(Tree::new(Storage {
                 encoder: BasicEncoder::<EntityKey, State<ValueDatum>>::default(),
                 backend: backend.clone(),
@@ -110,7 +110,7 @@ where
                 encoder: BasicEncoder::<ValueKey, State<EntityDatum>>::default(),
                 backend: backend.clone(),
             }))),
-        })
+        }
     }
 
     /// Attempt to initialize the [`Artifacts`] at a specific [`Version`].
@@ -173,18 +173,19 @@ where
         }
     }
 
-    async fn reset(&self, revision: Option<Revision>) -> Result<(), DialogArtifactsError> {
+    pub(crate) async fn reset(
+        &self,
+        revision: Option<Revision>,
+    ) -> Result<(), DialogArtifactsError> {
         let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
             self.entity_index.write(),
             self.attribute_index.write(),
             self.value_index.write()
         );
 
-        let entity_index_hash = revision.as_ref().map(|revision| revision.entity().clone());
-        let attribute_index_hash = revision
-            .as_ref()
-            .map(|revision| revision.attribute().clone());
-        let value_index_hash = revision.as_ref().map(|revision| revision.value().clone());
+        let entity_index_hash = revision.as_ref().map(|revision| *revision.entity());
+        let attribute_index_hash = revision.as_ref().map(|revision| *revision.attribute());
+        let value_index_hash = revision.as_ref().map(|revision| *revision.value());
 
         tokio::try_join!(
             entity_index.set_hash(entity_index_hash),
@@ -207,7 +208,12 @@ where
     fn select(
         &self,
         selector: FactSelector,
-    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + '_ + ConditionalSend {
+    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
+    {
+        let entity_index = self.entity_index.clone();
+        let attribute_index = self.attribute_index.clone();
+        let value_index = self.value_index.clone();
+
         try_stream! {
             let FactSelector {
                 entity, attribute, value
@@ -222,7 +228,7 @@ where
                     end = end.set_attribute(attribute.into());
                 }
 
-                let index = self.entity_index.read().await;
+                let index = entity_index.read().await;
                 let stream = index.stream_range(Range { start, end });
 
                 tokio::pin!(stream);
@@ -240,7 +246,7 @@ where
                 let start = AttributeKey::min().set_attribute(attribute.into());
                 let end = AttributeKey::max().set_attribute(attribute.into());
 
-                let index = self.attribute_index.read().await;
+                let index = attribute_index.read().await;
                 let stream = index.stream_range(Range { start, end });
 
                 tokio::pin!(stream);
@@ -269,7 +275,7 @@ where
                     end = end.set_attribute(attribute.into());
                 }
 
-                let index = self.value_index.read().await;
+                let index = value_index.read().await;
                 let stream = index.stream_range(Range { start, end });
 
                 tokio::pin!(stream);
@@ -281,7 +287,7 @@ where
                             .set_attribute(key.attribute())
                             .set_value_type(key.value_type());
 
-                        let entity_index = self.entity_index.read().await;
+                        let entity_index = entity_index.read().await;
                         let Some(State::Added(datum)) = entity_index.get(&key).await? else {
                             return Err(DialogArtifactsError::MalformedIndex(format!("Missing datum for key {:?}", key)))?;
                         };
@@ -295,7 +301,7 @@ where
                 }
             } else {
                 // insanitywolf.webp
-                let index = self.entity_index.read().await;
+                let index = entity_index.read().await;
                 let stream = index.stream();
 
                 for await item in stream {
@@ -370,7 +376,7 @@ where
         }
         .await;
 
-        if let Err(_) = transaction_result {
+        if transaction_result.is_err() {
             // Rollback
             self.reset(base_revision).await?;
         }
@@ -403,7 +409,7 @@ mod tests {
     async fn it_commits_and_selects_facts() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let entity_order = |l: &Artifact, r: &Artifact| l.of.cmp(&r.of);
-        let mut facts = Artifacts::new(storage_backend).await?;
+        let mut facts = Artifacts::new(storage_backend);
 
         let mut data = vec![
             Artifact {
@@ -442,7 +448,7 @@ mod tests {
 
         let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
 
-        let mut facts = Artifacts::new(storage_backend.clone()).await?;
+        let mut facts = Artifacts::new(storage_backend.clone());
 
         facts.commit(data).await?;
 
@@ -506,11 +512,11 @@ mod tests {
 
         let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
 
-        let mut facts_one = Artifacts::new(storage_backend.clone()).await?;
+        let mut facts_one = Artifacts::new(storage_backend.clone());
 
         facts_one.commit(data).await?;
 
-        let mut facts_two = Artifacts::new(storage_backend.clone()).await?;
+        let mut facts_two = Artifacts::new(storage_backend.clone());
 
         facts_two.commit(reordered_data).await?;
 
@@ -527,7 +533,7 @@ mod tests {
         let into_assert = |fact: Artifact| Instruction::Assert(fact);
         let storage_backend = Arc::new(Mutex::new(storage_backend));
 
-        let mut facts = Artifacts::new(storage_backend.clone()).await?;
+        let mut facts = Artifacts::new(storage_backend.clone());
 
         facts.commit(data.into_iter().map(into_assert)).await?;
         let revision = facts.revision().await.unwrap();

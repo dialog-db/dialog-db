@@ -29,6 +29,9 @@
 //!     .collect::earVec<Fact>>().await;
 //! ```
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub mod web;
+
 mod data;
 pub use data::*;
 

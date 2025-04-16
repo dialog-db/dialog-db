@@ -74,6 +74,7 @@
               trunk
               vulkan-loader
               wasm-bindgen-cli
+              wasm-pack
               wayland
               xorg.libX11
               xorg.libXi

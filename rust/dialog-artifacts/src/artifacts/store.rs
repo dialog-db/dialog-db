@@ -22,7 +22,7 @@ where
     fn select(
         &self,
         selector: FactSelector,
-    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + '_ + ConditionalSend;
+    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend;
 }
 
 /// A trait that may be implemented by anything that is capable of

@@ -23,7 +23,7 @@ pub enum Value {
     /// A floating point number
     Float(f64),
     /// TBD structured data (flatbuffers?)
-    Structured(Vec<u8>),
+    Record(Vec<u8>),
     /// A symbol type, used to distinguish attributes from other strings
     Symbol(Attribute),
 }
@@ -40,7 +40,7 @@ impl Value {
             Value::UnsignedInt(_) => ValueDataType::UnsignedInt,
             Value::SignedInt(_) => ValueDataType::SignedInt,
             Value::Float(_) => ValueDataType::Float,
-            Value::Structured(_) => ValueDataType::Structured,
+            Value::Record(_) => ValueDataType::Record,
             Value::Symbol(_) => ValueDataType::Symbol,
         }
     }
@@ -56,7 +56,7 @@ impl Value {
             Value::UnsignedInt(value) => value.to_le_bytes().to_vec(),
             Value::SignedInt(value) => value.to_le_bytes().to_vec(),
             Value::Float(value) => value.to_le_bytes().to_vec(),
-            Value::Structured(value) => value.to_owned(),
+            Value::Record(value) => value.to_owned(),
             Value::Symbol(value) => value.key_bytes().to_vec(),
         }
     }
@@ -127,7 +127,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
                     ))
                 },
             )?)),
-            ValueDataType::Structured => unimplemented!("TBD but probably flatbuffers?"),
+            ValueDataType::Record => unimplemented!("TBD but probably flatbuffers?"),
             ValueDataType::Symbol => match String::from_utf8(value) {
                 Ok(value) => Value::Symbol(Attribute::try_from(value)?),
                 Err(error) => {
@@ -256,6 +256,10 @@ impl From<Value> for ValueDataType {
 
 /// [`ValueDataType`] embodies all types that are able to be represented
 /// as a [`Value`].
+#[cfg_attr(
+    all(target_arch = "wasm32", target_os = "unknown"),
+    wasm_bindgen::prelude::wasm_bindgen
+)]
 #[repr(u8)]
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ValueDataType {
@@ -277,7 +281,7 @@ pub enum ValueDataType {
     /// A floating point number
     Float = 7,
     /// TBD structured data (flatbuffers?)
-    Structured = 8,
+    Record = 8,
     /// A symbol type, used to distinguish attributes from other strings
     Symbol = 9,
 }
@@ -310,7 +314,7 @@ impl From<&u8> for ValueDataType {
             5 => ValueDataType::UnsignedInt,
             6 => ValueDataType::SignedInt,
             7 => ValueDataType::Float,
-            8 => ValueDataType::Structured,
+            8 => ValueDataType::Record,
             _ => ValueDataType::Null,
         }
     }
