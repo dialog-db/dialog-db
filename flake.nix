@@ -72,12 +72,8 @@
               protobuf
               rust-toolchain
               trunk
-              vulkan-loader
               wasm-bindgen-cli
               wasm-pack
-              wayland
-              xorg.libX11
-              xorg.libXi
             ]
             ++ lib.optionals stdenv.isDarwin [
               darwin.apple_sdk.frameworks.SystemConfiguration
@@ -92,10 +88,12 @@
         interactive-dev-tools =
           with pkgs;
           common-dev-tools
+          ++ [
+            static-web-server
+          ]
           ++ lib.optionals stdenv.isLinux [
             chromium
             chromedriver
-            static-web-server
           ];
       in
       {
