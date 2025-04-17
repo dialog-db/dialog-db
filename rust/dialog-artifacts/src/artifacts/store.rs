@@ -2,26 +2,26 @@ use async_trait::async_trait;
 use dialog_common::ConditionalSend;
 use futures_util::Stream;
 
-use crate::{DialogArtifactsError, Instruction};
+use crate::{
+    Artifact, ArtifactSelector, DialogArtifactsError, Instruction, artifacts::selector::Constrained,
+};
 
-use super::{Artifact, ArtifactSelector};
-
-/// A trait that may be implemented by anything that is capable of
-/// querying [`Artifact`]s.
+/// A trait that may be implemented by anything that is capable of querying
+/// [`Artifact`]s.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait ArtifactStore
 where
     Self: Sized,
 {
-    /// Query for [`Artifact`]s that match the given [`ArtifactSelector`]. Results are
-    /// provided as a [`Stream`], implying that they are produced from the
-    /// implementation lazily.
+    /// Query for [`Artifact`]s that match the given [`ArtifactSelector`].
+    /// Results are provided as a [`Stream`], implying that they are produced
+    /// from the implementation lazily.
     ///
     /// For additional details, see the documentation for [`ArtifactSelector`].
     fn select(
         &self,
-        selector: ArtifactSelector,
+        selector: ArtifactSelector<Constrained>,
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend;
 }
 

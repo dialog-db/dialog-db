@@ -6,7 +6,7 @@
         "test": "web-test-runner *.test.ts --node-resolve"
     },
     "dependencies": {
-        "dialog-artifacts": "file:../pkg"
+        "dialog-artifacts": "file:../../../result/dialog-artifacts"
     },
     "devDependencies": {
         "@open-wc/testing": "^4.0.0",

@@ -39,7 +39,7 @@ use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 use crate::{
     Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Artifacts, Attribute, Blake3Hash,
     DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Revision, Value,
-    ValueDataType,
+    ValueDataType, artifacts::selector::Constrained,
 };
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -266,7 +266,7 @@ impl ArtifactsBinding {
 /// An async iterator that lazily yields `Artifact`s
 #[wasm_bindgen(js_name = "ArtifactIterator")]
 pub struct ArtifactIteratorBinding {
-    selector: ArtifactSelector,
+    selector: ArtifactSelector<Constrained>,
     artifacts: Arc<RwLock<Artifacts<WebStorageBackend>>>,
     stream: Option<Pin<Box<dyn Stream<Item = Result<Artifact, DialogArtifactsError>>>>>,
 }
@@ -274,7 +274,7 @@ pub struct ArtifactIteratorBinding {
 #[wasm_bindgen(js_class = "ArtifactIterator")]
 impl ArtifactIteratorBinding {
     fn new(
-        selector: ArtifactSelector,
+        selector: ArtifactSelector<Constrained>,
         artifacts: Arc<RwLock<Artifacts<WebStorageBackend>>>,
     ) -> Self {
         Self {
@@ -548,41 +548,47 @@ impl TryFrom<JsValue> for Instruction {
     }
 }
 
-impl TryFrom<JsValue> for ArtifactSelector {
+impl TryFrom<JsValue> for ArtifactSelector<Constrained> {
     type Error = JsValue;
 
     fn try_from(value: JsValue) -> Result<Self, Self::Error> {
-        let attribute = if let Some(the) = Reflect::get(&value, &"the".into())
+        let selector = if let Some(the) = Reflect::get(&value, &"the".into())
             .ok()
             .and_then(|value| if value.is_truthy() { Some(value) } else { None })
         {
-            Some(Attribute::try_from(the)?)
+            Some(ArtifactSelector::new().the(Attribute::try_from(the)?))
         } else {
             None
         };
 
-        let entity = if let Some(of) = Reflect::get(&value, &"of".into())
+        let selector = if let Some(of) = Reflect::get(&value, &"of".into())
             .ok()
             .and_then(|value| if value.is_truthy() { Some(value) } else { None })
         {
-            Some(Entity::try_from(of)?)
+            let entity = Entity::try_from(of)?;
+            if let Some(selector) = selector {
+                Some(selector.of(entity))
+            } else {
+                Some(ArtifactSelector::new().of(entity))
+            }
         } else {
-            None
+            selector
         };
 
-        let value = if let Some(is) = Reflect::get(&value, &"is".into())
+        let selector = if let Some(is) = Reflect::get(&value, &"is".into())
             .ok()
             .and_then(|value| if value.is_truthy() { Some(value) } else { None })
         {
-            Some(Value::try_from(is)?)
+            let value = Value::try_from(is)?;
+            if let Some(selector) = selector {
+                Some(selector.is(value))
+            } else {
+                Some(ArtifactSelector::new().is(value))
+            }
         } else {
-            None
+            selector
         };
 
-        Ok(ArtifactSelector {
-            attribute,
-            entity,
-            value,
-        })
+        selector.ok_or_else(|| DialogArtifactsError::EmptySelector.into())
     }
 }

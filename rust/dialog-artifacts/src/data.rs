@@ -2,7 +2,7 @@ use std::ops::Deref;
 
 use dialog_prolly_tree::ValueType;
 
-use crate::{DialogArtifactsError, HASH_SIZE};
+use crate::{Blake3Hash, DialogArtifactsError, HASH_SIZE, make_reference};
 
 #[cfg(doc)]
 use crate::{Artifacts, Attribute, Entity, Value};
@@ -58,6 +58,17 @@ impl TryFrom<Vec<u8>> for EntityDatum {
 pub struct ValueDatum {
     /// The raw representation of the [`Value`] asscoiated with this [`ValueDatum`]
     pub value: RawValue,
+
+    // TODO: We automatically hash values when the `ValueDatum` is created. Ideally
+    // we would only compute the hash lazily if it is requested (and then memoize it).
+    reference: Blake3Hash,
+}
+
+impl ValueDatum {
+    /// The hash reference that corresponds to this [`Value`]
+    pub fn reference(&self) -> &Blake3Hash {
+        &self.reference
+    }
 }
 
 impl ValueType for ValueDatum {
@@ -70,6 +81,9 @@ impl TryFrom<Vec<u8>> for ValueDatum {
     type Error = DialogArtifactsError;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Ok(Self { value })
+        Ok(Self {
+            reference: make_reference(&value),
+            value,
+        })
     }
 }
