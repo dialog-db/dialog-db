@@ -45,7 +45,7 @@ jobs:
 
   npm_packages:
     name: 'NPM Packages'
-    # needs: ['lints']
+    needs: ['lints']
     runs-on: 'macos-latest'
     steps:
       - uses: actions/checkout@v4
@@ -62,12 +62,10 @@ jobs:
           npm ci
           npm test
           EOF"
-
-          tar -czvf dialog-artifacts.tar.gz -C ./result/dialog-artifacts .
       - uses: actions/upload-artifact@v4
         with:
           name: dialog-artifacts
-          path: ./dialog-artifacts.tar.gz
+          path: ./result/dialog-artifacts
 
   rust_crates:
     name: 'Rust Crates'

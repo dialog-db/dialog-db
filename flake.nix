@@ -135,7 +135,7 @@
                 # SEE: https://github.com/rustwasm/wasm-pack/issues/1318#issuecomment-1713377536
                 export HOME=`pwd`
 
-                wasm-pack build --target web --weak-refs -m no-install ./rust/dialog-artifacts
+                wasm-pack build --release --target web --weak-refs -m no-install ./rust/dialog-artifacts
               '';
               installPhase = ''
                 mkdir -p $out

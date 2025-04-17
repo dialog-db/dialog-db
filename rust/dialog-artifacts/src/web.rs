@@ -30,7 +30,7 @@
 use std::{pin::Pin, sync::Arc};
 
 use base58::{FromBase58, ToBase58};
-use dialog_storage::IndexedDbStorageBackend;
+use dialog_storage::{CachedStorageBackend, IndexedDbStorageBackend};
 use futures_util::{Stream, StreamExt};
 use tokio::sync::RwLock;
 use wasm_bindgen::{convert::TryFromJsValue, prelude::*};
@@ -162,11 +162,15 @@ pub enum InstructionTypeBinding {
     Retract = 1,
 }
 
+type WebStorageBackend = CachedStorageBackend<IndexedDbStorageBackend<Blake3Hash, Vec<u8>>>;
+
+const STORAGE_CACHE_CAPACITY: usize = 2usize.pow(16);
+
 /// A triple store that can be used to store and retrieve semantic triples
 /// in the form of `Artifact`s.
 #[wasm_bindgen(js_name = "Artifacts")]
 pub struct ArtifactsBinding {
-    artifacts: Arc<RwLock<Artifacts<IndexedDbStorageBackend<Blake3Hash, Vec<u8>>>>>,
+    artifacts: Arc<RwLock<Artifacts<WebStorageBackend>>>,
 }
 
 #[wasm_bindgen(js_class = "Artifacts")]
@@ -187,21 +191,20 @@ impl ArtifactsBinding {
         #[wasm_bindgen(js_name = "dbName")] db_name: &str,
         revision: Option<Vec<u8>>,
     ) -> Result<Self, JsValue> {
+        let storage_backend = CachedStorageBackend::new(
+            IndexedDbStorageBackend::new(db_name, "dialog-artifact-blocks")
+                .await
+                .map_err(|error| DialogArtifactsError::from(error))?,
+            STORAGE_CACHE_CAPACITY,
+        )
+        .map_err(|error| DialogArtifactsError::from(error))?;
+
         let artifacts = if let Some(revision) = revision {
-            Artifacts::restore(
-                Revision::try_from(revision)?,
-                IndexedDbStorageBackend::new(db_name, "dialog-artifact-blocks")
-                    .await
-                    .map_err(|error| DialogArtifactsError::from(error))?,
-            )
-            .await?
+            Artifacts::restore(Revision::try_from(revision)?, storage_backend).await?
         } else {
-            Artifacts::new(
-                IndexedDbStorageBackend::new(db_name, "dialog-artifact-blocks")
-                    .await
-                    .map_err(|error| DialogArtifactsError::from(error))?,
-            )
+            Artifacts::new(storage_backend)
         };
+
         Ok(Self {
             artifacts: Arc::new(RwLock::new(artifacts)),
         })
@@ -263,16 +266,13 @@ impl ArtifactsBinding {
 #[wasm_bindgen(js_name = "ArtifactIterator")]
 pub struct ArtifactIteratorBinding {
     selector: FactSelector,
-    artifacts: Arc<RwLock<Artifacts<IndexedDbStorageBackend<Blake3Hash, Vec<u8>>>>>,
+    artifacts: Arc<RwLock<Artifacts<WebStorageBackend>>>,
     stream: Option<Pin<Box<dyn Stream<Item = Result<Artifact, DialogArtifactsError>>>>>,
 }
 
 #[wasm_bindgen(js_class = "ArtifactIterator")]
 impl ArtifactIteratorBinding {
-    fn new(
-        selector: FactSelector,
-        artifacts: Arc<RwLock<Artifacts<IndexedDbStorageBackend<Blake3Hash, Vec<u8>>>>>,
-    ) -> Self {
+    fn new(selector: FactSelector, artifacts: Arc<RwLock<Artifacts<WebStorageBackend>>>) -> Self {
         Self {
             selector,
             artifacts,
