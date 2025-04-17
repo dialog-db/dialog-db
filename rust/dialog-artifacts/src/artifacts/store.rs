@@ -4,24 +4,24 @@ use futures_util::Stream;
 
 use crate::{DialogArtifactsError, Instruction};
 
-use super::{Artifact, FactSelector};
+use super::{Artifact, ArtifactSelector};
 
 /// A trait that may be implemented by anything that is capable of
 /// querying [`Artifact`]s.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait FactStore
+pub trait ArtifactStore
 where
     Self: Sized,
 {
-    /// Query for [`Artifact`]s that match the given [`FactSelector`]. Results are
+    /// Query for [`Artifact`]s that match the given [`ArtifactSelector`]. Results are
     /// provided as a [`Stream`], implying that they are produced from the
     /// implementation lazily.
     ///
-    /// For additional details, see the documentation for [`FactSelector`].
+    /// For additional details, see the documentation for [`ArtifactSelector`].
     fn select(
         &self,
-        selector: FactSelector,
+        selector: ArtifactSelector,
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend;
 }
 
@@ -29,7 +29,7 @@ where
 /// of storing [`Artifact`]s.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait FactStoreMut: FactStore {
+pub trait ArtifactStoreMut: ArtifactStore {
     /// Commit one or more [`Artifact`]s to storage. Implementors should take care
     /// to ensure that commits are transactional and resilient to unexpected
     /// halts and other such failure modes.

@@ -38,7 +38,7 @@ use crate::{
 pub type Blake3Hash = [u8; HASH_SIZE];
 
 /// A [`Artifact`] embodies a datum - a semantic triple - that may be stored in or
-/// retrieved from a [`FactStore`].
+/// retrieved from a [`ArtifactStore`].
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct Artifact {
     /// The [`Attribute`] of the [`Artifact`]; the predicate of the triple
@@ -65,10 +65,10 @@ pub type Index<Key, Value, Backend> = Arc<
     >,
 >;
 
-/// [`Artifacts`] is an implementor of [`FactStore`] and [`FactStoreMut`].
+/// [`Artifacts`] is an implementor of [`ArtifactStore`] and [`ArtifactStoreMut`].
 /// Internally, [`Artifacts`] maintains indexes built from [`Tree`]s (that is,
 /// prolly trees). These indexes are built up as new [`Artifact`]s are commited,
-/// and they are chosen based on [`FactSelector`] shapes when [`Artifact`]s are
+/// and they are chosen based on [`ArtifactSelector`] shapes when [`Artifact`]s are
 /// queried.
 ///
 /// [`Artifacts`] are backed by a concrete implementation of [`StorageBackend`].
@@ -149,7 +149,7 @@ where
         })
     }
 
-    /// Get the hash that represents the [`FactStore`] at its current version.
+    /// Get the hash that represents the [`ArtifactStore`] at its current version.
     pub async fn revision(&self) -> Option<Revision> {
         let (entity_index, attribute_index, value_index) = tokio::join!(
             self.entity_index.read(),
@@ -199,7 +199,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> FactStore for Artifacts<Backend>
+impl<Backend> ArtifactStore for Artifacts<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSync
@@ -207,7 +207,7 @@ where
 {
     fn select(
         &self,
-        selector: FactSelector,
+        selector: ArtifactSelector,
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
     {
         let entity_index = self.entity_index.clone();
@@ -215,7 +215,7 @@ where
         let value_index = self.value_index.clone();
 
         try_stream! {
-            let FactSelector {
+            let ArtifactSelector {
                 entity, attribute, value
             } = &selector;
 
@@ -320,7 +320,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> FactStoreMut for Artifacts<Backend>
+impl<Backend> ArtifactStoreMut for Artifacts<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSync
@@ -395,8 +395,8 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::{
-        Artifact, Artifacts, Attribute, Entity, FactSelector, FactStore, FactStoreMut, Instruction,
-        Value, generate_data,
+        Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Artifacts, Attribute, Entity,
+        Instruction, Value, generate_data,
     };
 
     #[cfg(target_arch = "wasm32")]
@@ -430,7 +430,7 @@ mod tests {
             .commit(data.clone().into_iter().map(Instruction::Assert))
             .await?;
 
-        let fact_stream = facts.select(FactSelector::default());
+        let fact_stream = facts.select(ArtifactSelector::default());
 
         let mut facts: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
         facts.sort_by(entity_order);
@@ -457,7 +457,8 @@ mod tests {
             (storage_backend.reads(), storage_backend.writes())
         };
 
-        let fact_stream = facts.select(FactSelector::default().is(Value::String("name64".into())));
+        let fact_stream =
+            facts.select(ArtifactSelector::default().is(Value::String("name64".into())));
         let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
         assert_eq!(results.len(), 1);
@@ -474,7 +475,7 @@ mod tests {
         assert_eq!(net_writes, 0);
 
         let fact_stream =
-            facts.select(FactSelector::default().the(Attribute::from_str("item/id")?));
+            facts.select(ArtifactSelector::default().the(Attribute::from_str("item/id")?));
 
         let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
@@ -543,11 +544,12 @@ mod tests {
 
         assert_eq!(revision, restored_revision);
 
-        let fact_stream = facts.select(FactSelector::default().is(Value::String("name10".into())));
+        let fact_stream =
+            facts.select(ArtifactSelector::default().is(Value::String("name10".into())));
         let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
         let restored_fact_stream =
-            restored_facts.select(FactSelector::default().is(Value::String("name10".into())));
+            restored_facts.select(ArtifactSelector::default().is(Value::String("name10".into())));
         let restored_results: Vec<Artifact> = restored_fact_stream
             .map(|fact| fact.unwrap())
             .collect()

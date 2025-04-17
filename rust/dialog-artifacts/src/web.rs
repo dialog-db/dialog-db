@@ -37,8 +37,9 @@ use wasm_bindgen::{convert::TryFromJsValue, prelude::*};
 use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
-    Artifact, Artifacts, Attribute, Blake3Hash, DialogArtifactsError, Entity, FactSelector,
-    FactStore, FactStoreMut, HASH_SIZE, Instruction, RawEntity, Revision, Value, ValueDataType,
+    Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Artifacts, Attribute, Blake3Hash,
+    DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Revision, Value,
+    ValueDataType,
 };
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -248,7 +249,7 @@ impl ArtifactsBinding {
     /// are provided via an async iterator.
     #[wasm_bindgen(unchecked_return_type = "ArtifactIterable")]
     pub fn select(&self, selector: ArtifactSelectorDuckType) -> Result<JsValue, JsValue> {
-        let selector = FactSelector::try_from(JsValue::from(selector))?;
+        let selector = ArtifactSelector::try_from(JsValue::from(selector))?;
         let artifacts = self.artifacts.clone();
 
         let iterable = JsValue::from(Object::new());
@@ -265,14 +266,17 @@ impl ArtifactsBinding {
 /// An async iterator that lazily yields `Artifact`s
 #[wasm_bindgen(js_name = "ArtifactIterator")]
 pub struct ArtifactIteratorBinding {
-    selector: FactSelector,
+    selector: ArtifactSelector,
     artifacts: Arc<RwLock<Artifacts<WebStorageBackend>>>,
     stream: Option<Pin<Box<dyn Stream<Item = Result<Artifact, DialogArtifactsError>>>>>,
 }
 
 #[wasm_bindgen(js_class = "ArtifactIterator")]
 impl ArtifactIteratorBinding {
-    fn new(selector: FactSelector, artifacts: Arc<RwLock<Artifacts<WebStorageBackend>>>) -> Self {
+    fn new(
+        selector: ArtifactSelector,
+        artifacts: Arc<RwLock<Artifacts<WebStorageBackend>>>,
+    ) -> Self {
         Self {
             selector,
             artifacts,
@@ -544,7 +548,7 @@ impl TryFrom<JsValue> for Instruction {
     }
 }
 
-impl TryFrom<JsValue> for FactSelector {
+impl TryFrom<JsValue> for ArtifactSelector {
     type Error = JsValue;
 
     fn try_from(value: JsValue) -> Result<Self, Self::Error> {
@@ -575,7 +579,7 @@ impl TryFrom<JsValue> for FactSelector {
             None
         };
 
-        Ok(FactSelector {
+        Ok(ArtifactSelector {
             attribute,
             entity,
             value,
