@@ -10,6 +10,9 @@ pub use cache::*;
 mod measure;
 pub use measure::*;
 
+mod transfer;
+pub use transfer::*;
+
 mod content_addressed;
 pub use content_addressed::*;
 
