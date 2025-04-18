@@ -336,7 +336,7 @@ where
                 Hash = Hash,
             >,
     {
-        let get_child_indedialog_by_key =
+        let get_child_index_by_key =
             async |node: &Self,
                    key: Option<&Key>,
                    storage: &Storage|
@@ -389,7 +389,7 @@ where
                 match current.node.is_branch() {
                     true => {
                         if !matching {
-                            let Some((next_node, next_index)) = get_child_indedialog_by_key(&current.node, start_key.as_ref(), storage).await? else {
+                            let Some((next_node, next_index)) = get_child_index_by_key(&current.node, start_key.as_ref(), storage).await? else {
                                 // The start key is larger than any key stored in this tree.
                                 return;
                             };

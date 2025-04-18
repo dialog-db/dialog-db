@@ -22,7 +22,7 @@
 //!     }
 //! ]).await?;
 //!
-//! let artifact_stream = facts.select(FactSelector::default()
+//! let artifact_stream = facts.select(ArtifactSelector::default()
 //!     .the(Attribute::from_str("profile/name")));
 //!
 //! let artifacts = fact_stream.filter_map(|fact| fact.ok())

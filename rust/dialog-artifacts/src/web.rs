@@ -37,8 +37,9 @@ use wasm_bindgen::{convert::TryFromJsValue, prelude::*};
 use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
-    Artifact, Artifacts, Attribute, Blake3Hash, DialogArtifactsError, Entity, FactSelector,
-    FactStore, FactStoreMut, HASH_SIZE, Instruction, RawEntity, Revision, Value, ValueDataType,
+    Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Artifacts, Attribute, Blake3Hash,
+    DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Revision, Value,
+    ValueDataType, artifacts::selector::Constrained,
 };
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -248,7 +249,7 @@ impl ArtifactsBinding {
     /// are provided via an async iterator.
     #[wasm_bindgen(unchecked_return_type = "ArtifactIterable")]
     pub fn select(&self, selector: ArtifactSelectorDuckType) -> Result<JsValue, JsValue> {
-        let selector = FactSelector::try_from(JsValue::from(selector))?;
+        let selector = ArtifactSelector::try_from(JsValue::from(selector))?;
         let artifacts = self.artifacts.clone();
 
         let iterable = JsValue::from(Object::new());
@@ -265,14 +266,17 @@ impl ArtifactsBinding {
 /// An async iterator that lazily yields `Artifact`s
 #[wasm_bindgen(js_name = "ArtifactIterator")]
 pub struct ArtifactIteratorBinding {
-    selector: FactSelector,
+    selector: ArtifactSelector<Constrained>,
     artifacts: Arc<RwLock<Artifacts<WebStorageBackend>>>,
     stream: Option<Pin<Box<dyn Stream<Item = Result<Artifact, DialogArtifactsError>>>>>,
 }
 
 #[wasm_bindgen(js_class = "ArtifactIterator")]
 impl ArtifactIteratorBinding {
-    fn new(selector: FactSelector, artifacts: Arc<RwLock<Artifacts<WebStorageBackend>>>) -> Self {
+    fn new(
+        selector: ArtifactSelector<Constrained>,
+        artifacts: Arc<RwLock<Artifacts<WebStorageBackend>>>,
+    ) -> Self {
         Self {
             selector,
             artifacts,
@@ -544,41 +548,47 @@ impl TryFrom<JsValue> for Instruction {
     }
 }
 
-impl TryFrom<JsValue> for FactSelector {
+impl TryFrom<JsValue> for ArtifactSelector<Constrained> {
     type Error = JsValue;
 
     fn try_from(value: JsValue) -> Result<Self, Self::Error> {
-        let attribute = if let Some(the) = Reflect::get(&value, &"the".into())
+        let selector = if let Some(the) = Reflect::get(&value, &"the".into())
             .ok()
             .and_then(|value| if value.is_truthy() { Some(value) } else { None })
         {
-            Some(Attribute::try_from(the)?)
+            Some(ArtifactSelector::new().the(Attribute::try_from(the)?))
         } else {
             None
         };
 
-        let entity = if let Some(of) = Reflect::get(&value, &"of".into())
+        let selector = if let Some(of) = Reflect::get(&value, &"of".into())
             .ok()
             .and_then(|value| if value.is_truthy() { Some(value) } else { None })
         {
-            Some(Entity::try_from(of)?)
+            let entity = Entity::try_from(of)?;
+            if let Some(selector) = selector {
+                Some(selector.of(entity))
+            } else {
+                Some(ArtifactSelector::new().of(entity))
+            }
         } else {
-            None
+            selector
         };
 
-        let value = if let Some(is) = Reflect::get(&value, &"is".into())
+        let selector = if let Some(is) = Reflect::get(&value, &"is".into())
             .ok()
             .and_then(|value| if value.is_truthy() { Some(value) } else { None })
         {
-            Some(Value::try_from(is)?)
+            let value = Value::try_from(is)?;
+            if let Some(selector) = selector {
+                Some(selector.is(value))
+            } else {
+                Some(ArtifactSelector::new().is(value))
+            }
         } else {
-            None
+            selector
         };
 
-        Ok(FactSelector {
-            attribute,
-            entity,
-            value,
-        })
+        selector.ok_or_else(|| DialogArtifactsError::EmptySelector.into())
     }
 }

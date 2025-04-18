@@ -55,7 +55,6 @@ jobs:
         shell: bash
         run: |
           nix build .#dialog-artifacts-web
-          cp -r ./result/dialog-artifacts ./rust/dialog-artifacts/pkg
 
           nix develop --command bash -c "cat << 'EOF' | bash
           cd rust/dialog-artifacts/javascript_tests
