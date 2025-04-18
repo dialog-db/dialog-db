@@ -72,11 +72,8 @@
               protobuf
               rust-toolchain
               trunk
-              vulkan-loader
               wasm-bindgen-cli
-              wayland
-              xorg.libX11
-              xorg.libXi
+              wasm-pack
             ]
             ++ lib.optionals stdenv.isDarwin [
               darwin.apple_sdk.frameworks.SystemConfiguration
@@ -91,10 +88,12 @@
         interactive-dev-tools =
           with pkgs;
           common-dev-tools
+          ++ [
+            static-web-server
+          ]
           ++ lib.optionals stdenv.isLinux [
             chromium
             chromedriver
-            static-web-server
           ];
       in
       {
@@ -112,7 +111,43 @@
             };
         };
 
-        packages = { };
+        packages = {
+          dialog-artifacts-web =
+            let
+
+              rust-toolchain = rustToolchain ("stable");
+
+              rust-platform = pkgs.makeRustPlatform {
+                cargo = rust-toolchain;
+                rustc = rust-toolchain;
+              };
+            in
+            rust-platform.buildRustPackage {
+              name = "dialog-artifacts";
+              src = ./.;
+              doCheck = false;
+              env = {
+                RUST_BACKTRACE = "full";
+              };
+              buildPhase = ''
+                # NOTE: wasm-pack currently requires a writable $HOME
+                # directory to be set
+                # SEE: https://github.com/rustwasm/wasm-pack/issues/1318#issuecomment-1713377536
+                export HOME=`pwd`
+
+                wasm-pack build --release --target web --weak-refs -m no-install ./rust/dialog-artifacts
+              '';
+              installPhase = ''
+                mkdir -p $out
+                cp -r ./rust/dialog-artifacts/pkg $out/dialog-artifacts
+              '';
+
+              nativeBuildInputs = common-build-inputs "stable";
+              cargoLock = {
+                lockFile = ./Cargo.lock;
+              };
+            };
+        };
       }
     );
 }

@@ -4,8 +4,8 @@ pub use revision::*;
 mod instruction;
 pub use instruction::*;
 
-mod selector;
-pub use selector::*;
+pub mod selector;
+pub use selector::ArtifactSelector;
 
 mod store;
 pub use store::*;
@@ -19,6 +19,9 @@ pub use entity::*;
 mod value;
 pub use value::*;
 
+mod r#match;
+pub use r#match::*;
+
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -31,6 +34,7 @@ use tokio::sync::RwLock;
 use crate::{
     AttributeKey, BRANCH_FACTOR, DialogArtifactsError, EntityDatum, EntityKey, EntityKeyPart,
     HASH_SIZE, State, ValueDatum, ValueKey, ValueReferenceKeyPart,
+    artifacts::selector::Constrained,
 };
 
 /// The representation of the hash type (BLAKE3, in this case) that must be used
@@ -38,7 +42,7 @@ use crate::{
 pub type Blake3Hash = [u8; HASH_SIZE];
 
 /// A [`Artifact`] embodies a datum - a semantic triple - that may be stored in or
-/// retrieved from a [`FactStore`].
+/// retrieved from a [`ArtifactStore`].
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct Artifact {
     /// The [`Attribute`] of the [`Artifact`]; the predicate of the triple
@@ -65,10 +69,10 @@ pub type Index<Key, Value, Backend> = Arc<
     >,
 >;
 
-/// [`Artifacts`] is an implementor of [`FactStore`] and [`FactStoreMut`].
+/// [`Artifacts`] is an implementor of [`ArtifactStore`] and [`ArtifactStoreMut`].
 /// Internally, [`Artifacts`] maintains indexes built from [`Tree`]s (that is,
 /// prolly trees). These indexes are built up as new [`Artifact`]s are commited,
-/// and they are chosen based on [`FactSelector`] shapes when [`Artifact`]s are
+/// and they are chosen based on [`ArtifactSelector`] shapes when [`Artifact`]s are
 /// queried.
 ///
 /// [`Artifacts`] are backed by a concrete implementation of [`StorageBackend`].
@@ -96,8 +100,8 @@ where
         + 'static,
 {
     /// Initialize a new [`Artifacts`] with the provided [`StorageBackend`].
-    pub async fn new(backend: Backend) -> Result<Self, DialogArtifactsError> {
-        Ok(Self {
+    pub fn new(backend: Backend) -> Self {
+        Self {
             entity_index: Arc::new(RwLock::new(Tree::new(Storage {
                 encoder: BasicEncoder::<EntityKey, State<ValueDatum>>::default(),
                 backend: backend.clone(),
@@ -110,7 +114,7 @@ where
                 encoder: BasicEncoder::<ValueKey, State<EntityDatum>>::default(),
                 backend: backend.clone(),
             }))),
-        })
+        }
     }
 
     /// Attempt to initialize the [`Artifacts`] at a specific [`Version`].
@@ -118,42 +122,39 @@ where
         version: Revision,
         backend: Backend,
     ) -> Result<Self, DialogArtifactsError> {
+        let (entity_index, attribute_index, value_index) = tokio::try_join!(
+            Tree::from_hash(
+                version.entity(),
+                Storage {
+                    encoder: BasicEncoder::<EntityKey, State<ValueDatum>>::default(),
+                    backend: backend.clone(),
+                },
+            ),
+            Tree::from_hash(
+                version.attribute(),
+                Storage {
+                    encoder: BasicEncoder::<AttributeKey, State<ValueDatum>>::default(),
+                    backend: backend.clone(),
+                },
+            ),
+            Tree::from_hash(
+                version.value(),
+                Storage {
+                    encoder: BasicEncoder::<ValueKey, State<EntityDatum>>::default(),
+                    backend: backend.clone(),
+                },
+            )
+        )?;
+
         Ok(Self {
-            entity_index: Arc::new(RwLock::new(
-                Tree::from_hash(
-                    version.entity(),
-                    Storage {
-                        encoder: BasicEncoder::<EntityKey, State<ValueDatum>>::default(),
-                        backend: backend.clone(),
-                    },
-                )
-                .await?,
-            )),
-            attribute_index: Arc::new(RwLock::new(
-                Tree::from_hash(
-                    version.attribute(),
-                    Storage {
-                        encoder: BasicEncoder::<AttributeKey, State<ValueDatum>>::default(),
-                        backend: backend.clone(),
-                    },
-                )
-                .await?,
-            )),
-            value_index: Arc::new(RwLock::new(
-                Tree::from_hash(
-                    version.value(),
-                    Storage {
-                        encoder: BasicEncoder::<ValueKey, State<EntityDatum>>::default(),
-                        backend: backend.clone(),
-                    },
-                )
-                .await?,
-            )),
+            entity_index: Arc::new(RwLock::new(entity_index)),
+            attribute_index: Arc::new(RwLock::new(attribute_index)),
+            value_index: Arc::new(RwLock::new(value_index)),
         })
     }
 
-    /// Get the hash that represents the [`FactStore`] at its current version.
-    pub async fn version(&self) -> Option<Revision> {
+    /// Get the hash that represents the [`ArtifactStore`] at its current version.
+    pub async fn revision(&self) -> Option<Revision> {
         let (entity_index, attribute_index, value_index) = tokio::join!(
             self.entity_index.read(),
             self.attribute_index.read(),
@@ -175,11 +176,34 @@ where
             _ => None,
         }
     }
+
+    pub(crate) async fn reset(
+        &self,
+        revision: Option<Revision>,
+    ) -> Result<(), DialogArtifactsError> {
+        let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
+            self.entity_index.write(),
+            self.attribute_index.write(),
+            self.value_index.write()
+        );
+
+        let entity_index_hash = revision.as_ref().map(|revision| *revision.entity());
+        let attribute_index_hash = revision.as_ref().map(|revision| *revision.attribute());
+        let value_index_hash = revision.as_ref().map(|revision| *revision.value());
+
+        tokio::try_join!(
+            entity_index.set_hash(entity_index_hash),
+            attribute_index.set_hash(attribute_index_hash),
+            value_index.set_hash(value_index_hash),
+        )?;
+
+        Ok(())
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> FactStore for Artifacts<Backend>
+impl<Backend> ArtifactStore for Artifacts<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSync
@@ -187,12 +211,17 @@ where
 {
     fn select(
         &self,
-        selector: FactSelector,
-    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + '_ + ConditionalSend {
+        selector: ArtifactSelector<Constrained>,
+    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
+    {
+        let entity_index = self.entity_index.clone();
+        let attribute_index = self.attribute_index.clone();
+        let value_index = self.value_index.clone();
+
         try_stream! {
-            let FactSelector {
-                entity, attribute, value
-            } = &selector;
+            let entity = selector.entity();
+            let attribute = selector.attribute();
+            let value = selector.value();
 
             if let Some(entity) = entity {
                 let mut start = EntityKey::min().set_entity(entity.into());
@@ -203,35 +232,21 @@ where
                     end = end.set_attribute(attribute.into());
                 }
 
-                let index = self.entity_index.read().await;
+                let index = entity_index.read().await;
                 let stream = index.stream_range(Range { start, end });
 
                 tokio::pin!(stream);
 
                 for await item in stream {
-                    if let Ok(Entry { key, value: State::Added(datum) }) = item {
-                        yield Artifact {
-                            the: Attribute::try_from(key.attribute())?,
-                            of: Entity::from(key.entity()),
-                            is: Value::try_from((key.value_type(), datum.to_vec()))?
-                        }
-                    }
-                }
-            } else if let Some(attribute) = attribute {
-                let start = AttributeKey::min().set_attribute(attribute.into());
-                let end = AttributeKey::max().set_attribute(attribute.into());
+                    let entry = item?;
 
-                let index = self.attribute_index.read().await;
-                let stream = index.stream_range(Range { start, end });
-
-                tokio::pin!(stream);
-
-                for await item in stream {
-                    if let Ok(Entry { key, value: State::Added(datum) }) = item {
-                        yield Artifact {
-                            the: Attribute::try_from(key.attribute())?,
-                            of: Entity::from(key.entity()),
-                            is: Value::try_from((key.value_type(), datum.to_vec()))?
+                    if entry.matches_selector(&selector) {
+                        if let Entry { key, value: State::Added(datum) } = entry {
+                            yield Artifact {
+                                the: Attribute::try_from(key.attribute())?,
+                                of: Entity::from(key.entity()),
+                                is: Value::try_from((key.value_type(), datum.to_vec()))?
+                            };
                         }
                     }
                 }
@@ -250,44 +265,58 @@ where
                     end = end.set_attribute(attribute.into());
                 }
 
-                let index = self.value_index.read().await;
+                let index = value_index.read().await;
                 let stream = index.stream_range(Range { start, end });
 
                 tokio::pin!(stream);
 
                 for await item in stream {
-                    if let Ok(Entry { key, value: State::Added(datum) }) = item {
-                        let key = EntityKey::default()
-                            .set_entity(EntityKeyPart(&datum))
-                            .set_attribute(key.attribute())
-                            .set_value_type(key.value_type());
+                    let entry = item?;
 
-                        let entity_index = self.entity_index.read().await;
-                        let Some(State::Added(datum)) = entity_index.get(&key).await? else {
-                            return Err(DialogArtifactsError::MalformedIndex(format!("Missing datum for key {:?}", key)))?;
-                        };
+                    if entry.matches_selector(&selector) {
+                        if let Entry { key, value: State::Added(datum) } = entry {
+                            let key = EntityKey::default()
+                                .set_entity(EntityKeyPart(&datum))
+                                .set_attribute(key.attribute())
+                                .set_value_type(key.value_type());
 
-                        yield Artifact {
-                            the: Attribute::try_from(key.attribute())?,
-                            of: Entity::from(key.entity()),
-                            is: Value::try_from((key.value_type(), datum.to_vec()))?
+                            let entity_index = entity_index.read().await;
+                            let Some(State::Added(datum)) = entity_index.get(&key).await? else {
+                                return Err(DialogArtifactsError::MalformedIndex(format!("Missing datum for key {:?}", key)))?;
+                            };
+
+                            yield Artifact {
+                                the: Attribute::try_from(key.attribute())?,
+                                of: Entity::from(key.entity()),
+                                is: Value::try_from((key.value_type(), datum.to_vec()))?
+                            }
+                        }
+                    }
+                }
+            } else if let Some(attribute) = attribute {
+                let start = AttributeKey::min().set_attribute(attribute.into());
+                let end = AttributeKey::max().set_attribute(attribute.into());
+
+                let index = attribute_index.read().await;
+                let stream = index.stream_range(Range { start, end });
+
+                tokio::pin!(stream);
+
+                for await item in stream {
+                    let entry = item?;
+
+                    if entry.matches_selector(&selector) {
+                        if let Entry { key, value: State::Added(datum) } = entry {
+                            yield Artifact {
+                                the: Attribute::try_from(key.attribute())?,
+                                of: Entity::from(key.entity()),
+                                is: Value::try_from((key.value_type(), datum.to_vec()))?
+                            }
                         }
                     }
                 }
             } else {
-                // insanitywolf.webp
-                let index = self.entity_index.read().await;
-                let stream = index.stream();
-
-                for await item in stream {
-                    if let Ok(Entry { key, value: State::Added(datum) }) = item {
-                        yield Artifact {
-                            the: Attribute::try_from(key.attribute())?,
-                            of: Entity::from(key.entity()),
-                            is: Value::try_from((key.value_type(), datum.to_vec()))?
-                        }
-                    }
-                }
+                unreachable!("ArtifactSelector will always have at least one field specified")
             };
         }
     }
@@ -295,7 +324,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> FactStoreMut for Artifacts<Backend>
+impl<Backend> ArtifactStoreMut for Artifacts<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSync
@@ -306,45 +335,51 @@ where
         I: IntoIterator<Item = Instruction> + ConditionalSend,
         I::IntoIter: ConditionalSend,
     {
-        let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
-            self.entity_index.write(),
-            self.attribute_index.write(),
-            self.value_index.write()
-        );
+        let base_revision = self.revision().await;
 
-        for instruction in instructions {
-            match instruction {
-                Instruction::Assert(fact) => {
-                    tokio::try_join!(
-                        entity_index.set(
-                            EntityKey::from(&fact),
-                            State::Added(ValueDatum {
-                                value: fact.is.to_bytes(),
-                            }),
-                        ),
-                        attribute_index.set(
-                            AttributeKey::from(&fact),
-                            State::Added(ValueDatum {
-                                value: fact.is.to_bytes()
-                            })
-                        ),
-                        value_index.set(
-                            ValueKey::from(&fact),
-                            State::Added(EntityDatum { entity: *fact.of })
-                        ),
-                    )?;
-                }
-                Instruction::Retract(fact) => {
-                    tokio::try_join!(
-                        entity_index.set(EntityKey::from(&fact), State::Removed,),
-                        attribute_index.set(AttributeKey::from(&fact), State::Removed),
-                        value_index.set(ValueKey::from(&fact), State::Removed),
-                    )?;
+        let transaction_result = async {
+            let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
+                self.entity_index.write(),
+                self.attribute_index.write(),
+                self.value_index.write()
+            );
+
+            for instruction in instructions {
+                match instruction {
+                    Instruction::Assert(fact) => {
+                        let value_datum = ValueDatum::try_from(fact.is.to_bytes())?;
+
+                        tokio::try_join!(
+                            entity_index
+                                .set(EntityKey::from(&fact), State::Added(value_datum.clone())),
+                            attribute_index
+                                .set(AttributeKey::from(&fact), State::Added(value_datum)),
+                            value_index.set(
+                                ValueKey::from(&fact),
+                                State::Added(EntityDatum { entity: *fact.of })
+                            ),
+                        )?;
+                    }
+                    Instruction::Retract(fact) => {
+                        tokio::try_join!(
+                            entity_index.set(EntityKey::from(&fact), State::Removed,),
+                            attribute_index.set(AttributeKey::from(&fact), State::Removed),
+                            value_index.set(ValueKey::from(&fact), State::Removed),
+                        )?;
+                    }
                 }
             }
+
+            Ok(()) as Result<(), DialogArtifactsError>
+        }
+        .await;
+
+        if transaction_result.is_err() {
+            // Rollback
+            self.reset(base_revision).await?;
         }
 
-        Ok(())
+        transaction_result
     }
 }
 
@@ -358,8 +393,8 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::{
-        Artifact, Artifacts, Attribute, Entity, FactSelector, FactStore, FactStoreMut, Instruction,
-        Value, generate_data,
+        Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Artifacts, Attribute, Entity,
+        Instruction, Value, generate_data,
     };
 
     #[cfg(target_arch = "wasm32")]
@@ -372,7 +407,7 @@ mod tests {
     async fn it_commits_and_selects_facts() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let entity_order = |l: &Artifact, r: &Artifact| l.of.cmp(&r.of);
-        let mut facts = Artifacts::new(storage_backend).await?;
+        let mut facts = Artifacts::new(storage_backend);
 
         let mut data = vec![
             Artifact {
@@ -393,12 +428,123 @@ mod tests {
             .commit(data.clone().into_iter().map(Instruction::Assert))
             .await?;
 
-        let fact_stream = facts.select(FactSelector::default());
+        let fact_stream =
+            facts.select(ArtifactSelector::new().the(Attribute::from_str("profile/name")?));
 
         let mut facts: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
         facts.sort_by(entity_order);
 
         assert_eq!(data, facts);
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_can_query_efficiently_by_entity_and_value() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
+        let data = generate_data(32)?;
+        let attribute = Attribute::from_str("item/name")?;
+        let name = Value::String("name18".into());
+        let entity = data
+            .iter()
+            .find(|element| element.is == name)
+            .unwrap()
+            .of
+            .clone();
+
+        let mut facts = Artifacts::new(storage_backend.clone());
+
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let (initial_reads, initial_writes) = {
+            let storage_backend = storage_backend.lock().await;
+            (storage_backend.reads(), storage_backend.writes())
+        };
+
+        let fact_stream = facts.select(ArtifactSelector::new().of(entity.clone()).is(name.clone()));
+
+        let results: Vec<Artifact> = fact_stream.map(|result| result.unwrap()).collect().await;
+
+        assert_eq!(
+            vec![Artifact {
+                the: attribute,
+                of: entity,
+                is: name
+            }],
+            results
+        );
+
+        let (net_reads, net_writes) = {
+            let storage_backend = storage_backend.lock().await;
+            (
+                storage_backend.reads() - initial_reads,
+                storage_backend.writes() - initial_writes,
+            )
+        };
+
+        assert_eq!(net_reads, 2);
+        assert_eq!(net_writes, 0);
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_can_query_efficiently_by_attribute_and_value() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
+        let data = generate_data(32)?;
+        let attribute = Attribute::from_str("item/name")?;
+        let name = Value::String("name18".into());
+        let entity = data
+            .iter()
+            .find(|element| element.is == name)
+            .unwrap()
+            .of
+            .clone();
+
+        let mut facts = Artifacts::new(storage_backend.clone());
+
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let (initial_reads, initial_writes) = {
+            let storage_backend = storage_backend.lock().await;
+            (storage_backend.reads(), storage_backend.writes())
+        };
+
+        let fact_stream = facts.select(
+            ArtifactSelector::new()
+                .the(attribute.clone())
+                .is(name.clone()),
+        );
+
+        let results: Vec<Artifact> = fact_stream.map(|result| result.unwrap()).collect().await;
+
+        assert_eq!(
+            vec![Artifact {
+                the: attribute,
+                of: entity,
+                is: name
+            }],
+            results
+        );
+
+        let (net_reads, net_writes) = {
+            let storage_backend = storage_backend.lock().await;
+            (
+                storage_backend.reads() - initial_reads,
+                storage_backend.writes() - initial_writes,
+            )
+        };
+
+        assert_eq!(net_reads, 4);
+        assert_eq!(net_writes, 0);
 
         Ok(())
     }
@@ -411,7 +557,7 @@ mod tests {
 
         let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
 
-        let mut facts = Artifacts::new(storage_backend.clone()).await?;
+        let mut facts = Artifacts::new(storage_backend.clone());
 
         facts.commit(data).await?;
 
@@ -420,7 +566,7 @@ mod tests {
             (storage_backend.reads(), storage_backend.writes())
         };
 
-        let fact_stream = facts.select(FactSelector::default().is(Value::String("name64".into())));
+        let fact_stream = facts.select(ArtifactSelector::new().is(Value::String("name64".into())));
         let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
         assert_eq!(results.len(), 1);
@@ -437,7 +583,7 @@ mod tests {
         assert_eq!(net_writes, 0);
 
         let fact_stream =
-            facts.select(FactSelector::default().the(Attribute::from_str("item/id")?));
+            facts.select(ArtifactSelector::new().the(Attribute::from_str("item/id")?));
 
         let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
@@ -475,15 +621,15 @@ mod tests {
 
         let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
 
-        let mut facts_one = Artifacts::new(storage_backend.clone()).await?;
+        let mut facts_one = Artifacts::new(storage_backend.clone());
 
         facts_one.commit(data).await?;
 
-        let mut facts_two = Artifacts::new(storage_backend.clone()).await?;
+        let mut facts_two = Artifacts::new(storage_backend.clone());
 
         facts_two.commit(reordered_data).await?;
 
-        assert_eq!(facts_one.version().await, facts_two.version().await);
+        assert_eq!(facts_one.revision().await, facts_two.revision().await);
 
         Ok(())
     }
@@ -496,21 +642,21 @@ mod tests {
         let into_assert = |fact: Artifact| Instruction::Assert(fact);
         let storage_backend = Arc::new(Mutex::new(storage_backend));
 
-        let mut facts = Artifacts::new(storage_backend.clone()).await?;
+        let mut facts = Artifacts::new(storage_backend.clone());
 
         facts.commit(data.into_iter().map(into_assert)).await?;
-        let version = facts.version().await.unwrap();
+        let revision = facts.revision().await.unwrap();
 
-        let restored_facts = Artifacts::restore(version.clone(), storage_backend).await?;
-        let restored_version = restored_facts.version().await.unwrap();
+        let restored_facts = Artifacts::restore(revision.clone(), storage_backend).await?;
+        let restored_revision = restored_facts.revision().await.unwrap();
 
-        assert_eq!(version, restored_version);
+        assert_eq!(revision, restored_revision);
 
-        let fact_stream = facts.select(FactSelector::default().is(Value::String("name10".into())));
+        let fact_stream = facts.select(ArtifactSelector::new().is(Value::String("name10".into())));
         let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
         let restored_fact_stream =
-            restored_facts.select(FactSelector::default().is(Value::String("name10".into())));
+            restored_facts.select(ArtifactSelector::new().is(Value::String("name10".into())));
         let restored_results: Vec<Artifact> = restored_fact_stream
             .map(|fact| fact.unwrap())
             .collect()

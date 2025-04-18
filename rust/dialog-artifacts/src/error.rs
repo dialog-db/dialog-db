@@ -40,6 +40,10 @@ pub enum DialogArtifactsError {
     /// Raw bytes could not be interpreted as an entity
     #[error("Could not convert bytes into entity: {0}")]
     InvalidEntity(String),
+
+    /// Attempted to query with an unconstrained [`ArtifactSelector`]
+    #[error("An artifact selector must specify at least one field")]
+    EmptySelector,
 }
 
 impl From<DialogStorageError> for DialogArtifactsError {

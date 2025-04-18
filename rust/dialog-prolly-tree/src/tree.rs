@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, marker::PhantomData, ops::RangeBounds};
+use std::{
+    collections::BTreeMap,
+    marker::PhantomData,
+    ops::{Bound, RangeBounds},
+};
 
 use async_stream::try_stream;
 use dialog_storage::{ContentAddressedStorage, HashType};
@@ -84,6 +88,17 @@ where
         self.root.as_ref()
     }
 
+    /// Changes the root (revision) of the tree to the node identified by the
+    /// given [`HashType`]
+    pub async fn set_hash(&mut self, hash: Option<Hash>) -> Result<(), DialogProllyTreeError> {
+        self.root = if let Some(hash) = hash {
+            Some(Node::from_hash(hash, &self.storage).await?)
+        } else {
+            None
+        };
+        Ok(())
+    }
+
     /// Returns the [`HashType`] representing the root of this tree.
     ///
     /// Returns `None` if the tree is empty.
@@ -136,10 +151,27 @@ where
         R: RangeBounds<Key> + 'a,
     {
         try_stream! {
-            if let Some(root) = self.root.as_ref() {
-                let stream = root.get_range(range, &self.storage);
-                for await item in stream {
-                    yield item?;
+            match (range.start_bound(), range.end_bound()) {
+                // Handle the case where the start and end of the bounds are the
+                // same key by looking up the key directly
+                (
+                    Bound::Included(start_key) | Bound::Excluded(start_key),
+                    Bound::Included(end_key) | Bound::Excluded(end_key),
+                ) if start_key == end_key => {
+                    if let Some(value) = self.get(start_key).await? {
+                        yield Entry {
+                            key: start_key.clone(),
+                            value,
+                        };
+                    }
+                }
+                _ => {
+                    if let Some(root) = self.root.as_ref() {
+                        let stream = root.get_range(range, &self.storage);
+                        for await item in stream {
+                            yield item?;
+                        }
+                    }
                 }
             }
         }

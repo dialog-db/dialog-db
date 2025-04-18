@@ -22,12 +22,15 @@
 //!     }
 //! ]).await?;
 //!
-//! let artifact_stream = facts.select(FactSelector::default()
+//! let artifact_stream = facts.select(ArtifactSelector::default()
 //!     .the(Attribute::from_str("profile/name")));
 //!
 //! let artifacts = fact_stream.filter_map(|fact| fact.ok())
 //!     .collect::earVec<Fact>>().await;
 //! ```
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub mod web;
 
 mod data;
 pub use data::*;

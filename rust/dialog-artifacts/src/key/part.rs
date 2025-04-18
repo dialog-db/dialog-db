@@ -21,6 +21,11 @@ impl EntityKeyPart<'_> {
     pub fn max() -> Self {
         Self(&MAXIMUM_ENTITY)
     }
+
+    /// The internal array represented by this [`EntityKeyPart`]
+    pub fn raw(&self) -> &[u8; ENTITY_LENGTH] {
+        self.0
+    }
 }
 
 impl AsRef<[u8]> for EntityKeyPart<'_> {
@@ -55,6 +60,11 @@ impl AttributeKeyPart<'_> {
     /// An [`AttributeKeyPart`] where all bits are one
     pub fn max() -> Self {
         Self(&MAXIMUM_ATTRIBUTE)
+    }
+
+    /// The internal array represented by this [`AttributeKeyPart`]
+    pub fn raw(&self) -> &[u8; ATTRIBUTE_LENGTH] {
+        self.0
     }
 }
 
@@ -97,5 +107,10 @@ impl ValueReferenceKeyPart<'_> {
     /// A [`ValueReferenceKeyPart`] where all bits are one
     pub fn max() -> Self {
         Self(&MAXIMUM_VALUE_REFERENCE)
+    }
+
+    /// The internal array represented by this [`ValueKeyPart`]
+    pub fn raw(&self) -> &[u8; VALUE_REFERENCE_LENGTH] {
+        self.0
     }
 }

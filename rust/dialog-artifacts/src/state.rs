@@ -3,10 +3,10 @@ use dialog_prolly_tree::ValueType;
 use crate::DialogArtifactsError;
 
 #[cfg(doc)]
-use crate::{Artifact, FactStore};
+use crate::{Artifact, ArtifactStore};
 
 /// A [`State`] represents the presence or absence of a [`Artifact`] within a
-/// [`FactStore`]
+/// [`ArtifactStore`]
 #[derive(Clone, Debug)]
 pub enum State<Datum>
 where

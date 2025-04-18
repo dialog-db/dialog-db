@@ -54,3 +54,9 @@ impl From<Attribute> for String {
         value.0
     }
 }
+
+impl From<&Attribute> for String {
+    fn from(value: &Attribute) -> Self {
+        value.0.clone()
+    }
+}
