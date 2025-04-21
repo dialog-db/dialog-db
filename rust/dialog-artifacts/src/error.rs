@@ -29,6 +29,13 @@ pub enum DialogArtifactsError {
     #[error("Could not convert bytes into value: {0}")]
     InvalidValue(String),
 
+    /// A causal reference was invalid
+    #[error("Could not interpret bytes as a cause: {0}")]
+    InvalidCause(String),
+
+    #[error("Could not convert bytes into reference: {0}")]
+    InvalidReference(String),
+
     /// Raw bytes could not be interpreted as a datum state (asserted or retracted)
     #[error("Could not convert bytes into state: {0}")]
     InvalidState(String),

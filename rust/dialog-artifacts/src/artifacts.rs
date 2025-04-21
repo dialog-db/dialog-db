@@ -1,3 +1,6 @@
+mod artifact;
+pub use artifact::*;
+
 mod revision;
 pub use revision::*;
 
@@ -19,13 +22,16 @@ pub use entity::*;
 mod value;
 pub use value::*;
 
+mod cause;
+pub use cause::*;
+
 mod r#match;
 pub use r#match::*;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_prolly_tree::{BasicEncoder, Entry, GeometricDistribution, Tree, ValueType};
+use dialog_prolly_tree::{BasicEncoder, Entry, GeometricDistribution, Tree};
 use dialog_storage::{DialogStorageError, Storage, StorageBackend};
 use futures_util::Stream;
 use std::{ops::Range, sync::Arc};
@@ -40,18 +46,6 @@ use crate::{
 /// The representation of the hash type (BLAKE3, in this case) that must be used
 /// by a [`StorageBackend`] that may back an instance of [`Artifacts`].
 pub type Blake3Hash = [u8; HASH_SIZE];
-
-/// A [`Artifact`] embodies a datum - a semantic triple - that may be stored in or
-/// retrieved from a [`ArtifactStore`].
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
-pub struct Artifact {
-    /// The [`Attribute`] of the [`Artifact`]; the predicate of the triple
-    pub the: Attribute,
-    /// The [`Entity`] of the [`Artifact`]; the subject of the triple
-    pub of: Entity,
-    /// The [`Value`] of the [`Artifact`]; the object of the triple
-    pub is: Value,
-}
 
 /// An alias type that describes the [`Tree`]-based prolly tree that is
 /// used for each index in [`Artifacts`]
@@ -242,11 +236,7 @@ where
 
                     if entry.matches_selector(&selector) {
                         if let Entry { key, value: State::Added(datum) } = entry {
-                            yield Artifact {
-                                the: Attribute::try_from(key.attribute())?,
-                                of: Entity::from(key.entity()),
-                                is: Value::try_from((key.value_type(), datum.to_vec()))?
-                            };
+                            yield Artifact::try_from((key, datum))?;
                         }
                     }
                 }
@@ -284,12 +274,7 @@ where
                             let Some(State::Added(datum)) = entity_index.get(&key).await? else {
                                 return Err(DialogArtifactsError::MalformedIndex(format!("Missing datum for key {:?}", key)))?;
                             };
-
-                            yield Artifact {
-                                the: Attribute::try_from(key.attribute())?,
-                                of: Entity::from(key.entity()),
-                                is: Value::try_from((key.value_type(), datum.to_vec()))?
-                            }
+                            yield Artifact::try_from((key, datum))?;
                         }
                     }
                 }
@@ -307,11 +292,7 @@ where
 
                     if entry.matches_selector(&selector) {
                         if let Entry { key, value: State::Added(datum) } = entry {
-                            yield Artifact {
-                                the: Attribute::try_from(key.attribute())?,
-                                of: Entity::from(key.entity()),
-                                is: Value::try_from((key.value_type(), datum.to_vec()))?
-                            }
+                            yield Artifact::try_from((key, datum))?;
                         }
                     }
                 }
@@ -347,11 +328,24 @@ where
             for instruction in instructions {
                 match instruction {
                     Instruction::Assert(fact) => {
-                        let value_datum = ValueDatum::try_from(fact.is.to_bytes())?;
+                        let value_datum = ValueDatum::new(fact.is.clone(), fact.cause.clone());
+                        let entity_key = EntityKey::from(&fact);
+
+                        // if let Some(cause) = &fact.cause {
+                        //     match entity_index.get(&entity_key).await? {
+                        //         Some(State::Added(current_element))
+                        //             if cause
+                        //                 == &Cause::from(&Artifact::try_from((
+                        //                     entity_key.clone(),
+                        //                     current_element,
+                        //                 ))?) => {
+                        //                     entity_index.s
+                        //                 }
+                        //     }
+                        // }
 
                         tokio::try_join!(
-                            entity_index
-                                .set(EntityKey::from(&fact), State::Added(value_datum.clone())),
+                            entity_index.set(entity_key, State::Added(value_datum.clone())),
                             attribute_index
                                 .set(AttributeKey::from(&fact), State::Added(value_datum)),
                             value_index.set(
@@ -414,11 +408,13 @@ mod tests {
                 the: Attribute::from_str("profile/name")?,
                 of: Entity::new(),
                 is: Value::String("Foo Bar".into()),
+                cause: None,
             },
             Artifact {
                 the: Attribute::from_str("profile/name")?,
                 of: Entity::new(),
                 is: Value::String("Fizz Buzz".into()),
+                cause: None,
             },
         ];
 
@@ -473,7 +469,8 @@ mod tests {
             vec![Artifact {
                 the: attribute,
                 of: entity,
-                is: name
+                is: name,
+                cause: None
             }],
             results
         );
@@ -530,7 +527,8 @@ mod tests {
             vec![Artifact {
                 the: attribute,
                 of: entity,
-                is: name
+                is: name,
+                cause: None
             }],
             results
         );

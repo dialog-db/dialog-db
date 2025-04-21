@@ -38,7 +38,7 @@ use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
     Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Artifacts, Attribute, Blake3Hash,
-    DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Revision, Value,
+    Cause, DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Revision, Value,
     ValueDataType, artifacts::selector::Constrained,
 };
 
@@ -445,6 +445,15 @@ impl TryFrom<JsValue> for Value {
     }
 }
 
+impl TryFrom<JsValue> for Cause {
+    type Error = JsValue;
+
+    fn try_from(value: JsValue) -> Result<Self, Self::Error> {
+        let bytes = value.dyn_into::<Uint8Array>()?.to_vec();
+        Ok(Cause::try_from(bytes)?)
+    }
+}
+
 impl TryFrom<(ValueDataType, JsValue)> for Value {
     type Error = JsValue;
 
@@ -530,8 +539,15 @@ impl TryFrom<JsValue> for Artifact {
         let the = Reflect::get(&value, &"the".into()).and_then(Attribute::try_from)?;
         let of = Reflect::get(&value, &"of".into()).and_then(Entity::try_from)?;
         let is = Reflect::get(&value, &"is".into()).and_then(Value::try_from)?;
+        let cause = Reflect::get(&value, &"cause".into()).and_then(|value| {
+            if value.is_undefined() {
+                Ok(None)
+            } else {
+                Ok(Some(Cause::try_from(value)?))
+            }
+        })?;
 
-        Ok(Artifact { the, of, is })
+        Ok(Artifact { the, of, is, cause })
     }
 }
 
