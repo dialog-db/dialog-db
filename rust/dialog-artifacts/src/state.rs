@@ -23,9 +23,9 @@ where
     Datum: ValueType,
     DialogArtifactsError: From<<Datum as TryFrom<Vec<u8>>>::Error>,
 {
-    fn to_vec(&self) -> Vec<u8> {
+    fn serialize(&self) -> Vec<u8> {
         match self {
-            State::Added(datum) => [vec![1], datum.to_vec()].concat(),
+            State::Added(datum) => [vec![1], datum.serialize()].concat(),
             State::Removed => vec![0],
         }
     }

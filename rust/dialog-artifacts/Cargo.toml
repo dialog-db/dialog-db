@@ -24,6 +24,7 @@ async-trait = { workspace = true }
 base58 = { workspace = true }
 blake3 = { workspace = true }
 futures-util = { workspace = true }
+leb128 = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 static_assertions = { workspace = true }
