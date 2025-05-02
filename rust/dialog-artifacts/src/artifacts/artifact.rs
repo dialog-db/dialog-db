@@ -18,6 +18,8 @@ pub struct Artifact {
 }
 
 impl Artifact {
+    /// Change the value of the [`Artifact`], assigning the hash of its
+    /// antecedent as the `cause`.
     pub fn update(self, value: Value) -> Self {
         let cause = Some(Cause::from(&self));
         Self {

@@ -30,9 +30,6 @@ pub enum DialogArtifactsError {
     InvalidValue(String),
 
     /// A causal reference was invalid
-    #[error("Could not interpret bytes as a cause: {0}")]
-    InvalidCause(String),
-
     #[error("Could not convert bytes into reference: {0}")]
     InvalidReference(String),
 

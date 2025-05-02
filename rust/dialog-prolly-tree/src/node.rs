@@ -8,6 +8,14 @@ use nonempty::NonEmpty;
 
 use crate::{Block, DialogProllyTreeError, Entry, KeyType, Rank, Reference, ValueType};
 
+type BranchStack<const HASH_SIZE: usize, Key, Hash> = Vec<(
+    Option<NonEmpty<Reference<HASH_SIZE, Key, Hash>>>,
+    Option<NonEmpty<Reference<HASH_SIZE, Key, Hash>>>,
+)>;
+
+// Chosen arbitrarily
+const MAXIMUM_TREE_DEPTH: usize = 4096;
+
 /// Primary representation of tree nodes.
 ///
 /// The common error type used by this crate Each [`Node`] stores its children
@@ -158,6 +166,44 @@ where
         self.block.into_entries()
     }
 
+    /// Load all the child references of this [`Node`] from storage as [`Node`]s
+    /// and return them
+    pub async fn load_children<Storage>(
+        &self,
+        storage: &Storage,
+    ) -> Result<NonEmpty<Self>, DialogProllyTreeError>
+    where
+        Storage: ContentAddressedStorage<
+                HASH_SIZE,
+                Block = Block<HASH_SIZE, Key, Value, Hash>,
+                Hash = Hash,
+            >,
+    {
+        if !self.is_branch() {
+            return Err(DialogProllyTreeError::IncorrectTreeAccess(
+                "Cannot convert segment into child branches".into(),
+            ));
+        }
+
+        let mut branches = None;
+
+        for reference in self.block.clone().into_references()? {
+            let child = Node::from_reference(reference, storage).await?;
+            if branches.is_none() {
+                branches = Some(NonEmpty::new(child));
+            } else {
+                branches = branches.map(|mut inner| {
+                    inner.push(child);
+                    inner
+                });
+            }
+        }
+
+        branches.ok_or_else(|| {
+            DialogProllyTreeError::UnexpectedTreeShape("Branch node had no children".to_string())
+        })
+    }
+
     /// Recursively descends the hierarchy, returning an [`Entry`] matching
     /// `key` if found.
     pub async fn get_entry<Storage>(
@@ -172,8 +218,7 @@ where
                 Hash = Hash,
             >,
     {
-        #[allow(unused_assignments)]
-        let mut current_node_holder: Option<Self> = None;
+        let mut current_node_holder: Option<Self>;
         let mut current_node = self;
 
         loop {
@@ -183,11 +228,110 @@ where
                         return Ok(None);
                     };
                     current_node_holder = Some(node);
+                    // NOTE: Always unwrapping `Some(...)` here:
                     current_node = current_node_holder.as_ref().unwrap();
                 }
                 false => return current_node.entry_by_key(key),
             }
         }
+    }
+
+    /// Remove the entry corresponding to `key` from the tree (if it exists),
+    /// and return the new root of the tree. The root will be `None` when the
+    /// last [`Entry`] is removed from the tree.
+    pub async fn remove<Distribution, Storage>(
+        &self,
+        key: &Key,
+        storage: &mut Storage,
+    ) -> Result<Option<Self>, DialogProllyTreeError>
+    where
+        Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash>,
+        Storage: ContentAddressedStorage<
+                HASH_SIZE,
+                Block = Block<HASH_SIZE, Key, Value, Hash>,
+                Hash = Hash,
+            >,
+    {
+        let key_clone = key.to_owned();
+        let (node, mut branch_stack) = self.bisect(&key_clone, storage).await?;
+
+        let entries: NonEmpty<Entry<Key, Value>> = node.block.into_entries()?;
+
+        // Search for the key in entries
+        let entries = match entries.binary_search_by(|probe| probe.key.cmp(key)) {
+            // Entry was found; remove it
+            Ok(index) => {
+                // Otherwise remove the entry at index
+                let mut entries = Vec::from(entries);
+                entries.remove(index);
+                NonEmpty::from_vec(entries)
+            }
+            // Entry was not found; keep original entries
+            Err(_) => Some(entries),
+        };
+
+        // Handle based on whether we have entries left
+        let root = match entries {
+            Some(remaining_entries) => {
+                // We have remaining entries, need to create new nodes with them
+                let nodes = {
+                    let entries = remaining_entries.map(|entry| {
+                        let rank = Distribution::rank(&entry.key);
+                        (entry, rank)
+                    });
+                    Node::join_with_rank(entries, 1, storage).await?
+                };
+
+                // Rejoin the tree with the new nodes
+                Some(
+                    self.rejoin::<Distribution, _>(nodes, branch_stack, storage)
+                        .await?,
+                )
+            }
+            None => {
+                let mut nodes = None;
+
+                while let Some((mut left, right)) = branch_stack.pop() {
+                    // Combine left and right references, removing the current path
+                    if let Some(right) = right {
+                        left = left
+                            .map(|mut left| {
+                                left.append(&mut Vec::from(right.clone()));
+                                left
+                            })
+                            .or_else(|| Some(right));
+                    }
+
+                    let Some(references) = left else {
+                        continue;
+                    };
+
+                    // Create new nodes from the remaining references
+                    nodes = {
+                        let ranked_references = references.map(|reference| {
+                            let rank = Distribution::rank(reference.upper_bound());
+                            (reference, rank)
+                        });
+
+                        Some(Node::join_with_rank(ranked_references, 1, storage).await?)
+                    };
+
+                    break;
+                }
+
+                // Rejoin the tree with the new structure
+                if let Some(nodes) = nodes {
+                    Some(
+                        self.rejoin::<Distribution, _>(nodes, branch_stack, storage)
+                            .await?,
+                    )
+                } else {
+                    None
+                }
+            }
+        };
+
+        Ok(root)
     }
 
     /// Inserts a new [`Entry`] into the hierarchy represented by this [`Node`]
@@ -207,119 +351,37 @@ where
             >,
     {
         let key = new_entry.key.to_owned();
-        let mut node = self.to_owned();
-        let mut branch_stack = vec![];
-        let all_entries: Option<NonEmpty<Entry<Key, Value>>>;
+        let (node, branch_stack) = self.bisect(&key, storage).await?;
 
-        loop {
-            match node.is_branch() {
-                true => {
-                    let mut left = vec![];
-                    let mut right = vec![];
-                    let mut next = None;
-                    for child_reference in node.block.into_references()? {
-                        // If key may be contained within the child reference,
-                        // or if it's the largest boundary use the last child.
-                        if next.is_some() {
-                            right.push(child_reference);
-                        } else if &key <= child_reference.upper_bound() {
-                            next = Some(Node::from_reference(child_reference, storage).await?);
-                        } else {
-                            left.push(child_reference);
-                        }
-                    }
-                    // If key is greater than the greatest child, use the
-                    // greatest child.
-                    if next.is_none() {
-                        let last = left
-                            .pop()
-                            .ok_or(DialogProllyTreeError::UnexpectedTreeShape(
-                                "No upper bound found".into(),
-                            ))?;
-                        next = Some(Node::from_reference(last, storage).await?);
-                    }
-                    branch_stack.push((NonEmpty::from_vec(left), NonEmpty::from_vec(right)));
-                    node = next.ok_or(DialogProllyTreeError::UnexpectedTreeShape(
-                        "Next node not found".into(),
-                    ))?;
-                }
-                false => {
-                    let mut entries = node.block.into_entries()?;
-                    match entries.binary_search_by(|probe| probe.key.cmp(&key)) {
-                        // Entry was found; update the value.
-                        Ok(index) => {
-                            let Some(previous_entry) = entries.get_mut(index) else {
-                                return Err(DialogProllyTreeError::UnexpectedTreeShape(format!(
-                                    "Entry at index {} not found",
-                                    index,
-                                )));
-                            };
-                            previous_entry.value = new_entry.value;
-                        }
-                        // Entry was not found; insert at the provided index.
-                        Err(index) => {
-                            entries.insert(index, new_entry);
-                        }
-                    };
-                    all_entries = Some(entries);
-                    break;
-                }
+        let mut entries: NonEmpty<Entry<Key, Value>> = node.block.into_entries()?;
+
+        match entries.binary_search_by(|probe| probe.key.cmp(&key)) {
+            // Entry was found; update the value.
+            Ok(index) => {
+                let Some(previous_entry) = entries.get_mut(index) else {
+                    return Err(DialogProllyTreeError::UnexpectedTreeShape(format!(
+                        "Entry at index {} not found",
+                        index,
+                    )));
+                };
+                previous_entry.value = new_entry.value;
             }
-        }
-        let mut nodes = {
-            let Some(entries) = all_entries else {
-                return Err(DialogProllyTreeError::UnexpectedTreeShape(
-                    "No entries found".into(),
-                ));
-            };
+            // Entry was not found; insert at the provided index.
+            Err(index) => {
+                entries.insert(index, new_entry);
+            }
+        };
+
+        let nodes = {
             let entries = entries.map(|entry| {
                 let rank = Distribution::rank(&entry.key);
                 (entry, rank)
             });
             Node::join_with_rank(entries, 1, storage).await?
         };
-        let mut min_rank = 2;
-        loop {
-            let references = {
-                let references = nodes.map(|(node, rank)| (node.reference().clone(), rank));
-                match branch_stack.pop() {
-                    Some(siblings) => {
-                        // TBD if we must recompute rank for siblings references
-                        // when building up the tree. Attempt to try setting
-                        // rank to `0` for references outside of the modified
-                        // path.
-                        let left = siblings.0.map(|left| {
-                            left.map(|reference| {
-                                let rank = Distribution::rank(reference.upper_bound());
-                                (reference, rank)
-                            })
-                        });
-                        let right = siblings.1.map(|right| {
-                            right.map(|reference| {
-                                let rank = Distribution::rank(reference.upper_bound());
-                                (reference, rank)
-                            })
-                        });
-                        match (left, right) {
-                            (None, None) => references,
-                            (Some(left), None) => concat_nonempty(vec![left, references])?,
-                            (None, Some(right)) => concat_nonempty(vec![references, right])?,
-                            (Some(left), Some(right)) => {
-                                concat_nonempty(vec![left, references, right])?
-                            }
-                        }
-                    }
-                    None => references,
-                }
-            };
 
-            nodes = Node::join_with_rank(references, min_rank, storage).await?;
-            if branch_stack.is_empty() && nodes.len() == 1 {
-                break;
-            }
-            min_rank += 1;
-        }
-        Ok(nodes.head.0)
+        self.rejoin::<Distribution, _>(nodes, branch_stack, storage)
+            .await
     }
 
     /// Returns an async stream over entries with keys within the provided range.
@@ -496,7 +558,7 @@ where
                 Hash = Hash,
             >,
     {
-        let mut output = vec![];
+        let mut output: Vec<(Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>, u32)> = vec![];
         let mut pending = vec![];
         for (node, rank) in nodes {
             pending.push(node);
@@ -517,6 +579,128 @@ where
         NonEmpty::from_vec(output).ok_or(DialogProllyTreeError::InvalidConstruction(
             "Empty node list".into(),
         ))
+    }
+
+    /// Given a [`Key`], traverse to the node that would contain the
+    /// corresponding entry, recording the traverssal as a stack of left-hand
+    /// and right-hand nodes that constitute the path through the tree to the
+    /// ultimate segment.
+    async fn bisect<Storage>(
+        &self,
+        key: &Key,
+        storage: &Storage,
+    ) -> Result<(Self, BranchStack<HASH_SIZE, Key, Hash>), DialogProllyTreeError>
+    where
+        Storage: ContentAddressedStorage<
+                HASH_SIZE,
+                Block = Block<HASH_SIZE, Key, Value, Hash>,
+                Hash = Hash,
+            >,
+    {
+        let mut node = self.to_owned();
+        let mut branch_stack = vec![];
+
+        while node.is_branch() {
+            if branch_stack.len() > MAXIMUM_TREE_DEPTH {
+                return Err(DialogProllyTreeError::UnexpectedTreeShape(format!(
+                    "Tree depth exceded the soft maximum ({MAXIMUM_TREE_DEPTH})"
+                )));
+            }
+
+            let mut left = vec![];
+            let mut right = vec![];
+            let mut next_descendant = None;
+            for child_reference in node.block.into_references()? {
+                // If key may be contained within the child reference,
+                // or if it's the largest boundary use the last child.
+                if next_descendant.is_some() {
+                    right.push(child_reference);
+                } else if key <= child_reference.upper_bound() {
+                    next_descendant = Some(Node::from_reference(child_reference, storage).await?);
+                } else {
+                    left.push(child_reference);
+                }
+            }
+
+            // If key is greater than the greatest child, use the
+            // greatest child.
+            if next_descendant.is_none() {
+                let last_candidate =
+                    left.pop()
+                        .ok_or(DialogProllyTreeError::UnexpectedTreeShape(
+                            "No upper bound found".into(),
+                        ))?;
+                next_descendant = Some(Node::from_reference(last_candidate, storage).await?);
+            }
+            branch_stack.push((NonEmpty::from_vec(left), NonEmpty::from_vec(right)));
+            node = next_descendant.ok_or(DialogProllyTreeError::UnexpectedTreeShape(
+                "Next node not found".into(),
+            ))?;
+        }
+
+        Ok((node, branch_stack))
+    }
+
+    async fn rejoin<Distribution, Storage>(
+        &self,
+        mut nodes: NonEmpty<(Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>, u32)>,
+        mut branch_stack: BranchStack<HASH_SIZE, Key, Hash>,
+        storage: &mut Storage,
+    ) -> Result<Self, DialogProllyTreeError>
+    where
+        Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash>,
+        Storage: ContentAddressedStorage<
+                HASH_SIZE,
+                Block = Block<HASH_SIZE, Key, Value, Hash>,
+                Hash = Hash,
+            >,
+    {
+        let mut minimum_rank = 2;
+
+        loop {
+            let references = {
+                let references = nodes.map(|(node, rank)| (node.reference().clone(), rank));
+                match branch_stack.pop() {
+                    Some(siblings) => {
+                        // TBD if we must recompute rank for siblings references
+                        // when building up the tree. Attempt to try setting
+                        // rank to `0` for references outside of the modified
+                        // path.
+                        let left = siblings.0.map(|left| {
+                            left.map(|reference| {
+                                let rank = Distribution::rank(reference.upper_bound());
+                                (reference, rank)
+                            })
+                        });
+                        let right = siblings.1.map(|right| {
+                            right.map(|reference| {
+                                let rank = Distribution::rank(reference.upper_bound());
+                                (reference, rank)
+                            })
+                        });
+                        match (left, right) {
+                            (None, None) => references,
+                            (Some(left), None) => concat_nonempty(vec![left, references])?,
+                            (None, Some(right)) => concat_nonempty(vec![references, right])?,
+                            (Some(left), Some(right)) => {
+                                concat_nonempty(vec![left, references, right])?
+                            }
+                        }
+                    }
+                    None => references,
+                }
+            };
+
+            nodes = Node::join_with_rank(references, minimum_rank, storage).await?;
+
+            if branch_stack.is_empty() && nodes.len() == 1 {
+                break;
+            }
+
+            minimum_rank += 1;
+        }
+
+        Ok(nodes.head.0)
     }
 }
 
