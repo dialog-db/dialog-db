@@ -1,3 +1,4 @@
+use base58::ToBase58;
 use dialog_common::ConditionalSend;
 
 /// A trait that can be implemented for types that represent a hash. A blanket
@@ -6,6 +7,11 @@ use dialog_common::ConditionalSend;
 pub trait HashType<const SIZE: usize>: Clone + AsRef<[u8]> + ConditionalSend {
     /// Get the raw bytes of the hash
     fn bytes(&self) -> [u8; SIZE];
+
+    /// Format the hash as a display string
+    fn display(&self) -> String {
+        format!("#{}...", self.bytes()[0..6].to_base58())
+    }
 }
 
 impl<const SIZE: usize, T> HashType<SIZE> for T

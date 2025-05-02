@@ -2,6 +2,9 @@ use crate::{make_reference, reference_type};
 
 use super::{Artifact, Blake3Hash};
 
+/// A [`Cause`] is a reference to an [`Artifact`] that preceded a more recent
+/// version of the same [`Artifact`] (where same implies same [`Entity`] and
+/// same [`Attribute`]).
 #[repr(transparent)]
 #[derive(Clone, Debug, PartialEq, PartialOrd)]
 pub struct Cause(Blake3Hash);

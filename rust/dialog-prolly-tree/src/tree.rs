@@ -135,6 +135,19 @@ where
         Ok(())
     }
 
+    /// Remove the `key`/`value` pair associated with `key` (if it is present)
+    pub async fn delete(&mut self, key: &Key) -> Result<(), DialogProllyTreeError> {
+        match &self.root {
+            Some(root) => {
+                self.root = root
+                    .remove::<Distribution, _>(key, &mut self.storage)
+                    .await?;
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
     /// Returns an async stream over all entries.
     pub fn stream(
         &self,

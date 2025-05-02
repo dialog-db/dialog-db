@@ -71,6 +71,8 @@ pub struct ValueDatum {
 }
 
 impl ValueDatum {
+    /// Initialize a new [`ValueDatum`] from the [`Value`] and an optional
+    /// [`Cause`] (causal antecedent)
     pub fn new(value: Value, cause: Option<Cause>) -> Self {
         let value = value.to_bytes();
         Self {
@@ -80,10 +82,12 @@ impl ValueDatum {
         }
     }
 
+    /// Get the [`RawValue`] of this [`ValueDatum`]
     pub fn raw_value(&self) -> &RawValue {
         &self.raw_value
     }
 
+    /// Get the [`Cuase`] of this [`ValueDatum`], if any
     pub fn cause(&self) -> Option<&Cause> {
         self.cause.as_ref()
     }
@@ -93,14 +97,13 @@ impl ValueDatum {
         &self.reference
     }
 
+    /// Decompose the [`ValueDatum`] into a [`Value`] and [`Cause`] (if one is
+    /// assigned)
     pub fn into_value_and_cause(
         self,
         data_type: ValueDataType,
     ) -> Result<(Value, Option<Cause>), DialogArtifactsError> {
-        Ok((
-            Value::try_from((data_type, self.raw_value))?,
-            self.cause.map(|hash| Cause::from(hash)),
-        ))
+        Ok((Value::try_from((data_type, self.raw_value))?, self.cause))
     }
 }
 
@@ -122,7 +125,7 @@ impl ValueType for ValueDatum {
             value_bytes,
             self.cause
                 .as_ref()
-                .and_then(|cause| Some((*cause).to_vec()))
+                .map(|cause| (*cause).to_vec())
                 .unwrap_or_default(),
         ]
         .concat()
@@ -148,12 +151,12 @@ impl TryFrom<Vec<u8>> for ValueDatum {
         let mut cause = Vec::new();
 
         let cause = match cursor.read_to_end(&mut cause) {
-            Ok(length_read) if length_read == 0 => None,
+            Ok(0) => None,
             Ok(length_read) if length_read == HASH_SIZE => {
                 let hash: Blake3Hash = cause.try_into().map_err(|_| {
-                    DialogArtifactsError::InvalidValue(format!(
-                        "Unexpected cause conversion failure"
-                    ))
+                    DialogArtifactsError::InvalidValue(
+                        "Unexpected cause conversion failure".to_string(),
+                    )
                 })?;
 
                 Some(Cause::from(hash))
