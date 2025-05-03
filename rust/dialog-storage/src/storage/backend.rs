@@ -66,7 +66,7 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::{
-        CachedStorageBackend, MeasuredStorageBackend, MemoryStorageBackend, StorageBackend,
+        MeasuredStorageBackend, MemoryStorageBackend, StorageBackend, StorageCache, StorageOverlay,
         StorageSink, StorageSource, make_target_storage,
     };
 
@@ -91,11 +91,43 @@ mod tests {
 
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_can_wrap_backends_in_an_overlay() -> Result<()> {
+        let (storage_backend, _tempdir) = make_target_storage().await?;
+        let mut storage_backend = Arc::new(Mutex::new(storage_backend));
+
+        storage_backend.set(vec![1, 2, 3], vec![4, 5, 6]).await?;
+
+        let overlay_backend = Arc::new(Mutex::new(MemoryStorageBackend::default()));
+
+        let mut storage_overlay =
+            StorageOverlay::new(storage_backend.clone(), overlay_backend.clone());
+
+        storage_overlay.set(vec![2, 3, 4], vec![5, 6, 7]).await?;
+
+        assert_eq!(storage_backend.get(&vec![2, 3, 4]).await?, None);
+        assert_eq!(
+            overlay_backend.get(&vec![2, 3, 4]).await?,
+            Some(vec![5, 6, 7])
+        );
+        assert_eq!(
+            storage_overlay.get(&vec![2, 3, 4]).await?,
+            Some(vec![5, 6, 7])
+        );
+        assert_eq!(
+            storage_overlay.get(&vec![1, 2, 3]).await?,
+            Some(vec![4, 5, 6])
+        );
+
+        Ok(())
+    }
+
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_wrap_backends_in_a_transparent_cache() -> Result<()> {
         let (storage_backend, _tempdir) = make_target_storage().await?;
         let measured_storage_backend =
             Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
-        let mut storage_backend = CachedStorageBackend::new(measured_storage_backend.clone(), 100)?;
+        let mut storage_backend = StorageCache::new(measured_storage_backend.clone(), 100)?;
 
         storage_backend.set(vec![1, 2, 3], vec![4, 5, 6]).await?;
         storage_backend.set(vec![2, 3, 4], vec![5, 6, 7]).await?;
