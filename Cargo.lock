@@ -212,10 +212,12 @@ name = "dialog-storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "base58",
  "blake3",
  "dialog-common",
+ "futures-util",
  "getrandom",
  "js-sys",
  "rexie",

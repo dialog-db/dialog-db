@@ -66,7 +66,8 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::{
-        CachedStorageBackend, MeasuredStorageBackend, StorageBackend, make_target_storage,
+        CachedStorageBackend, MeasuredStorageBackend, MemoryStorageBackend, StorageBackend,
+        StorageSink, StorageSource, make_target_storage,
     };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -111,6 +112,35 @@ mod tests {
 
         assert_eq!(measured_storage.writes(), 2);
         assert_eq!(measured_storage.reads(), 2);
+
+        Ok(())
+    }
+
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_can_perform_bulk_storage_transfers() -> Result<()> {
+        let (mut target_storage_backend, _tempdir) = make_target_storage().await?;
+        let mut memory_storage_backend = MemoryStorageBackend::default();
+
+        for i in 0..4usize {
+            memory_storage_backend
+                .set(
+                    i.to_le_bytes().to_vec(),
+                    format!("Value{i}").as_bytes().to_vec(),
+                )
+                .await?;
+        }
+
+        target_storage_backend
+            .write(memory_storage_backend.drain())
+            .await?;
+
+        for i in 0..4usize {
+            let value = target_storage_backend
+                .get(&i.to_le_bytes().to_vec())
+                .await?;
+            assert_eq!(value, Some(format!("Value{i}").as_bytes().to_vec()));
+        }
 
         Ok(())
     }

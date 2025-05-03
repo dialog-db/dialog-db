@@ -1,11 +1,11 @@
-// use crate::{BlockStore, Error, Hash, HashRef, Result};
 use async_trait::async_trait;
+use futures_util::{Stream, TryStreamExt};
 use js_sys::Uint8Array;
 use rexie::{ObjectStore, Rexie, RexieBuilder, TransactionMode};
 use std::{marker::PhantomData, rc::Rc};
 use wasm_bindgen::{JsCast, JsValue};
 
-use crate::DialogStorageError;
+use crate::{DialogStorageError, StorageSink};
 
 use super::StorageBackend;
 
@@ -116,8 +116,61 @@ where
     }
 }
 
+#[async_trait(?Send)]
+impl<Key, Value> StorageSink for IndexedDbStorageBackend<Key, Value>
+where
+    Key: AsRef<[u8]> + Clone,
+    Value: AsRef<[u8]> + From<Vec<u8>> + Clone,
+{
+    async fn write<EntryStream>(
+        &mut self,
+        stream: EntryStream,
+    ) -> Result<(), <Self as StorageBackend>::Error>
+    where
+        EntryStream: Stream<
+            Item = Result<
+                (
+                    <Self as StorageBackend>::Key,
+                    <Self as StorageBackend>::Value,
+                ),
+                <Self as StorageBackend>::Error,
+            >,
+        >,
+    {
+        let tx = self
+            .db
+            .transaction(&[&self.store_name], TransactionMode::ReadWrite)
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+        let store = tx
+            .store(&self.store_name)
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+        tokio::pin!(stream);
+
+        let mut entries = Vec::<(JsValue, Option<JsValue>)>::new();
+
+        while let Some((key, value)) = stream.try_next().await? {
+            let key = bytes_to_typed_array(key.as_ref());
+            let value = bytes_to_typed_array(value.as_ref());
+            entries.push((value, Some(key)));
+        }
+
+        store.put_all(entries.into_iter()).await.map_err(|error| {
+            DialogStorageError::StorageBackend(format!(
+                "Failed while writing bulk entries to IndexedDB: {error}"
+            ))
+        })?;
+
+        tx.done()
+            .await
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+        Ok(())
+    }
+}
+
 fn bytes_to_typed_array(bytes: &[u8]) -> JsValue {
     let array = Uint8Array::new_with_length(bytes.len() as u32);
-    array.copy_from(&bytes);
+    array.copy_from(bytes);
     JsValue::from(array)
 }

@@ -5,16 +5,16 @@ use crate::DialogArtifactsError;
 #[cfg(doc)]
 use crate::{Artifact, ArtifactStore};
 
-/// A [`State`] represents the presence or absence of a [`Artifact`] within a
+/// A [`State`] represents the presence or absence of an [`Artifact`] within a
 /// [`ArtifactStore`]
 #[derive(Clone, Debug)]
 pub enum State<Datum>
 where
     Datum: ValueType,
 {
-    /// A [`Artifact`] that has been asserted
+    /// An [`Artifact`] that has been asserted
     Added(Datum),
-    /// A [`Artifact`] that has been retracted
+    /// An [`Artifact`] that has been retracted
     Removed,
 }
 

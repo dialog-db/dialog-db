@@ -1,7 +1,8 @@
-use crate::DialogStorageError;
+use crate::{DialogStorageError, StorageSink};
 use async_trait::async_trait;
 use base58::ToBase58;
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSend, ConditionalSync};
+use futures_util::{Stream, TryStreamExt, future::try_join_all};
 use std::{
     marker::PhantomData,
     path::{Path, PathBuf},
@@ -80,5 +81,46 @@ where
             .await
             .map(|value| Some(Value::from(value)))
             .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))
+    }
+}
+
+#[async_trait]
+impl<Key, Value> StorageSink for FileSystemStorageBackend<Key, Value>
+where
+    Key: AsRef<[u8]> + Clone + ConditionalSync,
+    Value: AsRef<[u8]> + Clone + From<Vec<u8>> + ConditionalSync,
+{
+    async fn write<EntryStream>(
+        &mut self,
+        stream: EntryStream,
+    ) -> Result<(), <Self as StorageBackend>::Error>
+    where
+        EntryStream: Stream<
+                Item = Result<
+                    (
+                        <Self as StorageBackend>::Key,
+                        <Self as StorageBackend>::Value,
+                    ),
+                    <Self as StorageBackend>::Error,
+                >,
+            > + ConditionalSend,
+    {
+        tokio::pin!(stream);
+
+        let mut writes = Vec::new();
+
+        while let Some((key, value)) = stream.try_next().await? {
+            let path = self.make_path(&key)?;
+            writes.push(async move {
+                tokio::fs::write(path, value)
+                    .await
+                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+                Ok(()) as Result<_, Self::Error>
+            });
+        }
+
+        try_join_all(writes.into_iter()).await?;
+
+        Ok(())
     }
 }

@@ -12,7 +12,9 @@ helpers = ["tempfile", "anyhow"]
 dialog-common = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
+async-stream = { workspace = true }
 async-trait = { workspace = true }
+futures-util = { workspace = true }
 sieve-cache = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
