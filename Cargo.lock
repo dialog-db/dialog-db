@@ -221,6 +221,7 @@ dependencies = [
  "futures-util",
  "getrandom",
  "js-sys",
+ "rand",
  "rexie",
  "sieve-cache",
  "tempfile",
