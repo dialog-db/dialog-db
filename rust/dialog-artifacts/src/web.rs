@@ -191,7 +191,7 @@ impl ArtifactsBinding {
     pub async fn open(
         #[wasm_bindgen(js_name = "dbName")] db_name: &str,
         revision: Option<Vec<u8>>,
-    ) -> Result<Self, JsValue> {
+    ) -> Result<Self, JsError> {
         let storage_backend = CachedStorageBackend::new(
             IndexedDbStorageBackend::new(db_name, "dialog-artifact-blocks")
                 .await
@@ -233,12 +233,19 @@ impl ArtifactsBinding {
     /// abandoned and the revision remains the same as it was at the start of
     /// the transaction.
     #[wasm_bindgen]
-    pub async fn commit(&mut self, iterable: &InstructionIterableDuckType) -> Result<(), JsValue> {
-        let Some(iterator) = js_sys::try_iter(iterable)? else {
-            return Err("Only iterables are allowed".into());
+    pub async fn commit(&mut self, iterable: &InstructionIterableDuckType) -> Result<(), JsError> {
+        let Some(iterator) = js_sys::try_iter(iterable).map_err(js_value_to_error)? else {
+            return Err(JsError::new("Only iterables are allowed"));
         };
 
-        let iterator = iterator.filter_map(|element| element.and_then(Instruction::try_from).ok());
+        let iterator = iterator.filter_map(|element| {
+            if let Ok(element) = element {
+                // NOTE: We are silently dropping unconvertable instructions here; probably bad
+                Instruction::try_from(element).ok()
+            } else {
+                None
+            }
+        });
 
         self.artifacts.write().await.commit(iterator).await?;
 
@@ -248,7 +255,7 @@ impl ArtifactsBinding {
     /// Query for `Artifact`s that match the given selector. Matching results
     /// are provided via an async iterator.
     #[wasm_bindgen(unchecked_return_type = "ArtifactIterable")]
-    pub fn select(&self, selector: ArtifactSelectorDuckType) -> Result<JsValue, JsValue> {
+    pub fn select(&self, selector: ArtifactSelectorDuckType) -> Result<JsValue, JsError> {
         let selector = ArtifactSelector::try_from(JsValue::from(selector))?;
         let artifacts = self.artifacts.clone();
 
@@ -257,7 +264,8 @@ impl ArtifactsBinding {
             Closure::new(move || ArtifactIteratorBinding::new(selector.clone(), artifacts.clone()));
         let async_iterator = async_iterator.into_js_value();
 
-        Reflect::set(&iterable, &Symbol::async_iterator(), &async_iterator)?;
+        Reflect::set(&iterable, &Symbol::async_iterator(), &async_iterator)
+            .map_err(js_value_to_error)?;
 
         Ok(iterable)
     }
@@ -286,7 +294,7 @@ impl ArtifactIteratorBinding {
 
     /// Get the next `Artifact` yielded by this iterator
     #[wasm_bindgen(unchecked_return_type = "IteratorResult<Artifact>")]
-    pub async fn next(&mut self) -> Result<JsValue, JsValue> {
+    pub async fn next(&mut self) -> Result<JsValue, JsError> {
         if self.stream.is_none() {
             self.stream = Some(Box::pin(
                 self.artifacts.read().await.select(self.selector.clone()),
@@ -301,9 +309,7 @@ impl ArtifactIteratorBinding {
             return iterable_result(None);
         };
 
-        let next_element = next_element
-            .map_err(|error| JsValue::from(error))
-            .and_then(JsValue::try_from)?;
+        let next_element = JsValue::try_from(next_element?)?;
 
         iterable_result(Some(next_element))
     }
@@ -312,17 +318,22 @@ impl ArtifactIteratorBinding {
 // NOTE: Everything below this line is a conversion to support duck typing on the
 // JavaScript side of the API boundary
 
-fn iterable_result(value: Option<JsValue>) -> Result<JsValue, JsValue> {
+fn js_value_to_error(value: JsValue) -> JsError {
+    JsError::new(&format!("{:?}", value))
+}
+
+fn iterable_result(value: Option<JsValue>) -> Result<JsValue, JsError> {
     let result = JsValue::from(Object::new());
 
     Reflect::set(
         &result,
         &"done".into(),
         &JsValue::from_bool(value.is_none()),
-    )?;
+    )
+    .map_err(js_value_to_error)?;
 
     if let Some(value) = value {
-        Reflect::set(&result, &"value".into(), &value)?;
+        Reflect::set(&result, &"value".into(), &value).map_err(js_value_to_error)?;
     };
 
     Ok(result)
@@ -338,7 +349,7 @@ impl From<(InstructionTypeBinding, Artifact)> for Instruction {
 }
 
 impl TryFrom<Value> for JsValue {
-    type Error = JsValue;
+    type Error = JsError;
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         let data_type = JsValue::from(value.data_type());
@@ -366,8 +377,8 @@ impl TryFrom<Value> for JsValue {
 
         let object = JsValue::from(Object::new());
 
-        Reflect::set(&object, &"type".into(), &data_type)?;
-        Reflect::set(&object, &"value".into(), &value)?;
+        Reflect::set(&object, &"type".into(), &data_type).map_err(js_value_to_error)?;
+        Reflect::set(&object, &"value".into(), &value).map_err(js_value_to_error)?;
 
         Ok(object)
     }
@@ -389,23 +400,23 @@ impl From<Entity> for JsValue {
 }
 
 impl TryFrom<Artifact> for JsValue {
-    type Error = JsValue;
+    type Error = JsError;
     fn try_from(artifact: Artifact) -> Result<Self, Self::Error> {
         let object = JsValue::from(Object::new());
         let attribute = JsValue::from(artifact.the);
         let entity = JsValue::from(artifact.of);
         let value = JsValue::try_from(artifact.is)?;
 
-        Reflect::set(&object, &"the".into(), &attribute)?;
-        Reflect::set(&object, &"of".into(), &entity)?;
-        Reflect::set(&object, &"is".into(), &value)?;
+        Reflect::set(&object, &"the".into(), &attribute).map_err(js_value_to_error)?;
+        Reflect::set(&object, &"of".into(), &entity).map_err(js_value_to_error)?;
+        Reflect::set(&object, &"is".into(), &value).map_err(js_value_to_error)?;
 
         Ok(object)
     }
 }
 
 impl TryFrom<JsValue> for Attribute {
-    type Error = JsValue;
+    type Error = JsError;
 
     fn try_from(attribute: JsValue) -> Result<Self, Self::Error> {
         let Some(string) = attribute.as_string() else {
@@ -417,17 +428,23 @@ impl TryFrom<JsValue> for Attribute {
 }
 
 impl TryFrom<JsValue> for Entity {
-    type Error = JsValue;
+    type Error = JsError;
 
     fn try_from(entity: JsValue) -> Result<Self, Self::Error> {
-        let bytes = entity.dyn_into::<Uint8Array>()?;
-        let raw_entity: RawEntity = bytes.to_vec().try_into()?;
+        let bytes = entity.dyn_into::<Uint8Array>().map_err(js_value_to_error)?;
+        let raw_entity: RawEntity = bytes.to_vec().try_into().map_err(|value: Vec<u8>| {
+            DialogArtifactsError::InvalidEntity(format!(
+                "Wrong length; expected {}, got {}",
+                HASH_SIZE,
+                value.len()
+            ))
+        })?;
         Ok(Entity::from(raw_entity))
     }
 }
 
 impl TryFrom<JsValue> for Value {
-    type Error = JsValue;
+    type Error = JsError;
 
     fn try_from(value: JsValue) -> Result<Self, Self::Error> {
         let data_type = Reflect::get(&value, &"type".into())
@@ -437,25 +454,29 @@ impl TryFrom<JsValue> for Value {
                         .into()
                 })
             })
-            .map(|value| ValueDataType::from(value as u8))?;
+            .map(|value| ValueDataType::from(value as u8))
+            .map_err(js_value_to_error)?;
 
-        let value = Reflect::get(&value, &"value".into())?;
+        let value = Reflect::get(&value, &"value".into()).map_err(js_value_to_error)?;
 
         Value::try_from((data_type, value))
     }
 }
 
 impl TryFrom<JsValue> for Cause {
-    type Error = JsValue;
+    type Error = JsError;
 
     fn try_from(value: JsValue) -> Result<Self, Self::Error> {
-        let bytes = value.dyn_into::<Uint8Array>()?.to_vec();
+        let bytes = value
+            .dyn_into::<Uint8Array>()
+            .map_err(js_value_to_error)?
+            .to_vec();
         Ok(Cause::try_from(bytes)?)
     }
 }
 
 impl TryFrom<(ValueDataType, JsValue)> for Value {
-    type Error = JsValue;
+    type Error = JsError;
 
     fn try_from((data_type, value): (ValueDataType, JsValue)) -> Result<Self, Self::Error> {
         if value.is_undefined() {
@@ -472,12 +493,19 @@ impl TryFrom<(ValueDataType, JsValue)> for Value {
         let value = match data_type {
             ValueDataType::Null => Value::Null,
             ValueDataType::Bytes => {
-                let byte_array: Uint8Array = value.dyn_into()?;
+                let byte_array: Uint8Array = value.dyn_into().map_err(js_value_to_error)?;
                 Value::Bytes(byte_array.to_vec())
             }
             ValueDataType::Entity => {
-                let byte_array: Uint8Array = value.dyn_into()?;
-                let raw_entity: RawEntity = byte_array.to_vec().try_into()?;
+                let byte_array: Uint8Array = value.dyn_into().map_err(js_value_to_error)?;
+                let raw_entity: RawEntity =
+                    byte_array.to_vec().try_into().map_err(|value: Vec<u8>| {
+                        DialogArtifactsError::InvalidEntity(format!(
+                            "Wrong length; expected {}, got {}",
+                            HASH_SIZE,
+                            value.len()
+                        ))
+                    })?;
                 Value::Entity(raw_entity)
             }
             ValueDataType::Boolean => Value::Boolean(value.is_truthy()),
@@ -516,7 +544,7 @@ impl TryFrom<(ValueDataType, JsValue)> for Value {
                 Value::Float(value)
             }
             ValueDataType::Record => {
-                let byte_array: Uint8Array = value.dyn_into()?;
+                let byte_array: Uint8Array = value.dyn_into().map_err(js_value_to_error)?;
                 Value::Record(byte_array.to_vec())
             }
             ValueDataType::Symbol => Value::Symbol(Attribute::try_from(
@@ -533,39 +561,50 @@ impl TryFrom<(ValueDataType, JsValue)> for Value {
 }
 
 impl TryFrom<JsValue> for Artifact {
-    type Error = JsValue;
+    type Error = JsError;
 
     fn try_from(value: JsValue) -> Result<Self, Self::Error> {
-        let the = Reflect::get(&value, &"the".into()).and_then(Attribute::try_from)?;
-        let of = Reflect::get(&value, &"of".into()).and_then(Entity::try_from)?;
-        let is = Reflect::get(&value, &"is".into()).and_then(Value::try_from)?;
-        let cause = Reflect::get(&value, &"cause".into()).and_then(|value| {
-            if value.is_undefined() {
-                Ok(None)
-            } else {
-                Ok(Some(Cause::try_from(value)?))
-            }
-        })?;
+        let the = Reflect::get(&value, &"the".into())
+            .map_err(js_value_to_error)
+            .and_then(Attribute::try_from)?;
+        let of = Reflect::get(&value, &"of".into())
+            .map_err(js_value_to_error)
+            .and_then(Entity::try_from)?;
+        let is = Reflect::get(&value, &"is".into())
+            .map_err(js_value_to_error)
+            .and_then(Value::try_from)?;
+        let cause = Reflect::get(&value, &"cause".into())
+            .and_then(|value| {
+                if value.is_undefined() {
+                    Ok(None)
+                } else {
+                    Ok(Some(Cause::try_from(value)?))
+                }
+            })
+            .map_err(js_value_to_error)?;
 
         Ok(Artifact { the, of, is, cause })
     }
 }
 
 impl TryFrom<JsValue> for Instruction {
-    type Error = JsValue;
+    type Error = JsError;
 
     fn try_from(value: JsValue) -> Result<Self, Self::Error> {
         let instruction_type = Reflect::get(&value, &"type".into())
-            .and_then(InstructionTypeBinding::try_from_js_value)?;
+            .and_then(InstructionTypeBinding::try_from_js_value)
+            .map_err(js_value_to_error)?;
 
-        let artifact = Reflect::get(&value, &"artifact".into()).and_then(Artifact::try_from)?;
+        let artifact = Reflect::get(&value, &"artifact".into())
+            .map_err(js_value_to_error)
+            .and_then(Artifact::try_from)?;
 
         Ok(Instruction::from((instruction_type, artifact)))
     }
 }
 
 impl TryFrom<JsValue> for ArtifactSelector<Constrained> {
-    type Error = JsValue;
+    type Error = JsError;
 
     fn try_from(value: JsValue) -> Result<Self, Self::Error> {
         let selector = if let Some(the) = Reflect::get(&value, &"the".into())
