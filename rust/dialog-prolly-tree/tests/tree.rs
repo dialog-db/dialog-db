@@ -1,6 +1,6 @@
 use anyhow::Result;
 use dialog_prolly_tree::{BasicEncoder, GeometricDistribution, Tree};
-use dialog_storage::{CachedStorageBackend, MeasuredStorageBackend, MemoryStorageBackend, Storage};
+use dialog_storage::{MeasuredStorageBackend, MemoryStorageBackend, Storage, StorageCache};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -215,7 +215,7 @@ async fn lru_store_caches() -> Result<()> {
     };
 
     let tracking = Arc::new(Mutex::new(MeasuredStorageBackend::new(backend)));
-    let lru = CachedStorageBackend::new(tracking.clone(), 10)?;
+    let lru = StorageCache::new(tracking.clone(), 10)?;
     let storage = Storage {
         backend: lru,
         encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),

@@ -30,7 +30,7 @@
 use std::{pin::Pin, sync::Arc};
 
 use base58::{FromBase58, ToBase58};
-use dialog_storage::{CachedStorageBackend, IndexedDbStorageBackend};
+use dialog_storage::{IndexedDbStorageBackend, StorageCache};
 use futures_util::{Stream, StreamExt};
 use tokio::sync::RwLock;
 use wasm_bindgen::{convert::TryFromJsValue, prelude::*};
@@ -173,7 +173,7 @@ pub enum InstructionTypeBinding {
     Retract = 1,
 }
 
-type WebStorageBackend = CachedStorageBackend<IndexedDbStorageBackend<Blake3Hash, Vec<u8>>>;
+type WebStorageBackend = StorageCache<IndexedDbStorageBackend<Blake3Hash, Vec<u8>>>;
 
 const STORAGE_CACHE_CAPACITY: usize = 2usize.pow(16);
 
@@ -202,7 +202,7 @@ impl ArtifactsBinding {
         #[wasm_bindgen(js_name = "dbName")] db_name: &str,
         revision: Option<Vec<u8>>,
     ) -> Result<Self, JsError> {
-        let storage_backend = CachedStorageBackend::new(
+        let storage_backend = StorageCache::new(
             IndexedDbStorageBackend::new(db_name, "dialog-artifact-blocks")
                 .await
                 .map_err(|error| DialogArtifactsError::from(error))?,

@@ -8,14 +8,14 @@ use tokio::sync::Mutex;
 use sieve_cache::SieveCache;
 use std::{hash::Hash, sync::Arc};
 
-/// A [CachedStorageBackend] acts as a transparent proxy to an inner
+/// A [StorageCache] acts as a transparent proxy to an inner
 /// [StorageBackend] implementation. Writes to the cache are passed
 /// through to the inner storage. Reads are cached in a [SieveCache],
 /// and may be retrieved from there on future reads.
 ///
 /// TODO: Should we also proactively cache writes?
 #[derive(Clone)]
-pub struct CachedStorageBackend<Backend>
+pub struct StorageCache<Backend>
 where
     Backend: StorageBackend,
     Backend::Key: Eq + Clone + Hash,
@@ -25,7 +25,7 @@ where
     cache: Arc<Mutex<SieveCache<Backend::Key, Backend::Value>>>,
 }
 
-impl<Backend> CachedStorageBackend<Backend>
+impl<Backend> StorageCache<Backend>
 where
     Backend: StorageBackend,
     Backend::Key: Eq + Clone + Hash,
@@ -49,7 +49,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> StorageBackend for CachedStorageBackend<Backend>
+impl<Backend> StorageBackend for StorageCache<Backend>
 where
     Backend: StorageBackend + ConditionalSync,
     Backend::Key: Eq + Clone + Hash,
