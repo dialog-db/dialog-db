@@ -93,6 +93,22 @@ describe('artifacts', () => {
         expect(count).to.be.eq(5);
     });
 
+    it('throws for invalid entities', async () => {
+        let artifacts = await Artifacts.open("test");
+
+        await populateWithHackers(artifacts);
+
+        let query;
+
+        try {
+            query = artifacts.select({
+                of: new Uint8Array()
+            });
+        } catch (error) { expect(error).to.be.ok } finally {
+            expect(query).to.be.undefined;
+        }
+    });
+
     it('can store an artifacts and select them again', async () => {
         let artifacts = await Artifacts.open("test");
         let entityMap = await populateWithHackers(artifacts);
