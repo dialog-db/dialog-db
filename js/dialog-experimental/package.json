@@ -1,0 +1,52 @@
+{
+  "name": "@dialog-db/experimental",
+  "version": "0.0.0",
+  "description": "Dialog experimental runtime",
+  "main": "lib.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --build",
+    "prepublishOnly": "tsc --build",
+    "test:web": "playwright-test --runner entail 'test/**/*.spec.js' --assets ../../result/dialog-artifacts/",
+    "test:node": "entail 'test/*.spec.js'",
+    "test": "npm run test:node && npm run test:web",
+    "coverage": "c8 entail test/**/*.spec.js",
+    "check": "tsc --build"
+  },
+  "keywords": [
+    "datalog",
+    "ui",
+    "view",
+    "db"
+  ],
+  "files": [
+    "src",
+    "dist/src"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/src/lib.d.ts",
+      "import": "./src/lib.js"
+    }
+  },
+  "dependencies": {
+    "@dialog-db/query": "file:../../../query",
+    "@dialog-db/view": "file:../../../view",
+    "@dialog-db/artifacts": "file:../../result/dialog-artifacts"
+  },
+  "devDependencies": {
+    "@types/deno": "^2.0.0",
+    "c8": "8.0.1",
+    "entail": "^2.1.2",
+    "playwright-test": "^14.1.9",
+    "prettier": "3.1.0",
+    "typescript": "^5.7.3"
+  },
+  "prettier": {
+    "trailingComma": "es5",
+    "experimentalTernaries": true,
+    "tabWidth": 2,
+    "semi": false,
+    "singleQuote": true
+  }
+}
