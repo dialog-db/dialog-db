@@ -1,4 +1,4 @@
-import init, { Artifacts, generateEntity, encode, Entity, InstructionType, ValueDataType } from "dialog-artifacts";
+import init, { Artifacts, generateEntity, encode, Entity, InstructionType, ValueDataType, Artifact, ArtifactApi } from "dialog-artifacts";
 import { expect } from "@open-wc/testing";
 
 await init();
@@ -127,6 +127,58 @@ describe('artifacts', () => {
         }
 
         expect(count).to.be.eq(5);
+    });
+
+    it('can update an artifact and record a causal reference', async () => {
+        let artifacts = await Artifacts.open("test");
+        let entityMap = await populateWithHackers(artifacts);
+
+        let query = artifacts.select({
+            the: "profile/handle",
+            is: {
+                type: ValueDataType.String,
+                value: "Lord Nikon"
+            }
+        });
+
+
+        let artifact;
+
+        for await (const result of query) {
+            artifact = result;
+        }
+
+        expect(artifact!.cause).to.be.undefined;
+
+        artifact = artifact!.update({
+            type: ValueDataType.String,
+            value: "Godking Nikon"
+        })!;
+
+        expect(artifact.cause).to.be.ok;
+
+        await artifacts.commit([
+            {
+                type: InstructionType.Assert,
+                artifact
+            }
+        ]);
+
+        query = artifacts.select({
+            the: "profile/handle",
+            is: {
+                type: ValueDataType.String,
+                value: "Godking Nikon"
+            }
+        });
+
+        let descendantArtifact;
+
+        for await (const result of query) {
+            descendantArtifact = result;
+        }
+
+        expect(descendantArtifact!.cause).to.be.ok;
     });
 
     it('can use a query result multiple times', async () => {

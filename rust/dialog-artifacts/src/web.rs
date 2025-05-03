@@ -66,13 +66,23 @@ interface Value {
 }
 
 /**
+ * A causal reference to an earlier version of an `Artifact`
+ */
+type Cause = Uint8Array;
+
+/**
  * An `Artifact` embodies a datum - a semantic triple - that may be stored in or
  * retrieved from `Artifacts`.
  */
 interface Artifact {
   the: Attribute,
   of: Entity,
-  is: Value
+  is: Value,
+  cause?: Cause
+}
+
+interface ArtifactApi {
+  update(value: Value): (Artifact & ArtifactApi)|void;
 }
 
 /**
@@ -100,7 +110,7 @@ interface ArtifactSelector {
 /**
  * The shape of the "async iterable" that is returned by `Artifacts.select`
  */
-type ArtifactIterable = AsyncIterable<Artifact>;
+type ArtifactIterable = AsyncIterable<Artifact & ArtifactApi>;
 "#;
 
 #[wasm_bindgen]
@@ -399,9 +409,29 @@ impl From<Entity> for JsValue {
     }
 }
 
+impl From<Cause> for JsValue {
+    fn from(value: Cause) -> Self {
+        let result = Uint8Array::new_with_length(HASH_SIZE as u32);
+        result.copy_from(value.as_ref());
+        JsValue::from(result)
+    }
+}
+
 impl TryFrom<Artifact> for JsValue {
     type Error = JsError;
     fn try_from(artifact: Artifact) -> Result<Self, Self::Error> {
+        let current_version = artifact.clone();
+
+        let update = Closure::<dyn Fn(JsValue) -> JsValue>::new(move |value: JsValue| {
+            if let Ok(value) = Value::try_from(value) {
+                JsValue::try_from(current_version.clone().update(value))
+                    .unwrap_or(JsValue::undefined())
+            } else {
+                JsValue::undefined()
+            }
+        })
+        .into_js_value();
+
         let object = JsValue::from(Object::new());
         let attribute = JsValue::from(artifact.the);
         let entity = JsValue::from(artifact.of);
@@ -410,6 +440,12 @@ impl TryFrom<Artifact> for JsValue {
         Reflect::set(&object, &"the".into(), &attribute).map_err(js_value_to_error)?;
         Reflect::set(&object, &"of".into(), &entity).map_err(js_value_to_error)?;
         Reflect::set(&object, &"is".into(), &value).map_err(js_value_to_error)?;
+        Reflect::set(&object, &"update".into(), &update).map_err(js_value_to_error)?;
+
+        if let Some(cause) = artifact.cause {
+            Reflect::set(&object, &"cause".into(), &JsValue::from(cause))
+                .map_err(js_value_to_error)?;
+        }
 
         Ok(object)
     }
