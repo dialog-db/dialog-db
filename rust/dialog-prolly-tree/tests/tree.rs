@@ -1,6 +1,6 @@
 use anyhow::Result;
 use dialog_prolly_tree::{BasicEncoder, GeometricDistribution, Tree};
-use dialog_storage::{CachedStorageBackend, MeasuredStorageBackend, MemoryStorageBackend, Storage};
+use dialog_storage::{MeasuredStorageBackend, MemoryStorageBackend, Storage, StorageCache};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -42,6 +42,56 @@ async fn basic_set_and_get() -> Result<()> {
         inverse_tree.hash(),
         "alternate insertion order results in same hash"
     );
+
+    Ok(())
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn basic_delete() -> Result<()> {
+    let storage = Arc::new(Mutex::new(Storage {
+        backend: MemoryStorageBackend::default(),
+        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
+    }));
+    let mut expected_tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage.clone());
+
+    expected_tree.set(bytes("foo1"), bytes("bar1")).await?;
+    expected_tree.set(bytes("foo3"), bytes("bar3")).await?;
+
+    let mut tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage.clone());
+
+    tree.set(bytes("foo1"), bytes("bar1")).await?;
+    tree.set(bytes("foo2"), bytes("bar2")).await?;
+    tree.set(bytes("foo3"), bytes("bar3")).await?;
+
+    tree.delete(&bytes("foo2")).await?;
+
+    assert_eq!(tree.get(&bytes("foo1")).await?, Some(bytes("bar1")));
+    assert_eq!(tree.get(&bytes("foo2")).await?, None);
+    assert_eq!(tree.get(&bytes("foo3")).await?, Some(bytes("bar3")));
+
+    assert_eq!(tree.hash(), expected_tree.hash());
+
+    Ok(())
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn delete_from_tree_with_one_entry() -> Result<()> {
+    let storage = Arc::new(Mutex::new(Storage {
+        backend: MemoryStorageBackend::default(),
+        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
+    }));
+
+    let mut tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage.clone());
+
+    tree.set(bytes("foo1"), bytes("bar1")).await?;
+
+    tree.delete(&bytes("foo1")).await?;
+
+    assert_eq!(tree.get(&bytes("foo1")).await?, None);
+    assert_eq!(tree.hash(), None);
+
     Ok(())
 }
 
@@ -114,6 +164,7 @@ async fn larger_random_tree() -> Result<()> {
     for entry in ledger {
         assert_eq!(tree.get(&entry.0).await?, Some(entry.1));
     }
+
     Ok(())
 }
 
@@ -164,7 +215,7 @@ async fn lru_store_caches() -> Result<()> {
     };
 
     let tracking = Arc::new(Mutex::new(MeasuredStorageBackend::new(backend)));
-    let lru = CachedStorageBackend::new(tracking.clone(), 10)?;
+    let lru = StorageCache::new(tracking.clone(), 10)?;
     let storage = Storage {
         backend: lru,
         encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),

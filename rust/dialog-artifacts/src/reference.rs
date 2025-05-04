@@ -14,3 +14,43 @@ where
 pub(crate) fn make_seed() -> [u8; 32] {
     rand::rng().random()
 }
+
+macro_rules! reference_type {
+    ( $struct:ident ) => {
+        impl From<Blake3Hash> for $struct {
+            fn from(value: Blake3Hash) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<$struct> for Blake3Hash {
+            fn from(value: $struct) -> Self {
+                value.0
+            }
+        }
+
+        impl std::ops::Deref for $struct {
+            type Target = Blake3Hash;
+
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+
+        impl TryFrom<Vec<u8>> for $struct {
+            type Error = crate::DialogArtifactsError;
+
+            fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+                Ok(Self(value.try_into().map_err(|value: Vec<u8>| {
+                    crate::DialogArtifactsError::InvalidReference(format!(
+                        "Incorrect length (expected {}, got {})",
+                        crate::HASH_SIZE,
+                        value.len()
+                    ))
+                })?))
+            }
+        }
+    };
+}
+
+pub(crate) use reference_type;

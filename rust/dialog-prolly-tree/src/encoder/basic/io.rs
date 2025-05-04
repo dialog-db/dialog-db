@@ -232,7 +232,7 @@ mod tests {
     use crate::{ReadFrom, Reader, WriteInto, Writer};
 
     #[test]
-    fn it_can_round_trip_compledialog_data() -> Result<()> {
+    fn it_can_round_trip_complex_data() -> Result<()> {
         #[derive(PartialEq, Debug)]
         pub struct ComplexData {
             bytes: [u8; 32],

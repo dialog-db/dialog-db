@@ -76,7 +76,7 @@ where
                 )?;
                 for entry in entries {
                     writer.write(&entry.key.as_ref())?;
-                    writer.write(&entry.value.to_vec().as_ref())?;
+                    writer.write(&entry.value.serialize().as_ref())?;
                 }
             }
         }
