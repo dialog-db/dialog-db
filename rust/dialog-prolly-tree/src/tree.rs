@@ -9,7 +9,7 @@ use dialog_storage::{ContentAddressedStorage, HashType};
 use futures_core::Stream;
 use nonempty::NonEmpty;
 
-use crate::{Adopter, Block, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
+use crate::{Adopter, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
 
 /// A key-value store backed by a Ranked Prolly Tree with configurable storage,
 /// encoding and rank distribution.

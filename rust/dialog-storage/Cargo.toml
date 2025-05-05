@@ -16,6 +16,7 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
 blake3 = { workspace = true }
+brotli = { workspace = true }
 futures-util = { workspace = true }
 sieve-cache = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -36,12 +37,12 @@ wasm-bindgen = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 blake3 = { workspace = true }
+rand = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt", "fs"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
-rand = { workspace = true }
 getrandom = { workspace = true, features = ["wasm_js"] }
 wasm-bindgen-test = { workspace = true }

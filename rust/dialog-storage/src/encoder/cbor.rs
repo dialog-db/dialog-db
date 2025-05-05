@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use dialog_common::ConditionalSync;
 use serde::{Serialize, de::DeserializeOwned};
 
+/// A basic [`Encoder`] implementation that encodes data as IPLD-compatible CBOR
 #[derive(Clone)]
 pub struct CborEncoder;
 

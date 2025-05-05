@@ -112,14 +112,6 @@ where
         version: Revision,
         backend: Backend,
     ) -> Result<Self, DialogArtifactsError> {
-        // let entity_index = Tree::from_hash(
-        //     version.entity(),
-        //     Storage {
-        //         encoder: CborEncoder,
-        //         backend: backend.clone(),
-        //     },
-        // );
-
         let storage = Storage {
             encoder: CborEncoder,
             backend,
@@ -384,7 +376,7 @@ mod tests {
     use std::{str::FromStr, sync::Arc};
 
     use anyhow::Result;
-    use dialog_storage::{MeasuredStorageBackend, make_target_storage};
+    use dialog_storage::{MeasuredStorage, make_target_storage};
     use futures_util::StreamExt;
     use tokio::sync::Mutex;
 
@@ -441,7 +433,7 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_query_efficiently_by_entity_and_value() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
-        let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
+        let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
         let data = generate_data(32)?;
         let attribute = Attribute::from_str("item/name")?;
         let name = Value::String("name18".into());
@@ -495,7 +487,7 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_query_efficiently_by_attribute_and_value() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
-        let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
+        let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
         let data = generate_data(32)?;
         let attribute = Attribute::from_str("item/name")?;
         let name = Value::String("name18".into());
@@ -555,7 +547,7 @@ mod tests {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let data = generate_data(256)?.into_iter().map(Instruction::Assert);
 
-        let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
+        let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
 
         let mut facts = Artifacts::new(storage_backend.clone());
 
@@ -619,7 +611,7 @@ mod tests {
         let data = data.into_iter().map(into_assert);
         let reordered_data = reordered_data.into_iter().map(into_assert);
 
-        let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
+        let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
 
         let mut facts_one = Artifacts::new(storage_backend.clone());
 

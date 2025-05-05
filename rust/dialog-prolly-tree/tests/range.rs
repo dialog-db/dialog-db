@@ -1,6 +1,6 @@
 use anyhow::Result;
-use dialog_prolly_tree::{BasicEncoder, GeometricDistribution, Tree};
-use dialog_storage::{MemoryStorageBackend, Storage};
+use dialog_prolly_tree::{GeometricDistribution, Tree};
+use dialog_storage::{CborEncoder, MemoryStorageBackend, Storage};
 use futures_util::TryStreamExt;
 use std::collections::BTreeMap;
 
@@ -19,12 +19,12 @@ async fn create_test_tree<const BRANCH_FACTOR: u32>(
         Vec<u8>,
         Vec<u8>,
         [u8; 32],
-        Storage<32, BasicEncoder<Vec<u8>, Vec<u8>>, MemoryStorageBackend<[u8; 32], Vec<u8>>>,
+        Storage<32, CborEncoder, MemoryStorageBackend<[u8; 32], Vec<u8>>>,
     >,
 > {
     let storage = Storage {
         backend: MemoryStorageBackend::default(),
-        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
+        encoder: CborEncoder,
     };
     let mut collection = BTreeMap::default();
     for i in 0..size {
@@ -53,7 +53,7 @@ async fn gets_full_range() -> Result<()> {
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn stream_range_on_empty_trees() -> Result<()> {
     let storage = Storage {
-        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
+        encoder: CborEncoder,
         backend: MemoryStorageBackend::default(),
     };
 
@@ -108,7 +108,7 @@ async fn request_out_of_range() -> Result<()> {
     );
 
     let storage = Storage {
-        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
+        encoder: CborEncoder,
         backend: MemoryStorageBackend::default(),
     };
     let mut tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage);

@@ -1,4 +1,4 @@
-use crate::{Block, DialogProllyTreeError, Entry, KeyType, Node, Reference, ValueType};
+use crate::{DialogProllyTreeError, Entry, KeyType, Node, Reference, ValueType};
 use async_trait::async_trait;
 use dialog_storage::{ContentAddressedStorage, HashType};
 use nonempty::NonEmpty;

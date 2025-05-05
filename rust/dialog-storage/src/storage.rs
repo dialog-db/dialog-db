@@ -7,6 +7,9 @@ pub use backend::*;
 mod cache;
 pub use cache::*;
 
+mod compress;
+pub use compress::*;
+
 mod overlay;
 pub use overlay::*;
 
