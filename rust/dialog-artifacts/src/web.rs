@@ -30,7 +30,9 @@
 use std::{pin::Pin, sync::Arc};
 
 use base58::{FromBase58, ToBase58};
-use dialog_storage::{CachedStorageBackend, IndexedDbStorageBackend};
+use dialog_storage::{
+    CachedStorageBackend, IndexedDbStorageBackend, MemoryStorageBackend, StorageBackend,
+};
 use futures_util::{Stream, StreamExt};
 use tokio::sync::RwLock;
 use wasm_bindgen::{convert::TryFromJsValue, prelude::*};
@@ -167,15 +169,70 @@ type WebStorageBackend = CachedStorageBackend<IndexedDbStorageBackend<Blake3Hash
 
 const STORAGE_CACHE_CAPACITY: usize = 2usize.pow(16);
 
+#[wasm_bindgen(js_name = "Store")]
+pub struct StoreBindings {
+    backend: Box<StorageBackend>,
+}
+
+#[wasm_bindgen(js_name = "MemoryStore")]
+pub struct MemoryStoreBindings {}
+
+#[wasm_bindgen(js_class = "MemoryStore")]
+impl MemoryStoreBindings {
+    #[wasm_bindgen]
+    pub async fn open() -> Result<StoreBindings, JsValue> {
+        let backend = MemoryStorageBackend::default();
+
+        Ok(StoreBindings {
+            backend: Box::new(backend),
+        })
+    }
+}
+
+#[wasm_bindgen(js_name = "IDBStore")]
+pub struct IDBStoreBindings {}
+
+#[wasm_bindgen(js_class = "IDBStore")]
+impl IDBStoreBindings {
+    #[wasm_bindgen]
+    pub async fn open(
+        #[wasm_bindgen(js_name = "dbName")] name: &str,
+    ) -> Result<StorageBackend, JsValue> {
+        let backend = CachedStorageBackend::new(
+            IndexedDbStorageBackend::new(name, "dialog-artifact-blocks")
+                .await
+                .map_err(|error| DialogArtifactsError::from(error))?,
+            STORAGE_CACHE_CAPACITY,
+        )
+        .map_err(|error| DialogArtifactsError::from(error))?;
+
+        Ok(StoreBindings {
+            backend: Box::new(backend),
+        })
+    }
+}
+
 /// A triple store that can be used to store and retrieve semantic triples
 /// in the form of `Artifact`s.
 #[wasm_bindgen(js_name = "Artifacts")]
 pub struct ArtifactsBinding {
-    artifacts: Arc<RwLock<Artifacts<WebStorageBackend>>>,
+    artifacts: Arc<RwLock<Artifacts<StorageBackend>>>,
 }
 
 #[wasm_bindgen(js_class = "Artifacts")]
 impl ArtifactsBinding {
+    #[wasm_bindgen]
+    pub async fn open(store: StoreBindings, revision: Option<Vec<u8>>) -> Result<Self, JsValue> {
+        let artifacts = if let Some(revision) = revision {
+            Artifacts::restore(Revision::try_from(revision)?, store.backend).await?
+        } else {
+            Artifacts::new(store.backend)
+        };
+
+        Ok(Self {
+            artifacts: Arc::new(RwLock::new(artifacts)),
+        })
+    }
     /// Construct a new `Artifacts`, backed by a database. If the same name is
     /// used for multiple instances (or across sessions), the same database will
     /// be used.
@@ -188,7 +245,7 @@ impl ArtifactsBinding {
     /// stored in it).
     // TODO: Support well-known hash for "empty" database
     #[wasm_bindgen]
-    pub async fn open(
+    pub async fn open_idb(
         #[wasm_bindgen(js_name = "dbName")] db_name: &str,
         revision: Option<Vec<u8>>,
     ) -> Result<Self, JsValue> {
