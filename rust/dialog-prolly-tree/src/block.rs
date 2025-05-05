@@ -1,5 +1,6 @@
 use dialog_storage::{DialogStorageError, HashType};
 use nonempty::NonEmpty;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     DialogProllyTreeError, Entry, KeyType, ReadFrom, Reader, Reference, ValueType, WriteInto,
@@ -8,13 +9,8 @@ use crate::{
 /// The serializable construct representing a [`Node`].
 /// A [`Block`] is what is stored in a [`BlockStore`],
 /// used to hydrate and store nodes.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Block<const HASH_SIZE: usize, Key, Value, Hash>
-where
-    Key: KeyType,
-    Value: ValueType,
-    Hash: HashType<HASH_SIZE>,
-{
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Block<const HASH_SIZE: usize, Key, Value, Hash> {
     /// A block representing a Branch.
     Branch(NonEmpty<Reference<HASH_SIZE, Key, Hash>>),
     /// A block representing a Segment.

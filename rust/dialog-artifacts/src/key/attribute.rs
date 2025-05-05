@@ -2,6 +2,8 @@ use std::ops::Deref;
 
 use arrayref::array_ref;
 use dialog_prolly_tree::KeyType;
+use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 
 use crate::{
     ATTRIBUTE_KEY_LENGTH, ATTRIBUTE_LENGTH, Artifact, AttributeKeyPart, DialogArtifactsError,
@@ -18,8 +20,8 @@ const MAXIMUM_ATTRIBUTE_KEY: [u8; ATTRIBUTE_KEY_LENGTH] = [u8::MAX; ATTRIBUTE_KE
 /// A [`KeyType`] that is used when constructing an index of the [`Attribute`]s
 /// of [`Artifact`]s.
 #[repr(transparent)]
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct AttributeKey([u8; ATTRIBUTE_KEY_LENGTH]);
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct AttributeKey(#[serde(with = "BigArray")] [u8; ATTRIBUTE_KEY_LENGTH]);
 
 impl AttributeKey {
     /// Construct an [`AttributeKey`] from the provided component key parts.

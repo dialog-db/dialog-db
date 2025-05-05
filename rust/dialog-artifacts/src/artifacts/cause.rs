@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::{make_reference, reference_type};
 
 use super::{Artifact, Blake3Hash};
@@ -6,7 +8,7 @@ use super::{Artifact, Blake3Hash};
 /// version of the same [`Artifact`] (where same implies same [`Entity`] and
 /// same [`Attribute`]).
 #[repr(transparent)]
-#[derive(Clone, Debug, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Cause(Blake3Hash);
 
 impl From<&Artifact> for Cause {

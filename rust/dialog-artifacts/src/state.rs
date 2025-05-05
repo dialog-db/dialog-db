@@ -1,4 +1,5 @@
 use dialog_prolly_tree::ValueType;
+use serde::{Deserialize, Serialize};
 
 use crate::DialogArtifactsError;
 
@@ -7,11 +8,8 @@ use crate::{Artifact, ArtifactStore};
 
 /// A [`State`] represents the presence or absence of an [`Artifact`] within a
 /// [`ArtifactStore`]
-#[derive(Clone, Debug)]
-pub enum State<Datum>
-where
-    Datum: ValueType,
-{
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum State<Datum> {
     /// An [`Artifact`] that has been asserted
     Added(Datum),
     /// An [`Artifact`] that has been retracted
@@ -25,7 +23,7 @@ where
 {
     fn serialize(&self) -> Vec<u8> {
         match self {
-            State::Added(datum) => [vec![1], datum.serialize()].concat(),
+            State::Added(datum) => [vec![1], ValueType::serialize(datum)].concat(),
             State::Removed => vec![0],
         }
     }

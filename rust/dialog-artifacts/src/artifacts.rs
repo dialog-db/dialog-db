@@ -31,8 +31,8 @@ pub use r#match::*;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_prolly_tree::{BasicEncoder, Entry, GeometricDistribution, Tree};
-use dialog_storage::{DialogStorageError, Storage, StorageBackend};
+use dialog_prolly_tree::{Entry, GeometricDistribution, Tree};
+use dialog_storage::{CborEncoder, DialogStorageError, Storage, StorageBackend};
 use futures_util::Stream;
 use std::{ops::Range, sync::Arc};
 use tokio::sync::RwLock;
@@ -49,18 +49,14 @@ pub type Blake3Hash = [u8; HASH_SIZE];
 
 /// An alias type that describes the [`Tree`]-based prolly tree that is
 /// used for each index in [`Artifacts`]
-pub type Index<Key, Value, Backend> = Arc<
-    RwLock<
-        Tree<
-            BRANCH_FACTOR,
-            HASH_SIZE,
-            GeometricDistribution,
-            Key,
-            State<Value>,
-            Blake3Hash,
-            Storage<HASH_SIZE, BasicEncoder<Key, State<Value>>, Backend>,
-        >,
-    >,
+pub type Index<Key, Value, Backend> = Tree<
+    BRANCH_FACTOR,
+    HASH_SIZE,
+    GeometricDistribution,
+    Key,
+    State<Value>,
+    Blake3Hash,
+    Storage<HASH_SIZE, CborEncoder, Backend>,
 >;
 
 /// [`Artifacts`] is an implementor of [`ArtifactStore`] and [`ArtifactStoreMut`].
@@ -82,9 +78,9 @@ where
         + ConditionalSync
         + 'static,
 {
-    entity_index: Index<EntityKey, ValueDatum, Backend>,
-    attribute_index: Index<AttributeKey, ValueDatum, Backend>,
-    value_index: Index<ValueKey, EntityDatum, Backend>,
+    entity_index: Arc<RwLock<Index<EntityKey, ValueDatum, Backend>>>,
+    attribute_index: Arc<RwLock<Index<AttributeKey, ValueDatum, Backend>>>,
+    value_index: Arc<RwLock<Index<ValueKey, EntityDatum, Backend>>>,
 }
 
 impl<Backend> Artifacts<Backend>
@@ -97,15 +93,15 @@ where
     pub fn new(backend: Backend) -> Self {
         Self {
             entity_index: Arc::new(RwLock::new(Tree::new(Storage {
-                encoder: BasicEncoder::<EntityKey, State<ValueDatum>>::default(),
+                encoder: CborEncoder,
                 backend: backend.clone(),
             }))),
             attribute_index: Arc::new(RwLock::new(Tree::new(Storage {
-                encoder: BasicEncoder::<AttributeKey, State<ValueDatum>>::default(),
+                encoder: CborEncoder,
                 backend: backend.clone(),
             }))),
             value_index: Arc::new(RwLock::new(Tree::new(Storage {
-                encoder: BasicEncoder::<ValueKey, State<EntityDatum>>::default(),
+                encoder: CborEncoder,
                 backend: backend.clone(),
             }))),
         }
@@ -116,34 +112,35 @@ where
         version: Revision,
         backend: Backend,
     ) -> Result<Self, DialogArtifactsError> {
+        // let entity_index = Tree::from_hash(
+        //     version.entity(),
+        //     Storage {
+        //         encoder: CborEncoder,
+        //         backend: backend.clone(),
+        //     },
+        // );
+
+        let storage = Storage {
+            encoder: CborEncoder,
+            backend,
+        };
+
         let (entity_index, attribute_index, value_index) = tokio::try_join!(
-            Tree::from_hash(
-                version.entity(),
-                Storage {
-                    encoder: BasicEncoder::<EntityKey, State<ValueDatum>>::default(),
-                    backend: backend.clone(),
-                },
-            ),
-            Tree::from_hash(
-                version.attribute(),
-                Storage {
-                    encoder: BasicEncoder::<AttributeKey, State<ValueDatum>>::default(),
-                    backend: backend.clone(),
-                },
-            ),
-            Tree::from_hash(
-                version.value(),
-                Storage {
-                    encoder: BasicEncoder::<ValueKey, State<EntityDatum>>::default(),
-                    backend: backend.clone(),
-                },
-            )
+            Tree::from_hash(version.entity(), storage.clone()),
+            Tree::from_hash(version.attribute(), storage.clone()),
+            Tree::from_hash(version.value(), storage)
         )?;
 
         Ok(Self {
-            entity_index: Arc::new(RwLock::new(entity_index)),
-            attribute_index: Arc::new(RwLock::new(attribute_index)),
-            value_index: Arc::new(RwLock::new(value_index)),
+            entity_index: Arc::new(RwLock::new(
+                entity_index as Index<EntityKey, ValueDatum, Backend>,
+            )),
+            attribute_index: Arc::new(RwLock::new(
+                attribute_index as Index<AttributeKey, ValueDatum, Backend>,
+            )),
+            value_index: Arc::new(RwLock::new(
+                value_index as Index<ValueKey, EntityDatum, Backend>,
+            )),
         })
     }
 

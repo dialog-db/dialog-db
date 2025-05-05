@@ -2,16 +2,13 @@ use std::fmt::Display;
 
 use base58::ToBase58;
 use dialog_storage::HashType;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::KeyType;
 
 /// A serializable reference to a [`Node`].
-#[derive(Debug, Clone, PartialEq)]
-pub struct Reference<const HASH_SIZE: usize, Key, Hash>
-where
-    Key: KeyType,
-    Hash: HashType<HASH_SIZE>,
-{
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Reference<const HASH_SIZE: usize, Key, Hash> {
     upper_bound: Key,
     hash: Hash,
 }

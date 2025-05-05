@@ -57,7 +57,7 @@ async fn stream_range_on_empty_trees() -> Result<()> {
         backend: MemoryStorageBackend::default(),
     };
 
-    let empty = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage);
+    let empty = Tree::<32, 32, GeometricDistribution, Vec<u8>, Vec<u8>, _, _>::new(storage);
 
     let stream = empty.stream_range(..);
     tokio::pin!(stream);
