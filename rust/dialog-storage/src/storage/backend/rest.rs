@@ -313,6 +313,116 @@ where
 // Helper functions are provided in the crate's helpers.rs file
 
 #[cfg(test)]
+mod unit_tests {
+    use super::*;
+    
+    #[test]
+    fn test_build_url_with_bucket_and_prefix() {
+        let config = RestStorageConfig {
+            endpoint: "https://example.com".to_string(),
+            bucket: Some("test-bucket".to_string()),
+            key_prefix: Some("test-prefix".to_string()),
+            ..Default::default()
+        };
+        
+        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
+        let key = vec![1, 2, 3]; // Base64: AQID
+        let url = backend.build_url(key.as_ref());
+        
+        assert_eq!(url, "https://example.com/test-bucket/test-prefix/AQID");
+    }
+    
+    #[test]
+    fn test_build_url_with_bucket_only() {
+        let config = RestStorageConfig {
+            endpoint: "https://example.com".to_string(),
+            bucket: Some("test-bucket".to_string()),
+            key_prefix: None,
+            ..Default::default()
+        };
+        
+        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
+        let key = vec![1, 2, 3]; // Base64: AQID
+        let url = backend.build_url(key.as_ref());
+        
+        assert_eq!(url, "https://example.com/test-bucket/AQID");
+    }
+    
+    #[test]
+    fn test_build_url_with_prefix_only() {
+        let config = RestStorageConfig {
+            endpoint: "https://example.com".to_string(),
+            bucket: None,
+            key_prefix: Some("test-prefix".to_string()),
+            ..Default::default()
+        };
+        
+        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
+        let key = vec![1, 2, 3]; // Base64: AQID
+        let url = backend.build_url(key.as_ref());
+        
+        assert_eq!(url, "https://example.com/test-prefix/AQID");
+    }
+    
+    #[test]
+    fn test_build_url_with_no_bucket_or_prefix() {
+        let config = RestStorageConfig {
+            endpoint: "https://example.com".to_string(),
+            bucket: None,
+            key_prefix: None,
+            ..Default::default()
+        };
+        
+        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
+        let key = vec![1, 2, 3]; // Base64: AQID
+        let url = backend.build_url(key.as_ref());
+        
+        assert_eq!(url, "https://example.com/AQID");
+    }
+    
+    #[test]
+    fn test_build_url_with_trailing_slash() {
+        let config = RestStorageConfig {
+            endpoint: "https://example.com/".to_string(),
+            bucket: None,
+            key_prefix: None,
+            ..Default::default()
+        };
+        
+        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
+        let key = vec![1, 2, 3]; // Base64: AQID
+        let url = backend.build_url(key.as_ref());
+        
+        assert_eq!(url, "https://example.com/AQID");
+    }
+    
+    #[test]
+    fn test_rest_storage_config_default() {
+        let config = RestStorageConfig::default();
+        
+        assert_eq!(config.endpoint, "http://localhost:8080");
+        assert!(config.api_key.is_none());
+        assert!(config.bucket.is_none());
+        assert!(config.key_prefix.is_none());
+        assert!(config.headers.is_empty());
+        assert_eq!(config.timeout_seconds, Some(30));
+        assert!(!config.chunked_upload);
+    }
+    
+    #[test]
+    fn test_error_conversion() {
+        let error = RestStorageBackendError::ConnectionFailed("failed to connect".to_string());
+        let dialog_error: DialogStorageError = error.into();
+        
+        if let DialogStorageError::StorageBackend(msg) = dialog_error {
+            assert!(msg.contains("failed to connect"));
+        } else {
+            panic!("Expected StorageBackend error");
+        }
+    }
+}
+
+#[cfg(all(test, feature = "http_tests"))]
 mod tests {
     use super::*;
     use anyhow::Result;
@@ -322,7 +432,7 @@ mod tests {
     use wasm_bindgen_test::wasm_bindgen_test;
     
     // Helper function to create a test REST backend with a mock server
-    async fn create_test_backend() -> (RestStorageBackend<Vec<u8>, Vec<u8>>, mockito::ServerGuard) {
+    fn create_test_backend() -> (RestStorageBackend<Vec<u8>, Vec<u8>>, mockito::ServerGuard) {
         let server = Server::new();
         let endpoint = server.url();
         
@@ -339,7 +449,7 @@ mod tests {
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_writes_and_reads_a_value() -> Result<()> {
-        let (mut backend, mut server) = create_test_backend().await;
+        let (mut backend, mut server) = create_test_backend();
         
         // Key as base64: AQID
         let key = vec![1, 2, 3];
@@ -373,7 +483,7 @@ mod tests {
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_returns_none_for_missing_values() -> Result<()> {
-        let (backend, mut server) = create_test_backend().await;
+        let (backend, mut server) = create_test_backend();
         
         let key = vec![10, 11, 12]; // Different key, base64: CgsMw==
         
@@ -394,7 +504,7 @@ mod tests {
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_handles_error_responses() -> Result<()> {
-        let (backend, mut server) = create_test_backend().await;
+        let (backend, mut server) = create_test_backend();
         
         let key = vec![20, 21, 22]; // base64: FBUWe==
         
@@ -465,7 +575,7 @@ mod tests {
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_perform_list_operations() -> Result<()> {
-        let (backend, mut server) = create_test_backend().await;
+        let (backend, mut server) = create_test_backend();
         
         // Mock the list endpoint
         let list_mock = server.mock("GET", "/_list")
@@ -509,7 +619,7 @@ mod tests {
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_perform_bulk_writes() -> Result<()> {
-        let (mut backend, mut server) = create_test_backend().await;
+        let (mut backend, mut server) = create_test_backend();
         
         // Create mocks for two PUT operations
         let put_mock1 = server.mock("PUT", "/AQID")
@@ -540,7 +650,7 @@ mod tests {
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_integrates_with_memory_backend() -> Result<()> {
-        let (mut rest_backend, mut server) = create_test_backend().await;
+        let (mut rest_backend, mut server) = create_test_backend();
         
         // Create a memory backend with some data
         let mut memory_backend = crate::MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
