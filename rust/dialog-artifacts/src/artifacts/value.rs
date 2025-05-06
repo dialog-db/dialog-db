@@ -1,6 +1,6 @@
-use crate::{
-    Attribute, Blake3Hash, DialogArtifactsError, ENTITY_LENGTH, RawEntity, make_reference,
-};
+use crate::{Attribute, DialogArtifactsError, ENTITY_LENGTH, RawEntity, make_reference};
+
+use dialog_storage::Blake3Hash;
 
 /// All value type representations that may be stored by [`Artifacts`]
 #[derive(Debug, Clone, PartialOrd, PartialEq)]

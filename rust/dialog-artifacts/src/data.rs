@@ -4,11 +4,10 @@ use std::{
 };
 
 use dialog_prolly_tree::ValueType;
+use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    Blake3Hash, Cause, DialogArtifactsError, HASH_SIZE, Value, ValueDataType, make_reference,
-};
+use crate::{Cause, DialogArtifactsError, HASH_SIZE, Value, ValueDataType, make_reference};
 
 #[cfg(doc)]
 use crate::{Artifacts, Attribute, Entity};

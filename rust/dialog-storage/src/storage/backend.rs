@@ -114,7 +114,8 @@ mod tests {
         let (storage_backend, _tempdir) = make_target_storage().await?;
         let compressed_measured_storage =
             Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
-        let compressed_storage = CompressedStorage::new(compressed_measured_storage.clone());
+        let compressed_storage =
+            CompressedStorage::<6, _>::new(compressed_measured_storage.clone());
         let mut measured_storage = Arc::new(Mutex::new(MeasuredStorage::new(compressed_storage)));
 
         let mut chunk_set = Vec::new();
