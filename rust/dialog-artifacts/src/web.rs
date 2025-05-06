@@ -30,15 +30,15 @@
 use std::{pin::Pin, sync::Arc};
 
 use base58::{FromBase58, ToBase58};
-use dialog_storage::{IndexedDbStorageBackend, StorageCache};
+use dialog_storage::{IndexedDbStorageBackend, StorageCache, web::ObjectSafeStorageBackend};
 use futures_util::{Stream, StreamExt};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use wasm_bindgen::{convert::TryFromJsValue, prelude::*};
 use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
-    Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Artifacts, Attribute, Blake3Hash,
-    Cause, DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Revision, Value,
+    Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Artifacts, Attribute, Cause,
+    DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Revision, Value,
     ValueDataType, artifacts::selector::Constrained,
 };
 
@@ -173,7 +173,7 @@ pub enum InstructionTypeBinding {
     Retract = 1,
 }
 
-type WebStorageBackend = StorageCache<IndexedDbStorageBackend<Blake3Hash, Vec<u8>>>;
+type WebStorageBackend = Arc<Mutex<dyn ObjectSafeStorageBackend>>;
 
 const STORAGE_CACHE_CAPACITY: usize = 2usize.pow(16);
 
@@ -209,6 +209,9 @@ impl ArtifactsBinding {
             STORAGE_CACHE_CAPACITY,
         )
         .map_err(|error| DialogArtifactsError::from(error))?;
+
+        // Erase the type:
+        let storage_backend: WebStorageBackend = Arc::new(Mutex::new(storage_backend));
 
         let artifacts = if let Some(revision) = revision {
             Artifacts::restore(Revision::try_from(revision)?, storage_backend).await?

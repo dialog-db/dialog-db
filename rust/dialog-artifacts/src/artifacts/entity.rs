@@ -1,6 +1,7 @@
 use std::fmt::Display;
 
-use crate::{Blake3Hash, make_reference, make_seed, reference_type};
+use crate::{make_reference, make_seed, reference_type};
+use dialog_storage::Blake3Hash;
 
 /// An [`Entity`] is the subject part of a semantic triple. Internally, an
 /// [`Entity`] is represented as a unique 32-byte hash.

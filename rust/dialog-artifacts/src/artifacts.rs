@@ -32,7 +32,7 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_prolly_tree::{Entry, GeometricDistribution, Tree};
-use dialog_storage::{CborEncoder, DialogStorageError, Storage, StorageBackend};
+use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Storage, StorageBackend};
 use futures_util::Stream;
 use std::{ops::Range, sync::Arc};
 use tokio::sync::RwLock;
@@ -42,10 +42,6 @@ use crate::{
     HASH_SIZE, State, ValueDatum, ValueKey, ValueReferenceKeyPart,
     artifacts::selector::Constrained,
 };
-
-/// The representation of the hash type (BLAKE3, in this case) that must be used
-/// by a [`StorageBackend`] that may back an instance of [`Artifacts`].
-pub type Blake3Hash = [u8; HASH_SIZE];
 
 /// An alias type that describes the [`Tree`]-based prolly tree that is
 /// used for each index in [`Artifacts`]
