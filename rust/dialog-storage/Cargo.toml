@@ -15,7 +15,9 @@ anyhow = { workspace = true, optional = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
+base64 = { workspace = true }
 futures-util = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
 sieve-cache = { workspace = true }
 rand = { workspace = true, optional = true }
 thiserror = { workspace = true }
@@ -33,10 +35,14 @@ wasm-bindgen = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 blake3 = { workspace = true }
+tokio-test = "0.4"
+mockito = "1.2"
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["sync", "macros", "rt", "fs"] }
+tokio = { workspace = true, features = ["sync", "macros", "rt", "fs", "rt-multi-thread"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 getrandom = { workspace = true, features = ["wasm_js"] }
