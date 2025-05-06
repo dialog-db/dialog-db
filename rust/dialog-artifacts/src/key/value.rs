@@ -2,6 +2,8 @@ use std::ops::Deref;
 
 use arrayref::array_ref;
 use dialog_prolly_tree::KeyType;
+use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 
 use crate::{
     ATTRIBUTE_LENGTH, Artifact, AttributeKeyPart, DialogArtifactsError, VALUE_DATA_TYPE_LENGTH,
@@ -17,8 +19,8 @@ const MAXIMUM_VALUE_KEY: [u8; VALUE_KEY_LENGTH] = [u8::MAX; VALUE_KEY_LENGTH];
 /// A [`KeyType`] that is used when constructing an index of the [`Value`]s
 /// of [`Artifact`]s.
 #[repr(transparent)]
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ValueKey([u8; VALUE_KEY_LENGTH]);
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ValueKey(#[serde(with = "BigArray")] [u8; VALUE_KEY_LENGTH]);
 
 impl ValueKey {
     /// Construct a [`ValueKey`] from the provided component key parts.

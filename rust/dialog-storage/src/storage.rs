@@ -7,6 +7,9 @@ pub use backend::*;
 mod cache;
 pub use cache::*;
 
+mod compress;
+pub use compress::*;
+
 mod overlay;
 pub use overlay::*;
 
@@ -14,6 +17,7 @@ mod measure;
 pub use measure::*;
 
 mod transfer;
+use serde::{Serialize, de::DeserializeOwned};
 pub use transfer::*;
 
 mod content_addressed;
@@ -43,16 +47,21 @@ where
     Backend: StorageBackend,
     Self: ConditionalSync,
 {
-    type Block = Encoder::Block;
     type Bytes = Encoder::Bytes;
     type Hash = Encoder::Hash;
     type Error = Encoder::Error;
 
-    async fn encode(&self, block: &Self::Block) -> Result<(Self::Hash, Self::Bytes), Self::Error> {
+    async fn encode<T>(&self, block: &T) -> Result<(Self::Hash, Self::Bytes), Self::Error>
+    where
+        T: Serialize + ConditionalSync,
+    {
         self.encoder.encode(block).await
     }
 
-    async fn decode(&self, bytes: &[u8]) -> Result<Self::Block, Self::Error> {
+    async fn decode<T>(&self, bytes: &[u8]) -> Result<T, Self::Error>
+    where
+        T: DeserializeOwned + ConditionalSync,
+    {
         self.encoder.decode(bytes).await
     }
 }
@@ -86,12 +95,15 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
 
+    use dialog_common::ConditionalSync;
+    use serde::de::DeserializeOwned;
+    use serde::{Deserialize, Serialize};
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    #[derive(PartialEq, Debug)]
+    #[derive(PartialEq, Debug, Serialize, Deserialize)]
     struct TestBlock {
         pub value: u32,
     }
@@ -102,28 +114,27 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl Encoder<32> for TestEncoder {
-        type Block = TestBlock;
         type Bytes = Vec<u8>;
         type Hash = [u8; 32];
         type Error = DialogStorageError;
 
-        async fn encode(
-            &self,
-            block: &Self::Block,
-        ) -> Result<(Self::Hash, Self::Bytes), Self::Error> {
-            let bytes = block.value.to_le_bytes().to_vec();
+        async fn encode<T>(&self, block: &T) -> Result<(Self::Hash, Self::Bytes), Self::Error>
+        where
+            T: Serialize + ConditionalSync,
+        {
+            let bytes = serde_ipld_dagcbor::to_vec(block)
+                .map_err(|error| DialogStorageError::EncodeFailed(format!("{error}")))?;
             let hash = blake3::hash(&bytes).as_bytes().to_owned();
 
             Ok((hash, bytes))
         }
 
-        async fn decode(&self, bytes: &[u8]) -> Result<Self::Block, Self::Error> {
-            let value = u32::from_le_bytes(
-                bytes
-                    .try_into()
-                    .map_err(|error| DialogStorageError::DecodeFailed(format!("{error}")))?,
-            );
-            Ok(TestBlock { value })
+        async fn decode<T>(&self, bytes: &[u8]) -> Result<T, Self::Error>
+        where
+            T: DeserializeOwned + ConditionalSync,
+        {
+            serde_ipld_dagcbor::from_slice::<T>(bytes)
+                .map_err(|error| DialogStorageError::DecodeFailed(format!("{error}")))
         }
     }
 

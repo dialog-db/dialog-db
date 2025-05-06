@@ -19,6 +19,9 @@
 //! The prepared `storage` will automatically implement
 //! [ContentAddressedStorage] for bounds-matching encoders and storage backends.
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub mod web;
+
 mod encoder;
 pub use encoder::*;
 

@@ -9,7 +9,7 @@ use dialog_storage::{ContentAddressedStorage, HashType};
 use futures_core::Stream;
 use nonempty::NonEmpty;
 
-use crate::{Adopter, Block, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
+use crate::{Adopter, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
 
 /// A key-value store backed by a Ranked Prolly Tree with configurable storage,
 /// encoding and rank distribution.
@@ -27,8 +27,7 @@ pub struct Tree<
     Key: KeyType + 'static,
     Value: ValueType,
     Hash: HashType<HASH_SIZE>,
-    Storage:
-        ContentAddressedStorage<HASH_SIZE, Block = Block<HASH_SIZE, Key, Value, Hash>, Hash = Hash>,
+    Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
 {
     storage: Storage,
     root: Option<Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>>,
@@ -46,8 +45,7 @@ where
     Key: KeyType,
     Value: ValueType,
     Hash: HashType<HASH_SIZE>,
-    Storage:
-        ContentAddressedStorage<HASH_SIZE, Block = Block<HASH_SIZE, Key, Value, Hash>, Hash = Hash>,
+    Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
 {
     /// Creates a new [`Tree`] with provided [`ContentAddressedStorage`].
     pub fn new(storage: Storage) -> Self {

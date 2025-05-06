@@ -31,8 +31,8 @@ pub use r#match::*;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_prolly_tree::{BasicEncoder, Entry, GeometricDistribution, Tree};
-use dialog_storage::{DialogStorageError, Storage, StorageBackend};
+use dialog_prolly_tree::{Entry, GeometricDistribution, Tree};
+use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Storage, StorageBackend};
 use futures_util::Stream;
 use std::{ops::Range, sync::Arc};
 use tokio::sync::RwLock;
@@ -43,24 +43,16 @@ use crate::{
     artifacts::selector::Constrained,
 };
 
-/// The representation of the hash type (BLAKE3, in this case) that must be used
-/// by a [`StorageBackend`] that may back an instance of [`Artifacts`].
-pub type Blake3Hash = [u8; HASH_SIZE];
-
 /// An alias type that describes the [`Tree`]-based prolly tree that is
 /// used for each index in [`Artifacts`]
-pub type Index<Key, Value, Backend> = Arc<
-    RwLock<
-        Tree<
-            BRANCH_FACTOR,
-            HASH_SIZE,
-            GeometricDistribution,
-            Key,
-            State<Value>,
-            Blake3Hash,
-            Storage<HASH_SIZE, BasicEncoder<Key, State<Value>>, Backend>,
-        >,
-    >,
+pub type Index<Key, Value, Backend> = Tree<
+    BRANCH_FACTOR,
+    HASH_SIZE,
+    GeometricDistribution,
+    Key,
+    State<Value>,
+    Blake3Hash,
+    Storage<HASH_SIZE, CborEncoder, Backend>,
 >;
 
 /// [`Artifacts`] is an implementor of [`ArtifactStore`] and [`ArtifactStoreMut`].
@@ -82,9 +74,9 @@ where
         + ConditionalSync
         + 'static,
 {
-    entity_index: Index<EntityKey, ValueDatum, Backend>,
-    attribute_index: Index<AttributeKey, ValueDatum, Backend>,
-    value_index: Index<ValueKey, EntityDatum, Backend>,
+    entity_index: Arc<RwLock<Index<EntityKey, ValueDatum, Backend>>>,
+    attribute_index: Arc<RwLock<Index<AttributeKey, ValueDatum, Backend>>>,
+    value_index: Arc<RwLock<Index<ValueKey, EntityDatum, Backend>>>,
 }
 
 impl<Backend> Artifacts<Backend>
@@ -97,15 +89,15 @@ where
     pub fn new(backend: Backend) -> Self {
         Self {
             entity_index: Arc::new(RwLock::new(Tree::new(Storage {
-                encoder: BasicEncoder::<EntityKey, State<ValueDatum>>::default(),
+                encoder: CborEncoder,
                 backend: backend.clone(),
             }))),
             attribute_index: Arc::new(RwLock::new(Tree::new(Storage {
-                encoder: BasicEncoder::<AttributeKey, State<ValueDatum>>::default(),
+                encoder: CborEncoder,
                 backend: backend.clone(),
             }))),
             value_index: Arc::new(RwLock::new(Tree::new(Storage {
-                encoder: BasicEncoder::<ValueKey, State<EntityDatum>>::default(),
+                encoder: CborEncoder,
                 backend: backend.clone(),
             }))),
         }
@@ -116,34 +108,27 @@ where
         version: Revision,
         backend: Backend,
     ) -> Result<Self, DialogArtifactsError> {
+        let storage = Storage {
+            encoder: CborEncoder,
+            backend,
+        };
+
         let (entity_index, attribute_index, value_index) = tokio::try_join!(
-            Tree::from_hash(
-                version.entity(),
-                Storage {
-                    encoder: BasicEncoder::<EntityKey, State<ValueDatum>>::default(),
-                    backend: backend.clone(),
-                },
-            ),
-            Tree::from_hash(
-                version.attribute(),
-                Storage {
-                    encoder: BasicEncoder::<AttributeKey, State<ValueDatum>>::default(),
-                    backend: backend.clone(),
-                },
-            ),
-            Tree::from_hash(
-                version.value(),
-                Storage {
-                    encoder: BasicEncoder::<ValueKey, State<EntityDatum>>::default(),
-                    backend: backend.clone(),
-                },
-            )
+            Tree::from_hash(version.entity(), storage.clone()),
+            Tree::from_hash(version.attribute(), storage.clone()),
+            Tree::from_hash(version.value(), storage)
         )?;
 
         Ok(Self {
-            entity_index: Arc::new(RwLock::new(entity_index)),
-            attribute_index: Arc::new(RwLock::new(attribute_index)),
-            value_index: Arc::new(RwLock::new(value_index)),
+            entity_index: Arc::new(RwLock::new(
+                entity_index as Index<EntityKey, ValueDatum, Backend>,
+            )),
+            attribute_index: Arc::new(RwLock::new(
+                attribute_index as Index<AttributeKey, ValueDatum, Backend>,
+            )),
+            value_index: Arc::new(RwLock::new(
+                value_index as Index<ValueKey, EntityDatum, Backend>,
+            )),
         })
     }
 
@@ -387,7 +372,7 @@ mod tests {
     use std::{str::FromStr, sync::Arc};
 
     use anyhow::Result;
-    use dialog_storage::{MeasuredStorageBackend, make_target_storage};
+    use dialog_storage::{MeasuredStorage, make_target_storage};
     use futures_util::StreamExt;
     use tokio::sync::Mutex;
 
@@ -444,7 +429,7 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_query_efficiently_by_entity_and_value() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
-        let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
+        let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
         let data = generate_data(32)?;
         let attribute = Attribute::from_str("item/name")?;
         let name = Value::String("name18".into());
@@ -498,7 +483,7 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_query_efficiently_by_attribute_and_value() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
-        let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
+        let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
         let data = generate_data(32)?;
         let attribute = Attribute::from_str("item/name")?;
         let name = Value::String("name18".into());
@@ -558,7 +543,7 @@ mod tests {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let data = generate_data(256)?.into_iter().map(Instruction::Assert);
 
-        let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
+        let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
 
         let mut facts = Artifacts::new(storage_backend.clone());
 
@@ -622,7 +607,7 @@ mod tests {
         let data = data.into_iter().map(into_assert);
         let reordered_data = reordered_data.into_iter().map(into_assert);
 
-        let storage_backend = Arc::new(Mutex::new(MeasuredStorageBackend::new(storage_backend)));
+        let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
 
         let mut facts_one = Artifacts::new(storage_backend.clone());
 

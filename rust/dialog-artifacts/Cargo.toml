@@ -27,6 +27,8 @@ futures-util = { workspace = true }
 leb128 = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
+serde = { workspace = true }
+serde-big-array = { workspace = true }
 static_assertions = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros"] }

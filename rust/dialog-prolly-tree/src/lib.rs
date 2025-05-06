@@ -24,9 +24,6 @@
 //! println!("{:?}", tree.hash());
 //! ```
 
-mod encoder;
-pub use encoder::*;
-
 mod block;
 pub use block::*;
 

@@ -4,10 +4,10 @@ use std::{
 };
 
 use dialog_prolly_tree::ValueType;
+use dialog_storage::Blake3Hash;
+use serde::{Deserialize, Serialize};
 
-use crate::{
-    Blake3Hash, Cause, DialogArtifactsError, HASH_SIZE, Value, ValueDataType, make_reference,
-};
+use crate::{Cause, DialogArtifactsError, HASH_SIZE, Value, ValueDataType, make_reference};
 
 #[cfg(doc)]
 use crate::{Artifacts, Attribute, Entity};
@@ -21,7 +21,7 @@ pub type RawAttribute = String;
 
 /// An [`EntityDatum`] is the layout of data stored in the value index of
 /// [`Artifacts`]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EntityDatum {
     /// The raw representation of the [`Entity`] associated with this
     /// [`EntityDatum`]
@@ -59,7 +59,7 @@ impl TryFrom<Vec<u8>> for EntityDatum {
 
 /// A [`ValueDatum`] is the layout of data stored in the entity and attribute
 /// indexes of [`Artifacts`]
-#[derive(Clone, Debug, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct ValueDatum {
     /// The raw representation of the [`Value`] asscoiated with this [`ValueDatum`]
     raw_value: RawValue,
@@ -110,7 +110,7 @@ impl ValueDatum {
 impl ValueType for ValueDatum {
     fn serialize(&self) -> Vec<u8> {
         let mut value_length = Vec::new();
-        let value_bytes = self.raw_value.serialize();
+        let value_bytes = ValueType::serialize(&self.raw_value);
 
         leb128::write::unsigned(&mut value_length, value_bytes.len() as u64)
             .map_err(|error| {
@@ -197,7 +197,7 @@ mod tests {
         let value = Value::String("Foo Bar FOO BAR".into());
         let cause = None;
         let datum = ValueDatum::new(value.clone(), cause);
-        let bytes = datum.serialize();
+        let bytes = ValueType::serialize(&datum);
         let deserialized_datum = ValueDatum::try_from(bytes.clone())?;
 
         assert_eq!(datum, deserialized_datum);

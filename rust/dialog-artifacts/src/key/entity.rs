@@ -2,6 +2,8 @@ use std::ops::Deref;
 
 use arrayref::array_ref;
 use dialog_prolly_tree::KeyType;
+use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 
 use crate::{
     ATTRIBUTE_LENGTH, Artifact, AttributeKeyPart, DialogArtifactsError, ENTITY_KEY_LENGTH,
@@ -18,8 +20,8 @@ const MAXIMUM_ENTITY_KEY: [u8; ENTITY_KEY_LENGTH] = [u8::MAX; ENTITY_KEY_LENGTH]
 /// A [`KeyType`] that is used when constructing an index of the [`Entity`]s
 /// of [`Artifact`]s.
 #[repr(transparent)]
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct EntityKey([u8; ENTITY_KEY_LENGTH]);
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct EntityKey(#[serde(with = "BigArray")] [u8; ENTITY_KEY_LENGTH]);
 
 impl EntityKey {
     /// Construct an [`EntityKey`] from the provided component key parts.
