@@ -1,20 +1,14 @@
 use dialog_storage::{DialogStorageError, HashType};
 use nonempty::NonEmpty;
+use serde::{Deserialize, Serialize};
 
-use crate::{
-    DialogProllyTreeError, Entry, KeyType, ReadFrom, Reader, Reference, ValueType, WriteInto,
-};
+use crate::{DialogProllyTreeError, Entry, KeyType, Reference, ValueType};
 
 /// The serializable construct representing a [`Node`].
 /// A [`Block`] is what is stored in a [`BlockStore`],
 /// used to hydrate and store nodes.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Block<const HASH_SIZE: usize, Key, Value, Hash>
-where
-    Key: KeyType,
-    Value: ValueType,
-    Hash: HashType<HASH_SIZE>,
-{
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Block<const HASH_SIZE: usize, Key, Value, Hash> {
     /// A block representing a Branch.
     Branch(NonEmpty<Reference<HASH_SIZE, Key, Hash>>),
     /// A block representing a Segment.
@@ -156,24 +150,3 @@ impl TryFrom<u8> for BlockType {
         })
     }
 }
-
-impl WriteInto for BlockType {
-    type Error = DialogStorageError;
-
-    fn write_into(&self, writer: &mut crate::Writer) -> Result<(), Self::Error> {
-        writer.write_u8(u8::from(*self))
-    }
-}
-
-impl<'a> ReadFrom<'a> for BlockType {
-    type Error = DialogStorageError;
-
-    fn read_from<'r>(reader: &'r Reader<'a>) -> Result<BlockType, Self::Error>
-    where
-        'r: 'a,
-    {
-        reader.read_u8()?.try_into()
-    }
-}
-
-// use dialog_storage::Storage;

@@ -7,6 +7,9 @@ use crate::FileSystemStorageBackend;
 use crate::IndexedDbStorageBackend;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+use base58::ToBase58;
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 type MakeTargetStorageOutput<K> = (IndexedDbStorageBackend<K, Vec<u8>>, ());
 #[cfg(not(target_arch = "wasm32"))]
 type MakeTargetStorageOutput<K> = (FileSystemStorageBackend<K, Vec<u8>>, tempfile::TempDir);
@@ -18,7 +21,11 @@ where
 {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     return Ok((
-        IndexedDbStorageBackend::<K, Vec<u8>>::new("test_db", "test_store").await?,
+        IndexedDbStorageBackend::<K, Vec<u8>>::new(
+            &format!("test_db_{}", rand::random::<[u8; 8]>().to_base58()),
+            &format!("test_store_{}", rand::random::<[u8; 8]>().to_base58()),
+        )
+        .await?,
         (),
     ));
     #[cfg(not(target_arch = "wasm32"))]

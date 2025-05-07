@@ -6,20 +6,27 @@ authors.workspace = true
 license.workspace = true
 
 [features]
-helpers = ["tempfile", "anyhow"]
+helpers = ["tempfile", "anyhow", "rand"]
 
 [dependencies]
 dialog-common = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
+async-stream = { workspace = true }
 async-trait = { workspace = true }
+base58 = { workspace = true }
+blake3 = { workspace = true }
+brotli = { workspace = true }
+futures-util = { workspace = true }
 sieve-cache = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_ipld_dagcbor = { workspace = true }
+rand = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tempfile = { workspace = true, optional = true }
-base58 = { workspace = true }
 tokio = { workspace = true, features = ["sync", "fs"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
@@ -30,6 +37,7 @@ wasm-bindgen = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 blake3 = { workspace = true }
+rand = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tempfile = { workspace = true }

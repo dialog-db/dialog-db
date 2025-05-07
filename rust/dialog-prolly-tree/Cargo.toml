@@ -5,6 +5,9 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+default = []
+
 [dependencies]
 dialog-common = { workspace = true }
 dialog-storage = { workspace = true }
@@ -16,8 +19,9 @@ base58 = { workspace = true }
 blake3 = { workspace = true }
 futures-core = { workspace = true }
 rand = { workspace = true }
+serde = { workspace = true }
 
-nonempty = { workspace = true }
+nonempty = { workspace = true, features = ["serialize"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
