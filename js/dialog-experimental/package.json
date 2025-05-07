@@ -7,7 +7,7 @@
   "scripts": {
     "vendor": "nix build .#dialog-artifacts-web && mv result vendor",
     "build": "npm vendor && npm check",
-    "prepublishOnly": "npm bulid",
+    "prepublishOnly": "npm build",
     "test:web": "playwright-test --runner entail 'test/**/*.spec(.web).js' --assets ../../result/dialog-artifacts/",
     "test:node": "entail 'test/*.spec.js'",
     "test": "npm run test:node && npm run test:web",
