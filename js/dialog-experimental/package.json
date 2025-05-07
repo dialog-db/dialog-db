@@ -5,8 +5,9 @@
   "main": "lib.js",
   "type": "module",
   "scripts": {
-    "build": "tsc --build",
-    "prepublishOnly": "tsc --build",
+    "vendor": "nix build .#dialog-artifacts-web && mv result vendor",
+    "build": "npm vendor && npm check",
+    "prepublishOnly": "npm bulid",
     "test:web": "playwright-test --runner entail 'test/**/*.spec(.web).js' --assets ../../result/dialog-artifacts/",
     "test:node": "entail 'test/*.spec.js'",
     "test": "npm run test:node && npm run test:web",
@@ -30,9 +31,7 @@
     }
   },
   "dependencies": {
-    "@dialog-db/query": "file:../../../query",
-    "@dialog-db/view": "file:../../../view",
-    "@dialog-db/artifacts": "file:../../result/dialog-artifacts"
+    "@dialog-db/query": "^0.11.1"
   },
   "devDependencies": {
     "@types/deno": "^2.0.0",

@@ -1,14 +1,15 @@
+import { Task, API, Constant } from '@dialog-db/query'
+
 import init, {
   Artifacts,
   ValueDataType,
   InstructionType,
-} from '@dialog-db/artifacts'
-import * as ArtifactsLib from '@dialog-db/artifacts'
-import { Task, API, Constant } from '@dialog-db/query'
-const { Link } = Constant
+} from '../vendor/dialog-artifacts/dialog_artifacts.js'
+import * as ArtifactsLib from '../vendor/dialog-artifacts/dialog_artifacts.js'
 
 let initialized = false
 
+const { Link } = Constant
 const ENTITY = Link.of(null)['/'].fill(0, 4)
 
 /**

@@ -1,6 +1,4 @@
 export * from '@dialog-db/query'
-export * from '@dialog-db/view'
 export * from './artifacts.js'
 export * as Artifacts from './artifacts.js'
 export * as Query from '@dialog-db/query'
-export * as View from '@dialog-db/view'
