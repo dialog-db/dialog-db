@@ -2,6 +2,7 @@ import init, {
   Artifacts,
   ValueDataType,
   InstructionType,
+  IDBStore,
 } from '@dialog-db/artifacts'
 import * as ArtifactsLib from '@dialog-db/artifacts'
 import { Task, API, Constant } from '@dialog-db/query'
@@ -28,9 +29,9 @@ export function* open(address) {
     initialized = true
   }
 
-  const artifact = yield* Task.wait(
-    Artifacts.open(address.name, address.revision)
-  )
+  const store = yield* Task.wait(IDBStore.open(address.name))
+
+  const artifact = yield* Task.wait(Artifacts.open(store, address.revision))
   const revision = yield* Task.wait(artifact.revision())
 
   return new ArtifactsStore(artifact, revision ?? GENESYS)
