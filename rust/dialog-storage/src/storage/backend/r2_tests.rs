@@ -21,6 +21,7 @@ use anyhow::Result;
 
 use crate::{
     DialogStorageError, RestStorageBackend, RestStorageConfig, StorageBackend, StorageSink,
+    storage::backend::rest::{AuthMethod, S3Credentials},
 };
 
 /// Check if the required environment variables are set
@@ -40,25 +41,28 @@ fn test_prefix() -> String {
 /// Set up the R2 storage backend with credentials from environment variables
 fn setup_r2_backend() -> Result<RestStorageBackend<Vec<u8>, Vec<u8>>, DialogStorageError> {
     let r2_key = env::var("R2_KEY").expect("R2_KEY environment variable not set");
-    // Secret is checked but not used in this simplified version
-    // In a real implementation, we would use a proper S3/R2 client with the secret
-    let _r2_secret = env::var("R2_SECRET").expect("R2_SECRET environment variable not set");
+    let r2_secret = env::var("R2_SECRET").expect("R2_SECRET environment variable not set");
     let r2_url = env::var("R2_URL").expect("R2_URL environment variable not set");
     let r2_bucket = env::var("R2_BUCKET").unwrap_or_else(|_| "dialog-test-bucket".to_string());
     let prefix = test_prefix();
     
-    // Use AWS Signature v4 credentials in custom headers
-    // For R2, we would typically use the AWS SDK for full S3-compatible access
-    // This is a simplified approach for testing the basic REST functionality
-    let mut headers = Vec::new();
-    headers.push(("X-Amz-Access-Key".to_string(), r2_key.clone()));
+    // Set up S3Credentials for R2
+    let s3_creds = S3Credentials {
+        access_key_id: r2_key,
+        secret_access_key: r2_secret,
+        region: "auto".to_string(), // R2 uses "auto" region
+        public_read: false,
+        expires: 86400, // 24 hours
+        session_token: None,
+    };
     
+    // Create the config with S3 authentication
     let config = RestStorageConfig {
         endpoint: r2_url,
-        api_key: Some(r2_key),
+        auth_method: AuthMethod::S3(s3_creds),
         bucket: Some(r2_bucket),
         key_prefix: Some(prefix),
-        headers,
+        headers: Vec::new(),
         ..Default::default()
     };
     
