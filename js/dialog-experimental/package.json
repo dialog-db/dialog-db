@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc --build",
     "prepublishOnly": "tsc --build",
-    "test:web": "playwright-test --runner entail 'test/**/*.spec.js' --assets ../../result/dialog-artifacts/",
+    "test:web": "playwright-test --runner entail 'test/**/*.spec(.web).js' --assets ../../result/dialog-artifacts/",
     "test:node": "entail 'test/*.spec.js'",
     "test": "npm run test:node && npm run test:web",
     "coverage": "c8 entail test/**/*.spec.js",
