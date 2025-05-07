@@ -1,4 +1,4 @@
-import { sign } from "./signer.ts"
+import { authorize } from "./signer.ts"
 import { sha256 } from "multiformats/hashes/sha2"
 import { base64pad } from "multiformats/bases/base64"
 import * as Raw from "multiformats/codecs/raw"
@@ -40,7 +40,7 @@ const put = async (request: Request): Promise<Response> => {
   const key = `${link}.blob`
   const checksum = base64pad.baseEncode(digest.digest)
 
-  const url = sign({
+  const url = authorize({
     credentials: config.credentials,
     endpoint: config.endpoint,
     bucket: config.bucket,
@@ -68,7 +68,7 @@ const put = async (request: Request): Promise<Response> => {
 const get = async (request: Request): Promise<Response> => {
   const { pathname, searchParams } = new URL(request.url)
 
-  const url = sign({
+  const url = authorize({
     credentials: config.credentials,
     endpoint: config.endpoint,
     bucket: config.bucket,
