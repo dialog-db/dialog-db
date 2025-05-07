@@ -1,0 +1,15 @@
+{
+  "tasks": {
+    "dev": "deno run --allow-env --allow-net --env-file=.env.gozala ./main.ts",
+    "dev-all": "deno run --allow-all --env-file=.env.gozala ./main.ts"
+  },
+  "imports": {
+    "@aws-sdk/client-s3": "npm:@aws-sdk/client-s3@^3.803.0",
+    "@aws-sdk/s3-request-presigner": "npm:@aws-sdk/s3-request-presigner@^3.803.0",
+    "@noble/hashes": "npm:@noble/hashes@^1.8.0",
+    "@std/assert": "jsr:@std/assert@^1.0.13",
+    "@web3-storage/sigv4": "npm:@web3-storage/sigv4@^1.0.2",
+    "blake3-multihash": "npm:blake3-multihash@^0.0.4",
+    "multiformats": "npm:multiformats@^13.3.2"
+  }
+}

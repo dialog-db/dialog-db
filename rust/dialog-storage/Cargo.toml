@@ -7,6 +7,8 @@ license.workspace = true
 
 [features]
 helpers = ["tempfile", "anyhow", "rand"]
+http_tests = []
+r2_tests = []
 
 [dependencies]
 dialog-common = { workspace = true }

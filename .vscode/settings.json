@@ -1,8 +1,7 @@
 {
-    "rust-analyzer.cargo.target": "wasm32-unknown-unknown",
-    "rust-analyzer.procMacro.ignored": {
-        "async-trait": [
-            "async_trait"
-        ]
-    }
+  "rust-analyzer.cargo.target": "wasm32-unknown-unknown",
+  "rust-analyzer.procMacro.ignored": {
+    "async-trait": ["async_trait"]
+  },
+  "deno.enablePaths": ["js/r2s3-proxy"]
 }
