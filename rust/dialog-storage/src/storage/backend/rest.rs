@@ -217,6 +217,7 @@ where
                 method: method.to_string(),
                 public_read: credentials.public_read,
                 service: "s3".to_string(),
+                time: None,
             };
             
             // Convert our credentials to the format expected by the signer
@@ -293,6 +294,7 @@ where
                 method: "PUT".to_string(),
                 public_read: credentials.public_read,
                 service: "s3".to_string(),
+                time: None,
             };
             
             // Convert our credentials to the format expected by the signer
@@ -473,7 +475,8 @@ where
                     method: "GET".to_string(),
                     public_read: credentials.public_read,
                     service: "s3".to_string(),
-                };
+                    time: None,
+                    };
                 
                 // Convert our credentials to the format expected by the signer
                 let signer_credentials = S3SignerCredentials {
