@@ -4,8 +4,8 @@ import init, {
   Artifacts,
   ValueDataType,
   InstructionType,
-} from '../vendor/dialog-artifacts/dialog_artifacts.js'
-import * as ArtifactsLib from '../vendor/dialog-artifacts/dialog_artifacts.js'
+} from './artifacts/dialog_artifacts.js'
+import * as ArtifactsLib from './artifacts/dialog_artifacts.js'
 
 let initialized = false
 
@@ -23,26 +23,32 @@ const ENTITY = Link.of(null)['/'].fill(0, 4)
  * @param {Address} address
  * @returns {API.Task<API.Querier & API.Transactor, Error>}
  */
-export function* open(address) {
-  if (!initialized) {
-    yield* Task.wait(init())
-    initialized = true
-  }
-
-  const artifact = yield* Task.wait(
-    Artifacts.open(address.name, address.revision)
-  )
-  const revision = yield* Task.wait(artifact.revision())
-
-  return new ArtifactsStore(artifact, revision ?? GENESYS)
-}
+export const open = (address) => Task.perform(ArtifactsStore.open(address))
 
 const GENESYS = new Uint8Array()
 
 /**
  * @implements {API.Querier}
+ * @implements {API.Transactor}
  */
 class ArtifactsStore {
+  /**
+   * @param {Address} address
+   * @returns {API.Task<API.Querier & API.Transactor, Error>}
+   */
+  static *open(address) {
+    if (!initialized) {
+      yield* Task.wait(init())
+      initialized = true
+    }
+
+    const artifact = yield* Task.wait(
+      Artifacts.open(address.name, address.revision)
+    )
+    const revision = yield* Task.wait(artifact.revision())
+
+    return new ArtifactsStore(artifact, revision ?? GENESYS)
+  }
   /**
    * @param {Artifacts} instance
    * @param {Uint8Array} revision
@@ -51,12 +57,29 @@ class ArtifactsStore {
     this.artifacts = instance
     this.revision = revision
   }
+
   /**
+   * * @param {API.FactsSelector} selector
+   */
+  select(selector) {
+    return Task.perform(ArtifactsStore.select(this, selector))
+  }
+
+  /**
+   * @param {API.Transaction} transaction
+   */
+
+  transact(transaction) {
+    return Task.perform(ArtifactsStore.transact(this, transaction))
+  }
+
+  /**
+   * @param {ArtifactsStore} self
    * @param {API.FactsSelector} selector
    */
-  *select(selector) {
+  static *select(self, selector) {
     const matches = yield* Task.wait(
-      this.artifacts.select({
+      self.artifacts.select({
         the: selector.the ? selector.the : undefined,
         of: selector.of ? toEntity(selector.of) : undefined,
         is: selector.is ? toTyped(selector.is) : undefined,
@@ -78,9 +101,10 @@ class ArtifactsStore {
   }
 
   /**
+   * @param {ArtifactsStore} self
    * @param {API.Transaction} transaction
    */
-  *transact(transaction) {
+  static *transact(self, transaction) {
     const changes = []
     for (const { assert, retract } of transaction) {
       if (assert) {
@@ -97,14 +121,14 @@ class ArtifactsStore {
       }
     }
 
-    yield* Task.wait(this.artifacts.commit(changes))
+    yield* Task.wait(self.artifacts.commit(changes))
 
-    const revision = yield* Task.wait(this.artifacts.revision())
+    const revision = yield* Task.wait(self.artifacts.revision())
     if (revision) {
-      this.revision = revision
+      self.revision = revision
     }
 
-    return this
+    return self
   }
 }
 

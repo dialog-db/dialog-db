@@ -3,3 +3,6 @@ node_modules
 coverage
 pkg
 result
+**/.claude/settings.local.json
+js/dialog-experimental/src/artifacts
+js/*/dist/
