@@ -2,6 +2,8 @@ import {
   Task,
   API,
   Constant,
+  type Predicate,
+  type FactSchema,
   type Querier,
   type Transactor,
   type Transaction,
@@ -18,7 +20,6 @@ import init, {
   InstructionType,
   type Artifact,
 } from './artifacts/dialog_artifacts.js'
-import * as ArtifactsLib from './artifacts/dialog_artifacts.js'
 
 let initialized = false
 
@@ -31,6 +32,21 @@ const ENTITY = Link.of(null)['/'].fill(0, 4)
 export type Address = {
   name: string
   revision?: Uint8Array
+}
+
+export type Subscriber<Fact> = (facts: Fact[]) => unknown
+
+export interface Source extends Querier {
+  subscribe<Fact>(
+    query: Predicate<Fact, string, FactSchema>,
+    subscriber: Subscriber<Fact>
+  ): Subscription
+}
+
+export interface Subscription {
+  readonly cancelled: boolean
+  cancel(): void
+  poll(source: Source): Task.Task<{}, Error>
 }
 
 /**
@@ -48,7 +64,7 @@ const GENESYS = new Uint8Array()
  * @implements {API.Querier}
  * @implements {API.Transactor}
  */
-class ArtifactsStore implements Querier, Transactor {
+export class ArtifactsStore implements Querier, Transactor, Source {
   /**
    * Open an artifacts store
    * @param address The store address configuration
@@ -65,7 +81,17 @@ class ArtifactsStore implements Querier, Transactor {
     )
     const revision = yield* Task.wait(instance.revision())
 
-    return new ArtifactsStore(instance, revision ?? GENESYS)
+    return new this(instance, revision ?? GENESYS)
+  }
+
+  static subscribe<Fact>(
+    self: ArtifactsStore,
+    query: Predicate<Fact, string, FactSchema>,
+    subscriber: Subscriber<Fact>
+  ) {
+    const subscription = new QuerySubscription(query, subscriber)
+    self.subscriptions.add(subscription)
+    return subscription
   }
 
   /**
@@ -75,7 +101,8 @@ class ArtifactsStore implements Querier, Transactor {
    */
   constructor(
     public instance: Artifacts,
-    private revision: Uint8Array
+    private revision: Uint8Array,
+    public subscriptions: Set<Subscription> = new Set()
   ) {}
 
   /**
@@ -150,12 +177,61 @@ class ArtifactsStore implements Querier, Transactor {
 
     yield* Task.wait(self.instance.commit(changes))
 
+    yield* this.broadcast(self)
+
     const revision = yield* Task.wait(self.instance.revision())
     if (revision) {
       self.revision = revision
     }
 
     return self
+  }
+
+  static *broadcast(self: ArtifactsStore) {
+    const { subscriptions } = self
+    for (const subscription of subscriptions) {
+      if (subscription.cancelled) {
+        subscriptions.delete(subscription)
+      } else {
+        const result = yield* Task.result(subscription.poll(self))
+        if (result.error) {
+          console.error(result.error)
+        }
+      }
+    }
+  }
+
+  subscribe<Fact>(
+    predicate: Predicate<Fact, string, FactSchema>,
+    subscriber: Subscriber<Fact>
+  ) {
+    return ArtifactsStore.subscribe(this, predicate, subscriber)
+  }
+}
+
+class QuerySubscription<Fact> implements Subscription {
+  #cancelled = false
+  constructor(
+    public predicate: Predicate<Fact, string, FactSchema>,
+    public subscriber: (facts: Fact[]) => unknown
+  ) {
+    this.cancel = this.cancel.bind(this)
+  }
+
+  get cancelled() {
+    return this.#cancelled
+  }
+
+  *poll(source: Querier) {
+    if (!this.#cancelled) {
+      const facts = yield* this.predicate.query({ from: source })
+      this.subscriber(facts)
+    }
+    return {}
+  }
+
+  cancel() {
+    this.#cancelled = true
   }
 }
 
