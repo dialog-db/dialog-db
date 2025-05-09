@@ -43,8 +43,8 @@ jobs:
     steps:
       - run: echo "Lints are good!"
 
-  more_npm_packages:
-    name: 'More NPM Packages'
+  pnpm_packages:
+    name: 'PNPM Packages'
     needs: ['lints']
     runs-on: ubuntu-latest
     strategy:
