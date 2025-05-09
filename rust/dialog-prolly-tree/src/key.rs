@@ -19,14 +19,8 @@ impl KeyType for Vec<u8> {}
 
 /// A value that may be stored within a [Tree]
 pub trait ValueType:
-    std::fmt::Debug + TryFrom<Vec<u8>> + ConditionalSync + Clone + Serialize + DeserializeOwned
+    std::fmt::Debug + ConditionalSync + Clone + Serialize + DeserializeOwned
 {
-    /// Serialize this value into its byte representation
-    fn serialize(&self) -> Vec<u8>;
 }
 
-impl ValueType for Vec<u8> {
-    fn serialize(&self) -> Vec<u8> {
-        self.clone()
-    }
-}
+impl ValueType for Vec<u8> {}

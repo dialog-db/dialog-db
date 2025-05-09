@@ -1,11 +1,14 @@
-use std::str::FromStr;
+use std::{fmt::Display, str::FromStr};
+
+use ::serde::{Deserialize, Serialize};
 
 use crate::{ATTRIBUTE_LENGTH, DialogArtifactsError, RawAttribute};
 
 /// An [`Attribute`] is the predicate part of a semantic triple. [`Attribute`]s
 /// in this crate may be a maximum of 64 bytes, and must be formated as
 /// "namespace/predicate". The namespace part of an attribute is required.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
 pub struct Attribute(RawAttribute, [u8; ATTRIBUTE_LENGTH]);
 
 impl Attribute {
@@ -58,5 +61,11 @@ impl From<Attribute> for String {
 impl From<&Attribute> for String {
     fn from(value: &Attribute) -> Self {
         value.0.clone()
+    }
+}
+
+impl Display for Attribute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", String::from(self))
     }
 }

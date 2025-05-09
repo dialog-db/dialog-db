@@ -6,13 +6,19 @@ use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
 use crate::{
-    ATTRIBUTE_LENGTH, Artifact, AttributeKeyPart, DialogArtifactsError, VALUE_DATA_TYPE_LENGTH,
-    VALUE_KEY_LENGTH, VALUE_REFERENCE_LENGTH, ValueDataType, ValueReferenceKeyPart, mutable_slice,
+    ATTRIBUTE_LENGTH, Artifact, AttributeKeyPart, DialogArtifactsError, ENTITY_LENGTH,
+    VALUE_DATA_TYPE_LENGTH, VALUE_KEY_LENGTH, VALUE_REFERENCE_LENGTH, ValueDataType,
+    ValueReferenceKeyPart, mutable_slice,
 };
+
+use super::EntityKeyPart;
 
 const VALUE_KEY_VALUE_DATA_TYPE_OFFSET: usize = 0;
 const VALUE_KEY_VALUE_REFERENCE_OFFSET: usize = VALUE_DATA_TYPE_LENGTH;
 const VALUE_KEY_ATTRIBUTE_OFFSET: usize = VALUE_DATA_TYPE_LENGTH + VALUE_REFERENCE_LENGTH;
+const VALUE_KEY_ENTITY_OFFSET: usize =
+    VALUE_DATA_TYPE_LENGTH + VALUE_REFERENCE_LENGTH + ATTRIBUTE_LENGTH;
+
 const MINIMUM_VALUE_KEY: [u8; VALUE_KEY_LENGTH] = [u8::MIN; VALUE_KEY_LENGTH];
 const MAXIMUM_VALUE_KEY: [u8; VALUE_KEY_LENGTH] = [u8::MAX; VALUE_KEY_LENGTH];
 
@@ -28,6 +34,7 @@ impl ValueKey {
         value_type: ValueDataType,
         value_reference: ValueReferenceKeyPart,
         attribute: AttributeKeyPart,
+        entity: EntityKeyPart,
     ) -> Self {
         let mut inner = MINIMUM_VALUE_KEY;
         inner[VALUE_KEY_VALUE_DATA_TYPE_OFFSET] = value_type.into();
@@ -39,6 +46,7 @@ impl ValueKey {
         .copy_from_slice(value_reference.0);
         mutable_slice![inner, VALUE_KEY_ATTRIBUTE_OFFSET, ATTRIBUTE_LENGTH]
             .copy_from_slice(attribute.0);
+        mutable_slice![inner, VALUE_KEY_ENTITY_OFFSET, ENTITY_LENGTH].copy_from_slice(entity.0);
         Self(inner)
     }
 
@@ -62,12 +70,26 @@ impl ValueKey {
         ])
     }
 
+    /// Get an [`EntityKeyPart`] that refers to the [`Entity`] part of this
+    /// [`ValueKey`]
+    pub fn entity(&self) -> EntityKeyPart {
+        EntityKeyPart(array_ref![self.0, VALUE_KEY_ENTITY_OFFSET, ENTITY_LENGTH])
+    }
+
     /// Set the [`AttributeKeyPart`], altering the [`Attribute`] part of this
     /// [`ValueKey`].
     pub fn set_attribute(&self, attribute: AttributeKeyPart) -> Self {
         let mut inner = self.0;
         mutable_slice![inner, VALUE_KEY_ATTRIBUTE_OFFSET, ATTRIBUTE_LENGTH]
             .copy_from_slice(attribute.0);
+        Self(inner)
+    }
+
+    /// Set the [`EntityKeyPart`], altering the [`Entity`] part of this
+    /// [`ValueKey`].
+    pub fn set_entity(&self, entity: EntityKeyPart) -> Self {
+        let mut inner = self.0;
+        mutable_slice![inner, VALUE_KEY_ENTITY_OFFSET, ENTITY_LENGTH].copy_from_slice(entity.0);
         Self(inner)
     }
 
@@ -134,6 +156,7 @@ impl From<&Artifact> for ValueKey {
             .set_value_type(fact.is.data_type())
             .set_value_reference(ValueReferenceKeyPart(&value_reference))
             .set_attribute(AttributeKeyPart::from(&fact.the))
+            .set_entity(EntityKeyPart::from(&fact.of))
     }
 }
 

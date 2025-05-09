@@ -45,6 +45,10 @@ pub enum DialogArtifactsError {
     #[error("Could not convert bytes into entity: {0}")]
     InvalidEntity(String),
 
+    /// An attempt to export the database failed
+    #[error("Could not export data: {0}")]
+    Export(String),
+
     /// Attempted to query with an unconstrained [`ArtifactSelector`]
     #[error("An artifact selector must specify at least one field")]
     EmptySelector,

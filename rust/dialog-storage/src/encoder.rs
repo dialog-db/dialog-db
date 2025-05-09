@@ -21,7 +21,7 @@ pub trait Encoder<const HASH_SIZE: usize>: Clone {
     /// Encode a serializable item into its referencable [`Hash`] and its bytes.
     async fn encode<T>(&self, block: &T) -> Result<(Self::Hash, Self::Bytes), Self::Error>
     where
-        T: Serialize + ConditionalSync;
+        T: Serialize + ConditionalSync + std::fmt::Debug;
 
     /// Decode bytes into some deserializable type.
     async fn decode<T>(&self, bytes: &[u8]) -> Result<T, Self::Error>

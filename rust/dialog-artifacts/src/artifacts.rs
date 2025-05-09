@@ -1,4 +1,5 @@
 mod artifact;
+
 pub use artifact::*;
 
 mod revision;
@@ -33,14 +34,19 @@ use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_prolly_tree::{Entry, GeometricDistribution, Tree};
 use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Storage, StorageBackend};
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt};
 use std::{ops::Range, sync::Arc};
 use tokio::sync::RwLock;
 
+#[cfg(feature = "csv")]
+use futures_util::TryStreamExt;
+
+#[cfg(feature = "csv")]
+use async_stream::stream;
+
 use crate::{
-    AttributeKey, BRANCH_FACTOR, DialogArtifactsError, EntityDatum, EntityKey, EntityKeyPart,
-    HASH_SIZE, State, ValueDatum, ValueKey, ValueReferenceKeyPart,
-    artifacts::selector::Constrained,
+    AttributeKey, BRANCH_FACTOR, DialogArtifactsError, EntityDatum, EntityKey, HASH_SIZE, State,
+    ValueDatum, ValueKey, ValueReferenceKeyPart, artifacts::selector::Constrained,
 };
 
 /// An alias type that describes the [`Tree`]-based prolly tree that is
@@ -101,6 +107,63 @@ where
                 backend: backend.clone(),
             }))),
         }
+    }
+
+    #[cfg(feature = "csv")]
+    /// Export the database in CSV format. Each row will consist of the data
+    /// from a single [`Artifact`], laid out in {attribute, entity, value,
+    /// cause} order.
+    // TODO: It would be cool if we could export (and maybe even import?) based
+    // on pattern matching.
+    pub async fn export<Write>(&self, write: &mut Write) -> Result<(), DialogArtifactsError>
+    where
+        Write: tokio::io::AsyncWrite + Unpin,
+    {
+        let mut csv = csv_async::AsyncSerializer::from_writer(write);
+
+        let entity_index = self.entity_index.read().await;
+        let entity_stream = entity_index.stream();
+
+        tokio::pin!(entity_stream);
+
+        while let Some(entry) = entity_stream.try_next().await? {
+            let Entry { key, value } = entry;
+
+            if let State::Added(datum) = value {
+                let artifact = Artifact::try_from((key, datum))?;
+
+                csv.serialize(artifact)
+                    .await
+                    .map_err(|error| DialogArtifactsError::Export(format!("{error}")))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "csv")]
+    /// Import data from a CSV laid out like the one produced by
+    /// [`Artifacts::export`]
+    pub async fn import<Read>(&mut self, read: &mut Read) -> Result<(), DialogArtifactsError>
+    where
+        Read: tokio::io::AsyncRead + Unpin + Send,
+    {
+        let instructions = stream! {
+            let mut reader = csv_async::AsyncReaderBuilder::new()
+                .create_deserializer(read);
+
+            let stream = reader.deserialize::<Artifact>();
+
+            for await artifact in stream {
+                if let Ok(artifact) = artifact {
+                    yield Instruction::Assert(artifact)
+                }
+            }
+        };
+
+        ArtifactStoreMut::commit(self, instructions).await?;
+
+        Ok(())
     }
 
     /// Attempt to initialize the [`Artifacts`] at a specific [`Version`].
@@ -235,6 +298,7 @@ where
                     .set_value_type(value.data_type())
                     .set_value_reference(ValueReferenceKeyPart(&value_reference));
 
+
                 if let Some(attribute) = attribute {
                     start = start.set_attribute(attribute.into());
                     end = end.set_attribute(attribute.into());
@@ -249,17 +313,17 @@ where
                     let entry = item?;
 
                     if entry.matches_selector(&selector) {
-                        if let Entry { key, value: State::Added(datum) } = entry {
-                            let key = EntityKey::default()
-                                .set_entity(EntityKeyPart(&datum))
-                                .set_attribute(key.attribute())
-                                .set_value_type(key.value_type());
+                        if let Entry { key, value: State::Added(_) } = entry {
+                                let key = EntityKey::default()
+                                    .set_entity(key.entity())
+                                    .set_attribute(key.attribute())
+                                    .set_value_type(key.value_type());
 
-                            let entity_index = entity_index.read().await;
-                            let Some(State::Added(datum)) = entity_index.get(&key).await? else {
-                                return Err(DialogArtifactsError::MalformedIndex(format!("Missing datum for key {:?}", key)))?;
-                            };
-                            yield Artifact::try_from((key, datum))?;
+                                let entity_index = entity_index.read().await;
+                                let Some(State::Added(datum)) = entity_index.get(&key).await? else {
+                                    return Err(DialogArtifactsError::MalformedIndex(format!("Missing datum for key {:?}", key)))?;
+                                };
+                                yield Artifact::try_from((key, datum))?;
                         }
                     }
                 }
@@ -296,10 +360,12 @@ where
         + ConditionalSync
         + 'static,
 {
-    async fn commit<I>(&mut self, instructions: I) -> Result<(), DialogArtifactsError>
+    async fn commit<Instructions>(
+        &mut self,
+        instructions: Instructions,
+    ) -> Result<(), DialogArtifactsError>
     where
-        I: IntoIterator<Item = Instruction> + ConditionalSend,
-        I::IntoIter: ConditionalSend,
+        Instructions: Stream<Item = Instruction> + ConditionalSend,
     {
         let base_revision = self.revision().await;
 
@@ -310,13 +376,16 @@ where
                 self.value_index.write()
             );
 
-            for instruction in instructions {
-                match instruction {
-                    Instruction::Assert(fact) => {
-                        let value_datum = ValueDatum::new(fact.is.clone(), fact.cause.clone());
-                        let entity_key = EntityKey::from(&fact);
+            tokio::pin!(instructions);
 
-                        if let Some(cause) = &fact.cause {
+            while let Some(instruction) = instructions.next().await {
+                match instruction {
+                    Instruction::Assert(artifact) => {
+                        let value_datum =
+                            ValueDatum::new(artifact.is.clone(), artifact.cause.clone());
+                        let entity_key = EntityKey::from(&artifact);
+
+                        if let Some(cause) = &artifact.cause {
                             if let Some(State::Added(current_element)) =
                                 entity_index.get(&entity_key).await?
                             {
@@ -337,11 +406,9 @@ where
                         tokio::try_join!(
                             entity_index.set(entity_key, State::Added(value_datum.clone())),
                             attribute_index
-                                .set(AttributeKey::from(&fact), State::Added(value_datum)),
-                            value_index.set(
-                                ValueKey::from(&fact),
-                                State::Added(EntityDatum { entity: *fact.of })
-                            ),
+                                .set(AttributeKey::from(&artifact), State::Added(value_datum)),
+                            value_index
+                                .set(ValueKey::from(&artifact), State::Added(EntityDatum {})),
                         )?;
                     }
                     Instruction::Retract(fact) => {
@@ -369,15 +436,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, sync::Arc};
+    use std::{collections::BTreeSet, str::FromStr, sync::Arc};
 
     use anyhow::Result;
-    use dialog_storage::{MeasuredStorage, make_target_storage};
+    use dialog_storage::{MeasuredStorage, MemoryStorageBackend, make_target_storage};
     use futures_util::StreamExt;
     use tokio::sync::Mutex;
 
     use crate::{
-        Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Artifacts, Attribute,
+        Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute,
         DialogArtifactsError, Entity, Instruction, Value, generate_data,
     };
 
@@ -421,6 +488,49 @@ mod tests {
         facts.sort_by(entity_order);
 
         assert_eq!(data, facts);
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_can_export_to_and_import_from_csv() -> Result<()> {
+        let (csv, expected_ids, expected_revision) = {
+            let storage_backend = MemoryStorageBackend::default();
+            let data = generate_data(1)?;
+            let mut artifacts = Artifacts::new(storage_backend.clone());
+
+            artifacts
+                .commit(data.into_iter().map(Instruction::Assert))
+                .await?;
+
+            let ids = artifacts
+                .select(ArtifactSelector::new().the(Attribute::from_str("item/id")?))
+                .map(|result| result.unwrap())
+                .collect::<Vec<Artifact>>()
+                .await;
+
+            let mut csv = tokio::io::BufWriter::new(Vec::<u8>::new());
+            artifacts.export(&mut csv).await?;
+            (csv.into_inner(), ids, artifacts.revision().await.unwrap())
+        };
+
+        println!("{}", String::from_utf8(csv.clone())?);
+
+        let mut artifacts = Artifacts::new(MemoryStorageBackend::default());
+
+        artifacts
+            .import(&mut tokio::io::BufReader::new(csv.as_ref()))
+            .await?;
+
+        let actual_ids = artifacts
+            .select(ArtifactSelector::new().the(Attribute::from_str("item/id")?))
+            .map(|result| result.unwrap())
+            .collect::<Vec<Artifact>>()
+            .await;
+
+        assert_eq!(expected_ids, actual_ids);
+        assert_eq!(expected_revision, artifacts.revision().await.unwrap());
 
         Ok(())
     }
@@ -593,12 +703,74 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_completes_a_query_when_no_data_matches() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let data = [124u128; 3]
+            .into_iter()
+            .map(Value::UnsignedInt)
+            .map(|value| Artifact {
+                the: "test/attribute".parse().unwrap(),
+                of: Entity::new(),
+                is: value,
+                cause: None,
+            })
+            .map(Instruction::Assert);
+
+        let mut artifacts = Artifacts::new(storage_backend.clone());
+        artifacts.commit(data).await?;
+
+        let results = artifacts
+            .select(ArtifactSelector::new().is(Value::UnsignedInt(123)))
+            .map(|result| result.unwrap().of)
+            .collect::<BTreeSet<Entity>>()
+            .await;
+
+        assert_eq!(results.len(), 0);
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_distinguishes_same_value_across_different_entities() -> Result<()> {
+        // NOTE: This covers a bug where we weren't aggregating entities in the value index properly
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let data = [123u128; 3]
+            .into_iter()
+            .map(Value::UnsignedInt)
+            .map(|value| Artifact {
+                the: "test/attribute".parse().unwrap(),
+                of: Entity::new(),
+                is: value,
+                cause: None,
+            })
+            .map(Instruction::Assert);
+
+        let mut artifacts = Artifacts::new(storage_backend.clone());
+        artifacts.commit(data).await?;
+
+        let data = generate_data(32)?.into_iter().map(Instruction::Assert);
+
+        artifacts.commit(data).await?;
+
+        let results = artifacts
+            .select(ArtifactSelector::new().is(Value::UnsignedInt(123)))
+            .map(|result| result.unwrap().of)
+            .collect::<BTreeSet<Entity>>()
+            .await;
+
+        assert_eq!(results.len(), 3);
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_produces_the_same_version_with_different_insertion_order() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let data = generate_data(32)?;
 
         let mut reordered_data = data.clone();
-        reordered_data.sort_by(|l, r| l.of.cmp(&r.of));
+        reordered_data.reverse();
 
         assert_ne!(data, reordered_data);
 

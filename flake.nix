@@ -91,6 +91,8 @@
           common-dev-tools
           ++ [
             static-web-server
+            leptosfmt
+            cargo-generate
           ]
           ++ lib.optionals stdenv.isLinux [
             chromium
@@ -131,6 +133,10 @@
             nativeBuildInputs = common-build-inputs "stable";
             cargoLock = {
               lockFile = ./Cargo.lock;
+              outputHashes = {
+                # TODO: https://github.com/gwierzchowski/csv-async/issues/27
+                "csv-async-1.3.0" = "sha256-cD+H0VRX0XtczWS140i93WS2ZzB9oag58t94/caGABM=";
+              };
             };
           };
 

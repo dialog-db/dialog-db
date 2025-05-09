@@ -28,7 +28,7 @@ pub trait ContentAddressedStorage<const HASH_SIZE: usize>: ConditionalSync + 'st
     /// Store a block and receive its hash
     async fn write<T>(&mut self, block: &T) -> Result<Self::Hash, Self::Error>
     where
-        T: Serialize + ConditionalSync;
+        T: Serialize + ConditionalSync + std::fmt::Debug;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -64,7 +64,7 @@ where
     }
     async fn write<T>(&mut self, block: &T) -> Result<Self::Hash, Self::Error>
     where
-        T: Serialize + ConditionalSync,
+        T: Serialize + ConditionalSync + std::fmt::Debug,
     {
         let (hash, encoded_bytes) = self.encode(block).await.map_err(|error| error.into())?;
         self.set(hash.clone(), encoded_bytes)
@@ -109,7 +109,7 @@ where
     }
     async fn write<T>(&mut self, block: &T) -> Result<Self::Hash, Self::Error>
     where
-        T: Serialize + ConditionalSync,
+        T: Serialize + ConditionalSync + std::fmt::Debug,
     {
         let mut storage = self.lock().await;
         let (hash, encoded_bytes) = storage.encode(block).await.map_err(|error| error.into())?;

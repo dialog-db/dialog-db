@@ -37,7 +37,7 @@ use wasm_bindgen::{convert::TryFromJsValue, prelude::*};
 use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
-    Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Artifacts, Attribute, Cause,
+    Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute, Cause,
     DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Revision, Value,
     ValueDataType, artifacts::selector::Constrained,
 };

@@ -18,7 +18,7 @@ impl Encoder<32> for CborEncoder {
 
     async fn encode<T>(&self, block: &T) -> Result<(Self::Hash, Self::Bytes), Self::Error>
     where
-        T: Serialize + ConditionalSync,
+        T: Serialize + ConditionalSync + std::fmt::Debug,
     {
         let bytes = serde_ipld_dagcbor::to_vec(block)
             .map_err(|error| DialogStorageError::EncodeFailed(format!("{error}")))?;
