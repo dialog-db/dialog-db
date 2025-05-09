@@ -43,8 +43,8 @@ jobs:
     steps:
       - run: echo "Lints are good!"
 
-  npm_packages:
-    name: 'NPM Packages'
+  more_npm_packages:
+    name: 'More NPM Packages'
     needs: ['lints']
     runs-on: ubuntu-latest
     strategy:
@@ -80,8 +80,8 @@ jobs:
       - name: Test (Web)
         run: pnpm run --if-present --dir typescript/${{matrix.package}} test:web
 
-  wasm_artifacts:
-    name: 'WASM Artifacts'
+  npm_packages:
+    name: 'NPM Packages'
     needs: ['lints']
     runs-on: 'macos-latest'
     steps:
