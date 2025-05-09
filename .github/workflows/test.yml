@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
 
-name: "Test"
+name: 'Test'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -12,8 +12,8 @@ concurrency:
 
 jobs:
   lint_nix:
-    name: "Lint Nix"
-    runs-on: "ubuntu-latest"
+    name: 'Lint Nix'
+    runs-on: 'ubuntu-latest'
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/flake-checker-action@main
@@ -22,30 +22,30 @@ jobs:
           ignore-missing-flake-lock: false
 
   lint_rust:
-    name: "Lint Rust"
-    needs: ["lint_nix"]
-    runs-on: "ubuntu-latest"
+    name: 'Lint Rust'
+    needs: ['lint_nix']
+    runs-on: 'ubuntu-latest'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
       - uses: Swatinem/rust-cache@v2
       - uses: ./.github/actions/setup-nix
-      - name: "Run lints"
+      - name: 'Run lints'
         shell: bash
         run: |
           nix develop --command cargo fmt --all -- --check
           nix develop --command cargo clippy --all -- -D warnings
 
   lints:
-    name: "Lints"
-    needs: ["lint_nix", "lint_rust"]
-    runs-on: "ubuntu-latest"
+    name: 'Lints'
+    needs: ['lint_nix', 'lint_rust']
+    runs-on: 'ubuntu-latest'
     steps:
       - run: echo "Lints are good!"
 
   npm_packages:
-    name: "NPM Packages"
-    needs: ["lints"]
+    name: 'NPM Packages'
+    needs: ['lints']
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -59,12 +59,12 @@ jobs:
       - uses: ./.github/actions/setup-nix
       - uses: pnpm/action-setup@v2
         with:
-          version: "latest"
+          version: 'latest'
       - name: Setup node ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-          cache: "pnpm"
+          cache: 'pnpm'
           cache-dependency-path: typescript/${{matrix.package}}/pnpm-lock.yaml
       - name: Install dependencies
         run: pnpm install --dir typescript/${{matrix.package}}
@@ -81,14 +81,14 @@ jobs:
         run: pnpm run --if-present --dir typescript/${{matrix.package}} test:web
 
   wasm_artifacts:
-    name: "WASM Artifacts"
-    needs: ["lints"]
-    runs-on: "macos-latest"
+    name: 'WASM Artifacts'
+    needs: ['lints']
+    runs-on: 'macos-latest'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
       - uses: ./.github/actions/setup-nix
-      - name: "Run `npm test`"
+      - name: 'Run `npm test`'
         shell: bash
         run: |
           nix build .#dialog-artifacts-web
@@ -104,21 +104,21 @@ jobs:
           path: ./result/dialog-artifacts
 
   rust_crates:
-    name: "Rust Crates"
-    needs: ["lints"]
-    runs-on: "ubuntu-latest"
+    name: 'Rust Crates'
+    needs: ['lints']
+    runs-on: 'ubuntu-latest'
     strategy:
       matrix:
         include:
-          - flags: ""
-          - flags: "--release"
-          - flags: "--target wasm32-unknown-unknown"
-          - flags: "--target wasm32-unknown-unknown --release"
+          - flags: ''
+          - flags: '--release'
+          - flags: '--target wasm32-unknown-unknown'
+          - flags: '--target wasm32-unknown-unknown --release'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
       - uses: ./.github/actions/setup-nix
-      - name: "Run `cargo test`"
+      - name: 'Run `cargo test`'
         shell: bash
         run: |
           # Ensure we don't pick up a built-in chrome / chromedriver
