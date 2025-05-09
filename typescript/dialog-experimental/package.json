@@ -1,6 +1,6 @@
 {
   "name": "@dialog-db/experimental",
-  "version": "0.0.1",
+  "version": "0.0.4",
   "description": "Dialog experimental runtime",
   "main": "lib.js",
   "type": "module",
@@ -22,6 +22,7 @@
   ],
   "files": [
     "src",
+    "src/artifacts/*",
     "dist/src"
   ],
   "exports": {
