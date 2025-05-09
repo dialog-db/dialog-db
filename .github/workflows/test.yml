@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
 
-name: 'Test'
+name: "Test"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -12,8 +12,8 @@ concurrency:
 
 jobs:
   lint_nix:
-    name: 'Lint Nix'
-    runs-on: 'ubuntu-latest'
+    name: "Lint Nix"
+    runs-on: "ubuntu-latest"
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/flake-checker-action@main
@@ -22,31 +22,68 @@ jobs:
           ignore-missing-flake-lock: false
 
   lint_rust:
-      name: 'Lint Rust'
-      needs: ['lint_nix']
-      runs-on: 'ubuntu-latest'
-      steps:
-        - uses: actions/checkout@v4
-        - uses: actions/download-artifact@v4
-        - uses: Swatinem/rust-cache@v2
-        - uses: ./.github/actions/setup-nix
-        - name: "Run lints"
-          shell: bash
-          run: |
-            nix develop --command cargo fmt --all -- --check
-            nix develop --command cargo clippy --all -- -D warnings
+    name: "Lint Rust"
+    needs: ["lint_nix"]
+    runs-on: "ubuntu-latest"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-nix
+      - name: "Run lints"
+        shell: bash
+        run: |
+          nix develop --command cargo fmt --all -- --check
+          nix develop --command cargo clippy --all -- -D warnings
 
   lints:
-    name: 'Lints'
-    needs: ['lint_nix', 'lint_rust']
-    runs-on: 'ubuntu-latest'
+    name: "Lints"
+    needs: ["lint_nix", "lint_rust"]
+    runs-on: "ubuntu-latest"
     steps:
       - run: echo "Lints are good!"
 
   npm_packages:
-    name: 'NPM Packages'
-    needs: ['lints']
-    runs-on: 'macos-latest'
+    name: "NPM Packages"
+    needs: ["lints"]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version:
+          - 20
+        package:
+          - dialog-experimental
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-nix
+      - uses: pnpm/action-setup@v2
+        with:
+          version: "latest"
+      - name: Setup node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: "pnpm"
+          cache-dependency-path: typescript/${{matrix.package}}/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --dir typescript/${{matrix.package}}
+      - run: pnpm run --if-present --dir typescript/${{matrix.package}} install:vendor
+      - name: Typecheck
+        uses: gozala/typescript-error-reporter-action@v1.0.8
+        with:
+          project: typescript/${{matrix.package}}/tsconfig.json
+      - name: Build
+        run: pnpm --if-present --dir typescript/${{matrix.package}} build
+      - name: Test (Node)
+        run: pnpm run --if-present --dir typescript/${{matrix.package}} test:node
+      - name: Test (Web)
+        run: pnpm run --if-present --dir typescript/${{matrix.package}} test:web
+
+  wasm_artifacts:
+    name: "WASM Artifacts"
+    needs: ["lints"]
+    runs-on: "macos-latest"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -67,16 +104,16 @@ jobs:
           path: ./result/dialog-artifacts
 
   rust_crates:
-    name: 'Rust Crates'
-    needs: ['lints']
-    runs-on: 'ubuntu-latest'
+    name: "Rust Crates"
+    needs: ["lints"]
+    runs-on: "ubuntu-latest"
     strategy:
       matrix:
         include:
-          - flags: ''
-          - flags: '--release'
-          - flags: '--target wasm32-unknown-unknown'
-          - flags: '--target wasm32-unknown-unknown --release'
+          - flags: ""
+          - flags: "--release"
+          - flags: "--target wasm32-unknown-unknown"
+          - flags: "--target wasm32-unknown-unknown --release"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

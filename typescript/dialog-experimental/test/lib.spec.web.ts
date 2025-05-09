@@ -1,7 +1,7 @@
 import { Artifacts, Query, fact, Task } from './self.js'
+import type { Suite } from 'entail'
 
-/** @type {import('entail').Suite} */
-export const testLib = {
+export const testLib: Suite = {
   'test imports': async (assert) => {
     assert.equal(typeof Artifacts, 'object')
     assert.equal(typeof Query, 'object')

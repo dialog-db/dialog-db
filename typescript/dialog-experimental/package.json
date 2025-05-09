@@ -2,17 +2,18 @@
   "name": "@dialog-db/experimental",
   "version": "0.0.4",
   "description": "Dialog experimental runtime",
-  "main": "lib.js",
+  "main": "dist/src/lib.js",
   "type": "module",
   "scripts": {
-    "vendor": "rm -rf src/vendor && nix build .#dialog-artifacts-web && cp -r result/dialog-artifacts src/artifacts && chmod -R 0755 src/artifacts && rm result",
-    "build": "npm run vendor && npm run check",
+    "install:vendor": "rm -rf src/artifacts && nix build .#dialog-artifacts-web && cp -r result/dialog-artifacts src/artifacts && chmod -R 0755 src/artifacts && rm result",
+    "build": "npm run install:vendor && npm run compile",
     "prepublishOnly": "npm run build",
-    "test:web": "playwright-test --runner entail 'test/**/*.spec(.web).js' --assets ./src/artifacts/",
-    "test:node": "entail 'test/*.spec.js'",
+    "test:web": "playwright-test --runner entail 'dist/test/**/*.spec(.web).js' --assets ./dist/src/artifacts/",
+    "test:node": "entail 'dist/test/*.spec.ts'",
     "test": "npm run test:node && npm run test:web",
-    "coverage": "c8 entail test/**/*.spec.js",
-    "check": "tsc --build"
+    "coverage": "c8 entail dist/test/**/*.spec.ts",
+    "compile": "tsc --build && cp -r src/artifacts dist/src/artifacts",
+    "check": "tsc --build --noEmit"
   },
   "keywords": [
     "datalog",
@@ -22,13 +23,13 @@
   ],
   "files": [
     "src",
-    "src/artifacts/*",
-    "dist/src"
+    "test",
+    "dist"
   ],
   "exports": {
     ".": {
       "types": "./dist/src/lib.d.ts",
-      "import": "./src/lib.js"
+      "import": "./dist/src/lib.js"
     }
   },
   "dependencies": {
