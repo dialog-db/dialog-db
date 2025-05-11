@@ -1,4 +1,4 @@
-import init, { Artifacts, generateEntity, encode, Entity, InstructionType, ValueDataType, Artifact, ArtifactApi } from "dialog-artifacts";
+import init, { Artifacts, generateEntity, encode, Entity, InstructionType, ValueDataType, Artifact, ArtifactApi } from "./dialog-artifacts";
 import { expect } from "@open-wc/testing";
 
 await init();
