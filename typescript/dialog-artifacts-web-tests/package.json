@@ -5,9 +5,6 @@
     "scripts": {
         "test": "web-test-runner *.test.ts --node-resolve"
     },
-    "dependencies": {
-        "dialog-artifacts": "file:../../../result/dialog-artifacts"
-    },
     "devDependencies": {
         "@open-wc/testing": "^4.0.0",
         "@types/mocha": "^10.0.10",

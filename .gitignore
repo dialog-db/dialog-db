@@ -6,3 +6,4 @@ result
 **/.claude/settings.local.json
 typescript/dialog-experimental/src/artifacts
 typescript/*/dist/
+typescript/dialog-artifacts-web-tests/dialog-artifacts
