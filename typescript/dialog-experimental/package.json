@@ -1,18 +1,18 @@
 {
   "name": "@dialog-db/experimental",
-  "version": "0.0.4",
+  "version": "0.0.7",
   "description": "Dialog experimental runtime",
-  "main": "lib.js",
+  "main": "dist/src/lib.js",
   "type": "module",
   "scripts": {
-    "vendor": "rm -rf src/vendor && nix build .#dialog-artifacts-web && cp -r result/dialog-artifacts src/artifacts && chmod -R 0755 src/artifacts && rm result",
-    "build": "npm run vendor && npm run check",
+    "build": "npm run compile",
     "prepublishOnly": "npm run build",
-    "test:web": "playwright-test --runner entail 'test/**/*.spec(.web).js' --assets ./src/artifacts/",
-    "test:node": "entail 'test/*.spec.js'",
+    "test:web": "wtr 'test/*.spec(.web).ts' --node-resolve",
+    "test:node": "ts-mocha -n loader=ts-node/esm -p ./tsconfig.json ./test/*.spec.ts",
     "test": "npm run test:node && npm run test:web",
-    "coverage": "c8 entail test/**/*.spec.js",
-    "check": "tsc --build"
+    "coverage": "c8 entail dist/test/**/*.spec.ts",
+    "compile": "tsc --build && mkdir -p dist/src && cp -r src/artifacts dist/src/artifacts",
+    "check": "tsc --build --noEmit"
   },
   "keywords": [
     "datalog",
@@ -22,13 +22,14 @@
   ],
   "files": [
     "src",
-    "src/artifacts/*",
-    "dist/src"
+    "test",
+    "dist",
+    "dist/src/artifacts/*"
   ],
   "exports": {
     ".": {
       "types": "./dist/src/lib.d.ts",
-      "import": "./src/lib.js"
+      "import": "./dist/src/lib.js"
     }
   },
   "dependencies": {
@@ -36,9 +37,13 @@
   },
   "devDependencies": {
     "@types/deno": "^2.0.0",
+    "@types/mocha": "^10.0.10",
+    "@open-wc/testing": "^4.0.0",
+    "@web/dev-server-esbuild": "^1.0.4",
+    "@web/test-runner": "^0.20.1",
     "c8": "8.0.1",
-    "entail": "^2.1.2",
-    "playwright-test": "^14.1.9",
+    "mocha": "^11.2.2",
+    "ts-mocha": "^11.1.0",
     "prettier": "3.1.0",
     "typescript": "^5.7.3"
   },
