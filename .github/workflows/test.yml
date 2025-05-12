@@ -43,43 +43,6 @@ jobs:
     steps:
       - run: echo "Lints are good!"
 
-  pnpm_packages:
-    name: 'PNPM Packages'
-    needs: ['lints']
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version:
-          - 20
-        package:
-          - dialog-experimental
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-nix
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 'latest'
-      - name: Setup node ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'pnpm'
-          cache-dependency-path: typescript/${{matrix.package}}/pnpm-lock.yaml
-      - name: Install dependencies
-        run: pnpm install --dir typescript/${{matrix.package}}
-      - run: pnpm run --if-present --dir typescript/${{matrix.package}} install:vendor
-      - name: Typecheck
-        uses: gozala/typescript-error-reporter-action@v1.0.8
-        with:
-          project: typescript/${{matrix.package}}/tsconfig.json
-      - name: Build
-        run: pnpm --if-present --dir typescript/${{matrix.package}} build
-      - name: Test (Node)
-        run: pnpm run --if-present --dir typescript/${{matrix.package}} test:node
-      - name: Test (Web)
-        run: pnpm run --if-present --dir typescript/${{matrix.package}} test:web
-
   npm_packages:
     name: 'NPM Packages'
     needs: ['lints']
@@ -91,17 +54,31 @@ jobs:
       - name: 'Run `npm test`'
         shell: bash
         run: |
-          nix build .#dialog-artifacts-web
+          nix build .#npm-packages
 
           nix develop --command bash -c "cat << 'EOF' | bash
-          cd rust/dialog-artifacts/javascript_tests
+
+          pushd typescript/dialog-artifacts-web-tests
+          ln -s ../../result/@dialog-db/dialog-artifacts ./
           npm ci
           npm test
+          popd
+
+          cp -r ./result/@dialog-db/experimental ./dialog-experimental
+          chmod -R 755 ./dialog-experimental
+          cd ./dialog-experimental
+          npm ci
+          npm test
+
           EOF"
       - uses: actions/upload-artifact@v4
         with:
           name: dialog-artifacts
-          path: ./result/dialog-artifacts
+          path: ./result/@dialog-db/dialog-artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dialog-experimental
+          path: ./result/@dialog-db/experimental
 
   rust_crates:
     name: 'Rust Crates'

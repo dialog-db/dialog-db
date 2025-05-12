@@ -76,7 +76,7 @@ class ArtifactsStore implements Querier, Transactor {
   constructor(
     public instance: Artifacts,
     private revision: Uint8Array
-  ) {}
+  ) { }
 
   /**
    * Select artifacts that match the given selector
@@ -216,8 +216,8 @@ const toTyped = (
     case 'number': {
       return (
         Number.isInteger(value) ? { value, type: ValueDataType.SignedInt }
-        : Number.isFinite(value) ? { value, type: ValueDataType.Float }
-        : unreachable(`Number ${value} can not be inferred`)
+          : Number.isFinite(value) ? { value, type: ValueDataType.Float }
+            : unreachable(`Number ${value} can not be inferred`)
       )
     }
     case 'bigint': {
