@@ -1,9 +1,13 @@
-use crate::{Attribute, DialogArtifactsError, ENTITY_LENGTH, RawEntity, make_reference};
+use std::{fmt::Display, str::FromStr};
 
+use crate::{Attribute, DialogArtifactsError, Entity, RawEntity, make_reference};
+
+use base58::{FromBase58, ToBase58};
 use dialog_storage::Blake3Hash;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// All value type representations that may be stored by [`Artifacts`]
-#[derive(Debug, Clone, PartialOrd, PartialEq)]
+#[derive(Debug, Clone, PartialOrd, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     /// An empty (null) value
     Null,
@@ -61,9 +65,90 @@ impl Value {
         }
     }
 
+    /// Serialize this [`Value`] to a UTF-8 string
+    pub fn to_utf8(&self) -> String {
+        match self {
+            Value::Null => "null".to_string(),
+            Value::Bytes(bytes) => format!("bytes:{}", bytes.to_base58()),
+            Value::Entity(raw) => format!("entity:{}", raw.to_base58()),
+            Value::Boolean(value) => format!("boolean:{}", value),
+            Value::String(string) => format!("string:{}", string),
+            Value::UnsignedInt(number) => format!("uint:{}", number),
+            Value::SignedInt(number) => format!("sint:{}", number),
+            Value::Float(number) => format!("float:{}", number),
+            Value::Record(record) => format!("record:{}", record.to_base58()),
+            Value::Symbol(attribute) => format!("attribute:{}", attribute),
+        }
+    }
+
     /// Produce a hash reference to this [`Value`]
     pub fn to_reference(&self) -> Blake3Hash {
         make_reference(self.to_bytes())
+    }
+}
+
+pub(crate) fn to_utf8<S>(value: &Value, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let serialized = value.to_utf8();
+    serialized.serialize(serializer)
+}
+
+pub(crate) fn from_utf8<'de, D>(deserializer: D) -> Result<Value, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer)?
+        .parse()
+        .map_err(|error| serde::de::Error::custom(format!("{error}")))
+}
+
+impl FromStr for Value {
+    type Err = DialogArtifactsError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "null" {
+            return Ok(Value::Null);
+        }
+
+        let Some((variant, value)) = s.split_once(':') else {
+            return Err(DialogArtifactsError::InvalidValue(format!(
+                "Unsupported variant or invalid format: \"{}\"",
+                s
+            )));
+        };
+
+        fn to_dialog_error_debug<E>(error: E) -> DialogArtifactsError
+        where
+            E: std::fmt::Debug,
+        {
+            DialogArtifactsError::InvalidValue(format!("{:?}", error))
+        }
+
+        fn to_dialog_error<E>(error: E) -> DialogArtifactsError
+        where
+            E: Display,
+        {
+            DialogArtifactsError::InvalidValue(format!("{}", error))
+        }
+
+        Ok(match variant {
+            "bytes" => Value::Bytes(value.from_base58().map_err(to_dialog_error_debug)?),
+            "entity" => Value::Entity(*Entity::try_from(value.to_owned())?),
+            "boolean" => Value::Boolean(bool::from_str(value).map_err(to_dialog_error)?),
+            "string" => Value::String(value.to_owned()),
+            "uint" => Value::UnsignedInt(value.parse().map_err(to_dialog_error)?),
+            "sint" => Value::SignedInt(value.parse().map_err(to_dialog_error)?),
+            "float" => Value::Float(value.parse().map_err(to_dialog_error)?),
+            "record" => Value::Record(value.from_base58().map_err(to_dialog_error_debug)?),
+            "attribute" => Value::Symbol(Attribute::from_str(value)?),
+            _ => {
+                return Err(DialogArtifactsError::InvalidValue(
+                    "Value part of serialized string is empty".into(),
+                ));
+            }
+        })
     }
 }
 
@@ -74,15 +159,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
         Ok(match value_data_type {
             ValueDataType::Null => Value::Null,
             ValueDataType::Bytes => Value::Bytes(value),
-            ValueDataType::Entity => {
-                Value::Entity(value.try_into().map_err(|value: Vec<u8>| {
-                    DialogArtifactsError::InvalidEntity(format!(
-                        "Wrong byte length for entity (expected {}, got {})",
-                        ENTITY_LENGTH,
-                        value.len()
-                    ))
-                })?)
-            }
+            ValueDataType::Entity => Value::Entity(*Entity::try_from(value)?),
             // TODO: How strictly validated must a bool representation be?
             ValueDataType::Boolean => match value.first() {
                 Some(byte) if value.len() == 1 => Value::Boolean(*byte != 0),
@@ -129,7 +206,9 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
             )?)),
             ValueDataType::Record => unimplemented!("TBD but probably flatbuffers?"),
             ValueDataType::Symbol => match String::from_utf8(value) {
-                Ok(value) => Value::Symbol(Attribute::try_from(value)?),
+                Ok(value) => Value::Symbol(Attribute::try_from(
+                    value.split('\u{0000}').take(1).collect::<String>(),
+                )?),
                 Err(error) => {
                     return Err(DialogArtifactsError::InvalidValue(format!(
                         "Not a valid UTF-8 string: {error}"
@@ -307,6 +386,7 @@ impl From<u8> for ValueDataType {
 impl From<&u8> for ValueDataType {
     fn from(value: &u8) -> Self {
         match value {
+            0 => ValueDataType::Null,
             1 => ValueDataType::Bytes,
             2 => ValueDataType::Entity,
             3 => ValueDataType::Boolean,
@@ -315,7 +395,13 @@ impl From<&u8> for ValueDataType {
             6 => ValueDataType::SignedInt,
             7 => ValueDataType::Float,
             8 => ValueDataType::Record,
-            _ => ValueDataType::Null,
+            9 => ValueDataType::Symbol,
+            _ => {
+                println!(
+                    "WARNING! Encountered unsupported value tag '{value}'; defaulting to null (but this is undefined behavior)..."
+                );
+                ValueDataType::Null
+            }
         }
     }
 }

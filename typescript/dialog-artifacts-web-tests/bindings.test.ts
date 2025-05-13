@@ -1,5 +1,5 @@
 import init, { Artifacts, generateEntity, encode, Entity, InstructionType, ValueDataType, Artifact, ArtifactApi } from "./dialog-artifacts";
-import { expect } from "@open-wc/testing";
+import { assert, expect } from "@open-wc/testing";
 
 await init();
 
@@ -210,5 +210,52 @@ describe('artifacts', () => {
         }
 
         expect(count).to.be.eq(10);
+
+        for await (const _artifact of query) {
+            for await (const _artifact of query) {
+                count++;
+            }
+        }
+
+        expect(count).to.be.eql(35);
+
+        const otherQuery = artifacts.select({
+            is: {
+                type: ValueDataType.String,
+                value: "Acid Burn"
+            }
+        });
+
+        for await (const _artifact of query) {
+            for await (const _artifact of otherQuery) {
+                count++;
+            }
+        }
+
+        expect(count).to.be.eql(40);
     });
+
+    it('pins an iterator at the version where iteration began', async () => {
+        let artifacts = await Artifacts.open("test");
+        let entityMap = await populateWithHackers(artifacts);
+
+        let query = artifacts.select({
+            the: "profile/name"
+        });
+
+        let count = 0;
+
+        for await (const artifact of query) {
+            await populateWithHackers(artifacts);
+
+            let expectedHandle = entityMap.get(encode(artifact.of))?.name;
+            expect(expectedHandle).to.be.ok;
+            expect(artifact.is.value).to.be.eq(expectedHandle!)
+
+            count++;
+        }
+
+        expect(count).to.be.eql(5);
+    });
+
 });

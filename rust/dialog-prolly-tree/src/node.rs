@@ -416,6 +416,7 @@ where
                 let Some(current) = branch_stack.last_mut() else {
                     return;
                 };
+
                 match current.node.is_branch() {
                     true => {
                         if !matching {
@@ -423,8 +424,15 @@ where
                                 // The start key is larger than any key stored in this tree.
                                 return;
                             };
-                            current.index = Some(next_index);
-                            branch_stack.push(TreeLocation { node: next_node, index: None });
+
+                            let next_index = Some(next_index);
+
+                            if current.index != next_index {
+                                current.index = next_index;
+                                branch_stack.push(TreeLocation { node: next_node, index: None });
+                            } else {
+                                branch_stack.pop();
+                            }
                         } else {
                             let next_index = match current.index {
                                 Some(visited_index) => visited_index + 1,
@@ -433,8 +441,14 @@ where
                             match current.node.block.references()?.get(next_index) {
                                 Some(reference) => {
                                     let next_node = Node::from_reference(reference.to_owned(), storage).await?;
-                                    current.index = Some(next_index);
-                                    branch_stack.push(TreeLocation { node: next_node, index: None });
+                                    let next_index = Some(next_index);
+
+                                    if current.index != next_index {
+                                        current.index = next_index;
+                                        branch_stack.push(TreeLocation { node: next_node, index: None });
+                                    } else {
+                                        branch_stack.pop();
+                                    }
                                 }
                                 None => {
                                     // Parent needs to check next sibling

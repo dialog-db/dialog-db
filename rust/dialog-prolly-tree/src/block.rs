@@ -105,7 +105,7 @@ where
 /// A [`BlockType`] contains variants that represent the kinds of blocks that
 /// may occur within a tree structure (either a branch or a segment)
 #[repr(u8)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum BlockType {
     /// A branch (non-leaf node)
     Branch = 0,

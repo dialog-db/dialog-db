@@ -9,8 +9,9 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
+default = ["csv"]
 helpers = ["dep:anyhow"]
+csv = ["dep:csv-async"]
 
 [dependencies]
 dialog-common = { workspace = true }
@@ -23,6 +24,7 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
 blake3 = { workspace = true }
+csv-async = { workspace = true, optional = true, features = ["tokio"] }
 futures-util = { workspace = true }
 leb128 = { workspace = true }
 rand = { workspace = true }
@@ -31,7 +33,7 @@ serde = { workspace = true }
 serde-big-array = { workspace = true }
 static_assertions = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync", "macros"] }
+tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
 
 [dev-dependencies]
 dialog-storage = { workspace = true, features = ["helpers"] }
