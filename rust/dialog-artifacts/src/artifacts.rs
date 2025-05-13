@@ -261,6 +261,11 @@ where
         let value_index = self.value_index.clone();
 
         try_stream! {
+            // We clone to "pin" the indexes at a version for the lifetime of the stream
+            let entity_index = entity_index.read().await.clone();
+            let attribute_index = attribute_index.read().await.clone();
+            let value_index = value_index.read().await.clone();
+
             let entity = selector.entity();
             let attribute = selector.attribute();
             let value = selector.value();
@@ -274,8 +279,7 @@ where
                     end = end.set_attribute(attribute.into());
                 }
 
-                let index = entity_index.read().await;
-                let stream = index.stream_range(Range { start, end });
+                let stream = entity_index.stream_range(Range { start, end });
 
                 tokio::pin!(stream);
 
@@ -304,8 +308,7 @@ where
                     end = end.set_attribute(attribute.into());
                 }
 
-                let index = value_index.read().await;
-                let stream = index.stream_range(Range { start, end });
+                let stream = value_index.stream_range(Range { start, end });
 
                 tokio::pin!(stream);
 
@@ -319,7 +322,6 @@ where
                                     .set_attribute(key.attribute())
                                     .set_value_type(key.value_type());
 
-                                let entity_index = entity_index.read().await;
                                 let Some(State::Added(datum)) = entity_index.get(&key).await? else {
                                     return Err(DialogArtifactsError::MalformedIndex(format!("Missing datum for key {:?}", key)))?;
                                 };
@@ -331,8 +333,7 @@ where
                 let start = AttributeKey::min().set_attribute(attribute.into());
                 let end = AttributeKey::max().set_attribute(attribute.into());
 
-                let index = attribute_index.read().await;
-                let stream = index.stream_range(Range { start, end });
+                let stream = attribute_index.stream_range(Range { start, end });
 
                 tokio::pin!(stream);
 
@@ -440,7 +441,7 @@ mod tests {
 
     use anyhow::Result;
     use dialog_storage::{MeasuredStorage, MemoryStorageBackend, make_target_storage};
-    use futures_util::StreamExt;
+    use futures_util::{StreamExt, TryStreamExt};
     use tokio::sync::Mutex;
 
     use crate::{
@@ -488,6 +489,41 @@ mod tests {
         facts.sort_by(entity_order);
 
         assert_eq!(data, facts);
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_pins_a_stream_at_the_version_where_iteration_begins() -> Result<()> {
+        let storage_backend = MemoryStorageBackend::default();
+        let data = generate_data(5)?;
+        let mut artifacts = Artifacts::new(storage_backend.clone());
+
+        let entities = data
+            .iter()
+            .map(|artifact| artifact.of.clone())
+            .collect::<BTreeSet<Entity>>();
+
+        artifacts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let stream = artifacts.select(ArtifactSelector::new().the("item/id".parse()?));
+
+        tokio::pin!(stream);
+
+        let mut count = 0usize;
+
+        while let Some(artifact) = stream.try_next().await? {
+            artifacts
+                .commit(generate_data(1)?.into_iter().map(Instruction::Assert))
+                .await?;
+            assert!(entities.contains(&artifact.of));
+            count += 1;
+        }
+
+        assert_eq!(count, 5);
 
         Ok(())
     }
