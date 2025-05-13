@@ -5,9 +5,10 @@
   "main": "dist/src/lib.js",
   "type": "module",
   "scripts": {
+    "vendor": "rm -rf ./src/artifacts && nix build .#dialog-artifacts-web && cp -r result/@dialog-db/dialog-artifacts src/artifacts && chmod -R 0755 src/artifacts && rm result",
     "build": "npm run compile",
     "prepublishOnly": "npm run build",
-    "test:web": "wtr 'test/*.spec(.web).ts' --node-resolve",
+    "test:web": "wtr 'test/*.spec(.web).ts(x)' --node-resolve",
     "test:node": "ts-mocha -n loader=ts-node/esm -p ./tsconfig.json ./test/*.spec.ts",
     "test": "npm run test:node && npm run test:web",
     "coverage": "c8 entail dist/test/**/*.spec.ts",
@@ -36,15 +37,21 @@
     "@dialog-db/query": "^0.11.1"
   },
   "devDependencies": {
+    "@open-wc/testing": "^4.0.0",
+    "@remcovaes/web-test-runner-vite-plugin": "^1.2.2",
+    "@testing-library/react": "^16.3.0",
     "@types/deno": "^2.0.0",
     "@types/mocha": "^10.0.10",
-    "@open-wc/testing": "^4.0.0",
-    "@web/dev-server-esbuild": "^1.0.4",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.4.1",
     "@web/test-runner": "^0.20.1",
     "c8": "8.0.1",
     "mocha": "^11.2.2",
-    "ts-mocha": "^11.1.0",
     "prettier": "3.1.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "ts-mocha": "^11.1.0",
     "typescript": "^5.7.3"
   },
   "prettier": {
