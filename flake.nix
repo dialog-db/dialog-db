@@ -174,7 +174,7 @@
 
             src = ./typescript/dialog-experimental/.;
 
-            npmDepsHash = "sha256-ybheDb38keqG+sP4Fxc+6LDnP/hkTTSFNvny05O6mvs=";
+            npmDepsHash = "sha256-/RpeFx73t6/12WNiTYZUjLDLzlZ3cRhwb0ojJ6txJEM=";
 
             nativeBuildInputs = common-build-inputs "stable" ++ [
               playwright-driver
