@@ -1,45 +1,45 @@
 import { Artifacts, Query, fact, Task } from './self.js'
-import type { Suite } from 'entail'
+import { assert } from "@open-wc/testing";
 
-export const testLib: Suite = {
-  'test imports': async (assert) => {
+describe("experimental", () => {
+  it("imports the module", () => {
     assert.equal(typeof Artifacts, 'object')
     assert.equal(typeof Query, 'object')
-  },
-  'test basics': (assert) =>
-    Task.spawn(function* () {
-      const Counter = fact({
-        name: String,
-        value: Number,
-      })
+  })
 
-      const db = yield* Artifacts.open({ name: 'test' })
+  it("can perform basic transactions", async () => Task.spawn(function* () {
+    const Counter = fact({
+      name: String,
+      value: Number,
+    })
 
-      yield* db.transact([...Counter.assert({ name: 'test', value: 0 })])
+    const db = yield* Artifacts.open({ name: 'test' })
 
-      const results = yield* Counter().query({ from: db })
+    yield* db.transact([...Counter.assert({ name: 'test', value: 0 })])
 
-      assert.deepEqual(results, [Counter.assert({ name: 'test', value: 0 })])
+    const results = yield* Counter().query({ from: db })
 
-      yield* db.transact([...Counter.assert({ name: 'test', value: 5 })])
+    assert.deepEqual(results, [Counter.assert({ name: 'test', value: 0 })])
 
-      assert.deepEqual(
-        yield* Counter().query({ from: db }),
-        [
-          Counter.assert({ name: 'test', value: 0 }),
-          Counter.assert({ name: 'test', value: 5 }),
-        ],
-        'returns both facts'
-      )
+    yield* db.transact([...Counter.assert({ name: 'test', value: 5 })])
 
-      yield* db.transact([
-        ...Counter.assert({ name: 'test', value: 0 }).retract(),
-      ])
+    assert.deepEqual(
+      yield* Counter().query({ from: db }),
+      [
+        Counter.assert({ name: 'test', value: 0 }),
+        Counter.assert({ name: 'test', value: 5 }),
+      ],
+      'returns both facts'
+    )
 
-      assert.deepEqual(
-        yield* Counter().query({ from: db }),
-        [Counter.assert({ name: 'test', value: 5 })],
-        'one fact was retracted'
-      )
-    }),
-}
+    yield* db.transact([
+      ...Counter.assert({ name: 'test', value: 0 }).retract(),
+    ])
+
+    assert.deepEqual(
+      yield* Counter().query({ from: db }),
+      [Counter.assert({ name: 'test', value: 5 })],
+      'one fact was retracted'
+    )
+  }))
+})

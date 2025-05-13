@@ -1,11 +1,11 @@
 import { Artifacts, Query, fact, Task } from './self.js'
 import { useQuery, Provider } from '@dialog-db/experimental/react'
-import type { Suite } from 'entail'
-import { createElement, useState } from 'react'
+import { createElement } from 'react'
 import { act, render, renderHook } from '@testing-library/react'
+import { assert } from '@open-wc/testing'
 
-export const testReact: Suite = {
-  'test hook': async (assert) => {
+describe('react integration', () => {
+  it('test hook', async () => {
     const db = await Artifacts.open({ name: 'test-hook' })
     const Counter = fact({
       name: String,
@@ -21,9 +21,9 @@ export const testReact: Suite = {
     rerender()
 
     assert.deepEqual(result.current, [v1])
-  },
+  })
 
-  'test hook with provider': async (assert) => {
+  it('test hook with provider', async () => {
     const db = await Artifacts.open({ name: 'test-provider' })
     const Todo = fact({
       title: String,
@@ -68,5 +68,5 @@ export const testReact: Suite = {
       ['Buy Milk', 'Buy Bread'],
       'now it has two todo items'
     )
-  },
-}
+  })
+})

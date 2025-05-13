@@ -174,7 +174,7 @@
 
             src = ./typescript/dialog-experimental/.;
 
-            npmDepsHash = "sha256-VNX6zaCZZ24GSWo9pzbxcnC1fWreaX0VOsaSAGlcpgQ=";
+            npmDepsHash = "sha256-/RpeFx73t6/12WNiTYZUjLDLzlZ3cRhwb0ojJ6txJEM=";
 
             nativeBuildInputs = common-build-inputs "stable" ++ [
               playwright-driver
@@ -200,6 +200,7 @@
                 ./tsconfig.json \
                 ./package.json \
                 ./package-lock.json \
+                ./web-test-runner.config.mjs \
                 ./test $out/@dialog-db/experimental
             '';
 
