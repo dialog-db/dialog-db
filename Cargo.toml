@@ -1,3 +1,19 @@
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.wasm-release]
+opt-level = "s"
+debug = 0
+inherits = "release"
+strip = "debuginfo"
+
 [workspace]
 members = [
     "rust/dialog-artifacts",
@@ -6,7 +22,6 @@ members = [
     "rust/dialog-prolly-tree",
     "rust/dialog-storage",
 ]
-
 resolver = "2"
 
 [workspace.package]
@@ -15,11 +30,6 @@ authors = ["The Meiosys Project Authors"]
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-dialog-common = { path = "./rust/dialog-common" }
-dialog-prolly-tree = { path = "./rust/dialog-prolly-tree" }
-dialog-storage = { path = "./rust/dialog-storage" }
-dialog-artifacts = { path = "./rust/dialog-artifacts" }
-
 anyhow = "1"
 arrayref = "0.3"
 async-stream = "0.3"
@@ -27,12 +37,17 @@ async-trait = "0.1"
 base58 = "0.2"
 blake3 = "1"
 brotli = "8"
+console_error_panic_hook = "0.1"
+csv-async = { version = "1", features = ["tokio"] }
 ed25519-dalek = "2"
 futures-core = "0.3"
 futures-util = "0.3"
 getrandom = "0.3"
 js-sys = "0.3"
 leb128 = "0.2"
+leptos = "0.8"
+leptos_meta = "0.8"
+leptos_router = "0.8"
 nonempty = "0.11"
 ptree = "0.5"
 rand = "0.9"
@@ -42,6 +57,7 @@ rkyv = "0.8"
 serde = "1"
 serde-big-array = "0.5"
 serde_ipld_dagcbor = "0.6"
+serde_json = "1"
 sieve-cache = "0.2"
 static_assertions = "1"
 tempfile = "3"
@@ -53,19 +69,18 @@ wasm-bindgen-futures = "0.4"
 wasm-bindgen-test = "0.3"
 web-sys = "0.3"
 
+[workspace.dependencies.dialog-artifacts]
+path = "./rust/dialog-artifacts"
 
-[profile.dev]
-opt-level = 1
+[workspace.dependencies.dialog-common]
+path = "./rust/dialog-common"
 
-[profile.dev.package."*"]
-opt-level = 3
+[workspace.dependencies.dialog-prolly-tree]
+path = "./rust/dialog-prolly-tree"
 
-[profile.release]
-codegen-units = 1
-lto = "thin"
+[workspace.dependencies.dialog-storage]
+path = "./rust/dialog-storage"
 
-[profile.wasm-release]
-inherits = "release"
-debug = false
-opt-level = "s"
-strip = "debuginfo"
+[patch.crates-io]
+# TODO: https://github.com/gwierzchowski/csv-async/issues/27
+csv-async = { git = "https://github.com/cdata/csv-async.git" }

@@ -1,16 +1,32 @@
+use std::fmt::Display;
+
+use base58::ToBase58;
+use serde::{Deserialize, Serialize};
+
 use crate::{AttributeKey, DialogArtifactsError, EntityKey, ValueDatum};
 
 use super::{Attribute, Cause, Entity, Value};
 
 /// A [`Artifact`] embodies a datum - a semantic triple - that may be stored in or
 /// retrieved from a [`ArtifactStore`].
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Artifact {
     /// The [`Attribute`] of the [`Artifact`]; the predicate of the triple
     pub the: Attribute,
     /// The [`Entity`] of the [`Artifact`]; the subject of the triple
+    #[serde(
+        serialize_with = "crate::artifacts::entity::to_utf8",
+        deserialize_with = "crate::artifacts::entity::from_utf8"
+    )]
     pub of: Entity,
     /// The [`Value`] of the [`Artifact`]; the object of the triple
+    // TODO: This is in support of Artifacts<->CSV but we probably want
+    // different (de)serialization for Artifacts<->JSON (assuming we ever
+    // want that.
+    #[serde(
+        serialize_with = "crate::artifacts::value::to_utf8",
+        deserialize_with = "crate::artifacts::value::from_utf8"
+    )]
     pub is: Value,
     /// The [`Cause`] of the [`Artifact`], which is a reference to an ancester
     /// version with a different [`Value`].
@@ -27,6 +43,16 @@ impl Artifact {
             cause,
             ..self
         }
+    }
+}
+
+impl Display for Artifact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let attribute = self.the.to_string();
+        let entity = format!("{}...", &self.of.as_ref().to_base58()[0..3]);
+        let value = self.is.to_utf8();
+
+        write!(f, "Artifact: the '{attribute}' of '{entity}' is '{value}'")
     }
 }
 

@@ -73,8 +73,8 @@ impl MatchCandidate for Entry<AttributeKey, State<ValueDatum>> {
 impl MatchCandidate for Entry<ValueKey, State<EntityDatum>> {
     fn matches_selector(&self, selector: &ArtifactSelector<Constrained>) -> bool {
         if let Some(entity) = selector.entity() {
-            if let State::Added(entry_value) = &self.value {
-                if entity.as_ref() != entry_value.entity {
+            if let State::Added(_) = &self.value {
+                if entity.as_ref() != self.key.entity().raw() {
                     return false;
                 }
             }

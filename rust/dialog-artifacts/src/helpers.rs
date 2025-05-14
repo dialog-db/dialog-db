@@ -10,6 +10,7 @@ use rand_chacha::ChaCha8Rng;
 pub fn generate_data(entity_count: usize) -> Result<Vec<Artifact>> {
     let item_id_attribute = Attribute::from_str("item/id")?;
     let item_name_attribute = Attribute::from_str("item/name")?;
+    let item_pointer_attribute = Attribute::from_str("attribute/pointer")?;
     let back_reference_attribute = Attribute::from_str("back/reference")?;
     let parent_attribute = Attribute::from_str("relationship/parentOf")?;
 
@@ -20,6 +21,13 @@ pub fn generate_data(entity_count: usize) -> Result<Vec<Artifact>> {
 
     for i in 0..entity_count {
         let entity = make_entity();
+
+        data.push(Artifact {
+            the: item_pointer_attribute.clone(),
+            of: entity.clone(),
+            is: Value::Symbol(parent_attribute.clone()),
+            cause: None,
+        });
 
         data.push(Artifact {
             the: item_id_attribute.clone(),
