@@ -1,10 +1,23 @@
 import type { Predicate, FactSchema } from '@dialog-db/query'
-import { useEffect, useState, useContext, createContext } from 'react'
-import { type Source } from './artifacts.js'
+import { useEffect, useState, useContext, createContext, useMemo } from 'react'
+import type { Session, Changes, DID, Revision } from './artifacts.js'
+import { open } from './artifacts.js'
 
-const QueryContext = createContext<Source | null>(null)
+const DialogContext = createContext<DID | null>(null)
 
-export const { Provider } = QueryContext
+/**
+ * Provider that can be used to bind a dialog db instance.
+ */
+export const { Provider } = DialogContext
+
+/**
+ * React hook that can be called at the top level of your component to obtain
+ * dialog session that was set using exported provider.
+ */
+export const useSession = () => {
+  const did = useContext(DialogContext)
+  return useMemo(() => (did ? open(did) : null), [did])
+}
 
 /**
  * @param predicate - Predicate hook will react to.
@@ -30,15 +43,33 @@ export const { Provider } = QueryContext
  */
 export const useQuery = <Fact>(
   predicate: Predicate<Fact, string, FactSchema>,
-  source?: Source
+  source?: Session
 ) => {
-  const [facts, setFacts] = useState([] as Fact[])
-  const artifacts = source ?? useContext(QueryContext)
+  const [selection, resetSelection] = useState([] as Fact[])
+  const session = source ?? useSession()
 
   useEffect(() => {
-    if (artifacts) {
-      artifacts.subscribe(predicate, setFacts).cancel
+    if (session) {
+      session.subscribe(predicate, resetSelection).cancel
     }
-  }, [artifacts])
-  return facts
+  }, [session])
+  return selection
 }
+
+/**
+ * React hook that can be used from the react component in order to obtain
+ * {@link transact} function pre-bound to the dialog session linked from the
+ * {@link Provider}.
+ */
+export const useTransaction = () => {
+  const session = useSession()
+
+  return (changes: Changes) => transact(changes, session!)
+}
+
+/**
+ * Transacts all of the assertions and retractions atomically in the provided
+ * dialog session.
+ */
+export const transact = (changes: Changes, session: Session) =>
+  session.transact(changes)

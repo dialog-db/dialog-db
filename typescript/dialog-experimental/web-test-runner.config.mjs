@@ -1,6 +1,11 @@
-import { esbuildPlugin } from '@web/dev-server-esbuild';
+import { vitePlugin } from '@remcovaes/web-test-runner-vite-plugin'
+import react from '@vitejs/plugin-react'
 
 export default {
-    plugins: [esbuildPlugin({ ts: true })],
-    testsFinishTimeout: 10000
-};
+  plugins: [
+    vitePlugin({
+      plugins: [react()],
+    }),
+  ],
+  testsFinishTimeout: 10000,
+}
