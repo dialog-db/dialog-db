@@ -32,6 +32,7 @@ use std::{pin::Pin, sync::Arc};
 use base58::{FromBase58, ToBase58};
 use dialog_storage::{IndexedDbStorageBackend, StorageCache, web::ObjectSafeStorageBackend};
 use futures_util::{Stream, StreamExt};
+use rand::{Rng, distr::Alphanumeric};
 use tokio::sync::{Mutex, RwLock};
 use wasm_bindgen::{convert::TryFromJsValue, prelude::*};
 use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
@@ -186,6 +187,22 @@ pub struct ArtifactsBinding {
 
 #[wasm_bindgen(js_class = "Artifacts")]
 impl ArtifactsBinding {
+    #[wasm_bindgen]
+    pub async fn anonymous() -> Result<Self, JsError> {
+        let identifier = rand::rng()
+            .sample_iter(&Alphanumeric)
+            .take(32)
+            .map(char::from)
+            .collect();
+
+        Self::open(identifier).await
+    }
+
+    #[wasm_bindgen]
+    pub async fn identifier(&self) -> String {
+        self.artifacts.read().await.identifier().to_owned()
+    }
+
     /// Construct a new `Artifacts`, backed by a database. If the same name is
     /// used for multiple instances (or across sessions), the same database will
     /// be used.
@@ -198,12 +215,9 @@ impl ArtifactsBinding {
     /// stored in it).
     // TODO: Support well-known hash for "empty" database
     #[wasm_bindgen]
-    pub async fn open(
-        #[wasm_bindgen(js_name = "dbName")] db_name: &str,
-        revision: Option<Vec<u8>>,
-    ) -> Result<Self, JsError> {
+    pub async fn open(identifier: String) -> Result<Self, JsError> {
         let storage_backend = StorageCache::new(
-            IndexedDbStorageBackend::new(db_name, "dialog-artifact-blocks")
+            IndexedDbStorageBackend::new(&identifier, "dialog-artifact-blocks")
                 .await
                 .map_err(|error| DialogArtifactsError::from(error))?,
             STORAGE_CACHE_CAPACITY,
@@ -212,12 +226,7 @@ impl ArtifactsBinding {
 
         // Erase the type:
         let storage_backend: WebStorageBackend = Arc::new(Mutex::new(storage_backend));
-
-        let artifacts = if let Some(revision) = revision {
-            Artifacts::restore(Revision::try_from(revision)?, storage_backend).await?
-        } else {
-            Artifacts::new(storage_backend)
-        };
+        let artifacts = Artifacts::open(identifier.to_owned(), storage_backend).await?;
 
         Ok(Self {
             artifacts: Arc::new(RwLock::new(artifacts)),
@@ -229,13 +238,15 @@ impl ArtifactsBinding {
     /// suitable for use with `Artifacts.restore`, for example when re-opening
     /// the triple store on future sessions.
     #[wasm_bindgen]
-    pub async fn revision(&self) -> Option<Vec<u8>> {
-        self.artifacts
+    pub async fn revision(&self) -> Result<Vec<u8>, JsError> {
+        Ok(self
+            .artifacts
             .read()
             .await
             .revision()
             .await
-            .map(|revision| revision.into())
+            .as_cbor()
+            .await?)
     }
 
     /// Persist a set of data in the triple store. The returned prommise

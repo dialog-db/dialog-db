@@ -19,7 +19,7 @@ pub enum DialogArtifactsError {
 
     /// Raw bytes could not be interpreted as a version
     #[error("Could not convert bytes into version: {0}")]
-    InvalidVersion(String),
+    InvalidRevision(String),
 
     /// Raw bytes could not be interpreted as a database index key
     #[error("Could not convert bytes into key: {0}")]

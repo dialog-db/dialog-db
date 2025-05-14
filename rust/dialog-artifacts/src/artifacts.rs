@@ -3,6 +3,7 @@ mod artifact;
 pub use artifact::*;
 
 mod revision;
+use rand::{Rng, distr::Alphanumeric};
 pub use revision::*;
 
 mod instruction;
@@ -33,7 +34,9 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_prolly_tree::{Entry, GeometricDistribution, Tree};
-use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Storage, StorageBackend};
+use dialog_storage::{
+    Blake3Hash, CborEncoder, DialogStorageError, Encoder, Storage, StorageBackend,
+};
 use futures_util::{Stream, StreamExt};
 use std::{ops::Range, sync::Arc};
 use tokio::sync::RwLock;
@@ -46,7 +49,7 @@ use async_stream::stream;
 
 use crate::{
     AttributeKey, BRANCH_FACTOR, DialogArtifactsError, EntityDatum, EntityKey, HASH_SIZE, State,
-    ValueDatum, ValueKey, ValueReferenceKeyPart, artifacts::selector::Constrained,
+    ValueDatum, ValueKey, ValueReferenceKeyPart, artifacts::selector::Constrained, make_reference,
 };
 
 /// An alias type that describes the [`Tree`]-based prolly tree that is
@@ -80,6 +83,8 @@ where
         + ConditionalSync
         + 'static,
 {
+    identifier: String,
+    storage: Storage<HASH_SIZE, CborEncoder, Backend>,
     entity_index: Arc<RwLock<Index<EntityKey, ValueDatum, Backend>>>,
     attribute_index: Arc<RwLock<Index<AttributeKey, ValueDatum, Backend>>>,
     value_index: Arc<RwLock<Index<ValueKey, EntityDatum, Backend>>>,
@@ -91,22 +96,58 @@ where
         + ConditionalSync
         + 'static,
 {
+    /// The name used to uniquely identify the data of this [`Artifacts`]
+    /// instance
+    pub fn identifier(&self) -> &str {
+        &self.identifier
+    }
+
     /// Initialize a new [`Artifacts`] with the provided [`StorageBackend`].
-    pub fn new(backend: Backend) -> Self {
-        Self {
-            entity_index: Arc::new(RwLock::new(Tree::new(Storage {
-                encoder: CborEncoder,
-                backend: backend.clone(),
-            }))),
-            attribute_index: Arc::new(RwLock::new(Tree::new(Storage {
-                encoder: CborEncoder,
-                backend: backend.clone(),
-            }))),
-            value_index: Arc::new(RwLock::new(Tree::new(Storage {
-                encoder: CborEncoder,
-                backend: backend.clone(),
-            }))),
-        }
+    pub async fn open(identifier: String, backend: Backend) -> Result<Self, DialogArtifactsError> {
+        let storage = Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        };
+
+        // TODO: We probably want to enforce some namespacing within storage so
+        // that generic K/V storage can go e.g., in a different IDB store or a
+        // different folder on the FS
+        let (entity_index, attribute_index, value_index) =
+            if let Some(revision) = storage.get(&make_reference(identifier.as_bytes())).await? {
+                let revision = CborEncoder.decode::<Revision>(&revision).await?;
+
+                tokio::try_join!(
+                    Tree::from_hash(revision.entity_index(), storage.clone()),
+                    Tree::from_hash(revision.attribute_index(), storage.clone()),
+                    Tree::from_hash(revision.value_index(), storage.clone())
+                )?
+            } else {
+                (
+                    Tree::new(storage.clone()),
+                    Tree::new(storage.clone()),
+                    Tree::new(storage.clone()),
+                )
+            };
+
+        Ok(Self {
+            identifier,
+            storage,
+            entity_index: Arc::new(RwLock::new(entity_index)),
+            attribute_index: Arc::new(RwLock::new(attribute_index)),
+            value_index: Arc::new(RwLock::new(value_index)),
+        })
+    }
+
+    /// Initialize a new, empty [`Artifacts`] with a randomly generated
+    /// identifier
+    pub async fn anonymous(backend: Backend) -> Result<Self, DialogArtifactsError> {
+        let identifier = rand::rng()
+            .sample_iter(&Alphanumeric)
+            .take(32)
+            .map(char::from)
+            .collect();
+
+        Self::open(identifier, backend).await
     }
 
     #[cfg(feature = "csv")]
@@ -166,37 +207,8 @@ where
         Ok(())
     }
 
-    /// Attempt to initialize the [`Artifacts`] at a specific [`Version`].
-    pub async fn restore(
-        version: Revision,
-        backend: Backend,
-    ) -> Result<Self, DialogArtifactsError> {
-        let storage = Storage {
-            encoder: CborEncoder,
-            backend,
-        };
-
-        let (entity_index, attribute_index, value_index) = tokio::try_join!(
-            Tree::from_hash(version.entity(), storage.clone()),
-            Tree::from_hash(version.attribute(), storage.clone()),
-            Tree::from_hash(version.value(), storage)
-        )?;
-
-        Ok(Self {
-            entity_index: Arc::new(RwLock::new(
-                entity_index as Index<EntityKey, ValueDatum, Backend>,
-            )),
-            attribute_index: Arc::new(RwLock::new(
-                attribute_index as Index<AttributeKey, ValueDatum, Backend>,
-            )),
-            value_index: Arc::new(RwLock::new(
-                value_index as Index<ValueKey, EntityDatum, Backend>,
-            )),
-        })
-    }
-
     /// Get the hash that represents the [`ArtifactStore`] at its current version.
-    pub async fn revision(&self) -> Option<Revision> {
+    pub async fn revision(&self) -> Revision {
         let (entity_index, attribute_index, value_index) = tokio::join!(
             self.entity_index.read(),
             self.attribute_index.read(),
@@ -209,29 +221,33 @@ where
             value_index.hash(),
         ) {
             (Some(entity_version), Some(attribute_version), Some(value_version)) => {
-                Some(Revision::from((
+                Revision::from((
                     entity_version.to_owned(),
                     attribute_version.to_owned(),
                     value_version.to_owned(),
-                )))
+                ))
             }
-            _ => None,
+            _ => NULL_REVISION.clone(),
         }
     }
 
-    pub(crate) async fn reset(
-        &self,
-        revision: Option<Revision>,
-    ) -> Result<(), DialogArtifactsError> {
+    pub(crate) async fn reset(&mut self, revision: Revision) -> Result<(), DialogArtifactsError> {
         let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
             self.entity_index.write(),
             self.attribute_index.write(),
             self.value_index.write()
         );
 
-        let entity_index_hash = revision.as_ref().map(|revision| *revision.entity());
-        let attribute_index_hash = revision.as_ref().map(|revision| *revision.attribute());
-        let value_index_hash = revision.as_ref().map(|revision| *revision.value());
+        self.storage
+            .set(
+                make_reference(self.identifier.as_bytes()),
+                CborEncoder.encode(&revision).await?.1,
+            )
+            .await?;
+
+        let entity_index_hash = Some(revision.entity_index().to_owned());
+        let attribute_index_hash = Some(revision.attribute_index().to_owned());
+        let value_index_hash = Some(revision.value_index().to_owned());
 
         tokio::try_join!(
             entity_index.set_hash(entity_index_hash),
@@ -364,7 +380,7 @@ where
     async fn commit<Instructions>(
         &mut self,
         instructions: Instructions,
-    ) -> Result<(), DialogArtifactsError>
+    ) -> Result<Revision, DialogArtifactsError>
     where
         Instructions: Stream<Item = Instruction> + ConditionalSend,
     {
@@ -422,16 +438,36 @@ where
                 }
             }
 
-            Ok(()) as Result<(), DialogArtifactsError>
+            let next_revision = match (
+                entity_index.hash(),
+                attribute_index.hash(),
+                value_index.hash(),
+            ) {
+                (Some(entity_index), Some(attribute_index), Some(value_index)) => {
+                    Revision::from((*entity_index, *attribute_index, *value_index))
+                }
+                _ => NULL_REVISION.clone(),
+            };
+
+            // Advance the effective pointer to the latest version of this DB
+            self.storage
+                .set(
+                    make_reference(self.identifier.as_bytes()),
+                    CborEncoder.encode(&next_revision).await?.1,
+                )
+                .await?;
+
+            Ok(next_revision) as Result<Revision, DialogArtifactsError>
         }
         .await;
 
-        if transaction_result.is_err() {
-            // Rollback
-            self.reset(base_revision).await?;
+        match transaction_result {
+            Ok(revision) => Ok(revision),
+            Err(error) => {
+                self.reset(base_revision).await?;
+                Err(error)
+            }
         }
-
-        transaction_result
     }
 }
 
@@ -459,7 +495,7 @@ mod tests {
     async fn it_commits_and_selects_facts() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let entity_order = |l: &Artifact, r: &Artifact| l.of.cmp(&r.of);
-        let mut facts = Artifacts::new(storage_backend);
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
 
         let mut data = vec![
             Artifact {
@@ -498,7 +534,7 @@ mod tests {
     async fn it_pins_a_stream_at_the_version_where_iteration_begins() -> Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let data = generate_data(5)?;
-        let mut artifacts = Artifacts::new(storage_backend.clone());
+        let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
 
         let entities = data
             .iter()
@@ -534,7 +570,7 @@ mod tests {
         let (csv, expected_ids, expected_revision) = {
             let storage_backend = MemoryStorageBackend::default();
             let data = generate_data(1)?;
-            let mut artifacts = Artifacts::new(storage_backend.clone());
+            let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
 
             artifacts
                 .commit(data.into_iter().map(Instruction::Assert))
@@ -548,12 +584,12 @@ mod tests {
 
             let mut csv = tokio::io::BufWriter::new(Vec::<u8>::new());
             artifacts.export(&mut csv).await?;
-            (csv.into_inner(), ids, artifacts.revision().await.unwrap())
+            (csv.into_inner(), ids, artifacts.revision().await)
         };
 
         println!("{}", String::from_utf8(csv.clone())?);
 
-        let mut artifacts = Artifacts::new(MemoryStorageBackend::default());
+        let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
 
         artifacts
             .import(&mut tokio::io::BufReader::new(csv.as_ref()))
@@ -566,7 +602,7 @@ mod tests {
             .await;
 
         assert_eq!(expected_ids, actual_ids);
-        assert_eq!(expected_revision, artifacts.revision().await.unwrap());
+        assert_eq!(expected_revision, artifacts.revision().await);
 
         Ok(())
     }
@@ -586,7 +622,7 @@ mod tests {
             .of
             .clone();
 
-        let mut facts = Artifacts::new(storage_backend.clone());
+        let mut facts = Artifacts::anonymous(storage_backend.clone()).await?;
 
         facts
             .commit(data.into_iter().map(Instruction::Assert))
@@ -640,7 +676,7 @@ mod tests {
             .of
             .clone();
 
-        let mut facts = Artifacts::new(storage_backend.clone());
+        let mut facts = Artifacts::anonymous(storage_backend.clone()).await?;
 
         facts
             .commit(data.into_iter().map(Instruction::Assert))
@@ -691,7 +727,7 @@ mod tests {
 
         let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
 
-        let mut facts = Artifacts::new(storage_backend.clone());
+        let mut facts = Artifacts::anonymous(storage_backend.clone()).await?;
 
         facts.commit(data).await?;
 
@@ -752,7 +788,7 @@ mod tests {
             })
             .map(Instruction::Assert);
 
-        let mut artifacts = Artifacts::new(storage_backend.clone());
+        let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
         artifacts.commit(data).await?;
 
         let results = artifacts
@@ -782,7 +818,7 @@ mod tests {
             })
             .map(Instruction::Assert);
 
-        let mut artifacts = Artifacts::new(storage_backend.clone());
+        let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
         artifacts.commit(data).await?;
 
         let data = generate_data(32)?.into_iter().map(Instruction::Assert);
@@ -817,11 +853,11 @@ mod tests {
 
         let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
 
-        let mut facts_one = Artifacts::new(storage_backend.clone());
+        let mut facts_one = Artifacts::anonymous(storage_backend.clone()).await?;
 
         facts_one.commit(data).await?;
 
-        let mut facts_two = Artifacts::new(storage_backend.clone());
+        let mut facts_two = Artifacts::anonymous(storage_backend.clone()).await?;
 
         facts_two.commit(reordered_data).await?;
 
@@ -838,13 +874,14 @@ mod tests {
         let into_assert = |fact: Artifact| Instruction::Assert(fact);
         let storage_backend = Arc::new(Mutex::new(storage_backend));
 
-        let mut facts = Artifacts::new(storage_backend.clone());
+        let mut facts = Artifacts::anonymous(storage_backend.clone()).await?;
+        let id = facts.identifier().to_owned();
 
         facts.commit(data.into_iter().map(into_assert)).await?;
-        let revision = facts.revision().await.unwrap();
+        let revision = facts.revision().await;
 
-        let restored_facts = Artifacts::restore(revision.clone(), storage_backend).await?;
-        let restored_revision = restored_facts.revision().await.unwrap();
+        let restored_facts = Artifacts::open(id, storage_backend).await?;
+        let restored_revision = restored_facts.revision().await;
 
         assert_eq!(revision, restored_revision);
 
@@ -869,7 +906,7 @@ mod tests {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let storage_backend = Arc::new(Mutex::new(storage_backend));
 
-        let mut artifacts = Artifacts::new(storage_backend.clone());
+        let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
 
         let attribute = Attribute::from_str("test/attribute")?;
         let entity = Entity::new();
