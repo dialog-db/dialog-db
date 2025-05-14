@@ -71,11 +71,11 @@ describe('artifacts', () => {
     }
 
     it('can restore from a revision', async () => {
-        let artifacts = await Artifacts.open("test");
+        let artifacts = await Artifacts.anonymous();
         let entityMap = await populateWithHackers(artifacts);
-        let revision = await artifacts.revision();
+        let identifier = await artifacts.identifier();
 
-        let restored_artifacts = await Artifacts.open("test", revision);
+        let restored_artifacts = await Artifacts.open(identifier);
 
         let query = restored_artifacts.select({
             the: "profile/handle"
@@ -94,7 +94,7 @@ describe('artifacts', () => {
     });
 
     it('throws for invalid entities', async () => {
-        let artifacts = await Artifacts.open("test");
+        let artifacts = await Artifacts.anonymous();
 
         await populateWithHackers(artifacts);
 
@@ -110,7 +110,7 @@ describe('artifacts', () => {
     });
 
     it('can store an artifacts and select them again', async () => {
-        let artifacts = await Artifacts.open("test");
+        let artifacts = await Artifacts.anonymous();
         let entityMap = await populateWithHackers(artifacts);
 
         let query = artifacts.select({
@@ -130,7 +130,7 @@ describe('artifacts', () => {
     });
 
     it('can update an artifact and record a causal reference', async () => {
-        let artifacts = await Artifacts.open("test");
+        let artifacts = await Artifacts.anonymous();
         let entityMap = await populateWithHackers(artifacts);
 
         let query = artifacts.select({
@@ -182,7 +182,7 @@ describe('artifacts', () => {
     });
 
     it('can use a query result multiple times', async () => {
-        let artifacts = await Artifacts.open("test");
+        let artifacts = await Artifacts.anonymous();
         let entityMap = await populateWithHackers(artifacts);
 
         let query = artifacts.select({
@@ -236,7 +236,7 @@ describe('artifacts', () => {
     });
 
     it('pins an iterator at the version where iteration began', async () => {
-        let artifacts = await Artifacts.open("test");
+        let artifacts = await Artifacts.anonymous();
         let entityMap = await populateWithHackers(artifacts);
 
         let query = artifacts.select({
