@@ -6,6 +6,8 @@ use crate::{
     Artifact, ArtifactSelector, DialogArtifactsError, Instruction, artifacts::selector::Constrained,
 };
 
+use super::Revision;
+
 /// A trait that may be implemented by anything that is capable of querying
 /// [`Artifact`]s.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -36,7 +38,7 @@ pub trait ArtifactStoreMut: ArtifactStore {
     async fn commit<Instructions>(
         &mut self,
         instructions: Instructions,
-    ) -> Result<(), DialogArtifactsError>
+    ) -> Result<Revision, DialogArtifactsError>
     where
         Instructions: Stream<Item = Instruction> + ConditionalSend;
 }
@@ -52,7 +54,7 @@ pub trait ArtifactStoreMutExt: ArtifactStoreMut {
     async fn commit<Instructions>(
         &mut self,
         instructions: Instructions,
-    ) -> Result<(), DialogArtifactsError>
+    ) -> Result<Revision, DialogArtifactsError>
     where
         Instructions: IntoIterator<Item = Instruction> + ConditionalSend,
         Instructions::IntoIter: ConditionalSend,

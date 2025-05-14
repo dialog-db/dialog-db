@@ -61,7 +61,7 @@ class ArtifactsStore implements Querier, Transactor {
     }
 
     const instance = yield* Task.wait(
-      Artifacts.open(address.name, address.revision)
+      Artifacts.open(address.name)
     )
     const revision = yield* Task.wait(instance.revision())
 
