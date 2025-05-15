@@ -18,6 +18,14 @@ interface HackerProfile {
     handle: string
 }
 
+const collect = async (selection: ArtifactIterable) => {
+    const results = [];
+    for await (const result of selection) {
+        results.push(result);
+    }
+    return results;
+};
+
 describe('artifacts', () => {
     const populateWithHackers = async (artifacts: Artifacts): Promise<Map<string, HackerProfile>> => {
         const hackers = [
