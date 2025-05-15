@@ -1,5 +1,15 @@
-import init, { Artifacts, generateEntity, encode, Entity, InstructionType, ValueDataType, Artifact, ArtifactApi } from "./dialog-artifacts";
-import { assert, expect } from "@open-wc/testing";
+import init, {
+    Artifacts,
+    generateEntity,
+    encode,
+    Entity,
+    InstructionType,
+    ValueDataType,
+    Artifact,
+    ArtifactApi,
+    type ArtifactIterable
+} from './dialog-artifacts';
+import { assert, expect } from '@open-wc/testing';
 
 await init();
 
@@ -7,6 +17,14 @@ interface HackerProfile {
     name: string,
     handle: string
 }
+
+const collect = async (selection: ArtifactIterable) => {
+    const results = [];
+    for await (const result of selection) {
+        results.push(result);
+    }
+    return results;
+};
 
 describe('artifacts', () => {
     const populateWithHackers = async (artifacts: Artifacts): Promise<Map<string, HackerProfile>> => {
@@ -258,4 +276,175 @@ describe('artifacts', () => {
         expect(count).to.be.eql(5);
     });
 
+    it('assert then retract', async () => {
+        let artifacts = await Artifacts.anonymous();
+        let e1 = generateEntity();
+        await artifacts.commit([
+            {
+                type: InstructionType.Assert,
+                artifact: {
+                    the: 'counter/count',
+                    of: e1,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 0
+                    }
+                }
+            }
+        ]);
+
+        let v1 = await collect(
+            artifacts.select({
+                the: 'counter/count'
+            })
+        );
+        assert.deepEqual(
+            v1.map(({ the, of, is }) => ({ the, of, is })),
+            [
+                {
+                    the: 'counter/count',
+                    of: e1,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 0
+                    }
+                }
+            ]
+        );
+
+        let e2 = generateEntity();
+        await artifacts.commit([
+            {
+                type: InstructionType.Assert,
+                artifact: {
+                    the: 'counter/count',
+                    of: e2,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 5
+                    }
+                }
+            }
+        ]);
+
+        let v2 = await collect(
+            artifacts.select({
+                the: 'counter/count'
+            })
+        );
+        assert.deepEqual(
+            v2.map(({ the, of, is }) => ({ the, of, is })).sort(),
+            [
+                {
+                    the: 'counter/count',
+                    of: e1,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 0
+                    }
+                },
+                {
+                    the: 'counter/count',
+                    of: e2,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 5
+                    }
+                }
+            ].sort()
+        );
+
+        await artifacts.commit([
+            {
+                type: InstructionType.Retract,
+                artifact: {
+                    the: 'counter/count',
+                    of: e1,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 0
+                    }
+                }
+            }
+        ]);
+
+        let v3 = await collect(
+            artifacts.select({
+                the: 'counter/count'
+            })
+        );
+
+        assert.deepEqual(
+            v3.map(({ the, of, is }) => ({ the, of, is })).sort(),
+            [
+                {
+                    the: 'counter/count',
+                    of: e2,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 5
+                    }
+                }
+            ],
+            'only one fact was retracted'
+        );
+    });
+
+    it('support cardinality many', async () => {
+        let artifacts = await Artifacts.anonymous();
+        let entity = generateEntity();
+        await artifacts.commit([
+            {
+                type: InstructionType.Assert,
+                artifact: {
+                    the: 'counter/count',
+                    of: entity,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 0
+                    }
+                }
+            },
+            {
+                type: InstructionType.Assert,
+                artifact: {
+                    the: 'counter/count',
+                    of: entity,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 2
+                    }
+                }
+            }
+        ]);
+
+        let query = artifacts.select({
+            of: entity,
+            the: 'counter/count'
+        });
+        const results = await collect(query);
+
+        assert.equal(results.length, 2);
+        assert.deepEqual(
+            results.map(({ the, of, is }) => ({ the, of, is })).sort(),
+            [
+                {
+                    the: 'counter/count',
+                    of: entity,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 0
+                    }
+                },
+                {
+                    the: 'counter/count',
+                    of: entity,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 2
+                    }
+                }
+            ].sort()
+        );
+    });
 });
