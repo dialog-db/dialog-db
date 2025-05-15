@@ -1,5 +1,15 @@
-import init, { Artifacts, generateEntity, encode, Entity, InstructionType, ValueDataType, Artifact, ArtifactApi } from "./dialog-artifacts";
-import { assert, expect } from "@open-wc/testing";
+import init, {
+    Artifacts,
+    generateEntity,
+    encode,
+    Entity,
+    InstructionType,
+    ValueDataType,
+    Artifact,
+    ArtifactApi,
+    type ArtifactIterable
+} from './dialog-artifacts';
+import { assert, expect } from '@open-wc/testing';
 
 await init();
 
@@ -258,4 +268,60 @@ describe('artifacts', () => {
         expect(count).to.be.eql(5);
     });
 
+    it('can retract one fact leaving the other', async () => {
+        let artifacts = await Artifacts.anonymous();
+        let entity = generateEntity();
+        artifacts.commit([
+            {
+                type: InstructionType.Assert,
+                artifact: {
+                    the: 'counter/count',
+                    of: entity,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 0
+                    }
+                }
+            },
+            {
+                type: InstructionType.Assert,
+                artifact: {
+                    the: 'counter/count',
+                    of: entity,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 2
+                    }
+                }
+            }
+        ]);
+
+        let query = artifacts.select({
+            of: entity,
+            the: 'counter/count'
+        });
+        const results = await collect(query);
+
+        assert.deepEqual(
+            results.map(({ the, of, is }) => ({ the, of, is })),
+            [
+                {
+                    the: 'counter/count',
+                    of: entity,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 0
+                    }
+                },
+                {
+                    the: 'counter/count',
+                    of: entity,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 2
+                    }
+                }
+            ]
+        );
+    });
 });
