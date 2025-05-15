@@ -262,7 +262,10 @@ export class DialogSession implements Session {
     }
 
     const connection = yield* this.connected(self)
+
+    // We reset database before we commit in because IDB could have being updated
     yield* Task.wait(connection.reset())
+
     const revision = toRevision(
       yield* Task.wait(connection.commit(transaction))
     )
@@ -322,10 +325,14 @@ export class DialogSession implements Session {
     return Task.perform(DialogSession.clear(this))
   }
 
-  async revision() {
-    await Task.perform(DialogSession.connected(this))
+  static *revision(self: DialogSession) {
+    const connection = yield* DialogSession.connected(self)
 
-    return toRevision(await this.#connection.open!.revision())
+    return toRevision(yield* Task.wait(connection.revision()))
+  }
+
+  revision() {
+    return Task.perform(DialogSession.revision(this))
   }
 
   static *clear(self: DialogSession) {

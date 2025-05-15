@@ -8,7 +8,7 @@ describe('experimental', () => {
     assert.equal(typeof Query, 'object')
   })
 
-  it.only('can perform basic transactions', async () =>
+  it('can perform basic transactions', async () =>
     Task.spawn(function* () {
       const db = Artifacts.open(alice)
       try {
@@ -71,6 +71,8 @@ describe('experimental', () => {
         [Counter.assert({ name: 'test', value: 15 })],
         'transacted state'
       )
+
+      await Task.perform(Task.sleep(100))
       assert.deepEqual(
         await Counter().query({ from: db }),
         [Counter.assert({ name: 'test', value: 15 })],

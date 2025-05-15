@@ -1,4 +1,4 @@
-import type { Predicate, FactSchema } from '@dialog-db/query'
+import { type Predicate, type FactSchema, Task } from '@dialog-db/query'
 import { useEffect, useState, useContext, createContext, useMemo } from 'react'
 import type { Session, Changes, DID, Revision } from './artifacts.js'
 import { open } from './artifacts.js'
@@ -41,16 +41,18 @@ export const useSession = () => {
  * }
  * ```
  */
-export const useQuery = <Fact>(
+export const useQuery = function useQuery<Fact>(
   predicate: Predicate<Fact, string, FactSchema>,
   source?: Session
-) => {
+) {
   const [selection, resetSelection] = useState([] as Fact[])
   const session = source ?? useSession()
 
   useEffect(() => {
     if (session) {
-      session.subscribe(predicate, resetSelection).cancel
+      const subscription = session.subscribe(predicate, resetSelection)
+      Task.perform(subscription.poll(session))
+      return subscription.cancel
     }
   }, [session])
   return selection

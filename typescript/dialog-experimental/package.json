@@ -7,8 +7,8 @@
   "scripts": {
     "build": "npm run compile",
     "prepublishOnly": "npm run compile",
-    "test:web": "wtr 'test/*.spec(.web).ts' --node-resolve",
-    "test:web:debug": "playwright-test 'test/*.spec(.web).ts' --assets src/artifacts --debug",
+    "test:web": "wtr 'test/*.spec(.web).(ts|tsx)' --node-resolve --concurrency 1",
+    "test:web:debug": "playwright-test 'test/*.spec(.web).(ts|tsx)' --assets src/artifacts --debug",
     "test:node": "ts-mocha -n loader=ts-node/esm -p ./tsconfig.json ./test/*.spec.ts",
     "test": "npm run test:node && npm run test:web",
     "coverage": "c8 entail dist/test/**/*.spec.ts",
@@ -58,7 +58,8 @@
     "prettier": "3.1.0",
     "react-dom": "19.1.0",
     "ts-mocha": "^11.1.0",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "playwright-test": "^14.1.9"
   },
   "prettier": {
     "trailingComma": "es5",
@@ -66,6 +67,6 @@
     "tabWidth": 2,
     "semi": false,
     "singleQuote": true,
-    "filepath": "**/*.ts"
+    "filepath": "**/*.(ts|tsx)"
   }
 }
