@@ -41,8 +41,8 @@ use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
     Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute, Cause,
-    DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Revision, Value,
-    ValueDataType, artifacts::selector::Constrained,
+    DEFAULT_BRANCH, DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Revision,
+    Value, ValueDataType, artifacts::selector::Constrained,
 };
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -214,17 +214,24 @@ impl ArtifactsBinding {
     /// be used.
     #[wasm_bindgen]
     pub async fn open(identifier: String) -> Result<Self, JsError> {
-        let storage_backend = StorageCache::new(
-            IndexedDbStorageBackend::new(&identifier, "dialog-artifact-blocks")
-                .await
-                .map_err(|error| DialogArtifactsError::from(error))?,
-            STORAGE_CACHE_CAPACITY,
-        )
-        .map_err(|error| DialogArtifactsError::from(error))?;
+        let (blocks, branches) = IndexedDbStorageBackend::new(&identifier)
+            .await
+            .map_err(|error| DialogArtifactsError::from(error))?;
 
         // Erase the type:
-        let storage_backend: WebStorageBackend = Arc::new(Mutex::new(storage_backend));
-        let artifacts = Artifacts::open(identifier.to_owned(), storage_backend).await?;
+        let blocks_backend: WebStorageBackend = Arc::new(Mutex::new(
+            StorageCache::new(blocks, STORAGE_CACHE_CAPACITY)
+                .map_err(|error| DialogArtifactsError::from(error))?,
+        ));
+        let branches_backend: WebStorageBackend = Arc::new(Mutex::new(branches));
+
+        let artifacts = Artifacts::open(
+            identifier.to_owned(),
+            DEFAULT_BRANCH.to_string(),
+            blocks_backend,
+            branches_backend,
+        )
+        .await?;
 
         Ok(Self {
             artifacts: Arc::new(RwLock::new(artifacts)),
@@ -271,6 +278,12 @@ impl ArtifactsBinding {
 
         let revision = self.artifacts.write().await.commit(iterator).await?;
 
+        Ok(revision.as_cbor().await?)
+    }
+
+    #[wasm_bindgen]
+    pub async fn head(&self) -> Result<Vec<u8>, JsError> {
+        let revision = self.artifacts.read().await.head().await?;
         Ok(revision.as_cbor().await?)
     }
 

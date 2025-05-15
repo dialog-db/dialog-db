@@ -10,6 +10,8 @@ use crate::{DialogStorageError, StorageSink};
 use super::StorageBackend;
 
 const INDEXEDDB_STORAGE_VERSION: u32 = 1;
+const BLOCK_STORE_NAME: &str = "dialog-artifact-blocks";
+const BRANCH_STORE_NAME: &str = "dialog-artifacts-branches";
 
 /// An IndexedDB-based [`StorageBackend`] implementation.
 #[derive(Clone)]
@@ -30,20 +32,48 @@ where
     Value: AsRef<[u8]> + From<Vec<u8>>,
 {
     /// Creates a new [`IndexedDbStorageBackend`].
-    pub async fn new(db_name: &str, store_name: &str) -> Result<Self, DialogStorageError> {
+    pub async fn store(db_name: &str, store_name: &str) -> Result<Self, DialogStorageError> {
         let db = RexieBuilder::new(db_name)
             .version(INDEXEDDB_STORAGE_VERSION)
-            .add_object_store(ObjectStore::new(store_name).auto_increment(false))
+            .add_object_store(ObjectStore::new(&BLOCK_STORE_NAME).auto_increment(false))
+            .add_object_store(ObjectStore::new(&BRANCH_STORE_NAME).auto_increment(false))
             .build()
             .await
             .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
 
         Ok(IndexedDbStorageBackend {
             db: Rc::new(db),
-            store_name: store_name.to_owned(),
+            store_name: store_name.to_string(),
             key_type: PhantomData,
             value_type: PhantomData,
         })
+    }
+
+    pub async fn new(db_name: &str) -> Result<(Self, Self), DialogStorageError> {
+        let db = Rc::new(
+            RexieBuilder::new(db_name)
+                .version(INDEXEDDB_STORAGE_VERSION)
+                .add_object_store(ObjectStore::new(&BLOCK_STORE_NAME).auto_increment(false))
+                .add_object_store(ObjectStore::new(&BRANCH_STORE_NAME).auto_increment(false))
+                .build()
+                .await
+                .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?,
+        );
+
+        Ok((
+            (IndexedDbStorageBackend {
+                db: db.clone(),
+                store_name: BLOCK_STORE_NAME.to_string(),
+                key_type: PhantomData,
+                value_type: PhantomData,
+            }),
+            (IndexedDbStorageBackend {
+                db: db.clone(),
+                store_name: BRANCH_STORE_NAME.to_string(),
+                key_type: PhantomData,
+                value_type: PhantomData,
+            }),
+        ))
     }
 }
 
