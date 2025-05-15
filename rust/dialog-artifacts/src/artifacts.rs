@@ -3,6 +3,7 @@ mod artifact;
 pub use artifact::*;
 
 mod revision;
+use base58::ToBase58;
 use rand::{Rng, distr::Alphanumeric};
 pub use revision::*;
 
@@ -35,7 +36,8 @@ use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_prolly_tree::{Entry, GeometricDistribution, Tree};
 use dialog_storage::{
-    Blake3Hash, CborEncoder, DialogStorageError, Encoder, Storage, StorageBackend,
+    Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, Storage,
+    StorageBackend,
 };
 use futures_util::{Stream, StreamExt};
 use std::{ops::Range, sync::Arc};
@@ -112,10 +114,24 @@ where
         // TODO: We probably want to enforce some namespacing within storage so
         // that generic K/V storage can go e.g., in a different IDB store or a
         // different folder on the FS
-        let (entity_index, attribute_index, value_index) =
-            if let Some(revision) = storage.get(&make_reference(identifier.as_bytes())).await? {
-                let revision = CborEncoder.decode::<Revision>(&revision).await?;
+        let (entity_index, attribute_index, value_index) = {
+            let revision = storage.get(&make_reference(identifier.as_bytes())).await?;
+            let revision = if let Some(revision) = revision {
+                storage
+                    .read::<Revision>(&Blake3Hash::try_from(revision).map_err(
+                        |bytes: Vec<u8>| {
+                            DialogArtifactsError::InvalidRevision(format!(
+                                "Incorrect byte length (expected {HASH_SIZE}, received {})",
+                                bytes.len()
+                            ))
+                        },
+                    )?)
+                    .await?
+            } else {
+                None
+            };
 
+            if let Some(revision) = revision {
                 tokio::try_join!(
                     Tree::from_hash(revision.entity_index(), storage.clone()),
                     Tree::from_hash(revision.attribute_index(), storage.clone()),
@@ -127,7 +143,8 @@ where
                     Tree::new(storage.clone()),
                     Tree::new(storage.clone()),
                 )
-            };
+            }
+        };
 
         Ok(Self {
             identifier,
@@ -208,35 +225,66 @@ where
     }
 
     /// Get the hash that represents the [`ArtifactStore`] at its current version.
-    pub async fn revision(&self) -> Revision {
+    pub async fn revision(&self) -> Result<Blake3Hash, DialogArtifactsError> {
         let (entity_index, attribute_index, value_index) = tokio::join!(
             self.entity_index.read(),
             self.attribute_index.read(),
             self.value_index.read()
         );
 
-        match (
-            entity_index.hash(),
-            attribute_index.hash(),
-            value_index.hash(),
-        ) {
-            (Some(entity_version), Some(attribute_version), Some(value_version)) => {
-                Revision::from((
-                    entity_version.to_owned(),
-                    attribute_version.to_owned(),
-                    value_version.to_owned(),
-                ))
-            }
-            _ => NULL_REVISION.clone(),
-        }
+        Ok(
+            match (
+                entity_index.hash(),
+                attribute_index.hash(),
+                value_index.hash(),
+            ) {
+                (Some(entity_version), Some(attribute_version), Some(value_version)) => {
+                    Revision::from((
+                        entity_version.to_owned(),
+                        attribute_version.to_owned(),
+                        value_version.to_owned(),
+                    ))
+                    .as_reference()
+                    .await?
+                }
+                _ => NULL_REVISION.as_reference().await?,
+            },
+        )
     }
 
-    pub(crate) async fn reset(&mut self, revision: Revision) -> Result<(), DialogArtifactsError> {
+    /// Reset the root of the database to `revision` if provided, or else reset
+    /// to the stored root if available, or else to an empty database.
+    pub async fn reset(
+        &mut self,
+        revision: Option<Blake3Hash>,
+    ) -> Result<(), DialogArtifactsError> {
         let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
             self.entity_index.write(),
             self.attribute_index.write(),
             self.value_index.write()
         );
+
+        let revision = if let Some(revision) = revision {
+            self.storage
+                .read::<Revision>(&revision)
+                .await?
+                .ok_or_else(|| {
+                    DialogArtifactsError::InvalidRevision(format!(
+                        "Block ({}) not found in storage",
+                        revision.to_base58()
+                    ))
+                })?
+        } else {
+            let block = self
+                .storage
+                .get(&make_reference(self.identifier().as_bytes()))
+                .await?;
+            if let Some(block) = block {
+                CborEncoder.decode::<Revision>(&block).await?
+            } else {
+                NULL_REVISION.clone()
+            }
+        };
 
         self.storage
             .set(
@@ -380,11 +428,11 @@ where
     async fn commit<Instructions>(
         &mut self,
         instructions: Instructions,
-    ) -> Result<Revision, DialogArtifactsError>
+    ) -> Result<Blake3Hash, DialogArtifactsError>
     where
         Instructions: Stream<Item = Instruction> + ConditionalSend,
     {
-        let base_revision = self.revision().await;
+        let base_revision = self.revision().await?;
 
         let transaction_result = async {
             let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
@@ -449,22 +497,24 @@ where
                 _ => NULL_REVISION.clone(),
             };
 
+            let next_revision = self.storage.write(&next_revision).await?;
+
             // Advance the effective pointer to the latest version of this DB
             self.storage
                 .set(
                     make_reference(self.identifier.as_bytes()),
-                    CborEncoder.encode(&next_revision).await?.1,
+                    next_revision.to_vec(),
                 )
                 .await?;
 
-            Ok(next_revision) as Result<Revision, DialogArtifactsError>
+            Ok(next_revision) as Result<Blake3Hash, DialogArtifactsError>
         }
         .await;
 
         match transaction_result {
             Ok(revision) => Ok(revision),
             Err(error) => {
-                self.reset(base_revision).await?;
+                self.reset(Some(base_revision)).await?;
                 Err(error)
             }
         }
@@ -713,7 +763,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 4);
+        assert_eq!(net_reads, 5);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -749,7 +799,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 4);
+        assert_eq!(net_reads, 5);
         assert_eq!(net_writes, 0);
 
         let fact_stream =
@@ -933,6 +983,46 @@ mod tests {
             .await;
 
         assert_eq!(results, vec![Ok(updated_artifact)]);
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_can_reset_to_an_earlier_version() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let data = generate_data(16)?;
+
+        let expected_entities = data
+            .iter()
+            .map(|datum| datum.of.clone())
+            .collect::<BTreeSet<Entity>>();
+
+        let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
+
+        let revision = artifacts
+            .commit(data.clone().into_iter().map(Instruction::Assert))
+            .await?;
+
+        let more_data = generate_data(16)?;
+
+        artifacts
+            .commit(more_data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        artifacts.reset(Some(revision)).await?;
+
+        let results = artifacts
+            .select(ArtifactSelector::new().the("item/id".parse()?))
+            .map(|result| result.unwrap())
+            .collect::<Vec<Artifact>>()
+            .await;
+
+        assert_eq!(results.len(), 16);
+
+        for result in results {
+            assert!(expected_entities.contains(&result.of))
+        }
 
         Ok(())
     }

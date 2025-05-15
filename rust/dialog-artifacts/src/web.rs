@@ -30,7 +30,9 @@
 use std::{pin::Pin, sync::Arc};
 
 use base58::{FromBase58, ToBase58};
-use dialog_storage::{IndexedDbStorageBackend, StorageCache, web::ObjectSafeStorageBackend};
+use dialog_storage::{
+    Blake3Hash, IndexedDbStorageBackend, StorageCache, web::ObjectSafeStorageBackend,
+};
 use futures_util::{Stream, StreamExt};
 use rand::{Rng, distr::Alphanumeric};
 use tokio::sync::{Mutex, RwLock};
@@ -39,8 +41,8 @@ use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
     Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute, Cause,
-    DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Revision, Value,
-    ValueDataType, artifacts::selector::Constrained,
+    DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Value, ValueDataType,
+    artifacts::selector::Constrained,
 };
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -235,14 +237,7 @@ impl ArtifactsBinding {
     /// the triple store on future sessions.
     #[wasm_bindgen]
     pub async fn revision(&self) -> Result<Vec<u8>, JsError> {
-        Ok(self
-            .artifacts
-            .read()
-            .await
-            .revision()
-            .await
-            .as_cbor()
-            .await?)
+        Ok(self.artifacts.read().await.revision().await?.to_vec())
     }
 
     /// Persist a set of data in the triple store. The returned prommise
@@ -253,10 +248,7 @@ impl ArtifactsBinding {
     /// abandoned and the revision remains the same as it was at the start of
     /// the transaction.
     #[wasm_bindgen]
-    pub async fn commit(
-        &mut self,
-        iterable: &InstructionIterableDuckType,
-    ) -> Result<Vec<u8>, JsError> {
+    pub async fn commit(&self, iterable: &InstructionIterableDuckType) -> Result<Vec<u8>, JsError> {
         let Some(iterator) = js_sys::try_iter(iterable).map_err(js_value_to_error)? else {
             return Err(JsError::new("Only iterables are allowed"));
         };
@@ -270,9 +262,33 @@ impl ArtifactsBinding {
             }
         });
 
-        let revision = self.artifacts.write().await.commit(iterator).await?;
+        Ok(self
+            .artifacts
+            .write()
+            .await
+            .commit(iterator)
+            .await?
+            .to_vec())
+    }
 
-        Ok(revision.as_cbor().await?)
+    /// Reset the root of the database to `revision` if provided, or else reset
+    /// to the stored root if available, or else to an empty database.
+    #[wasm_bindgen]
+    pub async fn reset(&self, revision: Option<Vec<u8>>) -> Result<(), JsError> {
+        let revision = if let Some(revision) = revision {
+            Some(Blake3Hash::try_from(revision).map_err(|bytes: Vec<u8>| {
+                DialogArtifactsError::InvalidRevision(format!(
+                    "Incorrect byte length (expected {HASH_SIZE}, received {})",
+                    bytes.len()
+                ))
+            })?)
+        } else {
+            None
+        };
+
+        self.artifacts.write().await.reset(revision).await?;
+
+        Ok(())
     }
 
     /// Query for `Artifact`s that match the given selector. Matching results

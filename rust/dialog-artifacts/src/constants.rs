@@ -8,4 +8,4 @@ use dialog_prolly_tree::Tree;
 pub const HASH_SIZE: usize = 32;
 
 /// The branch factor of the [`Tree`]s that constitute [`Artifact`] indexes
-pub const BRANCH_FACTOR: u32 = 64;
+pub const BRANCH_FACTOR: u32 = 254;
