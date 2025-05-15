@@ -235,14 +235,7 @@ impl ArtifactsBinding {
     /// the triple store on future sessions.
     #[wasm_bindgen]
     pub async fn revision(&self) -> Result<Vec<u8>, JsError> {
-        Ok(self
-            .artifacts
-            .read()
-            .await
-            .revision()
-            .await
-            .as_cbor()
-            .await?)
+        Ok(self.artifacts.read().await.revision().await?.to_vec())
     }
 
     /// Persist a set of data in the triple store. The returned prommise
@@ -253,10 +246,7 @@ impl ArtifactsBinding {
     /// abandoned and the revision remains the same as it was at the start of
     /// the transaction.
     #[wasm_bindgen]
-    pub async fn commit(
-        &mut self,
-        iterable: &InstructionIterableDuckType,
-    ) -> Result<Vec<u8>, JsError> {
+    pub async fn commit(&self, iterable: &InstructionIterableDuckType) -> Result<Vec<u8>, JsError> {
         let Some(iterator) = js_sys::try_iter(iterable).map_err(js_value_to_error)? else {
             return Err(JsError::new("Only iterables are allowed"));
         };
@@ -272,7 +262,7 @@ impl ArtifactsBinding {
 
         let revision = self.artifacts.write().await.commit(iterator).await?;
 
-        Ok(revision.as_cbor().await?)
+        Ok(revision.as_reference().await?.into())
     }
 
     /// Query for `Artifact`s that match the given selector. Matching results

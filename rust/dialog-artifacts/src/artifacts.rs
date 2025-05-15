@@ -3,6 +3,7 @@ mod artifact;
 pub use artifact::*;
 
 mod revision;
+use base58::ToBase58;
 use rand::{Rng, distr::Alphanumeric};
 pub use revision::*;
 
@@ -35,7 +36,8 @@ use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_prolly_tree::{Entry, GeometricDistribution, Tree};
 use dialog_storage::{
-    Blake3Hash, CborEncoder, DialogStorageError, Encoder, Storage, StorageBackend,
+    Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, Storage,
+    StorageBackend,
 };
 use futures_util::{Stream, StreamExt};
 use std::{ops::Range, sync::Arc};
@@ -208,35 +210,66 @@ where
     }
 
     /// Get the hash that represents the [`ArtifactStore`] at its current version.
-    pub async fn revision(&self) -> Revision {
+    pub async fn revision(&self) -> Result<Blake3Hash, DialogArtifactsError> {
         let (entity_index, attribute_index, value_index) = tokio::join!(
             self.entity_index.read(),
             self.attribute_index.read(),
             self.value_index.read()
         );
 
-        match (
-            entity_index.hash(),
-            attribute_index.hash(),
-            value_index.hash(),
-        ) {
-            (Some(entity_version), Some(attribute_version), Some(value_version)) => {
-                Revision::from((
-                    entity_version.to_owned(),
-                    attribute_version.to_owned(),
-                    value_version.to_owned(),
-                ))
-            }
-            _ => NULL_REVISION.clone(),
-        }
+        Ok(
+            match (
+                entity_index.hash(),
+                attribute_index.hash(),
+                value_index.hash(),
+            ) {
+                (Some(entity_version), Some(attribute_version), Some(value_version)) => {
+                    Revision::from((
+                        entity_version.to_owned(),
+                        attribute_version.to_owned(),
+                        value_version.to_owned(),
+                    ))
+                    .as_reference()
+                    .await?
+                }
+                _ => NULL_REVISION.as_reference().await?,
+            },
+        )
     }
 
-    pub(crate) async fn reset(&mut self, revision: Revision) -> Result<(), DialogArtifactsError> {
+    /// Reset the root of the database to `revision` if provided, or else reset
+    /// to the stored root if available, or else to an empty database.
+    pub async fn reset(
+        &mut self,
+        revision: Option<Blake3Hash>,
+    ) -> Result<(), DialogArtifactsError> {
         let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
             self.entity_index.write(),
             self.attribute_index.write(),
             self.value_index.write()
         );
+
+        let revision = if let Some(revision) = revision {
+            self.storage
+                .read::<Revision>(&revision)
+                .await?
+                .ok_or_else(|| {
+                    DialogArtifactsError::InvalidRevision(format!(
+                        "Block ({}) not found in storage",
+                        revision.to_base58()
+                    ))
+                })?
+        } else {
+            let block = self
+                .storage
+                .get(&make_reference(self.identifier().as_bytes()))
+                .await?;
+            if let Some(block) = block {
+                CborEncoder.decode::<Revision>(&block).await?
+            } else {
+                NULL_REVISION.clone()
+            }
+        };
 
         self.storage
             .set(
@@ -384,7 +417,7 @@ where
     where
         Instructions: Stream<Item = Instruction> + ConditionalSend,
     {
-        let base_revision = self.revision().await;
+        let base_revision = self.revision().await?;
 
         let transaction_result = async {
             let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
@@ -464,7 +497,7 @@ where
         match transaction_result {
             Ok(revision) => Ok(revision),
             Err(error) => {
-                self.reset(base_revision).await?;
+                self.reset(Some(base_revision)).await?;
                 Err(error)
             }
         }
@@ -713,7 +746,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 4);
+        assert_eq!(net_reads, 5);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -749,7 +782,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 4);
+        assert_eq!(net_reads, 5);
         assert_eq!(net_writes, 0);
 
         let fact_stream =

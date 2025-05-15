@@ -258,4 +258,13 @@ describe('artifacts', () => {
         expect(count).to.be.eql(5);
     });
 
+    it('gives a 32-byte hash as the revision', async () => {
+        let artifacts = await Artifacts.anonymous();
+        await populateWithHackers(artifacts);
+
+        let revision = await artifacts.revision();
+
+        expect(revision.length).to.be.eql(32);
+    });
+
 });
