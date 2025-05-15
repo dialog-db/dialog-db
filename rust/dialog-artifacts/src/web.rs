@@ -41,8 +41,8 @@ use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
     Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute, Cause,
-    DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Value, ValueDataType,
-    artifacts::selector::Constrained,
+    DEFAULT_BRANCH, DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Revision,
+    Value, ValueDataType, artifacts::selector::Constrained,
 };
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -214,17 +214,24 @@ impl ArtifactsBinding {
     /// be used.
     #[wasm_bindgen]
     pub async fn open(identifier: String) -> Result<Self, JsError> {
-        let storage_backend = StorageCache::new(
-            IndexedDbStorageBackend::new(&identifier, "dialog-artifact-blocks")
-                .await
-                .map_err(|error| DialogArtifactsError::from(error))?,
-            STORAGE_CACHE_CAPACITY,
-        )
-        .map_err(|error| DialogArtifactsError::from(error))?;
+        let (blocks, branches) = IndexedDbStorageBackend::new(&identifier)
+            .await
+            .map_err(|error| DialogArtifactsError::from(error))?;
 
         // Erase the type:
-        let storage_backend: WebStorageBackend = Arc::new(Mutex::new(storage_backend));
-        let artifacts = Artifacts::open(identifier.to_owned(), storage_backend).await?;
+        let blocks_backend: WebStorageBackend = Arc::new(Mutex::new(
+            StorageCache::new(blocks, STORAGE_CACHE_CAPACITY)
+                .map_err(|error| DialogArtifactsError::from(error))?,
+        ));
+        let branches_backend: WebStorageBackend = Arc::new(Mutex::new(branches));
+
+        let artifacts = Artifacts::open(
+            identifier.to_owned(),
+            DEFAULT_BRANCH.to_string(),
+            blocks_backend,
+            branches_backend,
+        )
+        .await?;
 
         Ok(Self {
             artifacts: Arc::new(RwLock::new(artifacts)),
@@ -271,8 +278,6 @@ impl ArtifactsBinding {
             .to_vec())
     }
 
-    /// Reset the root of the database to `revision` if provided, or else reset
-    /// to the stored root if available, or else to an empty database.
     #[wasm_bindgen]
     pub async fn reset(&self, revision: Option<Vec<u8>>) -> Result<(), JsError> {
         let revision = if let Some(revision) = revision {

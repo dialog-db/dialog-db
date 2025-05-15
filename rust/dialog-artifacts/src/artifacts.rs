@@ -66,6 +66,9 @@ pub type Index<Key, Value, Backend> = Tree<
     Storage<HASH_SIZE, CborEncoder, Backend>,
 >;
 
+/// A default branch name
+pub const DEFAULT_BRANCH: &str = "main";
+
 /// [`Artifacts`] is an implementor of [`ArtifactStore`] and [`ArtifactStoreMut`].
 /// Internally, [`Artifacts`] maintains indexes built from [`Tree`]s (that is,
 /// prolly trees). These indexes are built up as new [`Artifact`]s are commited,
@@ -86,7 +89,8 @@ where
         + 'static,
 {
     identifier: String,
-    storage: Storage<HASH_SIZE, CborEncoder, Backend>,
+    branch: String,
+    branches: Storage<HASH_SIZE, CborEncoder, Backend>,
     entity_index: Arc<RwLock<Index<EntityKey, ValueDatum, Backend>>>,
     attribute_index: Arc<RwLock<Index<AttributeKey, ValueDatum, Backend>>>,
     value_index: Arc<RwLock<Index<ValueKey, EntityDatum, Backend>>>,
@@ -105,19 +109,29 @@ where
     }
 
     /// Initialize a new [`Artifacts`] with the provided [`StorageBackend`].
-    pub async fn open(identifier: String, backend: Backend) -> Result<Self, DialogArtifactsError> {
-        let storage = Storage {
+    pub async fn open(
+        identifier: String,
+        branch: String,
+        blocks: Backend,
+        branches: Backend,
+    ) -> Result<Self, DialogArtifactsError> {
+        let blocks = Storage {
             encoder: CborEncoder,
-            backend: backend.clone(),
+            backend: blocks.clone(),
+        };
+
+        let branches = Storage {
+            encoder: CborEncoder,
+            backend: branches.clone(),
         };
 
         // TODO: We probably want to enforce some namespacing within storage so
         // that generic K/V storage can go e.g., in a different IDB store or a
         // different folder on the FS
         let (entity_index, attribute_index, value_index) = {
-            let revision = storage.get(&make_reference(identifier.as_bytes())).await?;
+            let revision = branches.get(&make_reference(branch.as_bytes())).await?;
             let revision = if let Some(revision) = revision {
-                storage
+                branches
                     .read::<Revision>(&Blake3Hash::try_from(revision).map_err(
                         |bytes: Vec<u8>| {
                             DialogArtifactsError::InvalidRevision(format!(
@@ -133,22 +147,23 @@ where
 
             if let Some(revision) = revision {
                 tokio::try_join!(
-                    Tree::from_hash(revision.entity_index(), storage.clone()),
-                    Tree::from_hash(revision.attribute_index(), storage.clone()),
-                    Tree::from_hash(revision.value_index(), storage.clone())
+                    Tree::from_hash(revision.entity_index(), blocks.clone()),
+                    Tree::from_hash(revision.attribute_index(), blocks.clone()),
+                    Tree::from_hash(revision.value_index(), blocks.clone())
                 )?
             } else {
                 (
-                    Tree::new(storage.clone()),
-                    Tree::new(storage.clone()),
-                    Tree::new(storage.clone()),
+                    Tree::new(blocks.clone()),
+                    Tree::new(blocks.clone()),
+                    Tree::new(blocks.clone()),
                 )
             }
         };
 
         Ok(Self {
             identifier,
-            storage,
+            branch,
+            branches,
             entity_index: Arc::new(RwLock::new(entity_index)),
             attribute_index: Arc::new(RwLock::new(attribute_index)),
             value_index: Arc::new(RwLock::new(value_index)),
@@ -157,14 +172,17 @@ where
 
     /// Initialize a new, empty [`Artifacts`] with a randomly generated
     /// identifier
-    pub async fn anonymous(backend: Backend) -> Result<Self, DialogArtifactsError> {
+    pub async fn anonymous(
+        blocks: Backend,
+        branches: Backend,
+    ) -> Result<Self, DialogArtifactsError> {
         let identifier = rand::rng()
             .sample_iter(&Alphanumeric)
             .take(32)
             .map(char::from)
             .collect();
 
-        Self::open(identifier, backend).await
+        Self::open(identifier, DEFAULT_BRANCH.to_string(), blocks, branches).await
     }
 
     #[cfg(feature = "csv")]
@@ -265,7 +283,7 @@ where
         );
 
         let revision = if let Some(revision) = revision {
-            self.storage
+            self.branches
                 .read::<Revision>(&revision)
                 .await?
                 .ok_or_else(|| {
@@ -276,8 +294,8 @@ where
                 })?
         } else {
             let block = self
-                .storage
-                .get(&make_reference(self.identifier().as_bytes()))
+                .branches
+                .get(&make_reference(self.branch.as_bytes()))
                 .await?;
             if let Some(block) = block {
                 CborEncoder.decode::<Revision>(&block).await?
@@ -286,9 +304,9 @@ where
             }
         };
 
-        self.storage
+        self.branches
             .set(
-                make_reference(self.identifier.as_bytes()),
+                make_reference(self.branch.as_bytes()),
                 CborEncoder.encode(&revision).await?.1,
             )
             .await?;
@@ -497,12 +515,12 @@ where
                 _ => NULL_REVISION.clone(),
             };
 
-            let next_revision = self.storage.write(&next_revision).await?;
+            let next_revision = self.branches.write(&next_revision).await?;
 
             // Advance the effective pointer to the latest version of this DB
-            self.storage
+            self.branches
                 .set(
-                    make_reference(self.identifier.as_bytes()),
+                    make_reference(self.branch.as_bytes()),
                     next_revision.to_vec(),
                 )
                 .await?;
@@ -537,6 +555,8 @@ mod tests {
 
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::DEFAULT_BRANCH;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -545,7 +565,8 @@ mod tests {
     async fn it_commits_and_selects_facts() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let entity_order = |l: &Artifact, r: &Artifact| l.of.cmp(&r.of);
-        let mut facts = Artifacts::anonymous(storage_backend).await?;
+        let mut facts =
+            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
 
         let mut data = vec![
             Artifact {
@@ -584,7 +605,8 @@ mod tests {
     async fn it_pins_a_stream_at_the_version_where_iteration_begins() -> Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let data = generate_data(5)?;
-        let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
+        let mut artifacts =
+            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
 
         let entities = data
             .iter()
@@ -620,7 +642,8 @@ mod tests {
         let (csv, expected_ids, expected_revision) = {
             let storage_backend = MemoryStorageBackend::default();
             let data = generate_data(1)?;
-            let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
+            let mut artifacts =
+                Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
 
             artifacts
                 .commit(data.into_iter().map(Instruction::Assert))
@@ -639,7 +662,9 @@ mod tests {
 
         println!("{}", String::from_utf8(csv.clone())?);
 
-        let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+        let storage_backend = MemoryStorageBackend::default();
+        let mut artifacts =
+            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
 
         artifacts
             .import(&mut tokio::io::BufReader::new(csv.as_ref()))
@@ -672,7 +697,8 @@ mod tests {
             .of
             .clone();
 
-        let mut facts = Artifacts::anonymous(storage_backend.clone()).await?;
+        let mut facts =
+            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
 
         facts
             .commit(data.into_iter().map(Instruction::Assert))
@@ -726,7 +752,8 @@ mod tests {
             .of
             .clone();
 
-        let mut facts = Artifacts::anonymous(storage_backend.clone()).await?;
+        let mut facts =
+            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
 
         facts
             .commit(data.into_iter().map(Instruction::Assert))
@@ -777,7 +804,8 @@ mod tests {
 
         let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
 
-        let mut facts = Artifacts::anonymous(storage_backend.clone()).await?;
+        let mut facts =
+            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
 
         facts.commit(data).await?;
 
@@ -838,7 +866,8 @@ mod tests {
             })
             .map(Instruction::Assert);
 
-        let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
+        let mut artifacts =
+            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
         artifacts.commit(data).await?;
 
         let results = artifacts
@@ -868,7 +897,8 @@ mod tests {
             })
             .map(Instruction::Assert);
 
-        let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
+        let mut artifacts =
+            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
         artifacts.commit(data).await?;
 
         let data = generate_data(32)?.into_iter().map(Instruction::Assert);
@@ -903,11 +933,13 @@ mod tests {
 
         let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
 
-        let mut facts_one = Artifacts::anonymous(storage_backend.clone()).await?;
+        let mut facts_one =
+            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
 
         facts_one.commit(data).await?;
 
-        let mut facts_two = Artifacts::anonymous(storage_backend.clone()).await?;
+        let mut facts_two =
+            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
 
         facts_two.commit(reordered_data).await?;
 
@@ -924,13 +956,20 @@ mod tests {
         let into_assert = |fact: Artifact| Instruction::Assert(fact);
         let storage_backend = Arc::new(Mutex::new(storage_backend));
 
-        let mut facts = Artifacts::anonymous(storage_backend.clone()).await?;
+        let mut facts =
+            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
         let id = facts.identifier().to_owned();
 
         facts.commit(data.into_iter().map(into_assert)).await?;
         let revision = facts.revision().await;
 
-        let restored_facts = Artifacts::open(id, storage_backend).await?;
+        let restored_facts = Artifacts::open(
+            id,
+            DEFAULT_BRANCH.to_string(),
+            storage_backend.clone(),
+            storage_backend.clone(),
+        )
+        .await?;
         let restored_revision = restored_facts.revision().await;
 
         assert_eq!(revision, restored_revision);
@@ -956,7 +995,8 @@ mod tests {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let storage_backend = Arc::new(Mutex::new(storage_backend));
 
-        let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
+        let mut artifacts =
+            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
 
         let attribute = Attribute::from_str("test/attribute")?;
         let entity = Entity::new();
@@ -998,7 +1038,8 @@ mod tests {
             .map(|datum| datum.of.clone())
             .collect::<BTreeSet<Entity>>();
 
-        let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
+        let mut artifacts =
+            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
 
         let revision = artifacts
             .commit(data.clone().into_iter().map(Instruction::Assert))
