@@ -114,10 +114,24 @@ where
         // TODO: We probably want to enforce some namespacing within storage so
         // that generic K/V storage can go e.g., in a different IDB store or a
         // different folder on the FS
-        let (entity_index, attribute_index, value_index) =
-            if let Some(revision) = storage.get(&make_reference(identifier.as_bytes())).await? {
-                let revision = CborEncoder.decode::<Revision>(&revision).await?;
+        let (entity_index, attribute_index, value_index) = {
+            let revision = storage.get(&make_reference(identifier.as_bytes())).await?;
+            let revision = if let Some(revision) = revision {
+                storage
+                    .read::<Revision>(&Blake3Hash::try_from(revision).map_err(
+                        |bytes: Vec<u8>| {
+                            DialogArtifactsError::InvalidRevision(format!(
+                                "Incorrect byte length (expected {HASH_SIZE}, received {})",
+                                bytes.len()
+                            ))
+                        },
+                    )?)
+                    .await?
+            } else {
+                None
+            };
 
+            if let Some(revision) = revision {
                 tokio::try_join!(
                     Tree::from_hash(revision.entity_index(), storage.clone()),
                     Tree::from_hash(revision.attribute_index(), storage.clone()),
@@ -129,7 +143,8 @@ where
                     Tree::new(storage.clone()),
                     Tree::new(storage.clone()),
                 )
-            };
+            }
+        };
 
         Ok(Self {
             identifier,
@@ -413,7 +428,7 @@ where
     async fn commit<Instructions>(
         &mut self,
         instructions: Instructions,
-    ) -> Result<Revision, DialogArtifactsError>
+    ) -> Result<Blake3Hash, DialogArtifactsError>
     where
         Instructions: Stream<Item = Instruction> + ConditionalSend,
     {
@@ -482,15 +497,17 @@ where
                 _ => NULL_REVISION.clone(),
             };
 
+            let next_revision = self.storage.write(&next_revision).await?;
+
             // Advance the effective pointer to the latest version of this DB
             self.storage
                 .set(
                     make_reference(self.identifier.as_bytes()),
-                    CborEncoder.encode(&next_revision).await?.1,
+                    next_revision.to_vec(),
                 )
                 .await?;
 
-            Ok(next_revision) as Result<Revision, DialogArtifactsError>
+            Ok(next_revision) as Result<Blake3Hash, DialogArtifactsError>
         }
         .await;
 
@@ -966,6 +983,46 @@ mod tests {
             .await;
 
         assert_eq!(results, vec![Ok(updated_artifact)]);
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_can_reset_to_an_earlier_version() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let data = generate_data(16)?;
+
+        let expected_entities = data
+            .iter()
+            .map(|datum| datum.of.clone())
+            .collect::<BTreeSet<Entity>>();
+
+        let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
+
+        let revision = artifacts
+            .commit(data.clone().into_iter().map(Instruction::Assert))
+            .await?;
+
+        let more_data = generate_data(16)?;
+
+        artifacts
+            .commit(more_data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        artifacts.reset(Some(revision)).await?;
+
+        let results = artifacts
+            .select(ArtifactSelector::new().the("item/id".parse()?))
+            .map(|result| result.unwrap())
+            .collect::<Vec<Artifact>>()
+            .await;
+
+        assert_eq!(results.len(), 16);
+
+        for result in results {
+            assert!(expected_entities.contains(&result.of))
+        }
 
         Ok(())
     }

@@ -267,4 +267,28 @@ describe('artifacts', () => {
         expect(revision.length).to.be.eql(32);
     });
 
+    it('can reset to an earlier revision', async () => {
+        let artifacts = await Artifacts.anonymous();
+        let entityMap = await populateWithHackers(artifacts);
+
+        let revision = await artifacts.revision();
+
+        await populateWithHackers(artifacts);
+
+        await artifacts.reset(revision);
+
+        let query = artifacts.select({
+            the: "profile/name"
+        });
+
+        let count = 0;
+
+        for await (const artifact of query) {
+            count++;
+            expect(entityMap.has(encode(artifact.of))).to.be.true;
+        }
+
+        expect(count).to.be.eql(5);
+    });
+
 });
