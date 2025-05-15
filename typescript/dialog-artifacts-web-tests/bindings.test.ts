@@ -276,6 +276,120 @@ describe('artifacts', () => {
         expect(count).to.be.eql(5);
     });
 
+    it('assert then retract', async () => {
+        let artifacts = await Artifacts.anonymous();
+        let e1 = generateEntity();
+        await artifacts.commit([
+            {
+                type: InstructionType.Assert,
+                artifact: {
+                    the: 'counter/count',
+                    of: e1,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 0
+                    }
+                }
+            }
+        ]);
+
+        let v1 = await collect(
+            artifacts.select({
+                the: 'counter/count'
+            })
+        );
+        assert.deepEqual(
+            v1.map(({ the, of, is }) => ({ the, of, is })),
+            [
+                {
+                    the: 'counter/count',
+                    of: e1,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 0
+                    }
+                }
+            ]
+        );
+
+        let e2 = generateEntity();
+        await artifacts.commit([
+            {
+                type: InstructionType.Assert,
+                artifact: {
+                    the: 'counter/count',
+                    of: e2,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 5
+                    }
+                }
+            }
+        ]);
+
+        let v2 = await collect(
+            artifacts.select({
+                the: 'counter/count'
+            })
+        );
+        assert.deepEqual(
+            v2.map(({ the, of, is }) => ({ the, of, is })).sort(),
+            [
+                {
+                    the: 'counter/count',
+                    of: e1,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 0
+                    }
+                },
+                {
+                    the: 'counter/count',
+                    of: e2,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 5
+                    }
+                }
+            ].sort()
+        );
+
+        await artifacts.commit([
+            {
+                type: InstructionType.Retract,
+                artifact: {
+                    the: 'counter/count',
+                    of: e1,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 0
+                    }
+                }
+            }
+        ]);
+
+        let v3 = await collect(
+            artifacts.select({
+                the: 'counter/count'
+            })
+        );
+
+        assert.deepEqual(
+            v3.map(({ the, of, is }) => ({ the, of, is })).sort(),
+            [
+                {
+                    the: 'counter/count',
+                    of: e2,
+                    is: {
+                        type: ValueDataType.SignedInt,
+                        value: 5
+                    }
+                }
+            ],
+            'only one fact was retracted'
+        );
+    });
+
     it('can retract one fact leaving the other', async () => {
         let artifacts = await Artifacts.anonymous();
         let entity = generateEntity();
