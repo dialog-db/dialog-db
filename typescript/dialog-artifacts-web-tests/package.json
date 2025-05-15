@@ -11,5 +11,10 @@
         "@web/dev-server-esbuild": "^1.0.4",
         "@web/test-runner": "^0.20.1",
         "typescript": "^5.8.3"
+    },
+    "prettier": {
+        "tabWidth": 4,
+        "trailingComma": "none",
+        "singleQuote": true
     }
 }

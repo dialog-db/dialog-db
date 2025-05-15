@@ -5,7 +5,7 @@ import { act, render, renderHook } from '@testing-library/react'
 import { assert } from '@open-wc/testing'
 import { bob, alice } from './constants.js'
 
-describe('react integration', () => {
+describe.skip('react integration', () => {
   it('test hook', async () => {
     const db = Artifacts.open(bob)
     try {

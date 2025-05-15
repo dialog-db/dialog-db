@@ -29,16 +29,11 @@ let ready: true | false | Promise<unknown> = false
 const { Link } = Constant
 const ENTITY = Link.of(null)['/'].fill(0, 4)
 
-const GENESIS = new Uint8Array(4 + 32 * 3)
-GENESIS.fill(0)
-GENESIS[0] = 1 // CID v1
-GENESIS[1] = 0x55 // raw binary
-GENESIS[2] = 0x00 // Identity multihash
-GENESIS[3] = 32 * 3 // Size of the revision
-
-const GENESIS_REVISION = Link.fromBytes(GENESIS)
-
-const EMPTY_TREE = GENESIS_REVISION.toString() as Revision
+/**
+ * We treate IPLD Link for empty byte array as an empty db revision.
+ */
+const REVISION = Link.of(new Uint8Array())
+const GENESIS = REVISION.toString()
 
 /**
  * DID identifier.
@@ -83,7 +78,7 @@ export interface Session extends Querier {
   /**
    * Takes changes and transacts them atomically.
    */
-  transact(changes: Changes): Task.Invocation<Session, Error>
+  transact(changes: Changes): Task.Invocation<Revision, Error>
 
   /**
    * Subscribes to the provided query & calls `subscriber` every time changes
@@ -132,103 +127,29 @@ export class DialogSession implements Session {
       throw new RangeError(`Only did:key identifiers are supported`)
     }
 
-    // We either use revision currently in stored in the localStorage or
-    // start with an empty tree.
-    const revision = localStorage.getItem(did) ?? EMPTY_TREE
-
-    return new this(did, revision)
+    return new this(did)
   }
   /**
    * Create a new ArtifactsStore instance
    */
   constructor(
     did: DID,
-    revision: Revision,
     subscriptions: Set<Subscription> = new Set(),
     channel = new BroadcastChannel(this.did())
   ) {
     this.#did = did
-    this.#revision = revision
     this.#subscriptions = subscriptions
     this.#channel = channel
     this.#connection = { pending: Task.perform(DialogSession.connect(this)) }
 
+    // DB may be mutated from the other sessions in order to know that we need
+    // to rerun queries we subscribe to broadcast channel
     this.#channel.addEventListener('message', this)
   }
 
   #did
-  #revision
   #subscriptions
   #channel
-
-  handleEvent(event: MessageEvent) {
-    Task.perform(this.checkout())
-  }
-
-  /**
-   * Reads revision for the given DID, if no revision info is found defaults to
-   * the genesis revision.
-   */
-  static revision(did: DID) {
-    return ((localStorage.getItem(did) as Revision) ?? EMPTY_TREE) as Revision
-  }
-
-  static *checkout(self: DialogSession) {
-    // If connection is pending we wait, once it is established revision from
-    // the tree will be used
-    if (self.#connection.pending) {
-      yield* Task.wait(this.connected(self))
-    }
-
-    // If we have connection but it's revision is out of date we got to
-    // reconnect.
-    if (self.#revision !== this.revision(self.did())) {
-      self.#connection = { pending: Task.perform(this.connect(self)) }
-      yield* this.connected(self)
-    }
-
-    // No we can broadcast changes to all the subscribers
-    yield* this.broadcast(self)
-  }
-  /**
-   * Checkout latest commited state of the database.
-   */
-  *checkout() {
-    return Task.perform(DialogSession.checkout(this))
-  }
-
-  static *reset(self: DialogSession, revision: Revision) {
-    // If desired revision is different we need to update local storage
-    if (this.revision(self.did()) !== revision) {
-      if (revision === EMPTY_TREE) {
-        localStorage.removeItem(self.did())
-      } else {
-        localStorage.setItem(self.did(), revision.toString())
-      }
-
-      // Notify other sessions that revision has changed.
-      self.#channel.postMessage({ revision })
-
-      // And checkout db from the desired revision
-      yield* this.checkout(self)
-    }
-  }
-  /**
-   * Resets database to the desired revision.
-   */
-  *reset(revision: Revision) {
-    return Task.perform(DialogSession.reset(this, revision))
-  }
-
-  #connection: Connection
-
-  static *connected(self: DialogSession): Task.Task<Artifacts, Error> {
-    if (self.#connection.pending) {
-      return yield* Task.wait(self.#connection.pending)
-    } else {
-      return self.#connection.open
-    }
-  }
 
   static *connect(self: DialogSession): Task.Task<Artifacts, Error> {
     if (ready === false) {
@@ -239,21 +160,37 @@ export class DialogSession implements Session {
       yield* Task.wait(ready)
     }
 
-    while (true) {
-      const revision = this.revision(self.did())
-      const conneciton = yield* Task.wait(
-        Artifacts.open(
-          self.did(),
-          // If revision is different from the base tree we
-          revision === EMPTY_TREE ? undefined : encodeRevision(revision)
-        )
-      )
+    const conneciton = yield* Task.wait(Artifacts.open(self.did()))
 
-      self.#revision = revision
-      if (this.revision(self.did()) === revision) {
-        self.#connection = { open: conneciton }
-        return conneciton
-      }
+    self.#connection = { open: conneciton }
+
+    return conneciton
+  }
+
+  handleEvent(event: MessageEvent) {
+    Task.perform(DialogSession.reset(this, event.data.revision ?? REVISION))
+  }
+
+  static *reset(self: DialogSession, revision: Revision) {
+    const connection = yield* this.connected(self)
+    // If we are resetting to genesis we can not actually reset because DB
+    // was removed instead we reopen connection.
+    if (revision === GENESIS) {
+      self.#connection = { pending: Task.perform(this.connect(self)) }
+      yield* this.connected(self)
+    } else {
+      yield* Task.wait(connection.reset())
+    }
+    yield* DialogSession.broadcast(self)
+  }
+
+  #connection: Connection
+
+  static *connected(self: DialogSession): Task.Task<Artifacts, Error> {
+    if (self.#connection.pending) {
+      return yield* Task.wait(self.#connection.pending)
+    } else {
+      return self.#connection.open
     }
   }
 
@@ -307,7 +244,7 @@ export class DialogSession implements Session {
   static *transact(
     self: DialogSession,
     changes: Changes
-  ): Task.Task<DialogSession, Error> {
+  ): Task.Task<Revision, Error> {
     const transaction = []
     for (const { assert, retract } of instructions(changes)) {
       if (assert) {
@@ -325,19 +262,17 @@ export class DialogSession implements Session {
     }
 
     const connection = yield* this.connected(self)
-    yield* Task.wait(connection.commit(transaction))
+    yield* Task.wait(connection.reset())
+    const revision = toRevision(
+      yield* Task.wait(connection.commit(transaction))
+    )
 
-    const bytes = yield* Task.wait(connection.revision())
-    const revision = decodeRevision(bytes!)
-
-    self.#revision = revision
-    localStorage.setItem(self.did(), revision.toString())
-
-    // Notify other sessions that data has changed.
-    self.#channel.postMessage({ revision })
+    // Notify other sessions to this db that we have commited some changes
+    self.#channel.postMessage({ revision: revision.toString() })
+    // We also broadcast changes to subscribers in this session.
     yield* this.broadcast(self)
 
-    return self
+    return revision
   }
 
   static *broadcast(self: DialogSession) {
@@ -358,7 +293,6 @@ export class DialogSession implements Session {
    * Subscribes to the querable predicate with a provided subscriber and will
    * call subscriber with new query results when new changes are transacted.
    */
-
   subscribe<Fact>(
     predicate: Predicate<Fact, string, FactSchema>,
     subscriber: Subscriber<Fact>
@@ -377,6 +311,7 @@ export class DialogSession implements Session {
   }
 
   close() {
+    this.#channel.removeEventListener('message', this)
     this.#subscriptions.clear()
   }
   /**
@@ -386,17 +321,28 @@ export class DialogSession implements Session {
   clear() {
     return Task.perform(DialogSession.clear(this))
   }
+
+  async revision() {
+    await Task.perform(DialogSession.connected(this))
+
+    return toRevision(await this.#connection.open!.revision())
+  }
+
   static *clear(self: DialogSession) {
-    yield* this.connected(self)
     self.close()
+    // Wait if we're still connected before we dispose the database
+    yield* this.connected(self)
 
     const erase = new Promise((resolve, reject) => {
       const request = indexedDB.deleteDatabase(self.did())
       request.onerror = reject
       request.onsuccess = resolve
     })
+
     yield* Task.wait(erase)
-    yield* this.reset(self, EMPTY_TREE)
+
+    // Tell other sessions that we have cleared the database
+    self.#channel.postMessage({ revision: GENESIS })
   }
 }
 
@@ -536,11 +482,9 @@ function* instructions(
   }
 }
 
-const encodeRevision = (revision: Revision) =>
-  Link.fromJSON({ '/': revision.toString() })['/'].subarray(4)
+/**
+ * Takes bytes returned by the {@link Artifacts.commit} and derives an IPLD
+ * link that we treat as revision hash.
+ */
 
-const decodeRevision = (bytes: Uint8Array) => {
-  const REVISION = GENESIS_REVISION['/'].slice(0)
-  REVISION.set(bytes, 4)
-  return Link.fromBytes(REVISION).toString() as Revision
-}
+const toRevision = (bytes: Uint8Array) => Link.of(bytes).toString() as Revision

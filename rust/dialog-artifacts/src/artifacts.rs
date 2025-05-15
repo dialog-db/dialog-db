@@ -231,7 +231,35 @@ where
         }
     }
 
-    pub(crate) async fn reset(&mut self, revision: Revision) -> Result<(), DialogArtifactsError> {
+    pub(crate) async fn reset(
+        &mut self,
+        to: Option<Revision>,
+    ) -> Result<Revision, DialogArtifactsError> {
+        // If revision is provided use it, otherwise read current revision from
+        // the store and use that instead. If store has no revision then use
+        // empty tree revision.
+        let revision = if let Some(revision) = to {
+            revision
+        } else {
+            if let Some(head) = self
+                .storage
+                .get(&make_reference(self.identifier.as_bytes()))
+                .await?
+            {
+                CborEncoder.decode::<Revision>(&head).await?
+            } else {
+                NULL_REVISION.clone()
+            }
+        };
+
+        // If current revision is the same as revision we're resetting to there
+        // this is a noop.
+        if self.revision().await == revision {
+            return Ok(revision);
+        }
+
+        // Otherwise proceed with a reset
+
         let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
             self.entity_index.write(),
             self.attribute_index.write(),
@@ -255,7 +283,7 @@ where
             value_index.set_hash(value_index_hash),
         )?;
 
-        Ok(())
+        Ok(revision)
     }
 }
 
@@ -464,7 +492,7 @@ where
         match transaction_result {
             Ok(revision) => Ok(revision),
             Err(error) => {
-                self.reset(base_revision).await?;
+                self.reset(Some(base_revision)).await?;
                 Err(error)
             }
         }

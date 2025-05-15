@@ -12,7 +12,7 @@
     "test:node": "ts-mocha -n loader=ts-node/esm -p ./tsconfig.json ./test/*.spec.ts",
     "test": "npm run test:node && npm run test:web",
     "coverage": "c8 entail dist/test/**/*.spec.ts",
-    "compile": "tsc --build && mkdir -p dist/src && cp -r src/artifacts dist/src/artifacts",
+    "compile": "tsc --build && rm -rf dist/src/artifacts  && mkdir -p dist/src && cp -r src/artifacts dist/src/artifacts",
     "vendor": "rm -rf ./src/artifacts && nix build .#dialog-artifacts-web && cp -r result/@dialog-db/dialog-artifacts src/artifacts && chmod -R 0755 src/artifacts && rm result",
     "check": "tsc --build --noEmit"
   },
