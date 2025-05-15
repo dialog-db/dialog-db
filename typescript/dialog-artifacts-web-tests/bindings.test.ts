@@ -390,10 +390,10 @@ describe('artifacts', () => {
         );
     });
 
-    it('can retract one fact leaving the other', async () => {
+    it('support cardinality many', async () => {
         let artifacts = await Artifacts.anonymous();
         let entity = generateEntity();
-        artifacts.commit([
+        await artifacts.commit([
             {
                 type: InstructionType.Assert,
                 artifact: {
@@ -424,8 +424,9 @@ describe('artifacts', () => {
         });
         const results = await collect(query);
 
+        assert.equal(results.length, 2);
         assert.deepEqual(
-            results.map(({ the, of, is }) => ({ the, of, is })),
+            results.map(({ the, of, is }) => ({ the, of, is })).sort(),
             [
                 {
                     the: 'counter/count',
@@ -443,7 +444,7 @@ describe('artifacts', () => {
                         value: 2
                     }
                 }
-            ]
+            ].sort()
         );
     });
 });
