@@ -264,8 +264,10 @@ where
             self.value_index.write()
         );
 
-        let revision = if let Some(revision) = revision {
-            self.storage
+        if let Some(revision) = revision {
+            // If a specific revision is requested, retrieve and validate it
+            let revision = self
+                .storage
                 .read::<Revision>(&revision)
                 .await?
                 .ok_or_else(|| {
@@ -273,35 +275,56 @@ where
                         "Block ({}) not found in storage",
                         revision.to_base58()
                     ))
-                })?
+                })?;
+
+            // Update storage with the requested revision
+            self.storage
+                .set(
+                    make_reference(self.identifier.as_bytes()),
+                    CborEncoder.encode(&revision).await?.1,
+                )
+                .await?;
+
+            // Set index hashes to point to the requested revision
+            let entity_index_hash = Some(revision.entity_index().to_owned());
+            let attribute_index_hash = Some(revision.attribute_index().to_owned());
+            let value_index_hash = Some(revision.value_index().to_owned());
+
+            tokio::try_join!(
+                entity_index.set_hash(entity_index_hash),
+                attribute_index.set_hash(attribute_index_hash),
+                value_index.set_hash(value_index_hash),
+            )?;
         } else {
+            // When no specific revision is requested, check if a revision exists
             let block = self
                 .storage
                 .get(&make_reference(self.identifier().as_bytes()))
                 .await?;
+
             if let Some(block) = block {
-                CborEncoder.decode::<Revision>(&block).await?
+                // If a revision exists in storage, use it
+                let revision = CborEncoder.decode::<Revision>(&block).await?;
+
+                // Set index hashes to point to the current revision
+                let entity_index_hash = Some(revision.entity_index().to_owned());
+                let attribute_index_hash = Some(revision.attribute_index().to_owned());
+                let value_index_hash = Some(revision.value_index().to_owned());
+
+                tokio::try_join!(
+                    entity_index.set_hash(entity_index_hash),
+                    attribute_index.set_hash(attribute_index_hash),
+                    value_index.set_hash(value_index_hash),
+                )?;
             } else {
-                NULL_REVISION.clone()
+                // If no revision exists, initialize empty trees
+                tokio::try_join!(
+                    entity_index.set_hash(None),
+                    attribute_index.set_hash(None),
+                    value_index.set_hash(None),
+                )?;
             }
-        };
-
-        self.storage
-            .set(
-                make_reference(self.identifier.as_bytes()),
-                CborEncoder.encode(&revision).await?.1,
-            )
-            .await?;
-
-        let entity_index_hash = Some(revision.entity_index().to_owned());
-        let attribute_index_hash = Some(revision.attribute_index().to_owned());
-        let value_index_hash = Some(revision.value_index().to_owned());
-
-        tokio::try_join!(
-            entity_index.set_hash(entity_index_hash),
-            attribute_index.set_hash(attribute_index_hash),
-            value_index.set_hash(value_index_hash),
-        )?;
+        }
 
         Ok(())
     }
@@ -1023,6 +1046,17 @@ mod tests {
         for result in results {
             assert!(expected_entities.contains(&result.of))
         }
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_can_reset_before_commit() -> Result<()> {
+        let (storage_backend, _) = make_target_storage().await?;
+
+        let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
+        artifacts.reset(None).await?;
 
         Ok(())
     }
