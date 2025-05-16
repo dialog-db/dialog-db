@@ -1,12 +1,11 @@
 use async_trait::async_trait;
 use dialog_common::ConditionalSend;
+use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
 use crate::{
     Artifact, ArtifactSelector, DialogArtifactsError, Instruction, artifacts::selector::Constrained,
 };
-
-use super::Revision;
 
 /// A trait that may be implemented by anything that is capable of querying
 /// [`Artifact`]s.
@@ -38,7 +37,7 @@ pub trait ArtifactStoreMut: ArtifactStore {
     async fn commit<Instructions>(
         &mut self,
         instructions: Instructions,
-    ) -> Result<Revision, DialogArtifactsError>
+    ) -> Result<Blake3Hash, DialogArtifactsError>
     where
         Instructions: Stream<Item = Instruction> + ConditionalSend;
 }
@@ -54,7 +53,7 @@ pub trait ArtifactStoreMutExt: ArtifactStoreMut {
     async fn commit<Instructions>(
         &mut self,
         instructions: Instructions,
-    ) -> Result<Revision, DialogArtifactsError>
+    ) -> Result<Blake3Hash, DialogArtifactsError>
     where
         Instructions: IntoIterator<Item = Instruction> + ConditionalSend,
         Instructions::IntoIter: ConditionalSend,

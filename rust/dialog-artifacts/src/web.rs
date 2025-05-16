@@ -31,7 +31,7 @@ use std::{pin::Pin, sync::Arc};
 
 use base58::{FromBase58, ToBase58};
 use dialog_storage::{
-    CborEncoder, Encoder, IndexedDbStorageBackend, StorageCache, web::ObjectSafeStorageBackend,
+    Blake3Hash, IndexedDbStorageBackend, StorageCache, web::ObjectSafeStorageBackend,
 };
 use futures_util::{Stream, StreamExt};
 use rand::{Rng, distr::Alphanumeric};
@@ -41,8 +41,8 @@ use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
     Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute, Cause,
-    DEFAULT_BRANCH, DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Revision,
-    Value, ValueDataType, artifacts::selector::Constrained,
+    DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Value, ValueDataType,
+    artifacts::selector::Constrained,
 };
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -214,24 +214,17 @@ impl ArtifactsBinding {
     /// be used.
     #[wasm_bindgen]
     pub async fn open(identifier: String) -> Result<Self, JsError> {
-        let (blocks, branches) = IndexedDbStorageBackend::new(&identifier)
-            .await
-            .map_err(|error| DialogArtifactsError::from(error))?;
+        let storage_backend = StorageCache::new(
+            IndexedDbStorageBackend::new(&identifier, "dialog-artifact-blocks")
+                .await
+                .map_err(|error| DialogArtifactsError::from(error))?,
+            STORAGE_CACHE_CAPACITY,
+        )
+        .map_err(|error| DialogArtifactsError::from(error))?;
 
         // Erase the type:
-        let blocks_backend: WebStorageBackend = Arc::new(Mutex::new(
-            StorageCache::new(blocks, STORAGE_CACHE_CAPACITY)
-                .map_err(|error| DialogArtifactsError::from(error))?,
-        ));
-        let branches_backend: WebStorageBackend = Arc::new(Mutex::new(branches));
-
-        let artifacts = Artifacts::open(
-            identifier.to_owned(),
-            DEFAULT_BRANCH.to_string(),
-            blocks_backend,
-            branches_backend,
-        )
-        .await?;
+        let storage_backend: WebStorageBackend = Arc::new(Mutex::new(storage_backend));
+        let artifacts = Artifacts::open(identifier.to_owned(), storage_backend).await?;
 
         Ok(Self {
             artifacts: Arc::new(RwLock::new(artifacts)),
@@ -244,14 +237,7 @@ impl ArtifactsBinding {
     /// the triple store on future sessions.
     #[wasm_bindgen]
     pub async fn revision(&self) -> Result<Vec<u8>, JsError> {
-        Ok(self
-            .artifacts
-            .read()
-            .await
-            .revision()
-            .await
-            .as_cbor()
-            .await?)
+        Ok(self.artifacts.read().await.revision().await?.to_vec())
     }
 
     /// Persist a set of data in the triple store. The returned prommise
@@ -276,27 +262,33 @@ impl ArtifactsBinding {
             }
         });
 
-        let revision = self.artifacts.write().await.commit(iterator).await?;
-
-        Ok(revision.as_cbor().await?)
+        Ok(self
+            .artifacts
+            .write()
+            .await
+            .commit(iterator)
+            .await?
+            .to_vec())
     }
 
+    /// Reset the root of the database to `revision` if provided, or else reset
+    /// to the stored root if available, or else to an empty database.
     #[wasm_bindgen]
-    pub async fn head(&self) -> Result<Vec<u8>, JsError> {
-        let revision = self.artifacts.read().await.head().await?;
-        Ok(revision.as_cbor().await?)
-    }
-
-    #[wasm_bindgen]
-    pub async fn reset(&self, revision: Option<Vec<u8>>) -> Result<Vec<u8>, JsError> {
-        let to = if let Some(bytes) = revision {
-            Some(CborEncoder.decode::<Revision>(&bytes).await?)
+    pub async fn reset(&self, revision: Option<Vec<u8>>) -> Result<(), JsError> {
+        let revision = if let Some(revision) = revision {
+            Some(Blake3Hash::try_from(revision).map_err(|bytes: Vec<u8>| {
+                DialogArtifactsError::InvalidRevision(format!(
+                    "Incorrect byte length (expected {HASH_SIZE}, received {})",
+                    bytes.len()
+                ))
+            })?)
         } else {
             None
         };
 
-        let out = self.artifacts.write().await.reset(to).await?;
-        Ok(out.as_cbor().await?)
+        self.artifacts.write().await.reset(revision).await?;
+
+        Ok(())
     }
 
     /// Query for `Artifact`s that match the given selector. Matching results

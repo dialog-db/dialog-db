@@ -42,6 +42,12 @@ impl Revision {
     pub async fn as_cbor(&self) -> Result<Vec<u8>, DialogArtifactsError> {
         Ok(CborEncoder.encode(self).await?.1)
     }
+
+    /// Encodes the [`Revision`] as IPLD-compatible CBOR and returns the hash
+    /// reference to the bytes
+    pub async fn as_reference(&self) -> Result<Blake3Hash, DialogArtifactsError> {
+        Ok(CborEncoder.encode(self).await?.0)
+    }
 }
 
 impl From<(Blake3Hash, Blake3Hash, Blake3Hash)> for Revision {

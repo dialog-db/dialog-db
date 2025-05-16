@@ -231,7 +231,30 @@ mod tests {
         let measured_storage = measured_storage_backend.lock().await;
 
         assert_eq!(measured_storage.writes(), 2);
-        assert_eq!(measured_storage.reads(), 2);
+        assert_eq!(measured_storage.reads(), 0);
+
+        Ok(())
+    }
+
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_updates_cache_key_on_write() -> Result<()> {
+        let (storage_backend, _tempdir) = make_target_storage().await?;
+        let mut storage_backend = StorageCache::new(storage_backend, 100)?;
+
+        storage_backend.set(vec![1, 2, 3], vec![4, 5, 6]).await?;
+
+        assert_eq!(
+            Some(vec![4, 5, 6]),
+            storage_backend.get(&vec![1, 2, 3]).await?
+        );
+
+        storage_backend.set(vec![1, 2, 3], vec![5, 6, 7]).await?;
+
+        assert_eq!(
+            Some(vec![5, 6, 7]),
+            storage_backend.get(&vec![1, 2, 3]).await?
+        );
 
         Ok(())
     }
