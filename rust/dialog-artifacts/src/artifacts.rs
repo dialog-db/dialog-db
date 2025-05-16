@@ -1026,4 +1026,15 @@ mod tests {
 
         Ok(())
     }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_can_reset_before_commit() -> Result<()> {
+        let (storage_backend, _) = make_target_storage().await?;
+
+        let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
+        artifacts.reset(None).await?;
+
+        Ok(())
+    }
 }
