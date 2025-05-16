@@ -17,7 +17,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn platform_specific_storage() -> Result<()> {
-    let (backend, _temp) = make_target_storage().await?;
+    let (backend, _branches, _temp) = make_target_storage().await?;
     let storage = Storage {
         backend,
         encoder: CborEncoder,

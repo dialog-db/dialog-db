@@ -563,10 +563,10 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_commits_and_selects_facts() -> Result<()> {
-        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let (blocks_storage, branches_storage, _temp_directory) = make_target_storage().await?;
         let entity_order = |l: &Artifact, r: &Artifact| l.of.cmp(&r.of);
         let mut facts =
-            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
+            Artifacts::anonymous(blocks_storage.clone(), branches_storage.clone()).await?;
 
         let mut data = vec![
             Artifact {
@@ -685,8 +685,9 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_query_efficiently_by_entity_and_value() -> Result<()> {
-        let (storage_backend, _temp_directory) = make_target_storage().await?;
-        let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
+        let (blocks_storage, branches_storage, _temp_directory) = make_target_storage().await?;
+        let blocks = Arc::new(Mutex::new(MeasuredStorage::new(blocks_storage)));
+        let branches = Arc::new(Mutex::new(MeasuredStorage::new(branches_storage)));
         let data = generate_data(32)?;
         let attribute = Attribute::from_str("item/name")?;
         let name = Value::String("name18".into());
@@ -697,15 +698,14 @@ mod tests {
             .of
             .clone();
 
-        let mut facts =
-            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
+        let mut facts = Artifacts::anonymous(blocks.clone(), branches.clone()).await?;
 
         facts
             .commit(data.into_iter().map(Instruction::Assert))
             .await?;
 
         let (initial_reads, initial_writes) = {
-            let storage_backend = storage_backend.lock().await;
+            let storage_backend = blocks.lock().await;
             (storage_backend.reads(), storage_backend.writes())
         };
 
@@ -724,7 +724,7 @@ mod tests {
         );
 
         let (net_reads, net_writes) = {
-            let storage_backend = storage_backend.lock().await;
+            let storage_backend = blocks.lock().await;
             (
                 storage_backend.reads() - initial_reads,
                 storage_backend.writes() - initial_writes,
@@ -740,8 +740,9 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_query_efficiently_by_attribute_and_value() -> Result<()> {
-        let (storage_backend, _temp_directory) = make_target_storage().await?;
-        let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
+        let (blocks_storage, branches_storage, _temp_directory) = make_target_storage().await?;
+        let blocks = Arc::new(Mutex::new(MeasuredStorage::new(blocks_storage)));
+        let branches = Arc::new(Mutex::new(MeasuredStorage::new(branches_storage)));
         let data = generate_data(32)?;
         let attribute = Attribute::from_str("item/name")?;
         let name = Value::String("name18".into());
@@ -752,15 +753,14 @@ mod tests {
             .of
             .clone();
 
-        let mut facts =
-            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
+        let mut facts = Artifacts::anonymous(blocks.clone(), branches.clone()).await?;
 
         facts
             .commit(data.into_iter().map(Instruction::Assert))
             .await?;
 
         let (initial_reads, initial_writes) = {
-            let storage_backend = storage_backend.lock().await;
+            let storage_backend = blocks.lock().await;
             (storage_backend.reads(), storage_backend.writes())
         };
 
@@ -783,7 +783,7 @@ mod tests {
         );
 
         let (net_reads, net_writes) = {
-            let storage_backend = storage_backend.lock().await;
+            let storage_backend = blocks.lock().await;
             (
                 storage_backend.reads() - initial_reads,
                 storage_backend.writes() - initial_writes,
@@ -799,19 +799,19 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_uses_indexes_to_optimize_reads() -> Result<()> {
-        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let (blocks_storage, branches_storage, _temp_directory) = make_target_storage().await?;
         let data = generate_data(256)?.into_iter().map(Instruction::Assert);
 
-        let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
+        let blocks = Arc::new(Mutex::new(MeasuredStorage::new(blocks_storage)));
+        let branches = Arc::new(Mutex::new(MeasuredStorage::new(branches_storage)));
 
-        let mut facts =
-            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
+        let mut facts = Artifacts::anonymous(blocks.clone(), branches.clone()).await?;
 
         facts.commit(data).await?;
 
         let (initial_reads, initial_writes) = {
-            let storage_backend = storage_backend.lock().await;
-            (storage_backend.reads(), storage_backend.writes())
+            let blocks = blocks.lock().await;
+            (blocks.reads(), blocks.writes())
         };
 
         let fact_stream = facts.select(ArtifactSelector::new().is(Value::String("name64".into())));
@@ -820,7 +820,7 @@ mod tests {
         assert_eq!(results.len(), 1);
 
         let (net_reads, net_writes) = {
-            let storage_backend = storage_backend.lock().await;
+            let storage_backend = blocks.lock().await;
             (
                 storage_backend.reads() - initial_reads,
                 storage_backend.writes() - initial_writes,
@@ -838,7 +838,7 @@ mod tests {
         assert_eq!(results.len(), 256);
 
         let (net_reads, net_writes) = {
-            let storage_backend = storage_backend.lock().await;
+            let storage_backend = blocks.lock().await;
             (
                 storage_backend.reads() - initial_reads,
                 storage_backend.writes() - initial_writes,
@@ -854,7 +854,7 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_completes_a_query_when_no_data_matches() -> Result<()> {
-        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let (blocks_storage, branches_storage, _temp_directory) = make_target_storage().await?;
         let data = [124u128; 3]
             .into_iter()
             .map(Value::UnsignedInt)
@@ -867,7 +867,7 @@ mod tests {
             .map(Instruction::Assert);
 
         let mut artifacts =
-            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
+            Artifacts::anonymous(blocks_storage.clone(), branches_storage.clone()).await?;
         artifacts.commit(data).await?;
 
         let results = artifacts
@@ -885,7 +885,7 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_distinguishes_same_value_across_different_entities() -> Result<()> {
         // NOTE: This covers a bug where we weren't aggregating entities in the value index properly
-        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let (blocks_storage, branches_storage, _temp_directory) = make_target_storage().await?;
         let data = [123u128; 3]
             .into_iter()
             .map(Value::UnsignedInt)
@@ -898,7 +898,7 @@ mod tests {
             .map(Instruction::Assert);
 
         let mut artifacts =
-            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
+            Artifacts::anonymous(blocks_storage.clone(), branches_storage.clone()).await?;
         artifacts.commit(data).await?;
 
         let data = generate_data(32)?.into_iter().map(Instruction::Assert);
@@ -918,7 +918,7 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_produces_the_same_version_with_different_insertion_order() -> Result<()> {
-        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let (blocks_storage, branches_storage, _temp_directory) = make_target_storage().await?;
         let data = generate_data(32)?;
 
         let mut reordered_data = data.clone();
@@ -931,15 +931,14 @@ mod tests {
         let data = data.into_iter().map(into_assert);
         let reordered_data = reordered_data.into_iter().map(into_assert);
 
-        let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
+        let blocks = Arc::new(Mutex::new(MeasuredStorage::new(blocks_storage)));
+        let branches = Arc::new(Mutex::new(MeasuredStorage::new(branches_storage)));
 
-        let mut facts_one =
-            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
+        let mut facts_one = Artifacts::anonymous(blocks.clone(), branches.clone()).await?;
 
         facts_one.commit(data).await?;
 
-        let mut facts_two =
-            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
+        let mut facts_two = Artifacts::anonymous(blocks.clone(), branches.clone()).await?;
 
         facts_two.commit(reordered_data).await?;
 
@@ -951,13 +950,13 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_restore_a_previously_commited_version() -> Result<()> {
-        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let (blocks_storage, branches_storage, _temp_directory) = make_target_storage().await?;
         let data = generate_data(64)?;
         let into_assert = |fact: Artifact| Instruction::Assert(fact);
-        let storage_backend = Arc::new(Mutex::new(storage_backend));
+        let blocks = Arc::new(Mutex::new(blocks_storage));
+        let branches = Arc::new(Mutex::new(branches_storage));
 
-        let mut facts =
-            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
+        let mut facts = Artifacts::anonymous(blocks.clone(), branches.clone()).await?;
         let id = facts.identifier().to_owned();
 
         facts.commit(data.into_iter().map(into_assert)).await?;
@@ -966,8 +965,8 @@ mod tests {
         let restored_facts = Artifacts::open(
             id,
             DEFAULT_BRANCH.to_string(),
-            storage_backend.clone(),
-            storage_backend.clone(),
+            blocks.clone(),
+            branches.clone(),
         )
         .await?;
         let restored_revision = restored_facts.revision().await;
@@ -992,11 +991,11 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_upsert_facts() -> Result<()> {
-        let (storage_backend, _temp_directory) = make_target_storage().await?;
-        let storage_backend = Arc::new(Mutex::new(storage_backend));
+        let (blocks_storage, branches_storage, _temp_directory) = make_target_storage().await?;
+        let blocks = Arc::new(Mutex::new(blocks_storage));
+        let branches = Arc::new(Mutex::new(branches_storage));
 
-        let mut artifacts =
-            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
+        let mut artifacts = Artifacts::anonymous(blocks.clone(), branches.clone()).await?;
 
         let attribute = Attribute::from_str("test/attribute")?;
         let entity = Entity::new();
@@ -1030,7 +1029,7 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_reset_to_an_earlier_version() -> Result<()> {
-        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let (blocks_storage, braches_storage, _temp_directory) = make_target_storage().await?;
         let data = generate_data(16)?;
 
         let expected_entities = data
@@ -1039,7 +1038,7 @@ mod tests {
             .collect::<BTreeSet<Entity>>();
 
         let mut artifacts =
-            Artifacts::anonymous(storage_backend.clone(), storage_backend.clone()).await?;
+            Artifacts::anonymous(blocks_storage.clone(), braches_storage.clone()).await?;
 
         let revision = artifacts
             .commit(data.clone().into_iter().map(Instruction::Assert))

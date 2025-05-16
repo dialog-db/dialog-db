@@ -41,8 +41,8 @@ use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
     Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute, Cause,
-    DEFAULT_BRANCH, DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Revision,
-    Value, ValueDataType, artifacts::selector::Constrained,
+    DEFAULT_BRANCH, DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Value,
+    ValueDataType, artifacts::selector::Constrained,
 };
 
 #[wasm_bindgen(typescript_custom_section)]

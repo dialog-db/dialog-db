@@ -98,7 +98,7 @@ mod tests {
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_writes_and_reads_a_value() -> Result<()> {
-        let (mut storage_backend, _tempdir) = make_target_storage().await?;
+        let (mut storage_backend, _, _tempdir) = make_target_storage().await?;
 
         storage_backend.set(vec![1, 2, 3], vec![4, 5, 6]).await?;
         let value = storage_backend.get(&vec![1, 2, 3]).await?;
@@ -111,7 +111,7 @@ mod tests {
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_compress_stored_values() -> Result<()> {
-        let (storage_backend, _tempdir) = make_target_storage().await?;
+        let (storage_backend, _, _tempdir) = make_target_storage().await?;
         let compressed_measured_storage =
             Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
         let compressed_storage =
@@ -181,7 +181,7 @@ mod tests {
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_wrap_backends_in_an_overlay() -> Result<()> {
-        let (storage_backend, _tempdir) = make_target_storage().await?;
+        let (storage_backend, _, _tempdir) = make_target_storage().await?;
         let mut storage_backend = Arc::new(Mutex::new(storage_backend));
 
         storage_backend.set(vec![1, 2, 3], vec![4, 5, 6]).await?;
@@ -213,7 +213,7 @@ mod tests {
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_wrap_backends_in_a_transparent_cache() -> Result<()> {
-        let (storage_backend, _tempdir) = make_target_storage().await?;
+        let (storage_backend, _, _tempdir) = make_target_storage().await?;
         let measured_storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
         let mut storage_backend = StorageCache::new(measured_storage_backend.clone(), 100)?;
 
@@ -239,7 +239,7 @@ mod tests {
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_updates_cache_key_on_write() -> Result<()> {
-        let (storage_backend, _tempdir) = make_target_storage().await?;
+        let (storage_backend, _, _tempdir) = make_target_storage().await?;
         let mut storage_backend = StorageCache::new(storage_backend, 100)?;
 
         storage_backend.set(vec![1, 2, 3], vec![4, 5, 6]).await?;
@@ -262,7 +262,7 @@ mod tests {
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_perform_bulk_storage_transfers() -> Result<()> {
-        let (mut target_storage_backend, _tempdir) = make_target_storage().await?;
+        let (mut target_storage_backend, _, _tempdir) = make_target_storage().await?;
         let mut memory_storage_backend = MemoryStorageBackend::default();
 
         for i in 0..4usize {
