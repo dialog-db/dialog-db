@@ -2,7 +2,14 @@ on:
   workflow_dispatch:
   pull_request:
   push:
-    branches: [main]
+    branches:
+      - main
+      # Run CI for brannches with this names so that radicle integration
+      # can pick those CI jobs and report them in patches (equivalent of pull
+      # requests)
+      - feat/*
+      - chore/*
+      - fix/*
 
 name: 'Test'
 
