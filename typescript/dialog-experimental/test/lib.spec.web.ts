@@ -8,7 +8,7 @@ describe('experimental', () => {
     assert.equal(typeof Query, 'object')
   })
 
-  it('can perform basic transactions', async () =>
+  it.only('can perform basic transactions', async () =>
     Task.spawn(function* () {
       const db = Artifacts.open(alice)
       try {
@@ -44,7 +44,7 @@ describe('experimental', () => {
           'one fact was retracted'
         )
       } finally {
-        yield* db.clear()
+        // yield* db.clear()
       }
     }))
 

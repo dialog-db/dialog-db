@@ -32,7 +32,7 @@ const ENTITY = Link.of(null)['/'].fill(0, 4)
 /**
  * We treate IPLD Link for empty byte array as an empty db revision.
  */
-const REVISION = Link.of(new Uint8Array())
+const REVISION = Link.of(null)
 const GENESIS = REVISION.toString()
 
 /**
