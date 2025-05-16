@@ -278,6 +278,8 @@ impl ArtifactsBinding {
             .to_vec())
     }
 
+    /// Reset the root of the database to `revision` if provided, or else reset
+    /// to the stored root if available, or else to an empty database.
     #[wasm_bindgen]
     pub async fn reset(&self, revision: Option<Vec<u8>>) -> Result<(), JsError> {
         let revision = if let Some(revision) = revision {
