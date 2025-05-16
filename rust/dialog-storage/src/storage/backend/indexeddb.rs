@@ -31,24 +31,9 @@ where
     Key: AsRef<[u8]>,
     Value: AsRef<[u8]> + From<Vec<u8>>,
 {
-    /// Creates a new [`IndexedDbStorageBackend`].
-    pub async fn store(db_name: &str, store_name: &str) -> Result<Self, DialogStorageError> {
-        let db = RexieBuilder::new(db_name)
-            .version(INDEXEDDB_STORAGE_VERSION)
-            .add_object_store(ObjectStore::new(&BLOCK_STORE_NAME).auto_increment(false))
-            .add_object_store(ObjectStore::new(&BRANCH_STORE_NAME).auto_increment(false))
-            .build()
-            .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-        Ok(IndexedDbStorageBackend {
-            db: Rc::new(db),
-            store_name: store_name.to_string(),
-            key_type: PhantomData,
-            value_type: PhantomData,
-        })
-    }
-
+    /// Creates a pair of [`IndexedDbStorageBackend`]s one for storing blocks
+    /// and other for storing branches. Each backend uses IDB store in the same
+    /// database.
     pub async fn new(db_name: &str) -> Result<(Self, Self), DialogStorageError> {
         let db = Rc::new(
             RexieBuilder::new(db_name)
