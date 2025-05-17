@@ -5,13 +5,9 @@ use crate::DialogArtifactsError;
 
 use super::Blake3Hash;
 
-/// A [`Revision`] that represents an empty (perhaps newly creaeted)
-/// [`Artifacts`]
-pub static NULL_REVISION: &Revision = &Revision {
-    entity_index: [0; 32],
-    attribute_index: [0; 32],
-    value_index: [0; 32],
-};
+/// A hash representing a null [`Revision`] that represents an empty (perhaps
+/// newly created) [`Artifacts`].
+pub static NULL_REVISION_HASH: Blake3Hash = [0; 32];
 
 /// A [`Revision`] represents the root of [`Artifacts`] for a given set of data.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
