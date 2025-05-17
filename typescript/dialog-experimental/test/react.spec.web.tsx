@@ -1,4 +1,4 @@
-import { Artifacts, Query, fact, Task, API } from './self.js'
+import { Session, Query, fact, Task, API } from './self.js'
 import {
   useQuery,
   Provider,
@@ -19,7 +19,7 @@ import { bob } from './constants.js'
 
 describe('react integration', () => {
   it('test hook', async () => {
-    const db = Artifacts.open(bob)
+    const db = Session.open(bob)
     try {
       const Counter = fact({
         name: String,
@@ -43,7 +43,7 @@ describe('react integration', () => {
   })
 
   it('test useQuery with a provider', async () => {
-    const session = Artifacts.open(bob)
+    const session = Session.open(bob)
     try {
       const Todo = fact({
         title: String,
@@ -94,7 +94,7 @@ describe('react integration', () => {
   })
 
   it('test useTransaction', async () => {
-    const session = Artifacts.open(bob)
+    const session = Session.open(bob)
     try {
       const Counter = fact({
         title: String,

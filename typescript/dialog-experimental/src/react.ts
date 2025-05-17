@@ -1,7 +1,7 @@
 import { type Predicate, type FactSchema, Task } from '@dialog-db/query'
 import { useEffect, useState, useContext, createContext, useMemo } from 'react'
-import type { Session, Changes, DID, Revision } from './artifacts.js'
-import { open } from './artifacts.js'
+import type { Session, Changes, DID } from './session.js'
+import { open } from './session.js'
 
 const DialogContext = createContext<DID | null>(null)
 

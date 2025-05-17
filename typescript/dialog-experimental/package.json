@@ -1,6 +1,6 @@
 {
   "name": "@dialog-db/experimental",
-  "version": "0.0.11",
+  "version": "0.0.13",
   "description": "Dialog experimental runtime",
   "type": "module",
   "scripts": {
@@ -29,13 +29,11 @@
   "exports": {
     ".": {
       "types": "./dist/src/lib.d.ts",
-      "import": "./dist/src/lib.js",
-      "default": "./dist/src/lib.js"
+      "import": "./dist/src/lib.js"
     },
     "./react": {
       "types": "./dist/src/react.d.ts",
-      "import": "./dist/src/react.js",
-      "default": "./dist/src/lib.js"
+      "import": "./dist/src/react.js"
     }
   },
   "dependencies": {

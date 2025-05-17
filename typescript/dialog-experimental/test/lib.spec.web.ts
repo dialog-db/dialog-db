@@ -1,16 +1,16 @@
-import { Artifacts, Query, fact, Task } from './self.js'
+import { Session, Query, fact, Task } from './self.js'
 import { assert } from '@open-wc/testing'
 import { alice, bob } from './constants.js'
 
 describe('experimental', () => {
   it('imports the module', () => {
-    assert.equal(typeof Artifacts, 'object')
+    assert.equal(typeof Session, 'object')
     assert.equal(typeof Query, 'object')
   })
 
   it('can perform basic transactions', async () =>
     Task.spawn(function* () {
-      const db = Artifacts.open(alice)
+      const db = Session.open(alice)
       try {
         const Counter = fact({
           name: String,
@@ -49,14 +49,14 @@ describe('experimental', () => {
     }))
 
   it('changes propagate across sessions', async () => {
-    const db = await Artifacts.open(alice)
+    const db = await Session.open(alice)
     try {
       const Counter = fact({
         name: String,
         value: Number,
       })
       await db.transact([Counter.assert({ name: 'test', value: 10 })])
-      const session = await Artifacts.open(alice)
+      const session = await Session.open(alice)
       assert.deepEqual(
         await Counter().query({ from: session }),
         [Counter.assert({ name: 'test', value: 10 })],
