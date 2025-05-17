@@ -128,6 +128,7 @@
             installPhase = ''
               mkdir -p $out/@dialog-db
               cp -r ./rust/dialog-artifacts/pkg $out/@dialog-db/dialog-artifacts
+              rm $out/@dialog-db/dialog-artifacts/.gitignore
             '';
 
             nativeBuildInputs = common-build-inputs "stable";

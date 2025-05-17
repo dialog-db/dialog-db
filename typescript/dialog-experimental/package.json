@@ -1,8 +1,7 @@
 {
   "name": "@dialog-db/experimental",
-  "version": "0.0.9",
+  "version": "0.0.11",
   "description": "Dialog experimental runtime",
-  "main": "dist/src/lib.js",
   "type": "module",
   "scripts": {
     "build": "npm run compile",
@@ -25,17 +24,18 @@
   "files": [
     "src",
     "test",
-    "dist",
-    "dist/src/artifacts/*"
+    "dist"
   ],
   "exports": {
     ".": {
       "types": "./dist/src/lib.d.ts",
-      "import": "./dist/src/lib.js"
+      "import": "./dist/src/lib.js",
+      "default": "./dist/src/lib.js"
     },
     "./react": {
       "types": "./dist/src/react.d.ts",
-      "import": "./dist/src/react.js"
+      "import": "./dist/src/react.js",
+      "default": "./dist/src/lib.js"
     }
   },
   "dependencies": {
@@ -67,6 +67,6 @@
     "tabWidth": 2,
     "semi": false,
     "singleQuote": true,
-    "filepath": "**/*.(ts|tsx)"
+    "filepath": "**/*.(ts|tsx|js)"
   }
 }
