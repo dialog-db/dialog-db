@@ -57,7 +57,7 @@ export type Change = Assertion | Retraction
 export interface Changes extends Iterable<Change> {}
 
 /**
- * Represents a database revision using RAW identity CID.
+ * Represents a database revision using via IPLD link formatted as string.
  */
 export interface Revision {
   toString(): string
@@ -73,10 +73,13 @@ export type Subscriber<Fact> = (facts: Fact[]) => unknown
  * Database session that can be used to query facts or/and transact changes.
  */
 export interface Session extends Querier {
+  /**
+   * DID identifier for the underlying database.
+   */
   did(): DID
 
   /**
-   * Takes changes and transacts them atomically.
+   * Takes changes and transacts them atomically into this database.
    */
   transact(changes: Changes): Task.Invocation<Revision, Error>
 
@@ -90,6 +93,16 @@ export interface Session extends Querier {
     query: Predicate<Fact, string, FactSchema>,
     subscriber: Subscriber<Fact>
   ): Subscription
+
+  /**
+   * Closes session & cancels all the subscribers.
+   */
+  close(): void
+
+  /**
+   * Closes session and erases underlying store.
+   */
+  clear(): Task.Invocation<void, Error>
 }
 
 /**
@@ -102,7 +115,7 @@ export interface Subscription {
 }
 
 /**
- * Open an artifacts store with the specified address
+ * Open a session to a database identified by a gived DID.
  */
 export const open = (did: DID) => DialogSession.open(did)
 
@@ -128,7 +141,7 @@ export class DialogSession implements Session {
    * @param address The store address configuration
    * @returns A task that resolves to a Querier and Transactor interface
    */
-  static open(did: DID) {
+  static open(did: DID): Session {
     if (!did.startsWith('did:key:')) {
       throw new RangeError(`Only did:key identifiers are supported`)
     }
