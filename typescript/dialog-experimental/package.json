@@ -1,6 +1,6 @@
 {
   "name": "@dialog-db/experimental",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "Dialog experimental runtime",
   "main": "dist/src/lib.js",
   "type": "module",
