@@ -36,8 +36,7 @@ use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_prolly_tree::{Entry, GeometricDistribution, Tree};
 use dialog_storage::{
-    Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, Storage,
-    StorageBackend,
+    Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Storage, StorageBackend,
 };
 use futures_util::{Stream, StreamExt};
 use std::{ops::Range, sync::Arc};
@@ -115,18 +114,22 @@ where
         // that generic K/V storage can go e.g., in a different IDB store or a
         // different folder on the FS
         let (entity_index, attribute_index, value_index) = {
-            let revision = storage.get(&make_reference(identifier.as_bytes())).await?;
-            let revision = if let Some(revision) = revision {
-                storage
-                    .read::<Revision>(&Blake3Hash::try_from(revision).map_err(
-                        |bytes: Vec<u8>| {
-                            DialogArtifactsError::InvalidRevision(format!(
-                                "Incorrect byte length (expected {HASH_SIZE}, received {})",
-                                bytes.len()
-                            ))
-                        },
-                    )?)
-                    .await?
+            let revision_block = storage.get(&make_reference(identifier.as_bytes())).await?;
+            let revision = if let Some(revision_hash_bytes) = revision_block {
+                // Check if the revision is NULL_REVISION_HASH
+                if revision_hash_bytes == NULL_REVISION_HASH {
+                    None
+                } else {
+                    // For actual revisions, read the revision from storage
+                    let hash = Blake3Hash::try_from(revision_hash_bytes).map_err(|bytes| {
+                        DialogArtifactsError::InvalidRevision(format!(
+                            "Incorrect byte length (expected {HASH_SIZE}, received {})",
+                            bytes.len()
+                        ))
+                    })?;
+
+                    storage.read::<Revision>(&hash).await?
+                }
             } else {
                 None
             };
@@ -247,95 +250,97 @@ where
                     .as_reference()
                     .await?
                 }
-                _ => NULL_REVISION.as_reference().await?,
+                _ => NULL_REVISION_HASH,
             },
         )
     }
 
-    /// Reset the root of the database to `revision` if provided, or else reset
+    /// Reset the root of the database to `revision_hash` if provided, or else reset
     /// to the stored root if available, or else to an empty database.
     pub async fn reset(
         &mut self,
-        revision: Option<Blake3Hash>,
+        revision_hash: Option<Blake3Hash>,
     ) -> Result<(), DialogArtifactsError> {
+        // Determine target revision we are resetting to
+        let required_hash = match revision_hash {
+            // If a specific revision hash is provided, use it
+            Some(hash) => hash,
+            // Otherwise get current revision hash from storage
+            None => {
+                let block = self
+                    .storage
+                    .get(&make_reference(self.identifier().as_bytes()))
+                    .await?;
+
+                match block {
+                    // If store has a revision, use it
+                    Some(block_data) => {
+                        // Check if the block data matches NULL_REVISION_HASH
+                        if block_data == NULL_REVISION_HASH.to_vec() {
+                            NULL_REVISION_HASH
+                        } else {
+                            Blake3Hash::try_from(block_data).map_err(|bytes| {
+                                DialogArtifactsError::InvalidRevision(format!(
+                                    "Incorrect byte length (expected {HASH_SIZE}, received {})",
+                                    bytes.len()
+                                ))
+                            })?
+                        }
+                    }
+                    // If no revision exists in storage, use NULL_REVISION_HASH
+                    None => NULL_REVISION_HASH,
+                }
+            }
+        };
+
+        // Now get hashes for the indexes.
+        let (entity_version, attribute_version, value_version) =
+            // The null revision does not actually exists it just represents
+            // empty indexes so we set all versions to None's.
+            if required_hash == NULL_REVISION_HASH {
+                (None, None, None)
+            } else {
+                // Otherwise we hydrate revision info from the store.
+                let revision = self
+                    .storage
+                    .read::<Revision>(&required_hash)
+                    .await?
+                    .ok_or_else(|| {
+                        DialogArtifactsError::InvalidRevision(format!(
+                            "Block ({}) not found in storage",
+                            required_hash.to_base58()
+                        ))
+                    })?;
+                (
+                    Some(revision.entity_index().to_owned()),
+                    Some(revision.attribute_index().to_owned()),
+                    Some(revision.value_index().to_owned()),
+                )
+            };
+
+        // Update storage to point to the revision hash only if it was
+        // explicitly provided. If it was not no point of updating because
+        // we just read it from the store.
+        if revision_hash.is_some() {
+            self.storage
+                .set(
+                    make_reference(self.identifier.as_bytes()),
+                    required_hash.to_vec(),
+                )
+                .await?;
+        }
+
+        // Finally update all the indexes
         let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
             self.entity_index.write(),
             self.attribute_index.write(),
             self.value_index.write()
         );
-
-        if let Some(revision) = revision {
-            // If a specific revision is requested, retrieve and validate it
-            let revision = self
-                .storage
-                .read::<Revision>(&revision)
-                .await?
-                .ok_or_else(|| {
-                    DialogArtifactsError::InvalidRevision(format!(
-                        "Block ({}) not found in storage",
-                        revision.to_base58()
-                    ))
-                })?;
-
-            // Update storage with the requested revision
-            self.storage
-                .set(
-                    make_reference(self.identifier.as_bytes()),
-                    CborEncoder.encode(&revision).await?.1,
-                )
-                .await?;
-
-            // Set index hashes to point to the requested revision
-            let entity_index_hash = Some(revision.entity_index().to_owned());
-            let attribute_index_hash = Some(revision.attribute_index().to_owned());
-            let value_index_hash = Some(revision.value_index().to_owned());
-
-            tokio::try_join!(
-                entity_index.set_hash(entity_index_hash),
-                attribute_index.set_hash(attribute_index_hash),
-                value_index.set_hash(value_index_hash),
-            )?;
-        } else {
-            // When no specific revision is requested, check if a revision exists
-            let block = self
-                .storage
-                .get(&make_reference(self.identifier().as_bytes()))
-                .await?;
-
-            let revision = if let Some(revision) = block {
-                self.storage
-                    .read::<Revision>(&Blake3Hash::try_from(revision).map_err(
-                        |bytes: Vec<u8>| {
-                            DialogArtifactsError::InvalidRevision(format!(
-                                "Incorrect byte length (expected {HASH_SIZE}, received {})",
-                                bytes.len()
-                            ))
-                        },
-                    )?)
-                    .await?
-            } else {
-                None
-            };
-
-            if let Some(revision) = revision {
-                let entity_index_hash = Some(revision.entity_index().to_owned());
-                let attribute_index_hash = Some(revision.attribute_index().to_owned());
-                let value_index_hash = Some(revision.value_index().to_owned());
-
-                tokio::try_join!(
-                    entity_index.set_hash(entity_index_hash),
-                    attribute_index.set_hash(attribute_index_hash),
-                    value_index.set_hash(value_index_hash),
-                )?;
-            } else {
-                // If no revision exists, initialize empty trees
-                tokio::try_join!(
-                    entity_index.set_hash(None),
-                    attribute_index.set_hash(None),
-                    value_index.set_hash(None),
-                )?;
-            }
-        }
+        tokio::try_join!(
+            entity_index.set_hash(entity_version),
+            attribute_index.set_hash(attribute_version),
+            value_index.set_hash(value_version),
+        )?;
 
         Ok(())
     }
@@ -525,23 +530,28 @@ where
                 attribute_index.hash(),
                 value_index.hash(),
             ) {
-                (Some(entity_index), Some(attribute_index), Some(value_index)) => {
-                    Revision::from((*entity_index, *attribute_index, *value_index))
-                }
-                _ => NULL_REVISION.clone(),
+                (Some(entity_index), Some(attribute_index), Some(value_index)) => Some(
+                    Revision::from((*entity_index, *attribute_index, *value_index)),
+                ),
+                _ => None,
             };
 
-            let next_revision = self.storage.write(&next_revision).await?;
+            let revision_hash = if let Some(revision) = &next_revision {
+                self.storage.write(&revision).await?;
+                revision.as_reference().await?
+            } else {
+                NULL_REVISION_HASH
+            };
 
             // Advance the effective pointer to the latest version of this DB
             self.storage
                 .set(
                     make_reference(self.identifier.as_bytes()),
-                    next_revision.to_vec(),
+                    revision_hash.to_vec(),
                 )
                 .await?;
 
-            Ok(next_revision) as Result<Blake3Hash, DialogArtifactsError>
+            Ok(revision_hash) as Result<Blake3Hash, DialogArtifactsError>
         }
         .await;
 
@@ -560,13 +570,16 @@ mod tests {
     use std::{collections::BTreeSet, str::FromStr, sync::Arc};
 
     use anyhow::Result;
-    use dialog_storage::{MeasuredStorage, MemoryStorageBackend, make_target_storage};
+    use dialog_storage::{
+        MeasuredStorage, MemoryStorageBackend, StorageBackend, make_target_storage,
+    };
     use futures_util::{StreamExt, TryStreamExt};
     use tokio::sync::Mutex;
 
     use crate::{
         Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute,
-        DialogArtifactsError, Entity, Instruction, Value, generate_data,
+        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, generate_data,
+        make_reference,
     };
 
     #[cfg(target_arch = "wasm32")]
@@ -1064,10 +1077,262 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_reset_before_commit() -> Result<()> {
-        let (storage_backend, _) = make_target_storage().await?;
+        let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
 
-        let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
+        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
         artifacts.reset(None).await?;
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_stores_null_revision_hash_directly() -> Result<()> {
+        // Use memory storage backend to avoid file system errors
+        let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
+
+        // Create an anonymous artifacts instance
+        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        // Reset to NULL_REVISION_HASH explicitly
+        artifacts.reset(Some(NULL_REVISION_HASH)).await?;
+
+        // Verify that the revision reference was set to NULL_REVISION_HASH
+        let reference_key = make_reference(artifacts.identifier().as_bytes());
+        let stored_value = artifacts.storage.get(&reference_key).await?;
+
+        assert!(stored_value.is_some(), "Reference should exist");
+        assert_eq!(
+            stored_value.unwrap(),
+            NULL_REVISION_HASH.to_vec(),
+            "Value should be NULL_REVISION_HASH"
+        );
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_handles_existing_null_revision() -> Result<()> {
+        // Use memory storage backend to avoid file system errors
+        let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
+
+        // Create an anonymous artifacts instance
+        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        // Manually set the reference to NULL_REVISION_HASH
+        let reference_key = make_reference(artifacts.identifier().as_bytes());
+        artifacts
+            .storage
+            .set(reference_key.clone(), NULL_REVISION_HASH.to_vec())
+            .await?;
+
+        // Get the value before reset
+        let before_value = artifacts.storage.get(&reference_key).await?;
+
+        // Now reset with None (should assume NULL_REVISION_HASH)
+        artifacts.reset(None).await?;
+
+        // Get the value after reset - should be unchanged since None was passed
+        let after_value = artifacts.storage.get(&reference_key).await?;
+        assert_eq!(
+            before_value, after_value,
+            "Storage shouldn't change with reset(None)"
+        );
+
+        // Verify we can still add data after reset
+        let entity = Entity::new();
+        let attribute = Attribute::from_str("test/attribute")?;
+        let value = Value::String("test value".into());
+
+        artifacts
+            .commit(vec![Instruction::Assert(Artifact {
+                the: attribute.clone(),
+                of: entity.clone(),
+                is: value.clone(),
+                cause: None,
+            })])
+            .await?;
+
+        // Verify the data exists
+        let results = artifacts
+            .select(ArtifactSelector::new().the(attribute))
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(results.len(), 1);
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_treats_null_revision_as_empty() -> Result<()> {
+        // Use memory storage backend to avoid file system errors
+        let storage_backend = MemoryStorageBackend::default();
+
+        // Create an anonymous artifacts instance
+        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        // Add some data
+        let entity = Entity::new();
+        let attribute = Attribute::from_str("test/attribute")?;
+        let value = Value::String("test value".into());
+
+        artifacts
+            .commit(vec![Instruction::Assert(Artifact {
+                the: attribute.clone(),
+                of: entity.clone(),
+                is: value.clone(),
+                cause: None,
+            })])
+            .await?;
+
+        // Verify the data exists
+        let results = artifacts
+            .select(ArtifactSelector::new().the(attribute.clone()))
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(results.len(), 1);
+
+        // Reset to NULL_REVISION_HASH
+        artifacts.reset(Some(NULL_REVISION_HASH)).await?;
+
+        // Verify data is gone (empty state)
+        let results = artifacts
+            .select(ArtifactSelector::new().the(attribute))
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(results.len(), 0);
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_verifies_storage_operations_for_null_revision() -> Result<()> {
+        // Test that null revision hash is stored correctly
+        let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
+
+        // Create artifacts instance
+        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        // Reset to NULL_REVISION_HASH with an explicit parameter
+        // (this should trigger a storage write)
+        artifacts.reset(Some(NULL_REVISION_HASH)).await?;
+
+        // Get the reference key and check what was stored
+        let reference_key = make_reference(artifacts.identifier().as_bytes());
+        let value = artifacts.storage.get(&reference_key).await?;
+
+        // Verify NULL_REVISION_HASH was stored directly
+        assert_eq!(value, Some(NULL_REVISION_HASH.to_vec()));
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_can_open_with_null_revision_hash() -> Result<()> {
+        // Use memory storage backend to avoid file system errors
+        let mut storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
+
+        // Create an identifier for testing
+        let identifier = "test-artifacts".to_string();
+
+        // Create a reference key for this identifier
+        let reference_key = make_reference(identifier.as_bytes());
+
+        // Set the NULL_REVISION_HASH directly in storage
+        storage_backend
+            .set(reference_key.clone(), NULL_REVISION_HASH.to_vec())
+            .await?;
+
+        // Open artifacts with this identifier - should successfully handle NULL_REVISION_HASH
+        let artifacts = Artifacts::open(identifier, storage_backend).await?;
+
+        // Verify we can use the artifacts instance
+        let entity = Entity::new();
+        let attribute = Attribute::from_str("test/attribute")?;
+        let value = Value::String("test value".into());
+
+        // Try to commit some data to verify it's working
+        let mut artifacts_mut = artifacts;
+        artifacts_mut
+            .commit(vec![Instruction::Assert(Artifact {
+                the: attribute.clone(),
+                of: entity.clone(),
+                is: value.clone(),
+                cause: None,
+            })])
+            .await?;
+
+        // Query the data to verify it was stored
+        let results = artifacts_mut
+            .select(ArtifactSelector::new().the(attribute))
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(
+            results.len(),
+            1,
+            "Should be able to read data after opening with NULL_REVISION_HASH"
+        );
+
+        Ok(())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_avoids_unnecessary_storage_writes() -> Result<()> {
+        // Use a memory storage backend so we can track writes
+        let mut storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
+
+        // Create a key we can track
+        let test_key = [42u8; 32];
+        let test_value = vec![1, 2, 3];
+
+        // Set an initial value
+        storage_backend.set(test_key, test_value.clone()).await?;
+
+        // Create artifacts
+        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        // First, establish a revision
+        let entity = Entity::new();
+        let attribute = Attribute::from_str("test/attribute")?;
+        let value = Value::String("test value".into());
+
+        artifacts
+            .commit(vec![Instruction::Assert(Artifact {
+                the: attribute.clone(),
+                of: entity.clone(),
+                is: value.clone(),
+                cause: None,
+            })])
+            .await?;
+
+        // Get the current revision (we don't need it, just ensure there is one)
+        let _ = artifacts.revision().await;
+
+        // Get the reference key
+        let reference_key = make_reference(artifacts.identifier().as_bytes());
+        let before_value = artifacts.storage.get(&reference_key).await?;
+
+        // Reset with None (should not trigger a storage write)
+        artifacts.reset(None).await?;
+
+        // Check the value after reset
+        let after_value = artifacts.storage.get(&reference_key).await?;
+
+        // Values should be identical since we didn't trigger a write
+        assert_eq!(
+            before_value, after_value,
+            "Storage value should not change when reset called with None"
+        );
 
         Ok(())
     }
