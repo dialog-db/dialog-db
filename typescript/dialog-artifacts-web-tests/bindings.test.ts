@@ -1,47 +1,35 @@
-import init, {
-    Artifacts,
-    generateEntity,
-    encode,
-    Entity,
-    InstructionType,
-    ValueDataType,
-    Artifact,
-    ArtifactApi,
-    type ArtifactIterable
-} from './dialog-artifacts';
-import { assert, expect } from '@open-wc/testing';
+import init, { Artifacts, generateEntity, encode, Entity, InstructionType, ValueDataType, Artifact, ArtifactApi } from "./dialog-artifacts";
+import { assert, expect } from "@open-wc/testing";
 
 await init();
 
 interface HackerProfile {
-    name: string;
-    handle: string;
+    name: string,
+    handle: string
 }
 
 describe('artifacts', () => {
-    const populateWithHackers = async (
-        artifacts: Artifacts
-    ): Promise<Map<string, HackerProfile>> => {
+    const populateWithHackers = async (artifacts: Artifacts): Promise<Map<string, HackerProfile>> => {
         const hackers = [
             {
-                name: 'Emmanuel Goldstein',
-                handle: 'Cereal Killer'
+                name: "Emmanuel Goldstein",
+                handle: "Cereal Killer"
             },
             {
-                name: 'Paul Cook',
-                handle: 'Lord Nikon'
+                name: "Paul Cook",
+                handle: "Lord Nikon"
             },
             {
-                name: 'Dade Murphy',
-                handle: 'Zero Cool'
+                name: "Dade Murphy",
+                handle: "Zero Cool"
             },
             {
-                name: 'Kate Libby',
-                handle: 'Acid Burn'
+                name: "Kate Libby",
+                handle: "Acid Burn"
             },
             {
-                name: 'Eugene Belford',
-                handle: 'The Plague'
+                name: "Eugene Belford",
+                handle: "The Plague"
             }
         ];
         const entityMap = new Map();
@@ -57,7 +45,7 @@ describe('artifacts', () => {
                 {
                     type: InstructionType.Assert,
                     artifact: {
-                        the: 'profile/name',
+                        the: "profile/name",
                         of: entity,
                         is: {
                             type: ValueDataType.String,
@@ -68,7 +56,7 @@ describe('artifacts', () => {
                 {
                     type: InstructionType.Assert,
                     artifact: {
-                        the: 'profile/handle',
+                        the: "profile/handle",
                         of: entity,
                         is: {
                             type: ValueDataType.String,
@@ -80,7 +68,7 @@ describe('artifacts', () => {
         }
 
         return entityMap;
-    };
+    }
 
     it('can restore from a revision', async () => {
         let artifacts = await Artifacts.anonymous();
@@ -90,7 +78,7 @@ describe('artifacts', () => {
         let restored_artifacts = await Artifacts.open(identifier);
 
         let query = restored_artifacts.select({
-            the: 'profile/handle'
+            the: "profile/handle"
         });
 
         let count = 0;
@@ -98,7 +86,7 @@ describe('artifacts', () => {
         for await (const artifact of query) {
             let expectedHandle = entityMap.get(encode(artifact.of))?.handle;
             expect(expectedHandle).to.be.ok;
-            expect(artifact.is.value).to.be.eq(expectedHandle!);
+            expect(artifact.is.value).to.be.eq(expectedHandle!)
             count++;
         }
 
@@ -116,9 +104,7 @@ describe('artifacts', () => {
             query = artifacts.select({
                 of: new Uint8Array()
             });
-        } catch (error) {
-            expect(error).to.be.ok;
-        } finally {
+        } catch (error) { expect(error).to.be.ok } finally {
             expect(query).to.be.undefined;
         }
     });
@@ -128,7 +114,7 @@ describe('artifacts', () => {
         let entityMap = await populateWithHackers(artifacts);
 
         let query = artifacts.select({
-            the: 'profile/handle'
+            the: "profile/handle"
         });
 
         let count = 0;
@@ -136,7 +122,7 @@ describe('artifacts', () => {
         for await (const artifact of query) {
             let expectedHandle = entityMap.get(encode(artifact.of))?.handle;
             expect(expectedHandle).to.be.ok;
-            expect(artifact.is.value).to.be.eq(expectedHandle!);
+            expect(artifact.is.value).to.be.eq(expectedHandle!)
             count++;
         }
 
@@ -148,12 +134,13 @@ describe('artifacts', () => {
         let entityMap = await populateWithHackers(artifacts);
 
         let query = artifacts.select({
-            the: 'profile/handle',
+            the: "profile/handle",
             is: {
                 type: ValueDataType.String,
-                value: 'Lord Nikon'
+                value: "Lord Nikon"
             }
         });
+
 
         let artifact;
 
@@ -165,7 +152,7 @@ describe('artifacts', () => {
 
         artifact = artifact!.update({
             type: ValueDataType.String,
-            value: 'Godking Nikon'
+            value: "Godking Nikon"
         })!;
 
         expect(artifact.cause).to.be.ok;
@@ -178,10 +165,10 @@ describe('artifacts', () => {
         ]);
 
         query = artifacts.select({
-            the: 'profile/handle',
+            the: "profile/handle",
             is: {
                 type: ValueDataType.String,
-                value: 'Godking Nikon'
+                value: "Godking Nikon"
             }
         });
 
@@ -199,7 +186,7 @@ describe('artifacts', () => {
         let entityMap = await populateWithHackers(artifacts);
 
         let query = artifacts.select({
-            the: 'profile/name'
+            the: "profile/name"
         });
 
         let count = 0;
@@ -207,7 +194,7 @@ describe('artifacts', () => {
         for await (const artifact of query) {
             let expectedHandle = entityMap.get(encode(artifact.of))?.name;
             expect(expectedHandle).to.be.ok;
-            expect(artifact.is.value).to.be.eq(expectedHandle!);
+            expect(artifact.is.value).to.be.eq(expectedHandle!)
 
             count++;
         }
@@ -217,7 +204,7 @@ describe('artifacts', () => {
         for await (const artifact of query) {
             let expectedHandle = entityMap.get(encode(artifact.of))?.name;
             expect(expectedHandle).to.be.ok;
-            expect(artifact.is.value).to.be.eq(expectedHandle!);
+            expect(artifact.is.value).to.be.eq(expectedHandle!)
 
             count++;
         }
@@ -235,7 +222,7 @@ describe('artifacts', () => {
         const otherQuery = artifacts.select({
             is: {
                 type: ValueDataType.String,
-                value: 'Acid Burn'
+                value: "Acid Burn"
             }
         });
 
@@ -253,7 +240,7 @@ describe('artifacts', () => {
         let entityMap = await populateWithHackers(artifacts);
 
         let query = artifacts.select({
-            the: 'profile/name'
+            the: "profile/name"
         });
 
         let count = 0;
@@ -263,7 +250,7 @@ describe('artifacts', () => {
 
             let expectedHandle = entityMap.get(encode(artifact.of))?.name;
             expect(expectedHandle).to.be.ok;
-            expect(artifact.is.value).to.be.eq(expectedHandle!);
+            expect(artifact.is.value).to.be.eq(expectedHandle!)
 
             count++;
         }
@@ -291,7 +278,7 @@ describe('artifacts', () => {
         await artifacts.reset(revision);
 
         let query = artifacts.select({
-            the: 'profile/name'
+            the: "profile/name"
         });
 
         let count = 0;
@@ -303,4 +290,5 @@ describe('artifacts', () => {
 
         expect(count).to.be.eql(5);
     });
+
 });
