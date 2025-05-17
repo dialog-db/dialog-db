@@ -302,11 +302,22 @@ where
                 .get(&make_reference(self.identifier().as_bytes()))
                 .await?;
 
-            if let Some(block) = block {
-                // If a revision exists in storage, use it
-                let revision = CborEncoder.decode::<Revision>(&block).await?;
+            let revision = if let Some(revision) = block {
+                self.storage
+                    .read::<Revision>(&Blake3Hash::try_from(revision).map_err(
+                        |bytes: Vec<u8>| {
+                            DialogArtifactsError::InvalidRevision(format!(
+                                "Incorrect byte length (expected {HASH_SIZE}, received {})",
+                                bytes.len()
+                            ))
+                        },
+                    )?)
+                    .await?
+            } else {
+                None
+            };
 
-                // Set index hashes to point to the current revision
+            if let Some(revision) = revision {
                 let entity_index_hash = Some(revision.entity_index().to_owned());
                 let attribute_index_hash = Some(revision.attribute_index().to_owned());
                 let value_index_hash = Some(revision.value_index().to_owned());
