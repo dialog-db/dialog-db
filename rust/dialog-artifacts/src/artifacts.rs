@@ -117,7 +117,7 @@ where
             let revision_block = storage.get(&make_reference(identifier.as_bytes())).await?;
             let revision = if let Some(revision_hash_bytes) = revision_block {
                 // Check if the revision is NULL_REVISION_HASH
-                if revision_hash_bytes == NULL_REVISION_HASH.to_vec() {
+                if revision_hash_bytes == NULL_REVISION_HASH {
                     None
                 } else {
                     // For actual revisions, read the revision from storage
@@ -262,7 +262,6 @@ where
         revision_hash: Option<Blake3Hash>,
     ) -> Result<(), DialogArtifactsError> {
         // Determine target revision we are resetting to
-        // Step 1: Figure out needed revision_hash
         let required_hash = match revision_hash {
             // If a specific revision hash is provided, use it
             Some(hash) => hash,
@@ -531,23 +530,28 @@ where
                 attribute_index.hash(),
                 value_index.hash(),
             ) {
-                (Some(entity_index), Some(attribute_index), Some(value_index)) => {
-                    Revision::from((*entity_index, *attribute_index, *value_index))
-                }
-                _ => Revision::from((NULL_REVISION_HASH, NULL_REVISION_HASH, NULL_REVISION_HASH)),
+                (Some(entity_index), Some(attribute_index), Some(value_index)) => Some(
+                    Revision::from((*entity_index, *attribute_index, *value_index)),
+                ),
+                _ => None,
             };
 
-            let next_revision = self.storage.write(&next_revision).await?;
+            let revision_hash = if let Some(revision) = &next_revision {
+                self.storage.write(&revision).await?;
+                revision.as_reference().await?
+            } else {
+                NULL_REVISION_HASH
+            };
 
             // Advance the effective pointer to the latest version of this DB
             self.storage
                 .set(
                     make_reference(self.identifier.as_bytes()),
-                    next_revision.to_vec(),
+                    revision_hash.to_vec(),
                 )
                 .await?;
 
-            Ok(next_revision) as Result<Blake3Hash, DialogArtifactsError>
+            Ok(revision_hash) as Result<Blake3Hash, DialogArtifactsError>
         }
         .await;
 
