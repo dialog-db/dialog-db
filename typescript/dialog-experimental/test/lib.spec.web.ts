@@ -8,7 +8,7 @@ describe('experimental', () => {
     assert.equal(typeof Query, 'object')
   })
 
-  it.only('can perform basic transactions', async () =>
+  it('can perform basic transactions', async () =>
     Task.spawn(function* () {
       const db = Artifacts.open(alice)
       try {
@@ -44,7 +44,7 @@ describe('experimental', () => {
           'one fact was retracted'
         )
       } finally {
-        // yield* db.clear()
+        yield* db.clear()
       }
     }))
 
@@ -62,6 +62,7 @@ describe('experimental', () => {
         [Counter.assert({ name: 'test', value: 10 })],
         'new session picks up where last lefts off'
       )
+
       await session.transact([
         Counter.assert({ name: 'test', value: 10 }).retract(),
         Counter.assert({ name: 'test', value: 15 }),

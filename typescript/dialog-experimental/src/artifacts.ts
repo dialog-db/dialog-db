@@ -112,6 +112,12 @@ type Connection = Variant<{
 }>
 
 /**
+ * We hold weak references to db sessions to avoid having more than one
+ * session for the same database in the same thread.
+ */
+const sessions = new Map<DID, WeakRef<DialogSession>>()
+
+/**
  * Implements a store for artifacts that provides querying and transaction capabilities
  * @implements {API.Querier}
  * @implements {API.Transactor}
@@ -127,7 +133,14 @@ export class DialogSession implements Session {
       throw new RangeError(`Only did:key identifiers are supported`)
     }
 
-    return new this(did)
+    const session = sessions.get(did)?.deref()
+    if (session) {
+      return session
+    } else {
+      const session = new this(did)
+      sessions.set(did, new WeakRef(session))
+      return session
+    }
   }
   /**
    * Create a new ArtifactsStore instance
@@ -314,6 +327,10 @@ export class DialogSession implements Session {
   }
 
   close() {
+    if (sessions.get(this.did())?.deref() === this) {
+      sessions.delete(this.did())
+    }
+
     this.#channel.removeEventListener('message', this)
     this.#subscriptions.clear()
   }
