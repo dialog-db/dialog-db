@@ -1,11 +1,9 @@
-import { Session, Query, fact, Task, API } from './self.js'
+import { Session, fact, Task } from './self.js'
 import {
   useQuery,
   Provider,
-  useSession,
   useTransaction,
 } from '@dialog-db/experimental/react'
-import * as React from 'react'
 
 import {
   act,
@@ -16,6 +14,7 @@ import {
 } from '@testing-library/react'
 import { assert } from '@open-wc/testing'
 import { bob } from './constants.js'
+import * as React from 'react'
 
 describe('react integration', () => {
   it('test hook', async () => {

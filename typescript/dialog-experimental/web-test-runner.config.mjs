@@ -1,10 +1,9 @@
 import { vitePlugin } from '@remcovaes/web-test-runner-vite-plugin'
-import react from '@vitejs/plugin-react'
-
+import reactRefresh from '@vitejs/plugin-react-refresh'
 export default {
   plugins: [
     vitePlugin({
-      plugins: [react()],
+      plugins: [reactRefresh()],
     }),
   ],
   testsFinishTimeout: 10000,
