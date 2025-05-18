@@ -208,6 +208,7 @@
                 ./tsconfig.json \
                 ./package.json \
                 ./package-lock.json \
+                ./web-test-runner.config.mjs \
                 ./test $out/@dialog-db/experimental
             '';
 
