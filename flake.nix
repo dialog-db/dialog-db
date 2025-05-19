@@ -128,6 +128,7 @@
             installPhase = ''
               mkdir -p $out/@dialog-db
               cp -r ./rust/dialog-artifacts/pkg $out/@dialog-db/dialog-artifacts
+              rm $out/@dialog-db/dialog-artifacts/.gitignore
             '';
 
             nativeBuildInputs = common-build-inputs "stable";
@@ -180,7 +181,8 @@
 
             src = ./typescript/dialog-experimental/.;
 
-            npmDepsHash = "sha256-ybheDb38keqG+sP4Fxc+6LDnP/hkTTSFNvny05O6mvs=";
+            # npmDepsHash = lib.fakeHash;
+            npmDepsHash = "sha256-qcnrYVltgUUXWQRFT9TzYfHOcdUswfEI/j6WkZ41HmU=";
 
             nativeBuildInputs = common-build-inputs "stable" ++ [
               playwright-driver
