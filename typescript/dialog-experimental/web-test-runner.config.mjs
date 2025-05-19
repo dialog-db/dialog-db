@@ -1,10 +1,13 @@
 import { vitePlugin } from '@remcovaes/web-test-runner-vite-plugin'
-import reactRefresh from '@vitejs/plugin-react-refresh'
+import react from '@vitejs/plugin-react-swc'
+
+react.preambleCode
 export default {
   plugins: [
     vitePlugin({
-      plugins: [reactRefresh()],
+      plugins: [react()],
     }),
   ],
+
   testsFinishTimeout: 10000,
 }
