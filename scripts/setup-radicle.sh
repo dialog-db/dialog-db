@@ -1,5 +1,5 @@
 #!/bin/sh
-# Don't use set -e to avoid terminal closing when sourced with . ./scripts/setup.sh
+# Don't use set -e to avoid terminal closing when sourced with . ./scripts/setup-radicle.sh
 # Instead, check return codes explicitly and report errors
 
 # Check if rad command is available

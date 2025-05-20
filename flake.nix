@@ -84,6 +84,8 @@
           cargo-nextest
           playwright-test
           nodejs
+          git
+          radicle-node  # Provides the 'rad' CLI tool
         ];
 
         interactive-dev-tools =
@@ -249,6 +251,26 @@
                 export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1
                 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1;
                 export PLAYWRIGHT_BROWSERS_PATH=${playwright-driver.browsers}
+                
+                # Get repository root directory using git
+                REPO_ROOT="$(git rev-parse --show-toplevel)"
+                
+                # Check if radicle is available
+                if command -v rad >/dev/null 2>&1; then
+                  # Run the setup script if it exists
+                  if [ -f "$REPO_ROOT/scripts/setup-radicle.sh" ]; then
+                    echo "🛠️  Running Radicle setup script..."
+                    . "$REPO_ROOT/scripts/setup-radicle.sh"
+                  else
+                    echo "⚠️  Radicle setup script not found at $REPO_ROOT/scripts/setup-radicle.sh"
+                  fi
+                else
+                  echo "⛓️‍💥 Radicle toolchain ('rad' command) not found in PATH."
+                  echo "  💡 This development environment should include radicle-node,"
+                  echo "      but the 'rad' command is not accessible."
+                  echo "  💡 Ensure you have run 'nix develop' rather than using a legacy shell."
+                  echo "  💡 If the problem persists, try running 'which radicle-node' to debug."
+                fi
               '';
             };
         };
