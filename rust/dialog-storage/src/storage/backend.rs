@@ -9,6 +9,9 @@ use crate::DialogStorageError;
 mod memory;
 pub use memory::*;
 
+mod remote;
+pub use remote::*;
+
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod indexeddb;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]

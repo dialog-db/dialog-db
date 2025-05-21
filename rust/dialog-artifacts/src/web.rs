@@ -29,15 +29,18 @@
 
 use std::{pin::Pin, sync::Arc};
 
+use async_compat::CompatExt;
 use base58::{FromBase58, ToBase58};
 use dialog_storage::{
-    Blake3Hash, IndexedDbStorageBackend, StorageCache, web::ObjectSafeStorageBackend,
+    Blake3Hash, CloudflareWorkerStorageBackend, IndexedDbStorageBackend, StorageCache,
+    SynchronizedStorage, web::ObjectSafeStorageBackend,
 };
 use futures_util::{Stream, StreamExt};
 use rand::{Rng, distr::Alphanumeric};
 use tokio::sync::{Mutex, RwLock};
 use wasm_bindgen::{convert::TryFromJsValue, prelude::*};
 use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
+use web_sys::ReadableStream;
 
 use crate::{
     Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute, Cause,
@@ -199,7 +202,7 @@ impl ArtifactsBinding {
             .map(char::from)
             .collect();
 
-        Self::open(identifier).await
+        Self::open(identifier, None).await
     }
 
     /// The name used to uniquely identify the data of this [`Artifacts`]
@@ -213,7 +216,7 @@ impl ArtifactsBinding {
     /// used for multiple instances (or across sessions), the same database will
     /// be used.
     #[wasm_bindgen]
-    pub async fn open(identifier: String) -> Result<Self, JsError> {
+    pub async fn open(identifier: String, remote_url: Option<String>) -> Result<Self, JsError> {
         let storage_backend = StorageCache::new(
             IndexedDbStorageBackend::new(&identifier, "dialog-artifact-blocks")
                 .await
@@ -221,6 +224,16 @@ impl ArtifactsBinding {
             STORAGE_CACHE_CAPACITY,
         )
         .map_err(|error| DialogArtifactsError::from(error))?;
+
+        let storage_backend: WebStorageBackend = if let Some(url) = remote_url {
+            let remote_storage_backend = CloudflareWorkerStorageBackend::new(url.parse()?);
+            Arc::new(Mutex::new(SynchronizedStorage::new(
+                storage_backend,
+                remote_storage_backend,
+            )))
+        } else {
+            Arc::new(Mutex::new(storage_backend))
+        };
 
         // Erase the type:
         let storage_backend: WebStorageBackend = Arc::new(Mutex::new(storage_backend));
@@ -307,6 +320,17 @@ impl ArtifactsBinding {
             .map_err(js_value_to_error)?;
 
         Ok(iterable)
+    }
+
+    #[wasm_bindgen]
+    pub async fn import(&self, stream: ReadableStream) -> Result<(), JsError> {
+        let mut read = wasm_streams::ReadableStream::from_raw(stream).into_async_read();
+        let mut read = read.compat_mut();
+
+        let mut artifacts = self.artifacts.write().await;
+        artifacts.import(&mut read).await?;
+
+        Ok(())
     }
 }
 

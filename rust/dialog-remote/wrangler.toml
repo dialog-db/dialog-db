@@ -1,0 +1,11 @@
+name = "dialog-remote"
+main = "build/worker/shim.mjs"
+compatibility_date = "2025-05-19"
+
+[build]
+command = "worker-build --release -m no-install . --offline"
+
+[[kv_namespaces]]
+binding = "dialog_db_demo"
+id = "937d9939310d4c109bd140662c844a77"
+preview_id = "c160314637f349cf8d630919623c039c"

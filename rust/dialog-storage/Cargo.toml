@@ -10,6 +10,7 @@ helpers = ["tempfile", "anyhow", "rand"]
 
 [dependencies]
 dialog-common = { workspace = true }
+dialog-remote = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
 async-stream = { workspace = true }
@@ -23,11 +24,18 @@ serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }
 rand = { workspace = true, optional = true }
 thiserror = { workspace = true }
+reqwest = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
+url = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tempfile = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["sync", "fs"] }
+tokio = { workspace = true, features = [
+    "sync",
+    "fs",
+    "macros",
+    "rt-multi-thread",
+] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 js-sys = { workspace = true }

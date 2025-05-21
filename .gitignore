@@ -3,6 +3,7 @@ node_modules
 coverage
 pkg
 result
+dist
 **/.claude/settings.local.json
 typescript/dialog-experimental/src/artifacts
 typescript/*/dist/

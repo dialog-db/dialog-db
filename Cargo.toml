@@ -20,6 +20,7 @@ members = [
     "rust/dialog-common",
     "rust/dialog-dbsp",
     "rust/dialog-prolly-tree",
+    "rust/dialog-remote",
     "rust/dialog-storage",
 ]
 resolver = "2"
@@ -29,20 +30,25 @@ version = "0.1.0"
 authors = ["The Meiosys Project Authors"]
 license = "MIT OR Apache-2.0"
 
+
 [workspace.dependencies]
 anyhow = "1"
 arrayref = "0.3"
+async-compat = "0.2"
 async-stream = "0.3"
 async-trait = "0.1"
+axum = { version = "0.8", default-features = false }
 base58 = "0.2"
 blake3 = "1"
 brotli = "8"
+chrono = "0.4"
 console_error_panic_hook = "0.1"
 csv-async = { version = "1", features = ["tokio"] }
 ed25519-dalek = "2"
 futures-core = "0.3"
 futures-util = "0.3"
 getrandom = "0.3"
+hmac = "0.12"
 js-sys = "0.3"
 leb128 = "0.2"
 leptos = "0.8"
@@ -52,22 +58,35 @@ nonempty = "0.11"
 ptree = "0.5"
 rand = "0.9"
 rand_chacha = "0.9"
+reqwest = { version = "0.12.15", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 rexie = "0.6"
 rkyv = "0.8"
 serde = "1"
 serde-big-array = "0.5"
 serde_ipld_dagcbor = "0.6"
 serde_json = "1"
-sieve-cache = "0.2"
+sha2 = "0.10"
+sieve-cache = "1"
 static_assertions = "1"
+s3-presign = "0.0.3"
 tempfile = "3"
 thiserror = "2"
 tokio = "1"
+tokio-util = "0.7"
+tower-service = "0.3.2"
 ulid = "1"
+url = "2"
 wasm-bindgen = "=0.2.100"
 wasm-bindgen-futures = "0.4"
 wasm-bindgen-test = "0.3"
+wasm-streams = "0.4"
 web-sys = "0.3"
+worker = { version = "0.5", features = ["http", "axum"] }
+worker-kv = { version = "0.8" }
+worker-macros = { version = "0.5", features = ["http"] }
 
 [workspace.dependencies.dialog-artifacts]
 path = "./rust/dialog-artifacts"
@@ -78,9 +97,12 @@ path = "./rust/dialog-common"
 [workspace.dependencies.dialog-prolly-tree]
 path = "./rust/dialog-prolly-tree"
 
+[workspace.dependencies.dialog-remote]
+path = "./rust/dialog-remote"
+
 [workspace.dependencies.dialog-storage]
 path = "./rust/dialog-storage"
 
-[patch.crates-io]
+# [patch.crates-io]
 # TODO: https://github.com/gwierzchowski/csv-async/issues/27
-csv-async = { git = "https://github.com/cdata/csv-async.git" }
+# csv-async = { git = "https://github.com/cdata/csv-async.git" }

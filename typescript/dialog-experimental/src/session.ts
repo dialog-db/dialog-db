@@ -44,7 +44,7 @@ export type DID = `did:${string}:${string}`
  * Change that retracts set of facts, which is usually a set corresponding to
  * one relation model.
  */
-export interface Retraction extends Iterable<{ retract: Fact }> {}
+export interface Retraction extends Iterable<{ retract: Fact }> { }
 
 /**
  * Change is either assertion or a rtercation.
@@ -54,7 +54,7 @@ export type Change = Assertion | Retraction
 /**
  * Changes are set of changes that can be transacted atomically.
  */
-export interface Changes extends Iterable<Change> {}
+export interface Changes extends Iterable<Change> { }
 
 /**
  * Represents a database revision using via IPLD link formatted as string.
@@ -77,6 +77,16 @@ export interface Session extends Querier {
    * DID identifier for the underlying database.
    */
   did(): DID
+
+  /**
+   * The URL of a remote to sync to, if any
+   */
+  remote(): string | null | void
+
+  /**
+   * The underlying Artifacts reference for this session
+   */
+  connection(): Connection
 
   /**
    * Takes changes and transacts them atomically into this database.
@@ -117,7 +127,7 @@ export interface Subscription {
 /**
  * Open a session to a database identified by a gived DID.
  */
-export const open = (did: DID) => DialogSession.open(did)
+export const open = (did: DID, remote?: string) => DialogSession.open(did, remote)
 
 type Connection = Variant<{
   pending: Task.Invocation<Artifacts, Error>
@@ -141,7 +151,7 @@ export class DialogSession implements Session {
    * @param address The store address configuration
    * @returns A task that resolves to a Querier and Transactor interface
    */
-  static open(did: DID): Session {
+  static open(did: DID, remote?: string): Session {
     if (!did.startsWith('did:key:')) {
       throw new RangeError(`Only did:key identifiers are supported`)
     }
@@ -150,7 +160,7 @@ export class DialogSession implements Session {
     if (session) {
       return session
     } else {
-      const session = new this(did)
+      const session = new this(did, remote)
       sessions.set(did, new WeakRef(session))
       return session
     }
@@ -160,12 +170,14 @@ export class DialogSession implements Session {
    */
   constructor(
     did: DID,
+    remote: string | null | undefined = undefined,
     subscriptions: Set<Subscription> = new Set(),
     channel = new BroadcastChannel(this.did())
   ) {
     this.#did = did
     this.#subscriptions = subscriptions
     this.#channel = channel
+    this.#remote = remote
     this.#connection = { pending: Task.perform(DialogSession.connect(this)) }
 
     // DB may be mutated from the other sessions in order to know that we need
@@ -176,6 +188,8 @@ export class DialogSession implements Session {
   #did
   #subscriptions
   #channel
+  #remote
+  #connection: Connection
 
   static *connect(self: DialogSession): Task.Task<Artifacts, Error> {
     if (ready === false) {
@@ -186,11 +200,11 @@ export class DialogSession implements Session {
       yield* Task.wait(ready)
     }
 
-    const conneciton = yield* Task.wait(Artifacts.open(self.did()))
+    const connection = yield* Task.wait(Artifacts.open(self.did(), self.remote()))
 
-    self.#connection = { open: conneciton }
+    self.#connection = { open: connection }
 
-    return conneciton
+    return connection
   }
 
   handleEvent(event: MessageEvent) {
@@ -210,8 +224,6 @@ export class DialogSession implements Session {
     yield* DialogSession.broadcast(self)
   }
 
-  #connection: Connection
-
   static *connected(self: DialogSession): Task.Task<Artifacts, Error> {
     if (self.#connection.pending) {
       return yield* Task.wait(self.#connection.pending)
@@ -225,6 +237,14 @@ export class DialogSession implements Session {
    */
   did() {
     return this.#did
+  }
+
+  remote() {
+    return this.#remote
+  }
+
+  connection() {
+    return this.#connection
   }
 
   /**
@@ -441,7 +461,7 @@ const fromIterable = async (iterable: ArtifactIterable) => {
   return selection
 }
 
-const select = async (connection: Artifacts, selector: ArtifactSelector) => {}
+const select = async (connection: Artifacts, selector: ArtifactSelector) => { }
 /**
  * Convert a link to an entity
  * @param link The link to convert
@@ -476,8 +496,8 @@ const toTyped = (
     case 'number': {
       return (
         Number.isInteger(value) ? { value, type: ValueDataType.SignedInt }
-        : Number.isFinite(value) ? { value, type: ValueDataType.Float }
-        : unreachable(`Number ${value} can not be inferred`)
+          : Number.isFinite(value) ? { value, type: ValueDataType.Float }
+            : unreachable(`Number ${value} can not be inferred`)
       )
     }
     case 'bigint': {

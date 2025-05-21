@@ -33,7 +33,7 @@ pub use r#match::*;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_common::{ConditionalSend, ConditionalSync, Unsent};
 use dialog_prolly_tree::{Entry, GeometricDistribution, Tree};
 use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Storage, StorageBackend,
@@ -207,11 +207,14 @@ where
     /// [`Artifacts::export`]
     pub async fn import<Read>(&mut self, read: &mut Read) -> Result<(), DialogArtifactsError>
     where
-        Read: tokio::io::AsyncRead + Unpin + Send,
+        Read: tokio::io::AsyncRead + Unpin + ConditionalSend,
     {
         let instructions = stream! {
+            // SAFETY: We wrap the `AsyncRead` in an [`Unsent`] here because
+            // `csv_async` unnecessarily requires a `Send` bound on
+            // `wasm32-unknown-unknown` targets
             let mut reader = csv_async::AsyncReaderBuilder::new()
-                .create_deserializer(read);
+                .create_deserializer(Unsent::new(read));
 
             let stream = reader.deserialize::<Artifact>();
 

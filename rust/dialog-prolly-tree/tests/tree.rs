@@ -193,6 +193,12 @@ async fn restores_tree_from_hash() -> Result<()> {
     Ok(())
 }
 
+// #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+// #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+// async fn near_miss_lookup_finishes() -> Result<()> {
+
+// }
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn lru_store_caches() -> Result<()> {

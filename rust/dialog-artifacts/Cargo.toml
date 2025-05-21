@@ -20,6 +20,7 @@ dialog-prolly-tree = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
 arrayref = { workspace = true }
+async-compat = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
@@ -31,9 +32,9 @@ rand = { workspace = true }
 rand_chacha = { workspace = true }
 serde = { workspace = true }
 serde-big-array = { workspace = true }
-static_assertions = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
+tokio-util = { workspace = true, features = ["io"] }
 
 [dev-dependencies]
 dialog-storage = { workspace = true, features = ["helpers"] }
@@ -43,6 +44,8 @@ anyhow = { workspace = true }
 getrandom = { workspace = true, features = ["wasm_js"] }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
+wasm-streams = { workspace = true }
+web-sys = { workspace = true, features = ["ReadableStream"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 wasm-bindgen-test = { workspace = true }

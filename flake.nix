@@ -5,12 +5,14 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay.url = "github:oxalica/rust-overlay";
+    wrangler-flake.url = "github:ryand56/wrangler";
   };
 
   outputs =
     { nixpkgs
     , flake-utils
     , rust-overlay
+    , wrangler-flake
     , ...
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -67,29 +69,28 @@
             with pkgs;
             [
               binaryen
+              cargo-nextest
+              cloudflare-cli
+              esbuild
               gnused
+              nodejs
               pkg-config
               protobuf
               rust-toolchain
               trunk
               wasm-bindgen-cli
               wasm-pack
+              worker-build
+              wrangler-flake.packages.${system}.wrangler
             ]
             ++ lib.optionals stdenv.isDarwin [
               darwin.apple_sdk.frameworks.SystemConfiguration
               darwin.apple_sdk.frameworks.Security
             ];
 
-        common-dev-tools = with pkgs; [
-          cargo-nextest
-          playwright-test
-          nodejs
-        ];
-
         interactive-dev-tools =
           with pkgs;
-          common-dev-tools
-          ++ [
+          [
             static-web-server
             leptosfmt
             cargo-generate
@@ -97,7 +98,6 @@
           ++ lib.optionals stdenv.isLinux [
             chromium
             chromedriver
-            playwright-driver
           ];
 
         dialog-artifacts-web =
@@ -134,10 +134,6 @@
             nativeBuildInputs = common-build-inputs "stable";
             cargoLock = {
               lockFile = ./Cargo.lock;
-              outputHashes = {
-                # TODO: https://github.com/gwierzchowski/csv-async/issues/27
-                "csv-async-1.3.0" = "sha256-cD+H0VRX0XtczWS140i93WS2ZzB9oag58t94/caGABM=";
-              };
             };
           };
 
@@ -220,21 +216,77 @@
             doCheck = false;
           };
 
-        npm-packages = with pkgs; stdenv.mkDerivation {
-          pname = "npm_packages";
-          version = "0.1.0";
-          buildInputs = [
-            dialog-artifacts-web
-            dialog-experimental
-          ];
-          src = ./.;
-          buildPhase = "";
-          installPhase = ''
-            mkdir -p $out/@dialog-db
-            cp -r ${dialog-artifacts-web}/@dialog-db/dialog-artifacts $out/@dialog-db
-            cp -r ${dialog-experimental}/@dialog-db/experimental $out/@dialog-db
-          '';
-        };
+        dialog-remote-cloudflare-worker =
+          let
+            rust-toolchain = rustToolchain ("stable");
+
+            rust-platform = pkgs.makeRustPlatform {
+              cargo = rust-toolchain;
+              rustc = rust-toolchain;
+            };
+          in
+          rust-platform.buildRustPackage {
+            pname = "dialog-remote-cloudflare-worker";
+            version = "0.1.0";
+            src = ./.;
+            nativeBuildInputs = common-build-inputs "stable";
+
+            buildPhase = ''
+              export HOME=`pwd`
+              cd rust/dialog-remote
+              wrangler build
+            '';
+
+            installPhase = ''
+              mkdir -p $out/dialog-remote-cloudflare-worker
+              cp ./wrangler.deploy.toml $out/dialog-remote-cloudflare-worker/wrangler.toml
+              cp -r ./build $out/dialog-remote-cloudflare-worker
+            '';
+
+            doCheck = false;
+
+            env = {
+              RUST_BACKTRACE = "full";
+            };
+
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+            };
+          };
+
+        # dialog-remote-cloudflare-worker = with pkgs; stdenv.mkDerivation
+        #   {
+        #     pname = "dialog-remote-cloudflare-worker";
+        #     version = "0.1.0";
+        #     src = ./.;
+        #     nativeBuildInputs = common-build-inputs "stable";
+        #     buildPhase = ''
+        #       export HOME=`pwd`
+        #       cd rust/dialog-remote
+        #       wrangler build
+        #     '';
+        #     installPhase = ''
+        #       mkdir -p $out/
+        #       cp -r ./rust/dialog-remote/build $out/dialog-remote-cloudflare-worker
+        #     '';
+        #   };
+
+        npm-packages = with pkgs;
+          stdenv.mkDerivation {
+            pname = "npm-packages";
+            version = "0.1.0";
+            buildInputs = [
+              dialog-artifacts-web
+              dialog-experimental
+            ];
+            src = ./.;
+            buildPhase = "";
+            installPhase = ''
+              mkdir -p $out/@dialog-db
+              cp -r ${dialog-artifacts-web}/@dialog-db/dialog-artifacts $out/@dialog-db
+              cp -r ${dialog-experimental}/@dialog-db/experimental $out/@dialog-db
+            '';
+          };
 
       in
       {
@@ -261,7 +313,7 @@
 
         packages =
           {
-            inherit dialog-artifacts-web dialog-experimental npm-packages;
+            inherit dialog-artifacts-web dialog-remote-cloudflare-worker dialog-experimental npm-packages;
           };
       }
     );

@@ -49,6 +49,9 @@ pub enum DialogArtifactsError {
     #[error("Could not export data: {0}")]
     Export(String),
 
+    #[error("Could not import data: {0}")]
+    Import(String),
+
     /// Attempted to query with an unconstrained [`ArtifactSelector`]
     #[error("An artifact selector must specify at least one field")]
     EmptySelector,
