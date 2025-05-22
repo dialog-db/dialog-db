@@ -5,28 +5,37 @@
 //!
 //! To make use of [`Artifacts`] via the Rust API:
 //!
-//! ```ignore
+//! ```rust
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::str::FromStr;
 //! use dialog_storage::MemoryStorageBackend;
-//! use dialog_facts::{Entity, Attribute, Value, Artifacts, Artifact};
+//! use dialog_artifacts::{Entity, Attribute, Value, Artifacts, Artifact, ArtifactSelector, Instruction, ArtifactStore, ArtifactStoreMut};
+//! use futures_util::{StreamExt, stream};
 //!
 //! // Substitute with your storage backend of choice:
 //! let storage_backend = MemoryStorageBackend::default();
-//! let mut artifacts = Artifacts::new(storage_backend);
+//! let mut artifacts = Artifacts::anonymous(storage_backend).await?;
 //!
-//! artifacts.commit([
-//!     Artifact {
-//!         the: Attribute::from_str("profile/name"),
-//!         of: Entity::new(),
-//!         is: Value::String("Foo Bar".into())
-//!     }
-//! ]).await?;
+//! // Create an artifact
+//! let artifact = Artifact {
+//!     the: Attribute::from_str("profile/name")?,
+//!     of: Entity::new(),
+//!     is: Value::String("Foo Bar".into()),
+//!     cause: None
+//! };
 //!
-//! let artifact_stream = facts.select(ArtifactSelector::default()
-//!     .the(Attribute::from_str("profile/name")));
+//! // Create a stream of instructions and commit
+//! let instructions = stream::iter(vec![Instruction::Assert(artifact)]);
+//! artifacts.commit(instructions).await?;
 //!
-//! let artifacts = fact_stream.filter_map(|fact| fact.ok())
-//!     .collect::earVec<Fact>>().await;
+//! // Query the artifacts
+//! let artifact_stream = artifacts.select(ArtifactSelector::new()
+//!     .the(Attribute::from_str("profile/name")?));
+//!
+//! let results = artifact_stream.filter_map(|fact| async move { fact.ok() })
+//!     .collect::<Vec<_>>().await;
+//! # Ok(())
+//! # }
 //! ```
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]

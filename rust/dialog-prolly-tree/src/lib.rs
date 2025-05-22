@@ -8,20 +8,27 @@
 //! In order to use it, first construct a [`dialog_storage::Storage`] and then initialize
 //! a [`Tree`] with it:
 //!
-//! ```ignore
-//! use dialog_storage::{Storage, MemoryStorageBackend};
-//! use dialog_prolly_tree::{BasicEncoder, Tree};
+//! ```rust
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use dialog_storage::{Storage, MemoryStorageBackend, CborEncoder};
+//! use dialog_prolly_tree::{Tree, GeometricDistribution};
+//! use dialog_storage::Blake3Hash;
 //!
 //! let storage = Storage {
-//!     encoder: BasicEncoder,
+//!     encoder: CborEncoder,
 //!     backend: MemoryStorageBackend::default()
 //! };
 //!
-//! let tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage);
+//! // Create a tree with branch factor 32, 32-byte hashes, geometric distribution
+//! let mut tree = Tree::<32, 32, GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash, _>::new(storage);
 //!
+//! // Store a key-value pair
 //! tree.set(vec![1, 2, 3], vec![4, 5, 6]).await?;
 //!
+//! // Get the hash of the tree root (if any)
 //! println!("{:?}", tree.hash());
+//! # Ok(())
+//! # }
 //! ```
 
 mod block;
