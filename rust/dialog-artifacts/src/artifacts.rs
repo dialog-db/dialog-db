@@ -1124,7 +1124,7 @@ mod tests {
         let reference_key = make_reference(artifacts.identifier().as_bytes());
         artifacts
             .storage
-            .set(reference_key.clone(), NULL_REVISION_HASH.to_vec())
+            .set(reference_key, NULL_REVISION_HASH.to_vec())
             .await?;
 
         // Get the value before reset
@@ -1247,7 +1247,7 @@ mod tests {
 
         // Set the NULL_REVISION_HASH directly in storage
         storage_backend
-            .set(reference_key.clone(), NULL_REVISION_HASH.to_vec())
+            .set(reference_key, NULL_REVISION_HASH.to_vec())
             .await?;
 
         // Open artifacts with this identifier - should successfully handle NULL_REVISION_HASH

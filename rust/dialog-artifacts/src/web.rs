@@ -1,8 +1,9 @@
 //! Web bindings for the `dialog-artifacts` crate.
 //!
-//! Example usage:
+//! Example usage in JavaScript:
 //!
 //! ```ignore
+//! // This is JavaScript code that uses the WASM bindings, not a Rust doctest
 //! import { Artifacts, generateEntity, InstructionType, ValueDataType } from "dialog-artifacts";
 //!
 //! let artifacts = await Artifacts.open("test");
