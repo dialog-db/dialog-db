@@ -3,9 +3,11 @@
 ![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue?label=License)
 [![Tests](https://img.shields.io/github/checks-status/dialog-db/dialog-db/main)](https://github.com/dialog-db/dialog-db/actions/workflows/run_test_suite.yaml?query=branch%3Amain)
 
-<picture align="center">
-  <img alt="Dialog DB" src="./notes/images/dialog.webp">
-</picture>
+<div align="center">
+  <picture>
+    <img width="70%" alt="Dialog DB" src="./notes/images/dialog.webp">
+  </picture>
+</div>
 
 > The world is divided into word-processing, spreadsheet, database and other applications. Computers are hierarchical. We have a desktop and hierarchical files which have to mean everything. 
 >
@@ -22,7 +24,7 @@ It has (or aims to have) the following properties:
 - Schema-on-read via an expressive [Datalog]-esque query API
 - Efficient synchronization across replicas
 - Support for both [Web Assembly] and native runtime environments
-- TODO: How many aspirational things do we want to include here?
+- Emphasis on data privacy and user-centered authority
 
 ## Status: Experimental
 
