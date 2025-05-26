@@ -552,13 +552,19 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum 0.8.4",
+ "base58",
  "chrono",
  "console_error_panic_hook",
+ "dialog-artifacts",
+ "dialog-prolly-tree",
+ "dialog-storage",
  "hmac",
+ "http",
  "reqwest",
  "sha2",
  "thiserror 2.0.12",
  "tokio",
+ "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -1874,6 +1880,20 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
+ "tower-layer",
+ "tower-service",
+]
+
+[[package]]
+name = "tower-http"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fdb0c213ca27a9f57ab69ddb290fd80d970922355b83ae380b395d3986b8a2e"
+dependencies = [
+ "bitflags",
+ "bytes",
+ "http",
+ "pin-project-lite",
  "tower-layer",
  "tower-service",
 ]

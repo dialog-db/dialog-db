@@ -5,6 +5,9 @@ compatibility_date = "2025-05-19"
 [build]
 command = "worker-build --release -m no-install . --offline"
 
+[observability.logs]
+enabled = true
+
 [[kv_namespaces]]
 binding = "dialog_db_demo"
 id = "937d9939310d4c109bd140662c844a77"

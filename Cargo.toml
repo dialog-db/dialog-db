@@ -22,6 +22,7 @@ members = [
     "rust/dialog-prolly-tree",
     "rust/dialog-remote",
     "rust/dialog-storage",
+
 ]
 resolver = "2"
 
@@ -49,6 +50,7 @@ futures-core = "0.3"
 futures-util = "0.3"
 getrandom = "0.3"
 hmac = "0.12"
+http = "1"
 js-sys = "0.3"
 leb128 = "0.2"
 leptos = "0.8"
@@ -76,6 +78,7 @@ tempfile = "3"
 thiserror = "2"
 tokio = "1"
 tokio-util = "0.7"
+tower-http = "0.6"
 tower-service = "0.3.2"
 ulid = "1"
 url = "2"

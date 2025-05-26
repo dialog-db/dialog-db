@@ -19,6 +19,9 @@ pub use measure::*;
 mod sync;
 pub use sync::*;
 
+mod tap;
+pub use tap::*;
+
 mod transfer;
 use serde::{Serialize, de::DeserializeOwned};
 pub use transfer::*;

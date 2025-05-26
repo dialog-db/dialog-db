@@ -7,14 +7,25 @@ use axum::{
     handler::Handler,
     routing::{get, get_service},
 };
+use http::Method;
+use tower_http::cors::{Any, CorsLayer};
 use tower_service::Service;
 use worker::{Context, Env, HttpRequest, kv::KvStore};
 
 fn router(kv: Arc<KvStore>) -> Router {
-    Router::new().route("/", get(root)).route(
-        "/block/{key}",
-        get_service(get_block.with_state(kv.clone())).post_service(put_block.with_state(kv)),
-    )
+    Router::new()
+        .route("/", get(root))
+        .route(
+            "/block/{key}",
+            get_service(get_block.with_state(kv.clone())).post_service(put_block.with_state(kv)),
+        )
+        .layer(
+            CorsLayer::new()
+                // allow `GET` and `POST` when accessing the resource
+                .allow_methods([Method::GET, Method::POST])
+                // allow requests from any origin
+                .allow_origin(Any),
+        )
 }
 
 #[worker::event(fetch)]
@@ -37,6 +48,7 @@ pub async fn root() -> &'static str {
 
 #[worker::send]
 pub async fn get_block(Path(key): Path<String>, State(kv): State<Arc<KvStore>>) -> Vec<u8> {
+    println!("Looking up key: {}", key);
     kv.get(&key)
         .bytes()
         .await
@@ -45,10 +57,16 @@ pub async fn get_block(Path(key): Path<String>, State(kv): State<Arc<KvStore>>) 
         .unwrap_or_default()
 }
 
+#[worker::send]
 pub async fn put_block(
     Path(key): Path<String>,
     State(kv): State<Arc<KvStore>>,
     value: Bytes,
 ) -> () {
-    kv.put_bytes(&key, value.as_ref()).unwrap();
+    println!("Assigning key: {}", key);
+    kv.put_bytes(&key, value.as_ref())
+        .unwrap()
+        .execute()
+        .await
+        .unwrap();
 }

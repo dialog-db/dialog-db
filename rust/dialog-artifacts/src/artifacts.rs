@@ -199,6 +199,25 @@ where
             }
         }
 
+        let res = self
+            .attribute_index
+            .read()
+            .await
+            .stream()
+            .collect::<Vec<_>>()
+            .await;
+
+        println!("ATTRIBUTE ENTRIES: {}", res.len());
+
+        let res = self
+            .value_index
+            .read()
+            .await
+            .stream()
+            .collect::<Vec<_>>()
+            .await;
+
+        println!("VALUE ENTRIES: {}", res.len());
         Ok(())
     }
 

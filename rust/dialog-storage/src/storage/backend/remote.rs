@@ -41,7 +41,7 @@ where
         let mut url = self.url.clone();
         url.set_path(&format!("/block/{}", key.as_ref().to_base58()));
         reqwest::Client::new()
-            .put(url)
+            .post(url)
             .body(Vec::from(value))
             .send()
             .await

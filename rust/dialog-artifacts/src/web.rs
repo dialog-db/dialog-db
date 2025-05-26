@@ -37,7 +37,10 @@ use dialog_storage::{
 };
 use futures_util::{Stream, StreamExt};
 use rand::{Rng, distr::Alphanumeric};
-use tokio::sync::{Mutex, RwLock};
+use tokio::{
+    io::BufWriter,
+    sync::{Mutex, RwLock},
+};
 use wasm_bindgen::{convert::TryFromJsValue, prelude::*};
 use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 use web_sys::ReadableStream;
@@ -331,6 +334,16 @@ impl ArtifactsBinding {
         artifacts.import(&mut read).await?;
 
         Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub async fn export(&self) -> Result<String, JsError> {
+        let artifacts = self.artifacts.read().await;
+        let mut result = BufWriter::new(Vec::new());
+
+        artifacts.export(&mut result).await?;
+
+        Ok(String::from_utf8(result.into_inner())?)
     }
 }
 
