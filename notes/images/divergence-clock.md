@@ -181,7 +181,13 @@ merge C tag: "8"
 
 ## Alternative Approach
 
-We could probably
+Instead of trying to captureing complete commit history inside a tree we could take completely different approach and instead have upstream tree and local workspace tree for local changes between. Reconciliation can take place on-push by merging local changes into upstream tree. This way tree would represent reconciled merge state so at query time no reconciliation would be required.
+
+This approach has a tradeoff making it impossible to surface conflicts at query time as they would need to be resolved before changes are pushed and once pushed information about prior conflict will be gone.
+
+Perhaps there are more lessons here to learn from datomic, as far as I understand in datomic tree represents current state, yet history is persisted in it's own index from which everything could be recovered. In other words datomic is can be though of index over the transaction log which is persisted to optimized for querying current state.
+
+In other words we could probably consider hybrid approach where superseded entries are pruned from the tree and are moved into an archival subtree (that still can be queried).
 
 [logical clock]:https://en.wikipedia.org/wiki/Logical_clock
 [vector clock]:https://en.wikipedia.org/wiki/Vector_clock
