@@ -30,10 +30,10 @@ flowchart LR
         V --- C["cause (causal reference)"]
     end
 
-    style E fill:#bbf,stroke:#333,stroke-width:2px
-    style A fill:#bfb,stroke:#333,stroke-width:2px
-    style V fill:#f9f,stroke:#333,stroke-width:2px
-    style C fill:#fcc,stroke:#333,stroke-width:2px
+    style E fill:#4DABF7,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style A fill:#40C057,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style V fill:#E599F7,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style C fill:#FF8787,stroke:#333,stroke-width:2px,color:#FFFFFF
 ```
 
 - **Entity (the)**: The subject being described
@@ -60,8 +60,8 @@ flowchart LR
         F5 -.-> F6
     end
     
-    style F1 fill:#bfb,stroke:#333,stroke-width:1px
-    style F6 fill:#f96,stroke:#333,stroke-width:2px
+    style F1 fill:#40C057,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style F6 fill:#F76707,stroke:#333,stroke-width:2px,color:#FFFFFF
 ```
 
 This causal model offers several advantages:
@@ -92,11 +92,11 @@ flowchart LR
     F1["Fact 1"] --> F2["Fact 2<br/>(references Fact 1)"] --> F3["Fact 3<br/>(references Fact 2)"]
     F1 --> F4["Fact 4<br/>(references Fact 1)"] --> F5["Fact 5<br/>(references Fact 4)"]
 
-    style F1 fill:#bbf,stroke:#333,stroke-width:2px
-    style F2 fill:#bbf,stroke:#333,stroke-width:2px
-    style F3 fill:#bbf,stroke:#333,stroke-width:2px
-    style F4 fill:#bfb,stroke:#333,stroke-width:2px
-    style F5 fill:#bfb,stroke:#333,stroke-width:2px
+    style F1 fill:#4DABF7,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style F2 fill:#4DABF7,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style F3 fill:#4DABF7,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style F4 fill:#40C057,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style F5 fill:#40C057,stroke:#333,stroke-width:2px,color:#FFFFFF
 ```
 
 - **Causality tracking**: Each change references its predecessor, forming a directed acyclic graph
@@ -123,13 +123,13 @@ flowchart TD
     Branch2 --> Segment3["Segment<br/>Hash: s3"]
     Branch2 --> Segment4["Segment<br/>Hash: s4"]
 
-    style Root fill:#f96,stroke:#333,stroke-width:2px
-    style Branch1 fill:#bbf,stroke:#333,stroke-width:2px
-    style Branch2 fill:#bbf,stroke:#333,stroke-width:2px
-    style Segment1 fill:#bfb,stroke:#333,stroke-width:1px
-    style Segment2 fill:#bfb,stroke:#333,stroke-width:1px
-    style Segment3 fill:#bfb,stroke:#333,stroke-width:1px
-    style Segment4 fill:#bfb,stroke:#333,stroke-width:1px
+    style Root fill:#F76707,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style Branch1 fill:#4DABF7,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style Branch2 fill:#4DABF7,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style Segment1 fill:#40C057,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style Segment2 fill:#40C057,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style Segment3 fill:#40C057,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style Segment4 fill:#40C057,stroke:#333,stroke-width:1px,color:#FFFFFF
 ```
 
 - **Deterministic layout**: The same data always produces the same tree structure regardless of insertion order
@@ -160,10 +160,10 @@ flowchart TD
         VAE["VAE Index<br/>(Value-Attribute-Entity)"]
     end
 
-    style Root fill:#f96,stroke:#333,stroke-width:2px
-    style EAV fill:#bbf,stroke:#333,stroke-width:2px
-    style AEV fill:#bfb,stroke:#333,stroke-width:2px
-    style VAE fill:#f9f,stroke:#333,stroke-width:2px
+    style Root fill:#F76707,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style EAV fill:#4DABF7,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style AEV fill:#40C057,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style VAE fill:#E599F7,stroke:#333,stroke-width:2px,color:#FFFFFF
 ```
 
 - **EAV Index**: Optimized for retrieving all attributes of a given entity ("What properties does entity X have?")
@@ -233,11 +233,11 @@ flowchart TD
         DB --> MP["Mutable Pointer"]
         DB --> PBT["Probabilistic B-Tree"]
 
-        style User fill:#f96,stroke:#333,stroke-width:2px
-        style DB fill:#bbf,stroke:#333,stroke-width:2px
-        style BS fill:#bfb,stroke:#333,stroke-width:1px
-        style MP fill:#f9f,stroke:#333,stroke-width:1px
-        style PBT fill:#fcc,stroke:#333,stroke-width:1px
+        style User fill:#F76707,stroke:#333,stroke-width:2px,color:#FFFFFF
+        style DB fill:#4DABF7,stroke:#333,stroke-width:2px,color:#FFFFFF
+        style BS fill:#40C057,stroke:#333,stroke-width:1px,color:#FFFFFF
+        style MP fill:#E599F7,stroke:#333,stroke-width:1px,color:#FFFFFF
+        style PBT fill:#FF8787,stroke:#333,stroke-width:1px,color:#FFFFFF
     end
 ```
 
@@ -278,11 +278,11 @@ flowchart TD
         LocalCache -->|"Missing data"| BlobStore["Blob Store"]
     end
 
-    style User fill:#f96,stroke:#333,stroke-width:2px
-    style LocalDB fill:#bbf,stroke:#333,stroke-width:2px
-    style LocalCache fill:#bfb,stroke:#333,stroke-width:1px
-    style Remote fill:#f9f,stroke:#333,stroke-width:1px
-    style BlobStore fill:#fcc,stroke:#333,stroke-width:1px
+    style User fill:#F76707,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style LocalDB fill:#4DABF7,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style LocalCache fill:#40C057,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style Remote fill:#E599F7,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style BlobStore fill:#FF8787,stroke:#333,stroke-width:1px,color:#FFFFFF
 ```
 
 DialogDB embraces local-first principles:
@@ -321,10 +321,10 @@ flowchart TD
     A --> Merge["Merged State"]
     B --> Merge
 
-    style Root fill:#bbf,stroke:#333,stroke-width:2px
-    style A fill:#bfb,stroke:#333,stroke-width:1px
-    style B fill:#f9f,stroke:#333,stroke-width:1px
-    style Merge fill:#fcc,stroke:#333,stroke-width:2px
+    style Root fill:#4DABF7,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style A fill:#40C057,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style B fill:#E599F7,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style Merge fill:#FF8787,stroke:#333,stroke-width:2px,color:#FFFFFF
 ```
 
 ### Query-Time Merge Semantics
