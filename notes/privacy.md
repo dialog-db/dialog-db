@@ -26,10 +26,10 @@ flowchart TD
     
     L0 --> L1 --> L2 --> L3
     
-    style L0 fill:#ddd,stroke:#333,stroke-width:1px
-    style L1 fill:#bfb,stroke:#333,stroke-width:1px
-    style L2 fill:#bbf,stroke:#333,stroke-width:1px
-    style L3 fill:#f9f,stroke:#333,stroke-width:1px
+    style L0 fill:#9398B0,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style L1 fill:#40C057,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style L2 fill:#4DABF7,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style L3 fill:#E599F7,stroke:#333,stroke-width:1px,color:#FFFFFF
 ```
 
 ### Level 0: No Access
@@ -89,11 +89,11 @@ flowchart TD
         Alice -->|"Delegates<br/>L3 access<br/>(Group A only)"| Charlie["Charlie<br/>Limited Collaborator"]
     end
     
-    style Alice fill:#f96,stroke:#333,stroke-width:2px
-    style SyncService fill:#bfb,stroke:#333,stroke-width:1px
-    style ValidationService fill:#bbf,stroke:#333,stroke-width:1px
-    style Bob fill:#f9f,stroke:#333,stroke-width:1px
-    style Charlie fill:#fcc,stroke:#333,stroke-width:1px
+    style Alice fill:#F76707,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style SyncService fill:#40C057,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style ValidationService fill:#4DABF7,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style Bob fill:#E599F7,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style Charlie fill:#FF8787,stroke:#333,stroke-width:1px,color:#FFFFFF
 ```
 
 ### UCAN Integration
@@ -123,9 +123,9 @@ flowchart TD
         Middle --> Inner["Inner Layer (L3)<br/>Fact Values"]
     end
     
-    style Outer fill:#bfb,stroke:#333,stroke-width:2px
-    style Middle fill:#bbf,stroke:#333,stroke-width:2px
-    style Inner fill:#f9f,stroke:#333,stroke-width:1px
+    style Outer fill:#40C057,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style Middle fill:#4DABF7,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style Inner fill:#E599F7,stroke:#333,stroke-width:1px,color:#FFFFFF
 ```
 
 ### Tiered Encryption Implementation
@@ -157,10 +157,10 @@ flowchart TD
     L3 --> GroupB["Group B Keys"]
     L3 --> GroupC["Group C Keys"]
     
-    style Root fill:#f96,stroke:#333,stroke-width:2px
-    style L1 fill:#bfb,stroke:#333,stroke-width:1px
-    style L2 fill:#bbf,stroke:#333,stroke-width:1px
-    style L3 fill:#f9f,stroke:#333,stroke-width:1px
+    style Root fill:#F76707,stroke:#333,stroke-width:2px,color:#FFFFFF
+    style L1 fill:#40C057,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style L2 fill:#4DABF7,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style L3 fill:#E599F7,stroke:#333,stroke-width:1px,color:#FFFFFF
 ```
 
 - **Hierarchical Keys**: Access keys are derived from a root key
@@ -180,10 +180,10 @@ flowchart LR
         P2 --> P3["Balanced<br/>Selective L2"] --> P4["Efficiency-Focused<br/>Broad L2 & L3"]
     end
     
-    style P1 fill:#f9f,stroke:#333,stroke-width:1px
-    style P2 fill:#bbf,stroke:#333,stroke-width:1px
-    style P3 fill:#bfb,stroke:#333,stroke-width:1px
-    style P4 fill:#fcc,stroke:#333,stroke-width:1px
+    style P1 fill:#E599F7,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style P2 fill:#4DABF7,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style P3 fill:#40C057,stroke:#333,stroke-width:1px,color:#FFFFFF
+    style P4 fill:#FF8787,stroke:#333,stroke-width:1px,color:#FFFFFF
 ```
 
 Users can configure their database to operate anywhere on this spectrum:
