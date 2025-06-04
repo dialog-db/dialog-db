@@ -112,13 +112,78 @@ We could accomplish first goal we must capture synchronization points e.g. tree 
 
 We can build upon this general idea but instead of using revision hash we could use monotonically growing tree size as synchronization point instead. Specifically we could use `{ since, drift, at }` tuple to represent our logical clock where:
 
-- `since` - Is count of commits in the database
-- `drift` - Is the number of commits made since updating `time`
+- `since` - Is count of commits in the shared tree (not local replica state)
+- `drift` - Is the number of commits made since last synchronization with shared tree
 - `at` - Is the unique identifier of the site that produced change
+
+The key insight is that `since` represents the shared convergence point - when two operations have the same `since` value but different `at` values, they were created from the same shared state and are therefore concurrent.
 
 With such a time stamps we would be able to identify concurrent changes by comparing `since` and `at` fields. If `since` is same but `at` is different changes are concurrent. Any two timestamps could also be compared by replacing `at` with a hash of the change.
 
 Above could be encoded into a lexicographic `${since}/${at}/${drift}` path that we could use to index commits in a deterministic order.
+
+## Push and Reconciliation Mechanism
+
+The system operates similar to git with a shared remote tree serving as the convergence point. Push operations use compare-and-swap semantics:
+
+1. **Attempt Push**: Try to update the shared tree root from current known state to new state including local commits
+2. **Handle Conflicts**: If the push fails (tree root has changed), the remote returns the current root hash
+3. **Reconcile**: Pull the new shared state and merge local changes into it
+4. **Retry**: Attempt push again with reconciled state
+
+This approach ensures that only one replica can successfully update the shared tree at a time, while others must reconcile their changes with the latest shared state before proceeding.
+
+### Push Operation State Diagram
+
+```mermaid
+stateDiagram-v2
+    [*] --> PrepareCommits: Local changes ready
+    PrepareCommits --> AttemptPush: Package local commits
+    AttemptPush --> PushSuccess: Compare-and-swap succeeds
+    AttemptPush --> PushFailed: Tree root changed
+    PushFailed --> PullLatest: Fetch current remote state
+    PullLatest --> MergeChanges: Download new segments
+    MergeChanges --> AttemptPush: Reconcile local commits
+    PushSuccess --> [*]: Remote updated
+
+    note right of AttemptPush
+        Try to update tree root:
+        old_root -> new_root
+    end note
+
+    note right of MergeChanges
+        Splice local commits into
+        updated remote tree
+    end note
+```
+
+### Pull Operation State Diagram
+
+```mermaid
+stateDiagram-v2
+    [*] --> CheckRemote: Query for updates
+    CheckRemote --> NoUpdates: Remote unchanged
+    CheckRemote --> HasUpdates: New commits available
+    NoUpdates --> [*]: Local state current
+    HasUpdates --> IdentifySegments: Determine needed tree segments
+    IdentifySegments --> DownloadSegments: Fetch required data
+    DownloadSegments --> UpdateLocal: Integrate new facts
+    UpdateLocal --> UpdateClock: Advance local 'since' value
+    UpdateClock --> [*]: Pull complete
+
+    note right of IdentifySegments
+        Query-driven: only fetch
+        segments needed for queries
+    end note
+```
+
+## Query-Time Conflict Resolution
+
+When queries encounter facts with the same `{ the, of, cause: { since } }` but different `cause.at` values, they are identified as concurrent conflicts. The system provides deterministic resolution by:
+
+1. **Default Winner**: Sort conflicting facts by their content hash and select the first one as the default value
+2. **Conflict Visibility**: Queries can optionally request to see all conflicting values for application-level resolution
+3. **Partial Replication Compatibility**: This resolution happens during query evaluation using only the facts present in replicated tree segments
 
 ## Divergence Clock Visualisation
 
@@ -178,6 +243,44 @@ merge C tag: "8"
 | Pull |   | C |  |
 | Commit | 4 | C | 1 |
 | Push | 7 | C |  |
+
+## Query-Driven Partial Replication
+
+The divergence clock design enables efficient partial replication through query-driven segment loading. Since all queries in the datalog-based system reduce to range scans over indexed facts, the system can:
+
+1. **Identify Required Segments**: Based on query predicates
+`{ the, of, is }`
+2. **Replicate Relevant Subtrees**: Pull only tree segments containing facts that match the query constraints and index nodes leading to them.
+3. **Maintain Causality**: The lexicographic ordering of `${since}/${at}/${drift}` ensures causal relationships are preserved within replicated segments
+4. **Resolve Conflicts Locally**: Concurrent facts with same `since` values will be co-located in nearby tree segments, enabling local conflict resolution
+
+This approach allows querying without requiring full database replication, unlike traditional CRDTs.
+
+## Indexing Strategy with Divergence Clocks
+
+The system maintains multiple index trees where facts are indexed by different orderings with the divergence clock embedded in the key structure:
+
+```
+EAVT Index (Entity-Attribute-Value-Time):
+"user:123/name/Alice/5/A/1" -> { the: "name", of: "user:123", is: "Alice", cause: {since: 5, at: "A", drift: 1} }
+
+AEVT Index (Attribute-qEntity-Value-Time):
+"name/user:123/Alice/5/A/1" -> { the: "name", of: "user:123", is: "Alice", cause: {since: 5, at: "A", drift: 1} }
+
+VEAT Index (Attribute-qEntity-Value-Time):
+"Alice/user:123/name/5/A/1" -> { the: "name", of: "user:123", is: "Alice", cause: {since: 5, at: "A", drift: 1} }
+
+
+TEAV Index (Time-Entity-Attribute-Value):
+"5/A/1/user:123/name/Alice" -> { the: "name", of: "user:123", is: "Alice", cause: {since: 5, at: "A", drift: 1} }
+```
+
+This design ensures that:
+
+1. **Range Queries Work Efficiently**: Scanning for all facts about `user:123` in EAVT index co-locates related facts regardless of when they were created
+2. **Conflicts Are Discoverable**: Facts with the same entity/attribute/value but different cause values appear adjacent in each index
+3. **Temporal Queries Are Supported**: TEAV index enables efficient "as of" queries and total ordering of all operations
+4. **Partial Replication Is Preserved**: Tree segments contain related facts based on the primary index components, with causality preserved in the key structure
 
 ## Alternative Approach
 
