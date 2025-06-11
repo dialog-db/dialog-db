@@ -394,7 +394,6 @@ impl TryFrom<Value> for JsValue {
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         let data_type = JsValue::from(value.data_type());
         let value = match value {
-            Value::Null => JsValue::null(),
             Value::Bytes(bytes) => {
                 let result = Uint8Array::new_with_length(bytes.len() as u32);
                 result.copy_from(bytes.as_ref());
@@ -546,18 +545,13 @@ impl TryFrom<(ValueDataType, JsValue)> for Value {
 
     fn try_from((data_type, value): (ValueDataType, JsValue)) -> Result<Self, Self::Error> {
         if value.is_undefined() {
-            return if matches!(data_type, ValueDataType::Null) {
-                Ok(Value::Null)
-            } else {
-                Err(DialogArtifactsError::InvalidValue(
-                    "Non-null data type must be initialized with a value".into(),
-                )
-                .into())
-            };
+            return Err(DialogArtifactsError::InvalidValue(
+                "Non-null data type must be initialized with a value".into(),
+            )
+            .into());
         };
 
         let value = match data_type {
-            ValueDataType::Null => Value::Null,
             ValueDataType::Bytes => {
                 let byte_array: Uint8Array = value.dyn_into().map_err(js_value_to_error)?;
                 Value::Bytes(byte_array.to_vec())

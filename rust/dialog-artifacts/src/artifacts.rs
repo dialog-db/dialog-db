@@ -752,7 +752,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 2);
+        assert_eq!(net_reads, 3);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -810,7 +810,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 5);
+        assert_eq!(net_reads, 4);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -846,7 +846,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 5);
+        assert_eq!(net_reads, 6);
         assert_eq!(net_writes, 0);
 
         let fact_stream =
@@ -864,7 +864,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 9);
+        assert_eq!(net_reads, 12);
         assert_eq!(net_writes, 0);
 
         Ok(())
