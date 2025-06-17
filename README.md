@@ -4,9 +4,7 @@
 [![Tests](https://img.shields.io/github/checks-status/dialog-db/dialog-db/main)](https://github.com/dialog-db/dialog-db/actions/workflows/run_test_suite.yaml?query=branch%3Amain)
 
 <div align="center">
-  <picture>
-    <img width="70%" alt="Dialog DB" src="./notes/images/dialog.webp">
-  </picture>
+  <img width="70%" alt="Dialog DB" src="./notes/images/dialog.webp">
 </div>
 
 > The world is divided into word-processing, spreadsheet, database and other applications. Computers are hierarchical. We have a desktop and hierarchical files which have to mean everything. 

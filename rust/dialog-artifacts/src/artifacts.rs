@@ -1,11 +1,11 @@
 mod artifact;
-
 pub use artifact::*;
 
 mod revision;
-use base58::ToBase58;
-use rand::{Rng, distr::Alphanumeric};
 pub use revision::*;
+
+mod data;
+pub use data::*;
 
 mod instruction;
 pub use instruction::*;
@@ -31,6 +31,9 @@ pub use cause::*;
 mod r#match;
 pub use r#match::*;
 
+use base58::ToBase58;
+use rand::{Rng, distributions::Alphanumeric};
+
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -49,8 +52,8 @@ use futures_util::TryStreamExt;
 use async_stream::stream;
 
 use crate::{
-    AttributeKey, BRANCH_FACTOR, DialogArtifactsError, EntityDatum, EntityKey, HASH_SIZE, State,
-    ValueDatum, ValueKey, ValueReferenceKeyPart, artifacts::selector::Constrained, make_reference,
+    AttributeKey, BRANCH_FACTOR, DialogArtifactsError, EntityKey, HASH_SIZE, State, ValueKey,
+    artifacts::selector::Constrained, make_reference,
 };
 
 /// An alias type that describes the [`Tree`]-based prolly tree that is
@@ -86,9 +89,9 @@ where
 {
     identifier: String,
     storage: Storage<HASH_SIZE, CborEncoder, Backend>,
-    entity_index: Arc<RwLock<Index<EntityKey, ValueDatum, Backend>>>,
-    attribute_index: Arc<RwLock<Index<AttributeKey, ValueDatum, Backend>>>,
-    value_index: Arc<RwLock<Index<ValueKey, EntityDatum, Backend>>>,
+    entity_index: Arc<RwLock<Index<EntityKey, Datum, Backend>>>,
+    attribute_index: Arc<RwLock<Index<AttributeKey, Datum, Backend>>>,
+    value_index: Arc<RwLock<Index<ValueKey, Datum, Backend>>>,
 }
 
 impl<Backend> Artifacts<Backend>
@@ -161,7 +164,7 @@ where
     /// Initialize a new, empty [`Artifacts`] with a randomly generated
     /// identifier
     pub async fn anonymous(backend: Backend) -> Result<Self, DialogArtifactsError> {
-        let identifier = rand::rng()
+        let identifier = rand::thread_rng()
             .sample_iter(&Alphanumeric)
             .take(32)
             .map(char::from)
@@ -188,10 +191,10 @@ where
         tokio::pin!(entity_stream);
 
         while let Some(entry) = entity_stream.try_next().await? {
-            let Entry { key, value } = entry;
+            let Entry { value, .. } = entry;
 
             if let State::Added(datum) = value {
-                let artifact = Artifact::try_from((key, datum))?;
+                let artifact = Artifact::try_from(datum)?;
 
                 csv.serialize(artifact)
                     .await
@@ -369,18 +372,9 @@ where
             let attribute_index = attribute_index.read().await.clone();
             let value_index = value_index.read().await.clone();
 
-            let entity = selector.entity();
-            let attribute = selector.attribute();
-            let value = selector.value();
-
-            if let Some(entity) = entity {
-                let mut start = EntityKey::min().set_entity(entity.into());
-                let mut end = EntityKey::max().set_entity(entity.into());
-
-                if let Some(attribute) = attribute {
-                    start = start.set_attribute(attribute.into());
-                    end = end.set_attribute(attribute.into());
-                }
+            if selector.entity().is_some() {
+                let start = EntityKey::min().apply_selector(&selector);
+                let end = EntityKey::max().apply_selector(&selector);
 
                 let stream = entity_index.stream_range(Range { start, end });
 
@@ -390,26 +384,14 @@ where
                     let entry = item?;
 
                     if entry.matches_selector(&selector) {
-                        if let Entry { key, value: State::Added(datum) } = entry {
-                            yield Artifact::try_from((key, datum))?;
+                        if let Entry { value: State::Added(datum), .. } = entry {
+                            yield Artifact::try_from(datum)?;
                         }
                     }
                 }
-            } else if let Some(value) = value {
-                let value_reference = value.to_reference();
-
-                let mut start = ValueKey::min()
-                    .set_value_type(value.data_type())
-                    .set_value_reference(ValueReferenceKeyPart(&value_reference));
-                let mut end = ValueKey::max()
-                    .set_value_type(value.data_type())
-                    .set_value_reference(ValueReferenceKeyPart(&value_reference));
-
-
-                if let Some(attribute) = attribute {
-                    start = start.set_attribute(attribute.into());
-                    end = end.set_attribute(attribute.into());
-                }
+            } else if selector.value().is_some() {
+                let start = ValueKey::min().apply_selector(&selector);
+                let end = ValueKey::max().apply_selector(&selector);
 
                 let stream = value_index.stream_range(Range { start, end });
 
@@ -419,22 +401,14 @@ where
                     let entry = item?;
 
                     if entry.matches_selector(&selector) {
-                        if let Entry { key, value: State::Added(_) } = entry {
-                                let key = EntityKey::default()
-                                    .set_entity(key.entity())
-                                    .set_attribute(key.attribute())
-                                    .set_value_type(key.value_type());
-
-                                let Some(State::Added(datum)) = entity_index.get(&key).await? else {
-                                    return Err(DialogArtifactsError::MalformedIndex(format!("Missing datum for key {:?}", key)))?;
-                                };
-                                yield Artifact::try_from((key, datum))?;
+                        if let Entry { value: State::Added(datum), .. } = entry {
+                            yield Artifact::try_from(datum)?;
                         }
                     }
                 }
-            } else if let Some(attribute) = attribute {
-                let start = AttributeKey::min().set_attribute(attribute.into());
-                let end = AttributeKey::max().set_attribute(attribute.into());
+            } else if selector.attribute().is_some() {
+                let start = AttributeKey::min().apply_selector(&selector);
+                let end = AttributeKey::max().apply_selector(&selector);
 
                 let stream = attribute_index.stream_range(Range { start, end });
 
@@ -444,8 +418,8 @@ where
                     let entry = item?;
 
                     if entry.matches_selector(&selector) {
-                        if let Entry { key, value: State::Added(datum) } = entry {
-                            yield Artifact::try_from((key, datum))?;
+                        if let Entry { value: State::Added(datum), .. } = entry {
+                            yield Artifact::try_from(datum)?;
                         }
                     }
                 }
@@ -485,34 +459,61 @@ where
             while let Some(instruction) = instructions.next().await {
                 match instruction {
                     Instruction::Assert(artifact) => {
-                        let value_datum =
-                            ValueDatum::new(artifact.is.clone(), artifact.cause.clone());
                         let entity_key = EntityKey::from(&artifact);
+                        let value_key = ValueKey::from(&entity_key);
+                        let attribute_key = AttributeKey::from(&entity_key);
 
-                        if let Some(cause) = &artifact.cause {
-                            if let Some(State::Added(current_element)) =
-                                entity_index.get(&entity_key).await?
-                            {
-                                let current_artifact = Artifact::try_from((
-                                    entity_key.clone(),
-                                    current_element.clone(),
-                                ))?;
-                                let current_artifact_reference = Cause::from(&current_artifact);
+                        let datum = Datum::from(artifact);
 
-                                if cause == &current_artifact_reference {
-                                    // Prune the old entry from the value index
-                                    let value_key = ValueKey::from(&current_artifact);
-                                    value_index.delete(&value_key).await?;
+                        if let Some(cause) = &datum.cause {
+                            let ancestor_key = {
+                                let search_start = EntityKey::min()
+                                    .set_entity(entity_key.entity())
+                                    .set_attribute(entity_key.attribute());
+                                let search_end = EntityKey::max()
+                                    .set_entity(entity_key.entity())
+                                    .set_attribute(entity_key.attribute());
+
+                                let search_stream =
+                                    entity_index.stream_range(search_start..search_end);
+
+                                let mut ancestor_key = None;
+
+                                tokio::pin!(search_stream);
+
+                                while let Some(candidate) = search_stream.try_next().await? {
+                                    if let State::Added(current_element) = candidate.value {
+                                        let current_artifact = Artifact::try_from(current_element)?;
+                                        let current_artifact_reference =
+                                            Cause::from(&current_artifact);
+
+                                        if cause == &current_artifact_reference {
+                                            ancestor_key = Some(candidate.key);
+                                            break;
+                                        }
+                                    }
                                 }
+
+                                ancestor_key
+                            };
+
+                            if let Some(entity_key) = ancestor_key {
+                                // Prune the old entry from the indexes
+                                let value_key = ValueKey::from(&entity_key);
+                                let attribute_key = AttributeKey::from(&entity_key);
+
+                                tokio::try_join!(
+                                    value_index.delete(&value_key),
+                                    attribute_index.delete(&attribute_key),
+                                    entity_index.delete(&entity_key),
+                                )?;
                             }
                         }
 
                         tokio::try_join!(
-                            entity_index.set(entity_key, State::Added(value_datum.clone())),
-                            attribute_index
-                                .set(AttributeKey::from(&artifact), State::Added(value_datum)),
-                            value_index
-                                .set(ValueKey::from(&artifact), State::Added(EntityDatum {})),
+                            attribute_index.set(attribute_key, State::Added(datum.clone())),
+                            value_index.set(value_key, State::Added(datum.clone())),
+                            entity_index.set(entity_key, State::Added(datum)),
                         )?;
                     }
                     Instruction::Retract(fact) => {
@@ -597,13 +598,13 @@ mod tests {
         let mut data = vec![
             Artifact {
                 the: Attribute::from_str("profile/name")?,
-                of: Entity::new(),
+                of: Entity::new()?,
                 is: Value::String("Foo Bar".into()),
                 cause: None,
             },
             Artifact {
                 the: Attribute::from_str("profile/name")?,
-                of: Entity::new(),
+                of: Entity::new()?,
                 is: Value::String("Fizz Buzz".into()),
                 cause: None,
             },
@@ -752,7 +753,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 3);
+        assert_eq!(net_reads, 1);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -810,7 +811,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 4);
+        assert_eq!(net_reads, 2);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -846,7 +847,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 6);
+        assert_eq!(net_reads, 3);
         assert_eq!(net_writes, 0);
 
         let fact_stream =
@@ -864,7 +865,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 12);
+        assert_eq!(net_reads, 7);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -879,7 +880,7 @@ mod tests {
             .map(Value::UnsignedInt)
             .map(|value| Artifact {
                 the: "test/attribute".parse().unwrap(),
-                of: Entity::new(),
+                of: Entity::new().unwrap(),
                 is: value,
                 cause: None,
             })
@@ -909,7 +910,7 @@ mod tests {
             .map(Value::UnsignedInt)
             .map(|value| Artifact {
                 the: "test/attribute".parse().unwrap(),
-                of: Entity::new(),
+                of: Entity::new().unwrap(),
                 is: value,
                 cause: None,
             })
@@ -1006,7 +1007,7 @@ mod tests {
         let mut artifacts = Artifacts::anonymous(storage_backend.clone()).await?;
 
         let attribute = Attribute::from_str("test/attribute")?;
-        let entity = Entity::new();
+        let entity = Entity::new()?;
         let artifact = Artifact {
             the: attribute,
             of: entity.clone(),
@@ -1141,7 +1142,7 @@ mod tests {
         );
 
         // Verify we can still add data after reset
-        let entity = Entity::new();
+        let entity = Entity::new()?;
         let attribute = Attribute::from_str("test/attribute")?;
         let value = Value::String("test value".into());
 
@@ -1175,7 +1176,7 @@ mod tests {
         let mut artifacts = Artifacts::anonymous(storage_backend).await?;
 
         // Add some data
-        let entity = Entity::new();
+        let entity = Entity::new()?;
         let attribute = Attribute::from_str("test/attribute")?;
         let value = Value::String("test value".into());
 
@@ -1254,7 +1255,7 @@ mod tests {
         let artifacts = Artifacts::open(identifier, storage_backend).await?;
 
         // Verify we can use the artifacts instance
-        let entity = Entity::new();
+        let entity = Entity::new()?;
         let attribute = Attribute::from_str("test/attribute")?;
         let value = Value::String("test value".into());
 
@@ -1302,7 +1303,7 @@ mod tests {
         let mut artifacts = Artifacts::anonymous(storage_backend).await?;
 
         // First, establish a revision
-        let entity = Entity::new();
+        let entity = Entity::new()?;
         let attribute = Attribute::from_str("test/attribute")?;
         let value = Value::String("test value".into());
 

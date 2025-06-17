@@ -44,5 +44,6 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt", "fs"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
-getrandom = { workspace = true, features = ["wasm_js"] }
+# getrandom = { workspace = true, features = ["wasm_js"] }
+getrandom = { workspace = true, features = ["js"] }
 wasm-bindgen-test = { workspace = true }

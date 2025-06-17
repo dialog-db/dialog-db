@@ -1,6 +1,6 @@
 use std::{fmt::Display, str::FromStr};
 
-use crate::{Attribute, DialogArtifactsError, Entity, RawEntity, make_reference};
+use crate::{Attribute, DialogArtifactsError, Entity, make_reference};
 
 use base58::{FromBase58, ToBase58};
 use dialog_storage::Blake3Hash;
@@ -12,7 +12,7 @@ pub enum Value {
     /// A byte buffer
     Bytes(Vec<u8>),
     /// An [`Entity`]
-    Entity(RawEntity),
+    Entity(Entity),
     /// A boolean
     Boolean(bool),
     /// A UTF-8 string
@@ -50,13 +50,14 @@ impl Value {
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             Value::Bytes(bytes) => bytes.to_owned(),
-            Value::Entity(entity) => entity.as_ref().to_vec(),
+            Value::Entity(entity) => entity.as_str().as_bytes().to_owned(),
             Value::Boolean(value) => vec![u8::from(*value)],
             Value::String(string) => string.as_bytes().to_vec(),
             Value::UnsignedInt(value) => value.to_le_bytes().to_vec(),
             Value::SignedInt(value) => value.to_le_bytes().to_vec(),
             Value::Float(value) => value.to_le_bytes().to_vec(),
             Value::Record(value) => value.to_owned(),
+            // TODO: Change this to bytes of string representation
             Value::Symbol(value) => value.key_bytes().to_vec(),
         }
     }
@@ -65,7 +66,7 @@ impl Value {
     pub fn to_utf8(&self) -> String {
         match self {
             Value::Bytes(bytes) => format!("bytes:{}", bytes.to_base58()),
-            Value::Entity(raw) => format!("entity:{}", raw.to_base58()),
+            Value::Entity(raw) => format!("entity:{}", raw),
             Value::Boolean(value) => format!("boolean:{}", value),
             Value::String(string) => format!("string:{}", string),
             Value::UnsignedInt(number) => format!("uint:{}", number),
@@ -126,7 +127,7 @@ impl FromStr for Value {
 
         Ok(match variant {
             "bytes" => Value::Bytes(value.from_base58().map_err(to_dialog_error_debug)?),
-            "entity" => Value::Entity(*Entity::try_from(value.to_owned())?),
+            "entity" => Value::Entity(Entity::from_str(value)?),
             "boolean" => Value::Boolean(bool::from_str(value).map_err(to_dialog_error)?),
             "string" => Value::String(value.to_owned()),
             "uint" => Value::UnsignedInt(value.parse().map_err(to_dialog_error)?),
@@ -149,7 +150,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
     fn try_from((value_data_type, value): (ValueDataType, Vec<u8>)) -> Result<Self, Self::Error> {
         Ok(match value_data_type {
             ValueDataType::Bytes => Value::Bytes(value),
-            ValueDataType::Entity => Value::Entity(*Entity::try_from(value)?),
+            ValueDataType::Entity => Value::Entity(Entity::try_from(value)?),
             // TODO: How strictly validated must a bool representation be?
             ValueDataType::Boolean => match value.first() {
                 Some(byte) if value.len() == 1 => Value::Boolean(*byte != 0),
@@ -215,8 +216,8 @@ impl From<Vec<u8>> for Value {
     }
 }
 
-impl From<RawEntity> for Value {
-    fn from(value: RawEntity) -> Self {
+impl From<Entity> for Value {
+    fn from(value: Entity) -> Self {
         Value::Entity(value)
     }
 }

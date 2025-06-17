@@ -19,7 +19,7 @@
 //! // Create an artifact
 //! let artifact = Artifact {
 //!     the: Attribute::from_str("profile/name")?,
-//!     of: Entity::new(),
+//!     of: Entity::new()?,
 //!     is: Value::String("Foo Bar".into()),
 //!     cause: None
 //! };
@@ -41,9 +41,6 @@
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub mod web;
 
-mod data;
-pub use data::*;
-
 mod artifacts;
 pub use artifacts::*;
 
@@ -61,6 +58,9 @@ pub use constants::*;
 
 mod key;
 pub use key::*;
+
+mod uri;
+pub use uri::*;
 
 #[cfg(any(test, feature = "helpers"))]
 mod helpers;
