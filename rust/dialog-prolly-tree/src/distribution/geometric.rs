@@ -65,7 +65,7 @@ pub(crate) fn compute_geometric_rank<const HASH_SIZE: usize>(
 #[cfg(test)]
 mod tests {
     use super::compute_geometric_rank;
-    use rand::{Rng, rng};
+    use rand::{Rng, thread_rng as rng};
 
     #[test]
     fn it_has_expected_distribution() {

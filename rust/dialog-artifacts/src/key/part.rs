@@ -36,15 +36,15 @@ impl AsRef<[u8]> for EntityKeyPart<'_> {
 
 impl<'a> From<&'a Entity> for EntityKeyPart<'a> {
     fn from(value: &'a Entity) -> Self {
-        Self(value)
+        Self(value.key_bytes())
     }
 }
 
-impl<'a> From<EntityKeyPart<'a>> for Entity {
-    fn from(value: EntityKeyPart<'a>) -> Self {
-        Self::from(value.0.to_owned())
-    }
-}
+// impl<'a> From<EntityKeyPart<'a>> for Entity {
+//     fn from(value: EntityKeyPart<'a>) -> Self {
+//         Self::from(value.0.to_owned())
+//     }
+// }
 
 /// A wrapper around a slice reference that corresponds to the [`Attribute`]
 /// part of a [`KeyType`]

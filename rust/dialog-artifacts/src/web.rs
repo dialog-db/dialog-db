@@ -28,21 +28,21 @@
 //! }
 //! ```
 
-use std::{pin::Pin, sync::Arc};
+use std::{pin::Pin, str::FromStr, sync::Arc};
 
 use base58::{FromBase58, ToBase58};
 use dialog_storage::{
     Blake3Hash, IndexedDbStorageBackend, StorageCache, web::ObjectSafeStorageBackend,
 };
 use futures_util::{Stream, StreamExt};
-use rand::{Rng, distr::Alphanumeric};
+use rand::{Rng, distributions::Alphanumeric};
 use tokio::sync::{Mutex, RwLock};
 use wasm_bindgen::{convert::TryFromJsValue, prelude::*};
 use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
     Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute, Cause,
-    DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Value, ValueDataType,
+    DialogArtifactsError, Entity, HASH_SIZE, Instruction, Value, ValueDataType,
     artifacts::selector::Constrained,
 };
 
@@ -162,9 +162,11 @@ pub fn decode(encoded: String) -> Result<Vec<u8>, JsValue> {
 }
 
 /// Generate a unique, valid `Entity`
+// TODO: Change this to pass a string when the query engine supports URI
+// entities
 #[wasm_bindgen(js_name = "generateEntity")]
-pub fn generate_entity() -> Vec<u8> {
-    RawEntity::from(Entity::new()).to_vec()
+pub fn generate_entity() -> Result<Vec<u8>, JsError> {
+    Ok(Entity::new().map(|entity| entity.to_string().as_bytes().to_owned())?)
 }
 
 /// Used to specify if an `Instruction` is an assertion or a retraction
@@ -194,7 +196,7 @@ impl ArtifactsBinding {
     /// identifier
     #[wasm_bindgen]
     pub async fn anonymous() -> Result<Self, JsError> {
-        let identifier = rand::rng()
+        let identifier = rand::thread_rng()
             .sample_iter(&Alphanumeric)
             .take(32)
             .map(char::from)
@@ -394,7 +396,6 @@ impl TryFrom<Value> for JsValue {
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         let data_type = JsValue::from(value.data_type());
         let value = match value {
-            Value::Null => JsValue::null(),
             Value::Bytes(bytes) => {
                 let result = Uint8Array::new_with_length(bytes.len() as u32);
                 result.copy_from(bytes.as_ref());
@@ -432,10 +433,9 @@ impl From<Attribute> for JsValue {
 
 impl From<Entity> for JsValue {
     fn from(value: Entity) -> Self {
-        let value = RawEntity::from(value);
-        let result = Uint8Array::new_with_length(HASH_SIZE as u32);
-        result.copy_from(&value);
-        JsValue::from(result)
+        // TODO: Change this to pass a string when the query
+        // engine supports URI entities
+        JsValue::from(value.to_string().as_bytes().to_owned())
     }
 }
 
@@ -493,19 +493,26 @@ impl TryFrom<JsValue> for Attribute {
     }
 }
 
+// TODO: Change this to expect a string when the query engine supports URI entities
+// impl TryFrom<JsValue> for Entity {
+//     type Error = JsError;
+
+//     fn try_from(entity: JsValue) -> Result<Self, Self::Error> {
+//         let entity = entity.as_string().ok_or_else(|| {
+//             DialogArtifactsError::InvalidEntity(format!("Expected a string, got '{:?}'", entity))
+//         })?;
+//         Ok(Entity::from_str(&entity)?)
+//     }
+// }
+
 impl TryFrom<JsValue> for Entity {
     type Error = JsError;
 
     fn try_from(entity: JsValue) -> Result<Self, Self::Error> {
         let bytes = entity.dyn_into::<Uint8Array>().map_err(js_value_to_error)?;
-        let raw_entity: RawEntity = bytes.to_vec().try_into().map_err(|value: Vec<u8>| {
-            DialogArtifactsError::InvalidEntity(format!(
-                "Wrong length; expected {}, got {}",
-                HASH_SIZE,
-                value.len()
-            ))
-        })?;
-        Ok(Entity::from(raw_entity))
+        let string = String::from_utf8(bytes.to_vec())
+            .map_err(|error| DialogArtifactsError::InvalidEntity(format!("{error}")))?;
+        Ok(Entity::from_str(&string)?)
     }
 }
 
@@ -546,33 +553,25 @@ impl TryFrom<(ValueDataType, JsValue)> for Value {
 
     fn try_from((data_type, value): (ValueDataType, JsValue)) -> Result<Self, Self::Error> {
         if value.is_undefined() {
-            return if matches!(data_type, ValueDataType::Null) {
-                Ok(Value::Null)
-            } else {
-                Err(DialogArtifactsError::InvalidValue(
-                    "Non-null data type must be initialized with a value".into(),
-                )
-                .into())
-            };
+            return Err(DialogArtifactsError::InvalidValue(
+                "Non-null data type must be initialized with a value".into(),
+            )
+            .into());
         };
 
         let value = match data_type {
-            ValueDataType::Null => Value::Null,
             ValueDataType::Bytes => {
                 let byte_array: Uint8Array = value.dyn_into().map_err(js_value_to_error)?;
                 Value::Bytes(byte_array.to_vec())
             }
             ValueDataType::Entity => {
-                let byte_array: Uint8Array = value.dyn_into().map_err(js_value_to_error)?;
-                let raw_entity: RawEntity =
-                    byte_array.to_vec().try_into().map_err(|value: Vec<u8>| {
-                        DialogArtifactsError::InvalidEntity(format!(
-                            "Wrong length; expected {}, got {}",
-                            HASH_SIZE,
-                            value.len()
-                        ))
-                    })?;
-                Value::Entity(raw_entity)
+                let string = value.as_string().ok_or_else(|| {
+                    DialogArtifactsError::InvalidEntity(format!(
+                        "Expected a string, got '{:?}'",
+                        value
+                    ))
+                })?;
+                Value::Entity(string.parse()?)
             }
             ValueDataType::Boolean => Value::Boolean(value.is_truthy()),
             ValueDataType::String => Value::String(value.as_string().ok_or_else(|| {

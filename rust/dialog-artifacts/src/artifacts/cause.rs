@@ -1,3 +1,6 @@
+use std::fmt::Display;
+
+use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 
 use crate::{make_reference, reference_type};
@@ -16,7 +19,7 @@ impl From<&Artifact> for Cause {
         Cause(make_reference(
             [
                 artifact.the.key_bytes().to_vec(),
-                (*artifact.of).to_vec(),
+                artifact.of.key_bytes().to_vec(),
                 artifact.is.to_bytes(),
                 (artifact.cause.as_ref())
                     .map(|cause| (*cause).to_vec())
@@ -24,6 +27,12 @@ impl From<&Artifact> for Cause {
             ]
             .concat(),
         ))
+    }
+}
+
+impl Display for Cause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.to_base58())
     }
 }
 

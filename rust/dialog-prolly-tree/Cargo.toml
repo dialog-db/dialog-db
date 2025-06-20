@@ -30,5 +30,6 @@ tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 futures-util = { workspace = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
-getrandom = { workspace = true, features = ["wasm_js"] }
+# getrandom = { workspace = true, features = ["wasm_js"] }
+getrandom = { workspace = true, features = ["js"] }
 wasm-bindgen-test = { workspace = true }

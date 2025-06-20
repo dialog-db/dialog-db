@@ -141,7 +141,7 @@ async fn create_tree_from_set() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn larger_random_tree() -> Result<()> {
-    use rand::{Rng, rng};
+    use rand::{Rng, thread_rng as rng};
 
     fn random() -> Vec<u8> {
         let mut buffer = [0u8; 32];

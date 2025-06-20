@@ -1,7 +1,7 @@
 use anyhow::Result;
 use dialog_prolly_tree::{GeometricDistribution, Tree};
 use dialog_storage::{CborEncoder, Storage, make_target_storage};
-use rand::{Rng, rng};
+use rand::{Rng, thread_rng as rng};
 
 fn random() -> Vec<u8> {
     let mut buffer = [0u8; 32];

@@ -1,15 +1,14 @@
-use std::fmt::Display;
+use std::{fmt::Display, str::FromStr};
 
-use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 
-use crate::{AttributeKey, DialogArtifactsError, EntityKey, ValueDatum};
+use crate::{Datum, DialogArtifactsError};
 
-use super::{Attribute, Cause, Entity, Value};
+use super::{Attribute, Cause, Entity, Value, ValueDataType};
 
 /// A [`Artifact`] embodies a datum - a semantic triple - that may be stored in or
 /// retrieved from a [`ArtifactStore`].
-#[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Artifact {
     /// The [`Attribute`] of the [`Artifact`]; the predicate of the triple
     pub the: Attribute,
@@ -46,42 +45,36 @@ impl Artifact {
     }
 }
 
+impl std::fmt::Debug for Artifact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Artifact")
+            .field("the", &self.the.to_string())
+            .field("of", &self.of.to_string())
+            .field("is", &self.is)
+            .field("cause", &self.cause.as_ref().map(|cause| cause.to_string()))
+            .finish()
+    }
+}
+
 impl Display for Artifact {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let attribute = self.the.to_string();
-        let entity = format!("{}...", &self.of.as_ref().to_base58()[0..3]);
+        let entity = format!("{}", &self.of);
         let value = self.is.to_utf8();
 
         write!(f, "Artifact: the '{attribute}' of '{entity}' is '{value}'")
     }
 }
 
-impl TryFrom<(EntityKey, ValueDatum)> for Artifact {
+impl TryFrom<Datum> for Artifact {
     type Error = DialogArtifactsError;
 
-    fn try_from((key, datum): (EntityKey, ValueDatum)) -> Result<Self, Self::Error> {
-        let (is, cause) = datum.into_value_and_cause(key.value_type())?;
-
+    fn try_from(value: Datum) -> Result<Self, Self::Error> {
         Ok(Artifact {
-            the: Attribute::try_from(key.attribute())?,
-            of: Entity::from(key.entity()),
-            is,
-            cause,
-        })
-    }
-}
-
-impl TryFrom<(AttributeKey, ValueDatum)> for Artifact {
-    type Error = DialogArtifactsError;
-
-    fn try_from((key, datum): (AttributeKey, ValueDatum)) -> Result<Self, Self::Error> {
-        let (is, cause) = datum.into_value_and_cause(key.value_type())?;
-
-        Ok(Artifact {
-            the: Attribute::try_from(key.attribute())?,
-            of: Entity::from(key.entity()),
-            is,
-            cause,
+            the: Attribute::from_str(&value.attribute)?,
+            of: Entity::from_str(&value.entity)?,
+            is: Value::try_from((ValueDataType::from(value.value_type), value.value))?,
+            cause: value.cause,
         })
     }
 }
@@ -100,7 +93,7 @@ mod tests {
     fn it_points_to_causal_ancestor_when_updated() -> Result<()> {
         let artifact = Artifact {
             the: Attribute::from_str("test/predicate")?,
-            of: Entity::new(),
+            of: Entity::new()?,
             is: Value::Boolean(false),
             cause: None,
         };

@@ -6,12 +6,12 @@ use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
 use crate::{
-    ATTRIBUTE_LENGTH, Artifact, AttributeKeyPart, DialogArtifactsError, ENTITY_LENGTH,
-    VALUE_DATA_TYPE_LENGTH, VALUE_KEY_LENGTH, VALUE_REFERENCE_LENGTH, ValueDataType,
-    ValueReferenceKeyPart, mutable_slice,
+    ATTRIBUTE_LENGTH, Artifact, ArtifactSelector, AttributeKeyPart, DialogArtifactsError,
+    ENTITY_LENGTH, VALUE_DATA_TYPE_LENGTH, VALUE_KEY_LENGTH, VALUE_REFERENCE_LENGTH, ValueDataType,
+    ValueReferenceKeyPart, mutable_slice, selector::Constrained,
 };
 
-use super::EntityKeyPart;
+use super::{AttributeKey, EntityKey, EntityKeyPart};
 
 const VALUE_KEY_VALUE_DATA_TYPE_OFFSET: usize = 0;
 const VALUE_KEY_VALUE_REFERENCE_OFFSET: usize = VALUE_DATA_TYPE_LENGTH;
@@ -36,18 +36,11 @@ impl ValueKey {
         attribute: AttributeKeyPart,
         entity: EntityKeyPart,
     ) -> Self {
-        let mut inner = MINIMUM_VALUE_KEY;
-        inner[VALUE_KEY_VALUE_DATA_TYPE_OFFSET] = value_type.into();
-        mutable_slice![
-            inner,
-            VALUE_KEY_VALUE_REFERENCE_OFFSET,
-            VALUE_REFERENCE_LENGTH
-        ]
-        .copy_from_slice(value_reference.0);
-        mutable_slice![inner, VALUE_KEY_ATTRIBUTE_OFFSET, ATTRIBUTE_LENGTH]
-            .copy_from_slice(attribute.0);
-        mutable_slice![inner, VALUE_KEY_ENTITY_OFFSET, ENTITY_LENGTH].copy_from_slice(entity.0);
-        Self(inner)
+        Self::default()
+            .set_entity(entity)
+            .set_attribute(attribute)
+            .set_value_type(value_type)
+            .set_value_reference(value_reference)
     }
 
     /// Construct the lowest possible [`ValueKey`] (all bits are zero)
@@ -78,7 +71,7 @@ impl ValueKey {
 
     /// Set the [`AttributeKeyPart`], altering the [`Attribute`] part of this
     /// [`ValueKey`].
-    pub fn set_attribute(&self, attribute: AttributeKeyPart) -> Self {
+    pub fn set_attribute(self, attribute: AttributeKeyPart) -> Self {
         let mut inner = self.0;
         mutable_slice![inner, VALUE_KEY_ATTRIBUTE_OFFSET, ATTRIBUTE_LENGTH]
             .copy_from_slice(attribute.0);
@@ -87,7 +80,7 @@ impl ValueKey {
 
     /// Set the [`EntityKeyPart`], altering the [`Entity`] part of this
     /// [`ValueKey`].
-    pub fn set_entity(&self, entity: EntityKeyPart) -> Self {
+    pub fn set_entity(self, entity: EntityKeyPart) -> Self {
         let mut inner = self.0;
         mutable_slice![inner, VALUE_KEY_ENTITY_OFFSET, ENTITY_LENGTH].copy_from_slice(entity.0);
         Self(inner)
@@ -105,7 +98,7 @@ impl ValueKey {
 
     /// Set the [`ValueReferenceKeyPart`], altering the [`Value`] part of this
     /// [`ValueKey`].
-    pub fn set_value_reference(&self, value: ValueReferenceKeyPart) -> Self {
+    pub fn set_value_reference(self, value: ValueReferenceKeyPart) -> Self {
         let mut inner = self.0;
         mutable_slice!(
             inner,
@@ -122,10 +115,34 @@ impl ValueKey {
     }
 
     /// Set the [`ValueDataType`] that is represented by this [`ValueKey`].
-    pub fn set_value_type(&self, value_type: ValueDataType) -> Self {
+    pub fn set_value_type(self, value_type: ValueDataType) -> Self {
         let mut inner = self.0;
         inner[VALUE_KEY_VALUE_DATA_TYPE_OFFSET] = value_type.into();
         Self(inner)
+    }
+
+    /// Sets the constrained parts of the given [`ArtifactSelector`] to the associated
+    /// components of this [`ValueKey`]
+    pub fn apply_selector(self, selector: &ArtifactSelector<Constrained>) -> Self {
+        let mut key = self;
+
+        if let Some(entity) = selector.entity() {
+            key = key.set_entity(entity.into());
+        };
+
+        if let Some(attribute) = selector.attribute() {
+            key = key.set_attribute(attribute.into());
+        }
+
+        if let Some(value_type) = selector.value().map(|value| value.data_type()) {
+            key = key.set_value_type(value_type);
+        }
+
+        if let Some(value_reference) = selector.value_reference() {
+            key = key.set_value_reference(ValueReferenceKeyPart(value_reference));
+        }
+
+        key
     }
 }
 
@@ -146,6 +163,32 @@ impl Deref for ValueKey {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl From<&ArtifactSelector<Constrained>> for ValueKey {
+    fn from(selector: &ArtifactSelector<Constrained>) -> Self {
+        ValueKey::default().apply_selector(selector)
+    }
+}
+
+impl From<&AttributeKey> for ValueKey {
+    fn from(value: &AttributeKey) -> Self {
+        ValueKey::default()
+            .set_entity(value.entity())
+            .set_attribute(value.attribute())
+            .set_value_type(value.value_type())
+            .set_value_reference(value.value_reference())
+    }
+}
+
+impl From<&EntityKey> for ValueKey {
+    fn from(value: &EntityKey) -> Self {
+        ValueKey::default()
+            .set_entity(value.entity())
+            .set_attribute(value.attribute())
+            .set_value_type(value.value_type())
+            .set_value_reference(value.value_reference())
     }
 }
 

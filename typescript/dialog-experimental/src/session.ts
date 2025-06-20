@@ -447,17 +447,18 @@ const select = async (connection: Artifacts, selector: ArtifactSelector) => {}
  * @param link The link to convert
  * @returns The entity bytes
  */
-const toEntity = (link: API.Link): Uint8Array => link['/'].subarray(-32)
+const toEntity = (link: API.Link): Uint8Array =>
+  new TextEncoder().encode(`of:${Link.toJSON(link)['/']}`)
 
 /**
  * Convert an entity to a link
  * @param entity The entity bytes
  * @returns The corresponding link
  */
-const fromEntity = (entity: Uint8Array): API.Link => {
-  ENTITY.set(entity, 4)
-  return Link.fromBytes(ENTITY.slice(0))
-}
+const fromEntity = (entity: Uint8Array): API.Link =>
+  Link.fromJSON({
+    '/': new TextDecoder().decode(entity).slice(3),
+  })
 
 /**
  * Convert a scalar value to a typed value
@@ -491,8 +492,6 @@ const toTyped = (
         return { type: ValueDataType.Bytes, value }
       } else if (Link.is(value)) {
         return { type: ValueDataType.Entity, value: value['/'] }
-      } else if (value === null) {
-        return { type: ValueDataType.Null, value }
       } else {
         throw Object.assign(new TypeError(`Object types are not supported`), {
           value,
