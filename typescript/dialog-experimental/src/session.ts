@@ -44,7 +44,7 @@ export type DID = `did:${string}:${string}`
  * Change that retracts set of facts, which is usually a set corresponding to
  * one relation model.
  */
-export interface Retraction extends Iterable<{ retract: Fact }> { }
+export interface Retraction extends Iterable<{ retract: Fact }> {}
 
 /**
  * Change is either assertion or a rtercation.
@@ -54,7 +54,7 @@ export type Change = Assertion | Retraction
 /**
  * Changes are set of changes that can be transacted atomically.
  */
-export interface Changes extends Iterable<Change> { }
+export interface Changes extends Iterable<Change> {}
 
 /**
  * Represents a database revision using via IPLD link formatted as string.
@@ -441,23 +441,24 @@ const fromIterable = async (iterable: ArtifactIterable) => {
   return selection
 }
 
-const select = async (connection: Artifacts, selector: ArtifactSelector) => { }
+const select = async (connection: Artifacts, selector: ArtifactSelector) => {}
 /**
  * Convert a link to an entity
  * @param link The link to convert
  * @returns The entity bytes
  */
-const toEntity = (link: API.Link): Uint8Array => link['/'].slice(0)
+const toEntity = (link: API.Link): Uint8Array =>
+  new TextEncoder().encode(`of:${Link.toJSON(link)['/']}`)
 
 /**
  * Convert an entity to a link
  * @param entity The entity bytes
  * @returns The corresponding link
  */
-const fromEntity = (entity: Uint8Array): API.Link => {
-  ENTITY.set(entity, 4)
-  return Link.fromBytes(ENTITY.slice(0))
-}
+const fromEntity = (entity: Uint8Array): API.Link =>
+  Link.fromJSON({
+    '/': new TextDecoder().decode(entity).slice(3),
+  })
 
 /**
  * Convert a scalar value to a typed value
@@ -476,8 +477,8 @@ const toTyped = (
     case 'number': {
       return (
         Number.isInteger(value) ? { value, type: ValueDataType.SignedInt }
-          : Number.isFinite(value) ? { value, type: ValueDataType.Float }
-            : unreachable(`Number ${value} can not be inferred`)
+        : Number.isFinite(value) ? { value, type: ValueDataType.Float }
+        : unreachable(`Number ${value} can not be inferred`)
       )
     }
     case 'bigint': {
