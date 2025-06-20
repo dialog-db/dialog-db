@@ -256,6 +256,7 @@ The divergence clock design enables efficient partial replication through query-
 
 This approach allows querying without requiring full database replication, unlike traditional CRDTs.
 
+
 ## Indexing Strategy with Divergence Clocks
 
 The system maintains multiple index trees where facts are indexed by different orderings with the divergence clock embedded in the key structure:
@@ -264,12 +265,11 @@ The system maintains multiple index trees where facts are indexed by different o
 EAVT Index (Entity-Attribute-Value-Time):
 "user:123/name/Alice/5/A/1" -> { the: "name", of: "user:123", is: "Alice", cause: {since: 5, at: "A", drift: 1} }
 
-AEVT Index (Attribute-qEntity-Value-Time):
+AEVT Index (Attribute-Entity-Value-Time):
 "name/user:123/Alice/5/A/1" -> { the: "name", of: "user:123", is: "Alice", cause: {since: 5, at: "A", drift: 1} }
 
-VEAT Index (Attribute-qEntity-Value-Time):
+VEAT Index (Value-Entity-Attribute-Time):
 "Alice/user:123/name/5/A/1" -> { the: "name", of: "user:123", is: "Alice", cause: {since: 5, at: "A", drift: 1} }
-
 
 TEAV Index (Time-Entity-Attribute-Value):
 "5/A/1/user:123/name/Alice" -> { the: "name", of: "user:123", is: "Alice", cause: {since: 5, at: "A", drift: 1} }
@@ -280,7 +280,7 @@ This design ensures that:
 1. **Range Queries Work Efficiently**: Scanning for all facts about `user:123` in EAVT index co-locates related facts regardless of when they were created
 2. **Conflicts Are Discoverable**: Facts with the same entity/attribute/value but different cause values appear adjacent in each index
 3. **Temporal Queries Are Supported**: TEAV index enables efficient "as of" queries and total ordering of all operations
-4. **Partial Replication Is Preserved**: Tree segments contain related facts based on the primary index components, with causality preserved in the key structure
+4. **Partial Replication Is Preserved**: Tree segments contain related facts based on the primary index components, with temporal information encoded in the path
 
 ## Alternative Approach
 
