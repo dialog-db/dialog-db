@@ -396,6 +396,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-encoding"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base58",
+ "brotli",
+ "dialog-common",
+ "leb128",
+ "rand",
+ "serde",
+ "serde_ipld_dagcbor",
+ "thiserror 2.0.12",
+]
+
+[[package]]
 name = "dialog-prolly-tree"
 version = "0.1.0"
 dependencies = [

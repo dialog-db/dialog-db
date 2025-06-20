@@ -1,0 +1,23 @@
+[package]
+name = "dialog-encoding"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+dialog-common = { workspace = true }
+
+anyhow = { workspace = true }
+leb128 = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+base58 = { workspace = true }
+brotli = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
