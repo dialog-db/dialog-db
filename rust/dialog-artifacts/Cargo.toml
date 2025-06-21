@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["csv"]
+debug = []
 helpers = ["dep:anyhow"]
 csv = ["dep:csv-async"]
 

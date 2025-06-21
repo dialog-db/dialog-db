@@ -1,0 +1,18 @@
+[package]
+name = "dialog-diagnose"
+description = "Debugging tools for Dialog databases"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+dialog-artifacts = { workspace = true, features = ["csv", "debug"] }
+ratatui = { workspace = true }
+tokio = { workspace = true, features = [
+    "macros",
+    "sync",
+    "io-util",
+    "rt-multi-thread",
+] }

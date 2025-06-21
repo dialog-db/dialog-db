@@ -100,6 +100,11 @@ where
         + ConditionalSync
         + 'static,
 {
+    #[cfg(feature = "debug")]
+    pub fn entity_index(&self) -> Arc<RwLock<Index<EntityKey, Datum, Backend>>> {
+        self.entity_index.clone()
+    }
+
     /// The name used to uniquely identify the data of this [`Artifacts`]
     /// instance
     pub fn identifier(&self) -> &str {
