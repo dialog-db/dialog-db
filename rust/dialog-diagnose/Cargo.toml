@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+csv = "1.3"
 dialog-artifacts = { workspace = true, features = ["csv", "debug"] }
 ratatui = { workspace = true }
 tokio = { workspace = true, features = [
