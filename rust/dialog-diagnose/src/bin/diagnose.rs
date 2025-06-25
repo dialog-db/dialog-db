@@ -22,6 +22,7 @@ pub async fn main() -> Result<()> {
 #[derive(Default)]
 pub struct Diagnose {
     exit: bool,
+    selected_tab: usize,
 }
 
 impl Diagnose {
@@ -42,6 +43,16 @@ impl Diagnose {
         match key_event.code {
             KeyCode::Char('q') => {
                 self.exit = true;
+            }
+            KeyCode::Left => {
+                if self.selected_tab > 0 {
+                    self.selected_tab -= 1;
+                }
+            }
+            KeyCode::Right => {
+                if self.selected_tab < 1 {
+                    self.selected_tab += 1;
+                }
             }
             _ => (),
         }
@@ -83,7 +94,7 @@ impl Widget for &Diagnose {
         // let selected_tab_index = self.selected_tab as usize;
         Tabs::new(["Facts", "Tree"])
             .highlight_style(highlight_style)
-            .select(0)
+            .select(self.selected_tab)
             .padding("", "")
             .divider(" ")
             .render(tabs_area, buf);
