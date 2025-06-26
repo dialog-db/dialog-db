@@ -7,7 +7,7 @@ pub struct DistributionChart<'a> {
     pub stats: &'a ArtifactsTreeStats,
 }
 
-impl<'a> Widget for DistributionChart<'a> {
+impl Widget for DistributionChart<'_> {
     fn render(self, area: Rect, buf: &mut Buffer)
     where
         Self: Sized,

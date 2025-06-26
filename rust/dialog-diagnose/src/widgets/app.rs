@@ -1,12 +1,27 @@
+//! Main application widget for the diagnose TUI.
+
 use ratatui::{prelude::*, widgets::Tabs};
 
 use crate::{DiagnoseFacts, DiagnoseState, DiagnoseTab, DiagnoseTree};
 
+/// Main application widget that renders the overall TUI layout.
+///
+/// This widget handles the top-level layout including:
+/// - Header with tab navigation
+/// - Content area for the selected tab
+/// - Footer with help text
 pub struct DiagnoseApp {}
 
 impl StatefulWidget for &DiagnoseApp {
     type State = DiagnoseState;
 
+    /// Renders the main application layout with tabs and content area.
+    ///
+    /// This method:
+    /// 1. Synchronizes data from background workers
+    /// 2. Sets up the overall layout (header, content, footer)
+    /// 3. Renders tab navigation and title
+    /// 4. Delegates content rendering to the appropriate tab widget
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         state.store.sync();
 

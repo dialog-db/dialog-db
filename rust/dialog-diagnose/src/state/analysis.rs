@@ -1,23 +1,46 @@
+//! Tree analysis module for computing prolly tree statistics.
+
 use std::{collections::VecDeque, sync::mpsc::Sender};
 
 use dialog_artifacts::{Datum, DialogArtifactsError, EntityKey, Index};
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
 
+/// Statistics about the structure and content of a prolly tree.
+///
+/// These statistics are computed asynchronously to provide insights
+/// into the tree's structure without blocking the UI.
 #[derive(Default, Debug, Clone)]
 pub struct ArtifactsTreeStats {
+    /// Maximum depth of the tree
     pub depth: usize,
+    /// Total number of entries across all leaf nodes
     pub total_entries: usize,
+    /// Distribution of entry counts across depth levels (up to 10 levels)
     pub distribution: [usize; 10],
+    /// Smallest segment size found in the tree
     pub minimum_segment_size: usize,
+    /// Largest segment size found in the tree
     pub maximum_segment_size: usize,
 }
 
+/// Background worker for computing tree statistics.
+///
+/// This worker performs a breadth-first traversal of the prolly tree
+/// to compute various statistics about its structure and contents.
 pub struct ArtifactsTreeAnalysis {
+    /// The prolly tree index to analyze
     tree: Index<EntityKey, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+    /// Channel sender for computed statistics
     tx: Sender<ArtifactsTreeStats>,
 }
 
 impl ArtifactsTreeAnalysis {
+    /// Creates a new tree analysis worker.
+    ///
+    /// # Arguments
+    ///
+    /// * `tree` - The prolly tree index to analyze
+    /// * `tx` - Channel sender for computed statistics
     pub fn new(
         tree: Index<EntityKey, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
         tx: Sender<ArtifactsTreeStats>,
@@ -25,6 +48,11 @@ impl ArtifactsTreeAnalysis {
         Self { tree, tx }
     }
 
+    /// Starts the background analysis task.
+    ///
+    /// This spawns a tokio task that performs a breadth-first traversal
+    /// of the tree to compute statistics. The results are sent via the
+    /// configured channel when complete.
     pub fn run(&self) {
         let Some(root) = self.tree.root() else {
             return;
@@ -55,7 +83,7 @@ impl ArtifactsTreeAnalysis {
                     }
                 }
 
-                if next_level.len() > 0 {
+                if !next_level.is_empty() {
                     levels.push_back(next_level);
                 }
 
@@ -69,7 +97,7 @@ impl ArtifactsTreeAnalysis {
                         max.max(*value),
                     )
                 });
-            let minimum_segment_size = minimum_segment_size.map(|value| *value).unwrap_or_default();
+            let minimum_segment_size = minimum_segment_size.copied().unwrap_or_default();
             let segment_band_width =
                 maximum_segment_size.saturating_sub(minimum_segment_size) as f64 / 9.;
 
