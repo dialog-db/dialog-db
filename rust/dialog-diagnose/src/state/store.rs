@@ -20,6 +20,30 @@ use super::{
     ArtifactsCursor, ArtifactsHierarchy, ArtifactsTreeAnalysis, ArtifactsTreeStats, TreeNode,
 };
 
+/// Unified message type for all worker communications.
+///
+/// This enum consolidates all messages sent from background workers
+/// to the main thread, eliminating the need for multiple channels.
+#[derive(Debug)]
+pub enum WorkerMessage {
+    /// A fact has been loaded at the specified index
+    Fact {
+        /// Index position of the fact
+        index: usize,
+        /// The loaded fact data
+        data: State<Datum>,
+    },
+    /// Tree analysis statistics have been computed
+    Stats(ArtifactsTreeStats),
+    /// A tree node has been loaded
+    Node {
+        /// Hash of the loaded node
+        hash: Blake3Hash,
+        /// The loaded tree node data
+        node: TreeNode,
+    },
+}
+
 /// Main store for managing database access and caching for the diagnose tool.
 ///
 /// `DiagnoseStore` coordinates between multiple background workers that load
@@ -33,12 +57,8 @@ pub struct DiagnoseStore {
     /// Worker for loading tree node hierarchy
     hierarchy: ArtifactsHierarchy,
 
-    /// Channel receiver for facts data
-    facts_rx: Receiver<(usize, State<Datum>)>,
-    /// Channel receiver for tree statistics
-    stats_rx: Receiver<ArtifactsTreeStats>,
-    /// Channel receiver for tree nodes
-    nodes_rx: Receiver<(Blake3Hash, TreeNode)>,
+    /// Unified channel receiver for all worker messages
+    message_rx: Receiver<WorkerMessage>,
 
     /// Cache of loaded facts indexed by position
     facts: BTreeMap<usize, State<Datum>>,
@@ -58,20 +78,13 @@ impl DiagnoseStore {
     pub async fn new(artifacts: Artifacts<MemoryStorageBackend<Blake3Hash, Vec<u8>>>) -> Self {
         let tree = artifacts.entity_index().read().await.clone();
 
-        // TODO: Unify message channels
-        let (tx, facts_rx) = channel();
-        let cursor = ArtifactsCursor::new(tree.clone(), tx);
-
-        let (tx, stats_rx) = channel();
-        let analysis = ArtifactsTreeAnalysis::new(tree.clone(), tx);
-
-        let (tx, nodes_rx) = channel();
+        let (tx, message_rx) = channel();
+        let cursor = ArtifactsCursor::new(tree.clone(), tx.clone());
+        let analysis = ArtifactsTreeAnalysis::new(tree.clone(), tx.clone());
         let hierarchy = ArtifactsHierarchy::new(tree, tx);
 
         Self {
-            facts_rx,
-            stats_rx,
-            nodes_rx,
+            message_rx,
 
             cursor,
             analysis,
@@ -89,24 +102,26 @@ impl DiagnoseStore {
     /// This method should be called regularly to pull data from the background
     /// workers into the main thread's cache for UI rendering.
     pub fn sync(&mut self) {
-        while let Ok(stats) = self.stats_rx.try_recv() {
-            self.stats = Promise::Resolved(stats);
-        }
-
-        while let Ok((key, value)) = self.facts_rx.try_recv() {
-            self.facts.insert(key, value);
-        }
-
-        while let Ok((hash, node)) = self.nodes_rx.try_recv() {
-            match &node {
-                TreeNode::Segment { .. } => (),
-                TreeNode::Branch { children, .. } => {
-                    for child in children {
-                        self.parentage.insert(*child, hash);
-                    }
+        while let Ok(message) = self.message_rx.try_recv() {
+            match message {
+                WorkerMessage::Fact { index, data } => {
+                    self.facts.insert(index, data);
                 }
-            };
-            self.nodes.insert(hash, node);
+                WorkerMessage::Stats(stats) => {
+                    self.stats = Promise::Resolved(stats);
+                }
+                WorkerMessage::Node { hash, node } => {
+                    match &node {
+                        TreeNode::Segment { .. } => (),
+                        TreeNode::Branch { children, .. } => {
+                            for child in children {
+                                self.parentage.insert(*child, hash);
+                            }
+                        }
+                    };
+                    self.nodes.insert(hash, node);
+                }
+            }
         }
     }
 

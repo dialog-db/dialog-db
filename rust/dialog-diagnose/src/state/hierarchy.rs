@@ -6,10 +6,13 @@ use dialog_artifacts::{Datum, DialogArtifactsError, EntityKey, HASH_SIZE, Index,
 use dialog_prolly_tree::{Block, Entry};
 use dialog_storage::{Blake3Hash, ContentAddressedStorage, MemoryStorageBackend};
 
+use super::store::WorkerMessage;
+
 /// Represents a node in the prolly tree hierarchy.
 ///
 /// Tree nodes can be either leaf segments containing actual data entries,
 /// or branch nodes containing references to child nodes.
+#[derive(Debug)]
 pub enum TreeNode {
     /// A leaf segment containing actual data entries
     Segment {
@@ -32,8 +35,8 @@ pub enum TreeNode {
 pub struct ArtifactsHierarchy {
     /// The prolly tree index to load nodes from
     tree: Index<EntityKey, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
-    /// Channel sender for loaded tree nodes
-    tx: Sender<(Blake3Hash, TreeNode)>,
+    /// Channel sender for worker messages
+    tx: Sender<WorkerMessage>,
 }
 
 impl ArtifactsHierarchy {
@@ -42,10 +45,10 @@ impl ArtifactsHierarchy {
     /// # Arguments
     ///
     /// * `tree` - The prolly tree index to load nodes from
-    /// * `tx` - Channel sender for loaded tree nodes
+    /// * `tx` - Channel sender for worker messages
     pub fn new(
         tree: Index<EntityKey, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
-        tx: Sender<(Blake3Hash, TreeNode)>,
+        tx: Sender<WorkerMessage>,
     ) -> Self {
         Self { tree, tx }
     }
@@ -85,7 +88,7 @@ impl ArtifactsHierarchy {
                 },
             };
 
-            tx.send((hash, node)).unwrap();
+            tx.send(WorkerMessage::Node { hash, node }).unwrap();
 
             Ok(()) as Result<_, DialogArtifactsError>
         });
