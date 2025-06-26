@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 //! # Dialog Diagnose Binary
 //!
 //! A command-line tool that provides a TUI for exploring Dialog databases.

@@ -9,11 +9,13 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 base58 = { workspace = true }
-clap = { workspace = true, features = ["derive"] }
 dialog-artifacts = { workspace = true, features = ["csv", "debug"] }
 dialog-prolly-tree = { workspace = true }
 dialog-storage = { workspace = true }
 futures-util = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+clap = { workspace = true, features = ["derive"] }
 ratatui = { workspace = true }
 throbber-widgets-tui = { workspace = true }
 tokio = { workspace = true, features = [

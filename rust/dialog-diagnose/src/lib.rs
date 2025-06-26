@@ -1,3 +1,5 @@
+#![cfg(not(target_arch = "wasm32"))]
+
 //! # Dialog Diagnose
 //!
 //! A Terminal User Interface (TUI) for debugging and inspecting Dialog databases.

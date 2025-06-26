@@ -101,6 +101,7 @@ where
         + 'static,
 {
     #[cfg(feature = "debug")]
+    /// Get a reference-counted pointer to the internal entity index of the [`Artifacts`]
     pub fn entity_index(&self) -> Arc<RwLock<Index<EntityKey, Datum, Backend>>> {
         self.entity_index.clone()
     }

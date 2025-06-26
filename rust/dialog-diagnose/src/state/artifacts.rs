@@ -5,10 +5,12 @@ use std::{
     sync::{Arc, mpsc::Sender},
 };
 
-use dialog_artifacts::{Datum, DialogArtifactsError, EntityKey, Index, State};
+use dialog_artifacts::{Datum, DialogArtifactsError, EntityKey, Index};
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
 use futures_util::{Stream, TryStreamExt};
 use tokio::sync::Mutex;
+
+use super::store::WorkerMessage;
 
 /// Internal state for the artifacts cursor.
 ///
@@ -32,8 +34,8 @@ pub struct ArtifactsCursor {
     state: Arc<Mutex<ArtifactsCursorState>>,
     /// The prolly tree index containing the facts
     tree: Index<EntityKey, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
-    /// Channel sender for streamed facts
-    tx: Sender<(usize, State<Datum>)>,
+    /// Channel sender for worker messages
+    tx: Sender<WorkerMessage>,
 }
 
 impl ArtifactsCursor {
@@ -42,10 +44,10 @@ impl ArtifactsCursor {
     /// # Arguments
     ///
     /// * `tree` - The prolly tree index containing facts data
-    /// * `tx` - Channel sender for streaming facts as they are loaded
+    /// * `tx` - Channel sender for worker messages
     pub fn new(
         tree: Index<EntityKey, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
-        tx: Sender<(usize, State<Datum>)>,
+        tx: Sender<WorkerMessage>,
     ) -> Self {
         Self {
             state: Default::default(),
@@ -91,7 +93,10 @@ impl ArtifactsCursor {
 
                 state.last_key = Some(element.key);
 
-                match tx.send((state.next_index, element.value)) {
+                match tx.send(WorkerMessage::Fact { 
+                    index: state.next_index, 
+                    data: element.value 
+                }) {
                     Ok(_) => (),
                     Err(_) => break,
                 }
