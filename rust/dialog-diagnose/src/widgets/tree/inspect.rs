@@ -1,4 +1,4 @@
-use ratatui::widgets::{Block, StatefulWidget, Wrap};
+use ratatui::widgets::{StatefulWidget, Wrap};
 use ratatui::{prelude::*, widgets::Paragraph};
 
 use crate::{DiagnoseState, FactTable, Promise, TreeNode};

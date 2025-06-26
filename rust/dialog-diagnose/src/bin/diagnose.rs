@@ -1,3 +1,9 @@
+//! # Dialog Diagnose Binary
+//!
+//! A command-line tool that provides a TUI for exploring Dialog databases.
+//! This binary creates an interactive terminal interface for browsing database
+//! facts and navigating the prolly tree structure.
+
 use std::time::Duration;
 
 use anyhow::Result;
@@ -10,6 +16,13 @@ use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
 };
 
+/// Main entry point for the diagnose TUI application.
+///
+/// This function:
+/// 1. Parses command-line arguments
+/// 2. Loads CSV data into a Dialog artifacts database
+/// 3. Initializes the TUI with the specified starting tab
+/// 4. Runs the interactive terminal interface
 #[tokio::main]
 pub async fn main() -> Result<()> {
     let cli = DiagnoseCli::parse();
@@ -36,12 +49,29 @@ pub async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Main application struct that manages the TUI state and event loop.
+///
+/// The `Diagnose` struct coordinates between user input, application state,
+/// and the terminal rendering. It handles keyboard events and maintains
+/// the overall application lifecycle.
 pub struct Diagnose {
+    /// Flag to control application exit
     exit: bool,
+    /// Application state containing UI state and database store
     state: DiagnoseState,
 }
 
 impl Diagnose {
+    /// Creates a new `Diagnose` instance with the given artifacts and optional starting tab.
+    ///
+    /// # Arguments
+    ///
+    /// * `artifacts` - The Dialog artifacts database to explore
+    /// * `starting_tab` - Optional tab to open initially (defaults to Facts view)
+    ///
+    /// # Returns
+    ///
+    /// A new `Diagnose` instance ready to run the TUI
     pub async fn new(
         artifacts: Artifacts<MemoryStorageBackend<[u8; 32], Vec<u8>>>,
         starting_tab: Option<DiagnoseTab>,
@@ -55,6 +85,18 @@ impl Diagnose {
         Ok(Self { exit: false, state })
     }
 
+    /// Runs the main TUI event loop.
+    ///
+    /// This method handles the continuous cycle of:
+    /// 1. Rendering the current state to the terminal
+    /// 2. Processing keyboard events
+    /// 3. Updating application state
+    ///
+    /// The loop continues until the user presses 'q' to quit.
+    ///
+    /// # Arguments
+    ///
+    /// * `terminal` - The ratatui terminal instance to render to
     pub fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         loop {
             if self.exit {
@@ -71,6 +113,15 @@ impl Diagnose {
         Ok(())
     }
 
+    /// Handles keyboard input events and updates application state accordingly.
+    ///
+    /// # Key Bindings
+    ///
+    /// * `q` - Quit the application
+    /// * `f/F` - Switch to Facts tab
+    /// * `t/T` - Switch to Tree tab
+    /// * `Up/Down` - Navigate within the current tab
+    /// * `Enter` - In Tree tab, expand/collapse selected node
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         match key_event.code {
             KeyCode::Char('q') => {
@@ -98,15 +149,14 @@ impl Diagnose {
                 DiagnoseTab::Facts => (),
                 DiagnoseTab::Tree => {
                     let selected_hash = &self.state.tree.selected_node;
-                    match self.state.store.node(selected_hash) {
-                        Promise::Resolved(TreeNode::Branch { .. }) => {
-                            if self.state.tree.expanded.contains(selected_hash) {
-                                self.state.tree.expanded.remove(selected_hash);
-                            } else {
-                                self.state.tree.expanded.insert(selected_hash.to_owned());
-                            }
+                    if let Promise::Resolved(TreeNode::Branch { .. }) =
+                        self.state.store.node(selected_hash)
+                    {
+                        if self.state.tree.expanded.contains(selected_hash) {
+                            self.state.tree.expanded.remove(selected_hash);
+                        } else {
+                            self.state.tree.expanded.insert(selected_hash.to_owned());
                         }
-                        _ => (),
                     }
                 }
             },
@@ -114,6 +164,10 @@ impl Diagnose {
         }
     }
 
+    /// Polls for and processes terminal events with a timeout.
+    ///
+    /// This method checks for keyboard events with a 100ms timeout,
+    /// ensuring the UI remains responsive while not consuming excessive CPU.
     fn handle_events(&mut self) -> Result<()> {
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {

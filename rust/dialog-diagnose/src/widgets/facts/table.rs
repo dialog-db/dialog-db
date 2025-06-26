@@ -11,7 +11,7 @@ pub struct FactTable<'a> {
     pub selected: Option<usize>,
 }
 
-impl<'a> Widget for FactTable<'a> {
+impl Widget for FactTable<'_> {
     fn render(self, area: Rect, buf: &mut Buffer)
     where
         Self: Sized,
@@ -41,7 +41,7 @@ impl<'a> Widget for FactTable<'a> {
 
                 match data {
                     Promise::Pending => {
-                        Row::new([Cell::from(Text::from(format!("Loading fact...")))])
+                        Row::new([Cell::from(Text::from("Loading fact...".to_string()))])
                     }
                     Promise::Resolved(State::Added(datum)) => {
                         let value = Value::try_from((
@@ -53,8 +53,8 @@ impl<'a> Widget for FactTable<'a> {
 
                         Row::new(
                             [
-                                format!("{}", datum.entity),
-                                format!("{}", datum.attribute),
+                                datum.entity.to_string(),
+                                datum.attribute.to_string(),
                                 value,
                                 format!("{:?}", datum.cause),
                             ]
@@ -71,7 +71,7 @@ impl<'a> Widget for FactTable<'a> {
                         )
                     }
                     Promise::Resolved(State::Removed) => {
-                        Row::new([Cell::from(Text::from(format!("<Retracted>")))])
+                        Row::new([Cell::from(Text::from("<Retracted>".to_string()))])
                     }
                 }
                 .style(Style::new().bg(color))
