@@ -52,8 +52,8 @@ use futures_util::TryStreamExt;
 use async_stream::stream;
 
 use crate::{
-    AttributeKey, BRANCH_FACTOR, DialogArtifactsError, EntityKey, HASH_SIZE, State, ValueKey,
-    artifacts::selector::Constrained, make_reference,
+    AttributeKey, BRANCH_FACTOR, DialogArtifactsError, EntityKey, FromKey, HASH_SIZE, KeyView,
+    State, ValueKey, artifacts::selector::Constrained, make_reference,
 };
 
 /// An alias type that describes the [`Tree`]-based prolly tree that is
@@ -384,8 +384,8 @@ where
             let value_index = value_index.read().await.clone();
 
             if selector.entity().is_some() {
-                let start = EntityKey::min().apply_selector(&selector);
-                let end = EntityKey::max().apply_selector(&selector);
+                let start = <EntityKey as KeyView>::min().apply_selector(&selector);
+                let end = <EntityKey as KeyView>::max().apply_selector(&selector);
 
                 let stream = entity_index.stream_range(Range { start, end });
 
@@ -401,8 +401,8 @@ where
                     }
                 }
             } else if selector.value().is_some() {
-                let start = ValueKey::min().apply_selector(&selector);
-                let end = ValueKey::max().apply_selector(&selector);
+                let start = <ValueKey as KeyView>::min().apply_selector(&selector);
+                let end = <ValueKey as KeyView>::max().apply_selector(&selector);
 
                 let stream = value_index.stream_range(Range { start, end });
 
@@ -418,8 +418,8 @@ where
                     }
                 }
             } else if selector.attribute().is_some() {
-                let start = AttributeKey::min().apply_selector(&selector);
-                let end = AttributeKey::max().apply_selector(&selector);
+                let start = <AttributeKey as KeyView>::min().apply_selector(&selector);
+                let end = <AttributeKey as KeyView>::max().apply_selector(&selector);
 
                 let stream = attribute_index.stream_range(Range { start, end });
 
@@ -471,17 +471,17 @@ where
                 match instruction {
                     Instruction::Assert(artifact) => {
                         let entity_key = EntityKey::from(&artifact);
-                        let value_key = ValueKey::from(&entity_key);
-                        let attribute_key = AttributeKey::from(&entity_key);
+                        let value_key = ValueKey::from_key(&entity_key);
+                        let attribute_key = AttributeKey::from_key(&entity_key);
 
                         let datum = Datum::from(artifact);
 
                         if let Some(cause) = &datum.cause {
                             let ancestor_key = {
-                                let search_start = EntityKey::min()
+                                let search_start = <EntityKey as KeyView>::min()
                                     .set_entity(entity_key.entity())
                                     .set_attribute(entity_key.attribute());
-                                let search_end = EntityKey::max()
+                                let search_end = <EntityKey as KeyView>::max()
                                     .set_entity(entity_key.entity())
                                     .set_attribute(entity_key.attribute());
 
@@ -510,8 +510,8 @@ where
 
                             if let Some(entity_key) = ancestor_key {
                                 // Prune the old entry from the indexes
-                                let value_key = ValueKey::from(&entity_key);
-                                let attribute_key = AttributeKey::from(&entity_key);
+                                let value_key = ValueKey::from_key(&entity_key);
+                                let attribute_key = AttributeKey::from_key(&entity_key);
 
                                 tokio::try_join!(
                                     value_index.delete(&value_key),
@@ -858,7 +858,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 3);
+        assert_eq!(net_reads, 2);
         assert_eq!(net_writes, 0);
 
         let fact_stream =
@@ -876,7 +876,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 7);
+        assert_eq!(net_reads, 9);
         assert_eq!(net_writes, 0);
 
         Ok(())

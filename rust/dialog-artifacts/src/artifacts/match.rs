@@ -1,7 +1,7 @@
 use dialog_prolly_tree::Entry;
 
 use crate::{
-    ArtifactSelector, AttributeKey, Datum, EntityKey, State, ValueKey,
+    ArtifactSelector, AttributeKey, Datum, EntityKey, KeyView, State, ValueKey,
     artifacts::selector::Constrained,
 };
 
