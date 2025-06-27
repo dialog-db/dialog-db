@@ -5,6 +5,11 @@ use crate::DiagnoseState;
 mod table;
 pub use table::*;
 
+/// Widget for displaying database facts in a table format.
+///
+/// This widget renders a table view of database facts, displaying them in a paginated
+/// format suitable for TUI display. It integrates with the `DiagnoseState` to show
+/// facts from the current database store.
 pub struct DiagnoseFacts {}
 
 impl StatefulWidget for &DiagnoseFacts {

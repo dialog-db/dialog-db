@@ -3,6 +3,17 @@ use ratatui::{prelude::*, widgets::Paragraph};
 
 use crate::{DiagnoseState, FactTable, Promise, TreeNode};
 
+/// Widget for inspecting detailed information about selected tree nodes.
+///
+/// This widget displays detailed information about the currently selected
+/// node in the tree explorer. For segment nodes, it shows the facts contained
+/// within using a table format. For branch nodes, it displays the upper bound
+/// key bytes in hexadecimal format.
+///
+/// The inspector adapts its display based on the node type:
+/// - **Segment nodes**: Shows a table of facts/entries
+/// - **Branch nodes**: Shows the upper bound key in hex format
+/// - **Loading states**: Shows loading indicator
 pub struct NodeInspector {}
 
 impl StatefulWidget for NodeInspector {

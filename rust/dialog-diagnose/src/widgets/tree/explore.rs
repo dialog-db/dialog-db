@@ -6,6 +6,18 @@ use ratatui::widgets::{Block, List};
 use crate::{DiagnoseState, Promise, TreeNode};
 use base58::ToBase58;
 
+/// Widget for exploring the prolly tree structure interactively.
+///
+/// This widget renders a tree view where users can navigate through branch
+/// and segment nodes. It shows node hashes, types, and hierarchy with
+/// visual indicators for expanded/collapsed states and selection.
+///
+/// Features:
+/// - Hierarchical tree visualization with indentation
+/// - Branch nodes can be expanded to show children
+/// - Segment nodes display entry counts
+/// - Visual highlighting for selected nodes
+/// - Base58-encoded hash display for node identification
 pub struct DiagnoseTreeExplore {}
 
 impl StatefulWidget for &DiagnoseTreeExplore {

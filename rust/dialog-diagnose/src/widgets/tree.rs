@@ -11,6 +11,15 @@ pub use inspect::*;
 mod distribution;
 pub use distribution::*;
 
+/// Widget for displaying the prolly tree structure in the TUI.
+///
+/// This widget provides a comprehensive view of the prolly tree, including:
+/// - Tree exploration with expandable nodes
+/// - Node inspection showing detailed information
+/// - Distribution chart showing segment size statistics
+///
+/// The layout is divided into three sections: distribution chart (top),
+/// tree explorer (middle), and node inspector (bottom).
 pub struct DiagnoseTree {}
 
 impl StatefulWidget for &DiagnoseTree {

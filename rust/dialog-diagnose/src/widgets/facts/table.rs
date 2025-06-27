@@ -6,8 +6,15 @@ use ratatui::{
 
 use crate::Promise;
 
+/// A table widget for rendering database facts.
+///
+/// This widget displays facts in a structured table format with columns for
+/// entity, attribute, value, and cause. It handles both resolved facts and
+/// pending promises, providing visual feedback for loading states.
 pub struct FactTable<'a> {
+    /// List of facts to display, potentially including pending promises
     pub facts: Vec<Promise<&'a State<Datum>>>,
+    /// Index of currently selected row, if any
     pub selected: Option<usize>,
 }
 
