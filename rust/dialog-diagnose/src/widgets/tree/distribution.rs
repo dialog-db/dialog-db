@@ -3,7 +3,18 @@ use ratatui::widgets::{Axis, Block, Chart, Dataset, GraphType};
 
 use crate::ArtifactsTreeStats;
 
+/// Widget for displaying a distribution chart of prolly tree segment sizes.
+///
+/// This widget renders a line chart showing the distribution of segment sizes
+/// across the prolly tree. It visualizes how many segments exist at each size,
+/// helping to understand the tree's balance and structure characteristics.
+///
+/// The chart displays:
+/// - X-axis: Entries per segment (segment size)
+/// - Y-axis: Number of segments with that size
+/// - Line graph showing the distribution curve
 pub struct DistributionChart<'a> {
+    /// Tree statistics containing distribution data to visualize
     pub stats: &'a ArtifactsTreeStats,
 }
 

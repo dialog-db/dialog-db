@@ -93,9 +93,9 @@ impl ArtifactsCursor {
 
                 state.last_key = Some(element.key);
 
-                match tx.send(WorkerMessage::Fact { 
-                    index: state.next_index, 
-                    data: element.value 
+                match tx.send(WorkerMessage::Fact {
+                    index: state.next_index,
+                    data: element.value,
                 }) {
                     Ok(_) => (),
                     Err(_) => break,
