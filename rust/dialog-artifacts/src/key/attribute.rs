@@ -3,35 +3,34 @@ use std::ops::Deref;
 use arrayref::array_ref;
 use dialog_prolly_tree::KeyType;
 use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
 
 use crate::{
-    ATTRIBUTE_KEY_LENGTH, ATTRIBUTE_LENGTH, Artifact, ArtifactSelector, AttributeKeyPart,
-    DialogArtifactsError, ENTITY_LENGTH, EntityKeyPart, VALUE_REFERENCE_LENGTH, ValueDataType,
-    mutable_slice, selector::Constrained,
+    ATTRIBUTE_LENGTH, Artifact, ArtifactSelector, AttributeKeyPart, DialogArtifactsError,
+    ENTITY_LENGTH, EntityKeyPart, TAG_LENGTH, VALUE_REFERENCE_LENGTH, ValueDataType, mutable_slice,
+    selector::Constrained,
 };
 
-use super::{EntityKey, VALUE_DATA_TYPE_LENGTH, ValueKey, ValueReferenceKeyPart};
+use super::{EntityKey, Key, KeyView, VALUE_DATA_TYPE_LENGTH, ValueKey, ValueReferenceKeyPart};
 
-const ATTRIBUTE_OFFSET: usize = 0;
-const ENTITY_OFFSET: usize = ATTRIBUTE_LENGTH;
-const VALUE_DATA_TYPE_OFFSET: usize = ENTITY_LENGTH + ATTRIBUTE_LENGTH;
-const VALUE_REFERENCE_OFFSET: usize = ENTITY_LENGTH + ATTRIBUTE_LENGTH + VALUE_DATA_TYPE_LENGTH;
+const TAG_OFFSET: usize = 0;
+const ATTRIBUTE_OFFSET: usize = TAG_LENGTH;
+const ENTITY_OFFSET: usize = TAG_LENGTH + ATTRIBUTE_LENGTH;
+const VALUE_DATA_TYPE_OFFSET: usize = TAG_LENGTH + ENTITY_LENGTH + ATTRIBUTE_LENGTH;
+const VALUE_REFERENCE_OFFSET: usize =
+    TAG_LENGTH + ENTITY_LENGTH + ATTRIBUTE_LENGTH + VALUE_DATA_TYPE_LENGTH;
 
-const MINIMUM_ATTRIBUTE_KEY: [u8; ATTRIBUTE_KEY_LENGTH] = [u8::MIN; ATTRIBUTE_KEY_LENGTH];
-const MAXIMUM_ATTRIBUTE_KEY: [u8; ATTRIBUTE_KEY_LENGTH] = [u8::MAX; ATTRIBUTE_KEY_LENGTH];
+pub const ATTRIBUTE_KEY_TAG: u8 = 1;
 
 /// A [`KeyType`] that is used when constructing an index of the [`Attribute`]s
 /// of [`Artifact`]s.
 #[repr(transparent)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct AttributeKey(#[serde(with = "BigArray")] [u8; ATTRIBUTE_KEY_LENGTH]);
+pub struct AttributeKey(Key);
 
-impl AttributeKey {
-    /// Construct an [`AttributeKey`] from the provided component key parts.
-    pub fn from_parts(
-        attribute: AttributeKeyPart,
+impl KeyView for AttributeKey {
+    fn from_parts(
         entity: EntityKeyPart,
+        attribute: AttributeKeyPart,
         value_type: ValueDataType,
         value_reference: ValueReferenceKeyPart,
     ) -> Self {
@@ -42,59 +41,45 @@ impl AttributeKey {
             .set_value_reference(value_reference)
     }
 
-    /// Construct the lowest possible [`AttributeKey`] (all bits are zero)
-    pub fn min() -> Self {
-        Self(MINIMUM_ATTRIBUTE_KEY)
+    fn min() -> Self {
+        Self(Key::min().set_tag(ATTRIBUTE_KEY_TAG))
     }
 
-    /// Construct the highest possible [`AttributeKey`] (all bits are one)
-    pub fn max() -> Self {
-        Self(MAXIMUM_ATTRIBUTE_KEY)
+    fn max() -> Self {
+        Self(Key::max().set_tag(ATTRIBUTE_KEY_TAG))
     }
 
-    /// Get an [`AttributeKeyPart`] that refers to the [`Attribute`] part of
-    /// this [`AttributeKey`].
-    pub fn attribute(&self) -> AttributeKeyPart {
+    fn attribute(&self) -> AttributeKeyPart {
         AttributeKeyPart(array_ref![self.0, ATTRIBUTE_OFFSET, ATTRIBUTE_LENGTH])
     }
 
-    /// Set the [`AttributeKeyPart`], altering the [`Attribute`] part of this
-    /// [`AttributeKey`].
-    pub fn set_attribute(self, attribute: AttributeKeyPart) -> Self {
+    fn set_attribute(self, attribute: AttributeKeyPart) -> Self {
         let mut inner = self.0;
         mutable_slice![inner, ATTRIBUTE_OFFSET, ATTRIBUTE_LENGTH].copy_from_slice(attribute.0);
         Self(inner)
     }
 
-    /// Get an [`EntityKeyPart`] that refers to the [`Entity`] part of this
-    /// [`AttributeKey`].
-    pub fn entity(&self) -> EntityKeyPart {
+    fn entity(&self) -> EntityKeyPart {
         EntityKeyPart(array_ref![self.0, ENTITY_OFFSET, ENTITY_LENGTH])
     }
 
-    /// Set the [`EntityKeyPart`], altering the [`Entity`] part of this
-    /// [`AttributeKey`].
-    pub fn set_entity(self, entity: EntityKeyPart) -> Self {
+    fn set_entity(self, entity: EntityKeyPart) -> Self {
         let mut inner = self.0;
         mutable_slice![inner, ENTITY_OFFSET, ENTITY_LENGTH].copy_from_slice(entity.0);
         Self(inner)
     }
 
-    /// Get the [`ValueDataType`] that is represented by this [`AttributeKey`].
-    pub fn value_type(&self) -> ValueDataType {
+    fn value_type(&self) -> ValueDataType {
         self.0[VALUE_DATA_TYPE_OFFSET].into()
     }
 
-    /// Set the [`ValueDataType`] that is represented by this [`AttributeKey`].
-    pub fn set_value_type(self, value_type: ValueDataType) -> Self {
+    fn set_value_type(self, value_type: ValueDataType) -> Self {
         let mut inner = self.0;
         inner[VALUE_DATA_TYPE_OFFSET] = value_type.into();
         Self(inner)
     }
 
-    /// Get a [`ValueReferenceKeyPart`] that refers to the [`Value`] part of
-    /// this [`AttributeKey`].
-    pub fn value_reference(&self) -> ValueReferenceKeyPart {
+    fn value_reference(&self) -> ValueReferenceKeyPart {
         ValueReferenceKeyPart(array_ref![
             self.0,
             VALUE_REFERENCE_OFFSET,
@@ -102,43 +87,17 @@ impl AttributeKey {
         ])
     }
 
-    /// Set the [`ValueReferenceKeyPart`], altering the [`Value`] part of this
-    /// [`AttributeKey`].
-    pub fn set_value_reference(self, value_reference: ValueReferenceKeyPart) -> Self {
+    fn set_value_reference(self, value_reference: ValueReferenceKeyPart) -> Self {
         let mut inner = self.0;
         mutable_slice!(inner, VALUE_REFERENCE_OFFSET, VALUE_REFERENCE_LENGTH)
             .copy_from_slice(value_reference.0);
         Self(inner)
     }
-
-    /// Sets the constrained parts of the given [`ArtifactSelector`] to the associated
-    /// components of this [`AttributeKey`]
-    pub fn apply_selector(self, selector: &ArtifactSelector<Constrained>) -> Self {
-        let mut key = self;
-
-        if let Some(entity) = selector.entity() {
-            key = key.set_entity(entity.into());
-        };
-
-        if let Some(attribute) = selector.attribute() {
-            key = key.set_attribute(attribute.into());
-        }
-
-        if let Some(value_type) = selector.value().map(|value| value.data_type()) {
-            key = key.set_value_type(value_type);
-        }
-
-        if let Some(value_reference) = selector.value_reference() {
-            key = key.set_value_reference(ValueReferenceKeyPart(value_reference));
-        }
-
-        key
-    }
 }
 
 impl Default for AttributeKey {
     fn default() -> Self {
-        Self::min()
+        <Self as KeyView>::min()
     }
 }
 
@@ -149,36 +108,10 @@ impl AsRef<[u8]> for AttributeKey {
 }
 
 impl Deref for AttributeKey {
-    type Target = [u8; ATTRIBUTE_KEY_LENGTH];
+    type Target = <Key as Deref>::Target;
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl From<&ArtifactSelector<Constrained>> for AttributeKey {
-    fn from(selector: &ArtifactSelector<Constrained>) -> Self {
-        AttributeKey::default().apply_selector(selector)
-    }
-}
-
-impl From<&ValueKey> for AttributeKey {
-    fn from(value: &ValueKey) -> Self {
-        AttributeKey::default()
-            .set_entity(value.entity())
-            .set_attribute(value.attribute())
-            .set_value_type(value.value_type())
-            .set_value_reference(value.value_reference())
-    }
-}
-
-impl From<&EntityKey> for AttributeKey {
-    fn from(value: &EntityKey) -> Self {
-        AttributeKey::default()
-            .set_entity(value.entity())
-            .set_attribute(value.attribute())
-            .set_value_type(value.value_type())
-            .set_value_reference(value.value_reference())
     }
 }
 
@@ -192,17 +125,17 @@ impl From<&Artifact> for AttributeKey {
     }
 }
 
+impl KeyType for AttributeKey {}
+
 impl TryFrom<Vec<u8>> for AttributeKey {
     type Error = DialogArtifactsError;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Ok(Self(value.try_into().map_err(|value: Vec<u8>| {
+        Ok(Self(Key(value.try_into().map_err(|value: Vec<u8>| {
             DialogArtifactsError::InvalidKey(format!(
-                "Wrong byte length for attribute key: {}",
+                "Wrong byte length for entity key: {}",
                 value.len()
             ))
-        })?))
+        })?)))
     }
 }
-
-impl KeyType for AttributeKey {}
