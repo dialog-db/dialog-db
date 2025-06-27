@@ -1,4 +1,5 @@
 #![cfg(not(target_arch = "wasm32"))]
+#![warn(missing_docs)]
 
 //! # Dialog Diagnose
 //!

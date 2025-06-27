@@ -45,7 +45,7 @@ impl Widget for FactTable<'_> {
                     }
                     Promise::Resolved(State::Added(datum)) => {
                         let value = Value::try_from((
-                            ValueDataType::try_from(datum.value_type).unwrap_or_default(),
+                            ValueDataType::from(datum.value_type),
                             datum.value.clone(),
                         ))
                         .map(|value| value.to_utf8())
