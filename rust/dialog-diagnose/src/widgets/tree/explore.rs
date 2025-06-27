@@ -6,12 +6,6 @@ use ratatui::widgets::{Block, List};
 use crate::{DiagnoseState, Promise, TreeNode};
 use base58::ToBase58;
 
-// enum TreeState<'a> {
-//     Node(Depth, &'a Blake3Hash, Promise<&'a TreeNode>),
-//     Entry(Depth, &'a Entry<EntityKey, State<Datum>>),
-//     Empty,
-// }
-
 pub struct DiagnoseTreeExplore {}
 
 impl StatefulWidget for &DiagnoseTreeExplore {

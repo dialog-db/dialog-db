@@ -105,12 +105,13 @@ impl TreeState {
 
         let mut cursor = &self.selected_node;
 
-        loop {
-            let (parent_hash, siblings) = match store.parent_node_of(cursor) {
-                Some((parent_hash, TreeNode::Branch { children, .. })) => (parent_hash, children),
-                _ => break,
-            };
-
+        while let Some((
+            parent_hash,
+            TreeNode::Branch {
+                children: siblings, ..
+            },
+        )) = store.parent_node_of(cursor)
+        {
             match self.position_of(cursor, store) + 1 {
                 index if index < siblings.len() => {
                     let Some(hash) = siblings.get(index) else {
