@@ -1,3 +1,8 @@
+//! Internal data representation for storing artifacts in indexes.
+//!
+//! This module defines the [`Datum`] type which is the internal serializable
+//! representation of artifacts stored within the prolly tree indexes.
+
 use dialog_prolly_tree::ValueType;
 use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Serialize};
@@ -23,7 +28,10 @@ pub struct Datum {
 }
 
 impl Datum {
-    /// The hash reference that corresponds to this [`Datum`]'s [`Value`]
+    /// Returns the hash reference that corresponds to this [`Datum`]'s [`Value`].
+    ///
+    /// This hash is used for indexing by value and enables efficient value-based
+    /// queries in the triple store.
     pub fn value_reference(&self) -> Blake3Hash {
         // TODO: Cache this
         make_reference(&self.value)

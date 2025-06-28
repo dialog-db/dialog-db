@@ -1,3 +1,9 @@
+//! Causal references for artifact versioning.
+//!
+//! This module defines the [`Cause`] type which represents causal relationships
+//! between artifacts, enabling proper versioning and update semantics in the
+//! triple store.
+
 use std::fmt::Display;
 
 use base58::ToBase58;

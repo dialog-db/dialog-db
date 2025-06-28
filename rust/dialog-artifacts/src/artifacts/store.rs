@@ -1,3 +1,9 @@
+//! Traits for artifact storage and querying.
+//!
+//! This module defines the core traits that enable querying and modification
+//! of artifacts in the triple store, providing both read-only and mutable
+//! interfaces.
+
 use async_trait::async_trait;
 use dialog_common::ConditionalSend;
 use dialog_storage::Blake3Hash;

@@ -1,3 +1,8 @@
+//! Instructions for modifying artifacts in the store.
+//!
+//! This module defines the [`Instruction`] enum which represents operations
+//! that can be applied to artifacts during commit transactions.
+
 use crate::Artifact;
 
 #[cfg(doc)]
