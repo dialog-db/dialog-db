@@ -2,7 +2,7 @@
 
 use std::{collections::VecDeque, sync::mpsc::Sender};
 
-use dialog_artifacts::{Datum, DialogArtifactsError, EntityKey, Index};
+use dialog_artifacts::{Datum, DialogArtifactsError, Index, Key};
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
 
 use super::store::WorkerMessage;
@@ -31,7 +31,7 @@ pub struct ArtifactsTreeStats {
 /// to compute various statistics about its structure and contents.
 pub struct ArtifactsTreeAnalysis {
     /// The prolly tree index to analyze
-    tree: Index<EntityKey, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+    tree: Index<Key, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
     /// Channel sender for worker messages
     tx: Sender<WorkerMessage>,
 }
@@ -44,7 +44,7 @@ impl ArtifactsTreeAnalysis {
     /// * `tree` - The prolly tree index to analyze
     /// * `tx` - Channel sender for worker messages
     pub fn new(
-        tree: Index<EntityKey, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+        tree: Index<Key, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
         tx: Sender<WorkerMessage>,
     ) -> Self {
         Self { tree, tx }

@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 pub use ratatui::prelude::*;
-use ratatui::widgets::{Block, List};
+use ratatui::widgets::{Block, List, ListState};
 
 use crate::{DiagnoseState, Promise, TreeNode};
 use base58::ToBase58;
@@ -32,10 +32,18 @@ impl StatefulWidget for &DiagnoseTreeExplore {
         let mut nodes = VecDeque::from([(vec![], &state.tree.root, root)]);
         let mut lines = Vec::new();
 
+        let [legend_area, tree_area] =
+            Layout::vertical(vec![Constraint::Max(1), Constraint::Fill(1)]).areas(area);
+
+        let mut selected_index = 0;
+        let mut max_expanded_depth = 0usize;
+
         while let Some((depth, hash, promise)) = nodes.pop_front() {
             let selected = hash == &state.tree.selected_node;
             let is_root = hash == &state.tree.root;
             let is_expanded = state.tree.expanded.contains(hash);
+
+            max_expanded_depth = max_expanded_depth.max(depth.len());
 
             let mut hash_string = hash.to_base58();
             hash_string.truncate(8);
@@ -43,6 +51,7 @@ impl StatefulWidget for &DiagnoseTreeExplore {
             let mut hash_span = hash_string.bold().style(Style::new().fg(Color::Yellow));
 
             if selected {
+                selected_index = lines.len();
                 hash_span = hash_span.patch_style(Style::new().bg(Color::DarkGray));
             }
 
@@ -104,7 +113,7 @@ impl StatefulWidget for &DiagnoseTreeExplore {
                         if is_root {
                             spans.push(" · ".into());
                             spans.push(
-                                Span::from(format!("Max. depth {}", stats.depth))
+                                Span::from(format!("Max. depth {}", stats.depth - 1))
                                     .style(Style::new().fg(Color::Green)),
                             );
                         }
@@ -139,8 +148,34 @@ impl StatefulWidget for &DiagnoseTreeExplore {
             };
         }
 
-        let list = List::new(lines);
+        if let Promise::Resolved(stats) = &stats {
+            let line = Line::from(format!(
+                "{} <- Tree Level",
+                (0..max_expanded_depth + 1)
+                    .map(|depth| format!(" {}", stats.depth.saturating_sub(depth + 1)))
+                    .collect::<String>()
+            ))
+            .style(Style::new().fg(Color::DarkGray));
+            line.render(legend_area, buf);
+        }
 
-        Widget::render(list.block(tree), area, buf);
+        let scroll_height = area.height as usize;
+        let scroll_offset = state.tree.scroll_offset;
+        let scroll_offset_height = scroll_height + scroll_offset;
+
+        let scroll_offset = if selected_index > scroll_offset_height - 2 {
+            selected_index - (scroll_height - 2)
+        } else if selected_index < scroll_offset + 2 {
+            selected_index.saturating_sub(2)
+        } else {
+            scroll_offset
+        };
+
+        state.tree.scroll_offset = scroll_offset;
+
+        let list = List::new(lines);
+        let mut list_state = ListState::default().with_offset(scroll_offset);
+
+        StatefulWidget::render(list.block(tree), tree_area, buf, &mut list_state);
     }
 }

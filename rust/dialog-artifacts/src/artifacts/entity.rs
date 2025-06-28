@@ -1,3 +1,9 @@
+//! Entity types for semantic triple subjects.
+//!
+//! This module defines the [`Entity`] type which represents the subject part of
+//! semantic triples. Entities are based on URIs and provide unique identification
+//! for objects in the triple store.
+
 use std::{fmt::Display, ops::Deref, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -10,6 +16,7 @@ use crate::{DialogArtifactsError, ENTITY_LENGTH, Uri};
 #[serde(into = "String", try_from = "String")]
 pub struct Entity(Uri, [u8; ENTITY_LENGTH]);
 
+/// Serializes an entity to UTF-8 format for CSV export.
 pub(crate) fn to_utf8<S>(entity: &Entity, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -17,6 +24,7 @@ where
     entity.0.serialize(serializer)
 }
 
+/// Deserializes an entity from UTF-8 format for CSV import.
 pub(crate) fn from_utf8<'de, D>(deserializer: D) -> Result<Entity, D::Error>
 where
     D: Deserializer<'de>,

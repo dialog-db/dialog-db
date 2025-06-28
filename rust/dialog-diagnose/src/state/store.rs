@@ -76,7 +76,7 @@ impl DiagnoseStore {
     /// This sets up all the background workers and channels for asynchronous
     /// data loading and initializes the internal caches.
     pub async fn new(artifacts: Artifacts<MemoryStorageBackend<Blake3Hash, Vec<u8>>>) -> Self {
-        let tree = artifacts.entity_index().read().await.clone();
+        let tree = artifacts.index().read().await.clone();
 
         let (tx, message_rx) = channel();
         let cursor = ArtifactsCursor::new(tree.clone(), tx.clone());

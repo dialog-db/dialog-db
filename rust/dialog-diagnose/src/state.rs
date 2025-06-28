@@ -52,6 +52,9 @@ pub struct TreeState {
     pub selected_entry: Option<usize>,
     /// Set of node hashes that are currently expanded in the tree view
     pub expanded: BTreeSet<Blake3Hash>,
+
+    /// Vertical scroll offset for the tree view to handle large trees
+    pub scroll_offset: usize,
 }
 
 impl TreeState {
@@ -180,7 +183,7 @@ impl DiagnoseState {
     /// to start at the root of the prolly tree.
     pub async fn new(artifacts: Artifacts<MemoryStorageBackend<[u8; 32], Vec<u8>>>) -> Self {
         let root_hash = artifacts
-            .entity_index()
+            .index()
             .read()
             .await
             .hash()
@@ -196,6 +199,7 @@ impl DiagnoseState {
                 selected_node: root_hash,
                 selected_entry: None,
                 expanded: Default::default(),
+                scroll_offset: 0,
             },
         }
     }

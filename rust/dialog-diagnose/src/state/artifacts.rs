@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, mpsc::Sender},
 };
 
-use dialog_artifacts::{Datum, DialogArtifactsError, EntityKey, Index};
+use dialog_artifacts::{Datum, DialogArtifactsError, Index, Key};
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
 use futures_util::{Stream, TryStreamExt};
 use tokio::sync::Mutex;
@@ -20,7 +20,7 @@ pub struct ArtifactsCursorState {
     /// Index of the next item to fetch
     next_index: usize,
     /// Last key processed (for resuming streams)
-    last_key: Option<EntityKey>,
+    last_key: Option<Key>,
     /// Whether the stream has finished
     finished: bool,
 }
@@ -33,7 +33,7 @@ pub struct ArtifactsCursor {
     /// Shared state for tracking cursor position
     state: Arc<Mutex<ArtifactsCursorState>>,
     /// The prolly tree index containing the facts
-    tree: Index<EntityKey, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+    tree: Index<Key, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
     /// Channel sender for worker messages
     tx: Sender<WorkerMessage>,
 }
@@ -46,7 +46,7 @@ impl ArtifactsCursor {
     /// * `tree` - The prolly tree index containing facts data
     /// * `tx` - Channel sender for worker messages
     pub fn new(
-        tree: Index<EntityKey, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+        tree: Index<Key, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
         tx: Sender<WorkerMessage>,
     ) -> Self {
         Self {

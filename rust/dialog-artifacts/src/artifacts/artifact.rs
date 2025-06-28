@@ -1,3 +1,9 @@
+//! Artifact data structure representing semantic triples.
+//!
+//! This module defines the core [`Artifact`] type which represents a semantic triple
+//! (subject-predicate-object) in the Dialog database. Artifacts are the fundamental
+//! units of data storage and retrieval.
+
 use std::{fmt::Display, str::FromStr};
 
 use serde::{Deserialize, Serialize};
