@@ -2,7 +2,7 @@
 
 use std::sync::mpsc::Sender;
 
-use dialog_artifacts::{Datum, DialogArtifactsError, EntityKey, HASH_SIZE, Index, State};
+use dialog_artifacts::{Datum, DialogArtifactsError, HASH_SIZE, Index, Key, State};
 use dialog_prolly_tree::{Block, Entry};
 use dialog_storage::{Blake3Hash, ContentAddressedStorage, MemoryStorageBackend};
 
@@ -17,12 +17,12 @@ pub enum TreeNode {
     /// A leaf segment containing actual data entries
     Segment {
         /// The entries stored in this leaf segment
-        entries: Vec<Entry<EntityKey, State<Datum>>>,
+        entries: Vec<Entry<Key, State<Datum>>>,
     },
     /// A branch node containing references to child nodes
     Branch {
         /// The upper bound key for this branch
-        upper_bound: EntityKey,
+        upper_bound: Key,
         /// Hashes of child nodes
         children: Vec<Blake3Hash>,
     },
@@ -34,7 +34,7 @@ pub enum TreeNode {
 /// the prolly tree structure.
 pub struct ArtifactsHierarchy {
     /// The prolly tree index to load nodes from
-    tree: Index<EntityKey, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+    tree: Index<Key, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
     /// Channel sender for worker messages
     tx: Sender<WorkerMessage>,
 }
@@ -47,7 +47,7 @@ impl ArtifactsHierarchy {
     /// * `tree` - The prolly tree index to load nodes from
     /// * `tx` - Channel sender for worker messages
     pub fn new(
-        tree: Index<EntityKey, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+        tree: Index<Key, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
         tx: Sender<WorkerMessage>,
     ) -> Self {
         Self { tree, tx }
@@ -67,7 +67,7 @@ impl ArtifactsHierarchy {
         let hash = hash.to_owned();
 
         tokio::spawn(async move {
-            let Some(block): Option<Block<HASH_SIZE, EntityKey, State<Datum>, Blake3Hash>> =
+            let Some(block): Option<Block<HASH_SIZE, Key, State<Datum>, Blake3Hash>> =
                 tree.storage().read(&hash).await?
             else {
                 // TODO: This should be an error condition
