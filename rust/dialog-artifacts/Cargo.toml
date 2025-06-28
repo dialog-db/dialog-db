@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["csv"]
+debug = []
 helpers = ["dep:anyhow"]
 csv = ["dep:csv-async"]
 
@@ -33,6 +34,7 @@ rand_core = { workspace = true }
 rand_chacha = { workspace = true }
 serde = { workspace = true }
 serde-big-array = { workspace = true }
+serde_json = { workspace = true }
 static_assertions = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
@@ -52,5 +54,13 @@ wasm-bindgen-futures = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+reqwest = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+tokio = { workspace = true, features = [
+    "io-util",
+    "io-std",
+    "sync",
+    "macros",
+    "rt",
+    "rt-multi-thread",
+] }
