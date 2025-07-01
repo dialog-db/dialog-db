@@ -114,7 +114,7 @@ I think we could synthesize ideas from various logical clocks that would offer t
 1. Ability to identify concurrent changes
 2. Ability to compare any two events (without having to read arbitrary tree branches)
 
-We could accomplish first goal we must capture synchronization points e.g. tree revision from where changes where made. This way if two changes have same a same revision they could be considered concurrent. However, since revision is a cryptogrphic hash we would not be able to compare two changes with different revisions as it would not be clear which one is older.
+To could accomplish first goal we must capture synchronization points e.g. tree revision from where changes where made. This way if two changes have same a same revision they could be considered concurrent. However, since revision is a cryptogrphic hash we would not be able to compare two changes with different revisions as it would not be clear which one is older.
 
 We can build upon this general idea but instead of using revision hash we could use monotonically growing time as synchronization point instead. Specifically we could use `{ since, drift, at }` tuple to represent our logical clock where:
 
