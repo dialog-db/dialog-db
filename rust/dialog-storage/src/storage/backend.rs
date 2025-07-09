@@ -82,6 +82,7 @@ mod tests {
     use std::sync::Arc;
 
     use anyhow::Result;
+    use rand::Rng;
     use tokio::sync::Mutex;
 
     use crate::{
@@ -124,12 +125,15 @@ mod tests {
             chunk_set.push(Vec::from(rand::random::<[u8; 32]>()));
         }
 
+        let mut rng = rand::thread_rng();
         for i in 0..1024usize {
-            let chunks = rand::random_range(8..64usize);
+            // let chunks = rand::random_range(8..64usize);
+            let chunks = rng.gen_range(8..64usize);
             let mut value = Vec::new();
 
             for _ in 0..chunks {
-                let index = rand::random_range(0..chunk_set.len());
+                // let index = rand::random_range(0..chunk_set.len());
+                let index = rng.gen_range(0..chunk_set.len());
                 value.append(&mut chunk_set[index].clone())
             }
 

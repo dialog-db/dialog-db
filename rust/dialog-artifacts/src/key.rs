@@ -20,16 +20,16 @@ macro_rules! mutable_slice {
 
 pub(crate) use mutable_slice;
 
-pub(crate) const ENTITY_LENGTH: usize = 32;
+pub(crate) const ENTITY_LENGTH: usize = 64;
 pub(crate) const ATTRIBUTE_LENGTH: usize = 64;
 pub(crate) const VALUE_DATA_TYPE_LENGTH: usize = 1;
 pub(crate) const VALUE_REFERENCE_LENGTH: usize = 32;
 
 pub(crate) const ENTITY_KEY_LENGTH: usize =
-    ENTITY_LENGTH + ATTRIBUTE_LENGTH + VALUE_DATA_TYPE_LENGTH;
+    ENTITY_LENGTH + ATTRIBUTE_LENGTH + VALUE_DATA_TYPE_LENGTH + VALUE_REFERENCE_LENGTH;
 
 pub(crate) const ATTRIBUTE_KEY_LENGTH: usize =
-    ATTRIBUTE_LENGTH + ENTITY_LENGTH + VALUE_DATA_TYPE_LENGTH;
+    ATTRIBUTE_LENGTH + ENTITY_LENGTH + VALUE_DATA_TYPE_LENGTH + VALUE_REFERENCE_LENGTH;
 
 pub(crate) const VALUE_KEY_LENGTH: usize =
     VALUE_DATA_TYPE_LENGTH + VALUE_REFERENCE_LENGTH + ATTRIBUTE_LENGTH + ENTITY_LENGTH;

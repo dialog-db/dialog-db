@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use crate::{Artifact, Attribute, Entity, Value};
 use anyhow::Result;
+use base58::ToBase58;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -16,7 +17,13 @@ pub fn generate_data(entity_count: usize) -> Result<Vec<Artifact>> {
 
     let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
     let mut data = vec![];
-    let mut make_entity = || Entity::from(rng.random::<[u8; 32]>());
+    // TODO: Switch back when we update rand et al
+    // SEE: https://github.com/dalek-cryptography/curve25519-dalek/issues/731
+    // let mut make_entity = || Entity::from(rng.random::<[u8; 32]>());
+    let mut make_entity = || {
+        Entity::try_from(format!("entity:{}", rng.r#gen::<[u8; 32]>().to_base58()))
+            .expect("Failed to generate random entity")
+    };
     let mut last_entity: Option<Entity> = None;
 
     for i in 0..entity_count {
@@ -47,7 +54,7 @@ pub fn generate_data(entity_count: usize) -> Result<Vec<Artifact>> {
             data.push(Artifact {
                 the: parent_attribute.clone(),
                 of: entity.clone(),
-                is: Value::Entity(*parent_entity),
+                is: Value::Entity(parent_entity.clone()),
                 cause: None,
             });
         }
@@ -55,7 +62,7 @@ pub fn generate_data(entity_count: usize) -> Result<Vec<Artifact>> {
         data.push(Artifact {
             the: back_reference_attribute.clone(),
             of: make_entity(),
-            is: Value::Entity(*entity),
+            is: Value::Entity(entity.clone()),
             cause: None,
         });
 

@@ -1,6 +1,6 @@
 use std::{fmt::Display, str::FromStr};
 
-use crate::{Attribute, DialogArtifactsError, Entity, RawEntity, make_reference};
+use crate::{Attribute, DialogArtifactsError, Entity, make_reference};
 
 use base58::{FromBase58, ToBase58};
 use dialog_storage::Blake3Hash;
@@ -9,12 +9,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// All value type representations that may be stored by [`Artifacts`]
 #[derive(Debug, Clone, PartialOrd, PartialEq, Serialize, Deserialize)]
 pub enum Value {
-    /// An empty (null) value
-    Null,
     /// A byte buffer
     Bytes(Vec<u8>),
     /// An [`Entity`]
-    Entity(RawEntity),
+    Entity(Entity),
     /// A boolean
     Boolean(bool),
     /// A UTF-8 string
@@ -36,7 +34,6 @@ impl Value {
     /// Get the [`ValueDataType`] that corresponds to this variant of [`Value`]
     pub fn data_type(&self) -> ValueDataType {
         match self {
-            Value::Null => ValueDataType::Null,
             Value::Bytes(_) => ValueDataType::Bytes,
             Value::Entity(_) => ValueDataType::Entity,
             Value::Boolean(_) => ValueDataType::Boolean,
@@ -52,15 +49,15 @@ impl Value {
     /// Convert this [`Value`] to its byte representation
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
-            Value::Null => vec![],
             Value::Bytes(bytes) => bytes.to_owned(),
-            Value::Entity(entity) => entity.as_ref().to_vec(),
+            Value::Entity(entity) => entity.as_str().as_bytes().to_owned(),
             Value::Boolean(value) => vec![u8::from(*value)],
             Value::String(string) => string.as_bytes().to_vec(),
             Value::UnsignedInt(value) => value.to_le_bytes().to_vec(),
             Value::SignedInt(value) => value.to_le_bytes().to_vec(),
             Value::Float(value) => value.to_le_bytes().to_vec(),
             Value::Record(value) => value.to_owned(),
+            // TODO: Change this to bytes of string representation
             Value::Symbol(value) => value.key_bytes().to_vec(),
         }
     }
@@ -68,9 +65,8 @@ impl Value {
     /// Serialize this [`Value`] to a UTF-8 string
     pub fn to_utf8(&self) -> String {
         match self {
-            Value::Null => "null".to_string(),
             Value::Bytes(bytes) => format!("bytes:{}", bytes.to_base58()),
-            Value::Entity(raw) => format!("entity:{}", raw.to_base58()),
+            Value::Entity(raw) => format!("entity:{}", raw),
             Value::Boolean(value) => format!("boolean:{}", value),
             Value::String(string) => format!("string:{}", string),
             Value::UnsignedInt(number) => format!("uint:{}", number),
@@ -108,10 +104,6 @@ impl FromStr for Value {
     type Err = DialogArtifactsError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "null" {
-            return Ok(Value::Null);
-        }
-
         let Some((variant, value)) = s.split_once(':') else {
             return Err(DialogArtifactsError::InvalidValue(format!(
                 "Unsupported variant or invalid format: \"{}\"",
@@ -135,7 +127,7 @@ impl FromStr for Value {
 
         Ok(match variant {
             "bytes" => Value::Bytes(value.from_base58().map_err(to_dialog_error_debug)?),
-            "entity" => Value::Entity(*Entity::try_from(value.to_owned())?),
+            "entity" => Value::Entity(Entity::from_str(value)?),
             "boolean" => Value::Boolean(bool::from_str(value).map_err(to_dialog_error)?),
             "string" => Value::String(value.to_owned()),
             "uint" => Value::UnsignedInt(value.parse().map_err(to_dialog_error)?),
@@ -157,9 +149,8 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
 
     fn try_from((value_data_type, value): (ValueDataType, Vec<u8>)) -> Result<Self, Self::Error> {
         Ok(match value_data_type {
-            ValueDataType::Null => Value::Null,
             ValueDataType::Bytes => Value::Bytes(value),
-            ValueDataType::Entity => Value::Entity(*Entity::try_from(value)?),
+            ValueDataType::Entity => Value::Entity(Entity::try_from(value)?),
             // TODO: How strictly validated must a bool representation be?
             ValueDataType::Boolean => match value.first() {
                 Some(byte) if value.len() == 1 => Value::Boolean(*byte != 0),
@@ -225,8 +216,8 @@ impl From<Vec<u8>> for Value {
     }
 }
 
-impl From<RawEntity> for Value {
-    fn from(value: RawEntity) -> Self {
+impl From<Entity> for Value {
+    fn from(value: Entity) -> Self {
         Value::Entity(value)
     }
 }
@@ -342,33 +333,31 @@ impl From<Value> for ValueDataType {
 #[repr(u8)]
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ValueDataType {
-    /// An empty (null) value
-    #[default]
-    Null = 0,
     /// A byte buffer
-    Bytes = 1,
+    #[default]
+    Bytes = 0,
     /// An [`Entity`]
-    Entity = 2,
+    Entity = 1,
     /// A boolean
-    Boolean = 3,
+    Boolean = 2,
     /// A UTF-8 string
-    String = 4,
+    String = 3,
     /// A 128-bit unsigned integer
-    UnsignedInt = 5,
+    UnsignedInt = 4,
     /// A 128-bit signed integer
-    SignedInt = 6,
+    SignedInt = 5,
     /// A floating point number
-    Float = 7,
+    Float = 6,
     /// TBD structured data (flatbuffers?)
-    Record = 8,
+    Record = 7,
     /// A symbol type, used to distinguish attributes from other strings
-    Symbol = 9,
+    Symbol = 8,
 }
 
 impl ValueDataType {
     /// The smallest [`ValueDataType`] in discriminant order
     pub fn min() -> Self {
-        ValueDataType::Null
+        ValueDataType::Bytes
     }
 
     /// The largest [`ValueDataType`] in discriminant order
@@ -386,21 +375,20 @@ impl From<u8> for ValueDataType {
 impl From<&u8> for ValueDataType {
     fn from(value: &u8) -> Self {
         match value {
-            0 => ValueDataType::Null,
-            1 => ValueDataType::Bytes,
-            2 => ValueDataType::Entity,
-            3 => ValueDataType::Boolean,
-            4 => ValueDataType::String,
-            5 => ValueDataType::UnsignedInt,
-            6 => ValueDataType::SignedInt,
-            7 => ValueDataType::Float,
-            8 => ValueDataType::Record,
-            9 => ValueDataType::Symbol,
+            0 => ValueDataType::Bytes,
+            1 => ValueDataType::Entity,
+            2 => ValueDataType::Boolean,
+            3 => ValueDataType::String,
+            4 => ValueDataType::UnsignedInt,
+            5 => ValueDataType::SignedInt,
+            6 => ValueDataType::Float,
+            7 => ValueDataType::Record,
+            8 => ValueDataType::Symbol,
             _ => {
                 println!(
-                    "WARNING! Encountered unsupported value tag '{value}'; defaulting to null (but this is undefined behavior)..."
+                    "WARNING! Encountered unsupported value tag '{value}'; defaulting to bytes..."
                 );
-                ValueDataType::Null
+                ValueDataType::Bytes
             }
         }
     }

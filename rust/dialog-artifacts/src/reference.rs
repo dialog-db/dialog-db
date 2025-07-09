@@ -1,5 +1,4 @@
 use dialog_storage::Blake3Hash;
-use rand::Rng;
 
 /// Produces a [Reference], which is a type-alias for a 32-byte array; in practice, these
 /// bytes are the BLAKE3 hash of the inputs to this function
@@ -10,10 +9,7 @@ where
     blake3::hash(bytes.as_ref()).as_bytes().to_owned()
 }
 
-pub(crate) fn make_seed() -> [u8; 32] {
-    rand::rng().random()
-}
-
+// TODO: We only have one "reference type" now, maybe deconstruct this macro
 macro_rules! reference_type {
     ( $struct:ident ) => {
         impl From<Blake3Hash> for $struct {

@@ -25,6 +25,10 @@ pub enum DialogArtifactsError {
     #[error("Could not convert bytes into key: {0}")]
     InvalidKey(String),
 
+    /// Could not interpret some string as a URI
+    #[error("Could not parse as URI: {0}")]
+    InvalidUri(String),
+
     /// Raw bytes could not be interpreted as a typed value
     #[error("Could not convert bytes into value: {0}")]
     InvalidValue(String),
