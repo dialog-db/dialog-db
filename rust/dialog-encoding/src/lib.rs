@@ -17,7 +17,7 @@
 //! # Basic Usage
 //!
 //! ```rust
-//! use dialog_encoding::{encode, decode, Cellular, DialogEncodingError};
+//! use dialog_encoding::{encode, decode, Cellular, Width, DialogEncodingError};
 //!
 //! // Define a data structure that can be broken into cells
 //! struct Record<'a> {
@@ -26,11 +26,15 @@
 //! }
 //!
 //! impl<'a> Cellular<'a> for Record<'a> {
+//!     fn cell_width() -> Width {
+//!         Width::Bounded(2)
+//!     }
+//!
 //!     fn cells(&'a self) -> impl Iterator<Item = &'a [u8]> {
 //!         [self.name, self.value].into_iter()
 //!     }
 //!
-//!     fn try_from_cells<I>(mut cells: I) -> Result<Self, DialogEncodingError>
+//!     fn try_from_cells<I>(cells: &mut I) -> Result<Self, DialogEncodingError>
 //!     where I: Iterator<Item = &'a [u8]> {
 //!         let name = cells.next().unwrap();
 //!         let value = cells.next().unwrap();
@@ -72,9 +76,12 @@ pub use cellular::*;
 mod buffer;
 pub use buffer::*;
 
+mod width;
+pub use width::*;
+
 #[cfg(test)]
 mod tests {
-    use crate::{decode, encode};
+    use crate::{Width, decode, encode};
 
     use super::Cellular;
     use anyhow::Result;
@@ -155,34 +162,38 @@ mod tests {
     }
 
     impl<'a> Cellular<'a> for CollectionCells<'a> {
-        fn cells(&'a self) -> impl Iterator<Item = &'a [u8]> {
+        fn cells(&self) -> impl Iterator<Item = &[u8]> {
             self.entries
                 .iter()
                 .flat_map(|entry_cells| entry_cells.cells())
         }
 
-        fn try_from_cells<I>(cells: I) -> std::result::Result<Self, crate::DialogEncodingError>
+        fn try_from_cells<I>(cells: &mut I) -> std::result::Result<Self, crate::DialogEncodingError>
         where
             I: Iterator<Item = &'a [u8]>,
         {
             let mut entries = Vec::new();
 
-            for chunk in &cells.chunks(4) {
-                entries.push(EntryCells::try_from_cells(chunk)?);
+            for mut chunk in &cells.chunks(4) {
+                entries.push(EntryCells::try_from_cells(&mut chunk)?);
             }
 
             Ok(Self { entries })
         }
+
+        fn cell_width() -> Width {
+            Width::Unbounded
+        }
     }
 
     impl<'a> Cellular<'a> for EntryCells<'a> {
-        fn cells(&'a self) -> impl Iterator<Item = &'a [u8]> {
+        fn cells(&self) -> impl Iterator<Item = &[u8]> {
             [self.string, self.bytes]
                 .into_iter()
                 .chain(self.inner.cells())
         }
 
-        fn try_from_cells<I>(mut cells: I) -> std::result::Result<Self, crate::DialogEncodingError>
+        fn try_from_cells<I>(cells: &mut I) -> std::result::Result<Self, crate::DialogEncodingError>
         where
             I: Iterator<Item = &'a [u8]>,
         {
@@ -195,20 +206,28 @@ mod tests {
                 inner: InnerCells::try_from_cells(cells)?,
             })
         }
+
+        fn cell_width() -> Width {
+            Width::Bounded(2) + InnerCells::cell_width()
+        }
     }
 
     impl<'a> Cellular<'a> for InnerCells<'a> {
-        fn cells(&'a self) -> impl Iterator<Item = &'a [u8]> {
+        fn cells(&self) -> impl Iterator<Item = &[u8]> {
             [self.byte, self.array].into_iter()
         }
 
-        fn try_from_cells<I>(mut cells: I) -> std::result::Result<Self, crate::DialogEncodingError>
+        fn try_from_cells<I>(cells: &mut I) -> std::result::Result<Self, crate::DialogEncodingError>
         where
             I: Iterator<Item = &'a [u8]>,
         {
             let Some(byte) = cells.next() else { panic!() };
             let Some(array) = cells.next() else { panic!() };
             Ok(Self { byte, array })
+        }
+
+        fn cell_width() -> Width {
+            Width::Bounded(2)
         }
     }
 
@@ -297,6 +316,234 @@ mod tests {
         let final_collection = Collection::try_from(collection_cells)?;
 
         assert_eq!(collection, final_collection);
+
+        Ok(())
+    }
+
+    trait ValueLike<'a>: Clone {
+        fn reference(&'a self) -> ValueReference<'a>;
+    }
+
+    #[derive(Clone)]
+    struct Value(Vec<u8>);
+
+    impl<'a> ValueLike<'a> for Value {
+        fn reference(&'a self) -> ValueReference<'a> {
+            ValueReference(self.0.as_slice())
+        }
+    }
+
+    #[derive(Clone)]
+    struct ValueReference<'a>(&'a [u8]);
+
+    impl<'a> ValueLike<'a> for ValueReference<'a> {
+        fn reference(&'a self) -> ValueReference<'a> {
+            Self(self.0)
+        }
+    }
+
+    impl<'a> Cellular<'a> for ValueReference<'a> {
+        fn cell_width() -> Width {
+            Width::Bounded(3)
+        }
+
+        fn cells(&self) -> impl Iterator<Item = &[u8]> {
+            std::iter::once(self.0)
+        }
+
+        fn try_from_cells<I>(cells: &mut I) -> std::result::Result<Self, crate::DialogEncodingError>
+        where
+            I: Iterator<Item = &'a [u8]>,
+        {
+            let inner = cells.next().unwrap();
+            Ok(Self(inner))
+        }
+    }
+
+    use std::{cell::OnceCell, marker::PhantomData};
+
+    struct Container<'a> {
+        buffer: Vec<u8>,
+        values: OnceCell<Vec<ValueReference<'a>>>,
+    }
+
+    impl<'a> Container<'a> {
+        fn decode_values(&'a self) -> Vec<ValueReference<'a>> {
+            if self.buffer.len() > 0 {
+                decode(&self.buffer).unwrap()
+            } else {
+                vec![]
+            }
+        }
+
+        fn values(&'a self) -> &'a Vec<ValueReference<'a>> {
+            self.values.get_or_init(|| self.decode_values())
+        }
+
+        pub fn new(buffer: Vec<u8>) -> Self {
+            Container {
+                buffer,
+                values: OnceCell::new(),
+            }
+        }
+
+        pub fn with_values<'b, Mutator>(&'a self, mutator: Mutator) -> Container<'b>
+        where
+            Mutator: FnOnce(&'a Vec<ValueReference<'a>>) -> Vec<ValueReference<'a>>,
+        {
+            let values = self.values();
+            let mutated_values = mutator(values);
+
+            let mut next_buffer = vec![];
+            encode(&mutated_values, &mut next_buffer).unwrap();
+
+            Container::new(next_buffer)
+        }
+    }
+
+    impl<'a> Cellular<'a> for Vec<ValueReference<'a>> {
+        fn cell_width() -> Width {
+            Width::Unbounded
+        }
+
+        fn cells(&self) -> impl Iterator<Item = &[u8]> {
+            self.iter().flat_map(|value| value.cells())
+        }
+
+        fn try_from_cells<I>(cells: &mut I) -> std::result::Result<Self, crate::DialogEncodingError>
+        where
+            I: Iterator<Item = &'a [u8]>,
+        {
+            let mut values = vec![];
+
+            for cell in cells {
+                values.push(ValueReference(cell));
+            }
+
+            Ok(values)
+        }
+    }
+
+    #[test]
+    fn it_can_mutate_a_container() -> Result<()> {
+        let container = Container::new(vec![]);
+
+        let next_values = (0..5)
+            .into_iter()
+            .map(|_| Value(vec![9, 9, 9, 9, 9]))
+            .collect::<Vec<Value>>();
+
+        let final_container = container.with_values(|values| {
+            let mut values = values.clone();
+            for value in &next_values {
+                values.push(value.reference());
+            }
+            values
+        });
+
+        assert_eq!(
+            final_container.buffer,
+            vec![5, 9, 9, 9, 9, 9, 2, 0, 5, 0, 0, 0, 0, 0]
+        );
+
+        Ok(())
+    }
+
+    struct GenericContainer<T> {
+        buffer: Vec<u8>,
+        values: OnceCell<Vec<T>>,
+    }
+
+    impl<'a, T> GenericContainer<T>
+    where
+        T: Cellular<'a>,
+    {
+        fn decode_values(&'a self) -> CellularVec<'a, T> {
+            if self.buffer.len() > 0 {
+                decode(&self.buffer).unwrap()
+            } else {
+                CellularVec(vec![], PhantomData)
+            }
+        }
+
+        fn values(&'a self) -> &'a Vec<T> {
+            self.values.get_or_init(|| self.decode_values().0)
+        }
+
+        pub fn new(buffer: Vec<u8>) -> Self {
+            GenericContainer {
+                buffer,
+                values: OnceCell::new(),
+            }
+        }
+
+        pub fn with_values<'b, Mutator>(&'a self, mutator: Mutator) -> Container<'b>
+        where
+            Mutator: FnOnce(&'a Vec<T>) -> Vec<T>,
+        {
+            let values = self.values();
+            let mut next_buffer = vec![];
+
+            let mutated_values = CellularVec(mutator(values), PhantomData);
+            encode(&mutated_values, &mut next_buffer).unwrap();
+
+            Container::new(next_buffer)
+        }
+    }
+
+    struct CellularVec<'a, T>(Vec<T>, PhantomData<&'a ()>)
+    where
+        T: Cellular<'a>;
+
+    impl<'a, T> Cellular<'a> for CellularVec<'a, T>
+    where
+        T: Cellular<'a>,
+    {
+        fn cell_width() -> Width {
+            Width::Unbounded
+        }
+
+        fn cells(&self) -> impl Iterator<Item = &[u8]> {
+            self.0.iter().flat_map(|value| value.cells())
+        }
+
+        fn try_from_cells<I>(cells: &mut I) -> std::result::Result<Self, crate::DialogEncodingError>
+        where
+            I: Iterator<Item = &'a [u8]>,
+        {
+            let mut values = vec![];
+
+            let mut cells = cells.peekable();
+
+            while let Some(_) = cells.peek() {
+                values.push(T::try_from_cells(&mut cells)?)
+            }
+
+            Ok(Self(values, PhantomData))
+        }
+    }
+
+    #[test]
+    fn it_can_mutate_a_generic_container() -> Result<()> {
+        let container = GenericContainer::new(vec![]);
+
+        let next_values = (0..5)
+            .into_iter()
+            .map(|_| Value(vec![9, 9, 9, 9, 9]))
+            .collect::<Vec<Value>>();
+
+        let final_container = container.with_values(|values| {
+            let mut values = values.clone();
+            for value in &next_values {
+                values.push(value.reference());
+            }
+            values
+        });
+
+        assert_eq!(
+            final_container.buffer,
+            vec![5, 9, 9, 9, 9, 9, 2, 0, 5, 0, 0, 0, 0, 0]
+        );
 
         Ok(())
     }

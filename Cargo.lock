@@ -244,6 +244,9 @@ name = "bytes"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "cassowary"
@@ -592,6 +595,7 @@ name = "dialog-common"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "zerocopy",
 ]
 
 [[package]]
@@ -682,6 +686,33 @@ dependencies = [
  "tokio",
  "wasm-bindgen",
  "wasm-bindgen-test",
+]
+
+[[package]]
+name = "dialog-tree"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "base58",
+ "blake3",
+ "bytes",
+ "dialog-common",
+ "dialog-encoding",
+ "dialog-storage",
+ "futures-core",
+ "futures-util",
+ "getrandom 0.2.16",
+ "itertools 0.14.0",
+ "nonempty",
+ "once_cell",
+ "rand 0.8.5",
+ "serde",
+ "thiserror 2.0.12",
+ "tokio",
+ "wasm-bindgen-test",
+ "zerocopy",
 ]
 
 [[package]]

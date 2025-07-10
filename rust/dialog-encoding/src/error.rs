@@ -22,6 +22,9 @@ pub enum DialogEncodingError {
     /// or encountering other I/O-related failures.
     #[error("Failed to decode a buffer: {0}")]
     BufferDecode(std::io::Error),
+
+    #[error("Invalid cell layout: {0}")]
+    InvalidLayout(String),
 }
 
 impl From<leb128::read::Error> for DialogEncodingError {

@@ -74,18 +74,22 @@ use crate::{Cellular, DialogEncodingError};
 /// # Example
 ///
 /// ```rust
-/// use dialog_encoding::{encode, Cellular};
+/// use dialog_encoding::{encode, Cellular, Width};
 ///
 /// struct MyData<'a> {
 ///     cells: Vec<&'a [u8]>,
 /// }
 ///
 /// impl<'a> Cellular<'a> for MyData<'a> {
+///     fn cell_width() -> Width {
+///         Width::Unbounded
+///     }
+///
 ///     fn cells(&'a self) -> impl Iterator<Item = &'a [u8]> {
 ///         self.cells.iter().copied()
 ///     }
 ///     
-///     fn try_from_cells<I>(cells: I) -> Result<Self, dialog_encoding::DialogEncodingError>
+///     fn try_from_cells<I>(cells: &mut I) -> Result<Self, dialog_encoding::DialogEncodingError>
 ///     where I: Iterator<Item = &'a [u8]> {
 ///         Ok(MyData { cells: cells.collect() })
 ///     }
@@ -97,9 +101,9 @@ use crate::{Cellular, DialogEncodingError};
 /// // The encoded buffer will deduplicate the repeated "hello"
 /// ```
 pub fn encode<'a, Layout, Buffer>(
-    layout: &'a Layout,
+    layout: &Layout,
     mut buffer: Buffer,
-) -> Result<(), std::io::Error>
+) -> Result<(), DialogEncodingError>
 where
     Layout: Cellular<'a>,
     Buffer: Write,
@@ -164,18 +168,22 @@ where
 /// # Example
 ///
 /// ```rust
-/// use dialog_encoding::{encode, decode, Cellular, DialogEncodingError};
+/// use dialog_encoding::{encode, decode, Cellular, Width, DialogEncodingError};
 ///
 /// struct MyData<'a> {
 ///     cells: Vec<&'a [u8]>,
 /// }
 ///
 /// impl<'a> Cellular<'a> for MyData<'a> {
+///     fn cell_width() -> Width {
+///         Width::Unbounded
+///     }
+///
 ///     fn cells(&'a self) -> impl Iterator<Item = &'a [u8]> {
 ///         self.cells.iter().copied()
 ///     }
 ///     
-///     fn try_from_cells<I>(cells: I) -> Result<Self, DialogEncodingError>
+///     fn try_from_cells<I>(cells: &mut I) -> Result<Self, DialogEncodingError>
 ///     where I: Iterator<Item = &'a [u8]> {
 ///         Ok(MyData { cells: cells.collect() })
 ///     }
@@ -197,7 +205,7 @@ where
 pub fn decode<'a, Layout, Buffer>(buffer: &'a Buffer) -> Result<Layout, DialogEncodingError>
 where
     Layout: Cellular<'a>,
-    Buffer: AsRef<[u8]>,
+    Buffer: AsRef<[u8]> + ?Sized,
 {
     let mut cursor: Cursor<&[u8]> = Cursor::new(buffer.as_ref());
 
@@ -221,7 +229,7 @@ where
 
     cursor.seek(SeekFrom::Start(cursor.position() + ranges_length))?;
 
-    Layout::try_from_cells(CellDecoder {
+    Layout::try_from_cells(&mut CellDecoder {
         data,
         ranges,
         cells: cursor,

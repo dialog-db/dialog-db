@@ -8,3 +8,4 @@ license.workspace = true
 
 [dependencies]
 blake3 = { workspace = true }
+zerocopy = { workspace = true, features = ["derive"] }

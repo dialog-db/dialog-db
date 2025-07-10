@@ -1,4 +1,4 @@
-use crate::DialogEncodingError;
+use crate::{DialogEncodingError, Width};
 
 /// Trait for data structures that can be decomposed into and reconstructed from byte cells.
 ///
@@ -17,7 +17,7 @@ use crate::DialogEncodingError;
 /// # Example
 ///
 /// ```rust
-/// use dialog_encoding::{Cellular, DialogEncodingError};
+/// use dialog_encoding::{Cellular, Width, DialogEncodingError};
 ///
 /// struct Person<'a> {
 ///     name: &'a [u8],
@@ -26,11 +26,15 @@ use crate::DialogEncodingError;
 /// }
 ///
 /// impl<'a> Cellular<'a> for Person<'a> {
+///     fn cell_width() -> Width {
+///         Width::Bounded(3)
+///     }
+///
 ///     fn cells(&'a self) -> impl Iterator<Item = &'a [u8]> {
 ///         [self.name, self.age, self.email].into_iter()
 ///     }
 ///
-///     fn try_from_cells<I>(mut cells: I) -> Result<Self, DialogEncodingError>
+///     fn try_from_cells<I>(cells: &mut I) -> Result<Self, DialogEncodingError>
 ///     where
 ///         I: Iterator<Item = &'a [u8]>,
 ///     {
@@ -42,6 +46,8 @@ use crate::DialogEncodingError;
 /// }
 /// ```
 pub trait Cellular<'a>: Sized {
+    fn cell_width() -> Width;
+
     /// Decomposes this data structure into an iterator of byte cells.
     ///
     /// Each cell represents a component of the data structure as a byte slice.
@@ -52,7 +58,7 @@ pub trait Cellular<'a>: Sized {
     ///
     /// An iterator that yields byte slices representing the individual cells
     /// that make up this data structure.
-    fn cells(&'a self) -> impl Iterator<Item = &'a [u8]>;
+    fn cells(&self) -> impl Iterator<Item = &[u8]>;
 
     /// Reconstructs a data structure from an iterator of byte cells.
     ///
@@ -78,7 +84,12 @@ pub trait Cellular<'a>: Sized {
     /// let reconstructed = Self::try_from_cells(cells.into_iter())?;
     /// assert_eq!(x, reconstructed); // If Self implements PartialEq
     /// ```
-    fn try_from_cells<I>(cells: I) -> Result<Self, DialogEncodingError>
+    fn try_from_cells<I>(cells: &mut I) -> Result<Self, DialogEncodingError>
     where
         I: Iterator<Item = &'a [u8]>;
+}
+
+pub trait CellularToOwned<'a>: Cellular<'a> {
+    type Owned: From<Self> + 'static;
+    fn to_owned(&self) -> Self::Owned;
 }

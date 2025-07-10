@@ -1,0 +1,41 @@
+[package]
+name = "dialog-tree"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+dialog-common = { workspace = true }
+dialog-encoding = { workspace = true }
+dialog-storage = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+async-stream = { workspace = true }
+base58 = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+futures-core = { workspace = true }
+itertools = { workspace = true }
+nonempty = { workspace = true, features = ["serialize"] }
+once_cell = { workspace = true }
+
+rand = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+zerocopy = { workspace = true }
+
+[dev-dependencies]
+dialog-storage = { workspace = true, features = ["helpers"] }
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+futures-util = { workspace = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+# getrandom = { workspace = true, features = ["wasm_js"] }
+getrandom = { workspace = true, features = ["js"] }
+wasm-bindgen-test = { workspace = true }
