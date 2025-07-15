@@ -168,18 +168,18 @@ type TrackV2 = Track & TrackAlbum
 
 🤔 However it is good to ponder how things would have turned out if we have started track that accounted for `album`  from the begining, most likely all tracks would have had `artist`, `title`, `album`, and `duration`, but than how would we have stored information about songs that we did not know an `album` or a `duration` for ?
 
-#### Subetyping
+#### Subtyping
 
 In type systems you could define a supertype containing subset of the subtype in fact that is what we end up defining in our `song` rule in datalog example. In other words we broke down model into smaller parts and then composed `track` from them.
 
 That is effectively what triples do they just take it to a logical extreme. This effectively reduces need for schema migration because our tables end up just maps of `entity -> value` where name of the table serves as an `attribute`.
 
-Everything else is just composition (or a query over those tables), therefor instead of migartion we can simply define a new query.
+Everything else is just composition (or a query over those tables), therefor instead of migration we can simply define a new query.
 
 
 #### Optional fields
 
-Alterantive way to handle our delema would be to make all fields optional _(explains why that is a default in SQL)_ that way you can always have a partial information. In some way this in almost what semantic triples are with a slight difference that record with no fields is possible in a design with all optional fields and impossible in semantic triples, but then again what is the point of entity if it has no relation to anything else ?
+Alternative way to handle our dilemma would be to make all fields optional _(explains why that is a default in SQL)_ that way you can always have a partial information. In some way this in almost what semantic triples are with a slight difference that record with no fields is possible in a design with all optional fields and impossible in semantic triples, but then again what is the point of entity if it has no relation to anything else ?
 
 In this approach however we either make all schema evolutions a second class extensions or we end up having to deal with schema migrations where we keep adding more and more optional fields to one very generic data model _(which also does not jazz with variant types)_.
 
