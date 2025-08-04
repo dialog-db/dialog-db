@@ -1,3 +1,5 @@
+use std::array::TryFromSliceError;
+
 use zerocopy::{FromBytes, Immutable, KnownLayout};
 
 /// The size of a BLAKE3 hash in bytes.
@@ -61,6 +63,20 @@ impl Blake3Hash {
 
     pub fn bytes(&self) -> &[u8; BLAKE3_HASH_SIZE] {
         &self.0
+    }
+}
+
+impl From<[u8; 32]> for Blake3Hash {
+    fn from(value: [u8; 32]) -> Self {
+        Blake3Hash(value)
+    }
+}
+
+impl TryFrom<&[u8]> for Blake3Hash {
+    type Error = TryFromSliceError;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        Ok(Blake3Hash(value.try_into()?))
     }
 }
 

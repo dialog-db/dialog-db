@@ -1,3 +1,6 @@
+use dialog_common::Blake3Hash;
+use zerocopy::TryFromBytes;
+
 use crate::{DialogEncodingError, Width};
 
 /// Trait for data structures that can be decomposed into and reconstructed from byte cells.
@@ -89,7 +92,86 @@ pub trait Cellular<'a>: Sized {
         I: Iterator<Item = &'a [u8]>;
 }
 
-pub trait CellularToOwned<'a>: Cellular<'a> {
-    type Owned: From<Self> + 'static;
-    fn to_owned(&self) -> Self::Owned;
+// pub trait CellularToOwned<'a>: Cellular<'a> {
+//     type Owned: From<Self> + 'static;
+//     fn to_owned(&self) -> Self::Owned;
+// }
+
+impl<'a> Cellular<'a> for Blake3Hash {
+    fn cell_width() -> Width {
+        Width::Bounded(1)
+    }
+
+    fn cells(&self) -> impl Iterator<Item = &[u8]> {
+        std::iter::once(self.bytes().as_ref())
+    }
+
+    fn try_from_cells<I>(cells: &mut I) -> Result<Self, DialogEncodingError>
+    where
+        I: Iterator<Item = &'a [u8]>,
+    {
+        cells
+            .next()
+            .ok_or_else(|| {
+                DialogEncodingError::InvalidLayout(format!(
+                    "No cells remaining to decode BLAKE3 hash"
+                ))
+            })
+            .and_then(|bytes| {
+                Blake3Hash::try_from(bytes).map_err(|error| {
+                    DialogEncodingError::InvalidLayout(format!(
+                        "Could not decode BLAKE3 hash from slice: {}",
+                        error
+                    ))
+                })
+            })
+    }
 }
+
+impl<'a> Cellular<'a> for &'a Blake3Hash {
+    fn cell_width() -> Width {
+        Width::Bounded(1)
+    }
+
+    fn cells(&self) -> impl Iterator<Item = &[u8]> {
+        std::iter::once(self.bytes().as_ref())
+    }
+
+    fn try_from_cells<I>(cells: &mut I) -> Result<Self, DialogEncodingError>
+    where
+        I: Iterator<Item = &'a [u8]>,
+    {
+        cells
+            .next()
+            .ok_or_else(|| {
+                DialogEncodingError::InvalidLayout(format!(
+                    "No cells remaining to decode BLAKE3 hash"
+                ))
+            })
+            .and_then(|bytes| {
+                Blake3Hash::try_ref_from_bytes(bytes).map_err(|error| {
+                    DialogEncodingError::InvalidLayout(format!(
+                        "Could not decode BLAKE3 hash from slice: {}",
+                        error
+                    ))
+                })
+            })
+    }
+}
+
+// impl<'a, const N: usize> Cellular<'a> for [u8; N] {
+//     fn cell_width() -> Width {
+//         Width::Bounded(1)
+//     }
+
+//     fn cells(&self) -> impl Iterator<Item = &[u8]> {
+//         todo!()
+//     }
+
+//     fn try_from_cells<I>(cells: &mut I) -> Result<Self, DialogEncodingError>
+//     where
+//         I: Iterator<Item = &'a [u8]>,
+//     {
+//         todo!()
+//     }
+// }

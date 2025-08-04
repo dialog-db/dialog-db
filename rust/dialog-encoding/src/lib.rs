@@ -73,11 +73,14 @@ pub use error::*;
 mod cellular;
 pub use cellular::*;
 
-mod buffer;
-pub use buffer::*;
+mod codec;
+pub use codec::*;
 
 mod width;
 pub use width::*;
+
+mod buf;
+pub use buf::*;
 
 #[cfg(test)]
 mod tests {

@@ -15,6 +15,12 @@ pub enum DialogTreeError {
 
     #[error("{0}")]
     Storage(DialogStorageError),
+
+    #[error("Failed to operate the tree: {0}")]
+    Operation(String),
+
+    #[error("Failed to retrieve item in cache: {0}")]
+    Cache(String),
 }
 
 impl From<DialogStorageError> for DialogTreeError {

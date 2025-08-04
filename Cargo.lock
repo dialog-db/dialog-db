@@ -238,6 +238,9 @@ name = "bumpalo"
 version = "3.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46c5e41b57b8bba42a04676d81cb89e9ee8e859a1a66f80a5a72e1cb76b34d43"
+dependencies = [
+ "allocator-api2",
+]
 
 [[package]]
 name = "bytes"
@@ -630,6 +633,7 @@ dependencies = [
  "anyhow",
  "base58",
  "brotli",
+ "bytes",
  "dialog-common",
  "itertools 0.14.0",
  "leb128",
@@ -692,15 +696,18 @@ dependencies = [
 name = "dialog-tree"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "anyhow",
  "async-stream",
  "async-trait",
  "base58",
  "blake3",
+ "bumpalo",
  "bytes",
  "dialog-common",
  "dialog-encoding",
  "dialog-storage",
+ "elsa",
  "futures-core",
  "futures-util",
  "getrandom 0.2.16",
@@ -766,6 +773,15 @@ name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+
+[[package]]
+name = "elsa"
+version = "1.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9abf33c656a7256451ebb7d0082c5a471820c31269e49d807c538c252352186e"
+dependencies = [
+ "stable_deref_trait",
+]
 
 [[package]]
 name = "equivalent"

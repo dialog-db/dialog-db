@@ -33,6 +33,7 @@ authors = ["The Meiosys Project Authors"]
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+allocator-api2 = "0.2"
 anyhow = "1"
 arrayref = "0.3"
 async-stream = "0.3"
@@ -40,12 +41,14 @@ async-trait = "0.1"
 base58 = "0.2"
 blake3 = "1"
 brotli = "8"
+bumpalo = { version = "3", features = ["allocator-api2"] }
 bytes = { version = "1", features = ["serde"] }
 clap = "4"
 clap_derive = "4"
 console_error_panic_hook = "0.1"
 csv-async = { version = "1", features = ["tokio"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+elsa = "1"
 futures-core = "0.3"
 futures-util = "0.3"
 # getrandom = "0.3"
