@@ -1,3 +1,4 @@
+use allocator_api2::alloc::Allocator;
 use dialog_common::Blake3Hash;
 use dialog_encoding::{BufOrRef, Cellular, DialogEncodingError, Width};
 use itertools::Itertools;
@@ -9,26 +10,28 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-pub enum NodeBody<'a, Key, Value>
+pub enum NodeBody<'a, Key, Value, Allocator>
 where
     Key: self::Key<'a>,
     Key::Ref: self::KeyRef<'a, Key>,
     Value: self::Value<'a>,
     Value::Ref: self::ValueRef<'a, Value>,
+    Allocator: self::Allocator,
 {
     Index {
         index: Index<'a, Key>,
-        child_cache: AppendCache<Blake3Hash, Node<'a, Key, Value>>,
+        child_cache: AppendCache<Blake3Hash, Node<'a, Key, Value, Allocator>>,
     },
     Segment(Segment<'a, Key, Value>),
 }
 
-impl<'a, Key, Value> NodeBody<'a, Key, Value>
+impl<'a, Key, Value, Allocator> NodeBody<'a, Key, Value, Allocator>
 where
     Key: self::Key<'a>,
     Key::Ref: self::KeyRef<'a, Key>,
     Value: self::Value<'a>,
     Value::Ref: self::ValueRef<'a, Value>,
+    Allocator: self::Allocator,
 {
     pub fn upper_bound(&'a self) -> Key::Ref {
         match self {
@@ -84,7 +87,7 @@ where
         &self.entries
     }
 
-    pub fn upsert(&'a self, entry: Entry<'a, Key, Value>) -> Result<Self, DialogTreeError> {
+    pub fn upsert(&self, entry: Entry<'a, Key, Value>) -> Result<Self, DialogTreeError> {
         let mut node = self.clone();
 
         match node.find(entry.key()) {
@@ -103,7 +106,7 @@ where
         Ok(node)
     }
 
-    pub fn remove(&'a self, key: &Key) -> Option<Self> {
+    pub fn remove(&self, key: &Key) -> Option<Self> {
         let mut node = self.clone();
 
         match node.find(key) {

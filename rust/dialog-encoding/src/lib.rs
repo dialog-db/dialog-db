@@ -87,7 +87,9 @@ mod tests {
     use crate::{Width, decode, encode};
 
     use super::Cellular;
+    use allocator_api2::alloc::Allocator;
     use anyhow::Result;
+    use blink_alloc::SyncBlinkAlloc;
     use itertools::Itertools;
     use rand::random;
 
@@ -263,6 +265,8 @@ mod tests {
 
     #[test]
     fn it_can_convert_a_struct_to_cells_and_back() -> Result<()> {
+        let mut allocator = SyncBlinkAlloc::new();
+
         let entry = Entry {
             string: "Hello".into(),
             bytes: vec![1, 2, 3],
@@ -276,9 +280,9 @@ mod tests {
         assert_eq!(entry_cells.cells().count(), 4);
 
         let mut buffer = Vec::new();
-        encode(&entry_cells, &mut buffer)?;
+        encode(&entry_cells, &mut buffer, &mut allocator)?;
 
-        let entry_cells: EntryCells<'_> = decode(&buffer)?;
+        let entry_cells: EntryCells<'_> = decode(&buffer, &mut allocator)?;
         let final_entry = Entry::try_from(entry_cells)?;
 
         assert_eq!(entry, final_entry);
@@ -288,6 +292,8 @@ mod tests {
 
     #[test]
     fn it_can_convert_a_collection_to_cells_and_back() -> Result<()> {
+        let mut allocator = SyncBlinkAlloc::new();
+
         let collection = Collection {
             entries: vec![
                 Entry {
@@ -313,9 +319,9 @@ mod tests {
         assert_eq!(collection_cells.cells().count(), 8);
 
         let mut buffer = Vec::new();
-        encode(&collection_cells, &mut buffer)?;
+        encode(&collection_cells, &mut buffer, &mut allocator)?;
 
-        let collection_cells: CollectionCells<'_> = decode(&buffer)?;
+        let collection_cells: CollectionCells<'_> = decode(&buffer, &mut allocator)?;
         let final_collection = Collection::try_from(collection_cells)?;
 
         assert_eq!(collection, final_collection);
@@ -365,15 +371,22 @@ mod tests {
 
     use std::{cell::OnceCell, marker::PhantomData};
 
-    struct Container<'a> {
+    struct Container<'a, Allocator> {
         buffer: Vec<u8>,
         values: OnceCell<Vec<ValueReference<'a>>>,
+        allocator: &'a Allocator,
     }
 
-    impl<'a> Container<'a> {
-        fn decode_values(&'a self) -> Vec<ValueReference<'a>> {
+    impl<'a, Allocator> Container<'a, Allocator>
+    where
+        Allocator: self::Allocator,
+    {
+        fn decode_values(&'a self) -> Vec<ValueReference<'a>>
+        where
+            Allocator: self::Allocator,
+        {
             if self.buffer.len() > 0 {
-                decode(&self.buffer).unwrap()
+                decode(&self.buffer, self.allocator).unwrap()
             } else {
                 vec![]
             }
@@ -383,24 +396,27 @@ mod tests {
             self.values.get_or_init(|| self.decode_values())
         }
 
-        pub fn new(buffer: Vec<u8>) -> Self {
+        pub fn new(buffer: Vec<u8>, allocator: &'a Allocator) -> Self {
             Container {
                 buffer,
                 values: OnceCell::new(),
+                allocator,
             }
         }
 
-        pub fn with_values<'b, Mutator>(&'a self, mutator: Mutator) -> Container<'b>
+        pub fn with_values<'b, Mutator>(&'a self, mutator: Mutator) -> Container<'b, Allocator>
         where
+            'a: 'b,
             Mutator: FnOnce(&'a Vec<ValueReference<'a>>) -> Vec<ValueReference<'a>>,
+            Allocator: self::Allocator,
         {
             let values = self.values();
             let mutated_values = mutator(values);
 
             let mut next_buffer = vec![];
-            encode(&mutated_values, &mut next_buffer).unwrap();
+            encode(&mutated_values, &mut next_buffer, self.allocator).unwrap();
 
-            Container::new(next_buffer)
+            Container::new(next_buffer, self.allocator)
         }
     }
 
@@ -429,7 +445,9 @@ mod tests {
 
     #[test]
     fn it_can_mutate_a_container() -> Result<()> {
-        let container = Container::new(vec![]);
+        let allocator = SyncBlinkAlloc::new();
+
+        let container = Container::new(vec![], &allocator);
 
         let next_values = (0..5)
             .into_iter()
@@ -452,18 +470,20 @@ mod tests {
         Ok(())
     }
 
-    struct GenericContainer<T> {
+    struct GenericContainer<'a, T, Allocator> {
         buffer: Vec<u8>,
         values: OnceCell<Vec<T>>,
+        allocator: &'a Allocator,
     }
 
-    impl<'a, T> GenericContainer<T>
+    impl<'a, T, Allocator> GenericContainer<'a, T, Allocator>
     where
         T: Cellular<'a>,
+        Allocator: self::Allocator,
     {
         fn decode_values(&'a self) -> CellularVec<'a, T> {
             if self.buffer.len() > 0 {
-                decode(&self.buffer).unwrap()
+                decode(&self.buffer, self.allocator).unwrap()
             } else {
                 CellularVec(vec![], PhantomData)
             }
@@ -473,24 +493,26 @@ mod tests {
             self.values.get_or_init(|| self.decode_values().0)
         }
 
-        pub fn new(buffer: Vec<u8>) -> Self {
+        pub fn new(buffer: Vec<u8>, allocator: &'a Allocator) -> Self {
             GenericContainer {
                 buffer,
                 values: OnceCell::new(),
+                allocator,
             }
         }
 
-        pub fn with_values<'b, Mutator>(&'a self, mutator: Mutator) -> Container<'b>
+        pub fn with_values<'b, Mutator>(&'a self, mutator: Mutator) -> Container<'b, Allocator>
         where
+            'a: 'b,
             Mutator: FnOnce(&'a Vec<T>) -> Vec<T>,
         {
             let values = self.values();
             let mut next_buffer = vec![];
 
             let mutated_values = CellularVec(mutator(values), PhantomData);
-            encode(&mutated_values, &mut next_buffer).unwrap();
+            encode(&mutated_values, &mut next_buffer, self.allocator).unwrap();
 
-            Container::new(next_buffer)
+            Container::new(next_buffer, self.allocator)
         }
     }
 
@@ -528,7 +550,8 @@ mod tests {
 
     #[test]
     fn it_can_mutate_a_generic_container() -> Result<()> {
-        let container = GenericContainer::new(vec![]);
+        let allocator = SyncBlinkAlloc::new();
+        let container = GenericContainer::new(vec![], &allocator);
 
         let next_values = (0..5)
             .into_iter()

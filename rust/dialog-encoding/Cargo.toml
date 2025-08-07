@@ -11,6 +11,7 @@ default = []
 [dependencies]
 dialog-common = { workspace = true }
 
+allocator-api2 = { workspace = true }
 anyhow = { workspace = true }
 bytes = { workspace = true }
 itertools = { workspace = true }
@@ -24,3 +25,4 @@ zerocopy = { workspace = true }
 base58 = { workspace = true }
 brotli = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
+blink-alloc = { workspace = true, features = ["sync"] }

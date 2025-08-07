@@ -20,7 +20,7 @@ async-stream = { workspace = true }
 base58 = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
-bumpalo = { workspace = true }
+# bumpalo = { workspace = true }
 elsa = { workspace = true }
 futures-core = { workspace = true }
 itertools = { workspace = true }
@@ -34,6 +34,7 @@ tokio = { workspace = true, features = ["sync"] }
 zerocopy = { workspace = true }
 
 [dev-dependencies]
+blink-alloc = { workspace = true }
 dialog-storage = { workspace = true, features = ["helpers"] }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 futures-util = { workspace = true }

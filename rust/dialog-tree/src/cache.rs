@@ -8,7 +8,7 @@ use crate::DialogTreeError;
 pub struct AppendCache<K, V>
 where
     K: Ord + Clone + Debug,
-    V: Clone + Debug,
+    V: Clone,
 {
     cache: FrozenBTreeMap<K, Arc<V>>,
 }
@@ -16,7 +16,7 @@ where
 impl<K, V> AppendCache<K, V>
 where
     K: Ord + Clone + Debug,
-    V: Clone + Debug,
+    V: Clone,
 {
     pub fn new() -> Self {
         Self {

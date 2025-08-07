@@ -55,6 +55,7 @@ use std::{
 };
 
 use crate::{Cellular, DialogEncodingError};
+use allocator_api2::{alloc::Allocator, vec::Vec};
 
 /// Encodes a columnar data structure into a binary buffer with deduplication.
 ///
@@ -100,17 +101,22 @@ use crate::{Cellular, DialogEncodingError};
 /// encode(&data, &mut buffer).unwrap();
 /// // The encoded buffer will deduplicate the repeated "hello"
 /// ```
-pub fn encode<'a, Layout, Buffer>(
+pub fn encode<'a, Layout, Buffer, Allocator>(
     layout: &Layout,
     mut buffer: Buffer,
+    allocator: &Allocator,
 ) -> Result<(), DialogEncodingError>
 where
     Layout: Cellular<'a>,
     Buffer: Write,
+    Allocator: self::Allocator,
 {
-    let mut data = Cursor::new(Vec::new());
-    let mut ranges = Cursor::new(Vec::new());
-    let mut cells = Cursor::new(Vec::new());
+    let mut data = Vec::<u8, &Allocator>::with_capacity_in(1_000_000, allocator);
+    let mut ranges = Vec::<u8, &Allocator>::with_capacity_in(1_000_000, allocator);
+    let mut cells = Vec::<u8, &Allocator>::with_capacity_in(1_000_000, allocator);
+    // let mut data = Cursor::new(Vec::new());
+    // let mut ranges = Cursor::new(Vec::new());
+    // let mut cells = Cursor::new(Vec::new());
     let mut bytes_to_index = BTreeMap::<&'a [u8], u64>::new();
     let mut next_index = 0u64;
     let mut data_length = 0usize;
@@ -132,9 +138,9 @@ where
         }
     }
 
-    let data = data.into_inner();
-    let ranges = ranges.into_inner();
-    let cells = cells.into_inner();
+    // let data = data.into_inner();
+    // let ranges = ranges.into_inner();
+    // let cells = cells.into_inner();
 
     // [ data length ][ data ]
     leb128::write::unsigned(&mut buffer, data.len() as u64)?;
@@ -202,10 +208,14 @@ where
 /// The returned data structure contains references to slices within the input buffer.
 /// This means the buffer must remain valid for as long as the decoded data is used.
 /// The lifetime parameter `'a` ensures this relationship is enforced by the compiler.
-pub fn decode<'a, Layout, Buffer>(buffer: &'a Buffer) -> Result<Layout, DialogEncodingError>
+pub fn decode<'a, Layout, Buffer, Allocator>(
+    buffer: &'a Buffer,
+    allocator: &Allocator,
+) -> Result<Layout, DialogEncodingError>
 where
     Layout: Cellular<'a>,
     Buffer: AsRef<[u8]> + ?Sized,
+    Allocator: self::Allocator,
 {
     let mut cursor: Cursor<&[u8]> = Cursor::new(buffer.as_ref());
 
@@ -218,7 +228,10 @@ where
     let ranges_length = leb128::read::unsigned(&mut cursor)?;
     let ranges_range = cursor.position() as usize..(cursor.position() + ranges_length) as usize;
     let mut range_data = Cursor::new(&buffer.as_ref()[ranges_range]);
-    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let ranges_capacity =
+        std::mem::size_of::<(usize, usize)>().saturating_mul(ranges_length as usize);
+    let mut ranges: Vec<(usize, usize), &Allocator> =
+        Vec::with_capacity_in(ranges_capacity, allocator);
 
     while (range_data.position() as usize) < range_data.get_ref().as_ref().len() {
         ranges.push((
@@ -247,16 +260,22 @@ where
 /// Each call to `next()` returns a slice directly into the `data` section of the
 /// original buffer. The lifetime `'a` ensures the buffer remains valid for the
 /// duration of iteration.
-pub struct CellDecoder<'a> {
+pub struct CellDecoder<'a, Allocator>
+where
+    Allocator: self::Allocator,
+{
     /// The deduplicated cell data section
     pub data: &'a [u8],
     /// Offset and length pairs for each unique cell in the data section  
-    pub ranges: Vec<(usize, usize)>,
+    pub ranges: Vec<(usize, usize), Allocator>,
     /// Cursor over the cell indices that reference into the ranges
     pub cells: Cursor<&'a [u8]>,
 }
 
-impl<'a> Iterator for CellDecoder<'a> {
+impl<'a, Allocator> Iterator for CellDecoder<'a, Allocator>
+where
+    Allocator: self::Allocator,
+{
     type Item = &'a [u8];
 
     /// Returns the next cell as a zero-copy slice into the original buffer.

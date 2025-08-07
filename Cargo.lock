@@ -204,6 +204,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "blink-alloc"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e669f146bb8b2327006ed94c69cf78c8ec81c100192564654230a40b4f091d82"
+dependencies = [
+ "allocator-api2",
+ "parking_lot",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -238,9 +248,6 @@ name = "bumpalo"
 version = "3.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46c5e41b57b8bba42a04676d81cb89e9ee8e859a1a66f80a5a72e1cb76b34d43"
-dependencies = [
- "allocator-api2",
-]
 
 [[package]]
 name = "bytes"
@@ -630,8 +637,10 @@ dependencies = [
 name = "dialog-encoding"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "anyhow",
  "base58",
+ "blink-alloc",
  "brotli",
  "bytes",
  "dialog-common",
@@ -702,7 +711,7 @@ dependencies = [
  "async-trait",
  "base58",
  "blake3",
- "bumpalo",
+ "blink-alloc",
  "bytes",
  "dialog-common",
  "dialog-encoding",
