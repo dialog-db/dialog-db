@@ -20,12 +20,12 @@ async-stream = { workspace = true }
 base58 = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
-# bumpalo = { workspace = true }
 elsa = { workspace = true }
 futures-core = { workspace = true }
 itertools = { workspace = true }
 nonempty = { workspace = true, features = ["serialize"] }
 once_cell = { workspace = true }
+parking_lot = { workspace = true }
 
 rand = { workspace = true }
 serde = { workspace = true }
@@ -34,10 +34,10 @@ tokio = { workspace = true, features = ["sync"] }
 zerocopy = { workspace = true }
 
 [dev-dependencies]
-blink-alloc = { workspace = true }
 dialog-storage = { workspace = true, features = ["helpers"] }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 futures-util = { workspace = true }
+bump-scope = { workspace = true, features = ["allocator-api2-03"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 # getrandom = { workspace = true, features = ["wasm_js"] }

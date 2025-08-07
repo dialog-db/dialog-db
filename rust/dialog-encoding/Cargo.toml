@@ -25,4 +25,4 @@ zerocopy = { workspace = true }
 base58 = { workspace = true }
 brotli = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
-blink-alloc = { workspace = true, features = ["sync"] }
+bump-scope = { workspace = true, features = ["allocator-api2-03"] }

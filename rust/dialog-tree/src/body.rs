@@ -16,7 +16,7 @@ where
     Key::Ref: self::KeyRef<'a, Key>,
     Value: self::Value<'a>,
     Value::Ref: self::ValueRef<'a, Value>,
-    Allocator: self::Allocator,
+    Allocator: self::Allocator + Clone,
 {
     Index {
         index: Index<'a, Key>,
@@ -31,7 +31,7 @@ where
     Key::Ref: self::KeyRef<'a, Key>,
     Value: self::Value<'a>,
     Value::Ref: self::ValueRef<'a, Value>,
-    Allocator: self::Allocator,
+    Allocator: self::Allocator + Clone,
 {
     pub fn upper_bound(&'a self) -> Key::Ref {
         match self {
@@ -87,7 +87,7 @@ where
         &self.entries
     }
 
-    pub fn upsert(&self, entry: Entry<'a, Key, Value>) -> Result<Self, DialogTreeError> {
+    pub fn upsert(&'a self, entry: Entry<'a, Key, Value>) -> Result<Self, DialogTreeError> {
         let mut node = self.clone();
 
         match node.find(entry.key()) {
@@ -106,7 +106,7 @@ where
         Ok(node)
     }
 
-    pub fn remove(&self, key: &Key) -> Option<Self> {
+    pub fn remove(&'a self, key: &Key) -> Option<Self> {
         let mut node = self.clone();
 
         match node.find(key) {

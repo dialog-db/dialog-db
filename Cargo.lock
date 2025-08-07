@@ -39,6 +39,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "allocator-api2"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78200ac3468a57d333cd0ea5dd398e25111194dcacd49208afca95c629a6311d"
+
+[[package]]
 name = "anstream"
 version = "0.6.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -204,16 +210,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blink-alloc"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e669f146bb8b2327006ed94c69cf78c8ec81c100192564654230a40b4f091d82"
-dependencies = [
- "allocator-api2",
- "parking_lot",
-]
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -241,6 +237,17 @@ checksum = "874bb8112abecc98cbd6d81ea4fa7e94fb9449648c93cc89aa40c81c24d7de03"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
+]
+
+[[package]]
+name = "bump-scope"
+version = "0.17.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89c967c2df3f22dabd003c45f4de979b118e4e60ea6dfb2dc7183719b44683fe"
+dependencies = [
+ "allocator-api2 0.2.21",
+ "allocator-api2 0.3.0",
+ "rustversion",
 ]
 
 [[package]]
@@ -637,11 +644,11 @@ dependencies = [
 name = "dialog-encoding"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocator-api2 0.3.0",
  "anyhow",
  "base58",
- "blink-alloc",
  "brotli",
+ "bump-scope",
  "bytes",
  "dialog-common",
  "itertools 0.14.0",
@@ -705,13 +712,13 @@ dependencies = [
 name = "dialog-tree"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocator-api2 0.3.0",
  "anyhow",
  "async-stream",
  "async-trait",
  "base58",
  "blake3",
- "blink-alloc",
+ "bump-scope",
  "bytes",
  "dialog-common",
  "dialog-encoding",
@@ -723,6 +730,7 @@ dependencies = [
  "itertools 0.14.0",
  "nonempty",
  "once_cell",
+ "parking_lot",
  "rand 0.8.5",
  "serde",
  "thiserror 2.0.12",
@@ -979,7 +987,7 @@ version = "0.15.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5971ac85611da7067dbfcabef3c70ebb5606018acd9e2a3903a0da507521e0d5"
 dependencies = [
- "allocator-api2",
+ "allocator-api2 0.2.21",
  "equivalent",
  "foldhash",
 ]

@@ -1,6 +1,6 @@
-use std::{marker::PhantomData, sync::Arc};
+use std::sync::Arc;
 
-use allocator_api2::{alloc::Allocator, vec, vec::Vec};
+use allocator_api2::alloc::Allocator;
 use bytes::Bytes;
 use dialog_common::{Blake3Hash, Blake3Hashed};
 use dialog_encoding::{BufOrRef, decode, encode};
@@ -76,39 +76,20 @@ pub enum NodeMutation<T> {
     Remove(T),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Node<'a, Key, Value, Allocator>
 where
     Key: self::Key<'a>,
     Key::Ref: self::KeyRef<'a, Key>,
     Value: self::Value<'a>,
     Value::Ref: self::ValueRef<'a, Value>,
-    Allocator: self::Allocator,
+    Allocator: self::Allocator + Clone,
 {
-    buffer: Arc<Vec<u8, &'a Allocator>>,
+    buffer: Bytes,
     body: OnceCell<NodeBody<'a, Key, Value, Allocator>>,
     hash: OnceCell<Blake3Hash>,
     dirty: bool,
-    allocator: &'a Allocator,
-}
-
-impl<'a, Key, Value, Allocator> Clone for Node<'a, Key, Value, Allocator>
-where
-    Key: self::Key<'a>,
-    Key::Ref: self::KeyRef<'a, Key>,
-    Value: self::Value<'a>,
-    Value::Ref: self::ValueRef<'a, Value>,
-    Allocator: self::Allocator,
-{
-    fn clone(&self) -> Self {
-        Self {
-            buffer: self.buffer.clone(),
-            body: OnceCell::new(),
-            hash: self.hash.clone(),
-            dirty: self.dirty.clone(),
-            allocator: self.allocator,
-        }
-    }
+    allocator: Allocator,
 }
 
 impl<'a, Key, Value, Allocator> Node<'a, Key, Value, Allocator>
@@ -117,28 +98,28 @@ where
     Key::Ref: self::KeyRef<'a, Key>,
     Value: self::Value<'a>,
     Value::Ref: self::ValueRef<'a, Value>,
-    Allocator: self::Allocator,
+    Allocator: self::Allocator + Clone,
 {
-    pub fn buffer(&self) -> &[u8] {
-        self.buffer.as_ref()
+    pub fn buffer(&self) -> &Bytes {
+        &self.buffer
     }
 
     pub fn segment(
         segment: Segment<'a, Key, Value>,
-        allocator: &'a Allocator,
+        allocator: Allocator,
     ) -> Result<Self, DialogTreeError> {
         let body = NodeBody::Segment(segment);
-        let buffer = Self::encode_body(&body, allocator)?;
+        let buffer = Self::encode_body(&body, &allocator)?;
 
         Ok(Self::with_buffer(buffer, true, allocator))
     }
 
     pub fn segment_with_entry(
         entry: Entry<'a, Key, Value>,
-        allocator: &'a Allocator,
+        allocator: Allocator,
     ) -> Result<Self, DialogTreeError> {
         let body = NodeBody::Segment(Segment::new(entry));
-        let buffer = Arc::new(Self::encode_body(&body, allocator)?);
+        let buffer = Self::encode_body(&body, &allocator)?;
 
         Ok(Self {
             buffer,
@@ -149,25 +130,25 @@ where
         })
     }
 
-    pub fn index(index: Index<'a, Key>, allocator: &'a Allocator) -> Result<Self, DialogTreeError> {
+    pub fn index(index: Index<'a, Key>, allocator: Allocator) -> Result<Self, DialogTreeError> {
         let body = NodeBody::Index {
             index,
             child_cache: AppendCache::new(),
         };
-        let buffer = Self::encode_body(&body, allocator)?;
+        let buffer = Self::encode_body(&body, &allocator)?;
 
         Ok(Self::with_buffer(buffer, true, allocator))
     }
 
     pub fn index_with_link(
         link: Link<'a, Key>,
-        allocator: &'a Allocator,
+        allocator: Allocator,
     ) -> Result<Self, DialogTreeError> {
         let body = NodeBody::Index {
             index: Index::new(link),
             child_cache: AppendCache::new(),
         };
-        let buffer = Arc::new(Self::encode_body(&body, allocator)?);
+        let buffer = Self::encode_body(&body, &allocator)?;
 
         Ok(Self {
             buffer,
@@ -178,13 +159,9 @@ where
         })
     }
 
-    pub fn with_buffer(
-        buffer: Vec<u8, &'a Allocator>,
-        dirty: bool,
-        allocator: &'a Allocator,
-    ) -> Self {
+    pub fn with_buffer(buffer: Bytes, dirty: bool, allocator: Allocator) -> Self {
         Self {
-            buffer: Arc::new(buffer),
+            buffer,
             body: OnceCell::new(),
             hash: OnceCell::new(),
             dirty,
@@ -204,40 +181,30 @@ where
         self.dirty
     }
 
-    pub fn body<'b>(&'b self) -> Result<&'b NodeBody<'a, Key, Value, Allocator>, DialogTreeError>
-    where
-        'b: 'a,
-    {
+    pub fn body(&'a self) -> Result<&'a NodeBody<'a, Key, Value, Allocator>, DialogTreeError> {
         self.body
-            .get_or_try_init(move || decode_body(&self.buffer, self.allocator))
+            .get_or_try_init(|| Self::decode_body(&self.buffer, &self.allocator))
     }
 
-    pub fn mutate_index<'b, KeyB, ValueB>(
+    pub fn mutate_index(
         &'a self,
         mutation: NodeMutation<Link<'a, Key>>,
-        allocator: &'b Allocator,
-    ) -> Result<Option<Node<'b, KeyB, ValueB, Allocator>>, DialogTreeError>
-    where
-        KeyB: self::Key<'b>,
-        KeyB::Ref: self::KeyRef<'b, KeyB>,
-        ValueB: self::Value<'b>,
-        ValueB::Ref: self::ValueRef<'b, ValueB>,
-    {
+    ) -> Result<Option<Self>, DialogTreeError> {
         let body = self.body()?;
 
         let next_node = match (body, mutation) {
             (NodeBody::Index { index, .. }, NodeMutation::Upsert(link)) => Some(Node {
-                buffer: Arc::new(Self::encode_body(
+                buffer: Self::encode_body(
                     &NodeBody::Index {
                         index: index.upsert(link)?,
                         child_cache: AppendCache::new(),
                     },
-                    allocator,
-                )?),
+                    &self.allocator,
+                )?,
                 dirty: true,
                 body: OnceCell::new(),
                 hash: OnceCell::new(),
-                allocator,
+                allocator: self.allocator.clone(),
             }),
             (NodeBody::Index { index, .. }, NodeMutation::Remove(link)) => {
                 if let Some(result) = index.remove(link.upper_bound()).map(|index| {
@@ -246,14 +213,14 @@ where
                             index,
                             child_cache: AppendCache::new(),
                         },
-                        allocator,
+                        &self.allocator,
                     )
                     .map(|buffer| Node {
-                        buffer: Arc::new(buffer),
+                        buffer,
                         dirty: true,
                         body: OnceCell::new(),
                         hash: OnceCell::new(),
-                        allocator,
+                        allocator: self.allocator.clone(),
                     })
                 }) {
                     Some(result?)
@@ -271,41 +238,40 @@ where
         Ok(next_node)
     }
 
-    pub fn mutate_segment<'b, KeyB, ValueB, AllocatorB>(
-        &'b self,
+    pub fn mutate_segment<'b, KeyB, ValueB>(
+        &'a self,
         mutation: NodeMutation<Entry<'a, Key, Value>>,
-        allocator: &'b AllocatorB,
-    ) -> Result<Option<Node<'b, KeyB, ValueB, AllocatorB>>, DialogTreeError>
+    ) -> Result<Option<Node<'b, KeyB, ValueB, Allocator>>, DialogTreeError>
     where
-        'b: 'a,
         KeyB: self::Key<'b>,
         KeyB::Ref: self::KeyRef<'b, KeyB>,
         ValueB: self::Value<'b>,
         ValueB::Ref: self::ValueRef<'b, ValueB>,
-        AllocatorB: self::Allocator,
     {
         let body = self.body()?;
 
-        let next_node: Option<Node<'b, KeyB, ValueB, AllocatorB>> = match (body, mutation) {
+        let next_node = match (body, mutation) {
             (NodeBody::Segment(segment), NodeMutation::Upsert(entry)) => Some(Node {
-                buffer: Arc::new(Self::encode_body(
+                buffer: Self::encode_body(
                     &NodeBody::Segment(segment.upsert(entry)?),
-                    allocator,
-                )?),
+                    &self.allocator,
+                )?,
                 dirty: true,
                 body: OnceCell::new(),
                 hash: OnceCell::new(),
-                allocator: allocator,
+                allocator: self.allocator.clone(),
             }),
 
             (NodeBody::Segment(segment), NodeMutation::Remove(entry)) => {
                 if let Some(result) = segment.remove(entry.key()).map(|segment| {
-                    Self::encode_body(&NodeBody::Segment(segment), allocator).map(|buffer| Node {
-                        buffer: Arc::new(buffer),
-                        dirty: true,
-                        body: OnceCell::new(),
-                        hash: OnceCell::new(),
-                        allocator: allocator,
+                    Self::encode_body(&NodeBody::Segment(segment), &self.allocator).map(|buffer| {
+                        Node {
+                            buffer,
+                            dirty: true,
+                            body: OnceCell::new(),
+                            hash: OnceCell::new(),
+                            allocator: self.allocator.clone(),
+                        }
                     })
                 }) {
                     Some(result?)
@@ -327,10 +293,8 @@ where
     pub fn redistribute_entries(
         entries: NonEmpty<&'a BufOrRef<'a, Entry<'a, Key, Value>>>,
         minimum_rank: Rank,
-        allocator: &'a Allocator,
+        allocator: Allocator,
     ) -> Result<NonEmpty<(Node<'a, Key, Value, Allocator>, Rank)>, DialogTreeError> {
-        use std::vec::Vec;
-
         let mut output: Vec<(Self, Rank)> = Vec::new();
         let mut pending = Vec::new();
 
@@ -344,13 +308,13 @@ where
                     Segment::from(NonEmpty::from_vec(std::mem::take(&mut pending)).ok_or(
                         DialogTreeError::Node("Cannot adopt an empty child list".into()),
                     )?);
-                let node = Self::segment(segment, allocator)?;
+                let node = Self::segment(segment, allocator.clone())?;
                 output.push((node, rank));
             }
         }
 
         if let Some(pending) = NonEmpty::from_vec(pending) {
-            let final_node = Self::segment(Segment::from(pending), allocator)?;
+            let final_node = Self::segment(Segment::from(pending), allocator.clone())?;
             output.push((final_node, minimum_rank));
         }
 
@@ -362,10 +326,8 @@ where
     pub fn redistribute_links(
         links: NonEmpty<&'a BufOrRef<'a, Link<'a, Key>>>,
         minimum_rank: Rank,
-        allocator: &'a Allocator,
+        allocator: Allocator,
     ) -> Result<NonEmpty<(Node<'a, Key, Value, Allocator>, Rank)>, DialogTreeError> {
-        use std::vec::Vec;
-
         let mut output: Vec<(Self, Rank)> = Vec::new();
         let mut pending = Vec::new();
 
@@ -378,13 +340,13 @@ where
                 let index = Index::from(NonEmpty::from_vec(std::mem::take(&mut pending)).ok_or(
                     DialogTreeError::Node("Cannot adopt an empty child list".into()),
                 )?);
-                let node = Self::index(index, allocator)?;
+                let node = Self::index(index, allocator.clone())?;
                 output.push((node, rank));
             }
         }
 
         if let Some(pending) = NonEmpty::from_vec(pending) {
-            let final_node = Self::index(Index::from(pending), allocator)?;
+            let final_node = Self::index(Index::from(pending), allocator.clone())?;
             output.push((final_node, minimum_rank));
         }
 
@@ -393,14 +355,14 @@ where
         })
     }
 
-    fn encode_body<'b, AllocatorB>(
+    // pub fn redistribute(&'a self) -> Result<(Self,NonEmpty<Self>), DialogTreeError> {
+    // }
+
+    fn encode_body(
         body: &NodeBody<'a, Key, Value, Allocator>,
-        allocator: &'b AllocatorB,
-    ) -> Result<Vec<u8, &'b AllocatorB>, DialogTreeError>
-    where
-        AllocatorB: self::Allocator,
-    {
-        let mut next_buffer = Vec::with_capacity_in(1_000_000, allocator);
+        allocator: &Allocator,
+    ) -> Result<Bytes, DialogTreeError> {
+        let mut next_buffer = vec![];
         match &body {
             NodeBody::Index { index: branch, .. } => {
                 next_buffer.push(u8::from(NodeType::Branch));
@@ -411,67 +373,56 @@ where
                 encode(segment, &mut next_buffer, allocator)?;
             }
         }
-        Ok(next_buffer)
-        // Ok(Bytes::from(next_buffer))
+        Ok(Bytes::from(next_buffer))
     }
 
-    // fn decode_body<'b>(
-    //     buffer: &'b Vec<u8, &Allocator>,
-    //     allocator: &'b Allocator,
-    // ) -> Result<NodeBody<'b, Key, Value, Allocator>, DialogTreeError> {
-    //     match NodeType::try_ref_from_bytes(&buffer[0..1]) {
-    //         Ok(NodeType::Branch) => {
-    //             let branch = decode::<_, _, _>(&buffer[1..], allocator)?;
-    //             Ok(NodeBody::Index {
-    //                 index: branch,
-    //                 child_cache: AppendCache::new(),
-    //             })
-    //         }
-    //         Ok(NodeType::Segment) => {
-    //             let segment = decode::<_, _, _>(&buffer[1..], allocator)?;
-    //             Ok(NodeBody::Segment(segment))
-    //         }
-    //         Err(error) => {
-    //             return Err(DialogTreeError::Node(format!(
-    //                 "Could not determine node type: {}",
-    //                 error
-    //             )));
-    //         }
-    //     }
-    // }
-}
-
-fn decode_body<'a, Key, Value, Allocator>(
-    buffer: &'a [u8],
-    allocator: &Allocator,
-) -> Result<NodeBody<'a, Key, Value, Allocator>, DialogTreeError>
-where
-    Key: self::Key<'a>,
-    Key::Ref: self::KeyRef<'a, Key>,
-    Value: self::Value<'a>,
-    Value::Ref: self::ValueRef<'a, Value>,
-    Allocator: self::Allocator,
-{
-    match NodeType::try_ref_from_bytes(&buffer[0..1]) {
-        Ok(NodeType::Branch) => {
-            let branch = decode::<_, _, _>(&buffer[1..], allocator)?;
-            Ok(NodeBody::Index {
-                index: branch,
-                child_cache: AppendCache::new(),
-            })
-        }
-        Ok(NodeType::Segment) => {
-            let segment = decode::<_, _, _>(&buffer[1..], allocator)?;
-            Ok(NodeBody::Segment(segment))
-        }
-        Err(error) => {
-            return Err(DialogTreeError::Node(format!(
-                "Could not determine node type: {}",
-                error
-            )));
+    fn decode_body(
+        buffer: &'a Bytes,
+        allocator: &Allocator,
+    ) -> Result<NodeBody<'a, Key, Value, Allocator>, DialogTreeError> {
+        match NodeType::try_ref_from_bytes(&buffer[0..1]) {
+            Ok(NodeType::Branch) => {
+                let branch = decode(&buffer[1..], allocator)?;
+                Ok(NodeBody::Index {
+                    index: branch,
+                    child_cache: AppendCache::new(),
+                })
+            }
+            Ok(NodeType::Segment) => {
+                let segment = decode(&buffer[1..], allocator)?;
+                Ok(NodeBody::Segment(segment))
+            }
+            Err(error) => {
+                return Err(DialogTreeError::Node(format!(
+                    "Could not determine node type: {}",
+                    error
+                )));
+            }
         }
     }
 }
+
+// fn decode_body<'a, Key, Value>(buffer: &'a Bytes) -> Result<NodeBody<'a, Key, Value>, DialogTreeError> where Key:{
+//     match NodeType::try_ref_from_bytes(&buffer[0..1]) {
+//         Ok(NodeType::Branch) => {
+//             let branch = decode::<'a, _, _>(&buffer[1..])?;
+//             Ok(NodeBody::Index {
+//                 index: branch,
+//                 child_cache: AppendCache::new(),
+//             })
+//         }
+//         Ok(NodeType::Segment) => {
+//             let segment = decode::<'a, _, _>(&buffer[1..])?;
+//             Ok(NodeBody::Segment(segment))
+//         }
+//         Err(error) => {
+//             return Err(DialogTreeError::Node(format!(
+//                 "Could not determine node type: {}",
+//                 error
+//             )));
+//         }
+//     }
+// }
 
 impl<'a, Key, Value, Allocator> Blake3Hashed for Node<'a, Key, Value, Allocator>
 where
@@ -479,7 +430,7 @@ where
     Key::Ref: self::KeyRef<'a, Key>,
     Value: self::Value<'a>,
     Value::Ref: self::ValueRef<'a, Value>,
-    Allocator: self::Allocator,
+    Allocator: self::Allocator + Clone,
 {
     fn hash(&self) -> &Blake3Hash {
         self.hash.get_or_init(|| Blake3Hash::hash(&self.buffer))
@@ -492,7 +443,7 @@ where
     Key::Ref: self::KeyRef<'a, Key>,
     Value: self::Value<'a>,
     Value::Ref: self::ValueRef<'a, Value>,
-    Allocator: self::Allocator,
+    Allocator: self::Allocator + Clone,
 {
 }
 
@@ -502,7 +453,7 @@ where
     Key::Ref: self::KeyRef<'a, Key>,
     Value: self::Value<'a>,
     Value::Ref: self::ValueRef<'a, Value>,
-    Allocator: self::Allocator,
+    Allocator: self::Allocator + Clone,
 {
     fn eq(&self, other: &Self) -> bool {
         self.buffer == other.buffer
@@ -515,7 +466,7 @@ where
     Key::Ref: self::KeyRef<'a, Key>,
     Value: self::Value<'a>,
     Value::Ref: self::ValueRef<'a, Value>,
-    Allocator: self::Allocator,
+    Allocator: self::Allocator + Clone,
 {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         self.buffer.partial_cmp(&other.buffer)
@@ -527,7 +478,7 @@ where
     Key::Ref: self::KeyRef<'a, Key>,
     Value: self::Value<'a>,
     Value::Ref: self::ValueRef<'a, Value>,
-    Allocator: self::Allocator,
+    Allocator: self::Allocator + Clone,
 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.buffer.cmp(&other.buffer)
@@ -537,14 +488,16 @@ where
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use blink_alloc::SyncBlinkAlloc;
+    use bump_scope::Bump;
     use dialog_common::{Blake3Hash, Blake3Hashed};
     use dialog_encoding::{Buf, BufOrRef, Cellular, DialogEncodingError, Ref, Width};
     use once_cell::sync::OnceCell;
 
-    use crate::{Entry, Key, KeyRef, NodeBody, NodeMutation, Value, ValueRef};
+    use crate::{Allocator, Entry, Key, KeyRef, NodeBody, NodeMutation, Value, ValueRef};
 
     use super::Node;
+
+    type TestNode<'a, Allocator> = Node<'a, TestKey, TestValue, Allocator>;
 
     #[derive(Clone, Debug)]
     pub struct TestKey([u8; 32], OnceCell<Blake3Hash>);
@@ -786,10 +739,11 @@ mod tests {
 
     #[test]
     fn it_doesnt_take_forever_to_update_large_nodes() -> Result<()> {
-        let allocator = SyncBlinkAlloc::new();
+        // let allocator = Global;
+        // let allocator = Allocator::new(SyncBlinkAlloc::new());
+        let allocator = Allocator::new(Bump::<bump_scope::alloc::Global, 1, true, true>::new());
         let entry = Entry::new(TestKey::new([0u8; 32]), TestValue::new(vec![1, 2, 3]));
-        let mut node = Node::segment_with_entry(entry, &allocator)?;
-        // let mut mutated_node;
+        let mut node = TestNode::segment_with_entry(entry, allocator)?;
         // let mut aggregate = vec![Node::segment_with_entry(entry)?];
         // let mut node = &aggregate[0];
         // let mut mutated_node;
@@ -798,26 +752,20 @@ mod tests {
         //     .map(|i| {
         //         let next_value = i.to_le_bytes().to_vec();
         //         (
-        //             node.mutate_segment(
-        //                 NodeMutation::Upsert(Entry::new(
-        //                     TestKey::new([0u8; 32]),
-        //                     TestValue::new([vec![1, 2, 3], next_value.clone()].concat()),
-        //                 )),
-        //                 &allocator,
-        //             )
+        //             node.mutate_segment(NodeMutation::Upsert(Entry::new(
+        //                 TestKey::new([0u8; 32]),
+        //                 TestValue::new([vec![1, 2, 3], next_value.clone()].concat()),
+        //             )))
         //             .unwrap()
         //             .unwrap(),
         //             next_value,
         //         )
         //     })
         //     .map(|(node, next_value)| {
-        //         node.mutate_segment::<TestKey, TestValue, _>(
-        //             NodeMutation::Upsert(Entry::new(
-        //                 TestKey::new(rand::random()),
-        //                 TestValue::new(next_value.clone()),
-        //             )),
-        //             &allocator,
-        //         )
+        //         node.mutate_segment::<TestKey, TestValue>(NodeMutation::Upsert(Entry::new(
+        //             TestKey::new(rand::random()),
+        //             TestValue::new(next_value.clone()),
+        //         )))
         //         .unwrap()
         //         .unwrap()
         //     })
@@ -827,39 +775,30 @@ mod tests {
             let next_value = i.to_le_bytes().to_vec();
 
             let mutated_node = node
-                .mutate_segment::<TestKey, TestValue, _>(
-                    NodeMutation::Upsert(Entry::new(
-                        TestKey::new([0u8; 32]),
-                        TestValue::new([vec![1, 2, 3], next_value.clone()].concat()),
-                    )),
-                    &allocator,
-                )?
+                .mutate_segment(NodeMutation::Upsert(Entry::new(
+                    TestKey::new([0u8; 32]),
+                    TestValue::new([vec![1, 2, 3], next_value.clone()].concat()),
+                )))?
                 .unwrap();
 
-            // for _ in 0..100usize {
-            //     node.mutate_segment::<'_, TestKey, TestValue, _>(
-            //         NodeMutation::Upsert(Entry::new(
-            //             TestKey::new([0u8; 32]),
-            //             TestValue::new([vec![1, 2, 3], next_value.clone()].concat()),
-            //         )),
-            //         &allocator,
-            //     )?
-            //     .unwrap();
-            // }
+            for _ in 0..100usize {
+                node.mutate_segment::<'_, TestKey, TestValue>(NodeMutation::Upsert(Entry::new(
+                    TestKey::new([0u8; 32]),
+                    TestValue::new([vec![1, 2, 3], next_value.clone()].concat()),
+                )))?
+                .unwrap();
+            }
 
             let extended_node = mutated_node
-                .mutate_segment::<TestKey, TestValue, _>(
-                    NodeMutation::Upsert(Entry::new(
-                        TestKey::new(rand::random()),
-                        TestValue::new(next_value.clone()),
-                    )),
-                    &allocator,
-                )?
+                .mutate_segment::<'_, TestKey, TestValue>(NodeMutation::Upsert(Entry::new(
+                    TestKey::new(rand::random()),
+                    TestValue::new(next_value.clone()),
+                )))?
                 .unwrap();
 
-            // node = extended_node;
+            node = extended_node;
 
-            match extended_node.body()? {
+            match node.body()? {
                 NodeBody::Segment(segment) => {
                     println!("Entries: {}", segment.entries().len());
                     assert_eq!(segment.entries().len(), i + 2);
@@ -878,43 +817,43 @@ mod tests {
                 _ => panic!("Wrong node body type!"),
             };
 
-            node = extended_node;
             // aggregate.push(mutated_node);
             // aggregate.push(extended_node);
         }
 
-        // drop(node);
-
         Ok(())
     }
 
-    // #[test]
-    // fn it_mutates_a_node() -> Result<()> {
-    //     let entry = Entry::new(TestKey::new([0u8; 32]), TestValue::new(vec![0, 1, 2]));
-    //     let node = Node::segment_with_entry(entry)?;
+    #[test]
+    fn it_mutates_a_node() -> Result<()> {
+        // let allocator = Global;
+        let allocator = Allocator::new(Bump::<bump_scope::alloc::Global, 1, true, true>::new());
+        // let allocator = Allocator::new(SyncBlinkAlloc::new());
+        let entry = Entry::new(TestKey::new([0u8; 32]), TestValue::new(vec![0, 1, 2]));
+        let node = TestNode::segment_with_entry(entry, allocator)?;
 
-    //     let mutated_node = node
-    //         .mutate_segment::<'_, TestKey, TestValue>(NodeMutation::Upsert(Entry::new(
-    //             TestKey::new([0u8; 32]),
-    //             TestValue::new(vec![1, 2, 3]),
-    //         )))?
-    //         .unwrap();
+        let mutated_node = node
+            .mutate_segment::<'_, TestKey, TestValue>(NodeMutation::Upsert(Entry::new(
+                TestKey::new([0u8; 32]),
+                TestValue::new(vec![1, 2, 3]),
+            )))?
+            .unwrap();
 
-    //     match mutated_node.body()? {
-    //         NodeBody::Segment(segment) => {
-    //             assert_eq!(segment.entries().len(), 1);
-    //             let entry = segment.entries().get(0).unwrap();
+        match mutated_node.body()? {
+            NodeBody::Segment(segment) => {
+                assert_eq!(segment.entries().len(), 1);
+                let entry = segment.entries().get(0).unwrap();
 
-    //             match entry {
-    //                 BufOrRef::Buf(_) => panic!("Entry should be a reference!"),
-    //                 BufOrRef::Ref(entry) => {
-    //                     assert_eq!(*entry.value(), TestValue::new(vec![1, 2, 3]))
-    //                 }
-    //             }
-    //         }
-    //         _ => panic!("Wrong node body type!"),
-    //     };
+                match entry {
+                    BufOrRef::Buf(_) => panic!("Entry should be a reference!"),
+                    BufOrRef::Ref(entry) => {
+                        assert_eq!(*entry.value(), TestValue::new(vec![1, 2, 3]))
+                    }
+                }
+            }
+            _ => panic!("Wrong node body type!"),
+        };
 
-    //     Ok(())
-    // }
+        Ok(())
+    }
 }

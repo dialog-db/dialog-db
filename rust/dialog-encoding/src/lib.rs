@@ -89,7 +89,7 @@ mod tests {
     use super::Cellular;
     use allocator_api2::alloc::Allocator;
     use anyhow::Result;
-    use blink_alloc::SyncBlinkAlloc;
+    use bump_scope::Bump;
     use itertools::Itertools;
     use rand::random;
 
@@ -265,7 +265,9 @@ mod tests {
 
     #[test]
     fn it_can_convert_a_struct_to_cells_and_back() -> Result<()> {
-        let mut allocator = SyncBlinkAlloc::new();
+        let allocator = Bump::<bump_scope::alloc::Global, 1, true, true>::new();
+
+        // let mut allocator = SyncBlinkAlloc::new();
 
         let entry = Entry {
             string: "Hello".into(),
@@ -280,9 +282,9 @@ mod tests {
         assert_eq!(entry_cells.cells().count(), 4);
 
         let mut buffer = Vec::new();
-        encode(&entry_cells, &mut buffer, &mut allocator)?;
+        encode(&entry_cells, &mut buffer, &allocator)?;
 
-        let entry_cells: EntryCells<'_> = decode(&buffer, &mut allocator)?;
+        let entry_cells: EntryCells<'_> = decode(&buffer, &allocator)?;
         let final_entry = Entry::try_from(entry_cells)?;
 
         assert_eq!(entry, final_entry);
@@ -292,7 +294,7 @@ mod tests {
 
     #[test]
     fn it_can_convert_a_collection_to_cells_and_back() -> Result<()> {
-        let mut allocator = SyncBlinkAlloc::new();
+        let allocator = Bump::<bump_scope::alloc::Global, 1, true, true>::new();
 
         let collection = Collection {
             entries: vec![
@@ -319,9 +321,9 @@ mod tests {
         assert_eq!(collection_cells.cells().count(), 8);
 
         let mut buffer = Vec::new();
-        encode(&collection_cells, &mut buffer, &mut allocator)?;
+        encode(&collection_cells, &mut buffer, &allocator)?;
 
-        let collection_cells: CollectionCells<'_> = decode(&buffer, &mut allocator)?;
+        let collection_cells: CollectionCells<'_> = decode(&buffer, &allocator)?;
         let final_collection = Collection::try_from(collection_cells)?;
 
         assert_eq!(collection, final_collection);
@@ -445,7 +447,7 @@ mod tests {
 
     #[test]
     fn it_can_mutate_a_container() -> Result<()> {
-        let allocator = SyncBlinkAlloc::new();
+        let allocator = Bump::<bump_scope::alloc::Global, 1, true, true>::new();
 
         let container = Container::new(vec![], &allocator);
 
@@ -550,7 +552,8 @@ mod tests {
 
     #[test]
     fn it_can_mutate_a_generic_container() -> Result<()> {
-        let allocator = SyncBlinkAlloc::new();
+        let allocator = Bump::<bump_scope::alloc::Global, 1, true, true>::new();
+
         let container = GenericContainer::new(vec![], &allocator);
 
         let next_values = (0..5)
