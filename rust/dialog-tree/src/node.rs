@@ -9,8 +9,8 @@ use once_cell::sync::OnceCell;
 use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes};
 
 use crate::{
-    AppendCache, DialogTreeError, Entry, Index, Key, KeyRef, Link, NodeBody, Rank, Segment, Value,
-    ValueRef, distribution,
+    AppendCache, BufferPool, DialogTreeError, Entry, Index, Key, KeyRef, Link, NodeBody, Rank,
+    Segment, Value, ValueRef, distribution,
 };
 
 #[derive(IntoBytes, Immutable, TryFromBytes, KnownLayout, Debug)]
@@ -71,6 +71,8 @@ impl From<NodeType> for u8 {
 //     }
 // }
 
+pub type NodeBufferPool = BufferPool<100_000>;
+
 pub enum NodeMutation<T> {
     Upsert(T),
     Remove(T),
@@ -83,7 +85,6 @@ where
     Key::Ref: self::KeyRef<'a, Key>,
     Value: self::Value<'a>,
     Value::Ref: self::ValueRef<'a, Value>,
-    Allocator: self::Allocator + Clone,
 {
     buffer: Bytes,
     body: OnceCell<NodeBody<'a, Key, Value, Allocator>>,
@@ -744,6 +745,7 @@ mod tests {
         let allocator = Allocator::new(Bump::<bump_scope::alloc::Global, 1, true, true>::new());
         let entry = Entry::new(TestKey::new([0u8; 32]), TestValue::new(vec![1, 2, 3]));
         let mut node = TestNode::segment_with_entry(entry, allocator)?;
+
         // let mut aggregate = vec![Node::segment_with_entry(entry)?];
         // let mut node = &aggregate[0];
         // let mut mutated_node;
