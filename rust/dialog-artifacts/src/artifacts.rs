@@ -52,8 +52,9 @@ use futures_util::TryStreamExt;
 use async_stream::stream;
 
 use crate::{
-    AttributeKey, BRANCH_FACTOR, DialogArtifactsError, EntityKey, HASH_SIZE, State, ValueKey,
-    artifacts::selector::Constrained, make_reference,
+    AttributeKey, BRANCH_FACTOR, DialogArtifactsError, EntityKey, FromKey, HASH_SIZE, Key, KeyView,
+    KeyViewConstruct, KeyViewMut, State, ValueKey, artifacts::selector::Constrained,
+    make_reference,
 };
 
 /// An alias type that describes the [`Tree`]-based prolly tree that is
@@ -89,9 +90,7 @@ where
 {
     identifier: String,
     storage: Storage<HASH_SIZE, CborEncoder, Backend>,
-    entity_index: Arc<RwLock<Index<EntityKey, Datum, Backend>>>,
-    attribute_index: Arc<RwLock<Index<AttributeKey, Datum, Backend>>>,
-    value_index: Arc<RwLock<Index<ValueKey, Datum, Backend>>>,
+    index: Arc<RwLock<Index<Key, Datum, Backend>>>,
 }
 
 impl<Backend> Artifacts<Backend>
@@ -102,8 +101,8 @@ where
 {
     #[cfg(feature = "debug")]
     /// Get a reference-counted pointer to the internal entity index of the [`Artifacts`]
-    pub fn entity_index(&self) -> Arc<RwLock<Index<EntityKey, Datum, Backend>>> {
-        self.entity_index.clone()
+    pub fn index(&self) -> Arc<RwLock<Index<Key, Datum, Backend>>> {
+        self.index.clone()
     }
 
     /// The name used to uniquely identify the data of this [`Artifacts`]
@@ -122,7 +121,7 @@ where
         // TODO: We probably want to enforce some namespacing within storage so
         // that generic K/V storage can go e.g., in a different IDB store or a
         // different folder on the FS
-        let (entity_index, attribute_index, value_index) = {
+        let index = {
             let revision_block = storage.get(&make_reference(identifier.as_bytes())).await?;
             let revision = if let Some(revision_hash_bytes) = revision_block {
                 // Check if the revision is NULL_REVISION_HASH
@@ -144,26 +143,16 @@ where
             };
 
             if let Some(revision) = revision {
-                tokio::try_join!(
-                    Tree::from_hash(revision.entity_index(), storage.clone()),
-                    Tree::from_hash(revision.attribute_index(), storage.clone()),
-                    Tree::from_hash(revision.value_index(), storage.clone())
-                )?
+                Tree::from_hash(revision.index(), storage.clone()).await?
             } else {
-                (
-                    Tree::new(storage.clone()),
-                    Tree::new(storage.clone()),
-                    Tree::new(storage.clone()),
-                )
+                Tree::new(storage.clone())
             }
         };
 
         Ok(Self {
             identifier,
             storage,
-            entity_index: Arc::new(RwLock::new(entity_index)),
-            attribute_index: Arc::new(RwLock::new(attribute_index)),
-            value_index: Arc::new(RwLock::new(value_index)),
+            index: Arc::new(RwLock::new(index)),
         })
     }
 
@@ -189,10 +178,14 @@ where
     where
         Write: tokio::io::AsyncWrite + Unpin,
     {
+        use crate::{EntityKey, KeyViewConstruct};
+
         let mut csv = csv_async::AsyncSerializer::from_writer(write);
 
-        let entity_index = self.entity_index.read().await;
-        let entity_stream = entity_index.stream();
+        let index = self.index.read().await;
+        let range = <EntityKey<Key> as KeyViewConstruct>::min().0
+            ..<EntityKey<Key> as KeyViewConstruct>::max().0;
+        let entity_stream = index.stream_range(range);
 
         tokio::pin!(entity_stream);
 
@@ -243,30 +236,12 @@ where
 
     /// Get the hash that represents the [`ArtifactStore`] at its current version.
     pub async fn revision(&self) -> Result<Blake3Hash, DialogArtifactsError> {
-        let (entity_index, attribute_index, value_index) = tokio::join!(
-            self.entity_index.read(),
-            self.attribute_index.read(),
-            self.value_index.read()
-        );
+        let index = self.index.read().await;
 
-        Ok(
-            match (
-                entity_index.hash(),
-                attribute_index.hash(),
-                value_index.hash(),
-            ) {
-                (Some(entity_version), Some(attribute_version), Some(value_version)) => {
-                    Revision::from((
-                        entity_version.to_owned(),
-                        attribute_version.to_owned(),
-                        value_version.to_owned(),
-                    ))
-                    .as_reference()
-                    .await?
-                }
-                _ => NULL_REVISION_HASH,
-            },
-        )
+        Ok(match index.hash() {
+            Some(index_version) => Revision::new(index_version).as_reference().await?,
+            _ => NULL_REVISION_HASH,
+        })
     }
 
     /// Reset the root of the database to `revision_hash` if provided, or else reset
@@ -308,11 +283,11 @@ where
         };
 
         // Now get hashes for the indexes.
-        let (entity_version, attribute_version, value_version) =
+        let index_version =
             // The null revision does not actually exists it just represents
             // empty indexes so we set all versions to None's.
             if required_hash == NULL_REVISION_HASH {
-                (None, None, None)
+                None
             } else {
                 // Otherwise we hydrate revision info from the store.
                 let revision = self
@@ -325,11 +300,8 @@ where
                             required_hash.to_base58()
                         ))
                     })?;
-                (
-                    Some(revision.entity_index().to_owned()),
-                    Some(revision.attribute_index().to_owned()),
-                    Some(revision.value_index().to_owned()),
-                )
+
+                Some(revision.index().to_owned())
             };
 
         // Update storage to point to the revision hash only if it was
@@ -344,17 +316,9 @@ where
                 .await?;
         }
 
-        // Finally update all the indexes
-        let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
-            self.entity_index.write(),
-            self.attribute_index.write(),
-            self.value_index.write()
-        );
-        tokio::try_join!(
-            entity_index.set_hash(entity_version),
-            attribute_index.set_hash(attribute_version),
-            value_index.set_hash(value_version),
-        )?;
+        // Finally update the index
+        let mut index = self.index.write().await;
+        index.set_hash(index_version).await?;
 
         Ok(())
     }
@@ -373,21 +337,17 @@ where
         selector: ArtifactSelector<Constrained>,
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
     {
-        let entity_index = self.entity_index.clone();
-        let attribute_index = self.attribute_index.clone();
-        let value_index = self.value_index.clone();
+        let index = self.index.clone();
 
         try_stream! {
             // We clone to "pin" the indexes at a version for the lifetime of the stream
-            let entity_index = entity_index.read().await.clone();
-            let attribute_index = attribute_index.read().await.clone();
-            let value_index = value_index.read().await.clone();
+            let index = index.read().await.clone();
 
             if selector.entity().is_some() {
-                let start = EntityKey::min().apply_selector(&selector);
-                let end = EntityKey::max().apply_selector(&selector);
+                let start = <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
+                let end = <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
 
-                let stream = entity_index.stream_range(Range { start, end });
+                let stream = index.stream_range(Range { start, end });
 
                 tokio::pin!(stream);
 
@@ -401,10 +361,10 @@ where
                     }
                 }
             } else if selector.value().is_some() {
-                let start = ValueKey::min().apply_selector(&selector);
-                let end = ValueKey::max().apply_selector(&selector);
+                let start = <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
+                let end = <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
 
-                let stream = value_index.stream_range(Range { start, end });
+                let stream = index.stream_range(Range { start, end });
 
                 tokio::pin!(stream);
 
@@ -418,10 +378,10 @@ where
                     }
                 }
             } else if selector.attribute().is_some() {
-                let start = AttributeKey::min().apply_selector(&selector);
-                let end = AttributeKey::max().apply_selector(&selector);
+                let start = <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
+                let end = <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
 
-                let stream = attribute_index.stream_range(Range { start, end });
+                let stream = index.stream_range(Range { start, end });
 
                 tokio::pin!(stream);
 
@@ -459,11 +419,7 @@ where
         let base_revision = self.revision().await?;
 
         let transaction_result = async {
-            let (mut entity_index, mut attribute_index, mut value_index) = tokio::join!(
-                self.entity_index.write(),
-                self.attribute_index.write(),
-                self.value_index.write()
-            );
+            let mut index = self.index.write().await;
 
             tokio::pin!(instructions);
 
@@ -471,22 +427,23 @@ where
                 match instruction {
                     Instruction::Assert(artifact) => {
                         let entity_key = EntityKey::from(&artifact);
-                        let value_key = ValueKey::from(&entity_key);
-                        let attribute_key = AttributeKey::from(&entity_key);
+                        let value_key = ValueKey::from_key(&entity_key);
+                        let attribute_key = AttributeKey::from_key(&entity_key);
 
                         let datum = Datum::from(artifact);
 
                         if let Some(cause) = &datum.cause {
                             let ancestor_key = {
-                                let search_start = EntityKey::min()
+                                let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
                                     .set_entity(entity_key.entity())
-                                    .set_attribute(entity_key.attribute());
-                                let search_end = EntityKey::max()
+                                    .set_attribute(entity_key.attribute())
+                                    .into_key();
+                                let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
                                     .set_entity(entity_key.entity())
-                                    .set_attribute(entity_key.attribute());
+                                    .set_attribute(entity_key.attribute())
+                                    .into_key();
 
-                                let search_stream =
-                                    entity_index.stream_range(search_start..search_end);
+                                let search_stream = index.stream_range(search_start..search_end);
 
                                 let mut ancestor_key = None;
 
@@ -508,45 +465,42 @@ where
                                 ancestor_key
                             };
 
-                            if let Some(entity_key) = ancestor_key {
+                            if let Some(key) = ancestor_key {
                                 // Prune the old entry from the indexes
-                                let value_key = ValueKey::from(&entity_key);
-                                let attribute_key = AttributeKey::from(&entity_key);
+                                let entity_key = EntityKey(key);
+                                let value_key = ValueKey::from_key(&entity_key);
+                                let attribute_key = AttributeKey::from_key(&entity_key);
 
-                                tokio::try_join!(
-                                    value_index.delete(&value_key),
-                                    attribute_index.delete(&attribute_key),
-                                    entity_index.delete(&entity_key),
-                                )?;
+                                // TODO: Make it concurrent / parallel
+                                index.delete(&entity_key.into_key()).await?;
+                                index.delete(&value_key.into_key()).await?;
+                                index.delete(&attribute_key.into_key()).await?;
                             }
                         }
 
-                        tokio::try_join!(
-                            attribute_index.set(attribute_key, State::Added(datum.clone())),
-                            value_index.set(value_key, State::Added(datum.clone())),
-                            entity_index.set(entity_key, State::Added(datum)),
-                        )?;
+                        // TODO: Make it concurrent / parallel
+                        index
+                            .set(entity_key.into_key(), State::Added(datum.clone()))
+                            .await?;
+                        index
+                            .set(attribute_key.into_key(), State::Added(datum.clone()))
+                            .await?;
+                        index.set(value_key.into_key(), State::Added(datum)).await?;
                     }
                     Instruction::Retract(fact) => {
-                        tokio::try_join!(
-                            entity_index.set(EntityKey::from(&fact), State::Removed,),
-                            attribute_index.set(AttributeKey::from(&fact), State::Removed),
-                            value_index.set(ValueKey::from(&fact), State::Removed),
-                        )?;
+                        let entity_key = EntityKey::from(&fact);
+                        let value_key = ValueKey::from_key(&entity_key);
+                        let attribute_key = AttributeKey::from_key(&entity_key);
+
+                        // TODO: Make it concurrent / parallel
+                        index.set(entity_key.into_key(), State::Removed).await?;
+                        index.set(attribute_key.into_key(), State::Removed).await?;
+                        index.set(value_key.into_key(), State::Removed).await?;
                     }
                 }
             }
 
-            let next_revision = match (
-                entity_index.hash(),
-                attribute_index.hash(),
-                value_index.hash(),
-            ) {
-                (Some(entity_index), Some(attribute_index), Some(value_index)) => Some(
-                    Revision::from((*entity_index, *attribute_index, *value_index)),
-                ),
-                _ => None,
-            };
+            let next_revision = index.hash().map(Revision::new);
 
             let revision_hash = if let Some(revision) = &next_revision {
                 self.storage.write(&revision).await?;
@@ -764,7 +718,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 1);
+        assert_eq!(net_reads, 2);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -858,7 +812,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 3);
+        assert_eq!(net_reads, 4);
         assert_eq!(net_writes, 0);
 
         let fact_stream =
@@ -876,7 +830,7 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 7);
+        assert_eq!(net_reads, 11);
         assert_eq!(net_writes, 0);
 
         Ok(())

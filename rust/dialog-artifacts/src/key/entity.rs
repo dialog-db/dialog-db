@@ -3,33 +3,49 @@ use std::ops::Deref;
 use arrayref::array_ref;
 use dialog_prolly_tree::KeyType;
 use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
 
 use crate::{
-    ATTRIBUTE_LENGTH, Artifact, ArtifactSelector, AttributeKeyPart, DialogArtifactsError,
-    ENTITY_KEY_LENGTH, ENTITY_LENGTH, EntityKeyPart, VALUE_REFERENCE_LENGTH, ValueDataType,
-    mutable_slice, selector::Constrained,
+    ATTRIBUTE_LENGTH, Artifact, AttributeKeyPart, ENTITY_LENGTH, EntityKeyPart, TAG_LENGTH,
+    VALUE_REFERENCE_LENGTH, ValueDataType, mutable_slice,
 };
 
-use super::{AttributeKey, VALUE_DATA_TYPE_LENGTH, ValueKey, ValueReferenceKeyPart};
+use super::{
+    Key, KeyBytes, KeyView, KeyViewConstruct, KeyViewMut, VALUE_DATA_TYPE_LENGTH,
+    ValueReferenceKeyPart,
+};
 
-const ENTITY_OFFSET: usize = 0;
-const ATTRIBUTE_OFFSET: usize = ENTITY_LENGTH;
-const VALUE_DATA_TYPE_OFFSET: usize = ENTITY_LENGTH + ATTRIBUTE_LENGTH;
-const VALUE_REFERENCE_OFFSET: usize = ENTITY_LENGTH + ATTRIBUTE_LENGTH + VALUE_DATA_TYPE_LENGTH;
+const ENTITY_OFFSET: usize = TAG_LENGTH;
+const ATTRIBUTE_OFFSET: usize = TAG_LENGTH + ENTITY_LENGTH;
+const VALUE_DATA_TYPE_OFFSET: usize = TAG_LENGTH + ENTITY_LENGTH + ATTRIBUTE_LENGTH;
+const VALUE_REFERENCE_OFFSET: usize =
+    TAG_LENGTH + ENTITY_LENGTH + ATTRIBUTE_LENGTH + VALUE_DATA_TYPE_LENGTH;
 
-const MINIMUM_ENTITY_KEY: [u8; ENTITY_KEY_LENGTH] = [u8::MIN; ENTITY_KEY_LENGTH];
-const MAXIMUM_ENTITY_KEY: [u8; ENTITY_KEY_LENGTH] = [u8::MAX; ENTITY_KEY_LENGTH];
+/// Tag byte that identifies entity-based index keys
+pub const ENTITY_KEY_TAG: u8 = 0;
 
 /// A [`KeyType`] that is used when constructing an index of the [`Entity`]s
 /// of [`Artifact`]s.
 #[repr(transparent)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct EntityKey(#[serde(with = "BigArray")] [u8; ENTITY_KEY_LENGTH]);
+pub struct EntityKey<K>(pub K);
 
-impl EntityKey {
-    /// Construct an [`EntityKey`] from the provided component key parts.
-    pub fn from_parts(
+impl EntityKey<Key> {
+    /// Converts this entity key into a generic key for storage in the prolly tree
+    pub fn into_key(self) -> Key {
+        self.0
+    }
+}
+
+impl KeyViewConstruct for EntityKey<Key> {
+    fn min() -> Self {
+        Self(Key::min().set_tag(ENTITY_KEY_TAG))
+    }
+
+    fn max() -> Self {
+        Self(Key::max().set_tag(ENTITY_KEY_TAG))
+    }
+
+    fn from_parts(
         entity: EntityKeyPart,
         attribute: AttributeKeyPart,
         value_type: ValueDataType,
@@ -41,124 +57,97 @@ impl EntityKey {
             .set_value_type(value_type)
             .set_value_reference(value_reference)
     }
+}
 
-    /// Construct the lowest possible [`EntityKey`] (all bits are zero)
-    pub fn min() -> Self {
-        Self(MINIMUM_ENTITY_KEY)
+impl<K> KeyView for EntityKey<K>
+where
+    K: AsRef<KeyBytes> + Clone,
+{
+    fn entity(&self) -> EntityKeyPart {
+        EntityKeyPart(array_ref![self.0.as_ref(), ENTITY_OFFSET, ENTITY_LENGTH])
     }
 
-    /// Construct the highest possible [`EntityKey`] (all bits are one)
-    pub fn max() -> Self {
-        Self(MAXIMUM_ENTITY_KEY)
+    fn attribute(&self) -> AttributeKeyPart {
+        AttributeKeyPart(array_ref![
+            self.0.as_ref(),
+            ATTRIBUTE_OFFSET,
+            ATTRIBUTE_LENGTH
+        ])
     }
 
-    /// Get an [`EntityKeyPart`] that refers to the [`Entity`] part of this
-    /// [`EntityKey`].
-    pub fn entity(&self) -> EntityKeyPart {
-        EntityKeyPart(array_ref![self.0, ENTITY_OFFSET, ENTITY_LENGTH])
+    fn value_type(&self) -> ValueDataType {
+        self.0.as_ref()[VALUE_DATA_TYPE_OFFSET].into()
     }
 
-    /// Set the [`EntityKeyPart`], altering the [`Entity`] part of this
-    /// [`EntityKey`].
-    pub fn set_entity(self, entity: EntityKeyPart) -> Self {
-        let mut inner = self.0;
-        mutable_slice![inner, ENTITY_OFFSET, ENTITY_LENGTH].copy_from_slice(entity.0);
-        Self(inner)
-    }
-
-    /// Get an [`AttributeKeyPart`] that refers to the [`Attribute`] part of
-    /// this [`EntityKey`].
-    pub fn attribute(&self) -> AttributeKeyPart {
-        AttributeKeyPart(array_ref![self.0, ATTRIBUTE_OFFSET, ATTRIBUTE_LENGTH])
-    }
-
-    /// Set the [`AttributeKeyPart`], altering the [`Attribute`] part of this
-    /// [`EntityKey`].
-    pub fn set_attribute(self, attribute: AttributeKeyPart) -> Self {
-        let mut inner = self.0;
-        mutable_slice![inner, ATTRIBUTE_OFFSET, ATTRIBUTE_LENGTH].copy_from_slice(attribute.0);
-        Self(inner)
-    }
-
-    /// Get the [`ValueDataType`] that is represented by this [`EntityKey`].
-    pub fn value_type(&self) -> ValueDataType {
-        self.0[VALUE_DATA_TYPE_OFFSET].into()
-    }
-
-    /// Set the [`ValueDataType`] that is represented by this [`EntityKey`].
-    pub fn set_value_type(self, value_type: ValueDataType) -> Self {
-        let mut inner = self.0;
-        inner[VALUE_DATA_TYPE_OFFSET] = value_type.into();
-        Self(inner)
-    }
-
-    /// Get a [`ValueReferenceKeyPart`] that refers to the [`Value`] part of
-    /// this [`EntityKey`].
-    pub fn value_reference(&self) -> ValueReferenceKeyPart {
+    fn value_reference(&self) -> ValueReferenceKeyPart {
         ValueReferenceKeyPart(array_ref![
-            self.0,
+            self.0.as_ref(),
             VALUE_REFERENCE_OFFSET,
             VALUE_REFERENCE_LENGTH
         ])
     }
+}
 
-    /// Set the [`ValueReferenceKeyPart`], altering the [`Value`] part of this
-    /// [`EntityKey`].
-    pub fn set_value_reference(self, value_reference: ValueReferenceKeyPart) -> Self {
-        let mut inner = self.0;
-        mutable_slice!(inner, VALUE_REFERENCE_OFFSET, VALUE_REFERENCE_LENGTH)
-            .copy_from_slice(value_reference.0);
-        Self(inner)
+impl<K> KeyViewMut for EntityKey<K>
+where
+    K: AsRef<KeyBytes> + AsMut<KeyBytes> + Clone,
+{
+    fn set_entity(mut self, entity: EntityKeyPart) -> Self {
+        mutable_slice![self.0.as_mut(), ENTITY_OFFSET, ENTITY_LENGTH].copy_from_slice(entity.0);
+        self
     }
 
-    /// Sets the constrained parts of the given [`ArtifactSelector`] to the associated
-    /// components of this [`EntityKey`]
-    pub fn apply_selector(self, selector: &ArtifactSelector<Constrained>) -> Self {
-        let mut key = self;
+    fn set_attribute(mut self, attribute: AttributeKeyPart) -> Self {
+        mutable_slice![self.0.as_mut(), ATTRIBUTE_OFFSET, ATTRIBUTE_LENGTH]
+            .copy_from_slice(attribute.0);
+        self
+    }
 
-        if let Some(entity) = selector.entity() {
-            key = key.set_entity(entity.into());
-        };
+    fn set_value_type(mut self, value_type: ValueDataType) -> Self {
+        self.0.as_mut()[VALUE_DATA_TYPE_OFFSET] = value_type.into();
+        self
+    }
 
-        if let Some(attribute) = selector.attribute() {
-            key = key.set_attribute(attribute.into());
-        }
-
-        if let Some(value_type) = selector.value().map(|value| value.data_type()) {
-            key = key.set_value_type(value_type);
-        }
-
-        if let Some(value_reference) = selector.value_reference() {
-            key = key.set_value_reference(ValueReferenceKeyPart(value_reference));
-        }
-
-        key
+    fn set_value_reference(mut self, value_reference: ValueReferenceKeyPart) -> Self {
+        mutable_slice!(
+            self.0.as_mut(),
+            VALUE_REFERENCE_OFFSET,
+            VALUE_REFERENCE_LENGTH
+        )
+        .copy_from_slice(value_reference.0);
+        self
     }
 }
 
-impl From<&AttributeKey> for EntityKey {
-    fn from(value: &AttributeKey) -> Self {
-        EntityKey::default()
-            .set_entity(value.entity())
-            .set_attribute(value.attribute())
-            .set_value_type(value.value_type())
-            .set_value_reference(value.value_reference())
+impl Default for EntityKey<Key> {
+    fn default() -> Self {
+        <Self as KeyViewConstruct>::min()
     }
 }
 
-impl From<&ValueKey> for EntityKey {
-    fn from(value: &ValueKey) -> Self {
-        EntityKey::default()
-            .set_entity(value.entity())
-            .set_attribute(value.attribute())
-            .set_value_type(value.value_type())
-            .set_value_reference(value.value_reference())
+impl<K> AsRef<KeyBytes> for EntityKey<K>
+where
+    K: AsRef<KeyBytes>,
+{
+    fn as_ref(&self) -> &KeyBytes {
+        self.0.as_ref()
     }
 }
 
-impl From<&Artifact> for EntityKey {
+impl<K> Deref for EntityKey<K>
+where
+    K: Deref<Target = KeyBytes>,
+{
+    type Target = K::Target;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<&Artifact> for EntityKey<Key> {
     fn from(fact: &Artifact) -> Self {
-        EntityKey::default()
+        EntityKey::<Key>::default()
             .set_entity(EntityKeyPart::from(&fact.of))
             .set_attribute(AttributeKeyPart::from(&fact.the))
             .set_value_type(fact.is.data_type())
@@ -166,43 +155,22 @@ impl From<&Artifact> for EntityKey {
     }
 }
 
-impl From<&ArtifactSelector<Constrained>> for EntityKey {
-    fn from(selector: &ArtifactSelector<Constrained>) -> Self {
-        EntityKey::default().apply_selector(selector)
+impl<K> KeyType for EntityKey<K>
+where
+    K: AsRef<KeyBytes> + AsMut<KeyBytes> + Clone + KeyType,
+{
+    fn bytes(&self) -> &[u8] {
+        self.as_ref().as_ref()
     }
 }
 
-impl Default for EntityKey {
-    fn default() -> Self {
-        Self(MINIMUM_ENTITY_KEY)
-    }
-}
-
-impl AsRef<[u8]> for EntityKey {
-    fn as_ref(&self) -> &[u8] {
-        self.0.as_ref()
-    }
-}
-
-impl Deref for EntityKey {
-    type Target = [u8; ENTITY_KEY_LENGTH];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl TryFrom<Vec<u8>> for EntityKey {
-    type Error = DialogArtifactsError;
+impl<K> TryFrom<Vec<u8>> for EntityKey<K>
+where
+    K: KeyType,
+{
+    type Error = <K as TryFrom<Vec<u8>>>::Error;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Ok(Self(value.try_into().map_err(|value: Vec<u8>| {
-            DialogArtifactsError::InvalidKey(format!(
-                "Wrong byte length for entity key: {}",
-                value.len()
-            ))
-        })?))
+        Ok(EntityKey(K::try_from(value)?))
     }
 }
-
-impl KeyType for EntityKey {}
