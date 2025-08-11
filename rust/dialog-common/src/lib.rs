@@ -6,3 +6,6 @@
 
 mod sync;
 pub use sync::*;
+
+mod hash;
+pub use hash::*;
