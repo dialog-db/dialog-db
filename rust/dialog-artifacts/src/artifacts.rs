@@ -100,6 +100,12 @@ where
         + ConditionalSync
         + 'static,
 {
+    #[cfg(feature = "debug")]
+    /// Get a reference-counted pointer to the internal entity index of the [`Artifacts`]
+    pub fn entity_index(&self) -> Arc<RwLock<Index<EntityKey, Datum, Backend>>> {
+        self.entity_index.clone()
+    }
+
     /// The name used to uniquely identify the data of this [`Artifacts`]
     /// instance
     pub fn identifier(&self) -> &str {
@@ -219,8 +225,13 @@ where
             let stream = reader.deserialize::<Artifact>();
 
             for await artifact in stream {
-                if let Ok(artifact) = artifact {
-                    yield Instruction::Assert(artifact)
+                match artifact {
+                    Ok(artifact) => {
+                        yield Instruction::Assert(artifact)
+                    }
+                    Err(error) => {
+                        println!("Skipping invalid datum: {error}");
+                    }
                 }
             }
         };
