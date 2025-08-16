@@ -1,10 +1,10 @@
-use std::{fmt::Display, str::FromStr};
+use std::{fmt::Display, fmt::Formatter, mem, str::FromStr};
 
 use crate::{Attribute, DialogArtifactsError, Entity, make_reference};
-
 use base58::{FromBase58, ToBase58};
 use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use thiserror::Error;
 
 /// All value type representations that may be stored by [`Artifacts`]
 #[derive(Debug, Clone, PartialOrd, PartialEq, Serialize, Deserialize)]
@@ -210,6 +210,34 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
     }
 }
 
+impl TryFrom<Value> for Attribute {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Symbol(attribute) => Ok(attribute),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::Symbol,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for Entity {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Entity(entity) => Ok(entity),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::Entity,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
 impl From<Vec<u8>> for Value {
     fn from(value: Vec<u8>) -> Self {
         Value::Bytes(value)
@@ -324,6 +352,14 @@ impl From<Value> for ValueDataType {
     }
 }
 
+/// Errors created when types are used inconsistently with value.
+#[derive(Error, Debug, PartialEq)]
+pub enum TypeError {
+    /// Expected type and actual type mismatch.
+    #[error("Type mismatch: expected {0}, got {1}")]
+    TypeMismatch(ValueDataType, ValueDataType),
+}
+
 /// [`ValueDataType`] embodies all types that are able to be represented
 /// as a [`Value`].
 #[cfg_attr(
@@ -363,6 +399,37 @@ impl ValueDataType {
     /// The largest [`ValueDataType`] in discriminant order
     pub fn max() -> Self {
         ValueDataType::Symbol
+    }
+
+    /// Check if the given value is of this type.
+    pub fn check(&self, value: &Value) -> Result<(), TypeError> {
+        let other = value.data_type();
+        self.unify(&other).and(Ok(()))
+    }
+
+    /// Unifies this type with the other type.
+    pub fn unify(&self, other: &ValueDataType) -> Result<ValueDataType, TypeError> {
+        if mem::discriminant(self) != mem::discriminant(other) {
+            Err(TypeError::TypeMismatch(*self, *other))
+        } else {
+            Ok(*self)
+        }
+    }
+}
+
+impl Display for ValueDataType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValueDataType::Bytes => write!(f, "Bytes"),
+            ValueDataType::Entity => write!(f, "Entity"),
+            ValueDataType::Boolean => write!(f, "Boolean"),
+            ValueDataType::String => write!(f, "String"),
+            ValueDataType::UnsignedInt => write!(f, "UnsignedInt"),
+            ValueDataType::SignedInt => write!(f, "SignedInt"),
+            ValueDataType::Float => write!(f, "Float"),
+            ValueDataType::Record => write!(f, "Record"),
+            ValueDataType::Symbol => write!(f, "Symbol"),
+        }
     }
 }
 

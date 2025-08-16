@@ -20,6 +20,7 @@ members = [
     "rust/dialog-common",
     "rust/dialog-dbsp",
     "rust/dialog-prolly-tree",
+    "rust/dialog-query",
     "rust/dialog-storage",
 ]
 resolver = "2"
@@ -80,6 +81,9 @@ path = "./rust/dialog-common"
 
 [workspace.dependencies.dialog-prolly-tree]
 path = "./rust/dialog-prolly-tree"
+
+[workspace.dependencies.dialog-query]
+path = "./rust/dialog-query"
 
 [workspace.dependencies.dialog-storage]
 path = "./rust/dialog-storage"
