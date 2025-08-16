@@ -400,18 +400,26 @@ mod tests {
 
     #[test]
     fn test_fact_selector_with_entity_and_value() {
-        let person_var = Variable::Any("person");
-        let name_var = Variable::String("name");
+        let person_var = Variable::untyped("person");
+        let name_var = Variable::<String>::new("name");
 
         let fact_selector = FactSelector::new()
             .the(Term::Constant(Value::String("person/name".to_string())))
-            .of(Term::Variable(person_var.clone()))
-            .is(Term::Variable(name_var.clone()));
+            .of(Term::from(person_var.clone()))
+            .is(Term::from(name_var.clone()));
 
         let vars = fact_selector.variables();
         assert_eq!(vars.len(), 2);
-        assert!(vars.contains(&&person_var));
-        assert!(vars.contains(&&name_var));
+        // Check that variables are present by comparing names and types
+        let var_names: Vec<&str> = vars.iter().map(|v| v.name()).collect();
+        assert!(var_names.contains(&"person"));
+        assert!(var_names.contains(&"name"));
+        
+        // Check types - all variables in Terms should be untyped after conversion
+        let person_var_in_list = vars.iter().find(|v| v.name() == "person").unwrap();
+        let name_var_in_list = vars.iter().find(|v| v.name() == "name").unwrap();
+        assert_eq!(person_var_in_list.data_type(), None);
+        assert_eq!(name_var_in_list.data_type(), None); // Terms convert all variables to untyped
     }
 
     #[test]
@@ -443,13 +451,13 @@ mod tests {
 
     #[test]
     fn test_fact_selector_with_variables() {
-        let user_var = Variable::Any("user");
-        let name_var = Variable::String("name");
+        let user_var = Variable::untyped("user");
+        let name_var = Variable::<String>::new("name");
 
         let fact_selector = FactSelector::new()
             .the("user/name")
-            .of(Term::Variable(user_var.clone()))
-            .is(Term::Variable(name_var.clone()));
+            .of(Term::from(user_var.clone()))
+            .is(Term::from(name_var.clone()));
 
         assert!(fact_selector.the.is_some());
         assert!(fact_selector.of.is_some());
@@ -465,15 +473,15 @@ mod tests {
         // Check entity is untyped variable
         if let Some(Term::Variable(var)) = &fact_selector.of {
             assert_eq!(var.name, "user");
-            assert!(var.data_type.is_none());
+            assert!(var.data_type().is_none());
         } else {
             panic!("Expected variable for entity");
         }
 
-        // Check value is typed variable
+        // Check value variable - all variables in Terms should be untyped
         if let Some(Term::Variable(var)) = &fact_selector.is {
             assert_eq!(var.name, "name");
-            assert!(var.data_type.is_some());
+            assert!(var.data_type().is_none()); // Terms convert all variables to untyped
         } else {
             panic!("Expected variable for value");
         }
@@ -502,7 +510,7 @@ mod tests {
         // Test your exact requested syntax
         let fact_selector1 = FactSelector::new()
             .the("gozala.io/name")
-            .of(Variable::Entity("user"));
+            .of(Variable::<Entity>::new("user"));
 
         assert!(fact_selector1.the.is_some());
         assert!(fact_selector1.of.is_some());
@@ -511,13 +519,13 @@ mod tests {
         // Test starting with different methods
         let fact_selector2 = FactSelector::new()
             .the("user/name")
-            .of(Variable::Any("user"))
+            .of(Variable::untyped("user"))
             .is("John");
 
         let fact_selector3 = FactSelector::new()
-            .of(Variable::Any("user"))
+            .of(Variable::untyped("user"))
             .the("user/name")
-            .is(Variable::String("name"));
+            .is(Variable::<String>::new("name"));
 
         let fact_selector4 = FactSelector::new().is("active").the("user/status");
 
@@ -542,18 +550,18 @@ mod tests {
         // Test that order doesn't matter
         let fact_selector1 = FactSelector::new()
             .the("user/email")
-            .of(Variable::Any("user"))
-            .is(Variable::String("email"));
+            .of(Variable::untyped("user"))
+            .is(Variable::<String>::new("email"));
 
         let fact_selector2 = FactSelector::new()
-            .of(Variable::Any("user"))
-            .is(Variable::String("email"))
+            .of(Variable::untyped("user"))
+            .is(Variable::<String>::new("email"))
             .the("user/email");
 
         let fact_selector3 = FactSelector::new()
-            .is(Variable::String("email"))
+            .is(Variable::<String>::new("email"))
             .the("user/email")
-            .of(Variable::Any("user"));
+            .of(Variable::untyped("user"));
 
         // All should have the same pattern content
         assert_eq!(fact_selector1.the, fact_selector2.the);
@@ -569,8 +577,8 @@ mod tests {
         // Test builder API with Variable constructors
         let fact_selector = FactSelector::new()
             .the("user/name")
-            .of(Variable::Any("user"))
-            .is(Variable::String("name"));
+            .of(Variable::untyped("user"))
+            .is(Variable::<String>::new("name"));
 
         assert!(fact_selector.the.is_some());
         assert!(fact_selector.of.is_some());
@@ -638,8 +646,8 @@ mod tests {
         // Step 2: Create fact selector with constants (following familiar-query pattern)
         let fact_selector = FactSelector::new()
             .the("user/name") // Constant attribute - this will be used for ArtifactSelector
-            .of(Variable::Entity("user")) // Variable entity - this will be unified
-            .is(Variable::String("name")); // Variable value - this will be unified
+            .of(Variable::<Entity>::new("user")) // Variable entity - this will be unified
+            .is(Variable::<String>::new("name")); // Variable value - this will be unified
 
         // Step 3: Create plan and test the familiar-query pattern
         let scope = VariableScope::new();
@@ -663,8 +671,9 @@ mod tests {
 
         // Verify that the frames contain variable bindings
         for frame in match_frames {
-            let user_var = Variable::Entity("user");
-            let name_var = Variable::String("name");
+            // Use untyped variables for frame operations since Terms convert to untyped
+            let user_var = Variable::untyped("user");
+            let name_var = Variable::untyped("name");
 
             // Check that the frame contains bindings for our variables
             assert!(
@@ -710,9 +719,9 @@ mod tests {
 
         // Create fact selector with all variables (no constants)
         let fact_selector = FactSelector::new()
-            .the(Variable::Attribute("attr")) // Variable
-            .of(Variable::Entity("entity")) // Variable
-            .is(Variable::Any("value")); // Variable
+            .the(Variable::<Attribute>::new("attr")) // Variable
+            .of(Variable::<Entity>::new("entity")) // Variable
+            .is(Variable::untyped("value")); // Variable
 
         // Create plan
         let scope = VariableScope::new();

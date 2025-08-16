@@ -130,8 +130,8 @@ mod tests {
         // Create a query with variables - this should fail when using Query trait
         let variable_query = Fact::select()
             .the("user/name")
-            .of(Variable::Entity("user"))    // Variable!
-            .is(Variable::String("name"));   // Variable!
+            .of(Variable::<Entity>::new("user"))    // Variable!
+            .is(Variable::<String>::new("name"));   // Variable!
         
         // Attempt to query - should fail with helpful error
         let result = variable_query.query(&artifacts);

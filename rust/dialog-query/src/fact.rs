@@ -453,8 +453,8 @@ mod integration_tests {
         
         let query_with_variables = Fact::select()
             .the("user/name")
-            .of(Variable::Entity("user"))  // This is a variable
-            .is(Variable::String("name")); // This is also a variable
+            .of(Variable::<Entity>::new("user"))  // This is a variable
+            .is(Variable::<String>::new("name")); // This is also a variable
         
         // Setup store for completeness
         let storage_backend = MemoryStorageBackend::default();
@@ -480,7 +480,7 @@ mod integration_tests {
         let mixed_query = Fact::select()
             .the("user/name")                    // Constant - OK
             .of(alice)                           // Constant - OK  
-            .is(Variable::String("name"));       // Variable - should fail
+            .is(Variable::<String>::new("name"));       // Variable - should fail
         
         // Setup store
         let storage_backend = MemoryStorageBackend::default();
