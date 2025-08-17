@@ -6,7 +6,7 @@ use crate::query::Query;
 use crate::selection::{Match, Selection};
 use crate::syntax::Syntax;
 use crate::term::Term;
-use crate::variable::{TypedVariable, VariableName, VariableScope};
+use crate::variable::{TypedVariable, Untyped, VariableName, VariableScope};
 use async_stream::try_stream;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
@@ -22,13 +22,13 @@ use std::str::FromStr;
 pub struct FactSelector {
     /// The attribute term (predicate)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub the: Option<Term>,
+    pub the: Option<Term<Attribute>>,
     /// The entity term (subject)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub of: Option<Term>,
+    pub of: Option<Term<Entity>>,
     /// The value term (object)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub is: Option<Term>,
+    pub is: Option<Term<Value>>,
     /// Optional fact configuration (reserved for future use)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fact: Option<serde_json::Value>,
@@ -46,35 +46,35 @@ impl FactSelector {
     }
 
     /// Set the attribute (predicate) - accepts strings or Terms
-    pub fn the<T: Into<Term>>(mut self, attr: T) -> Self {
+    pub fn the<T: Into<Term<Attribute>>>(mut self, attr: T) -> Self {
         self.the = Some(attr.into());
         self
     }
 
     /// Set the entity (subject) - accepts Variables or Terms
-    pub fn of<T: Into<Term>>(mut self, entity: T) -> Self {
+    pub fn of<T: Into<Term<Entity>>>(mut self, entity: T) -> Self {
         self.of = Some(entity.into());
         self
     }
 
     /// Set the value (object) - accepts Variables or Terms
-    pub fn is<T: Into<Term>>(mut self, value: T) -> Self {
+pub fn is<T: Into<Term<Value>>>(mut self, value: T) -> Self {
         self.is = Some(value.into());
         self
     }
 
     /// Get all variables referenced in this assertion
-    pub fn variables(&self) -> Vec<&TypedVariable<crate::variable::Untyped>> {
+    pub fn variables(&self) -> Vec<TypedVariable<Untyped>> {
         let mut vars = Vec::new();
 
         if let Some(Term::Variable(var)) = &self.the {
-            vars.push(var);
+            vars.push(var.to_untyped());
         }
         if let Some(Term::Variable(var)) = &self.of {
-            vars.push(var);
+            vars.push(var.to_untyped());
         }
         if let Some(Term::Variable(var)) = &self.is {
-            vars.push(var);
+            vars.push(var.to_untyped());
         }
 
         vars
@@ -92,26 +92,16 @@ impl FactSelector {
         // Convert attribute (the)
         if let Some(term) = &self.the {
             match term {
-                Term::Constant(Value::String(attr_str)) => {
-                    let attr = Attribute::from_str(attr_str).map_err(|_| {
-                        QueryError::InvalidAttribute {
-                            attribute: attr_str.clone(),
-                        }
-                    })?;
+                Term::Constant(the) => {
                     selector = Some(match selector {
-                        None => ArtifactSelector::new().the(attr),
-                        Some(s) => s.the(attr),
+                        None => ArtifactSelector::new().the(the.to_owned()),
+                        Some(s) => s.the(the.to_owned()),
                     });
                 }
                 Term::Variable(_) => {
                     return Err(QueryError::VariableNotSupported {
                         message: "Variables not supported in ArtifactSelector conversion"
                             .to_string(),
-                    });
-                }
-                _ => {
-                    return Err(QueryError::InvalidTerm {
-                        message: "Attribute must be a string".to_string(),
                     });
                 }
             }
@@ -120,21 +110,16 @@ impl FactSelector {
         // Convert entity (of)
         if let Some(term) = &self.of {
             match term {
-                Term::Constant(Value::Entity(entity)) => {
+                Term::Constant(of) => {
                     selector = Some(match selector {
-                        None => ArtifactSelector::new().of(entity.clone()),
-                        Some(s) => s.of(entity.clone()),
+                        None => ArtifactSelector::new().of(of.to_owned()),
+                        Some(s) => s.of(of.to_owned()),
                     });
                 }
                 Term::Variable(_) => {
                     return Err(QueryError::VariableNotSupported {
                         message: "Variables not supported in ArtifactSelector conversion"
                             .to_string(),
-                    });
-                }
-                _ => {
-                    return Err(QueryError::InvalidTerm {
-                        message: "Entity term must contain an Entity value".to_string(),
                     });
                 }
             }
@@ -145,8 +130,8 @@ impl FactSelector {
             match term {
                 Term::Constant(value) => {
                     selector = Some(match selector {
-                        None => ArtifactSelector::new().is(value.clone()),
-                        Some(s) => s.is(value.clone()),
+                        None => ArtifactSelector::new().is(value),
+                        Some(s) => s.is(value.to_owned()),
                     });
                 }
                 Term::Variable(_) => {
@@ -341,17 +326,17 @@ impl EvaluationPlan for FactSelectorPlan {
 
                         // Unify entity if we have an entity variable
                         if let Some(Term::Variable(var)) = &selector.of {
-                            new_frame = new_frame.set(var.clone(), Value::Entity(artifact.of)).map_err(|e| QueryError::FactStore(e.to_string()))?;
+                            new_frame = new_frame.set(var.to_untyped(), Value::Entity(artifact.of)).map_err(|e| QueryError::FactStore(e.to_string()))?;
                         }
 
                         // Unify attribute if we have an attribute variable
                         if let Some(Term::Variable(var)) = &selector.the {
-                            new_frame = new_frame.set(var.clone(), Value::String(artifact.the.to_string())).map_err(|e| QueryError::FactStore(e.to_string()))?;
+                            new_frame = new_frame.set(var.to_untyped(), Value::String(artifact.the.to_string())).map_err(|e| QueryError::FactStore(e.to_string()))?;
                         }
 
                         // Unify value if we have a value variable
                         if let Some(Term::Variable(var)) = &selector.is {
-                            new_frame = new_frame.set(var.clone(), artifact.is).map_err(|e| QueryError::FactStore(e.to_string()))?;
+                            new_frame = new_frame.set(var.to_untyped(), artifact.is).map_err(|e| QueryError::FactStore(e.to_string()))?;
                         }
 
                         yield new_frame;
@@ -400,10 +385,13 @@ mod tests {
 
     #[test]
     fn test_fact_selector_by_attribute() {
-        let attr_term = Term::Constant(Value::String("person/name".to_string()));
-        let fact_selector = FactSelector::new().the(attr_term.clone());
+        let fact_selector = FactSelector::new().the("person/name");
 
-        assert_eq!(fact_selector.the, Some(attr_term));
+        if let Some(Term::Constant(attr)) = &fact_selector.the {
+            assert_eq!(attr.to_string(), "person/name");
+        } else {
+            panic!("Expected constant attribute term");
+        }
         assert!(fact_selector.of.is_none());
         assert!(fact_selector.is.is_none());
     }
@@ -414,7 +402,7 @@ mod tests {
         let name_var = TypedVariable::<String>::new("name");
 
         let fact_selector = FactSelector::new()
-            .the(Term::Constant(Value::String("person/name".to_string())))
+            .the("person/name")
             .of(Term::from(person_var.clone()))
             .is(Term::from(name_var.clone()));
 
@@ -434,8 +422,7 @@ mod tests {
 
     #[test]
     fn test_fact_selector_json_serialization() {
-        let fact_selector =
-            FactSelector::new().the(Term::Constant(Value::String("person/name".to_string())));
+        let fact_selector = FactSelector::new().the("person/name");
 
         // Should be able to serialize and deserialize
         let serialized = serde_json::to_string(&fact_selector).unwrap();
@@ -452,10 +439,10 @@ mod tests {
         assert!(fact_selector.of.is_none());
         assert!(fact_selector.is.is_none());
 
-        if let Some(Term::Constant(Value::String(s))) = &fact_selector.the {
-            assert_eq!(s, "user/name");
+        if let Some(Term::Constant(attr)) = &fact_selector.the {
+            assert_eq!(attr.to_string(), "user/name");
         } else {
-            panic!("Expected constant string attribute");
+            panic!("Expected constant attribute");
         }
     }
 
@@ -474,10 +461,10 @@ mod tests {
         assert!(fact_selector.is.is_some());
 
         // Check attribute is constant
-        if let Some(Term::Constant(Value::String(s))) = &fact_selector.the {
-            assert_eq!(s, "user/name");
+        if let Some(Term::Constant(attr)) = &fact_selector.the {
+            assert_eq!(attr.to_string(), "user/name");
         } else {
-            panic!("Expected constant string attribute");
+            panic!("Expected constant attribute");
         }
 
         // Check entity is untyped variable
@@ -502,14 +489,15 @@ mod tests {
         let fact_selector =
             FactSelector::new()
                 .the("user/email")
-                .is(Term::Constant(Value::String(
-                    "user@example.com".to_string(),
-                )));
+                .is("user@example.com");
 
-        if let Some(Term::Constant(Value::String(s))) = &fact_selector.is {
-            assert_eq!(s, "user@example.com");
+        if let Some(Term::Constant(value)) = &fact_selector.is {
+            match value {
+                Value::String(s) => assert_eq!(s, "user@example.com"),
+                _ => panic!("Expected string value"),
+            }
         } else {
-            panic!("Expected constant string value");
+            panic!("Expected constant value");
         }
     }
 

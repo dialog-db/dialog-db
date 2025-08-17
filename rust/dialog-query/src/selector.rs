@@ -1,22 +1,30 @@
 //! Selector patterns for matching against the database
 
-use serde::{Deserialize, Serialize};
 use crate::term::Term;
+use crate::variable::IntoValueDataType;
+use dialog_artifacts::{Attribute, Entity};
+use serde::{Deserialize, Serialize};
 
 /// Selector pattern for matching against the database (with variables/constants)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Selector {
+pub struct Selector<T>
+where
+    T: IntoValueDataType,
+{
     /// The entity (subject)
-    pub entity: Term,
-    /// The attribute (predicate) 
-    pub attribute: Term,
+    pub entity: Term<Entity>,
+    /// The attribute (predicate)
+    pub attribute: Term<Attribute>,
     /// The value (object)
-    pub value: Term,
+    pub value: Term<T>,
 }
 
-impl Selector {
+impl<T> Selector<T>
+where
+    T: IntoValueDataType,
+{
     /// Create a new selector with the given terms
-    pub fn new(entity: Term, attribute: Term, value: Term) -> Self {
+    pub fn new(entity: Term<Entity>, attribute: Term<Attribute>, value: Term<T>) -> Self {
         Self {
             entity,
             attribute,

@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 /// Re-export ValueDataType for convenience
 pub use dialog_artifacts::ValueDataType;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct Untyped;
 
 /// Trait for types that can be converted to ValueDataType
@@ -50,6 +50,13 @@ impl_into_value_data_type!(dialog_artifacts::Attribute, ValueDataType::Symbol);
 
 impl IntoValueDataType for Untyped {
     fn into_value_data_type() -> Option<ValueDataType> {
+        None
+    }
+}
+
+impl IntoValueDataType for Value {
+    fn into_value_data_type() -> Option<ValueDataType> {
+        // Value is a dynamic type, so we return None to indicate it can hold any type
         None
     }
 }
@@ -115,7 +122,7 @@ where
     T: IntoValueDataType,
 {
     name: VariableName,
-    _phantomType: PhantomData<T>,
+    _phantom_type: PhantomData<T>,
 }
 
 // Implementation for all Variable<T> types
@@ -137,7 +144,7 @@ where
     pub fn new(name: impl Into<VariableName>) -> Self {
         TypedVariable {
             name: name.into(),
-            _phantomType: PhantomData,
+            _phantom_type: PhantomData,
         }
     }
 
@@ -158,6 +165,11 @@ where
         } else {
             true
         }
+    }
+
+    /// Convert this typed variable to an untyped variable
+    pub fn to_untyped(&self) -> TypedVariable<Untyped> {
+        TypedVariable::new(self.name().to_string())
     }
 }
 // Display implementation for all variables
@@ -586,7 +598,7 @@ mod constraint_tests {
         let var = TypedVariable::new("name");
         print!("var {}", var);
         let _u64_var = TypedVariable::<u64>::new("age");
-        var.eq(&_u64_var);
+        let _ = var.eq(&_u64_var);
         let _bool_var = TypedVariable::<bool>::new("active");
 
         // This test function compiling proves the constraint works

@@ -61,15 +61,19 @@ impl Match {
         }
     }
 
-    pub fn unify(&self, term: Term, value: Value) -> Result<Self, InconsistencyError> {
+    pub fn unify<T>(&self, term: Term<T>, value: Value) -> Result<Self, InconsistencyError>
+    where
+        T: crate::variable::IntoValueDataType + Clone + Into<Value> + PartialEq<Value>,
+    {
         match term {
-            Term::Variable(variable) => self.set(variable, value),
+            Term::Variable(variable) => self.set(variable.to_untyped(), value),
             Term::Constant(constant) => {
-                if constant == value {
+                let constant_value: Value = constant.into();
+                if constant_value == value {
                     Ok(self.clone())
                 } else {
                     Err(InconsistencyError::TypeMismatch {
-                        expected: constant,
+                        expected: constant_value,
                         actual: value,
                     })
                 }
@@ -77,10 +81,13 @@ impl Match {
         }
     }
 
-    pub fn resolve(&self, term: &Term) -> Result<Value, InconsistencyError> {
+    pub fn resolve<T>(&self, term: &Term<T>) -> Result<Value, InconsistencyError> 
+    where
+        T: crate::variable::IntoValueDataType + Clone + Into<Value>,
+    {
         match term {
-            Term::Variable(variable) => self.get(&variable),
-            Term::Constant(constant) => Ok(constant.clone()),
+            Term::Variable(variable) => self.get(&variable.to_untyped()),
+            Term::Constant(constant) => Ok(constant.clone().into()),
         }
     }
 }
