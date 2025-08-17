@@ -4,7 +4,7 @@ use dialog_artifacts::Value;
 use dialog_common::ConditionalSend;
 use futures_core::Stream;
 
-use crate::{InconsistencyError, QueryError, Term, Variable};
+use crate::{InconsistencyError, QueryError, Term, TypedVariable};
 
 pub trait Selection: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend {}
 
@@ -13,7 +13,7 @@ impl<S> Selection for S where S: Stream<Item = Result<Match, QueryError>> + 'sta
 
 #[derive(Clone, Debug)]
 pub struct Match {
-    variables: Arc<BTreeMap<Variable, Value>>,
+    variables: Arc<BTreeMap<TypedVariable<crate::variable::Untyped>, Value>>,
 }
 
 impl Match {
@@ -23,11 +23,14 @@ impl Match {
         }
     }
 
-    pub fn has(&self, variable: &Variable) -> bool {
+    pub fn has(&self, variable: &TypedVariable<crate::variable::Untyped>) -> bool {
         self.variables.contains_key(variable)
     }
 
-    pub fn get(&self, variable: &Variable) -> Result<Value, InconsistencyError> {
+    pub fn get(
+        &self,
+        variable: &TypedVariable<crate::variable::Untyped>,
+    ) -> Result<Value, InconsistencyError> {
         if let Some(value) = self.variables.get(variable) {
             Ok(value.clone())
         } else {
@@ -35,7 +38,11 @@ impl Match {
         }
     }
 
-    pub fn set(&self, variable: Variable, assignment: Value) -> Result<Self, InconsistencyError> {
+    pub fn set(
+        &self,
+        variable: TypedVariable<crate::variable::Untyped>,
+        assignment: Value,
+    ) -> Result<Self, InconsistencyError> {
         if let Ok(assigned) = self.get(&variable) {
             if assigned == assignment {
                 return Ok(self.clone());
@@ -61,7 +68,10 @@ impl Match {
                 if constant == value {
                     Ok(self.clone())
                 } else {
-                    Err(InconsistencyError::TypeMismatch { expected: constant, actual: value })
+                    Err(InconsistencyError::TypeMismatch {
+                        expected: constant,
+                        actual: value,
+                    })
                 }
             }
         }

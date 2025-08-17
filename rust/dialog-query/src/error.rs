@@ -1,7 +1,7 @@
 //! Error types for the query engine
 
 use crate::variable::VariableName;
-use crate::Variable;
+use crate::TypedVariable;
 use dialog_artifacts::{DialogArtifactsError, Value, ValueDataType};
 use thiserror::Error;
 
@@ -80,7 +80,7 @@ pub enum InconsistencyError {
     TypeMismatch { expected: Value, actual: Value },
 
     #[error("Unbound variable: {0}")]
-    UnboundVariableError(Variable),
+    UnboundVariableError(TypedVariable),
 
     #[error("Type mismatch: expected value of type {expected}, got {actual}")]
     UnexpectedType {

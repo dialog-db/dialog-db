@@ -26,10 +26,8 @@ pub use selector::Selector;
 pub use stream::*;
 pub use term::Term;
 
-pub use variable::{
-    AttributeVar, BoolVar, BytesVar, EntityVar, FloatVar, SIntVar, StringVar, UIntVar, Untyped,
-    UntypedVar, ValueDataType, Variable, VariableName,
-};
+pub use variable::Untyped;
+pub use variable::{TypedVariable, ValueDataType, VariableName};
 
 pub use plan::EvaluationPlan;
 pub use query::Query;
@@ -47,9 +45,6 @@ pub mod prelude {
     pub use crate::selector::Selector;
     pub use crate::syntax::Syntax;
     pub use crate::term::Term;
-    pub use crate::variable::{
-        AttributeVar, BoolVar, BytesVar, EntityVar, FloatVar, SIntVar, StringVar, UIntVar, Untyped,
-        UntypedVar, ValueDataType, Variable, VariableName,
-    };
+    pub use crate::variable::{TypedVariable, Untyped, ValueDataType, VariableName};
     // Macros are automatically available due to #[macro_export]
 }

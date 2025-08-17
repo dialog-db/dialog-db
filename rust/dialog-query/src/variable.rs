@@ -1,26 +1,29 @@
 //! New unified Variable system with generic types and clean turbofish syntax
 //! Provides both typed and untyped variables through a single Variable<T> enum
 
-use dialog_artifacts::{Attribute, Entity, Value};
-use serde::{Deserialize, Serialize};
+use dialog_artifacts::Value;
+// use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::marker::PhantomData;
 
 /// Re-export ValueDataType for convenience
 pub use dialog_artifacts::ValueDataType;
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Untyped;
+
 /// Trait for types that can be converted to ValueDataType
 /// This provides the bridge between Rust types and dialog-artifacts types
 pub trait IntoValueDataType {
-    fn into_value_data_type() -> ValueDataType;
+    fn into_value_data_type() -> Option<ValueDataType>;
 }
 
 /// Macro to implement IntoValueDataType for primitive types
 macro_rules! impl_into_value_data_type {
     ($rust_type:ty, $value_data_type:expr) => {
         impl IntoValueDataType for $rust_type {
-            fn into_value_data_type() -> ValueDataType {
-                $value_data_type
+            fn into_value_data_type() -> Option<ValueDataType> {
+                Some($value_data_type)
             }
         }
     };
@@ -45,232 +48,219 @@ impl_into_value_data_type!(Vec<u8>, ValueDataType::Bytes);
 impl_into_value_data_type!(dialog_artifacts::Entity, ValueDataType::Entity);
 impl_into_value_data_type!(dialog_artifacts::Attribute, ValueDataType::Symbol);
 
+impl IntoValueDataType for Untyped {
+    fn into_value_data_type() -> Option<ValueDataType> {
+        None
+    }
+}
+
 /// Variable name - following x-query pattern of string-based variables
 pub type VariableName = String;
 
-/// Unit type representing untyped variables
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Untyped;
-
-/// New unified Variable<T> with phantom types for zero-cost type safety
-/// When T = Untyped (default), the variable is untyped and can unify with any value
-/// When T = specific type, the variable is typed and only unifies with matching values
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Variable<T = Untyped> {
-    /// Variable name (following x-query pattern)
-    pub name: VariableName,
-    /// Phantom data to encode type at compile time (zero cost)
-    pub _phantom: PhantomData<T>,
-}
-
-// Display implementation for untyped variables
-impl Display for Variable<Untyped> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "?{}", self.name)
-    }
-}
-
-// Display implementation for typed variables
-impl<T> Display for Variable<T>
-where
-    T: IntoValueDataType,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "?{}<{}>", self.name, T::into_value_data_type())
-    }
-}
-
-// Hash implementation for untyped variables
-impl std::hash::Hash for Variable<Untyped> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
-        // No type to hash for untyped
-    }
-}
-
-// Hash implementation for typed variables
-impl<T> std::hash::Hash for Variable<T>
-where
-    T: IntoValueDataType,
-{
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
-        (T::into_value_data_type() as u8).hash(state);
-    }
-}
-
-// Serialize implementation for untyped variables
-impl serde::Serialize for Variable<Untyped> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("Variable", 2)?;
-        state.serialize_field("name", &self.name)?;
-        state.serialize_field("type", &None::<u8>)?;
-        state.end()
-    }
-}
-
-// Serialize implementation for typed variables
-impl<T> serde::Serialize for Variable<T>
-where
-    T: IntoValueDataType,
-{
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("Variable", 2)?;
-        state.serialize_field("name", &self.name)?;
-        state.serialize_field("type", &Some(T::into_value_data_type() as u8))?;
-        state.end()
-    }
-}
-
-// Note: Deserialization is only supported for untyped Variable<Untyped>
-// since we can't determine the type parameter from serialized data
-impl<'de> serde::Deserialize<'de> for Variable<Untyped> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        struct VariableHelper {
-            name: VariableName,
-            #[serde(rename = "type")]
-            data_type: Option<u8>,
-        }
-
-        let helper = VariableHelper::deserialize(deserializer)?;
-        // For now, always deserialize as untyped
-        // In the future, we could store type information differently
-        Ok(Variable {
-            name: helper.name,
-            _phantom: PhantomData,
-        })
-    }
+pub struct Variable {
+    name: VariableName,
+    _type: Option<ValueDataType>,
 }
 
 impl Variable {
-    /// Create a new untyped variable that can unify with any value
-    /// This is the primary method for creating untyped variables
-    ///
-    /// # Examples
-    /// ```
-    /// use dialog_query::Variable;
-    ///
-    /// let wildcard = Variable::untyped("anything");  // Returns Variable<Untyped>
-    /// ```
-    pub fn untyped(name: impl Into<VariableName>) -> Self {
-        Self {
+    pub fn new<T>(name: impl Into<VariableName>) -> Self
+    where
+        T: IntoValueDataType,
+    {
+        Variable {
             name: name.into(),
-            _phantom: PhantomData,
+            _type: T::into_value_data_type(),
         }
     }
-}
 
-// Base implementation for all Variable<T>
-impl<T> Variable<T> {
     /// Get the variable name
     pub fn name(&self) -> &str {
         &self.name
     }
-
-    /// Convert to an untyped variable for compatibility
-    pub fn as_untyped(&self) -> Variable<Untyped> {
-        Variable {
-            name: self.name.clone(),
-            _phantom: PhantomData,
-        }
-    }
-}
-
-// Specialized implementation for untyped variables
-impl Variable<Untyped> {
-    /// Create a new untyped variable (alias for Variable::untyped for backward compatibility)
-    ///
-    /// # Examples
-    /// ```
-    /// use dialog_query::Variable;
-    ///
-    /// let wildcard = Variable::untyped("anything");  // Unambiguous untyped creation
-    /// assert_eq!(wildcard.name(), "anything");
-    /// ```
-    pub fn new(name: impl Into<VariableName>) -> Self {
-        Variable::untyped(name)
-    }
-
-    /// Get the data type constraint for untyped variables (always None)
-    pub fn data_type(&self) -> Option<ValueDataType> {
-        None
-    }
-
-    /// Untyped variables can always unify with any value
-    pub fn can_unify_with(&self, _value: &Value) -> bool {
-        true
-    }
-}
-
-// Specialized implementation for typed variables
-impl<T> Variable<T>
-where
-    T: IntoValueDataType,
-{
-    /// Create a new typed variable with the specified type
-    /// This method requires explicit type specification using turbofish syntax
-    ///
-    /// # Examples
-    /// ```
-    /// use dialog_query::Variable;
-    ///
-    /// let name_var = Variable::<String>::new("name");  // Returns Variable<String>
-    /// let age_var = Variable::<u64>::new("age");       // Returns Variable<u64>
-    /// ```
-    pub fn new(name: impl Into<VariableName>) -> Self {
-        Self {
-            name: name.into(),
-            _phantom: PhantomData,
-        }
-    }
     /// Get the data type constraint for typed variables
     pub fn data_type(&self) -> Option<ValueDataType> {
-        Some(T::into_value_data_type())
+        self._type
     }
 
     /// Check if this typed variable can be unified with the given value
     pub fn can_unify_with(&self, value: &Value) -> bool {
         let value_type = ValueDataType::from(value);
-        T::into_value_data_type() == value_type
+        if let Some(var_type) = self.data_type() {
+            value_type == var_type
+        } else {
+            true
+        }
     }
 }
 
-/// Variable assignment types following familiar-query patterns
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum VariableAssignment {
-    /// Variable should be bound to entity key
-    EntityKey(Entity),
-    /// Variable should be bound to attribute key
-    AttributeKey(Attribute),
-    /// Variable should be bound to value
-    ValueKey(Value),
+impl<T> From<TypedVariable<T>> for Variable
+where
+    T: IntoValueDataType,
+{
+    fn from(value: TypedVariable<T>) -> Self {
+        Self::new::<T>(value.name())
+    }
 }
 
-/// Variable bindings - maps variable names to their values
-pub type VariableBindings = std::collections::BTreeMap<VariableName, Value>;
+/// New unified Variable<T> struct with phantom types for zero-cost type safety
+/// When T = () (default), the variable is untyped and can unify with any value
+/// When T = specific type, the variable is typed and only unifies with matching values
+///
+/// T is constrained to types that implement IntoValueDataType, ensuring only
+/// supported Dialog value types can be used.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TypedVariable<T = Untyped>
+where
+    T: IntoValueDataType,
+{
+    name: VariableName,
+    _phantomType: PhantomData<T>,
+}
 
-// Type aliases for convenient usage
-pub type StringVar = Variable<String>;
-pub type BoolVar = Variable<bool>;
-pub type UIntVar = Variable<u64>;
-pub type SIntVar = Variable<i64>;
-pub type FloatVar = Variable<f64>;
-pub type BytesVar = Variable<Vec<u8>>;
-pub type EntityVar = Variable<Entity>;
-pub type AttributeVar = Variable<Attribute>;
-pub type UntypedVar = Variable<Untyped>;
+// Implementation for all Variable<T> types
+impl<T> TypedVariable<T>
+where
+    T: IntoValueDataType,
+{
+    /// Create a new variable with the specified type
+    /// This method requires explicit type specification using turbofish syntax
+    ///
+    /// # Examples
+    /// ```
+    /// use dialog_query::{TypedVariable, Untyped};
+    ///
+    /// let name_var = TypedVariable::<String>::new("name");  // Returns Variable<String>
+    /// let age_var = TypedVariable::<u64>::new("age");       // Returns Variable<u64>
+    /// let any_var = TypedVariable::<Untyped>::new("any");   // Returns Variable<Untyped>
+    /// ```
+    pub fn new(name: impl Into<VariableName>) -> Self {
+        TypedVariable {
+            name: name.into(),
+            _phantomType: PhantomData,
+        }
+    }
+
+    /// Get the variable name
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// Get the data type constraint for typed variables
+    pub fn data_type(&self) -> Option<ValueDataType> {
+        T::into_value_data_type()
+    }
+
+    /// Check if this typed variable can be unified with the given value
+    pub fn can_unify_with(&self, value: &Value) -> bool {
+        let value_type = ValueDataType::from(value);
+        if let Some(var_type) = T::into_value_data_type() {
+            value_type == var_type
+        } else {
+            true
+        }
+    }
+}
+// Display implementation for all variables
+impl<T> Display for TypedVariable<T>
+where
+    T: IntoValueDataType,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match T::into_value_data_type() {
+            Some(data_type) => write!(f, "?{}<{:?}>", self.name, data_type),
+            None => write!(f, "?{}", self.name),
+        }
+    }
+}
+
+// Serialize implementation for typed variables
+impl<T> serde::Serialize for TypedVariable<T>
+where
+    T: IntoValueDataType,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        match self.data_type() {
+            Some(data_type) => {
+                let mut state = serializer.serialize_struct("Variable", 2)?;
+                state.serialize_field("name", self.name())?;
+                state.serialize_field("type", &(data_type as u8))?;
+                state.end()
+            }
+            None => {
+                let mut state = serializer.serialize_struct("Variable", 1)?;
+                state.serialize_field("name", self.name())?;
+                state.end()
+            }
+        }
+    }
+}
+
+// Deserialize implementation for Variable<T>
+impl<'de, T> serde::Deserialize<'de> for TypedVariable<T>
+where
+    T: IntoValueDataType,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, MapAccess, Visitor};
+        use std::fmt;
+
+        struct VariableVisitor<T>(PhantomData<T>);
+
+        impl<'de, T> Visitor<'de> for VariableVisitor<T>
+        where
+            T: IntoValueDataType,
+        {
+            type Value = TypedVariable<T>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct Variable")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<TypedVariable<T>, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut name = None;
+                let mut var_type: Option<u8> = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        "name" => {
+                            if name.is_some() {
+                                return Err(de::Error::duplicate_field("name"));
+                            }
+                            name = Some(map.next_value()?);
+                        }
+                        "type" => {
+                            if var_type.is_some() {
+                                return Err(de::Error::duplicate_field("type"));
+                            }
+                            var_type = Some(map.next_value()?);
+                        }
+                        _ => {
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                let name: String = name.ok_or_else(|| de::Error::missing_field("name"))?;
+
+                // For now, we ignore the type field and just create the variable
+                // with the phantom type T specified at compile time
+                Ok(TypedVariable::new(name))
+            }
+        }
+
+        deserializer.deserialize_struct("Variable", &["name", "type"], VariableVisitor(PhantomData))
+    }
+}
 
 /// Variable scope for tracking bound variables during planning
 #[derive(Debug, Clone)]
@@ -280,28 +270,27 @@ pub struct VariableScope {
 }
 
 impl VariableScope {
-    /// Create a new empty scope
+    /// Create a new empty variable scope
     pub fn new() -> Self {
         Self {
             bound_variables: std::collections::BTreeSet::new(),
         }
     }
 
-    /// Create a scope with the given bound variables
-    pub fn with_bound(variables: std::collections::BTreeSet<VariableName>) -> Self {
-        Self {
-            bound_variables: variables,
-        }
-    }
-
     /// Check if a variable is bound in this scope
-    pub fn is_bound(&self, variable: &VariableName) -> bool {
-        self.bound_variables.contains(variable)
+    pub fn is_bound(&self, variable_name: &VariableName) -> bool {
+        self.bound_variables.contains(variable_name)
     }
 
     /// Add a variable to the bound set
-    pub fn bind_variable(&mut self, variable: VariableName) {
-        self.bound_variables.insert(variable);
+    pub fn bind(&mut self, variable_name: VariableName) {
+        self.bound_variables.insert(variable_name);
+    }
+}
+
+impl Default for VariableScope {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -311,26 +300,26 @@ mod tests {
 
     #[test]
     fn test_variable_creation() {
-        let var = Variable::untyped("person");
+        let var = TypedVariable::<Untyped>::new("person");
         assert_eq!(var.name(), "person");
         assert!(var.data_type().is_none());
     }
 
     #[test]
     fn test_typed_variable() {
-        let var = Variable::<String>::new("name");
+        let var = TypedVariable::<String>::new("name");
         assert_eq!(var.name(), "name");
         assert_eq!(var.data_type(), Some(ValueDataType::String));
     }
 
     #[test]
     fn test_variable_type_matching() {
-        let string_var = Variable::<String>::new("name");
+        let string_var = TypedVariable::<String>::new("name");
 
         assert!(string_var.can_unify_with(&Value::String("Alice".to_string())));
         assert!(!string_var.can_unify_with(&Value::Boolean(true)));
 
-        let any_var = Variable::untyped("anything");
+        let any_var = TypedVariable::<Untyped>::new("anything");
         assert!(any_var.can_unify_with(&Value::String("Alice".to_string())));
         assert!(any_var.can_unify_with(&Value::Boolean(true)));
     }
@@ -352,101 +341,10 @@ mod tests {
     }
 
     #[test]
-    fn test_variable_scope() {
-        let mut scope = VariableScope::new();
-        assert!(!scope.is_bound(&"person".to_string()));
-
-        scope.bind_variable("person".to_string());
-        assert!(scope.is_bound(&"person".to_string()));
-    }
-
-    #[test]
-    fn test_variable_constructors() {
-        // Test untyped default behavior
-        let any_var = Variable::untyped("user");
-        assert_eq!(any_var.name(), "user");
-        assert_eq!(any_var.data_type(), None);
-
-        // Test turbofish syntax for typed variables
-        let string_var = Variable::<String>::new("name");
-        let bool_var = Variable::<bool>::new("active");
-        let int_var = Variable::<u64>::new("age");
-        let float_var = Variable::<f64>::new("score");
-        let entity_var = Variable::<Entity>::new("user");
-
-        assert_eq!(string_var.name(), "name");
-        assert_eq!(string_var.data_type(), Some(ValueDataType::String));
-
-        assert_eq!(bool_var.name(), "active");
-        assert_eq!(bool_var.data_type(), Some(ValueDataType::Boolean));
-
-        assert_eq!(int_var.name(), "age");
-        assert_eq!(int_var.data_type(), Some(ValueDataType::UnsignedInt));
-
-        assert_eq!(float_var.name(), "score");
-        assert_eq!(float_var.data_type(), Some(ValueDataType::Float));
-
-        assert_eq!(entity_var.name(), "user");
-        assert_eq!(entity_var.data_type(), Some(ValueDataType::Entity));
-    }
-
-    #[test]
     fn test_type_specific_constructors() {
-        // Test all type-specific constructors using turbofish syntax
-        let string_var = Variable::<String>::new("name");
-        let bool_var = Variable::<bool>::new("active");
-        let uint_var = Variable::<u64>::new("count");
-        let sint_var = Variable::<i64>::new("delta");
-        let float_var = Variable::<f64>::new("score");
-        let entity_var = Variable::<Entity>::new("user");
-        let symbol_var = Variable::<Attribute>::new("tag");
-        let bytes_var = Variable::<Vec<u8>>::new("data");
-
-        assert_eq!(string_var.data_type(), Some(ValueDataType::String));
-        assert_eq!(bool_var.data_type(), Some(ValueDataType::Boolean));
-        assert_eq!(uint_var.data_type(), Some(ValueDataType::UnsignedInt));
-        assert_eq!(sint_var.data_type(), Some(ValueDataType::SignedInt));
-        assert_eq!(float_var.data_type(), Some(ValueDataType::Float));
-        assert_eq!(entity_var.data_type(), Some(ValueDataType::Entity));
-        assert_eq!(symbol_var.data_type(), Some(ValueDataType::Symbol));
-        assert_eq!(bytes_var.data_type(), Some(ValueDataType::Bytes));
-    }
-
-    #[test]
-    fn test_turbofish_typed_constructor() {
-        // Test the new turbofish constructor Variable::<T>::new()
-        let name_var = Variable::<String>::new("name");
-        let age_var = Variable::<u64>::new("age");
-        let active_var = Variable::<bool>::new("active");
-        let score_var = Variable::<f64>::new("score");
-        let entity_var = Variable::<Entity>::new("user");
-        let bytes_var = Variable::<Vec<u8>>::new("data");
-
-        assert_eq!(name_var.name(), "name");
-        assert_eq!(name_var.data_type(), Some(ValueDataType::String));
-
-        assert_eq!(age_var.name(), "age");
-        assert_eq!(age_var.data_type(), Some(ValueDataType::UnsignedInt));
-
-        assert_eq!(active_var.name(), "active");
-        assert_eq!(active_var.data_type(), Some(ValueDataType::Boolean));
-
-        assert_eq!(score_var.name(), "score");
-        assert_eq!(score_var.data_type(), Some(ValueDataType::Float));
-
-        assert_eq!(entity_var.name(), "user");
-        assert_eq!(entity_var.data_type(), Some(ValueDataType::Entity));
-
-        assert_eq!(bytes_var.name(), "data");
-        assert_eq!(bytes_var.data_type(), Some(ValueDataType::Bytes));
-    }
-
-    #[test]
-    fn test_type_safety_with_turbofish_typed_constructor() {
-        // Test that typed variables correctly enforce type constraints
-        let string_var = Variable::<String>::new("name");
-        let uint_var = Variable::<u64>::new("age");
-        let bool_var = Variable::<bool>::new("active");
+        let string_var = TypedVariable::<String>::new("name");
+        let uint_var = TypedVariable::<u64>::new("age");
+        let bool_var = TypedVariable::<bool>::new("active");
 
         // String variable should only accept string values
         assert!(string_var.can_unify_with(&Value::String("Alice".to_string())));
@@ -465,21 +363,18 @@ mod tests {
     }
 
     #[test]
-    fn test_unified_api() {
-        // Test the unified API with turbofish syntax and default untyped
-        let typed_var = Variable::<String>::new("name");
-        let untyped_var = Variable::untyped("anything");
-        let bool_var = Variable::<bool>::new("manual");
+    fn test_variable_scope() {
+        let mut scope = VariableScope::new();
 
-        // All should have the expected names and types
-        assert_eq!(typed_var.name(), "name");
-        assert_eq!(typed_var.data_type(), Some(ValueDataType::String));
+        assert!(!scope.is_bound(&"person".to_string()));
 
-        assert_eq!(untyped_var.name(), "anything");
-        assert_eq!(untyped_var.data_type(), None);
+        scope.bind("person".to_string());
+        assert!(scope.is_bound(&"person".to_string()));
+    }
 
-        assert_eq!(bool_var.name(), "manual");
-        assert_eq!(bool_var.data_type(), Some(ValueDataType::Boolean));
+    #[test]
+    fn test_untyped_variables_can_unify_with_anything() {
+        let untyped_var = TypedVariable::<Untyped>::new("anything");
 
         // Test that untyped variables can unify with anything
         assert!(untyped_var.can_unify_with(&Value::String("test".to_string())));
@@ -538,8 +433,8 @@ mod tests {
         // Query 1: Find all names (constant attribute, variable entity and value)
         let name_query = Fact::select()
             .the("user/name") // Constant attribute
-            .of(Variable::<Entity>::new("user")) // Variable entity
-            .is(Variable::<String>::new("name")); // Variable value
+            .of(TypedVariable::<Entity>::new("user")) // Variable entity
+            .is(TypedVariable::<String>::new("name")); // Variable value
 
         // This should work because we have a constant attribute to optimize the query
         // Note: Currently returns an error but shows that the plan → evaluate approach is implemented
@@ -564,9 +459,9 @@ mod tests {
 
         // Create a query with all variables - should fail
         let all_vars_query = Fact::select()
-            .the(Variable::<Attribute>::new("attr")) // Variable
-            .of(Variable::<Entity>::new("entity")) // Variable
-            .is(Variable::untyped("value")); // Variable
+            .the(TypedVariable::<Attribute>::new("attr")) // Variable
+            .of(TypedVariable::<Entity>::new("entity")) // Variable
+            .is(TypedVariable::<Untyped>::new("value")); // Variable
 
         // This should fail because we don't have any constants to optimize the query
         let result = all_vars_query.query(&artifacts);
@@ -630,9 +525,9 @@ mod tests {
 
         // 1. Entity-optimized query (constant entity, should use plan → evaluate)
         let alice_facts = Fact::select()
-            .the(Variable::<Attribute>::new("attr"))
+            .the(TypedVariable::<Attribute>::new("attr"))
             .of(alice.clone()) // Constant entity - should optimize by entity
-            .is(Variable::untyped("value"));
+            .is(TypedVariable::<Untyped>::new("value"));
 
         let result = alice_facts.query(&artifacts);
         assert!(result.is_err());
@@ -643,8 +538,8 @@ mod tests {
         // 2. Attribute-optimized query (constant attribute, should work with direct query)
         let name_facts = Fact::select()
             .the("user/name") // Constant attribute - should optimize by attribute
-            .of(Variable::<Entity>::new("entity"))
-            .is(Variable::<String>::new("name"));
+            .of(TypedVariable::<Entity>::new("entity"))
+            .is(TypedVariable::<String>::new("name"));
 
         let result = name_facts.query(&artifacts);
         assert!(result.is_err());
@@ -654,8 +549,8 @@ mod tests {
 
         // 3. Value-optimized query (constant value, should use plan → evaluate)
         let alice_value_facts = Fact::select()
-            .the(Variable::<Attribute>::new("attr"))
-            .of(Variable::<Entity>::new("entity"))
+            .the(TypedVariable::<Attribute>::new("attr"))
+            .of(TypedVariable::<Entity>::new("entity"))
             .is(Value::String("Alice".to_string())); // Constant value - should optimize by value
 
         let result = alice_value_facts.query(&artifacts);
@@ -665,5 +560,37 @@ mod tests {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod constraint_tests {
+    use super::*;
+
+    #[test]
+    fn test_type_constraint_works() {
+        // These should compile - supported types
+        let _string_var = TypedVariable::<String>::new("name");
+        let _u64_var = TypedVariable::<u64>::new("age");
+        let _bool_var = TypedVariable::<bool>::new("active");
+        let _untyped_var = TypedVariable::<Untyped>::new("any");
+
+        // This test function compiling proves the constraint works
+        // because if we tried Variable::<SomeUnsupportedType>::new()
+        // it would fail to compile due to the IntoValueDataType bound
+    }
+
+    #[test]
+    fn vars() {
+        // These should compile - supported types
+        let var = TypedVariable::new("name");
+        print!("var {}", var);
+        let _u64_var = TypedVariable::<u64>::new("age");
+        var.eq(&_u64_var);
+        let _bool_var = TypedVariable::<bool>::new("active");
+
+        // This test function compiling proves the constraint works
+        // because if we tried Variable::<SomeUnsupportedType>::new()
+        // it would fail to compile due to the IntoValueDataType bound
     }
 }

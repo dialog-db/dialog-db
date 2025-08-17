@@ -17,7 +17,7 @@ I like to take inspiration from [Bevy]( https://bevy.org/learn/quick-start/getti
 In dialog we have attributes that act basically the same, however we also want them to have namespace not just name, to do so I think we could use enums instead
 
 ```rs
-#[schema]
+#[relation]
 enum MicroshaftEmployee {
     Name(String),
     Job(String),
@@ -68,4 +68,66 @@ In datomic this will translate to following schema
 {:db/ident :microshaft.employee/address
  :db/valueType :db.type/string
  :db/cardinality :db.cardinality/many}
+```
+
+I would expect to define models using such constructs which would look like this:
+
+```rs
+#[schema]
+struct Employee(Name, Salary, Job, Address);
+```
+
+You would be able to also define models with subset of fields like this:
+
+```rs
+#[schema]
+struct Employee(Name, Job);
+```
+
+You should be able to query using schema by writing something like this:
+
+```rs
+async fn demo() -> Result<()> {
+    let store = MemoryStorageBackend::default();
+    let artifacts = Artifacts::anonymous(store).await?;
+
+    let employees = Employee.query(&artifacts)?.collect().await;
+    println!("{:?}", employees);
+
+    Ok(())
+}
+```
+
+
+## Unknowns
+
+### Optionals
+
+Not sure if this can be made work, but if so it would probably a most natural way in rust
+
+```rs
+#[schema]
+struct Employee(Name, Option<Address>);
+```
+
+### Implicits
+
+Not sure how to go about implicits, which are different from optionals because query engine needs to be able to resolve it during execution.
+
+Also note that we can not mark relation implicit because it's how you compose relations in some cases it's required, in others it's optional and in others yet it is implied.
+
+```rs
+#[implicit("unknown")]
+type Role = Job;
+```
+
+Would be even better if we could annotate it inside the composition, but not sure how could this be manifested.
+
+```rs
+#[schema]
+struct Employee(
+  Name,
+  #[implicit("Earth")]
+  Address
+);
 ```
