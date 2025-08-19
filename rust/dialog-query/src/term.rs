@@ -59,6 +59,15 @@ where
     }
 }
 
+// impl<T> From<&TypedVariable<T>> for Term<T>
+// where
+//     T: IntoValueDataType,
+// {
+//     fn from(var: &TypedVariable<T>) -> Self {
+//         Term::Variable(var.clone())
+//     }
+// }
+
 // Convenience conversions for common types to Term<Value>
 impl From<Value> for Term<Value> {
     fn from(value: Value) -> Self {
@@ -335,7 +344,7 @@ mod tests {
         
         assert!(term1.is_constant());
         assert!(term2.is_constant());
-        
+
         if let Term::Constant(s) = term1 {
             assert_eq!(s, "hello");
         } else {

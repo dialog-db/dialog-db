@@ -18,6 +18,7 @@ pub mod syntax;
 pub mod term;
 pub mod variable;
 
+pub use dialog_artifacts::Entity;
 pub use error::{InconsistencyError, QueryError};
 pub use fact::{assert, retract, Assertion, Claim, Fact, Retraction};
 pub use fact_selector::{FactSelector, FactSelectorPlan};

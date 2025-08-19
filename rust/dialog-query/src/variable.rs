@@ -166,10 +166,13 @@ where
             true
         }
     }
-
+    
     /// Convert this typed variable to an untyped variable
     pub fn to_untyped(&self) -> TypedVariable<Untyped> {
-        TypedVariable::new(self.name().to_string())
+        TypedVariable {
+            name: self.name.clone(),
+            _phantom_type: PhantomData,
+        }
     }
 }
 // Display implementation for all variables
@@ -595,11 +598,11 @@ mod constraint_tests {
     #[test]
     fn vars() {
         // These should compile - supported types
-        let var = TypedVariable::new("name");
+        let var = TypedVariable::<String>::new("name");
         print!("var {}", var);
         let _u64_var = TypedVariable::<u64>::new("age");
-        let _ = var.eq(&_u64_var);
         let _bool_var = TypedVariable::<bool>::new("active");
+        let _untyped_var = TypedVariable::<Untyped>::new("any");
 
         // This test function compiling proves the constraint works
         // because if we tried Variable::<SomeUnsupportedType>::new()

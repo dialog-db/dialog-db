@@ -74,6 +74,8 @@ pub fn relation(_args: TokenStream, input: TokenStream) -> TokenStream {
         let enum_dotted = to_snake_case(&enum_name.to_string());
         let variant_snake = to_snake_case_with_underscores(&variant_name.to_string());
         let attribute_name = format!("{}/{}", enum_dotted, variant_snake);
+        let attribute_name_lit = syn::LitStr::new(&attribute_name, proc_macro2::Span::call_site());
+        
         
         let struct_def = quote! {
             #[doc = concat!("Attribute struct for ", stringify!(#variant_name))]
@@ -81,7 +83,7 @@ pub fn relation(_args: TokenStream, input: TokenStream) -> TokenStream {
             
             impl dialog_query::Attribute for #variant_name {
                 fn name() -> &'static str {
-                    #attribute_name
+                    #attribute_name_lit
                 }
                 
                 fn cardinality() -> dialog_query::Cardinality {
@@ -109,6 +111,7 @@ pub fn relation(_args: TokenStream, input: TokenStream) -> TokenStream {
                     self.0
                 }
             }
+
         };
         
         structs.push(struct_def);
@@ -118,6 +121,7 @@ pub fn relation(_args: TokenStream, input: TokenStream) -> TokenStream {
         #[allow(non_snake_case)]
         pub mod #enum_name {
             use super::*;
+            use dialog_query;
             
             #(#structs)*
         }

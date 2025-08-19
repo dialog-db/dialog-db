@@ -25,7 +25,7 @@ enum RelationWithMany {
 #[relation]
 enum ComplexRelation {
     Id(dialog_artifacts::Entity),
-    Attr(dialog_artifacts::Attribute), 
+    Attr(dialog_artifacts::Attribute),
     Data(Vec<u8>),
     Count(i64),
     Score(f64),
@@ -59,7 +59,10 @@ mod tests {
 
         // Test value types
         assert_eq!(SimpleRelation::Name::value_type(), ValueDataType::String);
-        assert_eq!(SimpleRelation::Age::value_type(), ValueDataType::UnsignedInt);
+        assert_eq!(
+            SimpleRelation::Age::value_type(),
+            ValueDataType::UnsignedInt
+        );
         assert_eq!(SimpleRelation::Active::value_type(), ValueDataType::Boolean);
     }
 
@@ -73,13 +76,22 @@ mod tests {
         // Test attribute names
         assert_eq!(RelationWithMany::Title::name(), "relation.with.many/title");
         assert_eq!(RelationWithMany::Tags::name(), "relation.with.many/tags");
-        assert_eq!(RelationWithMany::Categories::name(), "relation.with.many/categories");
-        assert_eq!(RelationWithMany::Published::name(), "relation.with.many/published");
+        assert_eq!(
+            RelationWithMany::Categories::name(),
+            "relation.with.many/categories"
+        );
+        assert_eq!(
+            RelationWithMany::Published::name(),
+            "relation.with.many/published"
+        );
 
         // Test cardinality - #[many] attributes should have Many cardinality
         assert_eq!(RelationWithMany::Title::cardinality(), Cardinality::One);
         assert_eq!(RelationWithMany::Tags::cardinality(), Cardinality::Many);
-        assert_eq!(RelationWithMany::Categories::cardinality(), Cardinality::Many);
+        assert_eq!(
+            RelationWithMany::Categories::cardinality(),
+            Cardinality::Many
+        );
         assert_eq!(RelationWithMany::Published::cardinality(), Cardinality::One);
 
         // Test values
@@ -91,7 +103,7 @@ mod tests {
 
     #[test]
     fn test_complex_data_types() {
-        use dialog_artifacts::{Entity, Attribute};
+        use dialog_artifacts::{Attribute, Entity};
         use std::str::FromStr;
 
         let entity = Entity::new().unwrap();
@@ -115,7 +127,10 @@ mod tests {
         assert_eq!(ComplexRelation::Id::value_type(), ValueDataType::Entity);
         assert_eq!(ComplexRelation::Attr::value_type(), ValueDataType::Symbol);
         assert_eq!(ComplexRelation::Data::value_type(), ValueDataType::Bytes);
-        assert_eq!(ComplexRelation::Count::value_type(), ValueDataType::SignedInt);
+        assert_eq!(
+            ComplexRelation::Count::value_type(),
+            ValueDataType::SignedInt
+        );
         assert_eq!(ComplexRelation::Score::value_type(), ValueDataType::Float);
     }
 
@@ -135,13 +150,13 @@ mod tests {
     #[test]
     fn test_snake_case_conversion() {
         // Test that CamelCase enum names are converted to dotted namespace in attribute names
-        
+
         // SimpleRelation -> simple.relation
         assert_eq!(SimpleRelation::Name::name(), "simple.relation/name");
-        
-        // RelationWithMany -> relation.with.many  
+
+        // RelationWithMany -> relation.with.many
         assert_eq!(RelationWithMany::Title::name(), "relation.with.many/title");
-        
+
         // ComplexRelation -> complex.relation
         assert_eq!(ComplexRelation::Id::name(), "complex.relation/id");
     }
@@ -169,20 +184,20 @@ mod tests {
         // Test that new() method works with Into<T> conversions
         let name1 = SimpleRelation::Name::new("John");
         let name2 = SimpleRelation::Name::new("John".to_string());
-        
+
         assert_eq!(name1.value(), name2.value());
-        
+
         // Test with string slice vs String
         let title1 = RelationWithMany::Title::new("Article");
         let title2 = RelationWithMany::Title::new("Article".to_string());
-        
+
         assert_eq!(title1.value(), title2.value());
     }
 
     #[test]
     fn test_relation_integration_with_terms() {
-        use dialog_query::Term;
         use dialog_artifacts::Value;
+        use dialog_query::Term;
 
         // Test that we can create Terms from relation attribute constants
         let _name_attr = SimpleRelation::Name::new("John");
@@ -206,10 +221,10 @@ mod tests {
         }
     }
 
-    #[test] 
+    #[test]
     fn test_relation_with_fact_selector() {
+        use dialog_artifacts::{Attribute, Entity, Value};
         use dialog_query::{FactSelector, Term};
-        use dialog_artifacts::{Entity, Attribute, Value};
         use std::str::FromStr;
 
         // Create test data
@@ -240,17 +255,20 @@ mod tests {
         // This test verifies that the macro generates compile-time errors
         // for unsupported types - we can't easily test compile failures
         // but we document the expected behavior here.
-        
+
         // The following would cause compile errors if uncommented:
         // #[relation]
         // enum UnsupportedTypes {
         //     CustomStruct(SomeCustomStruct), // Would generate compile_error!
         //     RawPointer(*const u8),          // Would generate compile_error!
         // }
-        
+
         // Instead, we test that supported types work correctly
         assert_eq!(SimpleRelation::Name::value_type(), ValueDataType::String);
-        assert_eq!(SimpleRelation::Age::value_type(), ValueDataType::UnsignedInt);
+        assert_eq!(
+            SimpleRelation::Age::value_type(),
+            ValueDataType::UnsignedInt
+        );
         assert_eq!(SimpleRelation::Active::value_type(), ValueDataType::Boolean);
     }
 }
