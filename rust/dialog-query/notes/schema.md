@@ -30,17 +30,65 @@ enum MicroshaftEmployee {
 This expands to following form
 
 ```rs
-#[derive(Attribute::one("microshaft.employee"))]
 struct Name(String);
+impl Attribute for Name {
+    domain() -> &'static str {
+        "microshaft.employee"
+    }
+    cardinality() -> Cardinality {
+        Cardinality::One
+    }
+}
+impl From<&Name> for dialog_artifacts::ValueDataType {
+    fn from(value: &Name) -> Self {
+        dialog_artifacts::ValueDataType::String
+    }
+}
 
-#[derive(Attribute::one("microshaft.employee"))]
 struct Job(String);
+impl Attribute for Job {
+    domain() -> &'static str {
+        "microshaft.employee"
+    }
+    cardinality() -> Cardinality {
+        Cardinality::One
+    }
+}
+impl From<&Job> for dialog_artifacts::ValueDataType {
+    fn from(value: &Job) -> Self {
+        dialog_artifacts::ValueDataType::String
+    }
+}
 
-#[derive(Attribute::one("microshaft.employee"))]
 struct Salary(u32);
+impl Attribute for Salary {
+    domain() -> &'static str {
+        "microshaft.employee"
+    }
+    cardinality() -> Cardinality {
+        Cardinality::One
+    }
+}
+impl From<&Salary> for dialog_artifacts::ValueDataType {
+    fn from(value: &Salary) -> Self {
+        dialog_artifacts::ValueDataType::UnsignedInt
+    }
+}
 
-#[derive(Attribute::many("microshaft.employee"))]
 struct Address(String);
+impl Attribute for Address {
+    domain() -> &'static str {
+        "microshaft.employee"
+    }
+    cardinality() -> Cardinality {
+        Cardinality::Many
+    }
+}
+impl From<&Address> for dialog_artifacts::ValueDataType {
+    fn from(value: &Address) -> Self {
+        dialog_artifacts::ValueDataType::String
+    }
+}
 
 impl MicroshaftEmployee {
     const Name: &'static = Name;
@@ -91,7 +139,8 @@ async fn demo() -> Result<()> {
     let store = MemoryStorageBackend::default();
     let artifacts = Artifacts::anonymous(store).await?;
 
-    let employees = Employee.query(&artifacts)?.collect().await;
+    let employees = Employee::find(Name::is("Alice"), Job::any())
+        .query(&artifacts)?.collect().await;
     println!("{:?}", employees);
 
     Ok(())
@@ -130,4 +179,20 @@ struct Employee(
   #[implicit("Earth")]
   Address
 );
+```
+
+
+## Alternative Approach
+
+```rs
+#[component]
+struct Employee {
+  name: String,
+  salary: i32,
+  #[many]
+  address: String,
+}
+impl Rule for Employee {
+
+}
 ```

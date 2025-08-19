@@ -29,11 +29,26 @@ pub use term::Term;
 pub use variable::Untyped;
 pub use variable::{TypedVariable, ValueDataType, VariableName};
 
+/// Cardinality indicates whether an attribute can have one or many values
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cardinality {
+    One,
+    Many,
+}
+
+/// Trait for attribute types that can be used in relations
+pub trait Attribute {
+    fn name() -> &'static str;
+    fn cardinality() -> Cardinality;
+    fn value_type() -> ValueDataType;
+}
+
 pub use plan::EvaluationPlan;
 pub use query::Query;
 pub use syntax::Syntax;
 
-// Macros are automatically available at crate root due to #[macro_export]
+// Re-export procedural macros
+pub use dialog_query_macros::relation;
 
 /// Re-export commonly used types
 pub mod prelude {

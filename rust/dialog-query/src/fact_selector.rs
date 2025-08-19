@@ -58,7 +58,7 @@ impl FactSelector {
     }
 
     /// Set the value (object) - accepts Variables or Terms
-pub fn is<T: Into<Term<Value>>>(mut self, value: T) -> Self {
+    pub fn is<T: Into<Term<Value>>>(mut self, value: T) -> Self {
         self.is = Some(value.into());
         self
     }
@@ -130,7 +130,7 @@ pub fn is<T: Into<Term<Value>>>(mut self, value: T) -> Self {
             match term {
                 Term::Constant(value) => {
                     selector = Some(match selector {
-                        None => ArtifactSelector::new().is(value),
+                        None => ArtifactSelector::new().is(value.to_owned()),
                         Some(s) => s.is(value.to_owned()),
                     });
                 }
@@ -164,9 +164,13 @@ pub fn is<T: Into<Term<Value>>>(mut self, value: T) -> Self {
                             attribute: format!("Invalid attribute format: {}", s),
                         })?
                     }
+                    Value::Symbol(attr) => attr,
                     _ => {
                         return Err(QueryError::InvalidAttribute {
-                            attribute: format!("Expected string for attribute, got: {:?}", value),
+                            attribute: format!(
+                                "Expected string or symbol for attribute, got: {:?}",
+                                value
+                            ),
                         })
                     }
                 };
@@ -380,7 +384,7 @@ impl Query for FactSelectorPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::variable::TypedVariable;
+    use crate::variable::{TypedVariable, ValueDataType};
     use dialog_artifacts::Value;
 
     #[test]
@@ -467,18 +471,20 @@ mod tests {
             panic!("Expected constant attribute");
         }
 
-        // Check entity is untyped variable
+        // Check entity variable (should be typed as Entity)
         if let Some(Term::Variable(var)) = &fact_selector.of {
             assert_eq!(var.name(), "user");
-            assert!(var.data_type().is_none());
+            assert_eq!(var.data_type(), Some(ValueDataType::Entity));
         } else {
             panic!("Expected variable for entity");
         }
 
-        // Check value variable - all variables in Terms should be untyped
+        // Check value variable (should be typed as Value, which returns None)
         if let Some(Term::Variable(var)) = &fact_selector.is {
             assert_eq!(var.name(), "name");
-            assert!(var.data_type().is_none()); // Terms convert all variables to untyped
+            // When TypedVariable<String> is converted to Term<Value>, it becomes TypedVariable<Value>
+            // TypedVariable<Value> returns None for data_type() since Value can hold any type
+            assert!(var.data_type().is_none());
         } else {
             panic!("Expected variable for value");
         }
@@ -486,10 +492,7 @@ mod tests {
 
     #[test]
     fn test_fact_selector_with_constant_value() {
-        let fact_selector =
-            FactSelector::new()
-                .the("user/email")
-                .is("user@example.com");
+        let fact_selector = FactSelector::new().the("user/email").is("user@example.com");
 
         if let Some(Term::Constant(value)) = &fact_selector.is {
             match value {
