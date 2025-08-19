@@ -217,7 +217,7 @@ mod tests {
         let name_attr = Attribute::from_str("simple.relation/name").unwrap();
 
         // Test that we can use relation-generated attribute names in FactSelector
-        let fact_selector = FactSelector::new()
+        let fact_selector: FactSelector<Value> = FactSelector::new()
             .the(name_attr)
             .of(Term::Constant(entity))
             .is(Term::Constant(Value::String("John".to_string())));

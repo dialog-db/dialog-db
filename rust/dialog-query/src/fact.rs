@@ -1,7 +1,8 @@
-//! Fact, Assertion, and Retraction types for the dialog-query system
+//! Fact, Assertion, Retraction, and Claim types for the dialog-query system
 
 use dialog_artifacts::{Artifact, Attribute, Cause, Entity, Instruction, Value};
 use serde::{Deserialize, Serialize};
+
 
 /// An assertion represents a fact to be asserted in the database
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,51 +26,109 @@ pub struct Retraction {
     pub is: Value,
 }
 
-/// A fact is an assertion with a cause - represents persisted data
+/// A claim represents an assertion or retraction before it becomes a fact
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Fact {
-    /// The attribute (predicate)
-    pub the: Attribute,
-    /// The entity (subject)
-    pub of: Entity,
-    /// The value (object)
-    pub is: Value,
-    /// The cause of this fact
-    pub cause: Cause,
+pub enum Claim<T = Value> {
+    /// An assertion claim
+    Assertion {
+        /// The attribute (predicate)
+        the: Attribute,
+        /// The entity (subject)
+        of: Entity,
+        /// The value (object)
+        is: T,
+    },
+    /// A retraction claim
+    Retraction {
+        /// The attribute (predicate)
+        the: Attribute,
+        /// The entity (subject)
+        of: Entity,
+        /// The value (object)
+        is: T,
+    },
+}
+
+/// A fact represents persisted data with a cause - can be an assertion or retraction
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Fact<T = Value> {
+    /// An assertion fact with cause
+    Assertion {
+        /// The attribute (predicate)
+        the: Attribute,
+        /// The entity (subject)
+        of: Entity,
+        /// The value (object)
+        is: T,
+        /// The cause of this fact
+        cause: Cause,
+    },
+    /// A retraction fact with cause
+    Retraction {
+        /// The attribute (predicate)
+        the: Attribute,
+        /// The entity (subject)
+        of: Entity,
+        /// The value (object)
+        is: T,
+        /// The cause of this fact
+        cause: Cause,
+    },
 }
 
 impl Fact {
-    /// Create an assertion from individual components
-    pub fn assert(
-        the: impl Into<Attribute>,
-        of: impl Into<Entity>,
-        is: impl Into<Value>,
-    ) -> Assertion {
-        Assertion {
-            the: the.into(),
-            of: of.into(),
-            is: is.into(),
-        }
-    }
-
-    /// Create a retraction from individual components
-    pub fn retract(
-        the: impl Into<Attribute>,
-        of: impl Into<Entity>,
-        is: impl Into<Value>,
-    ) -> Retraction {
-        Retraction {
-            the: the.into(),
-            of: of.into(),
-            is: is.into(),
-        }
-    }
-
-    /// Start building a fact selector for queries
-    pub fn select() -> crate::FactSelector {
+    /// Start building a fact selector for queries  
+    pub fn select() -> crate::FactSelector<Value> {
         crate::FactSelector::new()
     }
 }
+
+impl<T> Fact<T> {
+    /// Create an assertion claim from individual components
+    pub fn assert(
+        the: impl Into<Attribute>,
+        of: impl Into<Entity>,
+        is: T,
+    ) -> Claim<T> {
+        Claim::Assertion {
+            the: the.into(),
+            of: of.into(),
+            is,
+        }
+    }
+
+    /// Create a retraction claim from individual components
+    pub fn retract(
+        the: impl Into<Attribute>,
+        of: impl Into<Entity>,
+        is: T,
+    ) -> Claim<T> {
+        Claim::Retraction {
+            the: the.into(),
+            of: of.into(),
+            is,
+        }
+    }
+}
+
+/// Create a generic assertion claim from individual components
+pub fn assert<T>(the: impl Into<Attribute>, of: impl Into<Entity>, is: impl Into<T>) -> Claim<T> {
+    Claim::Assertion {
+        the: the.into(),
+        of: of.into(),
+        is: is.into(),
+    }
+}
+
+/// Create a generic retraction claim from individual components
+pub fn retract<T>(the: impl Into<Attribute>, of: impl Into<Entity>, is: impl Into<T>) -> Claim<T> {
+    Claim::Retraction {
+        the: the.into(),
+        of: of.into(),
+        is: is.into(),
+    }
+}
+
 
 /// Convert Assertion to Instruction for committing
 impl From<Assertion> for Instruction {
@@ -97,6 +156,35 @@ impl From<Retraction> for Instruction {
     }
 }
 
+/// Convert Claim to Instruction for committing
+impl<T> From<Claim<T>> for Instruction
+where
+    T: Into<Value>,
+{
+    fn from(claim: Claim<T>) -> Self {
+        match claim {
+            Claim::Assertion { the, of, is } => {
+                let artifact = Artifact {
+                    the,
+                    of,
+                    is: is.into(),
+                    cause: None,
+                };
+                Instruction::Assert(artifact)
+            }
+            Claim::Retraction { the, of, is } => {
+                let artifact = Artifact {
+                    the,
+                    of,
+                    is: is.into(),
+                    cause: None,
+                };
+                Instruction::Retract(artifact)
+            }
+        }
+    }
+}
+
 // Note: From implementations for external types (Attribute, Value) cannot be defined here
 // due to Rust's orphan rules. Users should use .parse() or explicit constructors instead.
 
@@ -107,40 +195,50 @@ mod tests {
     #[test]
     fn test_fact_assert() {
         let entity = Entity::new().unwrap();
-        let assertion = Fact::assert(
+        let claim = Fact::assert(
             "user/name".parse::<Attribute>().unwrap(),
             entity.clone(),
             Value::String("Alice".to_string()),
         );
 
-        assert_eq!(assertion.the.to_string(), "user/name");
-        assert_eq!(assertion.of, entity);
-        assert_eq!(assertion.is, Value::String("Alice".to_string()));
+        match claim {
+            Claim::Assertion { the, of, is } => {
+                assert_eq!(the.to_string(), "user/name");
+                assert_eq!(of, entity);
+                assert_eq!(is, Value::String("Alice".to_string()));
+            }
+            _ => panic!("Expected Claim::Assertion"),
+        }
     }
 
     #[test]
     fn test_fact_retract() {
         let entity = Entity::new().unwrap();
-        let retraction = Fact::retract(
+        let claim = Fact::retract(
             "user/name".parse::<Attribute>().unwrap(),
             entity.clone(),
             Value::String("Alice".to_string()),
         );
 
-        assert_eq!(retraction.the.to_string(), "user/name");
-        assert_eq!(retraction.of, entity);
-        assert_eq!(retraction.is, Value::String("Alice".to_string()));
+        match claim {
+            Claim::Retraction { the, of, is } => {
+                assert_eq!(the.to_string(), "user/name");
+                assert_eq!(of, entity);
+                assert_eq!(is, Value::String("Alice".to_string()));
+            }
+            _ => panic!("Expected Claim::Retraction"),
+        }
     }
 
     #[test]
     fn test_assertion_to_instruction() {
         let entity = Entity::new().unwrap();
-        let assertion = Fact::assert(
+        let claim = Fact::assert(
             "user/name".parse::<Attribute>().unwrap(),
             entity.clone(),
             Value::String("Alice".to_string()),
         );
-        let instruction: Instruction = assertion.into();
+        let instruction: Instruction = claim.into();
 
         match instruction {
             Instruction::Assert(artifact) => {
@@ -156,12 +254,12 @@ mod tests {
     #[test]
     fn test_retraction_to_instruction() {
         let entity = Entity::new().unwrap();
-        let retraction = Fact::retract(
+        let claim = Fact::retract(
             "user/name".parse::<Attribute>().unwrap(),
             entity.clone(),
             Value::String("Alice".to_string()),
         );
-        let instruction: Instruction = retraction.into();
+        let instruction: Instruction = claim.into();
 
         match instruction {
             Instruction::Retract(artifact) => {
@@ -179,24 +277,106 @@ mod tests {
         let entity = Entity::new().unwrap();
 
         // This is the clean API we want:
-        let assertion = Fact::assert(
+        let assertion_claim = Fact::assert(
             "user/name".parse::<Attribute>().unwrap(),
             entity.clone(),
             Value::String("Alice".to_string()),
         );
-        let retraction = Fact::retract(
+        let retraction_claim = Fact::retract(
             "user/email".parse::<Attribute>().unwrap(),
             entity.clone(),
             Value::String("alice@example.com".to_string()),
         );
 
         // Convert to instructions for committing
-        let assert_instruction: Instruction = assertion.into();
-        let retract_instruction: Instruction = retraction.into();
+        let assert_instruction: Instruction = assertion_claim.into();
+        let retract_instruction: Instruction = retraction_claim.into();
 
         // Verify they're the right types
         assert!(matches!(assert_instruction, Instruction::Assert(_)));
         assert!(matches!(retract_instruction, Instruction::Retract(_)));
+    }
+
+    #[test]
+    fn test_generic_static_functions() {
+        let entity = Entity::new().unwrap();
+
+        // Test generic static assert function with String type
+        let string_claim: Claim<String> = assert(
+            "user/name".parse::<Attribute>().unwrap(),
+            entity.clone(),
+            "Alice".to_string(),
+        );
+
+        match string_claim {
+            Claim::Assertion { the, of, is } => {
+                assert_eq!(the.to_string(), "user/name");
+                assert_eq!(of, entity);
+                assert_eq!(is, "Alice".to_string());
+            }
+            _ => panic!("Expected Claim::Assertion"),
+        }
+
+        // Test generic static retract function with u32 type
+        let number_claim: Claim<u32> = retract(
+            "user/age".parse::<Attribute>().unwrap(),
+            entity.clone(),
+            25u32,
+        );
+
+        match number_claim {
+            Claim::Retraction { the, of, is } => {
+                assert_eq!(the.to_string(), "user/age");
+                assert_eq!(of, entity);
+                assert_eq!(is, 25u32);
+            }
+            _ => panic!("Expected Claim::Retraction"),
+        }
+    }
+
+    #[test]
+    fn test_string_literal_support() {
+        let entity = Entity::new().unwrap();
+        
+        // Test with Value type (need to construct Value explicitly)
+        let claim = Fact::<Value>::assert(
+            "user/name".parse::<Attribute>().unwrap(),
+            entity.clone(),
+            Value::String("Alice".to_string()), // Direct Value construction
+        );
+        
+        match claim {
+            Claim::Assertion { the, of, is } => {
+                assert_eq!(the.to_string(), "user/name");
+                assert_eq!(of, entity);
+                assert_eq!(is, Value::String("Alice".to_string()));
+            }
+            _ => panic!("Expected Claim::Assertion"),
+        }
+
+        // Test with String type directly  
+        let string_claim = Fact::<String>::assert(
+            "user/email".parse::<Attribute>().unwrap(),
+            entity.clone(),
+            "alice@example.com".to_string(),
+        );
+        
+        match string_claim {
+            Claim::Assertion { the, of, is } => {
+                assert_eq!(the.to_string(), "user/email");
+                assert_eq!(of, entity);
+                assert_eq!(is, "alice@example.com".to_string());
+            }
+            _ => panic!("Expected Claim::Assertion"),
+        }
+
+        // Test that both types work with FactSelector and Query trait
+        let value_selector: crate::FactSelector<Value> = crate::FactSelector::new();
+        let string_selector: crate::FactSelector<String> = crate::FactSelector::new();
+        
+        // Both should compile and work
+        assert!(value_selector.the.is_none());
+        assert!(string_selector.the.is_none());
     }
 }
 

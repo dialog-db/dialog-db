@@ -19,7 +19,7 @@ pub mod term;
 pub mod variable;
 
 pub use error::{InconsistencyError, QueryError};
-pub use fact::{Assertion, Fact, Retraction};
+pub use fact::{assert, retract, Assertion, Claim, Fact, Retraction};
 pub use fact_selector::{FactSelector, FactSelectorPlan};
 pub use selection::{Match, Selection};
 pub use selector::Selector;

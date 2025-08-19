@@ -156,6 +156,62 @@ impl From<TypedVariable<Untyped>> for Term<dialog_artifacts::Attribute> {
     }
 }
 
+// From implementations for convenient Term creation from values
+impl From<String> for Term<String> {
+    fn from(value: String) -> Self {
+        Term::Constant(value)
+    }
+}
+
+impl From<&str> for Term<String> {
+    fn from(value: &str) -> Self {
+        Term::Constant(value.to_string())
+    }
+}
+
+
+impl From<u32> for Term<u32> {
+    fn from(value: u32) -> Self {
+        Term::Constant(value)
+    }
+}
+
+impl From<i32> for Term<i32> {
+    fn from(value: i32) -> Self {
+        Term::Constant(value)
+    }
+}
+
+impl From<i64> for Term<i64> {
+    fn from(value: i64) -> Self {
+        Term::Constant(value)
+    }
+}
+
+impl From<bool> for Term<bool> {
+    fn from(value: bool) -> Self {
+        Term::Constant(value)
+    }
+}
+
+impl From<f32> for Term<f32> {
+    fn from(value: f32) -> Self {
+        Term::Constant(value)
+    }
+}
+
+impl From<f64> for Term<f64> {
+    fn from(value: f64) -> Self {
+        Term::Constant(value)
+    }
+}
+
+impl From<Vec<u8>> for Term<Vec<u8>> {
+    fn from(value: Vec<u8>) -> Self {
+        Term::Constant(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +325,46 @@ mod tests {
             Some(dialog_artifacts::ValueDataType::UnsignedInt)
         );
         assert_eq!(any_term.as_variable().unwrap().data_type(), None);
+    }
+
+    #[test]
+    fn test_term_from_implementations() {
+        // Test String conversions
+        let term1: Term<String> = "hello".into();
+        let term2: Term<String> = "world".to_string().into();
+        
+        assert!(term1.is_constant());
+        assert!(term2.is_constant());
+        
+        if let Term::Constant(s) = term1 {
+            assert_eq!(s, "hello");
+        } else {
+            panic!("Expected constant string");
+        }
+
+        // Test numeric conversions
+        let age_term: Term<u32> = 25u32.into();
+        let score_term: Term<f64> = 3.14f64.into();
+        let active_term: Term<bool> = true.into();
+
+        assert!(age_term.is_constant());
+        assert!(score_term.is_constant());
+        assert!(active_term.is_constant());
+
+        // Test that From implementations create constants, not variables
+        match age_term {
+            Term::Constant(n) => assert_eq!(n, 25u32),
+            _ => panic!("Expected constant u32"),
+        }
+
+        match score_term {
+            Term::Constant(f) => assert_eq!(f, 3.14f64),
+            _ => panic!("Expected constant f64"),
+        }
+
+        match active_term {
+            Term::Constant(b) => assert_eq!(b, true),
+            _ => panic!("Expected constant bool"),
+        }
     }
 }
