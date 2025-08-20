@@ -4,7 +4,8 @@ use dialog_artifacts::Value;
 use dialog_common::ConditionalSend;
 use futures_core::Stream;
 
-use crate::{InconsistencyError, QueryError, Term, TypedVariable};
+use crate::variable::TypedVariable;
+use crate::{InconsistencyError, QueryError, Term};
 
 pub trait Selection: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend {}
 
@@ -13,7 +14,7 @@ impl<S> Selection for S where S: Stream<Item = Result<Match, QueryError>> + 'sta
 
 #[derive(Clone, Debug)]
 pub struct Match {
-    variables: Arc<BTreeMap<TypedVariable<crate::variable::Untyped>, Value>>,
+    variables: Arc<BTreeMap<TypedVariable<crate::types::Untyped>, Value>>,
 }
 
 impl Match {
@@ -23,13 +24,13 @@ impl Match {
         }
     }
 
-    pub fn has(&self, variable: &TypedVariable<crate::variable::Untyped>) -> bool {
+    pub fn has(&self, variable: &TypedVariable<crate::types::Untyped>) -> bool {
         self.variables.contains_key(variable)
     }
 
     pub fn get(
         &self,
-        variable: &TypedVariable<crate::variable::Untyped>,
+        variable: &TypedVariable<crate::types::Untyped>,
     ) -> Result<Value, InconsistencyError> {
         if let Some(value) = self.variables.get(variable) {
             Ok(value.clone())
@@ -40,7 +41,7 @@ impl Match {
 
     pub fn set(
         &self,
-        variable: TypedVariable<crate::variable::Untyped>,
+        variable: TypedVariable<crate::types::Untyped>,
         assignment: Value,
     ) -> Result<Self, InconsistencyError> {
         if let Ok(assigned) = self.get(&variable) {
@@ -63,10 +64,12 @@ impl Match {
 
     pub fn unify<T>(&self, term: Term<T>, value: Value) -> Result<Self, InconsistencyError>
     where
-        T: crate::variable::IntoValueDataType + Clone + Into<Value> + PartialEq<Value>,
+        T: crate::types::IntoValueDataType + Clone + Into<Value> + PartialEq<Value>,
     {
         match term {
-            Term::Variable(variable) => self.set(variable.to_untyped(), value),
+            Term::TypedVariable(name, _) => {
+                self.set(TypedVariable::<crate::types::Untyped>::new(name), value)
+            }
             Term::Constant(constant) => {
                 let constant_value: Value = constant.into();
                 if constant_value == value {
@@ -78,16 +81,24 @@ impl Match {
                     })
                 }
             }
+            Term::Any => Ok(self.clone()),
         }
     }
 
-    pub fn resolve<T>(&self, term: &Term<T>) -> Result<Value, InconsistencyError> 
+    pub fn resolve<T>(&self, term: &Term<T>) -> Result<Value, InconsistencyError>
     where
-        T: crate::variable::IntoValueDataType + Clone + Into<Value>,
+        T: crate::types::IntoValueDataType + Clone + Into<Value>,
     {
         match term {
-            Term::Variable(variable) => self.get(&variable.to_untyped()),
+            Term::TypedVariable(name, _) => {
+                self.get(&TypedVariable::<crate::types::Untyped>::new(name))
+            }
             Term::Constant(constant) => Ok(constant.clone().into()),
+            Term::Any => Err(InconsistencyError::UnboundVariableError(TypedVariable::<
+                crate::types::Untyped,
+            >::new(
+                "Any"
+            ))),
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Error types for the query engine
 
 use crate::variable::VariableName;
-use crate::TypedVariable;
+use crate::variable::TypedVariable;
 use dialog_artifacts::{DialogArtifactsError, Value, ValueDataType};
 use thiserror::Error;
 

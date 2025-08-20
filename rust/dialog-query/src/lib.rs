@@ -16,6 +16,7 @@ pub mod selector;
 pub mod stream;
 pub mod syntax;
 pub mod term;
+pub mod types;
 pub mod variable;
 
 pub use dialog_artifacts::Entity;
@@ -25,10 +26,11 @@ pub use fact_selector::{FactSelector, FactSelectorPlan};
 pub use selection::{Match, Selection};
 pub use selector::Selector;
 pub use stream::*;
-pub use term::Term;
+pub use term::*;
 
-pub use variable::Untyped;
-pub use variable::{TypedVariable, ValueDataType, VariableName};
+pub use dialog_artifacts::ValueDataType;
+pub use types::{IntoValueDataType, Untyped};
+pub use variable::VariableName;
 
 /// Cardinality indicates whether an attribute can have one or many values
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +63,8 @@ pub mod prelude {
     pub use crate::selector::Selector;
     pub use crate::syntax::Syntax;
     pub use crate::term::Term;
-    pub use crate::variable::{TypedVariable, Untyped, ValueDataType, VariableName};
+    pub use crate::types::{IntoValueDataType, Untyped};
+    pub use crate::variable::{TypedVariable, VariableName};
+    pub use dialog_artifacts::{Value, ValueDataType};
     // Macros are automatically available due to #[macro_export]
 }

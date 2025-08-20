@@ -1,8 +1,9 @@
 //! Fact, Assertion, Retraction, and Claim types for the dialog-query system
 
-use dialog_artifacts::{Artifact, Attribute, Cause, Entity, Instruction, Value};
+use dialog_artifacts::{Artifact, Attribute, Cause, Instruction, Value};
 use serde::{Deserialize, Serialize};
 
+pub use dialog_artifacts::Entity;
 
 /// An assertion represents a fact to be asserted in the database
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -77,7 +78,7 @@ pub enum Fact<T = Value> {
 }
 
 impl Fact {
-    /// Start building a fact selector for queries  
+    /// Start building a fact selector for queries
     pub fn select() -> crate::FactSelector<Value> {
         crate::FactSelector::new()
     }
@@ -85,11 +86,7 @@ impl Fact {
 
 impl<T> Fact<T> {
     /// Create an assertion claim from individual components
-    pub fn assert(
-        the: impl Into<Attribute>,
-        of: impl Into<Entity>,
-        is: T,
-    ) -> Claim<T> {
+    pub fn assert<The: Into<Attribute>, Of: Into<Entity>>(the: The, of: Of, is: T) -> Claim<T> {
         Claim::Assertion {
             the: the.into(),
             of: of.into(),
@@ -98,11 +95,7 @@ impl<T> Fact<T> {
     }
 
     /// Create a retraction claim from individual components
-    pub fn retract(
-        the: impl Into<Attribute>,
-        of: impl Into<Entity>,
-        is: T,
-    ) -> Claim<T> {
+    pub fn retract(the: impl Into<Attribute>, of: impl Into<Entity>, is: T) -> Claim<T> {
         Claim::Retraction {
             the: the.into(),
             of: of.into(),
@@ -112,7 +105,11 @@ impl<T> Fact<T> {
 }
 
 /// Create a generic assertion claim from individual components
-pub fn assert<T>(the: impl Into<Attribute>, of: impl Into<Entity>, is: impl Into<T>) -> Claim<T> {
+pub fn assert<T, The: Into<Attribute>, Of: Into<Entity>, Is: Into<T>>(
+    the: The,
+    of: Of,
+    is: Is,
+) -> Claim<T> {
     Claim::Assertion {
         the: the.into(),
         of: of.into(),
@@ -121,14 +118,17 @@ pub fn assert<T>(the: impl Into<Attribute>, of: impl Into<Entity>, is: impl Into
 }
 
 /// Create a generic retraction claim from individual components
-pub fn retract<T>(the: impl Into<Attribute>, of: impl Into<Entity>, is: impl Into<T>) -> Claim<T> {
+pub fn retract<T, The: Into<Attribute>, Of: Into<Entity>, Is: Into<T>>(
+    the: The,
+    of: Of,
+    is: Is,
+) -> Claim<T> {
     Claim::Retraction {
         the: the.into(),
         of: of.into(),
         is: is.into(),
     }
 }
-
 
 /// Convert Assertion to Instruction for committing
 impl From<Assertion> for Instruction {
@@ -337,14 +337,14 @@ mod tests {
     #[test]
     fn test_string_literal_support() {
         let entity = Entity::new().unwrap();
-        
+
         // Test with Value type (need to construct Value explicitly)
         let claim = Fact::<Value>::assert(
             "user/name".parse::<Attribute>().unwrap(),
             entity.clone(),
             Value::String("Alice".to_string()), // Direct Value construction
         );
-        
+
         match claim {
             Claim::Assertion { the, of, is } => {
                 assert_eq!(the.to_string(), "user/name");
@@ -354,13 +354,13 @@ mod tests {
             _ => panic!("Expected Claim::Assertion"),
         }
 
-        // Test with String type directly  
+        // Test with String type directly
         let string_claim = Fact::<String>::assert(
             "user/email".parse::<Attribute>().unwrap(),
             entity.clone(),
             "alice@example.com".to_string(),
         );
-        
+
         match string_claim {
             Claim::Assertion { the, of, is } => {
                 assert_eq!(the.to_string(), "user/email");
@@ -373,7 +373,7 @@ mod tests {
         // Test that both types work with FactSelector and Query trait
         let value_selector: crate::FactSelector<Value> = crate::FactSelector::new();
         let string_selector: crate::FactSelector<String> = crate::FactSelector::new();
-        
+
         // Both should compile and work
         assert!(value_selector.the.is_none());
         assert!(string_selector.the.is_none());
@@ -386,7 +386,8 @@ mod integration_tests {
     //! Fact::assert/retract → commit → Fact::select → query
 
     use super::*;
-    use crate::{Query, TypedVariable};
+    use crate::variable::TypedVariable;
+    use crate::Query;
     use anyhow::Result;
     use dialog_artifacts::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value};
     use dialog_storage::MemoryStorageBackend;

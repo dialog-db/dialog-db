@@ -6,7 +6,7 @@ use crate::query::Query;
 use crate::selection::{Match, Selection};
 use crate::syntax::Syntax;
 use crate::term::Term;
-use crate::variable::{TypedVariable, Untyped, VariableName, VariableScope};
+use crate::variable::{TypedVariable, VariableName, VariableScope};
 use async_stream::try_stream;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
@@ -21,7 +21,7 @@ use std::str::FromStr;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FactSelector<T = Value>
 where
-    T: crate::variable::IntoValueDataType + Clone + std::fmt::Debug,
+    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug,
 {
     /// The attribute term (predicate)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -37,12 +37,23 @@ where
     pub fact: Option<serde_json::Value>,
 }
 
-// Type alias for backward compatibility
-pub type ValueFactSelector = FactSelector<Value>;
+// use serde_json::Value;
+
+// let my_selector: FactSelector<serde_json::Value>;
+
+// #[derive(Deserialize)]
+// struct DeserializesFromJson {}
+
+// let deserializes_from_json: DeserializesFromJson = serde_json::from_str(...)?;
+
+// let my_selector: FactSelector<DeserializesFromJson>;
+
+// // Type alias for backward compatibility
+// pub type ValueFactSelector = FactSelector<Value>;
 
 impl<T> FactSelector<T>
 where
-    T: crate::variable::IntoValueDataType + Clone + std::fmt::Debug,
+    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug,
 {
     /// Create a new empty assertion with all fields as None
     pub fn new() -> Self {
@@ -73,17 +84,20 @@ where
     }
 
     /// Get all variables referenced in this assertion
-    pub fn variables(&self) -> Vec<TypedVariable<Untyped>> {
+    pub fn variables(&self) -> Vec<TypedVariable<crate::types::Untyped>> {
         let mut vars = Vec::new();
 
-        if let Some(Term::Variable(var)) = &self.the {
-            vars.push(var.to_untyped());
+        match &self.the {
+            Some(Term::TypedVariable(name, _)) => vars.push(TypedVariable::<crate::types::Untyped>::new(name)),
+            _ => {}
         }
-        if let Some(Term::Variable(var)) = &self.of {
-            vars.push(var.to_untyped());
+        match &self.of {
+            Some(Term::TypedVariable(name, _)) => vars.push(TypedVariable::<crate::types::Untyped>::new(name)),
+            _ => {}
         }
-        if let Some(Term::Variable(var)) = &self.is {
-            vars.push(var.to_untyped());
+        match &self.is {
+            Some(Term::TypedVariable(name, _)) => vars.push(TypedVariable::<crate::types::Untyped>::new(name)),
+            _ => {}
         }
 
         vars
@@ -97,7 +111,7 @@ where
 
 impl<T> FactSelector<T>
 where
-    T: crate::variable::IntoValueDataType + Clone + std::fmt::Debug + Into<Value>,
+    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Into<Value>,
 {
     /// Convert to ArtifactSelector if all terms are constants (no variables)
     pub fn to_artifact_selector(&self) -> QueryResult<ArtifactSelector<Constrained>> {
@@ -112,7 +126,7 @@ where
                         Some(s) => s.the(the.to_owned()),
                     });
                 }
-                Term::Variable(_) => {
+                Term::TypedVariable(_, _) | Term::Any => {
                     return Err(QueryError::VariableNotSupported {
                         message: "Variables not supported in ArtifactSelector conversion"
                             .to_string(),
@@ -130,7 +144,7 @@ where
                         Some(s) => s.of(of.to_owned()),
                     });
                 }
-                Term::Variable(_) => {
+                Term::TypedVariable(_, _) | Term::Any => {
                     return Err(QueryError::VariableNotSupported {
                         message: "Variables not supported in ArtifactSelector conversion"
                             .to_string(),
@@ -149,7 +163,7 @@ where
                         Some(s) => s.is(converted_value),
                     });
                 }
-                Term::Variable(_) => {
+                Term::TypedVariable(_, _) | Term::Any => {
                     return Err(QueryError::VariableNotSupported {
                         message: "Variables not supported in ArtifactSelector conversion"
                             .to_string(),
@@ -251,7 +265,7 @@ where
 #[derive(Debug, Clone)]
 pub struct FactSelectorPlan<T = Value>
 where
-    T: crate::variable::IntoValueDataType + Clone + std::fmt::Debug,
+    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug,
 {
     /// The fact selector operation to execute
     pub selector: FactSelector<T>,
@@ -263,7 +277,7 @@ where
 
 impl<T> FactSelectorPlan<T>
 where
-    T: crate::variable::IntoValueDataType + Clone + std::fmt::Debug,
+    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug,
 {
     /// Create a new fact selector plan
     pub fn new(fact_selector: FactSelector<T>, scope: &VariableScope) -> QueryResult<Self> {
@@ -287,7 +301,8 @@ where
 
 impl<T> Syntax for FactSelector<T>
 where
-    T: crate::variable::IntoValueDataType + Clone + std::fmt::Debug,
+    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Send + 'static,
+    Value: From<T>,
 {
     type Plan = FactSelectorPlan<T>;
 
@@ -298,7 +313,7 @@ where
 
 impl<T> TryFrom<FactSelector<T>> for ArtifactSelector<Constrained>
 where
-    T: crate::variable::IntoValueDataType + Clone + std::fmt::Debug + Into<Value>,
+    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Into<Value>,
 {
     type Error = QueryError;
 
@@ -309,7 +324,7 @@ where
 
 impl<T> Query for FactSelector<T>
 where
-    T: crate::variable::IntoValueDataType + Clone + std::fmt::Debug + Into<Value>,
+    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Into<Value>,
 {
     fn query<S>(
         &self,
@@ -335,12 +350,12 @@ where
 }
 
 impl<T> Plan for FactSelectorPlan<T> where
-    T: crate::variable::IntoValueDataType + Clone + std::fmt::Debug + Send + 'static
+    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Send + 'static
 {
 }
 impl<T> EvaluationPlan for FactSelectorPlan<T>
 where
-    T: crate::variable::IntoValueDataType + Clone + std::fmt::Debug + Into<Value> + Send + 'static,
+    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Into<Value> + Send + 'static,
 {
     fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> impl Selection + '_
     where
@@ -365,18 +380,18 @@ where
                         let mut new_frame = frame.clone();
 
                         // Unify entity if we have an entity variable
-                        if let Some(Term::Variable(var)) = &selector.of {
-                            new_frame = new_frame.set(var.to_untyped(), Value::Entity(artifact.of)).map_err(|e| QueryError::FactStore(e.to_string()))?;
+                        if let Some(Term::TypedVariable(name, _)) = &selector.of {
+                            new_frame = new_frame.set(TypedVariable::<crate::types::Untyped>::new(name), Value::Entity(artifact.of)).map_err(|e| QueryError::FactStore(e.to_string()))?;
                         }
 
                         // Unify attribute if we have an attribute variable
-                        if let Some(Term::Variable(var)) = &selector.the {
-                            new_frame = new_frame.set(var.to_untyped(), Value::String(artifact.the.to_string())).map_err(|e| QueryError::FactStore(e.to_string()))?;
+                        if let Some(Term::TypedVariable(name, _)) = &selector.the {
+                            new_frame = new_frame.set(TypedVariable::<crate::types::Untyped>::new(name), Value::String(artifact.the.to_string())).map_err(|e| QueryError::FactStore(e.to_string()))?;
                         }
 
                         // Unify value if we have a value variable
-                        if let Some(Term::Variable(var)) = &selector.is {
-                            new_frame = new_frame.set(var.to_untyped(), artifact.is).map_err(|e| QueryError::FactStore(e.to_string()))?;
+                        if let Some(Term::TypedVariable(name, _)) = &selector.is {
+                            new_frame = new_frame.set(TypedVariable::<crate::types::Untyped>::new(name), artifact.is).map_err(|e| QueryError::FactStore(e.to_string()))?;
                         }
 
                         yield new_frame;
@@ -396,7 +411,7 @@ where
 
 impl<T> Query for FactSelectorPlan<T>
 where
-    T: crate::variable::IntoValueDataType + Clone + std::fmt::Debug + Into<Value> + Send + 'static,
+    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Into<Value> + Send + 'static,
 {
     fn query<S>(
         &self,
@@ -423,7 +438,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::variable::{TypedVariable, ValueDataType};
+    use crate::variable::TypedVariable;
+    use dialog_artifacts::ValueDataType;
     use dialog_artifacts::Value;
 
     #[test]
@@ -441,13 +457,13 @@ mod tests {
 
     #[test]
     fn test_fact_selector_with_entity_and_value() {
-        let person_var = TypedVariable::<crate::variable::Untyped>::new("person");
+        let person_var = TypedVariable::<crate::types::Untyped>::new("person");
         let name_var = TypedVariable::<String>::new("name");
 
         let fact_selector: FactSelector<Value> = FactSelector::new()
             .the("person/name")
-            .of(Term::from(person_var.clone()))
-            .is(Term::from(name_var.clone()));
+            .of(Term::<Entity>::var("person"))
+            .is(Term::<String>::var("name"));
 
         let vars = fact_selector.variables();
         assert_eq!(vars.len(), 2);
@@ -491,13 +507,13 @@ mod tests {
 
     #[test]
     fn test_fact_selector_with_variables() {
-        let user_var = TypedVariable::<crate::variable::Untyped>::new("user");
+        let user_var = TypedVariable::<crate::types::Untyped>::new("user");
         let name_var = TypedVariable::<String>::new("name");
 
         let fact_selector: FactSelector<Value> = FactSelector::new()
             .the("user/name")
-            .of(Term::from(user_var.clone()))
-            .is(Term::from(name_var.clone()));
+            .of(Term::<Entity>::var("user"))
+            .is(Term::<Value>::var("name"));
 
         assert!(fact_selector.the.is_some());
         assert!(fact_selector.of.is_some());
@@ -511,19 +527,18 @@ mod tests {
         }
 
         // Check entity variable (should be typed as Entity)
-        if let Some(Term::Variable(var)) = &fact_selector.of {
-            assert_eq!(var.name(), "user");
-            assert_eq!(var.data_type(), Some(ValueDataType::Entity));
+        if let Some(term) = &fact_selector.of {
+            assert_eq!(term.name().unwrap(), "user");
+            assert_eq!(term.data_type(), Some(ValueDataType::Entity));
         } else {
             panic!("Expected variable for entity");
         }
 
         // Check value variable (should be typed as Value, which returns None)
-        if let Some(Term::Variable(var)) = &fact_selector.is {
-            assert_eq!(var.name(), "name");
-            // When TypedVariable<String> is converted to Term<Value>, it becomes TypedVariable<Value>
-            // TypedVariable<Value> returns None for data_type() since Value can hold any type
-            assert!(var.data_type().is_none());
+        if let Some(term) = &fact_selector.is {
+            assert_eq!(term.name().unwrap(), "name");
+            // Value type returns None since it can hold any type
+            assert!(term.data_type().is_none());
         } else {
             panic!("Expected variable for value");
         }
@@ -559,11 +574,11 @@ mod tests {
         // Test starting with different methods
         let fact_selector2: FactSelector<Value> = FactSelector::new()
             .the("user/name")
-            .of(TypedVariable::<crate::variable::Untyped>::new("user"))
+            .of(TypedVariable::<crate::types::Untyped>::new("user"))
             .is("John");
 
         let fact_selector3: FactSelector<Value> = FactSelector::new()
-            .of(TypedVariable::<crate::variable::Untyped>::new("user"))
+            .of(TypedVariable::<crate::types::Untyped>::new("user"))
             .the("user/name")
             .is(TypedVariable::<String>::new("name"));
 
@@ -591,18 +606,18 @@ mod tests {
         // Test that order doesn't matter
         let fact_selector1: FactSelector<Value> = FactSelector::new()
             .the("user/email")
-            .of(TypedVariable::<crate::variable::Untyped>::new("user"))
+            .of(TypedVariable::<crate::types::Untyped>::new("user"))
             .is(TypedVariable::<String>::new("email"));
 
         let fact_selector2: FactSelector<Value> = FactSelector::new()
-            .of(TypedVariable::<crate::variable::Untyped>::new("user"))
+            .of(TypedVariable::<crate::types::Untyped>::new("user"))
             .is(TypedVariable::<String>::new("email"))
             .the("user/email");
 
         let fact_selector3: FactSelector<Value> = FactSelector::new()
             .is(TypedVariable::<String>::new("email"))
             .the("user/email")
-            .of(TypedVariable::<crate::variable::Untyped>::new("user"));
+            .of(TypedVariable::<crate::types::Untyped>::new("user"));
 
         // All should have the same pattern content
         assert_eq!(fact_selector1.the, fact_selector2.the);
@@ -618,7 +633,7 @@ mod tests {
         // Test builder API with Variable constructors
         let fact_selector: FactSelector<Value> = FactSelector::new()
             .the("user/name")
-            .of(TypedVariable::<crate::variable::Untyped>::new("user"))
+            .of(TypedVariable::<crate::types::Untyped>::new("user"))
             .is(TypedVariable::<String>::new("name"));
 
         assert!(fact_selector.the.is_some());
@@ -713,8 +728,8 @@ mod tests {
         // Verify that the frames contain variable bindings
         for frame in match_frames {
             // Use untyped variables for frame operations since Terms convert to untyped
-            let user_var = TypedVariable::<crate::variable::Untyped>::new("user");
-            let name_var = TypedVariable::<crate::variable::Untyped>::new("name");
+            let user_var = TypedVariable::<crate::types::Untyped>::new("user");
+            let name_var = TypedVariable::<crate::types::Untyped>::new("name");
 
             // Check that the frame contains bindings for our variables
             assert!(
@@ -762,7 +777,7 @@ mod tests {
         let fact_selector: FactSelector<Value> = FactSelector::new()
             .the(TypedVariable::<Attribute>::new("attr")) // Variable
             .of(TypedVariable::<Entity>::new("entity")) // Variable
-            .is(TypedVariable::<crate::variable::Untyped>::new("value")); // Variable
+            .is(TypedVariable::<crate::types::Untyped>::new("value")); // Variable
 
         // Create plan
         let scope = VariableScope::new();

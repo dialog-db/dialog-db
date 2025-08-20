@@ -1,7 +1,7 @@
 //! Selector patterns for matching against the database
 
 use crate::term::Term;
-use crate::variable::IntoValueDataType;
+use crate::types::IntoValueDataType;
 use dialog_artifacts::{Attribute, Entity};
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Selector<T>
 where
-    T: IntoValueDataType,
+    T: IntoValueDataType + Clone,
 {
     /// The entity (subject)
     pub entity: Term<Entity>,
@@ -21,7 +21,7 @@ where
 
 impl<T> Selector<T>
 where
-    T: IntoValueDataType,
+    T: IntoValueDataType + Clone,
 {
     /// Create a new selector with the given terms
     pub fn new(entity: Term<Entity>, attribute: Term<Attribute>, value: Term<T>) -> Self {

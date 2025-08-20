@@ -47,7 +47,8 @@ pub trait Query {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Fact, TypedVariable};
+    use crate::Fact;
+    use crate::variable::TypedVariable;
     use anyhow::Result;
     use dialog_artifacts::{
         ArtifactStore, ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value,

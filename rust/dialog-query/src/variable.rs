@@ -1,114 +1,13 @@
 //! New unified Variable system with generic types and clean turbofish syntax
 //! Provides both typed and untyped variables through a single Variable<T> enum
 
-use dialog_artifacts::Value;
-// use serde::{Deserialize, Serialize};
+use dialog_artifacts::{Value, ValueDataType};
 use std::fmt::Display;
 use std::marker::PhantomData;
-
-/// Re-export ValueDataType for convenience
-pub use dialog_artifacts::ValueDataType;
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-pub struct Untyped;
-
-/// Trait for types that can be converted to ValueDataType
-/// This provides the bridge between Rust types and dialog-artifacts types
-pub trait IntoValueDataType {
-    fn into_value_data_type() -> Option<ValueDataType>;
-}
-
-/// Macro to implement IntoValueDataType for primitive types
-macro_rules! impl_into_value_data_type {
-    ($rust_type:ty, $value_data_type:expr) => {
-        impl IntoValueDataType for $rust_type {
-            fn into_value_data_type() -> Option<ValueDataType> {
-                Some($value_data_type)
-            }
-        }
-    };
-}
-
-// Implement for all supported types
-impl_into_value_data_type!(String, ValueDataType::String);
-impl_into_value_data_type!(bool, ValueDataType::Boolean);
-impl_into_value_data_type!(u128, ValueDataType::UnsignedInt);
-impl_into_value_data_type!(u64, ValueDataType::UnsignedInt);
-impl_into_value_data_type!(u32, ValueDataType::UnsignedInt);
-impl_into_value_data_type!(u16, ValueDataType::UnsignedInt);
-impl_into_value_data_type!(u8, ValueDataType::UnsignedInt);
-impl_into_value_data_type!(i128, ValueDataType::SignedInt);
-impl_into_value_data_type!(i64, ValueDataType::SignedInt);
-impl_into_value_data_type!(i32, ValueDataType::SignedInt);
-impl_into_value_data_type!(i16, ValueDataType::SignedInt);
-impl_into_value_data_type!(i8, ValueDataType::SignedInt);
-impl_into_value_data_type!(f64, ValueDataType::Float);
-impl_into_value_data_type!(f32, ValueDataType::Float);
-impl_into_value_data_type!(Vec<u8>, ValueDataType::Bytes);
-impl_into_value_data_type!(dialog_artifacts::Entity, ValueDataType::Entity);
-impl_into_value_data_type!(dialog_artifacts::Attribute, ValueDataType::Symbol);
-
-impl IntoValueDataType for Untyped {
-    fn into_value_data_type() -> Option<ValueDataType> {
-        None
-    }
-}
-
-impl IntoValueDataType for Value {
-    fn into_value_data_type() -> Option<ValueDataType> {
-        // Value is a dynamic type, so we return None to indicate it can hold any type
-        None
-    }
-}
+use crate::types::IntoValueDataType;
 
 /// Variable name - following x-query pattern of string-based variables
 pub type VariableName = String;
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Variable {
-    name: VariableName,
-    _type: Option<ValueDataType>,
-}
-
-impl Variable {
-    pub fn new<T>(name: impl Into<VariableName>) -> Self
-    where
-        T: IntoValueDataType,
-    {
-        Variable {
-            name: name.into(),
-            _type: T::into_value_data_type(),
-        }
-    }
-
-    /// Get the variable name
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-    /// Get the data type constraint for typed variables
-    pub fn data_type(&self) -> Option<ValueDataType> {
-        self._type
-    }
-
-    /// Check if this typed variable can be unified with the given value
-    pub fn can_unify_with(&self, value: &Value) -> bool {
-        let value_type = ValueDataType::from(value);
-        if let Some(var_type) = self.data_type() {
-            value_type == var_type
-        } else {
-            true
-        }
-    }
-}
-
-impl<T> From<TypedVariable<T>> for Variable
-where
-    T: IntoValueDataType,
-{
-    fn from(value: TypedVariable<T>) -> Self {
-        Self::new::<T>(value.name())
-    }
-}
 
 /// New unified Variable<T> struct with phantom types for zero-cost type safety
 /// When T = () (default), the variable is untyped and can unify with any value
@@ -117,7 +16,7 @@ where
 /// T is constrained to types that implement IntoValueDataType, ensuring only
 /// supported Dialog value types can be used.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TypedVariable<T = Untyped>
+pub struct TypedVariable<T = crate::types::Untyped>
 where
     T: IntoValueDataType,
 {
@@ -135,11 +34,16 @@ where
     ///
     /// # Examples
     /// ```
-    /// use dialog_query::{TypedVariable, Untyped};
+    /// use dialog_query::prelude::*;
     ///
-    /// let name_var = TypedVariable::<String>::new("name");  // Returns Variable<String>
-    /// let age_var = TypedVariable::<u64>::new("age");       // Returns Variable<u64>
-    /// let any_var = TypedVariable::<Untyped>::new("any");   // Returns Variable<Untyped>
+    /// let name_var = TypedVariable::<String>::new("name");  // Returns TypedVariable<String>
+    /// let age_var = TypedVariable::<u64>::new("age");       // Returns TypedVariable<u64>
+    /// let any_var = TypedVariable::<Value>::new("any");   // Returns TypedVariable<Value>
+    ///
+    /// // For creating Terms, use Term::var() instead:
+    /// let name_term = Term::<String>::var("name");   // Returns Term<String>
+    /// let age_term = Term::<u64>::var("age");        // Returns Term<u64>
+    /// let any_term = Term::<Value>::var("any");    // Returns Term<Value>
     /// ```
     pub fn new(name: impl Into<VariableName>) -> Self {
         TypedVariable {
@@ -166,9 +70,9 @@ where
             true
         }
     }
-    
+
     /// Convert this typed variable to an untyped variable
-    pub fn to_untyped(&self) -> TypedVariable<Untyped> {
+    pub fn to_untyped(&self) -> TypedVariable<Value> {
         TypedVariable {
             name: self.name.clone(),
             _phantom_type: PhantomData,
@@ -315,26 +219,26 @@ mod tests {
 
     #[test]
     fn test_variable_creation() {
-        let var = TypedVariable::<Untyped>::new("person");
-        assert_eq!(var.name(), "person");
+        let var = Term::<Value>::var("person");
+        assert_eq!(var.name().unwrap(), "person");
         assert!(var.data_type().is_none());
     }
 
     #[test]
     fn test_typed_variable() {
-        let var = TypedVariable::<String>::new("name");
-        assert_eq!(var.name(), "name");
+        let var = Term::<String>::var("name");
+        assert_eq!(var.name().unwrap(), "name");
         assert_eq!(var.data_type(), Some(ValueDataType::String));
     }
 
     #[test]
     fn test_variable_type_matching() {
-        let string_var = TypedVariable::<String>::new("name");
+        let string_var = Term::<String>::var("name");
 
         assert!(string_var.can_unify_with(&Value::String("Alice".to_string())));
         assert!(!string_var.can_unify_with(&Value::Boolean(true)));
 
-        let any_var = TypedVariable::<Untyped>::new("anything");
+        let any_var = Term::<Value>::var("anything");
         assert!(any_var.can_unify_with(&Value::String("Alice".to_string())));
         assert!(any_var.can_unify_with(&Value::Boolean(true)));
     }
@@ -357,9 +261,9 @@ mod tests {
 
     #[test]
     fn test_type_specific_constructors() {
-        let string_var = TypedVariable::<String>::new("name");
-        let uint_var = TypedVariable::<u64>::new("age");
-        let bool_var = TypedVariable::<bool>::new("active");
+        let string_var = Term::<String>::var("name");
+        let uint_var = Term::<u64>::var("age");
+        let bool_var = Term::<bool>::var("active");
 
         // String variable should only accept string values
         assert!(string_var.can_unify_with(&Value::String("Alice".to_string())));
@@ -389,7 +293,7 @@ mod tests {
 
     #[test]
     fn test_untyped_variables_can_unify_with_anything() {
-        let untyped_var = TypedVariable::<Untyped>::new("anything");
+        let untyped_var = Term::<Value>::var("anything");
 
         // Test that untyped variables can unify with anything
         assert!(untyped_var.can_unify_with(&Value::String("test".to_string())));
@@ -398,7 +302,7 @@ mod tests {
     }
 
     // Tests from variable_query_test.rs
-    use crate::{Fact, Query};
+    use crate::{Fact, Query, Term};
     use anyhow::Result;
     use dialog_artifacts::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction};
     use dialog_storage::MemoryStorageBackend;
@@ -448,8 +352,8 @@ mod tests {
         // Query 1: Find all names (constant attribute, variable entity and value)
         let name_query = Fact::select()
             .the("user/name") // Constant attribute
-            .of(TypedVariable::<Entity>::new("user")) // Variable entity
-            .is(TypedVariable::<String>::new("name")); // Variable value
+            .of(Term::<Entity>::var("user")) // Variable entity
+            .is(Term::<String>::var("name")); // Variable value
 
         // This should work because we have a constant attribute to optimize the query
         // Note: Currently returns an error but shows that the plan → evaluate approach is implemented
@@ -474,9 +378,9 @@ mod tests {
 
         // Create a query with all variables - should fail
         let all_vars_query = Fact::select()
-            .the(TypedVariable::<Attribute>::new("attr")) // Variable
-            .of(TypedVariable::<Entity>::new("entity")) // Variable
-            .is(TypedVariable::<Untyped>::new("value")); // Variable
+            .the(Term::<Attribute>::var("attr")) // Variable
+            .of(Term::<Entity>::var("entity")) // Variable
+            .is(Term::<Value>::var("value")); // Variable
 
         // This should fail because we don't have any constants to optimize the query
         let result = all_vars_query.query(&artifacts);
@@ -540,9 +444,9 @@ mod tests {
 
         // 1. Entity-optimized query (constant entity, should use plan → evaluate)
         let alice_facts = Fact::select()
-            .the(TypedVariable::<Attribute>::new("attr"))
+            .the(Term::<Attribute>::var("attr"))
             .of(alice.clone()) // Constant entity - should optimize by entity
-            .is(TypedVariable::<Untyped>::new("value"));
+            .is(Term::<Value>::var("value"));
 
         let result = alice_facts.query(&artifacts);
         assert!(result.is_err());
@@ -553,8 +457,8 @@ mod tests {
         // 2. Attribute-optimized query (constant attribute, should work with direct query)
         let name_facts = Fact::select()
             .the("user/name") // Constant attribute - should optimize by attribute
-            .of(TypedVariable::<Entity>::new("entity"))
-            .is(TypedVariable::<String>::new("name"));
+            .of(Term::<Entity>::var("entity"))
+            .is(Term::<String>::var("name"));
 
         let result = name_facts.query(&artifacts);
         assert!(result.is_err());
@@ -564,8 +468,8 @@ mod tests {
 
         // 3. Value-optimized query (constant value, should use plan → evaluate)
         let alice_value_facts = Fact::select()
-            .the(TypedVariable::<Attribute>::new("attr"))
-            .of(TypedVariable::<Entity>::new("entity"))
+            .the(Term::<Attribute>::var("attr"))
+            .of(Term::<Entity>::var("entity"))
             .is(Value::String("Alice".to_string())); // Constant value - should optimize by value
 
         let result = alice_value_facts.query(&artifacts);
@@ -581,14 +485,15 @@ mod tests {
 #[cfg(test)]
 mod constraint_tests {
     use super::*;
+    use crate::Term;
 
     #[test]
     fn test_type_constraint_works() {
         // These should compile - supported types
-        let _string_var = TypedVariable::<String>::new("name");
-        let _u64_var = TypedVariable::<u64>::new("age");
-        let _bool_var = TypedVariable::<bool>::new("active");
-        let _untyped_var = TypedVariable::<Untyped>::new("any");
+        let _string_var = Term::<String>::var("name");
+        let _u64_var = Term::<u64>::var("age");
+        let _bool_var = Term::<bool>::var("active");
+        let _untyped_var = Term::<Value>::var("any");
 
         // This test function compiling proves the constraint works
         // because if we tried Variable::<SomeUnsupportedType>::new()
@@ -598,11 +503,11 @@ mod constraint_tests {
     #[test]
     fn vars() {
         // These should compile - supported types
-        let var = TypedVariable::<String>::new("name");
+        let var = Term::<String>::var("name");
         print!("var {}", var);
-        let _u64_var = TypedVariable::<u64>::new("age");
-        let _bool_var = TypedVariable::<bool>::new("active");
-        let _untyped_var = TypedVariable::<Untyped>::new("any");
+        let _u64_var = Term::<u64>::var("age");
+        let _bool_var = Term::<bool>::var("active");
+        let _untyped_var = Term::<Value>::var("any");
 
         // This test function compiling proves the constraint works
         // because if we tried Variable::<SomeUnsupportedType>::new()
