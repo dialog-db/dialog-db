@@ -3,7 +3,8 @@
 //! This example shows how the Variable struct is constrained to only accept
 //! types that implement IntoValueDataType, preventing invalid type usage.
 
-use dialog_query::{Term, Untyped};
+use dialog_query::Term;
+use dialog_artifacts::Value;
 
 fn main() {
     println!("=== Variable Type Constraints Demo ===\n");
@@ -27,18 +28,18 @@ fn main() {
     println!("  Bytes variable: {}", bytes_var);
 
     let entity_var = Term::<dialog_artifacts::Entity>::var("entity");
-    println!("  Entity variable: {}", entity_var);
+    println!("  Entity term: {:?}", entity_var.name());
 
     let attribute_var = Term::<dialog_artifacts::Attribute>::var("attr");
-    println!("  Attribute variable: {}", attribute_var);
+    println!("  Attribute term: {:?}", attribute_var.name());
 
-    let untyped_var = Term::<Untyped>::var("anything");
-    println!("  Untyped variable: {}", untyped_var);
+    let flexible_var = Term::<Value>::var("anything");
+    println!("  Flexible term: {:?}", flexible_var.name());
 
     println!("\n❌ Unsupported types (these would NOT compile):");
-    println!("  // Variable::<HashMap<String, String>>::new(\"map\");  // ❌ Error!");
-    println!("  // Variable::<MyCustomStruct>::new(\"custom\");        // ❌ Error!");
-    println!("  // Variable::<Option<String>>::new(\"maybe\");         // ❌ Error!");
+    println!("  // Term::<HashMap<String, String>>::var(\"map\");  // ❌ Error!");
+    println!("  // Term::<MyCustomStruct>::var(\"custom\");        // ❌ Error!");
+    println!("  // Term::<Option<String>>::var(\"maybe\");         // ❌ Error!");
 
     println!("\n✅ The type constraint ensures only valid Dialog value types can be used!");
     println!("   Only types implementing IntoValueDataType are allowed.");

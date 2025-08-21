@@ -386,8 +386,7 @@ mod integration_tests {
     //! Fact::assert/retract → commit → Fact::select → query
 
     use super::*;
-    use crate::variable::TypedVariable;
-    use crate::Query;
+    use crate::{Query, Term};
     use anyhow::Result;
     use dialog_artifacts::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value};
     use dialog_storage::MemoryStorageBackend;
@@ -657,8 +656,8 @@ mod integration_tests {
 
         let query_with_variables = Fact::select()
             .the("user/name")
-            .of(TypedVariable::<Entity>::new("user")) // This is a variable
-            .is(TypedVariable::<String>::new("name")); // This is also a variable
+            .of(Term::<Entity>::var("user")) // This is a variable
+            .is(Term::<String>::var("name")); // This is also a variable
 
         // Setup store for completeness
         let storage_backend = MemoryStorageBackend::default();
@@ -684,7 +683,7 @@ mod integration_tests {
         let mixed_query = Fact::select()
             .the("user/name") // Constant - OK
             .of(alice) // Constant - OK
-            .is(TypedVariable::<String>::new("name")); // Variable - should fail
+            .is(Term::<String>::var("name")); // Variable - should fail
 
         // Setup store
         let storage_backend = MemoryStorageBackend::default();

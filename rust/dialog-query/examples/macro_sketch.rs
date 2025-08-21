@@ -13,8 +13,8 @@ use tokio::io::Empty;
 pub mod Employee {
     use dialog_query::{
         error::QueryResult,
-        variable::VariableScope,
-        Query, Syntax, VariableName,
+        syntax::VariableScope,
+        Query, Syntax,
     };
     use dialog_artifacts::{Artifact, ArtifactStore, DialogArtifactsError};
     use futures_util::Stream;

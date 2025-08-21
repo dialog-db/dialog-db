@@ -47,8 +47,7 @@ pub trait Query {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Fact;
-    use crate::variable::TypedVariable;
+    use crate::{Fact, Term};
     use anyhow::Result;
     use dialog_artifacts::{
         ArtifactStore, ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value,
@@ -135,6 +134,7 @@ mod tests {
         Ok(())
     }
 
+
     #[tokio::test]
     async fn test_query_trait_with_variables_fails() -> Result<()> {
         // Setup
@@ -144,8 +144,8 @@ mod tests {
         // Create a query with variables - this should fail when using Query trait
         let variable_query = Fact::select()
             .the("user/name")
-            .of(TypedVariable::<Entity>::new("user")) // Variable!
-            .is(TypedVariable::<String>::new("name")); // Variable!
+            .of(Term::<Entity>::var("user")) // Variable!
+            .is(Term::<String>::var("name")); // Variable!
 
         // Attempt to query - should fail with helpful error
         let result = variable_query.query(&artifacts);

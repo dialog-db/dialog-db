@@ -17,7 +17,6 @@ pub mod stream;
 pub mod syntax;
 pub mod term;
 pub mod types;
-pub mod variable;
 
 pub use dialog_artifacts::Entity;
 pub use error::{InconsistencyError, QueryError};
@@ -29,8 +28,7 @@ pub use stream::*;
 pub use term::*;
 
 pub use dialog_artifacts::ValueDataType;
-pub use types::{IntoValueDataType, Untyped};
-pub use variable::VariableName;
+pub use types::IntoValueDataType;
 
 /// Cardinality indicates whether an attribute can have one or many values
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +46,7 @@ pub trait Attribute {
 
 pub use plan::EvaluationPlan;
 pub use query::Query;
-pub use syntax::Syntax;
+pub use syntax::{Syntax, VariableScope};
 
 // Re-export procedural macros
 pub use dialog_query_macros::relation;
@@ -63,8 +61,7 @@ pub mod prelude {
     pub use crate::selector::Selector;
     pub use crate::syntax::Syntax;
     pub use crate::term::Term;
-    pub use crate::types::{IntoValueDataType, Untyped};
-    pub use crate::variable::{TypedVariable, VariableName};
+    pub use crate::types::IntoValueDataType;
     pub use dialog_artifacts::{Value, ValueDataType};
     // Macros are automatically available due to #[macro_export]
 }

@@ -5,10 +5,6 @@
 
 use dialog_artifacts::ValueDataType;
 
-/// Marker type for untyped variables that can hold any value
-/// This type implements Ord so it can be used as keys in BTreeMap
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-pub struct Untyped;
 
 /// Trait for types that can be converted to ValueDataType
 /// This provides the bridge between Rust types and dialog-artifacts types
@@ -53,9 +49,3 @@ impl IntoValueDataType for dialog_artifacts::Value {
     }
 }
 
-impl IntoValueDataType for Untyped {
-    fn into_value_data_type() -> Option<ValueDataType> {
-        // Untyped is a marker type that can hold any value
-        None
-    }
-}

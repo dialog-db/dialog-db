@@ -1,7 +1,5 @@
 //! Error types for the query engine
 
-use crate::variable::VariableName;
-use crate::variable::TypedVariable;
 use dialog_artifacts::{DialogArtifactsError, Value, ValueDataType};
 use thiserror::Error;
 
@@ -10,7 +8,7 @@ use thiserror::Error;
 pub enum QueryError {
     /// A variable was referenced but not bound in the current scope
     #[error("Unbound variable {variable_name:?} referenced")]
-    UnboundVariable { variable_name: VariableName },
+    UnboundVariable { variable_name: String },
 
     /// A rule application is missing required parameters
     #[error("Rule application omits required parameter \"{parameter}\"")]
@@ -18,7 +16,7 @@ pub enum QueryError {
 
     /// A variable appears in both input and output of a formula
     #[error("Variable {variable_name:?} cannot appear in both input and output")]
-    VariableInputOutputConflict { variable_name: VariableName },
+    VariableInputOutputConflict { variable_name: String },
 
     /// Planning failed due to circular dependencies
     #[error("Cannot plan query due to circular dependencies")]
@@ -80,7 +78,7 @@ pub enum InconsistencyError {
     TypeMismatch { expected: Value, actual: Value },
 
     #[error("Unbound variable: {0}")]
-    UnboundVariableError(TypedVariable),
+    UnboundVariableError(String),
 
     #[error("Type mismatch: expected value of type {expected}, got {actual}")]
     UnexpectedType {
@@ -90,4 +88,7 @@ pub enum InconsistencyError {
 
     #[error("Invalid fact selector")]
     UnconstrainedSelector,
+
+    #[error("Type conversion error: {0}")]
+    TypeConversion(#[from] dialog_artifacts::TypeError),
 }

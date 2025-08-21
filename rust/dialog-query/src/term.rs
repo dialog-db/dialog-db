@@ -102,28 +102,7 @@ where
     }
 }
 
-trait TermContent: IntoValueDataType + Clone {}
-
-// Implement TermContent for all relevant types
-impl TermContent for String {}
-impl TermContent for bool {}
-impl TermContent for u128 {}
-impl TermContent for u64 {}
-impl TermContent for u32 {}
-impl TermContent for u16 {}
-impl TermContent for u8 {}
-impl TermContent for i128 {}
-impl TermContent for i64 {}
-impl TermContent for i32 {}
-impl TermContent for i16 {}
-impl TermContent for i8 {}
-impl TermContent for f64 {}
-impl TermContent for f32 {}
-impl TermContent for Vec<u8> {}
-impl TermContent for dialog_artifacts::Entity {}
-impl TermContent for dialog_artifacts::Attribute {}
-impl TermContent for Value {}
-impl TermContent for crate::types::Untyped {}
+// TermContent trait removed - no longer needed with variable module elimination
 
 // Display implementation for Terms
 impl<T> fmt::Display for Term<T>
@@ -266,74 +245,8 @@ where
     }
 }
 
-// Support for converting TypedVariable to Term
-impl<T> From<crate::variable::TypedVariable<T>> for Term<T>
-where
-    T: IntoValueDataType + Clone,
-{
-    fn from(var: crate::variable::TypedVariable<T>) -> Self {
-        Term::TypedVariable(var.name().to_string(), PhantomData)
-    }
-}
-
-impl<T> From<&crate::variable::TypedVariable<T>> for Term<T>
-where
-    T: IntoValueDataType + Clone,
-{
-    fn from(var: &crate::variable::TypedVariable<T>) -> Self {
-        Term::TypedVariable(var.name().to_string(), PhantomData)
-    }
-}
-
-// Support for converting specific TypedVariables to Term<Value> (cross-type conversion)
-impl From<crate::variable::TypedVariable<String>> for Term<Value> {
-    fn from(var: crate::variable::TypedVariable<String>) -> Self {
-        Term::TypedVariable(var.name().to_string(), PhantomData)
-    }
-}
-
-impl From<&crate::variable::TypedVariable<String>> for Term<Value> {
-    fn from(var: &crate::variable::TypedVariable<String>) -> Self {
-        Term::TypedVariable(var.name().to_string(), PhantomData)
-    }
-}
-
-impl From<crate::variable::TypedVariable<crate::types::Untyped>> for Term<Value> {
-    fn from(var: crate::variable::TypedVariable<crate::types::Untyped>) -> Self {
-        Term::TypedVariable(var.name().to_string(), PhantomData)
-    }
-}
-
-impl From<&crate::variable::TypedVariable<crate::types::Untyped>> for Term<Value> {
-    fn from(var: &crate::variable::TypedVariable<crate::types::Untyped>) -> Self {
-        Term::TypedVariable(var.name().to_string(), PhantomData)
-    }
-}
-
-// Support for converting untyped variables to any Term type
-impl From<crate::variable::TypedVariable<crate::types::Untyped>> for Term<dialog_artifacts::Entity> {
-    fn from(var: crate::variable::TypedVariable<crate::types::Untyped>) -> Self {
-        Term::TypedVariable(var.name().to_string(), PhantomData)
-    }
-}
-
-impl From<&crate::variable::TypedVariable<crate::types::Untyped>> for Term<dialog_artifacts::Entity> {
-    fn from(var: &crate::variable::TypedVariable<crate::types::Untyped>) -> Self {
-        Term::TypedVariable(var.name().to_string(), PhantomData)
-    }
-}
-
-impl From<crate::variable::TypedVariable<crate::types::Untyped>> for Term<dialog_artifacts::Attribute> {
-    fn from(var: crate::variable::TypedVariable<crate::types::Untyped>) -> Self {
-        Term::TypedVariable(var.name().to_string(), PhantomData)
-    }
-}
-
-impl From<&crate::variable::TypedVariable<crate::types::Untyped>> for Term<dialog_artifacts::Attribute> {
-    fn from(var: &crate::variable::TypedVariable<crate::types::Untyped>) -> Self {
-        Term::TypedVariable(var.name().to_string(), PhantomData)
-    }
-}
+// TODO: Phase 3 - TypedVariable From implementations removed as part of variable module elimination
+// The functionality is preserved through Term::var() constructor
 
 // Support for converting specific typed Terms to Value Terms
 impl From<Term<String>> for Term<Value> {
@@ -349,39 +262,11 @@ impl From<Term<String>> for Term<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_artifacts::Value;
-    use crate::variable::TypedVariable;
-
-    #[test]
-    fn test_term_from_typed_variable() {
-        let typed_var = TypedVariable::<String>::new("name");
-        let term: Term<String> = Term::from(typed_var.clone());
-
-        assert!(term.is_variable());
-        assert!(!term.is_constant());
-
-        // Use the direct Term methods instead of as_variable (which is legacy)
-        assert_eq!(term.name(), Some("name"));
-        assert_eq!(
-            term.data_type(),
-            Some(dialog_artifacts::ValueDataType::String)
-        ); // Term preserves type information
-    }
-
-    #[test]
-    fn test_term_from_untyped_variable() {
-        let untyped_var = TypedVariable::<Value>::new("anything");
-        let term: Term<Value> = Term::from(untyped_var);
-
-        assert!(term.is_variable());
-        assert_eq!(term.name(), Some("anything"));
-        assert_eq!(term.data_type(), None);
-    }
 
     #[test]
     fn test_term_from_value() {
         let value = Value::String("test".to_string());
-        let term: Term<Value> = Term::from(value.clone());
+        let term = Term::from(value.clone());
 
         assert!(!term.is_variable());
         assert!(term.is_constant());
@@ -396,11 +281,11 @@ mod tests {
     #[test]
     fn test_new_variable_system_integration() {
         // Test that the new Variable<T> system works with Terms
-        let string_var = TypedVariable::<String>::new("name");
-        let untyped_var = TypedVariable::<Value>::new("anything");
+        let string_var = Term::<String>::var("name");
+        let untyped_var = Term::<Value>::var("anything");
 
-        let string_term: Term<String> = Term::from(string_var);
-        let untyped_term: Term<Value> = Term::from(untyped_var);
+        let string_term = string_var;  // Already a Term<String>
+        let untyped_term = untyped_var;  // Already a Term<Value>
 
         // Both should be variable terms
         assert!(string_term.is_variable());
@@ -420,14 +305,14 @@ mod tests {
     #[test]
     fn test_turbofish_syntax_with_terms() {
         // Test the new turbofish syntax works with Term conversion
-        let name_var = TypedVariable::<String>::new("name");
-        let age_var = TypedVariable::<u64>::new("age");
-        let any_var = TypedVariable::<Value>::new("wildcard");
+        let name_var = Term::<String>::var("name");
+        let age_var = Term::<u64>::var("age");
+        let any_var = Term::<Value>::var("wildcard");
 
         // Convert to terms - now preserves types
-        let name_term: Term<String> = Term::from(name_var);
-        let age_term: Term<u64> = Term::from(age_var);
-        let any_term: Term<Value> = Term::from(any_var);
+        let name_term = name_var;  // Already a Term<String>
+        let age_term = age_var;    // Already a Term<u64>
+        let any_term = any_var;    // Already a Term<Value>
 
         // All should be variable terms
         assert!(name_term.is_variable());
@@ -495,12 +380,12 @@ mod tests {
     #[test]
     fn test_term_from_variable_reference() {
         // Test that we can convert variable references to terms
-        let entity_var = TypedVariable::<dialog_artifacts::Entity>::new("entity");
-        let string_var = TypedVariable::<String>::new("name");
+        let entity_var = Term::<dialog_artifacts::Entity>::var("entity");
+        let string_var = Term::<String>::var("name");
 
-        // This should work with references (the new implementation)
-        let entity_term: Term<dialog_artifacts::Entity> = (&entity_var).into();
-        let string_term: Term<String> = (&string_var).into();
+        // This should work with the new implementation
+        let entity_term = entity_var.clone(); // Clone the Term
+        let string_term = string_var.clone(); // Clone the Term
 
         // Both should be variable terms
         assert!(entity_term.is_variable());

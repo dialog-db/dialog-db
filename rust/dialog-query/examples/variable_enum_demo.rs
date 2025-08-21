@@ -1,13 +1,13 @@
 use dialog_artifacts::Value;
-use dialog_query::{Term, Untyped};
+use dialog_query::Term;
 
 fn main() {
     println!("Variable Enum Demo");
     println!("==================");
 
-    // Untyped variables
-    let untyped_var = Term::<Untyped>::var("anything");
-    println!("Untyped variable: {}", untyped_var);
+    // Flexible value variables
+    let untyped_var = Term::<Value>::var("anything");
+    println!("Flexible variable: {:?}", untyped_var.name());
     println!("Data type: {:?}", untyped_var.data_type());
 
     // Typed variables with turbofish syntax
@@ -16,39 +16,25 @@ fn main() {
     let active_var = Term::<bool>::var("active");
 
     println!("\nTyped variables:");
-    println!("String variable: {}", string_var);
-    println!("Age variable: {}", age_var);
-    println!("Active variable: {}", active_var);
+    println!("String variable: {:?}", string_var.name());
+    println!("Age variable: {:?}", age_var.name());
+    println!("Active variable: {:?}", active_var.name());
 
-    // Type checking
+    // Type checking is enforced through the type system
     println!("\nType checking:");
-    println!(
-        "String var can unify with string: {}",
-        string_var.can_unify_with(&Value::String("Alice".to_string()))
-    );
-    println!(
-        "String var can unify with bool: {}",
-        string_var.can_unify_with(&Value::Boolean(true))
-    );
-    println!(
-        "Untyped var can unify with string: {}",
-        untyped_var.can_unify_with(&Value::String("Alice".to_string()))
-    );
-    println!(
-        "Untyped var can unify with bool: {}",
-        untyped_var.can_unify_with(&Value::Boolean(true))
-    );
+    println!("String terms work with string values");
+    println!("Value terms work with any value type");
 
-    // Struct field access (instead of enum pattern matching)
-    println!("\nStruct field access:");
+    // Term introspection
+    println!("\nTerm introspection:");
     if string_var.data_type().is_some() {
-        println!("String var is typed with name: {}", string_var.name().unwrap());
+        println!("String var is typed with name: {:?}", string_var.name().unwrap());
     } else {
-        println!("Unexpected untyped variant");
+        println!("Unexpected flexible variant");
     }
 
     if untyped_var.data_type().is_none() {
-        println!("Untyped var is untyped with name: {}", untyped_var.name().unwrap());
+        println!("Flexible var is flexible with name: {:?}", untyped_var.name().unwrap());
     } else {
         println!("Unexpected typed variant");
     }

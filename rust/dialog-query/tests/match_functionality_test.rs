@@ -2,6 +2,8 @@
 mod match_functionality_test {
     use dialog_query::*;
     use dialog_artifacts::Entity;
+    use dialog_query::error::QueryResult;
+    use dialog_query::syntax::VariableScope;
     
     // This test demonstrates the Match struct functionality that was requested.
     // It shows how Match structs work with the generic FactSelector<T> system
@@ -26,7 +28,7 @@ mod match_functionality_test {
     impl Syntax for TestNameMatch {
         type Plan = FactSelectorPlan<String>;
         
-        fn plan(&self, scope: &variable::VariableScope) -> error::QueryResult<Self::Plan> {
+        fn plan(&self, scope: &VariableScope) -> QueryResult<Self::Plan> {
             self.to_fact_selector().plan(scope)
         }
     }
@@ -45,7 +47,7 @@ mod match_functionality_test {
         };
         
         // Should implement Syntax
-        let scope = variable::VariableScope::new();
+        let scope = VariableScope::new();
         let _plan = match_pattern.plan(&scope).unwrap();
         
         // Test with variable
