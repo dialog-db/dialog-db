@@ -30,15 +30,18 @@ impl Match {
         InconsistencyError: From<<T as std::convert::TryFrom<Value>>::Error>,
     {
         match term {
-            Term::TypedVariable(name, _) => {
-                if let Some(value) = self.variables.get(name) {
-                    T::try_from(value.clone()).map_err(Into::into)
+            Term::Variable { name, .. } => {
+                if let Some(key) = name {
+                    if let Some(value) = self.variables.get(key) {
+                        T::try_from(value.clone()).map_err(Into::into)
+                    } else {
+                        Err(InconsistencyError::UnboundVariableError(key.clone()))
+                    }
                 } else {
-                    Err(InconsistencyError::UnboundVariableError(name.clone()))
+                    Err(InconsistencyError::UnboundVariableError("".to_string()))
                 }
             }
             Term::Constant(constant) => Ok(constant.clone()),
-            Term::Any => Err(InconsistencyError::UnboundVariableError("Any".to_string())),
         }
     }
 
@@ -53,36 +56,41 @@ impl Match {
         InconsistencyError: From<<T as std::convert::TryFrom<Value>>::Error>,
     {
         match term {
-            Term::TypedVariable(name, _) => {
-                // Check if variable is already bound
-                if let Some(existing_value) = self.variables.get(&name) {
-                    let existing_as_t_result = T::try_from(existing_value.clone());
+            Term::Variable { name, .. } => {
+                if let Some(key) = name {
+                    // Check if variable is already bound
+                    if let Some(existing_value) = self.variables.get(&key) {
+                        let existing_as_t_result = T::try_from(existing_value.clone());
 
-                    match existing_as_t_result {
-                        Ok(existing_as_t) => {
-                            if existing_as_t == value {
-                                Ok(self.clone())
-                            } else {
-                                Err(InconsistencyError::AssignmentError(format!(
+                        match existing_as_t_result {
+                            Ok(existing_as_t) => {
+                                if existing_as_t == value {
+                                    Ok(self.clone())
+                                } else {
+                                    Err(InconsistencyError::AssignmentError(format!(
                                     "Can not set {:?} to {:?} because it is already set to {:?}.",
-                                    name,
+                                    key,
                                     value.into(),
                                     existing_value
                                 )))
+                                }
+                            }
+                            Err(conversion_error) => {
+                                // Type mismatch with existing value
+                                Err(conversion_error.into())
                             }
                         }
-                        Err(conversion_error) => {
-                            // Type mismatch with existing value
-                            Err(conversion_error.into())
-                        }
+                    } else {
+                        // New binding
+                        let mut variables = (*self.variables).clone();
+                        variables.insert(key, value.into());
+                        Ok(Self {
+                            variables: Arc::new(variables),
+                        })
                     }
                 } else {
-                    // New binding
-                    let mut variables = (*self.variables).clone();
-                    variables.insert(name, value.into());
-                    Ok(Self {
-                        variables: Arc::new(variables),
-                    })
+                    // TODO: We should still check the type here
+                    Ok(self.clone())
                 }
             }
             Term::Constant(constant) => {
@@ -96,7 +104,6 @@ impl Match {
                     )))
                 }
             }
-            Term::Any => Ok(self.clone()), // Any always succeeds
         }
     }
 
@@ -105,9 +112,15 @@ impl Match {
         T: crate::types::IntoValueDataType + Clone,
     {
         match term {
-            Term::TypedVariable(name, _) => self.variables.contains_key(name),
+            Term::Variable { name, .. } => {
+                if let Some(key) = name {
+                    self.variables.contains_key(key)
+                } else {
+                    // We don't capture values for Any
+                    false
+                }
+            }
             Term::Constant(_) => true, // Constants are always "bound"
-            Term::Any => false,        // We don't capture values for Any
         }
     }
 
@@ -116,12 +129,17 @@ impl Match {
         T: crate::types::IntoValueDataType + Clone + Into<Value> + PartialEq<Value>,
     {
         match term {
-            Term::TypedVariable(name, _) => {
-                let mut variables = (*self.variables).clone();
-                variables.insert(name, value);
-                Ok(Self {
-                    variables: Arc::new(variables),
-                })
+            Term::Variable { name, .. } => {
+                if let Some(key) = name {
+                    let mut variables = (*self.variables).clone();
+                    variables.insert(key, value);
+
+                    Ok(Self {
+                        variables: Arc::new(variables),
+                    })
+                } else {
+                    Ok(self.clone())
+                }
             }
             Term::Constant(constant) => {
                 let constant_value: Value = constant.into();
@@ -134,7 +152,6 @@ impl Match {
                     })
                 }
             }
-            Term::Any => Ok(self.clone()),
         }
     }
 
@@ -143,17 +160,18 @@ impl Match {
         T: crate::types::IntoValueDataType + Clone + Into<Value>,
     {
         match term {
-            Term::TypedVariable(name, _) => {
-                if let Some(value) = self.variables.get(name) {
-                    Ok(value.clone())
+            Term::Variable { name, .. } => {
+                if let Some(key) = name {
+                    if let Some(value) = self.variables.get(key) {
+                        Ok(value.clone())
+                    } else {
+                        Err(InconsistencyError::UnboundVariableError(key.clone()))
+                    }
                 } else {
-                    Err(InconsistencyError::UnboundVariableError(
-                        name.to_string(),
-                    ))
+                    Err(InconsistencyError::UnboundVariableError("Any".to_string()))
                 }
             }
             Term::Constant(constant) => Ok(constant.clone().into()),
-            Term::Any => Err(InconsistencyError::UnboundVariableError("Any".to_string())),
         }
     }
 }

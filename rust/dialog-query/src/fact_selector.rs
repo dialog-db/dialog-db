@@ -1,4 +1,15 @@
 //! FactSelector for querying facts by pattern matching
+//!
+//! This module implements the `FactSelector<T>` type which represents a pattern
+//! for matching facts in the knowledge base. Facts are represented as (entity, attribute, value)
+//! triples, and FactSelector allows you to specify patterns for each component using:
+//!
+//! - **Constants**: Exact values to match (e.g., specific entity IDs, attribute names)
+//! - **Variables**: Named placeholders that can be bound to values during matching
+//! - **Wildcards**: Anonymous matchers that accept any value
+//!
+//! The selector supports both direct querying (when all terms are constants) and
+//! pattern matching evaluation (when variables are involved).
 
 use crate::error::{QueryError, QueryResult};
 use crate::plan::{EvaluationContext, EvaluationPlan, Plan};
@@ -17,35 +28,77 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::str::FromStr;
 
-
 /// FactSelector for pattern matching facts during queries
+///
+/// Represents a pattern for matching facts in the knowledge base. Each fact is a triple
+/// of (entity, attribute, value), and FactSelector allows specifying constraints on each:
+///
+/// # JSON Serialization
+/// FactSelector serializes to JSON with optional fields:
+/// ```json
+/// {
+///   "the": "attribute_name",           // Attribute constraint
+///   "of": { "?": { "name": "user" } },  // Entity variable
+///   "is": "constant_value"             // Value constraint
+/// }
+/// ```
+///
+/// # Generic Parameter T
+/// The type parameter T represents the expected value type:
+/// - `FactSelector<Value>`: Can match any value type (most common)
+/// - `FactSelector<String>`: Only matches string values
+/// - `FactSelector<Entity>`: Only matches entity values
+///
+/// # Pattern Matching
+/// Each field can be:
+/// - `None`: No constraint on this component
+/// - `Some(Term::Constant(...))`: Must match exact value
+/// - `Some(Term::TypedVariable(...))`: Binds to any matching value
+/// - `Some(Term::Any)`: Matches any value without binding
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(bound = "T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Serialize + for<'a> Deserialize<'a> + 'static")]
+#[serde(
+    bound = "T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Serialize + for<'a> Deserialize<'a> + 'static"
+)]
 pub struct FactSelector<T = Value>
 where
     T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + 'static,
 {
-    /// The attribute term (predicate)
+    /// The attribute term (predicate) - what property this fact describes
+    ///
+    /// Examples: "user/name", "user/email", Term::var("attr")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub the: Option<Term<Attribute>>,
-    /// The entity term (subject)
+
+    /// The entity term (subject) - what entity this fact is about
+    ///
+    /// Examples: specific Entity ID, Term::var("user"), Term::any()
     #[serde(skip_serializing_if = "Option::is_none")]
     pub of: Option<Term<Entity>>,
-    /// The value term (object)
+
+    /// The value term (object) - what value the attribute has for the entity
+    ///
+    /// Examples: "Alice", 42, Term::var("value"), Term::any()
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is: Option<Term<T>>,
+
     /// Optional fact configuration (reserved for future use)
+    ///
+    /// May be used for metadata, constraints, or other fact-level configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fact: Option<serde_json::Value>,
 }
 
-
-
+/// Core FactSelector functionality
+///
+/// Provides constructor and builder methods for creating fact patterns.
 impl<T> FactSelector<T>
 where
     T: crate::types::IntoValueDataType + Clone + std::fmt::Debug,
 {
-    /// Create a new empty assertion with all fields as None
+    /// Create a new empty fact selector with all fields as None
+    ///
+    /// This creates a completely unconstrained selector that would match all facts.
+    /// Use the builder methods (the(), of(), is()) to add constraints.
     pub fn new() -> Self {
         Self {
             the: None,
@@ -55,38 +108,66 @@ where
         }
     }
 
-    /// Set the attribute (predicate) - accepts strings or Terms
+    /// Set the attribute (predicate) constraint
+    ///
+    /// Accepts anything convertible to Term<Attribute>:
+    /// - String literals: `"user/name"`
+    /// - Attribute constants: `Attribute::parse("user/name")`
+    /// - Variables: `Term::<Attribute>::var("attr")`
+    /// - Wildcards: `Term::<Attribute>::any()`
     pub fn the<The: Into<Term<Attribute>>>(mut self, the: The) -> Self {
         self.the = Some(the.into());
         self
     }
 
-    /// Set the entity (subject) - accepts Variables or Terms
+    /// Set the entity (subject) constraint
+    ///
+    /// Accepts anything convertible to Term<Entity>:
+    /// - Entity constants: `Entity::new()`
+    /// - Variables: `Term::<Entity>::var("user")`
+    /// - Wildcards: `Term::<Entity>::any()`
     pub fn of<Of: Into<Term<Entity>>>(mut self, entity: Of) -> Self {
         self.of = Some(entity.into());
         self
     }
 
-    /// Set the value (object) - accepts Variables or Terms
+    /// Set the value (object) constraint
+    ///
+    /// Accepts anything convertible to Term<T>:
+    /// - Value constants: `"Alice"`, `42`, `true`
+    /// - Variables: `Term::<T>::var("value")`
+    /// - Wildcards: `Term::<T>::any()`
     pub fn is<V: Into<Term<T>>>(mut self, value: V) -> Self {
         self.is = Some(value.into());
         self
     }
 
-    /// Get all variables referenced in this assertion
+    /// Get all variable names referenced in this fact selector
+    ///
+    /// Returns a vector of variable names that would need to be bound
+    /// during pattern matching. Used for dependency analysis and planning.
+    ///
+    /// Only includes named Variable terms, not unnamed variables or constants.
     pub fn variables(&self) -> Vec<String> {
         let mut vars = Vec::new();
 
+        // Check each field for variables and collect their names
         match &self.the {
-            Some(Term::TypedVariable(name, _)) => vars.push(name.clone()),
+            Some(Term::Variable {
+                name: Some(name), ..
+            }) => vars.push(name.clone()),
             _ => {}
         }
         match &self.of {
-            Some(Term::TypedVariable(name, _)) => vars.push(name.clone()),
+            Some(Term::Variable {
+                name: Some(name), ..
+            }) => vars.push(name.clone()),
             _ => {}
         }
         match &self.is {
-            Some(Term::TypedVariable(name, _)) => vars.push(name.clone()),
+            Some(Term::Variable {
+                name: Some(name), ..
+            }) => vars.push(name.clone()),
             _ => {}
         }
 
@@ -94,6 +175,9 @@ where
     }
 
     /// Create an execution plan for this fact selector
+    ///
+    /// Analyzes the selector and variable scope to create an optimized execution plan.
+    /// The plan includes cost estimates and dependency information for query optimization.
     pub fn plan(&self, scope: &VariableScope) -> QueryResult<FactSelectorPlan<T>> {
         FactSelectorPlan::new(self.clone(), scope)
     }
@@ -116,7 +200,7 @@ where
                         Some(s) => s.the(the.to_owned()),
                     });
                 }
-                Term::TypedVariable(_, _) | Term::Any => {
+                Term::Variable { .. } => {
                     return Err(QueryError::VariableNotSupported {
                         message: "Variables not supported in ArtifactSelector conversion"
                             .to_string(),
@@ -134,7 +218,7 @@ where
                         Some(s) => s.of(of.to_owned()),
                     });
                 }
-                Term::TypedVariable(_, _) | Term::Any => {
+                Term::Variable { .. } => {
                     return Err(QueryError::VariableNotSupported {
                         message: "Variables not supported in ArtifactSelector conversion"
                             .to_string(),
@@ -153,7 +237,7 @@ where
                         Some(s) => s.is(converted_value),
                     });
                 }
-                Term::TypedVariable(_, _) | Term::Any => {
+                Term::Variable { .. } => {
                     return Err(QueryError::VariableNotSupported {
                         message: "Variables not supported in ArtifactSelector conversion"
                             .to_string(),
@@ -250,8 +334,6 @@ where
         }
     }
 }
-
-
 
 /// Execution plan for a fact selector operation
 #[derive(Debug, Clone)]

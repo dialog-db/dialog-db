@@ -109,7 +109,7 @@ fn test_term_constant_json_format() -> Result<(), Box<dyn std::error::Error>> {
 #[test] 
 fn test_term_any_json_format() -> Result<(), Box<dyn std::error::Error>> {
     // Test Any serialization
-    let any_term: Term<String> = Term::Any;
+    let any_term: Term<String> = Term::any();
     let json = serde_json::to_string(&any_term)?;
     
     // Should serialize as { "?": {} }

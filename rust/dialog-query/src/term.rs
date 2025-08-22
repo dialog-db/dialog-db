@@ -1,265 +1,274 @@
 //! Term types for pattern matching and query construction
+//!
+//! This module implements the core `Term<T>` type that represents either:
+//! - **Variables**: Placeholders that can match any value of type T
+//! - **Constants**: Concrete values of type T
+//! - **Any**: Wildcard that matches any value regardless of type
+//!
+//! The key insight is using `TermSyntax` as an intermediate representation for JSON
+//! serialization/deserialization, which allows clean separation between the API
+//! (`Term<T>`) and the JSON format (`TermSyntax<T>`).
 
-use std::any::TypeId;
 use std::fmt;
 use std::marker::PhantomData;
 
 use crate::types::IntoValueDataType;
 use dialog_artifacts::{Value, ValueDataType};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
-
-/// Term is either a constant value or a variable placeholder
-/// Generic over T to represent typed terms
-#[derive(Debug, Clone, PartialEq)]
+/// Term represents either a constant value or variable placeholder
+///
+/// This is the main API type used throughout the dialog-query system.
+/// Generic over T to represent typed terms (e.g., Term<String>, Term<Value>).
+///
+/// # JSON Serialization
+/// Terms serialize to different JSON formats:
+/// - Named variables: `{ "?": { "name": "var_name", "type": "String" } }`
+/// - Untyped variables (Term<Value>): `{ "?": { "name": "var_name" } }`
+/// - Unnamed variables (old Any): `{ "?": {} }`
+/// - Constants: Plain JSON values (e.g., `"Alice"`, `42`, `true`)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Term<T>
 where
-    T: IntoValueDataType + Clone,
+    T: IntoValueDataType + Clone + 'static,
 {
-    /// A named variable with type information
-    TypedVariable(String, PhantomData<T>),
-    /// Wildcard that matches any value - serializes as { "?": {} }
-    Any,
-    /// A concrete value of type T
-    Constant(T),
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-#[serde(untagged)]
-enum VariableSyntax {
-    Variable {
-        name: String,
-        #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-        _type: Option<ValueDataType>,
-    },
-    Any {},
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-enum TermSyntax<T> {
+    /// A variable with optional name and type information
+    /// Variables with name: None don't produce bindings but still match (replaces Any)
+    /// The PhantomData<T> carries the type information at compile time
     #[serde(rename = "?")]
-    Variable(VariableSyntax),
+    Variable {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(rename = "type", skip_serializing_if = "Type::<T>::is_any")]
+        _type: Type<T>,
+    },
+
+    /// A concrete value of type T
+    /// For Term<Value>, serializes as plain JSON (e.g., "Alice", 42, true)
+    /// For other types, uses normal serde serialization
     #[serde(untagged)]
     Constant(T),
 }
 
-#[test]
-fn test_term_syntax() {
-    let syntax: TermSyntax<Vec<u8>> = TermSyntax::Variable(VariableSyntax::Any {});
-    let serialized = serde_json::to_string(&syntax).unwrap();
-    assert_eq!(serialized, r#"{"?":{}}"#);
-
-    let var: TermSyntax<i32> = TermSyntax::Variable(VariableSyntax::Variable {
-        name: "x".to_string(),
-        _type: None,
-    });
-    let serialized = serde_json::to_string(&var).unwrap();
-    assert_eq!(serialized, r#"{"?":{"name":"x"}}"#);
-
-    let parse_any: TermSyntax<i32> = serde_json::from_str(r#"{"?": {}}"#).unwrap();
-    assert_eq!(parse_any, TermSyntax::Variable(VariableSyntax::Any {}));
-
-    let parse_var: TermSyntax<i32> = serde_json::from_str(r#"{"?": {"name": "x"}}"#).unwrap();
-    assert_eq!(
-        parse_var,
-        TermSyntax::Variable(VariableSyntax::Variable {
-            name: "x".to_string(),
-            _type: None,
-        })
-    );
-
-    let constant = TermSyntax::Constant(42);
-    let serialized = serde_json::to_string(&constant).unwrap();
-    assert_eq!(serialized, r#"42"#);
-
-    let parse_constant: TermSyntax<u32> = serde_json::from_str(r#"42"#).unwrap();
-    assert_eq!(parse_constant, TermSyntax::Constant(42));
-
-    let parse_typed_var: TermSyntax<i32> =
-        serde_json::from_str(r#"{"?": {"name": "x", "type": "SignedInt"}}"#).unwrap();
-    assert_eq!(
-        parse_typed_var,
-        TermSyntax::Variable(VariableSyntax::Variable {
-            name: "x".to_string(),
-            _type: Some(ValueDataType::SignedInt),
-        })
-    );
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(into = "Option<ValueDataType>")]
+pub struct Type<T: IntoValueDataType + Clone + 'static>(PhantomData<T>);
+impl<T: IntoValueDataType + Clone + 'static> Type<T> {
+    fn is_any(&self) -> bool {
+        T::into_value_data_type().is_none()
+    }
 }
 
-// Convert between Term and TermSyntax
+impl<T> From<Type<T>> for Option<ValueDataType>
+where
+    T: IntoValueDataType + Clone + 'static,
+{
+    fn from(_value: Type<T>) -> Self {
+        T::into_value_data_type()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+enum TermSyntax<T>
+where
+    T: IntoValueDataType + Clone + 'static,
+{
+    #[serde(rename = "?")]
+    Variable {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+        _type: Option<ValueDataType>,
+    },
+
+    /// A concrete value of type T
+    /// For Term<Value>, serializes as plain JSON (e.g., "Alice", 42, true)
+    /// For other types, uses normal serde serialization
+    #[serde(untagged)]
+    Constant(T),
+}
+
 impl<T> From<Term<T>> for TermSyntax<T>
 where
     T: IntoValueDataType + Clone + 'static,
 {
-    fn from(term: Term<T>) -> Self {
-        match term {
-            Term::TypedVariable(name, _) => {
-                // For Value type, we don't include type information (untyped variable)
-                let _type = if TypeId::of::<T>() == TypeId::of::<Value>() {
-                    None
-                } else {
-                    T::into_value_data_type()
-                };
-                
-                TermSyntax::Variable(VariableSyntax::Variable { name, _type })
-            }
-            Term::Any => TermSyntax::Variable(VariableSyntax::Any {}),
+    fn from(value: Term<T>) -> Self {
+        match value {
+            Term::Variable { name, _type } => TermSyntax::Variable {
+                name,
+                _type: T::into_value_data_type(),
+            },
             Term::Constant(value) => TermSyntax::Constant(value),
         }
     }
 }
 
-impl<T> From<TermSyntax<T>> for Term<T>
-where
-    T: IntoValueDataType + Clone,
-{
-    fn from(syntax: TermSyntax<T>) -> Self {
-        match syntax {
-            TermSyntax::Variable(VariableSyntax::Any {}) => Term::Any,
-            TermSyntax::Variable(VariableSyntax::Variable { name, .. }) => {
-                // Type information is carried by T, not by the syntax
-                Term::TypedVariable(name, PhantomData)
-            }
-            TermSyntax::Constant(value) => Term::Constant(value),
-        }
-    }
-}
-
-// Implement Serialize using the intermediate format
-impl<T> Serialize for Term<T>
-where
-    T: IntoValueDataType + Clone + Serialize + 'static,
-{
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let syntax: TermSyntax<T> = self.clone().into();
-        syntax.serialize(serializer)
-    }
-}
-
-impl<'de, T> Deserialize<'de> for Term<T>
-where
-    T: IntoValueDataType + Clone + Deserialize<'de> + 'static,
-{
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let syntax = TermSyntax::<T>::deserialize(deserializer)?;
-        Ok(Term::from(syntax))
-    }
-}
-
+/// Core functionality implementation for Term<T>
+///
+/// Provides constructor methods and introspection capabilities.
 impl<T> Term<T>
 where
     T: IntoValueDataType + Clone,
 {
+    pub fn new() -> Self {
+        Term::Variable {
+            name: None,
+            _type: Type(PhantomData),
+        }
+    }
+
+    /// Create a new typed variable with the given name
+    ///
+    /// The type T is carried via PhantomData and used for type information
+    /// during serialization and type checking.
     pub fn var<N: Into<String>>(name: N) -> Self {
-        Term::TypedVariable(name.into(), PhantomData)
+        Term::Variable {
+            name: Some(name.into()),
+            _type: Type(PhantomData),
+        }
     }
 
+    /// Create an unnamed variable term that matches any value without binding
+    ///
+    /// Replaces the old Any variant. These variables match anything but don't
+    /// produce bindings. Serializes as `{ "?": {} }` in JSON
     pub fn any() -> Self {
-        Term::Any
+        Term::Variable {
+            name: None,
+            _type: Type(PhantomData),
+        }
     }
 
-    /// Check if this term is a variable
+    /// Check if this term is a variable (named or unnamed)
     pub fn is_variable(&self) -> bool {
-        matches!(self, Term::TypedVariable(_, _))
+        matches!(self, Term::Variable { .. })
     }
 
-    /// Check if this term is a constant
+    /// Check if this term is a constant value
     pub fn is_constant(&self) -> bool {
         matches!(self, Term::Constant(_))
     }
 
-    /// Check if this term is the wildcard Any
+    /// Check if this term is an unnamed variable (old Any behavior)
+    ///
+    /// Unnamed variables match anything but don't produce bindings
     pub fn is_any(&self) -> bool {
-        matches!(self, Term::Any)
+        matches!(self, Term::Variable { name: None, .. })
     }
 
-    /// Get the variable name if this is a variable term
+    /// Get the variable name if this is a named variable term
+    ///
+    /// Returns None for constants and unnamed variables
     pub fn name(&self) -> Option<&str> {
         match self {
-            Term::TypedVariable(name, _) => Some(name),
+            Term::Variable {
+                name: Some(name), ..
+            } => Some(name),
             _ => None,
         }
     }
 
-    /// Get the data type if this is a variable term
+    /// Get the data type for this term's type parameter T
+    ///
+    /// Returns Some(ValueDataType) for typed variables, None for Value type
+    /// (since Value can hold any type). Always returns None for constants.
     pub fn data_type(&self) -> Option<ValueDataType> {
         match self {
-            Term::TypedVariable(_, _) => T::into_value_data_type(),
+            Term::Variable { .. } => T::into_value_data_type(),
             _ => None,
         }
     }
 
     /// Check if this term can unify with the given value
+    ///
+    /// Used during pattern matching to determine if a term can be bound to a value:
+    /// - Variables: Check if value's type matches the variable's type (if typed)
+    /// - Constants: Always return true (compatibility - actual comparison needs value conversion)
     pub fn can_unify_with(&self, value: &Value) -> bool {
         match self {
-            Term::TypedVariable(_, _) => {
-                // For typed variables, check if the value matches the type
+            Term::Variable { .. } => {
+                // For typed variables, check if the value matches the expected type
                 if let Some(var_type) = T::into_value_data_type() {
                     let value_type = ValueDataType::from(value);
                     value_type == var_type
                 } else {
-                    true // Untyped can unify with anything
+                    // Untyped variables (like Term<Value>) can unify with anything
+                    true
                 }
             }
             Term::Constant(_) => {
                 // For constants, we can't easily compare without knowing if T: Into<Value>
-                // For now, return true to maintain compatibility
+                // Return true to maintain compatibility - actual equality should be checked elsewhere
                 true
             }
-            Term::Any => true, // Any can unify with anything
         }
     }
 
     /// Get the variable name if this term is a variable
+    ///
+    /// Alias for name() method - kept for backward compatibility
     pub fn as_variable_name(&self) -> Option<&str> {
         match self {
-            Term::TypedVariable(name, _) => Some(name),
+            Term::Variable {
+                name: Some(name), ..
+            } => Some(name),
             _ => None,
         }
     }
 
-    /// Get the constant value if this term is one
+    /// Get the constant value if this term is a constant
+    ///
+    /// Returns None for variables
     pub fn as_constant(&self) -> Option<&T> {
         match self {
             Term::Constant(value) => Some(value),
-            Term::TypedVariable(_, _) | Term::Any => None,
+            Term::Variable { .. } => None,
         }
     }
 
+    /// Builder method for fluent API (placeholder implementation)
+    ///
+    /// Currently returns self unchanged - may be expanded for query building
     pub fn is<Is: Into<Term<T>>>(self, _other: Is) -> Self {
         self
     }
 }
 
-// TermContent trait removed - no longer needed with variable module elimination
-
-// Display implementation for Terms
+/// Display implementation for Terms
+///
+/// Provides human-readable representation:
+/// - Constants: Debug format of the value
+/// - Named variables: ?name<Type> format (or ?name for untyped)
+/// - Unnamed variables: _ (underscore)
+///
 impl<T> fmt::Display for Term<T>
 where
     T: IntoValueDataType + Clone + fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // Constants display as their debug representation
             Term::Constant(value) => write!(f, "{:?}", value),
-            Term::TypedVariable(name, _) => {
+            Term::Variable {
+                name: Some(name), ..
+            } => {
+                // Named variables show type information, untyped don't
                 if let Some(data_type) = T::into_value_data_type() {
                     write!(f, "?{}<{:?}>", name, data_type)
                 } else {
                     write!(f, "?{}", name)
                 }
             }
-            Term::Any => write!(f, "_"),
+            // Unnamed variables display as underscore
+            Term::Variable { name: None, .. } => write!(f, "_"),
         }
     }
 }
 
-// Convenience conversions for common types to Term<Value>
+/// Convenience conversions for common types to Term<Value>
+///
+/// These From implementations allow easy creation of Term<Value> constants
+/// from various types, automatically wrapping them in the appropriate Value variant.
 impl From<Value> for Term<Value> {
     fn from(value: Value) -> Self {
         Term::Constant(value)
@@ -290,7 +299,9 @@ impl From<dialog_artifacts::Entity> for Term<Value> {
     }
 }
 
-// Additional typed Term conversions
+/// Additional typed Term conversions for dialog-artifacts types
+///
+/// These allow direct conversion from artifact types to their corresponding Terms.
 impl From<&str> for Term<dialog_artifacts::Attribute> {
     fn from(s: &str) -> Self {
         Term::Constant(s.parse().unwrap())
@@ -315,7 +326,10 @@ impl From<dialog_artifacts::Entity> for Term<dialog_artifacts::Entity> {
     }
 }
 
-// From implementations for convenient Term creation from values
+/// From implementations for convenient Term creation from primitive values
+///
+/// These allow direct conversion from Rust primitives to their corresponding
+/// typed Terms (e.g., String -> Term<String>).
 impl From<String> for Term<String> {
     fn from(value: String) -> Self {
         Term::Constant(value)
@@ -370,7 +384,9 @@ impl From<Vec<u8>> for Term<Vec<u8>> {
     }
 }
 
-// Support for converting Term references to owned Terms
+/// Support for converting Term references to owned Terms
+///
+/// Allows cloning Terms when you have a reference but need an owned value.
 impl<T> From<&Term<T>> for Term<T>
 where
     T: IntoValueDataType + Clone,
@@ -380,16 +396,18 @@ where
     }
 }
 
-// TODO: Phase 3 - TypedVariable From implementations removed as part of variable module elimination
-// The functionality is preserved through Term::var() constructor
-
-// Support for converting specific typed Terms to Value Terms
+/// Support for converting specific typed Terms to Value Terms
+///
+/// This conversion preserves the Term structure while changing the value type
+/// from a specific type (like String) to the general Value enum.
 impl From<Term<String>> for Term<Value> {
     fn from(term: Term<String>) -> Self {
         match term {
             Term::Constant(value) => Term::Constant(Value::String(value)),
-            Term::TypedVariable(name, _) => Term::TypedVariable(name, PhantomData),
-            Term::Any => Term::Any,
+            Term::Variable { name, .. } => Term::Variable {
+                name,
+                _type: Type(PhantomData),
+            },
         }
     }
 }
@@ -397,6 +415,30 @@ impl From<Term<String>> for Term<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_serde_integration() {
+        let any = Term::<Value>::new();
+        assert_eq!(serde_json::to_string(&any).unwrap(), r#"{"?":{}}"#);
+
+        let string = Term::<String>::new();
+        assert_eq!(
+            serde_json::to_string(&string).unwrap(),
+            r#"{"?":{"type":"String"}}"#
+        );
+
+        let title = Term::<String>::var("title");
+        assert_eq!(
+            serde_json::to_string(&title).unwrap(),
+            r#"{"?":{"name":"title","type":"String"}}"#
+        );
+
+        let _title = Term::<Value>::var("title");
+        assert_eq!(
+            serde_json::to_string(&_title).unwrap(),
+            r#"{"?":{"name":"title"}}"#
+        );
+    }
 
     #[test]
     fn test_term_from_value() {

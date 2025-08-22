@@ -260,7 +260,7 @@ fn main() {
     //
 
     let other = Term::var("other");
-    let engineer = Employee::job.of(other).is(Term::Any);
+    let engineer = Employee::job.of(other).is(Term::any());
 
     // We can also use owned variables
     let entity_owned = Term::<Entity>::var("owned_entity");
