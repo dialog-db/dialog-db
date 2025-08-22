@@ -1,4 +1,9 @@
-use std::{fmt::Display, fmt::Formatter, mem, str::FromStr};
+use std::{
+    fmt::{Display, Formatter},
+    marker::PhantomData,
+    mem,
+    str::FromStr,
+};
 
 use crate::{Attribute, DialogArtifactsError, Entity, make_reference};
 use base58::{FromBase58, ToBase58};
@@ -286,12 +291,9 @@ impl TryFrom<Value> for u64 {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::UnsignedInt(uint) => {
-                u64::try_from(uint).map_err(|_| TypeError::TypeMismatch(
-                    ValueDataType::UnsignedInt,
-                    value.data_type(),
-                ))
-            }
+            Value::UnsignedInt(uint) => u64::try_from(uint).map_err(|_| {
+                TypeError::TypeMismatch(ValueDataType::UnsignedInt, value.data_type())
+            }),
             _ => Err(TypeError::TypeMismatch(
                 ValueDataType::UnsignedInt,
                 value.data_type(),
@@ -305,12 +307,9 @@ impl TryFrom<Value> for u32 {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::UnsignedInt(uint) => {
-                u32::try_from(uint).map_err(|_| TypeError::TypeMismatch(
-                    ValueDataType::UnsignedInt,
-                    value.data_type(),
-                ))
-            }
+            Value::UnsignedInt(uint) => u32::try_from(uint).map_err(|_| {
+                TypeError::TypeMismatch(ValueDataType::UnsignedInt, value.data_type())
+            }),
             _ => Err(TypeError::TypeMismatch(
                 ValueDataType::UnsignedInt,
                 value.data_type(),
@@ -324,12 +323,9 @@ impl TryFrom<Value> for u16 {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::UnsignedInt(uint) => {
-                u16::try_from(uint).map_err(|_| TypeError::TypeMismatch(
-                    ValueDataType::UnsignedInt,
-                    value.data_type(),
-                ))
-            }
+            Value::UnsignedInt(uint) => u16::try_from(uint).map_err(|_| {
+                TypeError::TypeMismatch(ValueDataType::UnsignedInt, value.data_type())
+            }),
             _ => Err(TypeError::TypeMismatch(
                 ValueDataType::UnsignedInt,
                 value.data_type(),
@@ -343,12 +339,9 @@ impl TryFrom<Value> for u8 {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::UnsignedInt(uint) => {
-                u8::try_from(uint).map_err(|_| TypeError::TypeMismatch(
-                    ValueDataType::UnsignedInt,
-                    value.data_type(),
-                ))
-            }
+            Value::UnsignedInt(uint) => u8::try_from(uint).map_err(|_| {
+                TypeError::TypeMismatch(ValueDataType::UnsignedInt, value.data_type())
+            }),
             _ => Err(TypeError::TypeMismatch(
                 ValueDataType::UnsignedInt,
                 value.data_type(),
@@ -391,12 +384,8 @@ impl TryFrom<Value> for i32 {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::SignedInt(sint) => {
-                i32::try_from(sint).map_err(|_| TypeError::TypeMismatch(
-                    ValueDataType::SignedInt,
-                    value.data_type(),
-                ))
-            }
+            Value::SignedInt(sint) => i32::try_from(sint)
+                .map_err(|_| TypeError::TypeMismatch(ValueDataType::SignedInt, value.data_type())),
             _ => Err(TypeError::TypeMismatch(
                 ValueDataType::SignedInt,
                 value.data_type(),
@@ -410,12 +399,8 @@ impl TryFrom<Value> for i16 {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::SignedInt(sint) => {
-                i16::try_from(sint).map_err(|_| TypeError::TypeMismatch(
-                    ValueDataType::SignedInt,
-                    value.data_type(),
-                ))
-            }
+            Value::SignedInt(sint) => i16::try_from(sint)
+                .map_err(|_| TypeError::TypeMismatch(ValueDataType::SignedInt, value.data_type())),
             _ => Err(TypeError::TypeMismatch(
                 ValueDataType::SignedInt,
                 value.data_type(),
@@ -429,12 +414,8 @@ impl TryFrom<Value> for i8 {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::SignedInt(sint) => {
-                i8::try_from(sint).map_err(|_| TypeError::TypeMismatch(
-                    ValueDataType::SignedInt,
-                    value.data_type(),
-                ))
-            }
+            Value::SignedInt(sint) => i8::try_from(sint)
+                .map_err(|_| TypeError::TypeMismatch(ValueDataType::SignedInt, value.data_type())),
             _ => Err(TypeError::TypeMismatch(
                 ValueDataType::SignedInt,
                 value.data_type(),
@@ -868,5 +849,23 @@ impl From<&u8> for ValueDataType {
 impl From<ValueDataType> for u8 {
     fn from(value: ValueDataType) -> Self {
         value as u8
+    }
+}
+
+impl From<String> for ValueDataType {
+    fn from(_: String) -> Self {
+        Self::String
+    }
+}
+
+impl From<bool> for ValueDataType {
+    fn from(_value: bool) -> Self {
+        Self::Boolean
+    }
+}
+
+impl From<ValueDataType> for PhantomData<ValueDataType> {
+    fn from(_value: ValueDataType) -> Self {
+        PhantomData
     }
 }

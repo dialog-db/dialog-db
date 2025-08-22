@@ -16,30 +16,40 @@ use crate::types::IntoValueDataType;
 use dialog_artifacts::{Value, ValueDataType};
 use serde::{Deserialize, Serialize};
 
-/// Term represents either a constant value or variable placeholder
+/// Term represents either a constant value or variable constraint of the
+/// predicate.
 ///
 /// This is the main API type used throughout the dialog-query system.
 /// Generic over T to represent typed terms (e.g., Term<String>, Term<Value>).
 ///
 /// # JSON Serialization
 /// Terms serialize to different JSON formats:
-/// - Named variables: `{ "?": { "name": "var_name", "type": "String" } }`
-/// - Untyped variables (Term<Value>): `{ "?": { "name": "var_name" } }`
-/// - Unnamed variables (old Any): `{ "?": {} }`
+/// - Named typed variable: `Term<String>`: `{ "?": { "name": "var_name", "type": "String" } }`
+/// - Named untyped variable `Term<Value>`: `{ "?": { "name": "var_name" } }`
+/// - Anonymous typed variable `Term<String>`: `{ "?": { "type": "String" } }`
+/// - Anonymous untyped variable `Term<Value>`: `{ "?": {} }`
 /// - Constants: Plain JSON values (e.g., `"Alice"`, `42`, `true`)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Term<T>
 where
     T: IntoValueDataType + Clone + 'static,
 {
-    /// A variable with optional name and type information
-    /// Variables with name: None don't produce bindings but still match (replaces Any)
-    /// The PhantomData<T> carries the type information at compile time
+    /// A variable term can be used as matching term across conjuncts in the
+    /// predicate. If variable has name it acts as an implicit join across
+    /// conjuncts. If variable has type other than `Value`, it acts as a type
+    /// constraint.
+    ///
+    /// Two variables with the same name and different types in the same
+    /// predicate will fail to unify will fail to match anything.
     #[serde(rename = "?")]
     Variable {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
-        #[serde(rename = "type", skip_serializing_if = "Type::<T>::is_any")]
+        #[serde(
+            rename = "type",
+            skip_serializing_if = "Type::<T>::is_any",
+            default = "Type::<T>::default"
+        )]
         _type: Type<T>,
     },
 
@@ -50,10 +60,32 @@ where
     Constant(T),
 }
 
+/// Wrapper around PhantomData<T> with additional functionality so it can
+/// be converted to and from Option<ValueDataType>.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(into = "Option<ValueDataType>")]
+#[serde(into = "Option<ValueDataType>", from = "Option<ValueDataType>")]
 pub struct Type<T: IntoValueDataType + Clone + 'static>(PhantomData<T>);
+
+impl<T: IntoValueDataType + Clone + 'static> Default for Type<T> {
+    fn default() -> Self {
+        Type(PhantomData)
+    }
+}
+
+// #[test]
+// fn test_type_default() {
+//     let out = Into::<Option<ValueDataType>>::into(PhantomData);
+// }
+
+// impl<T: IntoValueDataType + Clone + 'static> From<PhantomData<T>> for ValueDataType {
+//     fn from(_value: PhantomData<T>) -> Self {
+//         T::into_value_data_type()
+//     }
+// }
+
 impl<T: IntoValueDataType + Clone + 'static> Type<T> {
+    /// Returns true if `T` is `Value` as it can represent all supported data
+    /// types.
     fn is_any(&self) -> bool {
         T::into_value_data_type().is_none()
     }
@@ -67,39 +99,12 @@ where
         T::into_value_data_type()
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-enum TermSyntax<T>
+impl<T> From<Option<ValueDataType>> for Type<T>
 where
     T: IntoValueDataType + Clone + 'static,
 {
-    #[serde(rename = "?")]
-    Variable {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-        #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-        _type: Option<ValueDataType>,
-    },
-
-    /// A concrete value of type T
-    /// For Term<Value>, serializes as plain JSON (e.g., "Alice", 42, true)
-    /// For other types, uses normal serde serialization
-    #[serde(untagged)]
-    Constant(T),
-}
-
-impl<T> From<Term<T>> for TermSyntax<T>
-where
-    T: IntoValueDataType + Clone + 'static,
-{
-    fn from(value: Term<T>) -> Self {
-        match value {
-            Term::Variable { name, _type } => TermSyntax::Variable {
-                name,
-                _type: T::into_value_data_type(),
-            },
-            Term::Constant(value) => TermSyntax::Constant(value),
-        }
+    fn from(_value: Option<ValueDataType>) -> Self {
+        Type(PhantomData)
     }
 }
 
@@ -110,13 +115,6 @@ impl<T> Term<T>
 where
     T: IntoValueDataType + Clone,
 {
-    pub fn new() -> Self {
-        Term::Variable {
-            name: None,
-            _type: Type(PhantomData),
-        }
-    }
-
     /// Create a new typed variable with the given name
     ///
     /// The type T is carried via PhantomData and used for type information
@@ -128,15 +126,12 @@ where
         }
     }
 
-    /// Create an unnamed variable term that matches any value without binding
+    /// Create an anonymous variable that only used to pattern match by type
+    /// unless type is `Value`. If type is `Value`, it simply matches anything.
     ///
-    /// Replaces the old Any variant. These variables match anything but don't
-    /// produce bindings. Serializes as `{ "?": {} }` in JSON
-    pub fn any() -> Self {
-        Term::Variable {
-            name: None,
-            _type: Type(PhantomData),
-        }
+    /// Unlike other variables, it does not performs join across conjuncts.
+    pub fn blank() -> Self {
+        Self::default()
     }
 
     /// Check if this term is a variable (named or unnamed)
@@ -152,7 +147,7 @@ where
     /// Check if this term is an unnamed variable (old Any behavior)
     ///
     /// Unnamed variables match anything but don't produce bindings
-    pub fn is_any(&self) -> bool {
+    pub fn is_blank(&self) -> bool {
         matches!(self, Term::Variable { name: None, .. })
     }
 
@@ -231,6 +226,18 @@ where
     /// Currently returns self unchanged - may be expanded for query building
     pub fn is<Is: Into<Term<T>>>(self, _other: Is) -> Self {
         self
+    }
+}
+
+impl<T> Default for Term<T>
+where
+    T: IntoValueDataType + Clone,
+{
+    fn default() -> Self {
+        Term::Variable {
+            name: None,
+            _type: Type::default(),
+        }
     }
 }
 
@@ -418,10 +425,11 @@ mod tests {
 
     #[test]
     fn test_serde_integration() {
-        let any = Term::<Value>::new();
+        // Test serialization
+        let any = Term::<Value>::default();
         assert_eq!(serde_json::to_string(&any).unwrap(), r#"{"?":{}}"#);
 
-        let string = Term::<String>::new();
+        let string = Term::<String>::default();
         assert_eq!(
             serde_json::to_string(&string).unwrap(),
             r#"{"?":{"type":"String"}}"#
@@ -438,6 +446,73 @@ mod tests {
             serde_json::to_string(&_title).unwrap(),
             r#"{"?":{"name":"title"}}"#
         );
+
+        // Test deserialization
+        println!("Testing deserialization...");
+
+        // Test 1: Deserialize unnamed variable (Any)
+        let json1 = r#"{"?":{}}"#;
+        match serde_json::from_str::<Term<Value>>(json1) {
+            Ok(term) => {
+                println!("Deserialized term: {:?}", term);
+                assert_eq!(term, Term::default());
+            }
+            Err(e) => {
+                println!("Failed to deserialize: {}", e);
+                panic!("Deserialization failed: {}", e);
+            }
+        }
+
+        // // Test 2: Deserialize typed unnamed variable
+        // let json2 = r#"{"?":{"type":"String"}}"#;
+        // match serde_json::from_str::<Term<String>>(json2) {
+        //     Ok(term) => {
+        //         println!("✓ Deserialized typed Any: {:?}", term);
+        //         assert!(term.is_any());
+        //     }
+        //     Err(e) => panic!("Failed to deserialize typed Any: {}", e),
+        // }
+
+        // // Test 3: Deserialize named variable with type
+        // let json3 = r#"{"?":{"name":"title","type":"String"}}"#;
+        // match serde_json::from_str::<Term<String>>(json3) {
+        //     Ok(term) => {
+        //         println!("✓ Deserialized named variable: {:?}", term);
+        //         assert_eq!(term.name(), Some("title"));
+        //     }
+        //     Err(e) => panic!("Failed to deserialize named variable: {}", e),
+        // }
+
+        // // Test 4: Deserialize untyped named variable
+        // let json4 = r#"{"?":{"name":"title"}}"#;
+        // match serde_json::from_str::<Term<Value>>(json4) {
+        //     Ok(term) => {
+        //         println!("✓ Deserialized untyped variable: {:?}", term);
+        //         assert_eq!(term.name(), Some("title"));
+        //     }
+        //     Err(e) => panic!("Failed to deserialize untyped variable: {}", e),
+        // }
+
+        // // Test 5: Deserialize constant
+        // let json5 = r#""Alice""#;
+        // match serde_json::from_str::<Term<String>>(json5) {
+        //     Ok(term) => {
+        //         println!("✓ Deserialized constant: {:?}", term);
+        //         assert!(term.is_constant());
+        //         assert_eq!(term.as_constant(), Some(&"Alice".to_string()));
+        //     }
+        //     Err(e) => panic!("Failed to deserialize constant: {}", e),
+        // }
+
+        // // Test 6: Deserialize Entity variable (the failing case?)
+        // let json6 = r#"{"?":{"name":"user","type":"Entity"}}"#;
+        // match serde_json::from_str::<Term<dialog_artifacts::Entity>>(json6) {
+        //     Ok(term) => {
+        //         println!("✓ Deserialized Entity variable: {:?}", term);
+        //         assert_eq!(term.name(), Some("user"));
+        //     }
+        //     Err(e) => panic!("Failed to deserialize Entity variable: {}", e),
+        // }
     }
 
     #[test]

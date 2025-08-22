@@ -44,6 +44,9 @@ impl MicroshaftEmployeeName {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
+    pub fn value(&self) -> &str {
+        &self.0
+    }
 }
 
 pub struct MicroshaftEmployeeJob(String);
@@ -61,6 +64,9 @@ impl Attribute for MicroshaftEmployeeJob {
 impl MicroshaftEmployeeJob {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
+    }
+    pub fn value(&self) -> &str {
+        &self.0
     }
 }
 
@@ -80,6 +86,9 @@ impl MicroshaftEmployeeSalary {
     pub fn new(value: u32) -> Self {
         Self(value)
     }
+    pub fn value(&self) -> u32 {
+        self.0
+    }
 }
 
 pub struct MicroshaftEmployeeAddress(String);
@@ -88,7 +97,7 @@ impl Attribute for MicroshaftEmployeeAddress {
         "microshaft.employee/address"
     }
     fn cardinality() -> Cardinality {
-        Cardinality::Many  // Because of #[many] attribute
+        Cardinality::Many // Because of #[many] attribute
     }
     fn value_type() -> ValueDataType {
         ValueDataType::String
@@ -97,6 +106,9 @@ impl Attribute for MicroshaftEmployeeAddress {
 impl MicroshaftEmployeeAddress {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
+    }
+    pub fn value(&self) -> &str {
+        &self.0
     }
 }
 
@@ -111,24 +123,33 @@ pub mod MicroshaftEmployee {
 
 fn main() {
     println!("=== Macro Expansion Example ===\n");
-    
+
     // Now you can use the MicroshaftEmployee::Name syntax!
     let _name = MicroshaftEmployee::Name::new("John Doe");
     let _job = MicroshaftEmployee::Job::new("Software Engineer");
     let _salary = MicroshaftEmployee::Salary::new(150000);
     let _address = MicroshaftEmployee::Address::new("123 Main St");
-    
+
     println!("✅ MicroshaftEmployee::Name::new() works!");
     println!("✅ MicroshaftEmployee::Job::new() works!");
     println!("✅ MicroshaftEmployee::Salary::new() works!");
     println!("✅ MicroshaftEmployee::Address::new() works!");
-    
+
     // The structs implement the Attribute trait
     println!("\nAttribute info:");
     println!("Name attribute: {}", MicroshaftEmployeeName::name());
-    println!("Job cardinality: {:?}", MicroshaftEmployeeJob::cardinality());
-    println!("Salary value type: {:?}", MicroshaftEmployeeSalary::value_type());
-    
+    println!(
+        "Job cardinality: {:?}",
+        MicroshaftEmployeeJob::cardinality()
+    );
+    println!(
+        "Salary value type: {:?}",
+        MicroshaftEmployeeSalary::value_type()
+    );
+
     // Address has Many cardinality because of #[many]
-    println!("Address cardinality: {:?}", MicroshaftEmployeeAddress::cardinality());
+    println!(
+        "Address cardinality: {:?}",
+        MicroshaftEmployeeAddress::cardinality()
+    );
 }

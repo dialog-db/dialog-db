@@ -4,7 +4,7 @@
 //! terms through different type parameters, providing a single enum type that
 //! unifies all query operations.
 
-use dialog_artifacts::{Value, ValueDataType};
+use dialog_artifacts::Value;
 use dialog_query::Term;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -78,8 +78,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Type safety demonstration
     println!("\n4. Type Safety Checks");
-    let string_value = Value::String("Alice".to_string());
-    let int_value = Value::UnsignedInt(25);
+    let _string_value = Value::String("Alice".to_string());
+    let _int_value = Value::UnsignedInt(25);
     let _bool_value = Value::Boolean(true);
 
     println!("  Type safety is enforced at compile-time with Term<T>");
@@ -189,7 +189,7 @@ mod integration_tests {
         // Both are variables
         assert!(any_var.is_variable());
         assert!(another_any.is_variable());
-        
+
         // Test variable names
         assert_eq!(any_var.name(), Some("anything"));
         assert_eq!(another_any.name(), Some("other"));

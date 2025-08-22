@@ -71,13 +71,13 @@ where
 
     /// The entity term (subject) - what entity this fact is about
     ///
-    /// Examples: specific Entity ID, Term::var("user"), Term::any()
+    /// Examples: specific Entity ID, Term::var("user"), Term::new()
     #[serde(skip_serializing_if = "Option::is_none")]
     pub of: Option<Term<Entity>>,
 
     /// The value term (object) - what value the attribute has for the entity
     ///
-    /// Examples: "Alice", 42, Term::var("value"), Term::any()
+    /// Examples: "Alice", 42, Term::var("value"), Term::new()
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is: Option<Term<T>>,
 
@@ -114,7 +114,7 @@ where
     /// - String literals: `"user/name"`
     /// - Attribute constants: `Attribute::parse("user/name")`
     /// - Variables: `Term::<Attribute>::var("attr")`
-    /// - Wildcards: `Term::<Attribute>::any()`
+    /// - Wildcards: `Term::<Attribute>::new()`
     pub fn the<The: Into<Term<Attribute>>>(mut self, the: The) -> Self {
         self.the = Some(the.into());
         self
@@ -125,7 +125,7 @@ where
     /// Accepts anything convertible to Term<Entity>:
     /// - Entity constants: `Entity::new()`
     /// - Variables: `Term::<Entity>::var("user")`
-    /// - Wildcards: `Term::<Entity>::any()`
+    /// - Wildcards: `Term::<Entity>::new()`
     pub fn of<Of: Into<Term<Entity>>>(mut self, entity: Of) -> Self {
         self.of = Some(entity.into());
         self
@@ -136,7 +136,7 @@ where
     /// Accepts anything convertible to Term<T>:
     /// - Value constants: `"Alice"`, `42`, `true`
     /// - Variables: `Term::<T>::var("value")`
-    /// - Wildcards: `Term::<T>::any()`
+    /// - Wildcards: `Term::<T>::new()`
     pub fn is<V: Into<Term<T>>>(mut self, value: V) -> Self {
         self.is = Some(value.into());
         self

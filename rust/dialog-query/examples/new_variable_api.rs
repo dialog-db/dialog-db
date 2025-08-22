@@ -1,8 +1,8 @@
 //! Example demonstrating the new Term API with clean type-safe syntax
 //! This shows the clean API: Term::<T>::var() for typed variables
 
-use dialog_artifacts::{Entity, Value, ValueDataType};
-use dialog_query::{Term};
+use dialog_artifacts::{Entity, Value};
+use dialog_query::Term;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== New Variable API Demo ===");
@@ -49,10 +49,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Compile-Time Type Safety ===");
 
     // Type safety is now enforced through compile-time generics and runtime type checking
-    let alice_value = Value::String("Alice".to_string());
-    let bool_value = Value::Boolean(true);
-    let age_value = Value::UnsignedInt(42);
-    
+    let _alice_value = Value::String("Alice".to_string());
+    let _bool_value = Value::Boolean(true);
+    let _age_value = Value::UnsignedInt(42);
+
     println!("Type safety is enforced at compile-time with Term<T>");
     println!("String terms work with string values");
     println!("u64 terms work with unsigned int values");
@@ -90,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Native Term system - no conversion needed
     println!("\n=== Native Term System ===");
-    
+
     if name_var.is_variable() {
         println!(
             "Name term as variable: {:?} (type: {:?})",
@@ -133,10 +133,10 @@ mod tests {
         // Test that they have the right types and behaviors
         assert_eq!(name_var.name(), Some("name"));
         assert_eq!(name_var.data_type(), Some(ValueDataType::String));
-        
+
         assert_eq!(age_var.name(), Some("age"));
         assert_eq!(age_var.data_type(), Some(ValueDataType::UnsignedInt));
-        
+
         assert_eq!(any_var.name(), Some("anything"));
         assert_eq!(any_var.data_type(), None); // Value type is flexible
     }

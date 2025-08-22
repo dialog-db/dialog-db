@@ -1,7 +1,6 @@
 use std::marker::PhantomData;
 
-use dialog_query::{Attribute, Cardinality, Entity, Term, ValueDataType};
-use tokio::io::Empty;
+use dialog_query::{Entity, Term};
 
 // #[relation]
 // struct Employee {
@@ -16,10 +15,10 @@ pub mod Employee {
     pub use dialog_query::{Entity, Term};
     use futures_util::Stream;
     // Defines Employee model that will be returned when queries are matched
-    struct Model {
-        this: Entity,
-        name: String,
-        job: String,
+    pub struct Model {
+        pub this: Entity,
+        pub name: String,
+        pub job: String,
     }
 
     // Defines predicate that can be used in queries
@@ -50,7 +49,7 @@ pub mod Employee {
     pub struct MatchPlan;
     impl Syntax for Match {
         type Plan = MatchPlan;
-        fn plan(&self, scope: &VariableScope) -> QueryResult<Self::Plan> {
+        fn plan(&self, _scope: &VariableScope) -> QueryResult<Self::Plan> {
             Ok(MatchPlan)
         }
     }
@@ -164,15 +163,15 @@ pub mod Employee {
         }
     }
 
-    #[allow(non_snake_case)]
+    #[allow(non_upper_case_globals)]
     pub const name: name_api::PredicateBuilder = name_api::PredicateBuilder {};
-    #[allow(non_snake_case)]
+    #[allow(non_upper_case_globals)]
     pub const job: job_api::PredicateBuilder = job_api::PredicateBuilder {};
 }
 
 pub struct Person {
-    name: String,
-    birthday: u32,
+    pub name: String,
+    pub birthday: u32,
 }
 
 impl Person {
@@ -187,7 +186,7 @@ impl Person {
 
 pub struct Match<T>(PhantomData<T>);
 
-type Select<V> = V;
+pub type Select<V> = V;
 
 pub trait Selector {
     type Match;
@@ -225,14 +224,14 @@ impl Selector for Person {
 // }
 
 fn main() {
-    let jack = "Jack".to_string();
-    let p = Person::Match(|person| (person.name.is("Test"), person.birthday));
+    let _jack = "Jack".to_string();
+    let _p = Person::Match(|person| (person.name.is("Test"), person.birthday));
     // let selector = <Person as Selector>::Match {
     //     name: Term::var("name"),
     //     ..Person::select()
     // };
 
-    let out = Match::<Person>::select(PersonMatch {
+    let _out = Match::<Person>::select(PersonMatch {
         name: Term::var("name"),
         birthday: Term::var("birthday"),
     });
@@ -244,34 +243,34 @@ fn main() {
     let entity = Term::<Entity>::var("self");
 
     // Predicate using owned variable
-    let employee = Employee::Match {
+    let _employee = Employee::Match {
         this: entity.clone().into(),
         name: "John Doe".into(),
         job: "Software Engineer".into(),
     };
 
-    let find = Employee::Match::default();
+    let _find = Employee::Match::default();
 
     // This now works! We can pass variable references thanks to From<&TypedVariable<T>>
-    let constraint = Employee::name.of(&entity).is("John Doe");
-    let exclude = Employee::name.of(&entity).not("Jane Doe");
+    let _constraint = Employee::name.of(&entity).is("John Doe");
+    let _exclude = Employee::name.of(&entity).not("Jane Doe");
     //
     //
     //
 
     let other = Term::var("other");
-    let engineer = Employee::job.of(other).is(Term::any());
+    let _engineer = Employee::job.of(other).is(Term::blank());
 
     // We can also use owned variables
     let entity_owned = Term::<Entity>::var("owned_entity");
-    let constraint_owned = Employee::name.of(entity_owned).is("Jane Doe");
+    let _constraint_owned = Employee::name.of(entity_owned).is("Jane Doe");
 
     println!("✅ Variable references work: Employee::name.of(&entity).is(...)");
     println!("✅ Owned variables work: Employee::name.of(entity).is(...)");
     println!("✅ Both create Match structs for pattern matching!");
 
     // We can still use the entity variable after passing a reference
-    let another_constraint = Employee::name.of(&entity).is("Bob Smith");
+    let _another_constraint = Employee::name.of(&entity).is("Bob Smith");
 
     println!("✅ Variable can be reused after passing by reference!");
 }

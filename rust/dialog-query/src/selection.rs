@@ -330,7 +330,7 @@ mod tests {
         let match_frame = Match::new();
 
         // Setting Any term should always succeed
-        let any_term = Term::<String>::any();
+        let any_term = Term::<String>::blank();
         let result = match_frame.set(any_term, "anything".to_string());
         assert!(result.is_ok());
     }
@@ -356,7 +356,7 @@ mod tests {
         assert!(match_frame.has(&constant_term));
 
         // Any is always "bound"
-        let any_term = Term::<String>::any();
+        let any_term = Term::<String>::blank();
         assert!(!match_frame.has(&any_term));
     }
 

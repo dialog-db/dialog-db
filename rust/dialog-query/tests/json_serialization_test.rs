@@ -34,10 +34,10 @@ fn test_current_json_serialization() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test deserialization
     println!("Testing deserialization...");
-    let deserialized1: FactSelector<Value> = serde_json::from_str(&json1)?;
+    let _deserialized1: FactSelector<Value> = serde_json::from_str(&json1)?;
     println!("✓ Successfully deserialized first example");
 
-    let deserialized2: FactSelector<Value> = serde_json::from_str(&json2)?;
+    let _deserialized2: FactSelector<Value> = serde_json::from_str(&json2)?;
     println!("✓ Successfully deserialized second example");
 
     println!("\nCurrent serialization works!");

@@ -3,7 +3,7 @@
 //! This example shows how to use the new typed Term system
 //! to provide compile-time type safety in a unified system.
 
-use dialog_artifacts::{Entity, Value, ValueDataType};
+use dialog_artifacts::{Entity, Value};
 use dialog_query::Term;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -72,9 +72,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Type Safety Checks ===");
 
     // Type safety is enforced through the type system
-    let alice_value = Value::String("Alice".to_string());
-    let bool_value = Value::Boolean(true);
-    
+    let _alice_value = Value::String("Alice".to_string());
+    let _bool_value = Value::Boolean(true);
+
     println!("Type safety is enforced at compile-time with Term<T>");
     println!("String terms work with string values");
     println!("Value terms work with any value type");
@@ -155,7 +155,7 @@ mod integration_tests {
         assert_eq!(name_var.data_type(), Some(ValueDataType::String));
         assert_eq!(age_var.data_type(), Some(ValueDataType::UnsignedInt));
         assert_eq!(any_var.data_type(), None); // Value is flexible
-        
+
         // Test variable names
         assert_eq!(name_var.name(), Some("name"));
         assert_eq!(age_var.name(), Some("age"));
@@ -174,8 +174,14 @@ mod integration_tests {
         let vars = vec![
             (name_var.name().unwrap().to_string(), name_var.data_type()),
             (age_var.name().unwrap().to_string(), age_var.data_type()),
-            (active_var.name().unwrap().to_string(), active_var.data_type()),
-            (wildcard_var.name().unwrap().to_string(), wildcard_var.data_type()),
+            (
+                active_var.name().unwrap().to_string(),
+                active_var.data_type(),
+            ),
+            (
+                wildcard_var.name().unwrap().to_string(),
+                wildcard_var.data_type(),
+            ),
         ];
 
         assert_eq!(vars.len(), 4);
