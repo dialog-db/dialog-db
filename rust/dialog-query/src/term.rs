@@ -1,25 +1,155 @@
 //! Term types for pattern matching and query construction
 
+use std::any::TypeId;
 use std::fmt;
 use std::marker::PhantomData;
 
 use crate::types::IntoValueDataType;
 use dialog_artifacts::{Value, ValueDataType};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 
 /// Term is either a constant value or a variable placeholder
 /// Generic over T to represent typed terms
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Term<T>
 where
     T: IntoValueDataType + Clone,
 {
+    /// A named variable with type information
+    TypedVariable(String, PhantomData<T>),
+    /// Wildcard that matches any value - serializes as { "?": {} }
+    Any,
     /// A concrete value of type T
     Constant(T),
-    /// A typed variable placeholder with zero-cost type safety
-    TypedVariable(String, PhantomData<T>),
-    /// Wildcard that matches any value
-    Any,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[serde(untagged)]
+enum VariableSyntax {
+    Variable {
+        name: String,
+        #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+        _type: Option<ValueDataType>,
+    },
+    Any {},
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+enum TermSyntax<T> {
+    #[serde(rename = "?")]
+    Variable(VariableSyntax),
+    #[serde(untagged)]
+    Constant(T),
+}
+
+#[test]
+fn test_term_syntax() {
+    let syntax: TermSyntax<Vec<u8>> = TermSyntax::Variable(VariableSyntax::Any {});
+    let serialized = serde_json::to_string(&syntax).unwrap();
+    assert_eq!(serialized, r#"{"?":{}}"#);
+
+    let var: TermSyntax<i32> = TermSyntax::Variable(VariableSyntax::Variable {
+        name: "x".to_string(),
+        _type: None,
+    });
+    let serialized = serde_json::to_string(&var).unwrap();
+    assert_eq!(serialized, r#"{"?":{"name":"x"}}"#);
+
+    let parse_any: TermSyntax<i32> = serde_json::from_str(r#"{"?": {}}"#).unwrap();
+    assert_eq!(parse_any, TermSyntax::Variable(VariableSyntax::Any {}));
+
+    let parse_var: TermSyntax<i32> = serde_json::from_str(r#"{"?": {"name": "x"}}"#).unwrap();
+    assert_eq!(
+        parse_var,
+        TermSyntax::Variable(VariableSyntax::Variable {
+            name: "x".to_string(),
+            _type: None,
+        })
+    );
+
+    let constant = TermSyntax::Constant(42);
+    let serialized = serde_json::to_string(&constant).unwrap();
+    assert_eq!(serialized, r#"42"#);
+
+    let parse_constant: TermSyntax<u32> = serde_json::from_str(r#"42"#).unwrap();
+    assert_eq!(parse_constant, TermSyntax::Constant(42));
+
+    let parse_typed_var: TermSyntax<i32> =
+        serde_json::from_str(r#"{"?": {"name": "x", "type": "SignedInt"}}"#).unwrap();
+    assert_eq!(
+        parse_typed_var,
+        TermSyntax::Variable(VariableSyntax::Variable {
+            name: "x".to_string(),
+            _type: Some(ValueDataType::SignedInt),
+        })
+    );
+}
+
+// Convert between Term and TermSyntax
+impl<T> From<Term<T>> for TermSyntax<T>
+where
+    T: IntoValueDataType + Clone + 'static,
+{
+    fn from(term: Term<T>) -> Self {
+        match term {
+            Term::TypedVariable(name, _) => {
+                // For Value type, we don't include type information (untyped variable)
+                let _type = if TypeId::of::<T>() == TypeId::of::<Value>() {
+                    None
+                } else {
+                    T::into_value_data_type()
+                };
+                
+                TermSyntax::Variable(VariableSyntax::Variable { name, _type })
+            }
+            Term::Any => TermSyntax::Variable(VariableSyntax::Any {}),
+            Term::Constant(value) => TermSyntax::Constant(value),
+        }
+    }
+}
+
+impl<T> From<TermSyntax<T>> for Term<T>
+where
+    T: IntoValueDataType + Clone,
+{
+    fn from(syntax: TermSyntax<T>) -> Self {
+        match syntax {
+            TermSyntax::Variable(VariableSyntax::Any {}) => Term::Any,
+            TermSyntax::Variable(VariableSyntax::Variable { name, .. }) => {
+                // Type information is carried by T, not by the syntax
+                Term::TypedVariable(name, PhantomData)
+            }
+            TermSyntax::Constant(value) => Term::Constant(value),
+        }
+    }
+}
+
+// Implement Serialize using the intermediate format
+impl<T> Serialize for Term<T>
+where
+    T: IntoValueDataType + Clone + Serialize + 'static,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let syntax: TermSyntax<T> = self.clone().into();
+        syntax.serialize(serializer)
+    }
+}
+
+impl<'de, T> Deserialize<'de> for Term<T>
+where
+    T: IntoValueDataType + Clone + Deserialize<'de> + 'static,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let syntax = TermSyntax::<T>::deserialize(deserializer)?;
+        Ok(Term::from(syntax))
+    }
 }
 
 impl<T> Term<T>
@@ -33,6 +163,7 @@ where
     pub fn any() -> Self {
         Term::Any
     }
+
     /// Check if this term is a variable
     pub fn is_variable(&self) -> bool {
         matches!(self, Term::TypedVariable(_, _))
@@ -89,7 +220,7 @@ where
     pub fn as_variable_name(&self) -> Option<&str> {
         match self {
             Term::TypedVariable(name, _) => Some(name),
-            Term::Constant(_) | Term::Any => None,
+            _ => None,
         }
     }
 
@@ -99,6 +230,10 @@ where
             Term::Constant(value) => Some(value),
             Term::TypedVariable(_, _) | Term::Any => None,
         }
+    }
+
+    pub fn is<Is: Into<Term<T>>>(self, _other: Is) -> Self {
+        self
     }
 }
 
@@ -284,8 +419,8 @@ mod tests {
         let string_var = Term::<String>::var("name");
         let untyped_var = Term::<Value>::var("anything");
 
-        let string_term = string_var;  // Already a Term<String>
-        let untyped_term = untyped_var;  // Already a Term<Value>
+        let string_term = string_var; // Already a Term<String>
+        let untyped_term = untyped_var; // Already a Term<Value>
 
         // Both should be variable terms
         assert!(string_term.is_variable());
@@ -310,9 +445,9 @@ mod tests {
         let any_var = Term::<Value>::var("wildcard");
 
         // Convert to terms - now preserves types
-        let name_term = name_var;  // Already a Term<String>
-        let age_term = age_var;    // Already a Term<u64>
-        let any_term = any_var;    // Already a Term<Value>
+        let name_term = name_var; // Already a Term<String>
+        let age_term = age_var; // Already a Term<u64>
+        let any_term = any_var; // Already a Term<Value>
 
         // All should be variable terms
         assert!(name_term.is_variable());

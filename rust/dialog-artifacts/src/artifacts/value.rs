@@ -8,6 +8,7 @@ use thiserror::Error;
 
 /// All value type representations that may be stored by [`Artifacts`]
 #[derive(Debug, Clone, PartialOrd, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum Value {
     /// A byte buffer
     Bytes(Vec<u8>),
@@ -375,12 +376,8 @@ impl TryFrom<Value> for i64 {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::SignedInt(sint) => {
-                i64::try_from(sint).map_err(|_| TypeError::TypeMismatch(
-                    ValueDataType::SignedInt,
-                    value.data_type(),
-                ))
-            }
+            Value::SignedInt(sint) => i64::try_from(sint)
+                .map_err(|_| TypeError::TypeMismatch(ValueDataType::SignedInt, value.data_type())),
             _ => Err(TypeError::TypeMismatch(
                 ValueDataType::SignedInt,
                 value.data_type(),
@@ -774,7 +771,7 @@ pub enum TypeError {
     wasm_bindgen::prelude::wasm_bindgen
 )]
 #[repr(u8)]
-#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ValueDataType {
     /// A byte buffer
     #[default]

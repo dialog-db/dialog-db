@@ -66,15 +66,15 @@ accessible(Doc, User) :- owner(Doc, User).
 ```json
 {
   "match": {
-    "document": { "?": { "id": 1 } },
-    "user": { "?": { "id": 2 } }
+    "document": { "?": { "name": "document" } },
+    "user": { "?": { "name": "user" } }
   },
   "when": {
     "public": [
       {
         "match": {
           "the": "cafe.familiar.document/visibility",
-          "of": { "?": { "id": 1 } },
+          "of": { "?": { "name": "document" } },
           "is": "public"
         }
       }
@@ -83,8 +83,8 @@ accessible(Doc, User) :- owner(Doc, User).
       {
         "match": {
           "the": "cafe.familiar.document/owner",
-          "of": { "?": { "id": 1 } },
-          "is": { "?": { "id": 2 } }
+          "of": { "?": { "name": "document" } },
+          "is": { "?": { "name": "user" } }
         }
       }
     ]
@@ -107,20 +107,16 @@ Variables are placeholders with unique IDs that unify within rule scopes. They r
     "?": {
       "type": "object",
       "properties": {
-        "id": {
-          "type": "number",
-          "description": "Unique identifier for this variable"
-        },
         "name": {
           "type": "string",
-          "description": "Optional human-readable name for this variable"
+          "description": "Unique name for this variable"
         },
         "type": {
           "$ref": "#/definitions/Type",
           "description": "Optional type predicate"
         }
       },
-      "required": ["id"]
+      "required": ["name"]
     }
   },
   "required": ["?"]
@@ -130,14 +126,14 @@ Variables are placeholders with unique IDs that unify within rule scopes. They r
 #### Examples
 
 ```json
-// Simple variable with just an ID
-{ "?": { "id": 1 } }
+// Simple variable with just a name
+{ "?": { "name": "var1" } }
 
-// Variable with optional name for clarity
-{ "?": { "id": 2, "name": "person" } }
+// Variable with name for clarity
+{ "?": { "name": "person" } }
 
 // Variable with type constraint
-{ "?": { "id": 3, "type": "string" } }
+{ "?": { "name": "username", "type": "string" } }
 ```
 
 ### Terms
@@ -165,7 +161,7 @@ true                      // Boolean
 { "/": { "bytes": "SGVsbG8gV29ybGQ" } }  // Bytes (DAG-JSON)
 
 // Variables (placeholders)
-{ "?": { "id": 1 } }      // Variable reference
+{ "?": { "name": "document" } }      // Variable reference
 ```
 
 ### Predicate
@@ -211,7 +207,7 @@ Negation wraps other conjuncts to exclude matches that satisfy the inner predica
   "not": {
     "match": {
       "the": "cafe.familiar.user/status",
-      "of": { "?": { "id": 1 } },
+      "of": { "?": { "name": "document" } },
       "is": "blocked"
     }
   }
@@ -222,7 +218,7 @@ Negation wraps other conjuncts to exclude matches that satisfy the inner predica
   "not": {
     "operator": ">",
     "match": {
-      "of": { "?": { "id": 1 } },
+      "of": { "?": { "name": "document" } },
       "is": 100
     }
   }
@@ -259,8 +255,8 @@ Recursion enables recursive rule evaluation for transitive relationships.
 // Recursive call with variable bindings
 {
   "recur": {
-    "ancestor": { "?": { "id": 1 } },
-    "descendant": { "?": { "id": 2 } }
+    "ancestor": { "?": { "name": "document" } },
+    "descendant": { "?": { "name": "user" } }
   }
 }
 ```
@@ -315,9 +311,9 @@ Selection matches facts in the database by pattern matching against the uniform 
 // Match all facts about a specific entity
 {
   "match": {
-    "of": { "?": { "id": 1 } },
-    "the": { "?": { "id": 2 } },
-    "is": { "?": { "id": 3 } }
+    "of": { "?": { "name": "document" } },
+    "the": { "?": { "name": "user" } },
+    "is": { "?": { "name": "value" } }
   }
 }
 
@@ -325,8 +321,8 @@ Selection matches facts in the database by pattern matching against the uniform 
 {
   "match": {
     "the": "cafe.familiar.person/name",
-    "of": { "?": { "id": 1 } },
-    "is": { "?": { "id": 2 } }
+    "of": { "?": { "name": "document" } },
+    "is": { "?": { "name": "user" } }
   }
 }
 
@@ -334,8 +330,8 @@ Selection matches facts in the database by pattern matching against the uniform 
 {
   "match": {
     "is": "Alice",
-    "the": { "?": { "id": 1 } },
-    "of": { "?": { "id": 2 } }
+    "the": { "?": { "name": "document" } },
+    "of": { "?": { "name": "user" } }
   }
 }
 ```
@@ -373,21 +369,21 @@ Rule Application is how you execute queries. It applies a rule with specific var
 // Simple query using a rule
 {
   "match": {
-    "person": { "?": { "id": 1 } },
-    "name": { "?": { "id": 2 } }
+    "person": { "?": { "name": "document" } },
+    "name": { "?": { "name": "user" } }
   },
   "rule": {
     "match": {
-      "person": { "?": { "id": 10 } },
-      "name": { "?": { "id": 11 } }
+      "person": { "?": { "name": "person" } },
+      "name": { "?": { "name": "name" } }
     },
     "when": {
       "where": [
         {
           "match": {
             "the": "cafe.familiar.person/name",
-            "of": { "?": { "id": 10 } },
-            "is": { "?": { "id": 11 } }
+            "of": { "?": { "name": "person" } },
+            "is": { "?": { "name": "name" } }
           }
         }
       ]
@@ -398,13 +394,13 @@ Rule Application is how you execute queries. It applies a rule with specific var
 // Complex rule showing the full hierarchy
 {
   "match": {
-    "user": { "?": { "id": 1 } },
-    "access": { "?": { "id": 2 } }
+    "user": { "?": { "name": "document" } },
+    "access": { "?": { "name": "user" } }
   },
   "rule": {
     "match": {
-      "user": { "?": { "id": 10 } },
-      "access": { "?": { "id": 11 } }
+      "user": { "?": { "name": "person" } },
+      "access": { "?": { "name": "name" } }
     },
     "when": {
       "admin": [
@@ -412,7 +408,7 @@ Rule Application is how you execute queries. It applies a rule with specific var
         {
           "match": {
             "the": "cafe.familiar.user/role",
-            "of": { "?": { "id": 10 } },
+            "of": { "?": { "name": "person" } },
             "is": "admin"
           }
         }
@@ -422,8 +418,8 @@ Rule Application is how you execute queries. It applies a rule with specific var
         {
           "match": {
             "the": "cafe.familiar.document/owner",
-            "of": { "?": { "id": 12 } },
-            "is": { "?": { "id": 10 } }
+            "of": { "?": { "name": "document2" } },
+            "is": { "?": { "name": "person" } }
           }
         },
         // Negation: Exclude archived documents
@@ -431,7 +427,7 @@ Rule Application is how you execute queries. It applies a rule with specific var
           "not": {
             "match": {
               "the": "cafe.familiar.document/status",
-              "of": { "?": { "id": 12 } },
+              "of": { "?": { "name": "document2" } },
               "is": "archived"
             }
           }
@@ -440,8 +436,8 @@ Rule Application is how you execute queries. It applies a rule with specific var
         {
           "operator": "text/length",
           "match": {
-            "of": { "?": { "id": 11 } },
-            "is": { "?": { "id": 13 } }
+            "of": { "?": { "name": "name" } },
+            "is": { "?": { "name": "length" } }
           }
         }
       ]
@@ -535,7 +531,7 @@ Formula Application applies built-in operators. **Critical**: Input parameters m
 {
   "operator": "==",
   "match": {
-    "of": { "?": { "id": 1 } },    // INPUT: must be bound
+    "of": { "?": { "name": "document" } },    // INPUT: must be bound
     "is": "Alice"                  // INPUT: expected value to match
   }
 }
@@ -544,8 +540,8 @@ Formula Application applies built-in operators. **Critical**: Input parameters m
 {
   "operator": "text/length",
   "match": {
-    "of": { "?": { "id": 1 } },    // INPUT: must be bound (the text)
-    "is": { "?": { "id": 2 } }     // OUTPUT: captures length (can be unbound)
+    "of": { "?": { "name": "document" } },    // INPUT: must be bound (the text)
+    "is": { "?": { "name": "user" } }     // OUTPUT: captures length (can be unbound)
   }
 }
 ```
@@ -572,20 +568,16 @@ Formula Application applies built-in operators. **Critical**: Input parameters m
     "?": {
       "type": "object",
       "properties": {
-        "id": {
-          "type": "number",
-          "description": "Unique identifier for this variable"
-        },
         "name": {
           "type": "string",
-          "description": "Optional human-readable name for this variable"
+          "description": "Human-readable name for this variable"
         },
         "type": {
           "$ref": "#/definitions/Type",
           "description": "Optional type predicate"
         }
       },
-      "required": ["id"]
+      "required": ["name"]
     }
   },
   "required": ["?"]

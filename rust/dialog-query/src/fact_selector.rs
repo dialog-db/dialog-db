@@ -3,7 +3,7 @@
 use crate::error::{QueryError, QueryResult};
 use crate::plan::{EvaluationContext, EvaluationPlan, Plan};
 use crate::query::Query;
-use crate::selection::{Match, Selection};
+use crate::selection::{Match, Selection as SelectionTrait};
 use crate::syntax::Syntax;
 use crate::syntax::VariableScope;
 use crate::term::Term;
@@ -17,11 +17,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::str::FromStr;
 
+
 /// FactSelector for pattern matching facts during queries
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(bound = "T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Serialize + for<'a> Deserialize<'a> + 'static")]
 pub struct FactSelector<T = Value>
 where
-    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug,
+    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + 'static,
 {
     /// The attribute term (predicate)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -37,19 +39,7 @@ where
     pub fact: Option<serde_json::Value>,
 }
 
-// use serde_json::Value;
 
-// let my_selector: FactSelector<serde_json::Value>;
-
-// #[derive(Deserialize)]
-// struct DeserializesFromJson {}
-
-// let deserializes_from_json: DeserializesFromJson = serde_json::from_str(...)?;
-
-// let my_selector: FactSelector<DeserializesFromJson>;
-
-// // Type alias for backward compatibility
-// pub type ValueFactSelector = FactSelector<Value>;
 
 impl<T> FactSelector<T>
 where
@@ -261,11 +251,13 @@ where
     }
 }
 
+
+
 /// Execution plan for a fact selector operation
 #[derive(Debug, Clone)]
 pub struct FactSelectorPlan<T = Value>
 where
-    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug,
+    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + 'static,
 {
     /// The fact selector operation to execute
     pub selector: FactSelector<T>,
@@ -363,10 +355,10 @@ where
         + 'static
         + PartialEq<Value>,
 {
-    fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> impl Selection + '_
+    fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> impl SelectionTrait + '_
     where
         S: ArtifactStore + Clone + Send + 'static,
-        M: Selection + 'static,
+        M: SelectionTrait + 'static,
     {
         // We need to capture context by value to satisfy lifetime requirements
         let store = context.store;

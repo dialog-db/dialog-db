@@ -1,6 +1,6 @@
-use dialog_query::{
-    Attribute, Cardinality, Entity, Term, ValueDataType,
-};
+use std::marker::PhantomData;
+
+use dialog_query::{Attribute, Cardinality, Entity, Term, ValueDataType};
 use tokio::io::Empty;
 
 // #[relation]
@@ -11,14 +11,10 @@ use tokio::io::Empty;
 
 #[allow(non_snake_case)]
 pub mod Employee {
-    use dialog_query::{
-        error::QueryResult,
-        syntax::VariableScope,
-        Query, Syntax,
-    };
     use dialog_artifacts::{Artifact, ArtifactStore, DialogArtifactsError};
-    use futures_util::Stream;
+    use dialog_query::{error::QueryResult, syntax::VariableScope, Query, Syntax};
     pub use dialog_query::{Entity, Term};
+    use futures_util::Stream;
     // Defines Employee model that will be returned when queries are matched
     struct Model {
         this: Entity,
@@ -58,7 +54,7 @@ pub mod Employee {
             Ok(MatchPlan)
         }
     }
-    
+
     impl Query for MatchPlan {
         fn query<S>(
             &self,
@@ -174,7 +170,77 @@ pub mod Employee {
     pub const job: job_api::PredicateBuilder = job_api::PredicateBuilder {};
 }
 
+pub struct Person {
+    name: String,
+    birthday: u32,
+}
+
+impl Person {
+    #[allow(non_snake_case)]
+    fn Match<F: Fn(PersonMatch) -> (Term<String>, Term<u32>)>(f: F) -> (Term<String>, Term<u32>) {
+        f(PersonMatch {
+            name: Term::var("name"),
+            birthday: Term::var("birthday"),
+        })
+    }
+}
+
+pub struct Match<T>(PhantomData<T>);
+
+type Select<V> = V;
+
+pub trait Selector {
+    type Match;
+
+    fn select() -> Self::Match;
+}
+
+pub struct PersonMatch {
+    name: Term<String>,
+    birthday: Term<u32>,
+}
+
+impl Match<Person> {
+    fn select(selector: PersonMatch) -> PersonMatch {
+        selector
+    }
+}
+
+impl Selector for Person {
+    type Match = PersonMatch;
+
+    fn select() -> Self::Match {
+        Self::Match {
+            name: Term::var("name"),
+            birthday: Term::var("birthday"),
+        }
+    }
+}
+
+// impl Person {
+//     #[allow(non_snake_case)]
+//     fn select(selector: PersonSelector) -> PersonSelector {
+//         selector
+//     }
+// }
+
 fn main() {
+    let jack = "Jack".to_string();
+    let p = Person::Match(|person| (person.name.is("Test"), person.birthday));
+    // let selector = <Person as Selector>::Match {
+    //     name: Term::var("name"),
+    //     ..Person::select()
+    // };
+
+    let out = Match::<Person>::select(PersonMatch {
+        name: Term::var("name"),
+        birthday: Term::var("birthday"),
+    });
+    // let person = PersonMatch; {
+    //     name: Term::var("name"),
+    //     birthday: Term::var("birthday"),
+    // };
+
     let entity = Term::<Entity>::var("self");
 
     // Predicate using owned variable

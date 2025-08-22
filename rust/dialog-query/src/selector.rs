@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 
 /// Selector pattern for matching against the database (with variables/constants)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(bound = "T: IntoValueDataType + Clone + Serialize + for<'a> Deserialize<'a> + 'static")]
 pub struct Selector<T>
 where
-    T: IntoValueDataType + Clone,
+    T: IntoValueDataType + Clone + 'static,
 {
     /// The entity (subject)
     pub entity: Term<Entity>,
