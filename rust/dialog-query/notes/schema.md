@@ -352,3 +352,21 @@ struct Employee {
     address: Address,
 }
 ```
+
+## Another Take
+
+```rs
+#[derive(Rule)]
+pub struct Person {
+    pub name: String,
+    pub birthday: u32,
+}
+
+#[rule(Person)]
+fn above_40(person: Match<Person>) -> When {
+    [
+      Person.is(person),
+      Person.name.is("John")
+    ]
+}
+```

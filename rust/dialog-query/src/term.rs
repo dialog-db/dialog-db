@@ -126,6 +126,10 @@ where
         }
     }
 
+    pub fn the<Is: Into<T>>(value: Is) -> Self {
+        Term::Constant(value.into())
+    }
+
     /// Create an anonymous variable that only used to pattern match by type
     /// unless type is `Value`. If type is `Value`, it simply matches anything.
     ///
