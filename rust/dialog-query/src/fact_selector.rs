@@ -578,7 +578,7 @@ mod tests {
     fn test_fact_selector_with_variables() {
         let fact_selector: FactSelector<Value> = FactSelector::new()
             .the("user/name")
-            .of(Term::<Entity>::var("user"))
+            .of(Term::var("user"))
             .is(Term::<Value>::var("name"));
 
         assert!(fact_selector.the.is_some());
@@ -629,7 +629,7 @@ mod tests {
         // Test basic builder syntax with Term::var()
         let fact_selector1: FactSelector<Value> = FactSelector::new()
             .the("gozala.io/name")
-            .of(Term::<Entity>::var("user"));
+            .of(Term::var("user"));
 
         assert!(fact_selector1.the.is_some());
         assert!(fact_selector1.of.is_some());
@@ -638,12 +638,12 @@ mod tests {
         // Test starting with different methods
         let fact_selector2: FactSelector<Value> = FactSelector::new()
             .the("user/name")
-            .of(Term::<Entity>::var("user"))
+            .of(Term::var("user"))
             .is("John");
 
         let fact_selector3: FactSelector<Value> = FactSelector::new()
-            .of(Term::<Entity>::var("user"))
             .the("user/name")
+            .of(Term::var("user"))
             .is(Term::<String>::var("name"));
 
         let fact_selector4: FactSelector<Value> =
@@ -668,11 +668,11 @@ mod tests {
         // Test that order doesn't matter
         let fact_selector1: FactSelector<Value> = FactSelector::new()
             .the("user/email")
-            .of(Term::<Entity>::var("user"))
+            .of(Term::var("user"))
             .is(Term::<String>::var("email"));
 
         let fact_selector2: FactSelector<Value> = FactSelector::new()
-            .of(Term::<Entity>::var("user"))
+            .of(Term::var("user"))
             .is(Term::<String>::var("email"))
             .the("user/email");
 
@@ -695,7 +695,7 @@ mod tests {
         // Test builder API with Term::var() constructors
         let fact_selector: FactSelector<Value> = FactSelector::new()
             .the("user/name")
-            .of(Term::<Entity>::var("user"))
+            .of(Term::var("user"))
             .is(Term::<String>::var("name"));
 
         assert!(fact_selector.the.is_some());
@@ -764,7 +764,7 @@ mod tests {
         // Step 2: Create fact selector with constants (following familiar-query pattern)
         let fact_selector: FactSelector<Value> = FactSelector::new()
             .the("user/name") // Constant attribute - this will be used for ArtifactSelector
-            .of(Term::<Entity>::var("user")) // Variable entity - this will be unified
+            .of(Term::var("user")) // Variable entity - this will be unified
             .is(Term::<String>::var("name")); // Variable value - this will be unified
 
         // Step 3: Create plan and test the familiar-query pattern
@@ -837,8 +837,8 @@ mod tests {
 
         // Create fact selector with all variables (no constants)
         let fact_selector: FactSelector<Value> = FactSelector::new()
-            .the(Term::<Attribute>::var("attr")) // Variable
-            .of(Term::<Entity>::var("entity")) // Variable
+            .the(Term::var("attr")) // Variable
+            .of(Term::var("entity")) // Variable
             .is(Term::<Value>::var("value")); // Variable
 
         // Create plan
