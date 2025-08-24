@@ -11,7 +11,7 @@
 //! The core insight is that Rust's type system provides static type information
 //! that we can reflect into the dynamic ValueDataType enum used by dialog-artifacts.
 
-use dialog_artifacts::ValueDataType;
+use dialog_artifacts::{Value, ValueDataType};
 
 /// Trait for types that can provide ValueDataType metadata
 ///
@@ -28,7 +28,7 @@ use dialog_artifacts::ValueDataType;
 /// ```rust
 /// use dialog_query::types::IntoValueDataType;
 /// use dialog_artifacts::{Value, ValueDataType};
-/// 
+///
 /// // For concrete types
 /// assert_eq!(String::into_value_data_type(), Some(ValueDataType::String));
 /// assert_eq!(u32::into_value_data_type(), Some(ValueDataType::UnsignedInt));
@@ -108,5 +108,95 @@ impl IntoValueDataType for dialog_artifacts::Value {
         // Value is a dynamic type, so we return None to indicate it can hold any type
         // This makes Term<Value> variables serialize without type information
         None
+    }
+}
+
+pub trait Scalar: IntoValueDataType + Clone + std::fmt::Debug + 'static {
+    /// Can be used to convert scalars into boxed value. It is intentionally
+    /// different from `From<Scalar> impl Value` to avoid unintentional
+    /// type erasure.
+    fn as_value(&self) -> Value;
+}
+
+impl Scalar for bool {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
+    }
+}
+
+impl Scalar for String {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
+    }
+}
+
+impl Scalar for u16 {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
+    }
+}
+impl Scalar for u32 {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
+    }
+}
+
+impl Scalar for u128 {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
+    }
+}
+
+impl Scalar for i16 {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
+    }
+}
+
+impl Scalar for i32 {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
+    }
+}
+
+impl Scalar for i64 {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
+    }
+}
+impl Scalar for i128 {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
+    }
+}
+
+impl Scalar for f32 {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
+    }
+}
+impl Scalar for f64 {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
+    }
+}
+impl Scalar for dialog_artifacts::Entity {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
+    }
+}
+impl Scalar for dialog_artifacts::Attribute {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
+    }
+}
+impl Scalar for Vec<u8> {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
+    }
+}
+impl Scalar for dialog_artifacts::Value {
+    fn as_value(&self) -> Value {
+        self.to_owned()
     }
 }

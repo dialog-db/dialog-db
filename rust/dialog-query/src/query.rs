@@ -89,7 +89,7 @@ mod tests {
         // Step 2: Test Query trait on FactSelector with constants
 
         // Query 1: Find Alice by name using Query trait
-        let alice_query = Fact::select()
+        let alice_query = Fact::<Value>::select()
             .the("user/name")
             .of(alice.clone())
             .is(Value::String("Alice".to_string()));
@@ -106,7 +106,7 @@ mod tests {
         assert_eq!(alice_results[0].is, Value::String("Alice".to_string()));
 
         // Query 2: Find all user/name facts using Query trait
-        let all_names_query = Fact::select().the("user/name");
+        let all_names_query = Fact::<Value>::select().the("user/name");
 
         let all_names_stream = all_names_query.query(&artifacts)?;
         let all_names_results = all_names_stream
@@ -117,7 +117,7 @@ mod tests {
         assert_eq!(all_names_results.len(), 2); // Alice and Bob
 
         // Query 3: Find Alice's email using Query trait
-        let email_query = Fact::select().the("user/email").of(alice.clone());
+        let email_query = Fact::<Value>::select().the("user/email").of(alice.clone());
 
         let email_stream = email_query.query(&artifacts)?;
         let email_results = email_stream
@@ -134,26 +134,21 @@ mod tests {
         Ok(())
     }
 
-
     #[tokio::test]
-    async fn test_query_trait_with_variables_fails() -> Result<()> {
+    async fn test_query_trait_with_variables_succeeds_if_constants_present() -> Result<()> {
         // Setup
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
-        // Create a query with variables - this should fail when using Query trait
-        let variable_query = Fact::select()
-            .the("user/name")
-            .of(Term::<Entity>::var("user")) // Variable!
-            .is(Term::<String>::var("name")); // Variable!
+        // Create a query with variables - variables are skipped, constants used
+        let variable_query = Fact::<Value>::select()
+            .the("user/name") // Constant - used
+            .of(Term::<Entity>::var("user")) // Variable - skipped
+            .is(Term::<Value>::var("name")); // Variable - skipped
 
-        // Attempt to query - should fail with helpful error
+        // Should succeed because we have at least one constant
         let result = variable_query.query(&artifacts);
-        assert!(result.is_err());
-
-        if let Err(error) = result {
-            assert!(error.to_string().contains("Variable not supported"));
-        }
+        assert!(result.is_ok());
 
         Ok(())
     }
@@ -189,7 +184,7 @@ mod tests {
         artifacts.commit(stream::iter(instructions)).await?;
 
         // Test with FactSelector
-        let fact_selector = Fact::select().the("user/name").of(alice.clone());
+        let fact_selector = Fact::<Value>::select().the("user/name").of(alice.clone());
 
         let results = execute_query(fact_selector, &artifacts).await?;
         assert_eq!(results.len(), 1);
@@ -239,7 +234,7 @@ mod tests {
         artifacts.commit(stream::iter(instructions)).await?;
 
         // Test fluent query building with immediate execution
-        let admin_count = Fact::select()
+        let admin_count = Fact::<Value>::select()
             .the("user/role")
             .is(Value::String("admin".to_string()))
             .query(&artifacts)?
@@ -251,7 +246,7 @@ mod tests {
         assert_eq!(admin_count, 1); // Only Alice is admin
 
         // Test another fluent query
-        let user_names: Vec<String> = Fact::select()
+        let user_names: Vec<String> = Fact::<Value>::select()
             .the("user/name")
             .query(&artifacts)?
             .filter_map(|result| async move {

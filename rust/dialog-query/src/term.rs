@@ -126,10 +126,6 @@ where
         }
     }
 
-    pub fn the<Is: Into<T>>(value: Is) -> Self {
-        Term::Constant(value.into())
-    }
-
     /// Create an anonymous variable that only used to pattern match by type
     /// unless type is `Value`. If type is `Value`, it simply matches anything.
     ///
@@ -407,21 +403,7 @@ where
     }
 }
 
-/// Support for converting specific typed Terms to Value Terms
-///
-/// This conversion preserves the Term structure while changing the value type
-/// from a specific type (like String) to the general Value enum.
-impl From<Term<String>> for Term<Value> {
-    fn from(term: Term<String>) -> Self {
-        match term {
-            Term::Constant(value) => Term::Constant(Value::String(value)),
-            Term::Variable { name, .. } => Term::Variable {
-                name,
-                _type: Type(PhantomData),
-            },
-        }
-    }
-}
+// Removed From<Term<String>> for Term<Value> implementation to prevent type erasure
 
 #[cfg(test)]
 mod tests {

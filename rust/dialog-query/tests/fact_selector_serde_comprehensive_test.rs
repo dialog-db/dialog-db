@@ -4,7 +4,7 @@ use dialog_query::{FactSelector, Term};
 #[test]
 fn test_fact_selector_empty() -> Result<(), Box<dyn std::error::Error>> {
     // Test completely empty FactSelector
-    let selector = FactSelector::<Value>::new();
+    let selector = FactSelector::new();
     let json = serde_json::to_string(&selector)?;
     assert_eq!(json, r#"{}"#);
 
@@ -21,7 +21,7 @@ fn test_fact_selector_empty() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_fact_selector_only_attribute_constant() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with only attribute (the) as constant
-    let selector = FactSelector::<Value>::new().the("person/name");
+    let selector = FactSelector::new().the("person/name");
     let json = serde_json::to_string(&selector)?;
     assert_eq!(json, r#"{"the":"person/name"}"#);
 
@@ -38,8 +38,7 @@ fn test_fact_selector_only_attribute_constant() -> Result<(), Box<dyn std::error
 #[test]
 fn test_fact_selector_only_attribute_variable() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with only attribute (the) as variable
-    let selector =
-        FactSelector::<Value>::new().the(Term::<dialog_artifacts::Attribute>::var("attr"));
+    let selector = FactSelector::new().the(Term::<dialog_artifacts::Attribute>::var("attr"));
     let json = serde_json::to_string(&selector)?;
     assert_eq!(json, r#"{"the":{"?":{"name":"attr","type":"Symbol"}}}"#);
 
@@ -54,9 +53,9 @@ fn test_fact_selector_only_attribute_variable() -> Result<(), Box<dyn std::error
 fn test_fact_selector_only_entity_constant() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with only entity (of) as constant
     let entity = dialog_artifacts::Entity::new().unwrap();
-    let selector = FactSelector::<Value>::new().of(entity.clone());
+    let selector = FactSelector::new().of(entity.clone());
     let json = serde_json::to_string(&selector)?;
-    
+
     // Entity serializes to its DID string representation
     let expected = format!(r#"{{"of":"{}"}}"#, entity);
     assert_eq!(json, expected);
@@ -71,7 +70,7 @@ fn test_fact_selector_only_entity_constant() -> Result<(), Box<dyn std::error::E
 #[test]
 fn test_fact_selector_only_entity_variable() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with only entity (of) as variable
-    let selector = FactSelector::<Value>::new().of(Term::<dialog_artifacts::Entity>::var("user"));
+    let selector = FactSelector::new().of(Term::<dialog_artifacts::Entity>::var("user"));
     let json = serde_json::to_string(&selector)?;
     assert_eq!(json, r#"{"of":{"?":{"name":"user","type":"Entity"}}}"#);
 
@@ -85,7 +84,7 @@ fn test_fact_selector_only_entity_variable() -> Result<(), Box<dyn std::error::E
 #[test]
 fn test_fact_selector_only_value_constant_string() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with only value (is) as string constant
-    let selector = FactSelector::<Value>::new().is("Alice");
+    let selector = FactSelector::new().is("Alice");
     let json = serde_json::to_string(&selector)?;
     assert_eq!(json, r#"{"is":"Alice"}"#);
 
@@ -99,7 +98,7 @@ fn test_fact_selector_only_value_constant_string() -> Result<(), Box<dyn std::er
 #[test]
 fn test_fact_selector_only_value_constant_number() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with only value (is) as number constant
-    let selector = FactSelector::<Value>::new().is(Value::SignedInt(42));
+    let selector = FactSelector::new().is(Value::SignedInt(42));
     let json = serde_json::to_string(&selector)?;
     assert_eq!(json, r#"{"is":42}"#);
 
@@ -123,7 +122,7 @@ fn test_fact_selector_only_value_constant_number() -> Result<(), Box<dyn std::er
 #[test]
 fn test_fact_selector_only_value_constant_boolean() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with only value (is) as boolean constant
-    let selector = FactSelector::<Value>::new().is(Value::Boolean(true));
+    let selector = FactSelector::new().is(Value::Boolean(true));
     let json = serde_json::to_string(&selector)?;
     assert_eq!(json, r#"{"is":true}"#);
 
@@ -138,7 +137,7 @@ fn test_fact_selector_only_value_constant_boolean() -> Result<(), Box<dyn std::e
 fn test_fact_selector_only_value_variable_typed() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with only value (is) as typed variable
     // Note: Term<String> gets converted to Term<Value> and loses type info
-    let selector = FactSelector::<Value>::new().is(Term::<String>::var("name"));
+    let selector = FactSelector::new().is(Term::var("name"));
     let json = serde_json::to_string(&selector)?;
     // When Term<String> is used in FactSelector<Value>, it gets converted to Term<Value>
     // and loses the String type constraint, becoming just {"?":{"name":"name"}}
@@ -154,7 +153,7 @@ fn test_fact_selector_only_value_variable_typed() -> Result<(), Box<dyn std::err
 #[test]
 fn test_fact_selector_only_value_variable_untyped() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with only value (is) as untyped variable (Value type)
-    let selector = FactSelector::<Value>::new().is(Term::<Value>::var("value"));
+    let selector = FactSelector::new().is(Term::<Value>::var("value"));
     let json = serde_json::to_string(&selector)?;
     // Should NOT contain type field for Value type
     assert_eq!(json, r#"{"is":{"?":{"name":"value"}}}"#);
@@ -170,7 +169,7 @@ fn test_fact_selector_only_value_variable_untyped() -> Result<(), Box<dyn std::e
 fn test_fact_selector_only_value_blank_typed() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with only value (is) as blank (unnamed) typed variable
     // Note: Term<String> gets converted to Term<Value> and loses type info
-    let selector = FactSelector::<Value>::new().is(Term::<String>::default());
+    let selector = FactSelector::new().is(Term::<Value>::blank());
     let json = serde_json::to_string(&selector)?;
     // When Term<String> is used in FactSelector<Value>, it gets converted to Term<Value>
     // and loses the String type constraint, becoming just {"?":{}}}
@@ -186,7 +185,7 @@ fn test_fact_selector_only_value_blank_typed() -> Result<(), Box<dyn std::error:
 #[test]
 fn test_fact_selector_only_value_blank_untyped() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with only value (is) as blank (unnamed) untyped variable
-    let selector = FactSelector::<Value>::new().is(Term::<Value>::default());
+    let selector = FactSelector::new().is(Term::<Value>::default());
     let json = serde_json::to_string(&selector)?;
     // Should NOT contain name or type fields for blank Value variables
     assert_eq!(json, r#"{"is":{"?":{}}}"#);
@@ -202,7 +201,7 @@ fn test_fact_selector_only_value_blank_untyped() -> Result<(), Box<dyn std::erro
 fn test_fact_selector_all_constants() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with all fields as constants
     let entity = dialog_artifacts::Entity::new().unwrap();
-    let selector = FactSelector::<Value>::new()
+    let selector = FactSelector::new()
         .the("person/name")
         .of(entity.clone())
         .is("Alice");
@@ -220,16 +219,19 @@ fn test_fact_selector_all_constants() -> Result<(), Box<dyn std::error::Error>> 
 #[test]
 fn test_fact_selector_all_variables_typed() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with all fields as typed variables
-    let selector = FactSelector::<Value>::new()
-        .the(Term::<dialog_artifacts::Attribute>::var("attr"))
-        .of(Term::<dialog_artifacts::Entity>::var("user"))
-        .is(Term::<String>::var("name")); // This becomes Term<Value> and loses type info
+    let selector = FactSelector::new()
+        .the(Term::var("attr"))
+        .of(Term::var("user"))
+        .is(Term::<String>::var("name")); // Typed FactSelector preserves String type
     let json = serde_json::to_string(&selector)?;
     // The "is" field loses String type constraint when converted to Term<Value>
-    assert_eq!(json, r#"{"the":{"?":{"name":"attr","type":"Symbol"}},"of":{"?":{"name":"user","type":"Entity"}},"is":{"?":{"name":"name"}}}"#);
+    assert_eq!(
+        json,
+        r#"{"the":{"?":{"name":"attr","type":"Symbol"}},"of":{"?":{"name":"user","type":"Entity"}},"is":{"?":{"name":"name","type":"String"}}}"#
+    );
 
     // Test deserialization
-    let deserialized: FactSelector<Value> = serde_json::from_str(&json)?;
+    let deserialized = serde_json::from_str(&json)?;
     assert_eq!(selector, deserialized);
 
     Ok(())
@@ -238,13 +240,16 @@ fn test_fact_selector_all_variables_typed() -> Result<(), Box<dyn std::error::Er
 #[test]
 fn test_fact_selector_all_variables_untyped() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with all fields as untyped variables (Value type)
-    let selector = FactSelector::<Value>::new()
+    let selector = FactSelector::new()
         .the(Term::<dialog_artifacts::Attribute>::var("attr")) // Attribute must be typed
         .of(Term::<dialog_artifacts::Entity>::var("user")) // Entity must be typed
         .is(Term::<Value>::var("value")); // Value can be untyped
     let json = serde_json::to_string(&selector)?;
     // Value should not have type field
-    assert_eq!(json, r#"{"the":{"?":{"name":"attr","type":"Symbol"}},"of":{"?":{"name":"user","type":"Entity"}},"is":{"?":{"name":"value"}}}"#);
+    assert_eq!(
+        json,
+        r#"{"the":{"?":{"name":"attr","type":"Symbol"}},"of":{"?":{"name":"user","type":"Entity"}},"is":{"?":{"name":"value"}}}"#
+    );
 
     // Test deserialization
     let deserialized: FactSelector<Value> = serde_json::from_str(&json)?;
@@ -256,13 +261,16 @@ fn test_fact_selector_all_variables_untyped() -> Result<(), Box<dyn std::error::
 #[test]
 fn test_fact_selector_all_blanks_typed() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with all fields as blank (unnamed) typed variables
-    let selector = FactSelector::<Value>::new()
-        .the(Term::<dialog_artifacts::Attribute>::default())
-        .of(Term::<dialog_artifacts::Entity>::default())
-        .is(Term::<String>::default()); // This becomes Term<Value> and loses type info
+    let selector = FactSelector::new()
+        .the(Term::blank())
+        .of(Term::blank())
+        .is(Term::<Value>::default()); // Now uses explicit Value type
     let json = serde_json::to_string(&selector)?;
     // The "is" field loses String type constraint when converted to Term<Value>
-    assert_eq!(json, r#"{"the":{"?":{"type":"Symbol"}},"of":{"?":{"type":"Entity"}},"is":{"?":{}}}"#);
+    assert_eq!(
+        json,
+        r#"{"the":{"?":{"type":"Symbol"}},"of":{"?":{"type":"Entity"}},"is":{"?":{}}}"#
+    );
 
     // Test deserialization
     let deserialized: FactSelector<Value> = serde_json::from_str(&json)?;
@@ -274,12 +282,15 @@ fn test_fact_selector_all_blanks_typed() -> Result<(), Box<dyn std::error::Error
 #[test]
 fn test_fact_selector_all_blanks_mixed() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with all fields as blank variables (mixed typed/untyped)
-    let selector = FactSelector::<Value>::new()
+    let selector = FactSelector::new()
         .the(Term::<dialog_artifacts::Attribute>::default())
         .of(Term::<dialog_artifacts::Entity>::default())
         .is(Term::<Value>::default());
     let json = serde_json::to_string(&selector)?;
-    assert_eq!(json, r#"{"the":{"?":{"type":"Symbol"}},"of":{"?":{"type":"Entity"}},"is":{"?":{}}}"#);
+    assert_eq!(
+        json,
+        r#"{"the":{"?":{"type":"Symbol"}},"of":{"?":{"type":"Entity"}},"is":{"?":{}}}"#
+    );
 
     // Test deserialization
     let deserialized: FactSelector<Value> = serde_json::from_str(&json)?;
@@ -291,12 +302,15 @@ fn test_fact_selector_all_blanks_mixed() -> Result<(), Box<dyn std::error::Error
 #[test]
 fn test_fact_selector_mixed_constants_variables() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with mixed constants and variables
-    let selector = FactSelector::<Value>::new()
+    let selector = FactSelector::new()
         .the("person/name") // constant
         .of(Term::<dialog_artifacts::Entity>::var("user")) // variable
         .is("Alice"); // constant
     let json = serde_json::to_string(&selector)?;
-    assert_eq!(json, r#"{"the":"person/name","of":{"?":{"name":"user","type":"Entity"}},"is":"Alice"}"#);
+    assert_eq!(
+        json,
+        r#"{"the":"person/name","of":{"?":{"name":"user","type":"Entity"}},"is":"Alice"}"#
+    );
 
     // Test deserialization
     let deserialized: FactSelector<Value> = serde_json::from_str(&json)?;
@@ -308,13 +322,16 @@ fn test_fact_selector_mixed_constants_variables() -> Result<(), Box<dyn std::err
 #[test]
 fn test_fact_selector_mixed_variables_blanks() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with mixed named variables and blanks
-    let selector = FactSelector::<Value>::new()
+    let selector = FactSelector::new()
         .the(Term::<dialog_artifacts::Attribute>::var("attr")) // named variable
         .of(Term::<dialog_artifacts::Entity>::default()) // blank
-        .is(Term::<String>::var("name")); // named variable - loses type info
+        .is(Term::<Value>::var("name")); // Now uses explicit Value type
     let json = serde_json::to_string(&selector)?;
     // The "is" field loses String type constraint when converted to Term<Value>
-    assert_eq!(json, r#"{"the":{"?":{"name":"attr","type":"Symbol"}},"of":{"?":{"type":"Entity"}},"is":{"?":{"name":"name"}}}"#);
+    assert_eq!(
+        json,
+        r#"{"the":{"?":{"name":"attr","type":"Symbol"}},"of":{"?":{"type":"Entity"}},"is":{"?":{"name":"name"}}}"#
+    );
 
     // Test deserialization
     let deserialized: FactSelector<Value> = serde_json::from_str(&json)?;
@@ -326,12 +343,15 @@ fn test_fact_selector_mixed_variables_blanks() -> Result<(), Box<dyn std::error:
 #[test]
 fn test_fact_selector_complex_mixed() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with complex mix: constant, named variable, blank variable
-    let selector = FactSelector::<Value>::new()
+    let selector = FactSelector::new()
         .the("person/name") // constant
         .of(Term::<dialog_artifacts::Entity>::var("user")) // named variable
         .is(Term::<Value>::default()); // blank untyped variable
     let json = serde_json::to_string(&selector)?;
-    assert_eq!(json, r#"{"the":"person/name","of":{"?":{"name":"user","type":"Entity"}},"is":{"?":{}}}"#);
+    assert_eq!(
+        json,
+        r#"{"the":"person/name","of":{"?":{"name":"user","type":"Entity"}},"is":{"?":{}}}"#
+    );
 
     // Test deserialization
     let deserialized: FactSelector<Value> = serde_json::from_str(&json)?;
@@ -349,11 +369,11 @@ fn test_fact_selector_value_types() -> Result<(), Box<dyn std::error::Error>> {
     let expected_entity = format!(r#"{{"is":"{}"}}"#, entity);
     assert_eq!(json_entity, expected_entity);
 
-    let selector_float = FactSelector::<Value>::new().is(Value::Float(3.14));
+    let selector_float = FactSelector::new().is(Value::Float(3.14));
     let json_float = serde_json::to_string(&selector_float)?;
     assert_eq!(json_float, r#"{"is":3.14}"#);
 
-    let selector_bytes = FactSelector::<Value>::new().is(Value::Bytes(vec![1, 2, 3]));
+    let selector_bytes = FactSelector::new().is(Value::Bytes(vec![1, 2, 3]));
     let json_bytes = serde_json::to_string(&selector_bytes)?;
     assert_eq!(json_bytes, r#"{"is":[1,2,3]}"#);
 

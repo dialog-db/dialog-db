@@ -4,7 +4,7 @@ use dialog_artifacts::Value;
 use dialog_common::ConditionalSend;
 use futures_core::Stream;
 
-use crate::{InconsistencyError, QueryError, Term};
+use crate::{fact::Scalar, InconsistencyError, QueryError, Term};
 
 pub trait Selection: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend {}
 
@@ -26,7 +26,7 @@ impl Match {
     // Type-safe methods using Term<T>
     pub fn get<T>(&self, term: &Term<T>) -> Result<T, InconsistencyError>
     where
-        T: crate::types::IntoValueDataType + Clone + std::convert::TryFrom<Value>,
+        T: Scalar + std::convert::TryFrom<Value>,
         InconsistencyError: From<<T as std::convert::TryFrom<Value>>::Error>,
     {
         match term {
@@ -155,9 +155,60 @@ impl Match {
         }
     }
 
-    pub fn resolve<T>(&self, term: &Term<T>) -> Result<Value, InconsistencyError>
+    pub fn unify_value<T>(&self, term: Term<T>, value: Value) -> Result<Self, InconsistencyError>
     where
-        T: crate::types::IntoValueDataType + Clone + Into<Value>,
+        T: Scalar,
+    {
+        match term {
+            Term::Variable { name, .. } => {
+                if let Some(key) = name {
+                    let mut variables = (*self.variables).clone();
+                    variables.insert(key, value);
+
+                    Ok(Self {
+                        variables: Arc::new(variables),
+                    })
+                } else {
+                    Ok(self.clone())
+                }
+            }
+            Term::Constant(constant) => {
+                let constant_value = constant.as_value();
+                if constant_value == value {
+                    Ok(self.clone())
+                } else {
+                    Err(InconsistencyError::TypeMismatch {
+                        expected: constant_value,
+                        actual: value,
+                    })
+                }
+            }
+        }
+    }
+
+    pub fn resolve<T>(&self, term: &Term<T>) -> Result<T, InconsistencyError>
+    where
+        T: Scalar + From<Value>,
+    {
+        match term {
+            Term::Variable { name, .. } => {
+                if let Some(key) = name {
+                    if let Some(value) = self.variables.get(key) {
+                        Ok(T::from(value.clone()))
+                    } else {
+                        Err(InconsistencyError::UnboundVariableError(key.clone()))
+                    }
+                } else {
+                    Err(InconsistencyError::UnboundVariableError("Any".to_string()))
+                }
+            }
+            Term::Constant(constant) => Ok(constant.clone().into()),
+        }
+    }
+
+    pub fn resolve_value<T>(&self, term: &Term<T>) -> Result<Value, InconsistencyError>
+    where
+        T: Scalar,
     {
         match term {
             Term::Variable { name, .. } => {
@@ -171,7 +222,7 @@ impl Match {
                     Err(InconsistencyError::UnboundVariableError("Any".to_string()))
                 }
             }
-            Term::Constant(constant) => Ok(constant.clone().into()),
+            Term::Constant(constant) => Ok(constant.as_value()),
         }
     }
 }

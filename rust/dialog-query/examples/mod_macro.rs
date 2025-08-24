@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 
+use dialog_query::fact::Scalar;
 use dialog_query::Entity;
 pub use dialog_query::{FactSelector, IntoValueDataType, Term};
 use std::marker::PhantomData;
@@ -94,7 +95,7 @@ pub struct MatchAttribute<T: IntoValueDataType + Clone + Debug + 'static> {
     pub of: Term<Entity>,
 }
 
-impl<T: IntoValueDataType + Clone + Debug + 'static> MatchAttribute<T> {
+impl<T: Scalar> MatchAttribute<T> {
     pub fn new(namespace: &'static str, name: &'static str, of: Term<Entity>) -> Self {
         Self {
             attribute: Attribute::new(namespace, name),
@@ -194,8 +195,8 @@ fn main() {
     let _birthday = Person(&person).birthday.is(1983_07_03 as u32);
     let _john = Match::<Person> {
         this: person.clone(),
-        name: Term::the("John"),
-        birthday: Term::the(1983_07_03 as u32),
+        name: Term::from("John"),
+        birthday: Term::from(1983_07_03 as u32),
     };
 
     let _named_alice = Person(Term::var("alice")).name.is("Alice");
@@ -208,7 +209,7 @@ fn main() {
     let out = Person(&person).name.is("John");
 
     let claim = Claim::<Person> {
-        name: Term::the("John"),
-        birthday: Term::the(1983_07_03u32),
+        name: Term::from("John"),
+        birthday: Term::from(1983_07_03u32),
     };
 }

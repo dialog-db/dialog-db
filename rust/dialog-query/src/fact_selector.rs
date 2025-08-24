@@ -18,6 +18,7 @@ use crate::selection::{Match, Selection as SelectionTrait};
 use crate::syntax::Syntax;
 use crate::syntax::VariableScope;
 use crate::term::Term;
+use crate::types::Scalar;
 use async_stream::try_stream;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
@@ -26,7 +27,6 @@ use dialog_artifacts::{
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::str::FromStr;
 
 /// FactSelector for pattern matching facts during queries
 ///
@@ -59,10 +59,7 @@ use std::str::FromStr;
 #[serde(
     bound = "T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Serialize + for<'a> Deserialize<'a> + 'static"
 )]
-pub struct FactSelector<T = Value>
-where
-    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + 'static,
-{
+pub struct FactSelector<T: Scalar = Value> {
     /// The attribute term (predicate) - what property this fact describes
     ///
     /// Examples: "user/name", "user/email", Term::var("attr")
@@ -91,10 +88,7 @@ where
 /// Core FactSelector functionality
 ///
 /// Provides constructor and builder methods for creating fact patterns.
-impl<T> FactSelector<T>
-where
-    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug,
-{
+impl<T: Scalar> FactSelector<T> {
     /// Create a new empty fact selector with all fields as None
     ///
     /// This creates a completely unconstrained selector that would match all facts.
@@ -183,10 +177,7 @@ where
     }
 }
 
-impl<T> FactSelector<T>
-where
-    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Into<Value>,
-{
+impl<T: Scalar> FactSelector<T> {
     /// Convert to ArtifactSelector if all terms are constants (no variables)
     pub fn to_artifact_selector(&self) -> QueryResult<ArtifactSelector<Constrained>> {
         let mut selector: Option<ArtifactSelector<Constrained>> = None;
@@ -200,12 +191,7 @@ where
                         Some(s) => s.the(the.to_owned()),
                     });
                 }
-                Term::Variable { .. } => {
-                    return Err(QueryError::VariableNotSupported {
-                        message: "Variables not supported in ArtifactSelector conversion"
-                            .to_string(),
-                    });
-                }
+                Term::Variable { .. } => {}
             }
         }
 
@@ -218,12 +204,7 @@ where
                         Some(s) => s.of(of.to_owned()),
                     });
                 }
-                Term::Variable { .. } => {
-                    return Err(QueryError::VariableNotSupported {
-                        message: "Variables not supported in ArtifactSelector conversion"
-                            .to_string(),
-                    });
-                }
+                Term::Variable { .. } => {}
             }
         }
 
@@ -231,18 +212,13 @@ where
         if let Some(term) = &self.is {
             match term {
                 Term::Constant(value) => {
-                    let converted_value: Value = value.clone().into();
+                    let converted_value = value.as_value();
                     selector = Some(match selector {
                         None => ArtifactSelector::new().is(converted_value),
                         Some(s) => s.is(converted_value),
                     });
                 }
-                Term::Variable { .. } => {
-                    return Err(QueryError::VariableNotSupported {
-                        message: "Variables not supported in ArtifactSelector conversion"
-                            .to_string(),
-                    });
-                }
+                Term::Variable { .. } => {}
             }
         }
 
@@ -258,12 +234,13 @@ where
         selector = if let Some(term) = &self.the {
             // If we can resolve it from the given frame we will constrain
             // selector with it.
-            if let Ok(value) = frame.resolve(term) {
-                // We need to ensure that that resolved value is a string
+            if let Ok(value) = frame.resolve_value(term) {
+                // We need to ensure that the resolved value is a string
                 // that can be parsed as an attribute
-                let attribute: Attribute = match value {
+                let attribute: dialog_artifacts::Attribute = match value {
                     Value::String(s) => {
-                        Attribute::from_str(&s).map_err(|_| QueryError::InvalidAttribute {
+                        use std::str::FromStr;
+                        dialog_artifacts::Attribute::from_str(&s).map_err(|_| QueryError::InvalidAttribute {
                             attribute: format!("Invalid attribute format: {}", s),
                         })?
                     }
@@ -291,8 +268,8 @@ where
         };
 
         selector = if let Some(term) = &self.of {
-            if let Ok(value) = frame.resolve(term) {
-                let entity: Entity =
+            if let Ok(value) = frame.resolve_value(term) {
+                let entity: dialog_artifacts::Entity =
                     value
                         .clone()
                         .try_into()
@@ -312,7 +289,7 @@ where
         };
 
         selector = if let Some(term) = &self.is {
-            if let Ok(value) = frame.resolve(term) {
+            if let Ok(value) = frame.resolve_value(term) {
                 if let Some(selector) = selector {
                     Some(selector.is(value))
                 } else {
@@ -337,10 +314,7 @@ where
 
 /// Execution plan for a fact selector operation
 #[derive(Debug, Clone)]
-pub struct FactSelectorPlan<T = Value>
-where
-    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + 'static,
-{
+pub struct FactSelectorPlan<T: Scalar = Value> {
     /// The fact selector operation to execute
     pub selector: FactSelector<T>,
     /// Variables that must be bound before execution
@@ -349,7 +323,7 @@ where
     pub cost: f64,
 }
 
-impl<T> FactSelectorPlan<T>
+impl<T: Scalar> FactSelectorPlan<T>
 where
     T: crate::types::IntoValueDataType + Clone + std::fmt::Debug,
 {
@@ -373,9 +347,9 @@ where
     }
 }
 
-impl<T> Syntax for FactSelector<T>
+impl<T: Scalar> Syntax for FactSelector<T>
 where
-    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Send + 'static,
+    T: Scalar + Send,
     Value: From<T>,
 {
     type Plan = FactSelectorPlan<T>;
@@ -385,10 +359,7 @@ where
     }
 }
 
-impl<T> TryFrom<FactSelector<T>> for ArtifactSelector<Constrained>
-where
-    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Into<Value>,
-{
+impl<T: Scalar> TryFrom<FactSelector<T>> for ArtifactSelector<Constrained> {
     type Error = QueryError;
 
     fn try_from(fact_selector: FactSelector<T>) -> Result<Self, Self::Error> {
@@ -396,9 +367,7 @@ where
     }
 }
 
-impl<T> Query for FactSelector<T>
-where
-    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Into<Value>,
+impl<T: Scalar> Query for FactSelector<T>
 {
     fn query<S>(
         &self,
@@ -423,19 +392,10 @@ where
     }
 }
 
-impl<T> Plan for FactSelectorPlan<T> where
-    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Send + 'static
-{
-}
+impl<T: Scalar + Send> Plan for FactSelectorPlan<T> {}
 impl<T> EvaluationPlan for FactSelectorPlan<T>
 where
-    T: crate::types::IntoValueDataType
-        + Clone
-        + std::fmt::Debug
-        + Into<Value>
-        + Send
-        + 'static
-        + PartialEq<Value>,
+    T: Scalar + Into<Value> + Send + PartialEq<Value>,
 {
     fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> impl SelectionTrait + '_
     where
@@ -471,7 +431,7 @@ where
 
                         // Unify value if we have a value variable using type-safe unify
                         if let Some(value_term) = &selector.is {
-                            new_frame = new_frame.unify(value_term.clone(), artifact.is).map_err(|e| QueryError::FactStore(e.to_string()))?;
+                            new_frame = new_frame.unify_value(value_term.clone(), artifact.is).map_err(|e| QueryError::FactStore(e.to_string()))?;
                         }
 
                         yield new_frame;
@@ -491,7 +451,7 @@ where
 
 impl<T> Query for FactSelectorPlan<T>
 where
-    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Into<Value> + Send + 'static,
+    T: Scalar + Send,
 {
     fn query<S>(
         &self,
@@ -539,7 +499,7 @@ mod tests {
         let fact_selector: FactSelector<Value> = FactSelector::new()
             .the("person/name")
             .of(Term::<Entity>::var("person"))
-            .is(Term::<String>::var("name"));
+            .is(Term::<Value>::var("name"));
 
         let vars = fact_selector.variables();
         assert_eq!(vars.len(), 2);
@@ -644,7 +604,7 @@ mod tests {
         let fact_selector3: FactSelector<Value> = FactSelector::new()
             .the("user/name")
             .of(Term::var("user"))
-            .is(Term::<String>::var("name"));
+            .is(Term::<Value>::var("name"));
 
         let fact_selector4: FactSelector<Value> =
             FactSelector::new().is("active").the("user/status");
@@ -669,15 +629,15 @@ mod tests {
         let fact_selector1: FactSelector<Value> = FactSelector::new()
             .the("user/email")
             .of(Term::var("user"))
-            .is(Term::<String>::var("email"));
+            .is(Term::<Value>::var("email"));
 
         let fact_selector2: FactSelector<Value> = FactSelector::new()
             .of(Term::var("user"))
-            .is(Term::<String>::var("email"))
+            .is(Term::<Value>::var("email"))
             .the("user/email");
 
         let fact_selector3: FactSelector<Value> = FactSelector::new()
-            .is(Term::<String>::var("email"))
+            .is(Term::<Value>::var("email"))
             .the("user/email")
             .of(Term::<Entity>::var("user"));
 
@@ -696,7 +656,7 @@ mod tests {
         let fact_selector: FactSelector<Value> = FactSelector::new()
             .the("user/name")
             .of(Term::var("user"))
-            .is(Term::<String>::var("name"));
+            .is(Term::<Value>::var("name"));
 
         assert!(fact_selector.the.is_some());
         assert!(fact_selector.of.is_some());
@@ -765,7 +725,7 @@ mod tests {
         let fact_selector: FactSelector<Value> = FactSelector::new()
             .the("user/name") // Constant attribute - this will be used for ArtifactSelector
             .of(Term::var("user")) // Variable entity - this will be unified
-            .is(Term::<String>::var("name")); // Variable value - this will be unified
+            .is(Term::<Value>::var("name")); // Variable value - this will be unified
 
         // Step 3: Create plan and test the familiar-query pattern
         let scope = VariableScope::new();
