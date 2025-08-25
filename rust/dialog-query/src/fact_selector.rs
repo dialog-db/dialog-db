@@ -104,13 +104,13 @@ impl<T: Scalar> FactSelector<T> {
 
     /// Set the attribute (predicate) constraint
     ///
-    /// Accepts anything convertible to Term<Attribute>:
+    /// Accepts types that implement IntoAttributeTerm:
     /// - String literals: `"user/name"`
     /// - Attribute constants: `Attribute::parse("user/name")`
     /// - Variables: `Term::<Attribute>::var("attr")`
     /// - Wildcards: `Term::<Attribute>::new()`
-    pub fn the<The: Into<Term<Attribute>>>(mut self, the: The) -> Self {
-        self.the = Some(the.into());
+    pub fn the<The: crate::term::IntoAttributeTerm>(mut self, the: The) -> Self {
+        self.the = Some(the.into_attribute_term());
         self
     }
 
@@ -575,10 +575,7 @@ mod tests {
         let fact_selector = FactSelector::new().the("user/email").is("user@example.com");
 
         if let Some(Term::Constant(value)) = &fact_selector.is {
-            match value {
-                Value::String(s) => assert_eq!(s, "user@example.com"),
-                _ => panic!("Expected string value"),
-            }
+            assert_eq!(*value, "user@example.com");
         } else {
             panic!("Expected constant value");
         }
@@ -599,7 +596,7 @@ mod tests {
         let fact_selector2: FactSelector<Value> = FactSelector::new()
             .the("user/name")
             .of(Term::var("user"))
-            .is("John");
+            .is(Value::String("John".to_string()));
 
         let fact_selector3: FactSelector<Value> = FactSelector::new()
             .the("user/name")
@@ -607,7 +604,7 @@ mod tests {
             .is(Term::<Value>::var("name"));
 
         let fact_selector4: FactSelector<Value> =
-            FactSelector::new().is("active").the("user/status");
+            FactSelector::new().is(Value::String("active".to_string())).the("user/status");
 
         // All should create valid Assertion patterns
         assert!(fact_selector2.the.is_some());

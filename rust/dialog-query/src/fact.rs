@@ -454,7 +454,7 @@ mod integration_tests {
         let alice_email_query = Fact::select()
             .the("user/email")
             .of(alice.clone())
-            .is(Term::<String>::from("alice@example.com"));
+            .is("alice@example.com");
 
         let alice_email_results = alice_email_query
             .query(&artifacts)?
@@ -599,9 +599,7 @@ mod integration_tests {
         artifacts.commit(stream::iter(instructions)).await?;
 
         // Query 1: Find all admins by role using Query trait
-        let admin_query = Fact::select()
-            .the("user/role")
-            .is(Term::<String>::from("admin"));
+        let admin_query = Fact::select().the("user/role").is("admin");
 
         let admin_results = admin_query
             .query(&artifacts)?
@@ -699,6 +697,38 @@ mod integration_tests {
         let _string_result = string_selector.query(&artifacts);
         let _value_result = value_selector.query(&artifacts);
         let _entity_result = entity_selector.query(&artifacts);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_type_inference_with_string_literals() -> Result<()> {
+        // This test demonstrates how type inference works with string literals
+
+        // Pattern 1: When using Fact::select() without type annotation,
+        // string literals infer to String type
+        let inferred_string_query = Fact::select().the("user/name").is("Bob"); // This infers Fact<String> because "Bob" -> Term<String>
+
+        // Pattern 2: When you need Value type, be explicit
+        let value_query = Fact::select()
+            .the("user/email")
+            .is(Value::String("alice@example.com".to_string())); // Explicit Value
+
+        // Pattern 3: String-typed selectors work naturally
+        let string_query = Fact::select().the("user/name").is("Bob"); // Type is already String, works naturally
+
+        // Pattern 4: The specific case from line 602 now works with inference!
+        let admin_query = Fact::select().the("user/role").is("admin"); // Infers as Fact<String>
+
+        // All should compile without ambiguity
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        // Verify they work - the inferred query is actually FactSelector<String>
+        let _inferred_result = inferred_string_query.query(&artifacts);
+        let _value_result = value_query.query(&artifacts);
+        let _string_result = string_query.query(&artifacts);
+        let _admin_result = admin_query.query(&artifacts);
 
         Ok(())
     }

@@ -6,10 +6,10 @@ fn test_current_json_serialization() -> Result<(), Box<dyn std::error::Error>> {
     println!("Testing current FactSelector JSON serialization...\n");
 
     // Test 1: FactSelector with constants
-    let selector1: FactSelector<Value> = FactSelector::new()
+    let selector1 = FactSelector::new()
         .the("person/name")
-        .of(Term::<dialog_artifacts::Entity>::var("user"))
-        .is("Alice");
+        .of(Term::var("user"))
+        .is(Value::String("Alice".to_string()));
 
     let json1 = serde_json::to_string_pretty(&selector1)?;
     println!("FactSelector with constants and variable:");

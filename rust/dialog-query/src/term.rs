@@ -282,17 +282,6 @@ impl From<Value> for Term<Value> {
     }
 }
 
-impl From<String> for Term<Value> {
-    fn from(s: String) -> Self {
-        Term::Constant(Value::String(s))
-    }
-}
-
-impl From<&str> for Term<Value> {
-    fn from(s: &str) -> Self {
-        Term::Constant(Value::String(s.to_string()))
-    }
-}
 
 impl From<dialog_artifacts::Attribute> for Term<Value> {
     fn from(attr: dialog_artifacts::Attribute) -> Self {
@@ -306,18 +295,36 @@ impl From<dialog_artifacts::Entity> for Term<Value> {
     }
 }
 
-/// Additional typed Term conversions for dialog-artifacts types
-///
-/// These allow direct conversion from artifact types to their corresponding Terms.
-impl From<&str> for Term<dialog_artifacts::Attribute> {
-    fn from(s: &str) -> Self {
-        Term::Constant(s.parse().unwrap())
+/// Trait for types that can be converted into Term<Attribute>
+/// 
+/// This trait is used to avoid ambiguity with From<&str> implementations
+/// for other Term types while still allowing convenient attribute creation.
+pub trait IntoAttributeTerm {
+    /// Convert self into a Term<Attribute>
+    fn into_attribute_term(self) -> Term<dialog_artifacts::Attribute>;
+}
+
+impl IntoAttributeTerm for &str {
+    fn into_attribute_term(self) -> Term<dialog_artifacts::Attribute> {
+        Term::Constant(self.parse().unwrap())
     }
 }
 
-impl From<String> for Term<dialog_artifacts::Attribute> {
-    fn from(s: String) -> Self {
-        Term::Constant(s.parse().unwrap())
+impl IntoAttributeTerm for String {
+    fn into_attribute_term(self) -> Term<dialog_artifacts::Attribute> {
+        Term::Constant(self.parse().unwrap())
+    }
+}
+
+impl IntoAttributeTerm for dialog_artifacts::Attribute {
+    fn into_attribute_term(self) -> Term<dialog_artifacts::Attribute> {
+        Term::Constant(self)
+    }
+}
+
+impl IntoAttributeTerm for Term<dialog_artifacts::Attribute> {
+    fn into_attribute_term(self) -> Term<dialog_artifacts::Attribute> {
+        self
     }
 }
 

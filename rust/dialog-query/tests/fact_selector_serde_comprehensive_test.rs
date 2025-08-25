@@ -84,7 +84,7 @@ fn test_fact_selector_only_entity_variable() -> Result<(), Box<dyn std::error::E
 #[test]
 fn test_fact_selector_only_value_constant_string() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with only value (is) as string constant
-    let selector = FactSelector::new().is("Alice");
+    let selector = FactSelector::new().is(Value::String("Alice".to_string()));
     let json = serde_json::to_string(&selector)?;
     assert_eq!(json, r#"{"is":"Alice"}"#);
 
@@ -204,7 +204,7 @@ fn test_fact_selector_all_constants() -> Result<(), Box<dyn std::error::Error>> 
     let selector = FactSelector::new()
         .the("person/name")
         .of(entity.clone())
-        .is("Alice");
+        .is(Value::String("Alice".to_string()));
     let json = serde_json::to_string(&selector)?;
     let expected = format!(r#"{{"the":"person/name","of":"{}","is":"Alice"}}"#, entity);
     assert_eq!(json, expected);
@@ -305,7 +305,7 @@ fn test_fact_selector_mixed_constants_variables() -> Result<(), Box<dyn std::err
     let selector = FactSelector::new()
         .the("person/name") // constant
         .of(Term::<dialog_artifacts::Entity>::var("user")) // variable
-        .is("Alice"); // constant
+        .is(Value::String("Alice".to_string())); // constant
     let json = serde_json::to_string(&selector)?;
     assert_eq!(
         json,
@@ -391,10 +391,7 @@ fn test_fact_selector_round_trip_all_variants() -> Result<(), Box<dyn std::error
     let test_cases = vec![
         ("empty", FactSelector::<Value>::new()),
         ("only_attr_const", FactSelector::new().the("test/attr")),
-        (
-            "only_entity_var",
-            FactSelector::new().of(Term::<dialog_artifacts::Entity>::var("e")),
-        ),
+        ("only_entity_var", FactSelector::new().of(Term::var("e"))),
         (
             "only_value_blank",
             FactSelector::new().is(Term::<Value>::default()),
@@ -403,8 +400,8 @@ fn test_fact_selector_round_trip_all_variants() -> Result<(), Box<dyn std::error
             "mixed",
             FactSelector::new()
                 .the("test/attr")
-                .of(Term::<dialog_artifacts::Entity>::var("user"))
-                .is("test_string"),
+                .of(Term::var("user"))
+                .is(Value::String("test_string".to_string())),
         ), // Use string to avoid int/float deserialization issues
     ];
 
