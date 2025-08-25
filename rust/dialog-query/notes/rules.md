@@ -189,7 +189,7 @@ fn main() {
 
     // Predicate that can be used to query for `Person` with given
     // name `John` and birthday `1983_07_03`
-    let john = Match::<Person> {
+    let john = Match<Person> {
         this: person.clone(),
         name: Term::from("John"),
         birthday: Term::from(1983_07_03u32),
