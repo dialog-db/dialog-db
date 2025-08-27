@@ -3,6 +3,8 @@ use std::{collections::BTreeMap, sync::Arc};
 use dialog_artifacts::Value;
 use dialog_common::ConditionalSend;
 use futures_core::Stream;
+use std::task;
+use std::pin::Pin;
 
 use crate::{fact::Scalar, InconsistencyError, QueryError, Term};
 
@@ -224,6 +226,30 @@ impl Match {
             }
             Term::Constant(constant) => Ok(constant.as_value()),
         }
+    }
+}
+
+/// An empty selection that yields no matches
+///
+/// This is useful as a placeholder for unimplemented rule evaluation
+/// or for rules that have no valid matches.
+#[derive(Debug, Clone)]
+pub struct EmptySelection;
+
+impl EmptySelection {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Stream for EmptySelection {
+    type Item = Result<Match, QueryError>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        _cx: &mut task::Context<'_>,
+    ) -> task::Poll<Option<Self::Item>> {
+        task::Poll::Ready(None)
     }
 }
 

@@ -32,8 +32,6 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 # Macro utilities
 paste = "1.0"
 
-# Procedural macros
-dialog-query-macros = { path = "../dialog-query-macros" }
 
 [dev-dependencies]
 tokio-test = "0.4"

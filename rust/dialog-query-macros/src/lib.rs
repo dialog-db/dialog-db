@@ -118,6 +118,7 @@ pub fn relation(_args: TokenStream, input: TokenStream) -> TokenStream {
     }
     
     let expanded = quote! {
+        // Replace the original enum with a module containing the generated structs
         #[allow(non_snake_case)]
         pub mod #enum_name {
             use super::*;

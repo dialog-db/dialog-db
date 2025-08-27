@@ -425,7 +425,6 @@ dependencies = [
  "async-stream",
  "dialog-artifacts",
  "dialog-common",
- "dialog-query-macros",
  "dialog-storage",
  "futures-core",
  "futures-util",
@@ -436,15 +435,6 @@ dependencies = [
  "thiserror 2.0.12",
  "tokio",
  "tokio-test",
-]
-
-[[package]]
-name = "dialog-query-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
