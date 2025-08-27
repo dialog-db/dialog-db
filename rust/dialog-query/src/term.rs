@@ -12,8 +12,8 @@
 use std::fmt;
 use std::marker::PhantomData;
 
+use crate::artifact::{Attribute, Entity, Value, ValueDataType};
 use crate::types::IntoValueDataType;
-use dialog_artifacts::{Value, ValueDataType};
 use serde::{Deserialize, Serialize};
 
 /// Term represents either a constant value or variable constraint of the
@@ -282,60 +282,59 @@ impl From<Value> for Term<Value> {
     }
 }
 
-
-impl From<dialog_artifacts::Attribute> for Term<Value> {
-    fn from(attr: dialog_artifacts::Attribute) -> Self {
+impl From<Attribute> for Term<Value> {
+    fn from(attr: Attribute) -> Self {
         Term::Constant(Value::String(attr.to_string()))
     }
 }
 
-impl From<dialog_artifacts::Entity> for Term<Value> {
-    fn from(entity: dialog_artifacts::Entity) -> Self {
+impl From<Entity> for Term<Value> {
+    fn from(entity: crate::artifact::Entity) -> Self {
         Term::Constant(Value::Entity(entity))
     }
 }
 
 /// Trait for types that can be converted into Term<Attribute>
-/// 
+///
 /// This trait is used to avoid ambiguity with From<&str> implementations
 /// for other Term types while still allowing convenient attribute creation.
 pub trait IntoAttributeTerm {
     /// Convert self into a Term<Attribute>
-    fn into_attribute_term(self) -> Term<dialog_artifacts::Attribute>;
+    fn into_attribute_term(self) -> Term<Attribute>;
 }
 
 impl IntoAttributeTerm for &str {
-    fn into_attribute_term(self) -> Term<dialog_artifacts::Attribute> {
+    fn into_attribute_term(self) -> Term<Attribute> {
         Term::Constant(self.parse().unwrap())
     }
 }
 
 impl IntoAttributeTerm for String {
-    fn into_attribute_term(self) -> Term<dialog_artifacts::Attribute> {
+    fn into_attribute_term(self) -> Term<Attribute> {
         Term::Constant(self.parse().unwrap())
     }
 }
 
-impl IntoAttributeTerm for dialog_artifacts::Attribute {
-    fn into_attribute_term(self) -> Term<dialog_artifacts::Attribute> {
+impl IntoAttributeTerm for Attribute {
+    fn into_attribute_term(self) -> Term<Attribute> {
         Term::Constant(self)
     }
 }
 
-impl IntoAttributeTerm for Term<dialog_artifacts::Attribute> {
-    fn into_attribute_term(self) -> Term<dialog_artifacts::Attribute> {
+impl IntoAttributeTerm for Term<Attribute> {
+    fn into_attribute_term(self) -> Term<Attribute> {
         self
     }
 }
 
-impl From<dialog_artifacts::Attribute> for Term<dialog_artifacts::Attribute> {
-    fn from(attr: dialog_artifacts::Attribute) -> Self {
+impl From<Attribute> for Term<Attribute> {
+    fn from(attr: Attribute) -> Self {
         Term::Constant(attr)
     }
 }
 
-impl From<dialog_artifacts::Entity> for Term<dialog_artifacts::Entity> {
-    fn from(entity: dialog_artifacts::Entity) -> Self {
+impl From<Entity> for Term<Entity> {
+    fn from(entity: Entity) -> Self {
         Term::Constant(entity)
     }
 }
@@ -499,7 +498,7 @@ mod tests {
 
         // // Test 6: Deserialize Entity variable (the failing case?)
         // let json6 = r#"{"?":{"name":"user","type":"Entity"}}"#;
-        // match serde_json::from_str::<Term<dialog_artifacts::Entity>>(json6) {
+        // match serde_json::from_str::<Term<Entity>>(json6) {
         //     Ok(term) => {
         //         println!("✓ Deserialized Entity variable: {:?}", term);
         //         assert_eq!(term.name(), Some("user"));
@@ -538,10 +537,7 @@ mod tests {
 
         // Terms now preserve type information using direct methods
         assert_eq!(string_term.name(), Some("name"));
-        assert_eq!(
-            string_term.data_type(),
-            Some(dialog_artifacts::ValueDataType::String)
-        );
+        assert_eq!(string_term.data_type(), Some(ValueDataType::String));
 
         assert_eq!(untyped_term.name(), Some("anything"));
         assert_eq!(untyped_term.data_type(), None);
@@ -570,14 +566,8 @@ mod tests {
         assert_eq!(any_term.name(), Some("wildcard"));
 
         // Terms now preserve type information
-        assert_eq!(
-            name_term.data_type(),
-            Some(dialog_artifacts::ValueDataType::String)
-        );
-        assert_eq!(
-            age_term.data_type(),
-            Some(dialog_artifacts::ValueDataType::UnsignedInt)
-        );
+        assert_eq!(name_term.data_type(), Some(ValueDataType::String));
+        assert_eq!(age_term.data_type(), Some(ValueDataType::UnsignedInt));
         assert_eq!(any_term.data_type(), None);
     }
 
@@ -625,7 +615,7 @@ mod tests {
     #[test]
     fn test_term_from_variable_reference() {
         // Test that we can convert variable references to terms
-        let entity_var = Term::<dialog_artifacts::Entity>::var("entity");
+        let entity_var = Term::<Entity>::var("entity");
         let string_var = Term::<String>::var("name");
 
         // This should work with the new implementation
@@ -638,15 +628,9 @@ mod tests {
 
         // Check that variable names are preserved
         assert_eq!(entity_term.name(), Some("entity"));
-        assert_eq!(
-            entity_term.data_type(),
-            Some(dialog_artifacts::ValueDataType::Entity)
-        );
+        assert_eq!(entity_term.data_type(), Some(ValueDataType::Entity));
 
         assert_eq!(string_term.name(), Some("name"));
-        assert_eq!(
-            string_term.data_type(),
-            Some(dialog_artifacts::ValueDataType::String)
-        );
+        assert_eq!(string_term.data_type(), Some(ValueDataType::String));
     }
 }

@@ -1,7 +1,7 @@
+pub use crate::artifact::Entity;
 pub use crate::fact_selector::FactSelector;
 pub use crate::term::Term;
 pub use crate::types::Scalar;
-use dialog_artifacts::Entity;
 pub use std::marker::PhantomData;
 
 #[derive(Clone, Debug)]

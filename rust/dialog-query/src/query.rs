@@ -1,7 +1,7 @@
 //! Query trait for polymorphic querying across different store types
 
+use crate::artifact::{Artifact, ArtifactStore, DialogArtifactsError};
 use crate::error::QueryResult;
-use dialog_artifacts::{Artifact, ArtifactStore, DialogArtifactsError};
 use futures_util::Stream;
 
 /// A trait for types that can query an ArtifactStore
@@ -47,11 +47,11 @@ pub trait Query {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Fact, Term};
-    use anyhow::Result;
-    use dialog_artifacts::{
+    use crate::artifact::{
         ArtifactStore, ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value,
     };
+    use crate::{Fact, Term};
+    use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
     use futures_util::{stream, StreamExt};
 
@@ -160,7 +160,7 @@ mod tests {
         async fn execute_query<Q: Query>(
             query: Q,
             store: &impl ArtifactStore,
-        ) -> Result<Vec<dialog_artifacts::Artifact>> {
+        ) -> Result<Vec<crate::artifact::Artifact>> {
             let stream = query.query(store)?;
             let results = stream
                 .filter_map(|result| async move { result.ok() })

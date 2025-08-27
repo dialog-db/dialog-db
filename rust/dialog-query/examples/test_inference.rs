@@ -1,4 +1,4 @@
-use dialog_artifacts::{Value, ValueDataType};
+use dialog_query::artifact::{Value, ValueDataType};
 
 pub enum Term<T: Into<ValueDataType>> {
     Variable { name: String, value_type: T },

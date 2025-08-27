@@ -1,10 +1,10 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use dialog_artifacts::Value;
+use crate::artifact::Value;
 use dialog_common::ConditionalSend;
 use futures_core::Stream;
-use std::task;
 use std::pin::Pin;
+use std::task;
 
 use crate::{fact::Scalar, InconsistencyError, QueryError, Term};
 
@@ -257,7 +257,7 @@ impl Stream for EmptySelection {
 mod tests {
     use super::*;
     use crate::Term;
-    use dialog_artifacts::{Attribute, Entity};
+    use crate::artifact::{Attribute, Entity};
     use std::str::FromStr;
 
     #[test]

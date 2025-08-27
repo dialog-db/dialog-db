@@ -3,10 +3,10 @@
 //! This module implements join operations needed for rule evaluation,
 //! particularly for joining multiple fact selector results on shared variables.
 
+use crate::artifact::{ArtifactStore, Value};
 use crate::plan::{EvaluationContext, EvaluationPlan, Plan};
 use crate::selection::{Match, Selection};
 use crate::QueryError;
-use dialog_artifacts::{ArtifactStore, Value};
 use futures_core::Stream;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -54,7 +54,7 @@ impl<L: Selection, R: Selection> Join<L, R> {
                 // Both have the variable - they must match
                 let left_val = left.resolve_value(&crate::term::Term::<Value>::var(var));
                 let right_val = right.resolve_value(&crate::term::Term::<Value>::var(var));
-                
+
                 match (left_val, right_val) {
                     (Ok(l), Ok(r)) => {
                         if l != r {
@@ -72,7 +72,7 @@ impl<L: Selection, R: Selection> Join<L, R> {
     fn combine_matches(left: &Match, _right: &Match) -> Result<Match, QueryError> {
         // Start with the left match
         let result = left.clone();
-        
+
         // For each variable in the right match, try to unify it with the result
         // This is a simplified implementation - a full one would need proper unification
         // For now, we just return the left match since we've already checked compatibility
@@ -86,7 +86,7 @@ impl<L: Selection, R: Selection> Stream for Join<L, R> {
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // This is a very simplified join implementation
         // A full implementation would need proper streaming join algorithms
-        
+
         // For now, just return empty to avoid infinite loops
         Poll::Ready(None)
     }
@@ -106,7 +106,10 @@ pub struct FactSelectorJoinPlan {
 
 impl FactSelectorJoinPlan {
     /// Create a new join plan
-    pub fn new(plans: Vec<crate::fact_selector::FactSelectorPlan<Value>>, join_variables: Vec<String>) -> Self {
+    pub fn new(
+        plans: Vec<crate::fact_selector::FactSelectorPlan<Value>>,
+        join_variables: Vec<String>,
+    ) -> Self {
         Self {
             plans,
             join_variables,
@@ -144,25 +147,25 @@ impl EvaluationPlan for FactSelectorJoinPlan {
 
 /// Helper to create attribute join plans for rule matches
 pub fn create_attribute_join(
-    entity: crate::term::Term<dialog_artifacts::Entity>,
+    entity: crate::term::Term<crate::artifact::Entity>,
     attributes: Vec<(String, crate::term::Term<Value>)>,
 ) -> FactSelectorJoinPlan {
     let mut plans = Vec::new();
-    
+
     for (attr_name, value_term) in attributes {
-        let attr = attr_name.parse::<dialog_artifacts::Attribute>().unwrap();
-        
+        let attr = attr_name.parse::<crate::artifact::Attribute>().unwrap();
+
         let selector = crate::fact_selector::FactSelector::<Value> {
             the: Some(crate::term::Term::from(attr)),
             of: Some(entity.clone()),
             is: Some(value_term),
             fact: None,
         };
-        
+
         if let Ok(plan) = selector.plan(&crate::syntax::VariableScope::new()) {
             plans.push(plan);
         }
     }
-    
+
     FactSelectorJoinPlan::join_on_entity(plans)
 }

@@ -1,4 +1,4 @@
-use dialog_artifacts::Value;
+use dialog_query::artifact::Value;
 use dialog_query::{FactSelector, Term};
 
 #[test]
@@ -38,7 +38,7 @@ fn test_fact_selector_only_attribute_constant() -> Result<(), Box<dyn std::error
 #[test]
 fn test_fact_selector_only_attribute_variable() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with only attribute (the) as variable
-    let selector = FactSelector::new().the(Term::<dialog_artifacts::Attribute>::var("attr"));
+    let selector = FactSelector::new().the(Term::<dialog_query::artifact::Attribute>::var("attr"));
     let json = serde_json::to_string(&selector)?;
     assert_eq!(json, r#"{"the":{"?":{"name":"attr","type":"Symbol"}}}"#);
 
@@ -52,7 +52,7 @@ fn test_fact_selector_only_attribute_variable() -> Result<(), Box<dyn std::error
 #[test]
 fn test_fact_selector_only_entity_constant() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with only entity (of) as constant
-    let entity = dialog_artifacts::Entity::new().unwrap();
+    let entity = dialog_query::artifact::Entity::new().unwrap();
     let selector = FactSelector::new().of(entity.clone());
     let json = serde_json::to_string(&selector)?;
 
@@ -70,7 +70,7 @@ fn test_fact_selector_only_entity_constant() -> Result<(), Box<dyn std::error::E
 #[test]
 fn test_fact_selector_only_entity_variable() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with only entity (of) as variable
-    let selector = FactSelector::new().of(Term::<dialog_artifacts::Entity>::var("user"));
+    let selector = FactSelector::new().of(Term::<dialog_query::artifact::Entity>::var("user"));
     let json = serde_json::to_string(&selector)?;
     assert_eq!(json, r#"{"of":{"?":{"name":"user","type":"Entity"}}}"#);
 
@@ -200,7 +200,7 @@ fn test_fact_selector_only_value_blank_untyped() -> Result<(), Box<dyn std::erro
 #[test]
 fn test_fact_selector_all_constants() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with all fields as constants
-    let entity = dialog_artifacts::Entity::new().unwrap();
+    let entity = dialog_query::artifact::Entity::new().unwrap();
     let selector = FactSelector::new()
         .the("person/name")
         .of(entity.clone())
@@ -241,8 +241,8 @@ fn test_fact_selector_all_variables_typed() -> Result<(), Box<dyn std::error::Er
 fn test_fact_selector_all_variables_untyped() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with all fields as untyped variables (Value type)
     let selector = FactSelector::new()
-        .the(Term::<dialog_artifacts::Attribute>::var("attr")) // Attribute must be typed
-        .of(Term::<dialog_artifacts::Entity>::var("user")) // Entity must be typed
+        .the(Term::<dialog_query::artifact::Attribute>::var("attr")) // Attribute must be typed
+        .of(Term::<dialog_query::artifact::Entity>::var("user")) // Entity must be typed
         .is(Term::<Value>::var("value")); // Value can be untyped
     let json = serde_json::to_string(&selector)?;
     // Value should not have type field
@@ -283,8 +283,8 @@ fn test_fact_selector_all_blanks_typed() -> Result<(), Box<dyn std::error::Error
 fn test_fact_selector_all_blanks_mixed() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with all fields as blank variables (mixed typed/untyped)
     let selector = FactSelector::new()
-        .the(Term::<dialog_artifacts::Attribute>::default())
-        .of(Term::<dialog_artifacts::Entity>::default())
+        .the(Term::<dialog_query::artifact::Attribute>::default())
+        .of(Term::<dialog_query::artifact::Entity>::default())
         .is(Term::<Value>::default());
     let json = serde_json::to_string(&selector)?;
     assert_eq!(
@@ -304,7 +304,7 @@ fn test_fact_selector_mixed_constants_variables() -> Result<(), Box<dyn std::err
     // Test FactSelector with mixed constants and variables
     let selector = FactSelector::new()
         .the("person/name") // constant
-        .of(Term::<dialog_artifacts::Entity>::var("user")) // variable
+        .of(Term::<dialog_query::artifact::Entity>::var("user")) // variable
         .is(Value::String("Alice".to_string())); // constant
     let json = serde_json::to_string(&selector)?;
     assert_eq!(
@@ -323,8 +323,8 @@ fn test_fact_selector_mixed_constants_variables() -> Result<(), Box<dyn std::err
 fn test_fact_selector_mixed_variables_blanks() -> Result<(), Box<dyn std::error::Error>> {
     // Test FactSelector with mixed named variables and blanks
     let selector = FactSelector::new()
-        .the(Term::<dialog_artifacts::Attribute>::var("attr")) // named variable
-        .of(Term::<dialog_artifacts::Entity>::default()) // blank
+        .the(Term::<dialog_query::artifact::Attribute>::var("attr")) // named variable
+        .of(Term::<dialog_query::artifact::Entity>::default()) // blank
         .is(Term::<Value>::var("name")); // Now uses explicit Value type
     let json = serde_json::to_string(&selector)?;
     // The "is" field loses String type constraint when converted to Term<Value>
@@ -345,7 +345,7 @@ fn test_fact_selector_complex_mixed() -> Result<(), Box<dyn std::error::Error>> 
     // Test FactSelector with complex mix: constant, named variable, blank variable
     let selector = FactSelector::new()
         .the("person/name") // constant
-        .of(Term::<dialog_artifacts::Entity>::var("user")) // named variable
+        .of(Term::<dialog_query::artifact::Entity>::var("user")) // named variable
         .is(Term::<Value>::default()); // blank untyped variable
     let json = serde_json::to_string(&selector)?;
     assert_eq!(
@@ -363,7 +363,7 @@ fn test_fact_selector_complex_mixed() -> Result<(), Box<dyn std::error::Error>> 
 #[test]
 fn test_fact_selector_value_types() -> Result<(), Box<dyn std::error::Error>> {
     // Test different Value constant types in is field
-    let entity = dialog_artifacts::Entity::new().unwrap();
+    let entity = dialog_query::artifact::Entity::new().unwrap();
     let selector_entity = FactSelector::<Value>::new().is(entity.clone());
     let json_entity = serde_json::to_string(&selector_entity)?;
     let expected_entity = format!(r#"{{"is":"{}"}}"#, entity);

@@ -1,13 +1,13 @@
 //! Query execution plans - traits and context for evaluation
 
 use crate::Selection;
-use dialog_artifacts::ArtifactStore;
+use crate::artifact::ArtifactStore;
 use dialog_common::ConditionalSend;
 use std::collections::BTreeMap;
 
 /// A single result frame with variable bindings
 /// Equivalent to MatchFrame in TypeScript: Map<Variable, Scalar>
-pub type MatchFrame = BTreeMap<String, dialog_artifacts::Value>;
+pub type MatchFrame = BTreeMap<String, crate::artifact::Value>;
 
 /// Evaluation context passed to plans during execution
 /// Based on TypeScript EvaluationContext in @query/src/api.ts

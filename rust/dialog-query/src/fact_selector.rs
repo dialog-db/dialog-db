@@ -11,6 +11,10 @@
 //! The selector supports both direct querying (when all terms are constants) and
 //! pattern matching evaluation (when variables are involved).
 
+use crate::artifact::{
+    Artifact, ArtifactSelector, ArtifactStore, Attribute, Constrained, DialogArtifactsError,
+    Entity, Value,
+};
 use crate::error::{QueryError, QueryResult};
 use crate::plan::{EvaluationContext, EvaluationPlan, Plan};
 use crate::query::Query;
@@ -20,10 +24,6 @@ use crate::syntax::VariableScope;
 use crate::term::Term;
 use crate::types::Scalar;
 use async_stream::try_stream;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStore, Attribute, DialogArtifactsError, Entity, Value,
-};
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -237,11 +237,13 @@ impl<T: Scalar> FactSelector<T> {
             if let Ok(value) = frame.resolve_value(term) {
                 // We need to ensure that the resolved value is a string
                 // that can be parsed as an attribute
-                let attribute: dialog_artifacts::Attribute = match value {
+                let attribute: crate::artifact::Attribute = match value {
                     Value::String(s) => {
                         use std::str::FromStr;
-                        dialog_artifacts::Attribute::from_str(&s).map_err(|_| QueryError::InvalidAttribute {
-                            attribute: format!("Invalid attribute format: {}", s),
+                        crate::artifact::Attribute::from_str(&s).map_err(|_| {
+                            QueryError::InvalidAttribute {
+                                attribute: format!("Invalid attribute format: {}", s),
+                            }
                         })?
                     }
                     Value::Symbol(attr) => attr,
@@ -269,7 +271,7 @@ impl<T: Scalar> FactSelector<T> {
 
         selector = if let Some(term) = &self.of {
             if let Ok(value) = frame.resolve_value(term) {
-                let entity: dialog_artifacts::Entity =
+                let entity: crate::artifact::Entity =
                     value
                         .clone()
                         .try_into()
@@ -367,8 +369,7 @@ impl<T: Scalar> TryFrom<FactSelector<T>> for ArtifactSelector<Constrained> {
     }
 }
 
-impl<T: Scalar> Query for FactSelector<T>
-{
+impl<T: Scalar> Query for FactSelector<T> {
     fn query<S>(
         &self,
         store: &S,
@@ -478,8 +479,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_artifacts::Value;
-    use dialog_artifacts::ValueDataType;
+    use crate::artifact::Value;
+    use crate::artifact::ValueDataType;
 
     #[test]
     fn test_fact_selector_by_attribute() {
@@ -603,8 +604,9 @@ mod tests {
             .of(Term::var("user"))
             .is(Term::<Value>::var("name"));
 
-        let fact_selector4: FactSelector<Value> =
-            FactSelector::new().is(Value::String("active".to_string())).the("user/status");
+        let fact_selector4 = FactSelector::new()
+            .is(Value::String("active".to_string()))
+            .the("user/status");
 
         // All should create valid Assertion patterns
         assert!(fact_selector2.the.is_some());
@@ -665,6 +667,7 @@ mod tests {
     }
 
     // Tests from fact_selector_test.rs
+    use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction};
     use crate::syntax::VariableScope;
     use crate::{
         plan::{EvaluationContext, EvaluationPlan},
@@ -672,7 +675,6 @@ mod tests {
     };
     use crate::{selection::Match, QueryError};
     use anyhow::Result;
-    use dialog_artifacts::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction};
     use dialog_storage::MemoryStorageBackend;
     use futures_util::{stream, StreamExt};
 

@@ -54,7 +54,7 @@ Derived `Rule` should also expand to the following form:
 
 ```rs
 use dialog_query::attribute::{Attribute, MatchAttribute};
-use dialog_query::Entity;
+use dialog_query::artifact::Entity;
 use dialog_query::fact::Scalar;
 use std::marker::PhantomData;
 

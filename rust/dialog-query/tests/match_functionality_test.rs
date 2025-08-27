@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod match_functionality_test {
     use dialog_query::*;
-    use dialog_artifacts::Entity;
+    use dialog_query::artifact::Entity;
     use dialog_query::error::QueryResult;
     use dialog_query::syntax::VariableScope;
     

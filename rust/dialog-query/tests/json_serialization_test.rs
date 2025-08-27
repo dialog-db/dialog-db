@@ -1,4 +1,4 @@
-use dialog_artifacts::Value;
+use dialog_query::artifact::Value;
 use dialog_query::{FactSelector, Term};
 
 #[test]
@@ -17,8 +17,8 @@ fn test_current_json_serialization() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test 2: FactSelector with all variables
     let selector2: FactSelector<Value> = FactSelector::new()
-        .the(Term::<dialog_artifacts::Attribute>::var("attr"))
-        .of(Term::<dialog_artifacts::Entity>::var("entity"))
+        .the(Term::<dialog_query::artifact::Attribute>::var("attr"))
+        .of(Term::<dialog_query::artifact::Entity>::var("entity"))
         .is(Term::<Value>::var("value"));
 
     let json2 = serde_json::to_string_pretty(&selector2)?;

@@ -6,6 +6,7 @@
 //! This crate implements the core query planning and execution functionality,
 //! designed to be equivalent to the TypeScript query engine in @query/.
 
+pub mod artifact;
 pub mod attribute;
 pub mod concept;
 pub mod error;
@@ -13,30 +14,30 @@ pub mod fact;
 pub mod fact_selector;
 pub mod join;
 pub mod plan;
-pub mod predicate;
+pub mod premise;
 pub mod query;
 pub mod rule;
 pub mod selection;
 pub mod selector;
+pub mod statement;
 pub mod stream;
 pub mod syntax;
 pub mod term;
 pub mod types;
 
-pub use dialog_artifacts::Entity;
+pub use artifact::{Entity, Value, ValueDataType};
 pub use error::{InconsistencyError, QueryError};
 pub use fact::{assert, retract, Assertion, Claim, Fact, Retraction};
 pub use fact_selector::{FactSelector, FactSelectorPlan};
-pub use predicate::{Predicate, PredicateForm, PredicateFormPlan};
+pub use premise::Premise;
 pub use rule::{
     DerivedRule, DerivedRuleMatch, DerivedRuleMatchPlan, Rule, RuleApplication, RuleApplicationPlan,
 };
 pub use selection::{Match, Selection};
 pub use selector::Selector;
+pub use statement::{Statement, StatementPlan};
 pub use stream::*;
 pub use term::*;
-
-pub use dialog_artifacts::ValueDataType;
 pub use types::IntoValueDataType;
 
 /// Cardinality indicates whether an attribute can have one or many values
@@ -59,17 +60,18 @@ pub use syntax::{Syntax, VariableScope};
 
 /// Re-export commonly used types
 pub mod prelude {
+    pub use crate::artifact::{Value, ValueDataType};
     pub use crate::error::QueryError;
     pub use crate::fact::{Assertion, Fact, Retraction};
     pub use crate::fact_selector::{FactSelector, FactSelectorPlan};
     pub use crate::plan::EvaluationPlan;
-    pub use crate::predicate::{Predicate, PredicateForm, PredicateFormPlan};
+    pub use crate::premise::Premise;
     pub use crate::query::Query;
     pub use crate::rule::{DerivedRule, DerivedRuleMatch, Rule};
     pub use crate::selector::Selector;
+    pub use crate::statement::{Statement, StatementPlan};
     pub use crate::syntax::{Syntax, VariableScope};
     pub use crate::term::Term;
     pub use crate::types::IntoValueDataType;
-    pub use dialog_artifacts::{Value, ValueDataType};
     // Macros are automatically available due to #[macro_export]
 }

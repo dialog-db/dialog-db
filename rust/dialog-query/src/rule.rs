@@ -7,14 +7,15 @@
 //! and follows the patterns described in the design document at notes/rules.md.
 
 // use crate::attribute::{Attribute, Match as AttributeMatch};
+use crate::artifact::{ArtifactStore, Value};
 use crate::concept::Concept;
 use crate::error::QueryResult;
 use crate::plan::{EvaluationContext, EvaluationPlan, MatchFrame, Plan};
-use crate::predicate::{Predicate, PredicateForm};
+use crate::premise::Premise;
 use crate::selection::Selection;
+use crate::statement::Statement;
 use crate::syntax::VariableScope;
 use crate::term::Term;
-use dialog_artifacts::{ArtifactStore, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -26,20 +27,21 @@ pub type Claim<T: Concept> = T::Claim;
 #[allow(type_alias_bounds)]
 pub type Attributes<T: Concept> = T::Attributes;
 
-pub type When = Vec<PredicateForm>;
+pub type When = Vec<Statement>;
 
 /// A rule that derives facts from conditions
 ///
 /// This trait represents the core abstraction for rule-based deduction.
 /// Implementors define how to derive predicates (facts) when certain conditions are met.
+/// Rules should be associated with Concepts to provide proper type safety.
 pub trait Rule: Clone + std::fmt::Debug {
     /// The type of match pattern this rule produces
-    /// The Match type must implement Predicate so it can be used directly in queries
-    type Match: Predicate + Clone + std::fmt::Debug;
+    /// The Match type must implement Premise so it can be used directly in queries
+    type Match: Premise + Clone + std::fmt::Debug;
 
-    /// Get the predicates that must be satisfied for this rule to apply
+    /// Get the premises that must be satisfied for this rule to apply
     ///
-    /// Returns a list of predicates representing the conditions (premises)
+    /// Returns a list of statements representing the conditions (premises)
     /// that must be true for this rule to derive new facts.
     fn when(&self) -> When;
 
@@ -81,7 +83,7 @@ impl DerivedRule {
 impl Rule for DerivedRule {
     type Match = DerivedRuleMatch;
 
-    fn when(&self) -> Vec<PredicateForm> {
+    fn when(&self) -> Vec<Statement> {
         let mut predicates = Vec::new();
 
         // Generate a predicate for each attribute
@@ -93,7 +95,7 @@ impl Rule for DerivedRule {
             let full_attr_name = format!("{}/{}", self.the, attr_name);
             let attr_term = Term::from(
                 full_attr_name
-                    .parse::<dialog_artifacts::Attribute>()
+                    .parse::<crate::artifact::Attribute>()
                     .unwrap(),
             );
 
@@ -108,13 +110,13 @@ impl Rule for DerivedRule {
                 fact: None,
             };
 
-            predicates.push(PredicateForm::fact_selector(selector));
+            predicates.push(Statement::fact_selector(selector));
         }
 
         // If we have no attributes, create a tag predicate
         if predicates.is_empty() {
             let tag_attr = format!("the/{}", self.the);
-            let attr_term = Term::from(tag_attr.parse::<dialog_artifacts::Attribute>().unwrap());
+            let attr_term = Term::from(tag_attr.parse::<crate::artifact::Attribute>().unwrap());
             let value_term = Term::from(Value::String(self.the.clone()));
 
             let selector = crate::fact_selector::FactSelector {
@@ -124,7 +126,7 @@ impl Rule for DerivedRule {
                 fact: None,
             };
 
-            predicates.push(PredicateForm::fact_selector(selector));
+            predicates.push(Statement::fact_selector(selector));
         }
 
         predicates
@@ -151,7 +153,7 @@ pub struct DerivedRuleMatch {
     pub variables: BTreeMap<String, Term<Value>>,
 }
 
-impl Predicate for DerivedRuleMatch {
+impl Premise for DerivedRuleMatch {
     type Plan = DerivedRuleMatchPlan;
 
     fn plan(&self, scope: &VariableScope) -> QueryResult<Self::Plan> {
@@ -179,8 +181,8 @@ pub struct DerivedRuleMatchPlan {
     /// The rule match this plan executes
     pub rule_match: DerivedRuleMatch,
 
-    /// Plans for evaluating each premise predicate
-    pub premise_plans: Vec<crate::predicate::PredicateFormPlan>,
+    /// Plans for evaluating each premise statement
+    pub premise_plans: Vec<crate::statement::StatementPlan>,
 }
 
 impl Plan for DerivedRuleMatchPlan {}
@@ -243,7 +245,7 @@ impl<R: Rule> RuleApplication<R> {
     }
 }
 
-impl<R: Rule + Send> Predicate for RuleApplication<R>
+impl<R: Rule + Send> Premise for RuleApplication<R>
 where
     R::Match: Send,
 {
@@ -270,11 +272,11 @@ pub struct RuleApplicationPlan<R: Rule> {
     pub rule_match: R::Match,
 }
 
-impl<R: Rule + Send> Plan for RuleApplicationPlan<R> where R::Match: Send + Predicate {}
+impl<R: Rule + Send> Plan for RuleApplicationPlan<R> where R::Match: Send + Premise {}
 
 impl<R: Rule + Send> EvaluationPlan for RuleApplicationPlan<R>
 where
-    R::Match: Send + Predicate,
+    R::Match: Send + Premise,
 {
     fn cost(&self) -> f64 {
         self.application.cost()
@@ -294,10 +296,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::predicate::{Predicate, PredicateForm};
+    use crate::artifact::Value;
+    use crate::premise::Premise;
+    use crate::statement::Statement;
     use crate::syntax::VariableScope;
     use crate::term::Term;
-    use dialog_artifacts::Value;
     use std::collections::BTreeMap;
 
     #[test]
@@ -329,7 +332,7 @@ mod tests {
         // Each premise should be a fact selector
         for premise in premises {
             match premise {
-                PredicateForm::FactSelector(_) => {
+                Statement::Select(_) => {
                     // This is expected
                 }
             }
@@ -346,7 +349,7 @@ mod tests {
         assert_eq!(premises.len(), 1);
 
         match &premises[0] {
-            PredicateForm::FactSelector(selector) => {
+            Statement::Select(selector) => {
                 // Should have a "the/tag" attribute and value "tag"
                 assert!(selector.the.is_some());
                 assert!(selector.of.is_some());
@@ -376,19 +379,15 @@ mod tests {
     }
 
     #[test]
-    fn test_predicate_form_fact_selector() {
+    fn test_statement_fact_selector() {
         let entity_term = Term::var("entity");
-        let attr_term = Term::from(
-            "person/name"
-                .parse::<dialog_artifacts::Attribute>()
-                .unwrap(),
-        );
+        let attr_term = Term::from("person/name".parse::<crate::artifact::Attribute>().unwrap());
         let value_term = Term::from(Value::String("Alice".to_string()));
 
-        let predicate = PredicateForm::fact(Some(attr_term), Some(entity_term), Some(value_term));
+        let statement = Statement::fact(Some(attr_term), Some(entity_term), Some(value_term));
 
-        match predicate {
-            PredicateForm::FactSelector(selector) => {
+        match statement {
+            Statement::Select(selector) => {
                 assert!(selector.the.is_some());
                 assert!(selector.of.is_some());
                 assert!(selector.is.is_some());
@@ -397,19 +396,15 @@ mod tests {
     }
 
     #[test]
-    fn test_predicate_planning() {
+    fn test_statement_planning() {
         let entity_term = Term::var("entity");
-        let attr_term = Term::from(
-            "person/name"
-                .parse::<dialog_artifacts::Attribute>()
-                .unwrap(),
-        );
+        let attr_term = Term::from("person/name".parse::<crate::artifact::Attribute>().unwrap());
         let value_term = Term::from(Value::String("Alice".to_string()));
 
-        let predicate = PredicateForm::fact(Some(attr_term), Some(entity_term), Some(value_term));
+        let statement = Statement::fact(Some(attr_term), Some(entity_term), Some(value_term));
 
         let scope = VariableScope::new();
-        let plan = predicate.plan(&scope);
+        let plan = statement.plan(&scope);
 
         // Should successfully create a plan
         assert!(plan.is_ok());

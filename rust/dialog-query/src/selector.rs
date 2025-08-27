@@ -1,8 +1,8 @@
 //! Selector patterns for matching against the database
 
+use crate::artifact::{Attribute, Entity};
 use crate::term::Term;
 use crate::types::IntoValueDataType;
-use dialog_artifacts::{Attribute, Entity};
 use serde::{Deserialize, Serialize};
 
 /// Selector pattern for matching against the database (with variables/constants)

@@ -11,7 +11,7 @@
 //! The core insight is that Rust's type system provides static type information
 //! that we can reflect into the dynamic ValueDataType enum used by dialog-artifacts.
 
-use dialog_artifacts::{Value, ValueDataType};
+use crate::artifact::{Attribute, Entity, Value, ValueDataType};
 
 /// Trait for types that can provide ValueDataType metadata
 ///
@@ -27,7 +27,7 @@ use dialog_artifacts::{Value, ValueDataType};
 /// # Usage
 /// ```rust
 /// use dialog_query::types::IntoValueDataType;
-/// use dialog_artifacts::{Value, ValueDataType};
+/// use dialog_query::artifact::{Value, ValueDataType};
 ///
 /// // For concrete types
 /// assert_eq!(String::into_value_data_type(), Some(ValueDataType::String));
@@ -93,8 +93,8 @@ impl_into_value_data_type!(f32, ValueDataType::Float);
 impl_into_value_data_type!(Vec<u8>, ValueDataType::Bytes);
 
 // Dialog-artifacts specific types
-impl_into_value_data_type!(dialog_artifacts::Entity, ValueDataType::Entity);
-impl_into_value_data_type!(dialog_artifacts::Attribute, ValueDataType::Symbol);
+impl_into_value_data_type!(Entity, ValueDataType::Entity);
+impl_into_value_data_type!(Attribute, ValueDataType::Symbol);
 
 /// Special implementation for Value type
 ///
@@ -103,7 +103,7 @@ impl_into_value_data_type!(dialog_artifacts::Attribute, ValueDataType::Symbol);
 /// we return None to indicate "this can be any type".
 ///
 /// This is used by Term<Value> to indicate untyped variables in JSON serialization.
-impl IntoValueDataType for dialog_artifacts::Value {
+impl IntoValueDataType for Value {
     fn into_value_data_type() -> Option<ValueDataType> {
         // Value is a dynamic type, so we return None to indicate it can hold any type
         // This makes Term<Value> variables serialize without type information
@@ -180,12 +180,12 @@ impl Scalar for f64 {
         Value::from(self.to_owned())
     }
 }
-impl Scalar for dialog_artifacts::Entity {
+impl Scalar for Entity {
     fn as_value(&self) -> Value {
         Value::from(self.to_owned())
     }
 }
-impl Scalar for dialog_artifacts::Attribute {
+impl Scalar for Attribute {
     fn as_value(&self) -> Value {
         Value::from(self.to_owned())
     }
@@ -195,7 +195,7 @@ impl Scalar for Vec<u8> {
         Value::from(self.to_owned())
     }
 }
-impl Scalar for dialog_artifacts::Value {
+impl Scalar for Value {
     fn as_value(&self) -> Value {
         self.to_owned()
     }

@@ -1,4 +1,4 @@
-use dialog_artifacts::Value;
+use dialog_query::artifact::Value;
 use dialog_query::{FactSelector, Term};
 
 #[test]

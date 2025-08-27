@@ -1,10 +1,8 @@
 //! Fact, Assertion, Retraction, and Claim types for the dialog-query system
 
+pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Instruction, Value};
 pub use crate::types::Scalar;
-use dialog_artifacts::{Artifact, Attribute, Cause, Instruction, Value};
 use serde::{Deserialize, Serialize};
-
-pub use dialog_artifacts::Entity;
 
 /// An assertion represents a fact to be asserted in the database
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -390,7 +388,7 @@ mod integration_tests {
     use super::*;
     use crate::{Query, Term};
     use anyhow::Result;
-    use dialog_artifacts::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value};
+    use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value};
     use dialog_storage::MemoryStorageBackend;
     use futures_util::{stream, StreamExt};
 

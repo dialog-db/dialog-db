@@ -1,6 +1,6 @@
 //! Error types for the query engine
 
-use dialog_artifacts::{DialogArtifactsError, Value, ValueDataType};
+use crate::artifact::{DialogArtifactsError, Value, ValueDataType};
 use thiserror::Error;
 
 /// Errors that can occur during query planning and execution
@@ -90,5 +90,5 @@ pub enum InconsistencyError {
     UnconstrainedSelector,
 
     #[error("Type conversion error: {0}")]
-    TypeConversion(#[from] dialog_artifacts::TypeError),
+    TypeConversion(#[from] crate::artifact::TypeError),
 }
