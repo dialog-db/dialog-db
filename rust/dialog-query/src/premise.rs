@@ -15,7 +15,7 @@ use crate::syntax::VariableScope;
 /// conditions. Premises describe what must be true for a rule to apply. They
 /// are NOT used for rule conclusions - only for the conditions that must be
 /// satisfied.
-pub trait Premise: Clone + std::fmt::Debug {
+pub trait Premise: Clone + std::fmt::Debug + Sized {
     /// The type of plan this premise produces when planned
     type Plan: EvaluationPlan;
 

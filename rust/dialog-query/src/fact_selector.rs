@@ -23,6 +23,7 @@ use crate::syntax::Syntax;
 use crate::syntax::VariableScope;
 use crate::term::Term;
 use crate::types::Scalar;
+use crate::Premise;
 use async_stream::try_stream;
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
@@ -476,6 +477,12 @@ where
     }
 }
 
+impl<T: Scalar + Into<Value> + Send + PartialEq<Value>> Premise for FactSelector<T> {
+    type Plan = FactSelectorPlan<T>;
+    fn plan(&self, scope: &VariableScope) -> QueryResult<Self::Plan> {
+        self.plan(scope)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
