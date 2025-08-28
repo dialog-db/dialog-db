@@ -10,6 +10,7 @@
 use crate::artifact::{ArtifactStore, Value};
 use crate::concept::Concept;
 use crate::error::QueryResult;
+use crate::fact_selector::FactSelector;
 use crate::plan::{EvaluationContext, EvaluationPlan, MatchFrame, Plan};
 use crate::premise::Premise;
 use crate::selection::Selection;
@@ -29,48 +30,268 @@ pub type Attributes<T: Concept> = T::Attributes;
 
 /// Collection of premises that must be satisfied for a rule to apply.
 ///
-/// This is simply an alias for `Vec<Statement>` to provide semantic meaning
-/// for the "when" part of rules - the conditions that must be true for a rule to fire.
+/// This type represents the "when" part of rules - the conditions that must be true for a rule to fire.
+/// It supports multiple clean syntax options for rule definitions.
 ///
 /// # Design Goal
-/// 
-/// The goal is to enable clean, readable rule definitions using the standard
-/// `vec![]` macro: `vec![premise1, premise2, premise3]`
-/// 
-/// This provides clean syntax without type annotations or conversion methods,
-/// matching idiomatic Rust patterns.
 ///
-/// # Usage Pattern
-/// 
-/// Rules should return premises using the `vec!` macro:
+/// Enable clean, readable rule definitions through multiple ergonomic approaches:
+/// - Array syntax: `When::from([premise1, premise2])`
+/// - Macro syntax: `when![premise1, premise2]`
+/// - Operator chaining: `premise1 & premise2 & premise3`
+/// - Mixed approaches for maximum flexibility
+///
+/// # Usage Patterns
+///
 /// ```rust
-/// use dialog_query::{When, Statement, FactSelector, Term, Value};
-/// 
-/// struct ExampleRule;
-/// 
+/// use dialog_query::{When, FactSelector, Term, Value, when};
+///
+/// struct ExampleRule {
+///     selector1: FactSelector<Value>,
+///     selector2: FactSelector<Value>,
+///     selector3: FactSelector<Value>,
+/// }
+///
 /// impl ExampleRule {
-///     fn when(&self) -> When {
-///         vec![
-///             Statement::select(FactSelector {
-///                 the: Some(Term::from("attr1".parse::<dialog_query::artifact::Attribute>().unwrap())),
-///                 of: Some(Term::var("entity")),
-///                 is: Some(Term::from(Value::String("value1".to_string()))),
-///                 fact: None,
-///             }),
-///             Statement::select(FactSelector {
-///                 the: Some(Term::from("attr2".parse::<dialog_query::artifact::Attribute>().unwrap())),
-///                 of: Some(Term::var("entity")),
-///                 is: Some(Term::var("value2")),
-///                 fact: None,
-///             }),
-///         ]
+///     // Option 1: Array syntax - clean and direct
+///     fn when_array(&self) -> When {
+///         When::from([self.selector1.clone(), self.selector2.clone(), self.selector3.clone()])
+///     }
+///
+///     // Option 2: Macro syntax - most concise
+///     fn when_macro(&self) -> When {
+///         when![self.selector1.clone(), self.selector2.clone(), self.selector3.clone()]
+///     }
+///
+///     // Option 3: Operator chaining - reads like logical AND
+///     fn when_operators(&self) -> When {
+///         self.selector1.clone() & self.selector2.clone() & self.selector3.clone()
 ///     }
 /// }
 /// ```
-pub type When = Vec<Statement>;
+/// Trait for types that can be converted into multiple statements
+///
+/// This enables flexible composition where single items, collections, or custom
+/// types can all contribute statements to rule conditions.
+pub trait Statements {
+    type IntoIter: IntoIterator<Item = Statement>;
+    fn statements(self) -> Self::IntoIter;
+}
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct When(Vec<Statement>);
 
+impl When {
+    /// Create a new empty When collection
+    pub fn new() -> Self {
+        When(Vec::new())
+    }
 
+    /// Create a When from anything that implements Statements
+    pub fn from<T: Statements>(items: T) -> Self {
+        When(items.statements().into_iter().collect())
+    }
+
+    /// Get the number of statements
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Get an iterator over the statements
+    pub fn iter(&self) -> impl Iterator<Item = &Statement> {
+        self.0.iter()
+    }
+
+    /// Add a statement-producing item to this When
+    pub fn extend<T: Statements>(&mut self, items: T) {
+        self.0.extend(items.statements());
+    }
+
+    /// Get the inner Vec for compatibility
+    pub fn into_vec(self) -> Vec<Statement> {
+        self.0
+    }
+
+    /// Get reference to inner Vec for compatibility
+    pub fn as_vec(&self) -> &Vec<Statement> {
+        &self.0
+    }
+}
+
+// Implement indexing
+impl std::ops::Index<usize> for When {
+    type Output = Statement;
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.0[index]
+    }
+}
+
+// Implement IntoIterator for When
+impl IntoIterator for When {
+    type Item = Statement;
+    type IntoIter = std::vec::IntoIter<Statement>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+// Implement IntoIterator for &When
+impl<'a> IntoIterator for &'a When {
+    type Item = &'a Statement;
+    type IntoIter = std::slice::Iter<'a, Statement>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl Default for When {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// Implement Statements for single statement types
+impl Statements for Statement {
+    type IntoIter = std::iter::Once<Statement>;
+    fn statements(self) -> Self::IntoIter {
+        std::iter::once(self)
+    }
+}
+
+impl Statements for FactSelector<crate::artifact::Value> {
+    type IntoIter = std::iter::Once<Statement>;
+    fn statements(self) -> Self::IntoIter {
+        std::iter::once(Statement::Select(self))
+    }
+}
+
+// Implement Statements for collections
+impl Statements for Vec<Statement> {
+    type IntoIter = std::vec::IntoIter<Statement>;
+    fn statements(self) -> Self::IntoIter {
+        self.into_iter()
+    }
+}
+
+impl<const N: usize> Statements for [Statement; N] {
+    type IntoIter = std::array::IntoIter<Statement, N>;
+    fn statements(self) -> Self::IntoIter {
+        self.into_iter()
+    }
+}
+
+impl<const N: usize> Statements for [FactSelector<crate::artifact::Value>; N] {
+    type IntoIter = std::iter::Map<
+        std::array::IntoIter<FactSelector<crate::artifact::Value>, N>,
+        fn(FactSelector<crate::artifact::Value>) -> Statement,
+    >;
+    fn statements(self) -> Self::IntoIter {
+        self.into_iter().map(|selector| Statement::Select(selector))
+    }
+}
+
+impl Statements for Vec<FactSelector<crate::artifact::Value>> {
+    type IntoIter = std::iter::Map<
+        std::vec::IntoIter<FactSelector<crate::artifact::Value>>,
+        fn(FactSelector<crate::artifact::Value>) -> Statement,
+    >;
+    fn statements(self) -> Self::IntoIter {
+        self.into_iter().map(|selector| Statement::Select(selector))
+    }
+}
+
+impl Statements for When {
+    type IntoIter = std::vec::IntoIter<Statement>;
+    fn statements(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+// Implement BitAnd (&) operators for combining statements
+impl std::ops::BitAnd<When> for When {
+    type Output = When;
+    fn bitand(mut self, rhs: When) -> When {
+        self.0.extend(rhs.0);
+        self
+    }
+}
+
+impl std::ops::BitAnd<FactSelector<crate::artifact::Value>> for When {
+    type Output = When;
+    fn bitand(mut self, rhs: FactSelector<crate::artifact::Value>) -> When {
+        self.0.push(Statement::Select(rhs));
+        self
+    }
+}
+
+impl std::ops::BitAnd<Statement> for When {
+    type Output = When;
+    fn bitand(mut self, rhs: Statement) -> When {
+        self.0.push(rhs);
+        self
+    }
+}
+
+// Allow starting chains with fact selectors
+impl std::ops::BitAnd<FactSelector<crate::artifact::Value>>
+    for FactSelector<crate::artifact::Value>
+{
+    type Output = When;
+    fn bitand(self, rhs: FactSelector<crate::artifact::Value>) -> When {
+        When::from(vec![self, rhs])
+    }
+}
+
+impl std::ops::BitAnd<When> for FactSelector<crate::artifact::Value> {
+    type Output = When;
+    fn bitand(self, mut rhs: When) -> When {
+        let mut result = When::new();
+        result.0.push(Statement::Select(self));
+        result.0.extend(rhs.0);
+        result
+    }
+}
+
+// Allow starting chains with statements
+impl std::ops::BitAnd<Statement> for Statement {
+    type Output = When;
+    fn bitand(self, rhs: Statement) -> When {
+        When::from(vec![self, rhs])
+    }
+}
+
+impl std::ops::BitAnd<When> for Statement {
+    type Output = When;
+    fn bitand(self, mut rhs: When) -> When {
+        let mut result = When::new();
+        result.0.push(self);
+        result.0.extend(rhs.0);
+        result
+    }
+}
+
+/// Macro for creating When collections with clean array-like syntax
+///
+/// This macro provides the most concise way to create rule conditions:
+///
+/// ```rust
+/// use dialog_query::when;
+///
+/// fn example() -> When {
+///     when![selector1, selector2, selector3]
+/// }
+/// ```
+#[macro_export]
+macro_rules! when {
+    [$($item:expr),* $(,)?] => {
+        $crate::rule::When::from(vec![$($item),*])
+    };
+}
 
 /// A rule that derives facts from conditions
 ///
@@ -184,15 +405,11 @@ impl DerivedRule {
     }
 }
 
-
-
-
-
 impl Rule for DerivedRule {
     type Match = DerivedRuleMatch;
 
     fn when(&self) -> When {
-        let mut predicates = Vec::new();
+        let mut selectors = Vec::new();
 
         // Generate a predicate for each attribute
         // All predicates will use the same entity variable to ensure they join
@@ -218,11 +435,11 @@ impl Rule for DerivedRule {
                 fact: None,
             };
 
-            predicates.push(Statement::select(selector));
+            selectors.push(selector);
         }
 
         // If we have no attributes, create a tag predicate
-        if predicates.is_empty() {
+        if selectors.is_empty() {
             let tag_attr = format!("the/{}", self.the);
             let attr_term = Term::from(tag_attr.parse::<crate::artifact::Attribute>().unwrap());
             let value_term = Term::from(Value::String(self.the.clone()));
@@ -234,10 +451,10 @@ impl Rule for DerivedRule {
                 fact: None,
             };
 
-            predicates.push(Statement::select(selector));
+            selectors.push(selector);
         }
 
-        predicates
+        When::from(selectors)
     }
 
     fn r#match(&self, variables: BTreeMap<String, Term<Value>>) -> Self::Match {
@@ -539,15 +756,15 @@ mod tests {
             fact: None,
         });
 
-        // This is the key test - vec! macro syntax should work
-        let when_collection: When = vec![statement1.clone(), statement2.clone()];
+        // This is the key test - When::from syntax should work
+        let when_collection: When = When::from([statement1.clone(), statement2.clone()]);
 
         assert_eq!(when_collection.len(), 2);
         assert_eq!(when_collection[0], statement1);
         assert_eq!(when_collection[1], statement2);
 
         // Test single element vecs
-        let single_when: When = vec![statement1.clone()];
+        let single_when: When = When::from([statement1.clone()]);
         assert_eq!(single_when.len(), 1);
         assert_eq!(single_when[0], statement1);
     }
@@ -578,8 +795,8 @@ mod tests {
                 fact: None,
             });
 
-            // Clean vec! macro - no .into() or type annotations needed!
-            vec![statement1, statement2]
+            // Clean When::from - no .into() or type annotations needed!
+            When::from([statement1, statement2])
         }
 
         // Call our example rule function
@@ -627,8 +844,8 @@ mod tests {
                     fact: None,
                 });
 
-                // This is the key test: using vec! macro for clean syntax
-                vec![statement1, statement2]
+                // This is the key test: using When::from for clean syntax
+                When::from([statement1, statement2])
             }
 
             fn r#match(&self, variables: BTreeMap<String, Term<Value>>) -> Self::Match {
@@ -691,6 +908,73 @@ mod tests {
     }
 
     #[test]
+    fn test_new_when_api_comprehensive() {
+        // Test comprehensive When API with all syntax options
+
+        let selector1 = crate::fact_selector::FactSelector {
+            the: Some(Term::from(
+                "test/attr1".parse::<crate::artifact::Attribute>().unwrap(),
+            )),
+            of: Some(Term::var("entity")),
+            is: Some(Term::from(Value::String("value1".to_string()))),
+            fact: None,
+        };
+
+        let selector2 = crate::fact_selector::FactSelector {
+            the: Some(Term::from(
+                "test/attr2".parse::<crate::artifact::Attribute>().unwrap(),
+            )),
+            of: Some(Term::var("entity")),
+            is: Some(Term::var("value2")),
+            fact: None,
+        };
+
+        let selector3 = crate::fact_selector::FactSelector {
+            the: Some(Term::from(
+                "test/attr3".parse::<crate::artifact::Attribute>().unwrap(),
+            )),
+            of: Some(Term::var("entity")),
+            is: Some(Term::var("value3")),
+            fact: None,
+        };
+
+        // Test 1: When::from with Vec<FactSelector>
+        let when1 = When::from(vec![selector1.clone(), selector2.clone()]);
+        assert_eq!(when1.len(), 2);
+
+        // Test 2: When::from with array of FactSelectors
+        let when2 = When::from([selector1.clone(), selector2.clone()]);
+        assert_eq!(when2.len(), 2);
+
+        // Test 3: when! macro
+        let when3 = when![selector1.clone(), selector2.clone(), selector3.clone()];
+        assert_eq!(when3.len(), 3);
+
+        // Test 4: & operator chaining
+        let when4 = selector1.clone() & selector2.clone() & selector3.clone();
+        assert_eq!(when4.len(), 3);
+
+        // Test 5: Mixed & operations
+        let when5 = when1 & selector3.clone();
+        assert_eq!(when5.len(), 3);
+
+        // Test 6: When & When
+        let when6 = when2 & when3;
+        assert_eq!(when6.len(), 5);
+
+        // Test 7: Verify all statements are correct
+        for statement in &when4 {
+            if let Statement::Select(ref selector) = statement {
+                assert!(selector.the.is_some());
+                assert!(selector.of.is_some());
+                assert!(selector.is.is_some());
+            } else {
+                panic!("Expected FactSelector statement");
+            }
+        }
+    }
+
+    #[test]
     fn test_direct_array_return_without_into() {
         // Test for the new IntoWhen trait that allows direct array returns
 
@@ -719,8 +1003,8 @@ mod tests {
                     fact: None,
                 });
 
-                // This is the key test: using vec! macro for clean syntax
-                vec![statement1, statement2]
+                // This is the key test: using When::from for clean syntax
+                When::from(vec![statement1, statement2])
             }
 
             fn r#match(&self, variables: BTreeMap<String, Term<Value>>) -> Self::Match {

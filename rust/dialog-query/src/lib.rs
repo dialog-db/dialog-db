@@ -31,7 +31,7 @@ pub use fact::{assert, retract, Assertion, Claim, Fact, Retraction};
 pub use fact_selector::{FactSelector, FactSelectorPlan};
 pub use premise::Premise;
 pub use rule::{
-    DerivedRule, DerivedRuleMatch, DerivedRuleMatchPlan, Rule, RuleApplication, RuleApplicationPlan, When,
+    DerivedRule, DerivedRuleMatch, DerivedRuleMatchPlan, Rule, RuleApplication, RuleApplicationPlan, When, Statements,
 };
 pub use selection::{Match, Selection};
 pub use selector::Selector;
@@ -67,7 +67,7 @@ pub mod prelude {
     pub use crate::plan::EvaluationPlan;
     pub use crate::premise::Premise;
     pub use crate::query::Query;
-    pub use crate::rule::{DerivedRule, DerivedRuleMatch, Rule, When};
+    pub use crate::rule::{DerivedRule, DerivedRuleMatch, Rule, When, Statements};
     pub use crate::selector::Selector;
     pub use crate::statement::{Statement, StatementPlan};
     pub use crate::syntax::{Syntax, VariableScope};
