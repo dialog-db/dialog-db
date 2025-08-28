@@ -43,8 +43,9 @@ pub type Attributes<T: Concept> = T::Attributes;
 ///
 /// # Usage Patterns
 ///
-/// ```rust
-/// use dialog_query::{When, FactSelector, Term, Value, when};
+/// ```rust,ignore
+/// use dialog_query::{When, FactSelector, Term, Value, when, Rule};
+/// use std::collections::BTreeMap;
 ///
 /// struct ExampleRule {
 ///     selector1: FactSelector<Value>,
@@ -52,20 +53,32 @@ pub type Attributes<T: Concept> = T::Attributes;
 ///     selector3: FactSelector<Value>,
 /// }
 ///
-/// impl ExampleRule {
-///     // Option 1: Array syntax - clean and direct
-///     fn when_array(&self) -> When {
-///         When::from([self.selector1.clone(), self.selector2.clone(), self.selector3.clone()])
+/// struct ExampleMatch {
+///     selector1: FactSelector<Value>,
+///     selector2: FactSelector<Value>,
+///     selector3: FactSelector<Value>,
+/// }
+///
+/// impl Rule for ExampleRule {
+///     type Match = ExampleMatch;
+///
+///     fn when(terms: Self::Match) -> When {
+///         // Option 1: Array syntax - clean and direct
+///         When::from([terms.selector1, terms.selector2, terms.selector3])
+///         
+///         // Option 2: Macro syntax - most concise  
+///         // when![terms.selector1, terms.selector2, terms.selector3]
+///         
+///         // Option 3: Operator chaining - reads like logical AND
+///         // terms.selector1 & terms.selector2 & terms.selector3
 ///     }
 ///
-///     // Option 2: Macro syntax - most concise
-///     fn when_macro(&self) -> When {
-///         when![self.selector1.clone(), self.selector2.clone(), self.selector3.clone()]
-///     }
-///
-///     // Option 3: Operator chaining - reads like logical AND
-///     fn when_operators(&self) -> When {
-///         self.selector1.clone() & self.selector2.clone() & self.selector3.clone()
+///     fn r#match(&self, variables: BTreeMap<String, Term<Value>>) -> Self::Match {
+///         ExampleMatch {
+///             selector1: self.selector1.clone(),
+///             selector2: self.selector2.clone(),
+///             selector3: self.selector3.clone(),
+///         }
 ///     }
 /// }
 /// ```
@@ -249,7 +262,7 @@ impl std::ops::BitAnd<FactSelector<crate::artifact::Value>>
 
 impl std::ops::BitAnd<When> for FactSelector<crate::artifact::Value> {
     type Output = When;
-    fn bitand(self, mut rhs: When) -> When {
+    fn bitand(self, rhs: When) -> When {
         let mut result = When::new();
         result.0.push(Statement::Select(self));
         result.0.extend(rhs.0);
@@ -267,7 +280,7 @@ impl std::ops::BitAnd<Statement> for Statement {
 
 impl std::ops::BitAnd<When> for Statement {
     type Output = When;
-    fn bitand(self, mut rhs: When) -> When {
+    fn bitand(self, rhs: When) -> When {
         let mut result = When::new();
         result.0.push(self);
         result.0.extend(rhs.0);
@@ -280,9 +293,27 @@ impl std::ops::BitAnd<When> for Statement {
 /// This macro provides the most concise way to create rule conditions:
 ///
 /// ```rust
-/// use dialog_query::when;
+/// use dialog_query::{when, When, FactSelector, Term, Value};
 ///
 /// fn example() -> When {
+///     let selector1 = FactSelector {
+///         the: Some(Term::from("attr1".parse::<dialog_query::artifact::Attribute>().unwrap())),
+///         of: Some(Term::var("entity")),
+///         is: Some(Term::from(Value::String("value1".to_string()))),
+///         fact: None,
+///     };
+///     let selector2 = FactSelector {
+///         the: Some(Term::from("attr2".parse::<dialog_query::artifact::Attribute>().unwrap())),
+///         of: Some(Term::var("entity")),
+///         is: Some(Term::var("value2")),
+///         fact: None,
+///     };
+///     let selector3 = FactSelector {
+///         the: Some(Term::from("attr3".parse::<dialog_query::artifact::Attribute>().unwrap())),
+///         of: Some(Term::var("entity")),
+///         is: Some(Term::var("value3")),
+///         fact: None,
+///     };
 ///     when![selector1, selector2, selector3]
 /// }
 /// ```
@@ -334,7 +365,7 @@ pub trait Rule: Clone + std::fmt::Debug {
     /// This represents a specific instance of the rule with variable bindings.
     /// The Match type must implement Premise so it can be used directly in queries,
     /// enabling compositional rule building.
-    type Match: Premise + Clone + std::fmt::Debug;
+    type Match: Premise;
 
     /// Define the conditions (premises) that must be satisfied for this rule to apply
     ///
@@ -342,21 +373,24 @@ pub trait Rule: Clone + std::fmt::Debug {
     /// be satisfied for the rule to fire. The premises are evaluated as a conjunction
     /// (logical AND).
     ///
+    /// # Parameters
+    ///
+    /// - `terms`: The match pattern with variable bindings that this rule is checking
+    ///
     /// # Return Pattern
     ///
-    /// Return premises using vec! macro:
-    /// `vec![premise1, premise2, premise3]` (no type annotations needed!)
-    ///
-    /// This provides clean, readable rule definitions that match the syntax
-    /// shown in the design documentation.
+    /// Return premises using the clean When syntax:
+    /// - `When::from([premise1, premise2])` - Array syntax
+    /// - `when![premise1, premise2]` - Macro syntax  
+    /// - `premise1 & premise2` - Operator chaining
     ///
     /// # Implementation Notes
     ///
     /// - All premises must be satisfied (AND logic)
-    /// - Premises typically share variables to create joins
-    /// - Use Statement::fact_selector() for most basic premises
-    /// - Variables like Term::var("entity") create joins across premises
-    fn when(&self) -> When;
+    /// - Premises typically use variables from the match pattern
+    /// - Variables create joins across premises
+    /// - The match pattern provides the context for generating appropriate premises
+    fn when(terms: Self::Match) -> When;
 
     /// Create a match instance with specific variable bindings
     ///
@@ -408,24 +442,26 @@ impl DerivedRule {
 impl Rule for DerivedRule {
     type Match = DerivedRuleMatch;
 
-    fn when(&self) -> When {
+    fn when(terms: Self::Match) -> When {
         let mut selectors = Vec::new();
 
-        // Generate a predicate for each attribute
-        // All predicates will use the same entity variable to ensure they join
-        let entity_var = Term::var("this");
+        // Generate a predicate for each attribute using variables from the match
+        // Note: For entities, we need to use a variable of type Entity, not Value
+        let entity_var: Term<crate::artifact::Entity> = Term::var("this");
 
-        for (attr_name, _attr_type) in &self.attributes {
+        for (attr_name, _attr_type) in &terms.rule.attributes {
             // Create attribute name in the format "namespace/attribute"
-            let full_attr_name = format!("{}/{}", self.the, attr_name);
+            let full_attr_name = format!("{}/{}", terms.rule.the, attr_name);
             let attr_term = Term::from(
                 full_attr_name
                     .parse::<crate::artifact::Attribute>()
                     .unwrap(),
             );
 
-            // Create a variable for the attribute value
-            let value_var = Term::var(attr_name);
+            // Get the value variable from the match or create a new one
+            let value_var = terms.variables.get(attr_name)
+                .cloned()
+                .unwrap_or_else(|| Term::var(attr_name));
 
             // Create the fact selector predicate
             let selector = crate::fact_selector::FactSelector {
@@ -440,9 +476,9 @@ impl Rule for DerivedRule {
 
         // If we have no attributes, create a tag predicate
         if selectors.is_empty() {
-            let tag_attr = format!("the/{}", self.the);
+            let tag_attr = format!("the/{}", terms.rule.the);
             let attr_term = Term::from(tag_attr.parse::<crate::artifact::Attribute>().unwrap());
-            let value_term = Term::from(Value::String(self.the.clone()));
+            let value_term = Term::from(Value::String(terms.rule.the.clone()));
 
             let selector = crate::fact_selector::FactSelector {
                 the: Some(attr_term),
@@ -485,7 +521,7 @@ impl Premise for DerivedRuleMatch {
         // Create execution plans for each premise predicate
         let mut premise_plans = Vec::new();
 
-        for predicate in self.rule.when() {
+        for predicate in DerivedRule::when(self.clone()) {
             let plan = predicate.plan(scope)?;
             premise_plans.push(plan);
         }
@@ -649,7 +685,8 @@ mod tests {
         attributes.insert("age".to_string(), "u32".to_string());
 
         let rule = DerivedRule::new("person".to_string(), attributes);
-        let premises = rule.when();
+        let rule_match = rule.r#match(BTreeMap::new());
+        let premises = DerivedRule::when(rule_match);
 
         // Should generate one predicate per attribute
         assert_eq!(premises.len(), 2);
@@ -668,7 +705,8 @@ mod tests {
     fn test_derived_rule_premises_empty_attributes() {
         let attributes = BTreeMap::new();
         let rule = DerivedRule::new("tag".to_string(), attributes);
-        let premises = rule.when();
+        let rule_match = rule.r#match(BTreeMap::new());
+        let premises = DerivedRule::when(rule_match);
 
         // Should generate a tag predicate for empty attributes
         assert_eq!(premises.len(), 1);
@@ -825,7 +863,7 @@ mod tests {
         impl Rule for VecTestRule {
             type Match = VecTestRuleMatch;
 
-            fn when(&self) -> When {
+            fn when(_terms: Self::Match) -> When {
                 let statement1 = Statement::select(crate::fact_selector::FactSelector {
                     the: Some(Term::from(
                         "macro/attr1".parse::<crate::artifact::Attribute>().unwrap(),
@@ -890,7 +928,8 @@ mod tests {
 
         // Test the rule
         let rule = VecTestRule;
-        let when_result = rule.when();
+        let rule_match = rule.r#match(BTreeMap::new());
+        let when_result = VecTestRule::when(rule_match);
 
         // Verify it works correctly
         assert_eq!(when_result.len(), 2);
@@ -984,7 +1023,7 @@ mod tests {
         impl Rule for TestRule {
             type Match = TestRuleMatch;
 
-            fn when(&self) -> When {
+            fn when(_terms: Self::Match) -> When {
                 let statement1 = Statement::select(crate::fact_selector::FactSelector {
                     the: Some(Term::from(
                         "test/attr1".parse::<crate::artifact::Attribute>().unwrap(),
@@ -1049,7 +1088,8 @@ mod tests {
 
         // Test the rule
         let rule = TestRule;
-        let when_result = rule.when();
+        let rule_match = rule.r#match(BTreeMap::new());
+        let when_result = TestRule::when(rule_match);
 
         // Verify it works correctly
         assert_eq!(when_result.len(), 2);

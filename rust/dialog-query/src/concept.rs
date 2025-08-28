@@ -1,3 +1,5 @@
+use crate::Statements;
+
 /// Concept is a set of attributes associated with entity representing an
 /// abstract idea. It is a tool for the domain modeling and in some regard
 /// similar to a table in relational database or a collection in the document
@@ -11,7 +13,7 @@ pub trait Concept: Clone + std::fmt::Debug {
     /// Type representing a query of this concept. It is a set of terms
     /// corresponding to the set of attributes defined by this concept.
     /// It is used as premise of the rule.
-    type Match;
+    type Match: Statements;
     /// Type representing a claim of this concept. It is used in inductive rules
     /// to describe state of the matching concept in the subsequent time
     type Claim;
