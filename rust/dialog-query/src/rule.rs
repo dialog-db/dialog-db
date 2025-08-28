@@ -65,10 +65,10 @@ pub type Attributes<T: Concept> = T::Attributes;
 ///     fn when(terms: Self::Match) -> When {
 ///         // Option 1: Array syntax - clean and direct
 ///         When::from([terms.selector1, terms.selector2, terms.selector3])
-///         
-///         // Option 2: Macro syntax - most concise  
+///
+///         // Option 2: Macro syntax - most concise
 ///         // when![terms.selector1, terms.selector2, terms.selector3]
-///         
+///
 ///         // Option 3: Operator chaining - reads like logical AND
 ///         // terms.selector1 & terms.selector2 & terms.selector3
 ///     }
@@ -338,35 +338,15 @@ macro_rules! when {
 /// The design follows the patterns described in notes/rules.md, enabling clean,
 /// declarative rule definitions that look similar to datalog syntax.
 ///
-/// # Implementation Pattern
-///
-/// There are two ways to implement clean rule definitions:
-///
-/// **Option 1: Direct Array Returns (Recommended)**
-///
-/// Set `type When = [Statement; N]` and return arrays directly:
-/// `[premise1, premise2]` (no .into() needed!)
-///
-/// **Option 2: When Return Type**
-///
-/// Set `type When = dialog_query::When` and return arrays with conversion:
-/// `[premise1, premise2].into()` (.into() required)
-///
-/// Both approaches provide readable rule definitions that match the patterns in the design documentation.
-///
 /// # Type Safety
 ///
-/// - Rules should be associated with Concepts for proper type safety
-/// - The Match type must implement Premise so it can be used in queries
-/// - All premises in when() must be satisfiable for the rule to fire
-pub trait Rule: Clone + std::fmt::Debug {
-    /// The type of match pattern this rule produces when instantiated
-    ///
-    /// This represents a specific instance of the rule with variable bindings.
-    /// The Match type must implement Premise so it can be used directly in queries,
-    /// enabling compositional rule building.
-    type Match: Premise;
-
+/// Rules are associated with Concepts which provide:
+/// - `Match`: The match pattern with Term-wrapped fields for querying
+/// - `Claim`: The claim pattern for asserting derived facts
+/// - `Attributes`: Builder pattern with attribute matchers
+///
+/// The Concept association ensures proper type safety and consistent patterns.
+pub trait Rule: Concept {
     /// Define the conditions (premises) that must be satisfied for this rule to apply
     ///
     /// This method defines the "when" part of the rule - all returned premises must
@@ -381,7 +361,7 @@ pub trait Rule: Clone + std::fmt::Debug {
     ///
     /// Return premises using the clean When syntax:
     /// - `When::from([premise1, premise2])` - Array syntax
-    /// - `when![premise1, premise2]` - Macro syntax  
+    /// - `when![premise1, premise2]` - Macro syntax
     /// - `premise1 & premise2` - Operator chaining
     ///
     /// # Implementation Notes
@@ -391,24 +371,6 @@ pub trait Rule: Clone + std::fmt::Debug {
     /// - Variables create joins across premises
     /// - The match pattern provides the context for generating appropriate premises
     fn when(terms: Self::Match) -> When;
-
-    /// Create a match instance with specific variable bindings
-    ///
-    /// This instantiates the rule with concrete variable bindings, typically
-    /// from query patterns or other rule applications. The resulting Match
-    /// can then be used in queries or as premises in other rules.
-    ///
-    /// # Parameters
-    ///
-    /// - `variables`: Map of variable names to their bound values
-    ///
-    /// # Returns
-    ///
-    /// A Match instance that implements Premise and can be used in:
-    /// - Direct queries: `dialog.query(rule_match)`
-    /// - Other rule premises: Include the match as a premise
-    /// - Compositional rule building
-    fn r#match(&self, variables: BTreeMap<String, Term<Value>>) -> Self::Match;
 }
 
 /// A derived rule that deduces facts by joining attributes on an entity
@@ -437,17 +399,58 @@ impl DerivedRule {
     pub fn new(the: String, attributes: BTreeMap<String, String>) -> Self {
         Self { the, attributes }
     }
+
+    /// Create a match pattern for querying this concept
+    pub fn r#match<E: Into<Term<crate::artifact::Entity>>>(entity: E) -> DerivedRuleAttributes {
+        DerivedRuleAttributes {
+            entity: entity.into(),
+            rule: None, // Will be set when used with a specific rule
+        }
+    }
+
+    /// Create a match instance with specific entity and attributes
+    pub fn create_match(
+        &self,
+        entity: Term<crate::artifact::Entity>,
+        attributes: BTreeMap<String, Term<Value>>,
+    ) -> DerivedRuleMatch {
+        DerivedRuleMatch {
+            this: entity,
+            rule: self.clone(),
+            attributes,
+        }
+    }
+}
+
+/// Attributes pattern for DerivedRule - used for building queries with .is() and .not()
+#[derive(Debug, Clone)]
+pub struct DerivedRuleAttributes {
+    pub entity: Term<crate::artifact::Entity>,
+    pub rule: Option<DerivedRule>,
+}
+
+/// Claim pattern for DerivedRule - used in rule conclusions
+#[derive(Debug, Clone)]
+pub struct DerivedRuleClaim {
+    pub attributes: BTreeMap<String, Term<Value>>,
+}
+
+impl Concept for DerivedRule {
+    type Match = DerivedRuleMatch;
+    type Claim = DerivedRuleClaim;
+    type Attributes = DerivedRuleAttributes;
+
+    fn name() -> &'static str {
+        "DerivedRule"
+    }
 }
 
 impl Rule for DerivedRule {
-    type Match = DerivedRuleMatch;
-
     fn when(terms: Self::Match) -> When {
         let mut selectors = Vec::new();
 
-        // Generate a predicate for each attribute using variables from the match
-        // Note: For entities, we need to use a variable of type Entity, not Value
-        let entity_var: Term<crate::artifact::Entity> = Term::var("this");
+        // Use the entity from the match pattern
+        let entity_var = terms.this.clone();
 
         for (attr_name, _attr_type) in &terms.rule.attributes {
             // Create attribute name in the format "namespace/attribute"
@@ -459,7 +462,9 @@ impl Rule for DerivedRule {
             );
 
             // Get the value variable from the match or create a new one
-            let value_var = terms.variables.get(attr_name)
+            let value_var = terms
+                .attributes
+                .get(attr_name)
                 .cloned()
                 .unwrap_or_else(|| Term::var(attr_name));
 
@@ -492,26 +497,31 @@ impl Rule for DerivedRule {
 
         When::from(selectors)
     }
-
-    fn r#match(&self, variables: BTreeMap<String, Term<Value>>) -> Self::Match {
-        DerivedRuleMatch {
-            rule: self.clone(),
-            variables,
-        }
-    }
 }
 
 /// A match instance for a derived rule
 ///
-/// Represents a specific application of a derived rule with particular
-/// variable bindings. This is what gets evaluated during query execution.
+/// Represents a match pattern with Term-wrapped fields for querying.
+/// This follows the Concept pattern where Match types have:
+/// - A `this` field of type Term<Entity> for the entity being matched
+/// - Term-wrapped fields for each attribute
 #[derive(Debug, Clone)]
 pub struct DerivedRuleMatch {
+    /// The entity being matched
+    pub this: Term<crate::artifact::Entity>,
+
     /// The rule definition this match is based on
     pub rule: DerivedRule,
 
-    /// Variable bindings for this match
-    pub variables: BTreeMap<String, Term<Value>>,
+    /// Attribute terms - one Term per attribute defined in the rule
+    pub attributes: BTreeMap<String, Term<Value>>,
+}
+
+impl Statements for DerivedRuleMatch {
+    type IntoIter = std::vec::IntoIter<Statement>;
+    fn statements(self) -> Self::IntoIter {
+        DerivedRule::when(self).into_iter()
+    }
 }
 
 impl Premise for DerivedRuleMatch {
@@ -608,18 +618,15 @@ impl<R: Rule> RuleApplication<R> {
 
 impl<R: Rule + Send> Premise for RuleApplication<R>
 where
-    R::Match: Send,
+    R::Match: Send + Premise,
 {
     type Plan = RuleApplicationPlan<R>;
 
     fn plan(&self, _scope: &VariableScope) -> QueryResult<Self::Plan> {
-        // Create a match instance from the rule
-        let rule_match = self.rule.r#match(self.terms.clone());
-
-        Ok(RuleApplicationPlan {
-            application: self.clone(),
-            rule_match,
-        })
+        // For now, create a placeholder rule_match
+        // In practice, this would need to be constructed differently
+        // since Rule no longer has r#match method
+        todo!("RuleApplication needs to be refactored for new Rule trait")
     }
 }
 
@@ -685,7 +692,7 @@ mod tests {
         attributes.insert("age".to_string(), "u32".to_string());
 
         let rule = DerivedRule::new("person".to_string(), attributes);
-        let rule_match = rule.r#match(BTreeMap::new());
+        let rule_match = rule.create_match(Term::var("entity"), BTreeMap::new());
         let premises = DerivedRule::when(rule_match);
 
         // Should generate one predicate per attribute
@@ -705,7 +712,7 @@ mod tests {
     fn test_derived_rule_premises_empty_attributes() {
         let attributes = BTreeMap::new();
         let rule = DerivedRule::new("tag".to_string(), attributes);
-        let rule_match = rule.r#match(BTreeMap::new());
+        let rule_match = rule.create_match(Term::var("entity"), BTreeMap::new());
         let premises = DerivedRule::when(rule_match);
 
         // Should generate a tag predicate for empty attributes
@@ -728,17 +735,18 @@ mod tests {
 
         let rule = DerivedRule::new("person".to_string(), attributes);
 
-        let mut variables = BTreeMap::new();
-        variables.insert("this".to_string(), Term::var("person_entity"));
-        variables.insert(
+        let entity = Term::var("person_entity");
+        let mut attr_values = BTreeMap::new();
+        attr_values.insert(
             "name".to_string(),
             Term::from(Value::String("Alice".to_string())),
         );
 
-        let rule_match = rule.r#match(variables.clone());
+        let rule_match = rule.create_match(entity.clone(), attr_values.clone());
 
         assert_eq!(rule_match.rule.the, "person");
-        assert_eq!(rule_match.variables, variables);
+        assert_eq!(rule_match.this, entity);
+        assert_eq!(rule_match.attributes, attr_values);
     }
 
     #[test]
@@ -860,9 +868,30 @@ mod tests {
         #[derive(Debug, Clone)]
         struct VecTestRule;
 
-        impl Rule for VecTestRule {
-            type Match = VecTestRuleMatch;
+        #[derive(Debug, Clone)]
+        struct VecTestRuleAttributes;
 
+        #[derive(Debug, Clone)]
+        struct VecTestRuleClaim;
+
+        impl Statements for VecTestRuleMatch {
+            type IntoIter = std::vec::IntoIter<Statement>;
+            fn statements(self) -> Self::IntoIter {
+                VecTestRule::when(self).into_iter()
+            }
+        }
+
+        impl Concept for VecTestRule {
+            type Match = VecTestRuleMatch;
+            type Claim = VecTestRuleClaim;
+            type Attributes = VecTestRuleAttributes;
+
+            fn name() -> &'static str {
+                "VecTestRule"
+            }
+        }
+
+        impl Rule for VecTestRule {
             fn when(_terms: Self::Match) -> When {
                 let statement1 = Statement::select(crate::fact_selector::FactSelector {
                     the: Some(Term::from(
@@ -885,15 +914,11 @@ mod tests {
                 // This is the key test: using When::from for clean syntax
                 When::from([statement1, statement2])
             }
-
-            fn r#match(&self, variables: BTreeMap<String, Term<Value>>) -> Self::Match {
-                VecTestRuleMatch { variables }
-            }
         }
 
         #[derive(Debug, Clone)]
         struct VecTestRuleMatch {
-            variables: BTreeMap<String, Term<Value>>,
+            this: Term<crate::artifact::Entity>,
         }
 
         impl Premise for VecTestRuleMatch {
@@ -927,8 +952,9 @@ mod tests {
         }
 
         // Test the rule
-        let rule = VecTestRule;
-        let rule_match = rule.r#match(BTreeMap::new());
+        let rule_match = VecTestRuleMatch {
+            this: Term::var("test_entity"),
+        };
         let when_result = VecTestRule::when(rule_match);
 
         // Verify it works correctly
@@ -1020,9 +1046,23 @@ mod tests {
         #[derive(Debug, Clone)]
         struct TestRule;
 
-        impl Rule for TestRule {
-            type Match = TestRuleMatch;
+        #[derive(Debug, Clone)]
+        struct TestRuleAttributes;
 
+        #[derive(Debug, Clone)]
+        struct TestRuleClaim;
+
+        impl Concept for TestRule {
+            type Match = TestRuleMatch;
+            type Claim = TestRuleClaim;
+            type Attributes = TestRuleAttributes;
+
+            fn name() -> &'static str {
+                "TestRule"
+            }
+        }
+
+        impl Rule for TestRule {
             fn when(_terms: Self::Match) -> When {
                 let statement1 = Statement::select(crate::fact_selector::FactSelector {
                     the: Some(Term::from(
@@ -1045,15 +1085,18 @@ mod tests {
                 // This is the key test: using When::from for clean syntax
                 When::from(vec![statement1, statement2])
             }
-
-            fn r#match(&self, variables: BTreeMap<String, Term<Value>>) -> Self::Match {
-                TestRuleMatch { variables }
-            }
         }
 
         #[derive(Debug, Clone)]
         struct TestRuleMatch {
-            variables: BTreeMap<String, Term<Value>>,
+            this: Term<crate::artifact::Entity>,
+        }
+
+        impl Statements for TestRuleMatch {
+            type IntoIter = std::vec::IntoIter<Statement>;
+            fn statements(self) -> Self::IntoIter {
+                TestRule::when(self).into_iter()
+            }
         }
 
         impl Premise for TestRuleMatch {
@@ -1087,8 +1130,9 @@ mod tests {
         }
 
         // Test the rule
-        let rule = TestRule;
-        let rule_match = rule.r#match(BTreeMap::new());
+        let rule_match = TestRuleMatch {
+            this: Term::var("test_entity"),
+        };
         let when_result = TestRule::when(rule_match);
 
         // Verify it works correctly
