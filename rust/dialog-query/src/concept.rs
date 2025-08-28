@@ -1,3 +1,5 @@
+use crate::artifact::Entity;
+use crate::term::Term;
 use crate::Statements;
 
 /// Concept is a set of attributes associated with entity representing an
@@ -21,4 +23,15 @@ pub trait Concept: Clone + std::fmt::Debug {
     type Attributes;
 
     fn name() -> &'static str;
+
+    /// Create an attributes pattern for querying this concept
+    ///
+    /// This method enables fluent query building with .is() and .not() methods:
+    /// ```rust,ignore
+    /// use dialog_query::Term;
+    ///
+    /// let person_query = Person::r#match(Term::var("entity"));
+    /// // person_query.name.is("John").age.not(25);  // Future API
+    /// ```
+    fn r#match<T: Into<Term<Entity>>>(this: T) -> Self::Attributes;
 }

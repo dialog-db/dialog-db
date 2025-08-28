@@ -7,7 +7,7 @@
 //! and follows the patterns described in the design document at notes/rules.md.
 
 // use crate::attribute::{Attribute, Match as AttributeMatch};
-use crate::artifact::{ArtifactStore, Value};
+use crate::artifact::{ArtifactStore, Entity, Value};
 use crate::concept::Concept;
 use crate::error::QueryResult;
 use crate::fact_selector::FactSelector;
@@ -400,14 +400,6 @@ impl DerivedRule {
         Self { the, attributes }
     }
 
-    /// Create a match pattern for querying this concept
-    pub fn r#match<E: Into<Term<crate::artifact::Entity>>>(entity: E) -> DerivedRuleAttributes {
-        DerivedRuleAttributes {
-            entity: entity.into(),
-            rule: None, // Will be set when used with a specific rule
-        }
-    }
-
     /// Create a match instance with specific entity and attributes
     pub fn create_match(
         &self,
@@ -442,6 +434,13 @@ impl Concept for DerivedRule {
 
     fn name() -> &'static str {
         "DerivedRule"
+    }
+
+    fn r#match<T: Into<Term<crate::artifact::Entity>>>(this: T) -> Self::Attributes {
+        DerivedRuleAttributes {
+            entity: this.into(),
+            rule: None, // Will be set when used with a specific rule instance
+        }
     }
 }
 
@@ -889,6 +888,10 @@ mod tests {
             fn name() -> &'static str {
                 "VecTestRule"
             }
+
+            fn r#match<T: Into<Term<crate::artifact::Entity>>>(_this: T) -> Self::Attributes {
+                VecTestRuleAttributes
+            }
         }
 
         impl Rule for VecTestRule {
@@ -1059,6 +1062,10 @@ mod tests {
 
             fn name() -> &'static str {
                 "TestRule"
+            }
+
+            fn r#match<T: Into<Term<crate::artifact::Entity>>>(_this: T) -> Self::Attributes {
+                TestRuleAttributes
             }
         }
 
