@@ -2,7 +2,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Data, Fields, Type};
+use syn::{parse_macro_input, DeriveInput, Data, Fields, Type, Attribute, Meta, Expr, Lit};
 
 /// Procedural macro to generate attribute structs from an enum definition.
 ///
@@ -151,6 +151,30 @@ fn type_to_value_data_type(ty: &Type) -> proc_macro2::TokenStream {
     }
 }
 
+/// Extract doc comments from attributes
+fn extract_doc_comments(attrs: &[Attribute]) -> String {
+    let mut docs = Vec::new();
+    
+    for attr in attrs {
+        match &attr.meta {
+            Meta::NameValue(nv) if nv.path.is_ident("doc") => {
+                if let Expr::Lit(expr_lit) = &nv.value {
+                    if let Lit::Str(lit) = &expr_lit.lit {
+                        // Trim leading space that rustdoc adds
+                        let doc = lit.value();
+                        let trimmed = doc.trim_start_matches(' ');
+                        docs.push(trimmed.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    // Join multiple doc comment lines with spaces
+    docs.join(" ")
+}
+
 fn to_snake_case(s: &str) -> String {
     let mut result = String::new();
     let mut chars = s.chars().peekable();
@@ -263,6 +287,10 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
         let field_name_str = field_name.to_string();
         let field_name_lit = syn::LitStr::new(&field_name_str, proc_macro2::Span::call_site());
         
+        // Extract doc comment for the field
+        let doc_comment = extract_doc_comments(&field.attrs);
+        let doc_comment_lit = syn::LitStr::new(&doc_comment, proc_macro2::Span::call_site());
+        
         // Generate Match field (Term<T>)
         match_fields.push(quote! {
             pub #field_name: dialog_query::Term<#field_type>
@@ -303,7 +331,7 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
             #field_name: dialog_query::attribute::Match::new(
                 #namespace_lit,
                 #field_name_lit, 
-                "",  // description - TODO: extract from docstring
+                #doc_comment_lit,
                 entity_term.clone()
             )
         });

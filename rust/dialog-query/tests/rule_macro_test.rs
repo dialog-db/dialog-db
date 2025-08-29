@@ -37,12 +37,12 @@ fn test_derive_rule_generates_types() {
     assert_eq!(_attributes.name.the(), "person/name");
     assert_eq!(_attributes.birthday.the(), "person/birthday");
     assert_eq!(_attributes.name.attribute.cardinality, Cardinality::One);
-    // assert_eq!(_attributes.name.attribute.description, "Name of the person");
+    assert_eq!(_attributes.name.attribute.description, "Name of the person");
     assert_eq!(_attributes.birthday.attribute.cardinality, Cardinality::One);
-    // assert_eq!(
-    //     _attributes.birthday.attribute.description,
-    //     "Birthday of the person"
-    // );
+    assert_eq!(
+        _attributes.birthday.attribute.description,
+        "Birthday of the person"
+    );
 
     // Test that Person implements Rule
     let default_match = Match::<Person>::default();
