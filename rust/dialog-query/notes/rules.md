@@ -91,7 +91,7 @@ pub mod person {
     use dialog_query::attribute::{MatchAttribute};
     pub use dialog_query::{FactSelector, Term};
 
-    pub const THE: &'static str = "person";
+    pub const NAMESPACE: &'static str = "person";
 
     /// Attributes of the person relation.
     pub struct Attributes {
@@ -106,26 +106,54 @@ pub mod person {
         pub birthday: Term<u32>,
     }
 
-    impl Predicate for Match {
-        pub fn plan(&self, scope: &VariableScope) -> PlanResult<Plan<Person>> {
-            todo!("implement match planner")
+    impl Statements for Match {
+        fn statements(&self) -> Self::IntoIter {
+            [
+                Attribute::Match::new(
+                    NAMESPACE,
+                    "name",
+                    self.this.clone().into(),
+                ).is(self.name.clone().into()),
+                Attribute::Match::new(
+                    NAMESPACE,
+                    "birthday",
+                    self.birthday.clone().into(),
+                ).is(self.birthday.clone().into()),
+            ]
         }
     }
+
 
     pub struct Not {
         pub this: Term<Entity>,
         pub name: Term<String>,
         pub birthday: Term<u32>,
     }
-
-    impl Predicate for Not {
-        pub fn plan(&self, scope: &VariableScope) -> PlanResult<Plan<Person>> {
-            todo!("implement negation planner")
+    impl Statement for Not {
+        fn statements(&self) -> Self::IntoIter {
+            [
+                Statement::Not(Statement::Match(Match { ..self }))
+            ]
         }
     }
 
+
     /// Pattern for claiming person relation from rules.
-    pub struct Claim {
+    pub struct Assert {
+        pub this: Term<Entity>,
+        pub name: Term<String>,
+        pub birthday: Term<u32>,
+    }
+
+    /// Pattern for retracting person relation from rules.
+    pub struct Retract {
+        pub this: Term<Entity>,
+        pub name: Term<String>,
+        pub birthday: Term<u32>,
+    }
+
+    pub struct Retract {
+        pub this: Term<Entity>,
         pub name: Term<String>,
         pub birthday: Term<u32>,
     }
@@ -147,6 +175,13 @@ pub mod person {
             }
         }
     }
+  }
+
+  impl Rule for Person {
+      type Match = person::Match;
+      type Assert = person::Assert;
+      type Retract = person::Retract;
+      type Attributes = person::Attributes;
   }
 }
 ```
@@ -250,20 +285,20 @@ pub struct Increment;
 // Rule that will match when there is no counter.
 #[rule(Counter)]
 fn new(counter: Match<Counter>) -> When {
-    [
+    When::from([
         // No counter exists at this time
         Not<Counter> {
             this: Term::blank(),
             count: Term::blank(),
             title: Term::blank(),
         },
-        // claim (create) new counter next time
-        Claim<Counter> {
+        // assert new counter next time
+        Assert<Counter> {
             this: counter.this,
             count: 0,
             title: "basic counter".to_string(),
         }
-    ]
+    ])
 }
 
 // Rule that will match when we have a counter and an
@@ -271,28 +306,32 @@ fn new(counter: Match<Counter>) -> When {
 #[rule(Counter)]
 fn inc(terms: Match<Counter>) -> When {
     // We have want to find counter and capture it's count so we define a var.
-    let last_count = Term::var("last_count");
-    [
-        // We have a counter with last_count for it's current
+    let count = Term::var("count");
+
+    When::from([
+        // We have a counter with count for it's current
         // count value.
         Match<Counter> {
             this: counter.this,
-            count: last_count,
+            count,
             title: counter.title
         },
+
         // We also have `Incerment` fact asserted on the same
         // entity, signalling increment action taking place.
         Match<Increment> { this: counter.this },
+
         // Built in oprator that derives an incremented term
         // from provided term.
         Math::inc(last_count).is(terms.count),
+
         // Going forward we will
-        Claim<Counter> {
+        Assert<Counter> {
             this: counter.this,
             count: counter.count,
             title: counter.title
         }
-    ]
+    ])
 }
 ```
 

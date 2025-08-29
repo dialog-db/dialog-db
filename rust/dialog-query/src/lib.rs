@@ -29,14 +29,18 @@ pub use artifact::{Entity, Value, ValueDataType};
 pub use error::{InconsistencyError, QueryError};
 pub use fact::{assert, retract, Assertion, Claim, Fact, Retraction};
 pub use fact_selector::{FactSelector, FactSelectorPlan};
+pub use plan::EvaluationPlan;
 pub use premise::Premise;
+pub use query::Query;
 pub use rule::{
-    DerivedRule, DerivedRuleMatch, DerivedRuleMatchPlan, Rule, RuleApplication, RuleApplicationPlan, When, Statements,
+    DerivedRule, DerivedRuleMatch, DerivedRuleMatchPlan, Rule, RuleApplication,
+    RuleApplicationPlan, Statements, When,
 };
 pub use selection::{Match, Selection};
 pub use selector::Selector;
 pub use statement::{Statement, StatementPlan};
 pub use stream::*;
+pub use syntax::{Syntax, VariableScope};
 pub use term::*;
 pub use types::IntoValueDataType;
 
@@ -54,9 +58,6 @@ pub trait Attribute {
     fn value_type() -> ValueDataType;
 }
 
-pub use plan::EvaluationPlan;
-pub use query::Query;
-pub use syntax::{Syntax, VariableScope};
 
 /// Re-export commonly used types
 pub mod prelude {
@@ -67,7 +68,7 @@ pub mod prelude {
     pub use crate::plan::EvaluationPlan;
     pub use crate::premise::Premise;
     pub use crate::query::Query;
-    pub use crate::rule::{DerivedRule, DerivedRuleMatch, Rule, When, Statements};
+    pub use crate::rule::{DerivedRule, DerivedRuleMatch, Rule, Statements, When};
     pub use crate::selector::Selector;
     pub use crate::statement::{Statement, StatementPlan};
     pub use crate::syntax::{Syntax, VariableScope};

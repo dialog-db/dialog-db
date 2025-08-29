@@ -1,3 +1,5 @@
+use dialog_artifacts::Instruction;
+
 use crate::artifact::Entity;
 use crate::term::Term;
 use crate::Statements;
@@ -16,9 +18,13 @@ pub trait Concept: Clone + std::fmt::Debug {
     /// corresponding to the set of attributes defined by this concept.
     /// It is used as premise of the rule.
     type Match: Statements;
-    /// Type representing a claim of this concept. It is used in inductive rules
-    /// to describe state of the matching concept in the subsequent time
-    type Claim;
+    /// Type representing an assertion of this concept. It is used in the
+    /// inductive rules that describe how state of the concept changes
+    /// (or persists) over time.
+    type Assert;
+    /// Type representing a retraction of this concept. It is used in the
+    /// inductive rules to describe conditions for the of the concepts lifecycle.
+    type Retract;
     /// Type describing attributes of this concept.
     type Attributes;
 
@@ -34,4 +40,15 @@ pub trait Concept: Clone + std::fmt::Debug {
     /// // person_query.name.is("John").age.not(25);  // Future API
     /// ```
     fn r#match<T: Into<Term<Entity>>>(this: T) -> Self::Attributes;
+}
+
+/// Every assertion or retraction can be decomposed into a set of
+/// assertion / retraction.
+///
+/// This trait enables us to define each Concpet::Assert and Concpet::Retract
+/// such that it could be decomposed into a set of instructions which can be
+/// then be committed.
+pub trait Instructions {
+    type IntoIter: IntoIterator<Item = Instruction>;
+    fn instructions(self) -> Self::IntoIter;
 }
