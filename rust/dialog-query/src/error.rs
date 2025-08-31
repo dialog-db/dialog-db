@@ -67,6 +67,17 @@ impl From<DialogArtifactsError> for QueryError {
     }
 }
 
+impl From<InconsistencyError> for QueryError {
+    fn from(err: InconsistencyError) -> Self {
+        match err {
+            InconsistencyError::UnboundVariableError(var) => QueryError::UnboundVariable { 
+                variable_name: var 
+            },
+            _ => QueryError::FactStore(err.to_string())
+        }
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum InconsistencyError {
     #[error("Variable type is inconsistent with value: {0}")]

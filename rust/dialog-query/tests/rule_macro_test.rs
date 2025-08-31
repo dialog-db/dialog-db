@@ -1,6 +1,6 @@
 use dialog_query::attribute::Cardinality;
 use dialog_query::concept::Concept;
-use dialog_query::rule::Match;
+use dialog_query::rule::{Match, Rule};
 use dialog_query::*;
 use dialog_query_macros::Rule;
 
@@ -18,7 +18,7 @@ fn test_derive_rule_generates_types() {
     let entity = Term::var("person_entity");
 
     // Test the generated Match struct
-    let person_match = Match::<Person> {
+    let person_match = PersonMatch {
         this: entity.clone(),
         name: Term::var("person_name"),
         birthday: Term::var("person_birthday"),
@@ -30,6 +30,18 @@ fn test_derive_rule_generates_types() {
 
     // Test that Person implements Concept
     assert_eq!(Person::name(), "person");
+
+    // Test the attributes() method
+    let attrs = Person::attributes();
+    assert_eq!(attrs.len(), 2);
+    assert_eq!(attrs[0].namespace, "person");
+    assert_eq!(attrs[0].name, "name");
+    assert_eq!(attrs[0].description, "Name of the person");
+    assert_eq!(attrs[0].data_type(), Some(ValueDataType::String));
+    assert_eq!(attrs[1].namespace, "person");
+    assert_eq!(attrs[1].name, "birthday");
+    assert_eq!(attrs[1].description, "Birthday of the person");
+    assert_eq!(attrs[1].data_type(), Some(ValueDataType::UnsignedInt));
 
     // Test the r#match function
     let _attributes = Person::r#match(entity.clone());
@@ -45,9 +57,14 @@ fn test_derive_rule_generates_types() {
     );
 
     // Test that Person implements Rule
-    let default_match = Match::<Person>::default();
-    let when_result = Person::when(default_match);
-    assert!(when_result.len() >= 2); // Should have at least the 2 field statements
+    let test_match = Match::<Person> {
+        this: Term::var("person"),
+        name: Term::var("name"),
+        birthday: Term::var("birthday"),
+    };
+
+    let when_result = Person::when(test_match);
+    assert_eq!(when_result.len(), 2); // Should have 2 field statements
 }
 
 #[test]

@@ -141,6 +141,12 @@ impl Scalar for u32 {
     }
 }
 
+impl Scalar for u64 {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
+    }
+}
+
 impl Scalar for u128 {
     fn as_value(&self) -> Value {
         Value::from(self.to_owned())

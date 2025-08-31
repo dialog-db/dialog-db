@@ -13,6 +13,7 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use crate::artifact::{Attribute, Entity, Value, ValueDataType};
+use crate::fact::Scalar;
 use crate::types::IntoValueDataType;
 use serde::{Deserialize, Serialize};
 
@@ -113,7 +114,7 @@ where
 /// Provides constructor methods and introspection capabilities.
 impl<T> Term<T>
 where
-    T: IntoValueDataType + Clone,
+    T: Scalar,
 {
     /// Create a new typed variable with the given name
     ///
@@ -226,6 +227,16 @@ where
     /// Currently returns self unchanged - may be expanded for query building
     pub fn is<Is: Into<Term<T>>>(self, _other: Is) -> Self {
         self
+    }
+
+    pub fn as_unknown(&self) -> Term<Value> {
+        match self {
+            Term::Constant(value) => Term::Constant(value.as_value()),
+            Term::Variable { name, _type } => Term::Variable {
+                name: name.clone(),
+                _type: Type::default(),
+            },
+        }
     }
 }
 

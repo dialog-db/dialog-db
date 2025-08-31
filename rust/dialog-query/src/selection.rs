@@ -15,7 +15,7 @@ impl<S> Selection for S where S: Stream<Item = Result<Match, QueryError>> + 'sta
 
 #[derive(Clone, Debug)]
 pub struct Match {
-    variables: Arc<BTreeMap<String, Value>>,
+    pub variables: Arc<BTreeMap<String, Value>>,
 }
 
 impl Match {
@@ -188,23 +188,25 @@ impl Match {
         }
     }
 
-    pub fn resolve<T>(&self, term: &Term<T>) -> Result<T, InconsistencyError>
+    /// Resolve a variable term into a constant term if this frame has a
+    /// binding for it. Otherwise, return the original term.
+    pub fn resolve<T: Scalar>(&self, term: &Term<T>) -> &Term<T>
     where
-        T: Scalar + From<Value>,
+        T: Scalar,
     {
         match term {
             Term::Variable { name, .. } => {
                 if let Some(key) = name {
                     if let Some(value) = self.variables.get(key) {
-                        Ok(T::from(value.clone()))
+                        &Term::Constant(value.into())
                     } else {
-                        Err(InconsistencyError::UnboundVariableError(key.clone()))
+                        term
                     }
                 } else {
-                    Err(InconsistencyError::UnboundVariableError("Any".to_string()))
+                    term
                 }
             }
-            Term::Constant(constant) => Ok(constant.clone().into()),
+            Term::Constant(_) => term,
         }
     }
 
@@ -256,8 +258,8 @@ impl Stream for EmptySelection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Term;
     use crate::artifact::{Attribute, Entity};
+    use crate::Term;
     use std::str::FromStr;
 
     #[test]

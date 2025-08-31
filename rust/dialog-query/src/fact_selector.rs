@@ -16,18 +16,17 @@ use crate::artifact::{
     Entity, Value,
 };
 use crate::error::{QueryError, QueryResult};
-use crate::plan::{EvaluationContext, EvaluationPlan, Plan};
+use crate::plan::{Cost, EvaluationContext, EvaluationPlan};
 use crate::query::Query;
 use crate::selection::{Match, Selection as SelectionTrait};
 use crate::syntax::Syntax;
 use crate::syntax::VariableScope;
 use crate::term::Term;
 use crate::types::Scalar;
-use crate::Premise;
+use crate::{Fact, Premise};
 use async_stream::try_stream;
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
 /// FactSelector for pattern matching facts during queries
 ///
@@ -137,54 +136,73 @@ impl<T: Scalar> FactSelector<T> {
         self
     }
 
-    /// Get all variable names referenced in this fact selector
-    ///
-    /// Returns a vector of variable names that would need to be bound
-    /// during pattern matching. Used for dependency analysis and planning.
-    ///
-    /// Only includes named Variable terms, not unnamed variables or constants.
-    pub fn variables(&self) -> Vec<String> {
-        let mut vars = Vec::new();
-
-        // Check each field for variables and collect their names
-        match &self.the {
-            Some(Term::Variable {
-                name: Some(name), ..
-            }) => vars.push(name.clone()),
-            _ => {}
-        }
-        match &self.of {
-            Some(Term::Variable {
-                name: Some(name), ..
-            }) => vars.push(name.clone()),
-            _ => {}
-        }
-        match &self.is {
-            Some(Term::Variable {
-                name: Some(name), ..
-            }) => vars.push(name.clone()),
-            _ => {}
-        }
-
-        vars
-    }
-
     /// Create an execution plan for this fact selector
     ///
     /// Analyzes the selector and variable scope to create an optimized execution plan.
     /// The plan includes cost estimates and dependency information for query optimization.
     pub fn plan(&self, scope: &VariableScope) -> QueryResult<FactSelectorPlan<T>> {
-        FactSelectorPlan::new(self.clone(), scope)
+        // We estimate cost estimation at 100 even if we know all the variables
+        let mut cost = Cost::Estimate(100);
+
+        // If self.of is not provided or is not in set in the scope we increase
+        // a cost estimate by 500
+        if let Some(of) = &self.of {
+            if !scope.contains(&of) {
+                &cost.add(500);
+            }
+        } else {
+            &cost.add(500);
+        }
+
+        // If self.the is not provided or is not in set in the scope we increase
+        // a cost estimate by 200
+        if let Some(the) = &self.the {
+            if !scope.contains(&the) {
+                &cost.add(200);
+            }
+        } else {
+            &cost.add(200);
+        }
+
+        if let Some(is) = &self.is {
+            if !scope.contains(&is) {
+                &cost.add(300);
+            }
+        } else {
+            &cost.add(300);
+        }
+
+        Ok(FactSelectorPlan {
+            selector: self.clone(),
+            cost,
+        })
+    }
+
+    pub fn resolve(&self, frame: &Match) -> Self {
+        FactSelector {
+            the: self.the.clone().map(|term| frame.resolve(&term).into()),
+            of: self.of.clone().map(|term| frame.resolve(&term).into()),
+            is: self.is.clone().map(|term| frame.resolve(&term).into()),
+            fact: None,
+        }
+    }
+
+    pub fn resolve_artifact_selector(
+        &self,
+        frame: &Match,
+    ) -> Result<ArtifactSelector<Constrained>, QueryError> {
+        return self.resolve(frame).try_into()?;
     }
 }
 
-impl<T: Scalar> FactSelector<T> {
-    /// Convert to ArtifactSelector if all terms are constants (no variables)
-    pub fn to_artifact_selector(&self) -> QueryResult<ArtifactSelector<Constrained>> {
+impl<T: Scalar> TryFrom<&FactSelector<T>> for ArtifactSelector<Constrained> {
+    type Error = QueryError;
+
+    fn try_from(fact_selector: &FactSelector<T>) -> Result<Self, Self::Error> {
         let mut selector: Option<ArtifactSelector<Constrained>> = None;
 
         // Convert attribute (the)
-        if let Some(term) = &self.the {
+        if let Some(term) = &fact_selector.the {
             match term {
                 Term::Constant(the) => {
                     selector = Some(match selector {
@@ -197,7 +215,7 @@ impl<T: Scalar> FactSelector<T> {
         }
 
         // Convert entity (of)
-        if let Some(term) = &self.of {
+        if let Some(term) = &fact_selector.of {
             match term {
                 Term::Constant(of) => {
                     selector = Some(match selector {
@@ -210,7 +228,7 @@ impl<T: Scalar> FactSelector<T> {
         }
 
         // Convert value (is)
-        if let Some(term) = &self.is {
+        if let Some(term) = &fact_selector.is {
             match term {
                 Term::Constant(value) => {
                     let converted_value = value.as_value();
@@ -227,92 +245,6 @@ impl<T: Scalar> FactSelector<T> {
             message: "At least one field must be constrained".to_string(),
         })
     }
-
-    pub fn resolve(&self, frame: &Match) -> Result<ArtifactSelector<Constrained>, QueryError> {
-        let mut selector: Option<ArtifactSelector<Constrained>> = None;
-
-        // If we have the term in our selector we need to resolve it.
-        selector = if let Some(term) = &self.the {
-            // If we can resolve it from the given frame we will constrain
-            // selector with it.
-            if let Ok(value) = frame.resolve_value(term) {
-                // We need to ensure that the resolved value is a string
-                // that can be parsed as an attribute
-                let attribute: crate::artifact::Attribute = match value {
-                    Value::String(s) => {
-                        use std::str::FromStr;
-                        crate::artifact::Attribute::from_str(&s).map_err(|_| {
-                            QueryError::InvalidAttribute {
-                                attribute: format!("Invalid attribute format: {}", s),
-                            }
-                        })?
-                    }
-                    Value::Symbol(attr) => attr,
-                    _ => {
-                        return Err(QueryError::InvalidAttribute {
-                            attribute: format!(
-                                "Expected string or symbol for attribute, got: {:?}",
-                                value
-                            ),
-                        })
-                    }
-                };
-
-                if let Some(selector) = selector {
-                    Some(selector.the(attribute.clone()))
-                } else {
-                    Some(ArtifactSelector::default().the(attribute.clone()))
-                }
-            } else {
-                selector
-            }
-        } else {
-            selector
-        };
-
-        selector = if let Some(term) = &self.of {
-            if let Ok(value) = frame.resolve_value(term) {
-                let entity: crate::artifact::Entity =
-                    value
-                        .clone()
-                        .try_into()
-                        .map_err(|_| QueryError::InvalidTerm {
-                            message: format!("Expected entity, got: {:?}", value),
-                        })?;
-                if let Some(selector) = selector {
-                    Some(selector.of(entity))
-                } else {
-                    Some(ArtifactSelector::default().of(entity.clone()))
-                }
-            } else {
-                selector
-            }
-        } else {
-            selector
-        };
-
-        selector = if let Some(term) = &self.is {
-            if let Ok(value) = frame.resolve_value(term) {
-                if let Some(selector) = selector {
-                    Some(selector.is(value))
-                } else {
-                    Some(ArtifactSelector::default().is(value.clone()))
-                }
-            } else {
-                selector
-            }
-        } else {
-            selector
-        };
-
-        if let Some(selector) = selector {
-            Ok(selector)
-        } else {
-            Err(QueryError::EmptySelector {
-                message: "Fact selector must have at least one constant term".to_string(),
-            })
-        }
-    }
 }
 
 /// Execution plan for a fact selector operation
@@ -320,34 +252,8 @@ impl<T: Scalar> FactSelector<T> {
 pub struct FactSelectorPlan<T: Scalar = Value> {
     /// The fact selector operation to execute
     pub selector: FactSelector<T>,
-    /// Variables that must be bound before execution
-    pub required_bindings: BTreeSet<String>,
     /// Cost estimate for this operation
-    pub cost: f64,
-}
-
-impl<T: Scalar> FactSelectorPlan<T>
-where
-    T: crate::types::IntoValueDataType + Clone + std::fmt::Debug,
-{
-    /// Create a new fact selector plan
-    pub fn new(fact_selector: FactSelector<T>, scope: &VariableScope) -> QueryResult<Self> {
-        let variables = fact_selector.variables();
-        let required_bindings = variables
-            .iter()
-            .filter(|var| !scope.bound_variables.contains(*var))
-            .cloned()
-            .collect();
-
-        // Base cost for assertion operation
-        let cost = 100.0;
-
-        Ok(FactSelectorPlan {
-            selector: fact_selector,
-            required_bindings,
-            cost,
-        })
-    }
+    pub cost: Cost,
 }
 
 impl<T: Scalar> Syntax for FactSelector<T>
@@ -358,15 +264,7 @@ where
     type Plan = FactSelectorPlan<T>;
 
     fn plan(&self, scope: &VariableScope) -> QueryResult<Self::Plan> {
-        FactSelectorPlan::new(self.clone(), scope)
-    }
-}
-
-impl<T: Scalar> TryFrom<FactSelector<T>> for ArtifactSelector<Constrained> {
-    type Error = QueryError;
-
-    fn try_from(fact_selector: FactSelector<T>) -> Result<Self, Self::Error> {
-        fact_selector.to_artifact_selector()
+        self.plan(&scope)
     }
 }
 
@@ -378,23 +276,11 @@ impl<T: Scalar> Query for FactSelector<T> {
     where
         S: ArtifactStore,
     {
-        // Check if we can optimize with direct store query (constants only)
-        if let Ok(artifact_selector) = self.to_artifact_selector() {
-            // All constants - use direct store query
-            Ok(store.select(artifact_selector))
-        } else {
-            // Has variables - Query trait doesn't support variables
-            // Users should use the plan → evaluate approach instead
-            Err(QueryError::VariableNotSupported {
-                message:
-                    "Query trait does not support variables. Use plan → evaluate approach instead."
-                        .to_string(),
-            })
-        }
+        // Convert to the artifact selector and select
+        Ok(store.select(self.try_into()?))
     }
 }
 
-impl<T: Scalar + Send> Plan for FactSelectorPlan<T> {}
 impl<T> EvaluationPlan for FactSelectorPlan<T>
 where
     T: Scalar + Into<Value> + Send + PartialEq<Value>,
@@ -412,7 +298,7 @@ where
         try_stream! {
             for await frame in selection {
                 let frame = frame?;
-                if let Ok(artifact_selector) = selector.resolve(&frame) {
+                if let Ok(artifact_selector) = selector.resolve_artifact_selector(&frame) {
                     let stream = store.select(artifact_selector);
 
                     for await artifact in stream {
@@ -446,8 +332,16 @@ where
         }
     }
 
-    fn cost(&self) -> f64 {
-        self.cost
+    fn cost(&self) -> &Cost {
+        &self.cost
+    }
+}
+
+impl<T: Scalar> TryFrom<&FactSelectorPlan<T>> for ArtifactSelector<Constrained> {
+    type Error = QueryError;
+
+    fn try_from(plan: &FactSelectorPlan<T>) -> Result<Self, Self::Error> {
+        plan.selector.into().try_into()
     }
 }
 
@@ -462,18 +356,7 @@ where
     where
         S: ArtifactStore,
     {
-        // For FactSelectorPlan, the Query trait should also not support variables
-        if let Ok(artifact_selector) = self.selector.to_artifact_selector() {
-            // All constants - use direct store query for optimization
-            Ok(store.select(artifact_selector))
-        } else {
-            // Has variables - Query trait doesn't support variables even for plans
-            Err(QueryError::VariableNotSupported {
-                message:
-                    "Query trait does not support variables. Use plan → evaluate approach instead."
-                        .to_string(),
-            })
-        }
+        Ok(store.select(self.try_into()?))
     }
 }
 
@@ -500,20 +383,6 @@ mod tests {
         }
         assert!(fact_selector.of.is_none());
         assert!(fact_selector.is.is_none());
-    }
-
-    #[test]
-    fn test_fact_selector_with_entity_and_value() {
-        let fact_selector: FactSelector<Value> = FactSelector::new()
-            .the("person/name")
-            .of(Term::<Entity>::var("person"))
-            .is(Term::<Value>::var("name"));
-
-        let vars = fact_selector.variables();
-        assert_eq!(vars.len(), 2);
-        // Check that variables are present by comparing names
-        assert!(vars.contains(&"person".to_string()));
-        assert!(vars.contains(&"name".to_string()));
     }
 
     #[test]
@@ -667,10 +536,6 @@ mod tests {
         assert!(fact_selector.the.is_some());
         assert!(fact_selector.of.is_some());
         assert!(fact_selector.is.is_some());
-
-        // Check that variables are properly set
-        let vars = fact_selector.variables();
-        assert_eq!(vars.len(), 2);
     }
 
     // Tests from fact_selector_test.rs
