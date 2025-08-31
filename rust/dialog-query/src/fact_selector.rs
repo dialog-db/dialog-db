@@ -256,28 +256,15 @@ pub struct FactSelectorPlan<T: Scalar = Value> {
     pub cost: Cost,
 }
 
-impl<T: Scalar> Syntax for FactSelector<T>
-where
-    T: Scalar + Send,
-    Value: From<T>,
-{
-    type Plan = FactSelectorPlan<T>;
-
-    fn plan(&self, scope: &VariableScope) -> QueryResult<Self::Plan> {
-        self.plan(&scope)
-    }
-}
-
 impl<T: Scalar> Query for FactSelector<T> {
-    fn query<S>(
-        &self,
-        store: &S,
-    ) -> QueryResult<impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static>
+    fn query<S, M>(&self, store: &S) -> QueryResult<M>
     where
         S: ArtifactStore,
+        M: SelectionTrait,
     {
-        // Convert to the artifact selector and select
-        Ok(store.select(self.try_into()?))
+        let scope = VariableScope::new();
+        let plan = self.plan(&scope)?;
+        Query::query(&plan, store)
     }
 }
 
@@ -285,18 +272,17 @@ impl<T> EvaluationPlan for FactSelectorPlan<T>
 where
     T: Scalar + Into<Value> + Send + PartialEq<Value>,
 {
-    fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> impl SelectionTrait + '_
+    fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> M
     where
         S: ArtifactStore + Clone + Send + 'static,
         M: SelectionTrait + 'static,
     {
         // We need to capture context by value to satisfy lifetime requirements
         let store = context.store;
-        let selection = context.selection;
         let selector = self.selector.clone();
 
-        try_stream! {
-            for await frame in selection {
+        let selection = try_stream! {
+            for await frame in context.selection {
                 let frame = frame?;
                 if let Ok(artifact_selector) = selector.resolve_artifact_selector(&frame) {
                     let stream = store.select(artifact_selector);
@@ -329,7 +315,9 @@ where
                     yield frame;
                 }
             }
-        }
+        };
+
+        selection.into()
     }
 
     fn cost(&self) -> &Cost {
@@ -345,20 +333,20 @@ impl<T: Scalar> TryFrom<&FactSelectorPlan<T>> for ArtifactSelector<Constrained> 
     }
 }
 
-impl<T> Query for FactSelectorPlan<T>
-where
-    T: Scalar + Send,
-{
-    fn query<S>(
-        &self,
-        store: &S,
-    ) -> QueryResult<impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static>
-    where
-        S: ArtifactStore,
-    {
-        Ok(store.select(self.try_into()?))
-    }
-}
+// impl<T> Query for FactSelectorPlan<T>
+// where
+//     T: Scalar + Send,
+// {
+//     fn query<S>(
+//         &self,
+//         store: &S,
+//     ) -> QueryResult<impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static>
+//     where
+//         S: ArtifactStore,
+//     {
+//         Ok(store.select(self.try_into()?))
+//     }
+// }
 
 impl<T: Scalar + Into<Value> + Send + PartialEq<Value>> Premise for FactSelector<T> {
     type Plan = FactSelectorPlan<T>;
@@ -605,7 +593,7 @@ mod tests {
         // Step 4: Create evaluation context with initial empty selection
         let initial_match = Match::new();
         let initial_selection = stream::iter(vec![Ok(initial_match)]);
-        let context = EvaluationContext::new(artifacts.clone(), initial_selection);
+        let context = EvaluationContext::single(artifacts.clone(), initial_selection);
 
         // Step 5: Execute the plan using familiar-query pattern
         let result_stream = plan.evaluate(context);
@@ -679,7 +667,7 @@ mod tests {
         // Create evaluation context with initial empty selection
         let initial_match = Match::new();
         let initial_selection = stream::iter(vec![Ok(initial_match)]);
-        let context = EvaluationContext::new(artifacts.clone(), initial_selection);
+        let context = EvaluationContext::single(artifacts.clone(), initial_selection);
 
         // Execute the plan - should return empty results because no constants can be resolved
         let result_stream = plan.evaluate(context);

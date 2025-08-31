@@ -2,6 +2,9 @@
 
 use crate::artifact::{Artifact, ArtifactStore, DialogArtifactsError};
 use crate::error::QueryResult;
+use crate::plan::{EvaluationContext, EvaluationPlan};
+use crate::premise::Premise;
+use crate::{Match, Selection, VariableScope};
 use futures_util::Stream;
 
 /// A trait for types that can query an ArtifactStore
@@ -36,12 +39,30 @@ pub trait Query {
     /// Execute the query against the provided store
     ///
     /// Returns a stream of artifacts that match the query criteria.
-    fn query<S>(
+    fn query<S: ArtifactStore + Clone + Send + 'static, M: Selection>(
         &self,
         store: &S,
-    ) -> QueryResult<impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static>
-    where
-        S: ArtifactStore;
+    ) -> QueryResult<M>;
+}
+
+impl<Plan: EvaluationPlan> Query for Plan {
+    fn query<S: ArtifactStore + Clone + Send + 'static, M: Selection>(
+        &self,
+        store: &S,
+    ) -> QueryResult<M> {
+        Ok(self.evaluate(EvaluationContext::new(store.clone())))
+    }
+}
+
+impl<Plan: EvaluationPlan, P: Premise<Plan = Plan>> Query for P {
+    fn query<S: ArtifactStore + Clone + Send + 'static, M: Selection>(
+        &self,
+        store: &S,
+    ) -> QueryResult<M> {
+        let scope = VariableScope::new();
+        let plan = self.plan(&scope)?;
+        plan.query(store)
+    }
 }
 
 #[cfg(test)]

@@ -1,3 +1,5 @@
+use std::process::Output;
+
 use crate::artifact::Entity;
 use crate::artifact::Value;
 use crate::attribute::Attribute;
@@ -11,6 +13,7 @@ use crate::statement::Statement;
 use crate::term::Term;
 use crate::Fact;
 use crate::FactSelector;
+use crate::FactSelectorPlan;
 use crate::Statements;
 use crate::VariableScope;
 use async_stream::try_stream;
@@ -114,7 +117,7 @@ impl<T: Match + Clone + std::fmt::Debug> Premise for T {
     type Plan = Plan;
 
     fn plan(&self, scope: &VariableScope) -> QueryResult<Self::Plan> {
-        let conjuncts = [];
+        let conjuncts: Vec<FactSelectorPlan<Value>> = vec![];
         let cost = Cost::Estimate(0);
 
         let entity = self.this();
@@ -125,39 +128,45 @@ impl<T: Match + Clone + std::fmt::Debug> Premise for T {
             let select = Fact::select().the(attribute.the()).of(&entity).is(&term);
             let conjuct = select.plan(&scope)?;
             // account for the cost of the conjunct
-            cost.add(&conjuct.cost);
+            cost.join(&conjuct.cost);
 
-            conjuncts.push(select.plan(&scope)?);
+            conjuncts.push(select.into().plan(&scope)?);
         }
 
         let bindings = scope.clone();
 
-        Ok(Plan {})
+        Ok(Plan { cost, conjuncts })
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct Plan {}
+pub struct Plan {
+    cost: Cost,
+    conjuncts: Vec<FactSelectorPlan<Value>>,
+}
 
 impl EvaluationPlan for Plan {
-    fn cost(&self) -> f64 {
-        0.0
+    fn cost(&self) -> &Cost {
+        &self.cost
     }
-    fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> impl SelectionTrait + '_
+    fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> M
     where
         S: crate::artifact::ArtifactStore + Clone + Send + 'static,
         M: SelectionTrait + 'static,
     {
         let store = context.store;
-        let selection = context.selection;
 
-        try_stream! {
-            for await frame in selection {
-                let mut current_frame = frame?;
-                yield current_frame;
-            }
+        let mut selection = context.selection;
+        for conjunct in &self.conjuncts {
+            let output = conjunct.evaluate(EvaluationContext {
+                store: store.clone(),
+                selection,
+            });
 
+            selection = output.into();
         }
+
+        return selection;
     }
 }
 

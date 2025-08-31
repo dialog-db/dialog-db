@@ -1,8 +1,9 @@
 //! Query execution plans - traits and context for evaluation
 
 use crate::artifact::ArtifactStore;
-use crate::Selection;
+use crate::{Match, Query, Selection};
 use dialog_common::ConditionalSend;
+use futures_core::Stream;
 use std::collections::BTreeMap;
 
 /// A single result frame with variable bindings
@@ -28,8 +29,15 @@ where
     M: Selection,
 {
     /// Create a new evaluation context
-    pub fn new(store: S, selection: M) -> Self {
+    pub fn single(store: S, selection: M) -> Self {
         Self { store, selection }
+    }
+
+    pub fn new(store: S) -> Self {
+        Self {
+            store,
+            selection: Stream::once(Ok(Match::new())),
+        }
     }
 }
 
@@ -42,8 +50,15 @@ pub enum Cost {
 }
 
 impl Cost {
+    pub fn add(&self, cost: usize) -> Self {
+        match self {
+            Cost::Infinity => Cost::Estimate(cost),
+            Cost::Estimate(total) => Cost::Estimate(total + cost),
+        }
+    }
+
     /// Add cost to this cost
-    pub fn add(&mut self, cost: &Cost) {
+    pub fn join(&mut self, cost: &Cost) {
         match self {
             // If current cost is infinity, replace it with the the given
             // cost.
@@ -69,8 +84,8 @@ pub trait EvaluationPlan: Clone + std::fmt::Debug + ConditionalSend {
     fn cost(&self) -> &Cost;
     /// Execute this plan with the given context and return result frames
     /// This follows the familiar-query pattern where frames flow through the evaluation
-    fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> impl Selection + '_
+    fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> M
     where
         S: ArtifactStore + Clone + Send + 'static,
-        M: Selection + 'static;
+        M: Selection;
 }
