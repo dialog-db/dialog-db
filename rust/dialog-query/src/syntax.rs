@@ -30,7 +30,7 @@ impl VariableScope {
             // Otherwise we just check if the variable name is in the bound set.
             Term::Variable {
                 name: Some(name), ..
-            } => self.bound_variables.contains(&name),
+            } => self.bound_variables.contains(name),
         }
     }
 }

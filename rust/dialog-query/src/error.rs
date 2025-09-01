@@ -48,6 +48,10 @@ pub enum QueryError {
 
     #[error("Fact store: {0}")]
     FactStore(String),
+
+    /// Query planning errors
+    #[error("Planning error: {message}")]
+    PlanningError { message: String },
 }
 
 /// Result type for query operations

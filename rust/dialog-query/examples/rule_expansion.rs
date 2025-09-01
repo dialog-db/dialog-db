@@ -67,25 +67,34 @@ mod person {
     pub struct Retract;
 
     pub struct Match {
-        pub this: Term<Entity>,
-        pub name: Term<String>,
-        pub age: Term<u32>,
+        pub this: Term<Value>,
+        pub name: Term<Value>,
+        pub age: Term<Value>,
     }
     impl concept::Match for Match {
         type Instance = Person;
         type Attributes = Attributes;
 
-        fn term_for(&self, name: &str) -> Option<Term<Value>> {
+        fn term_for(&self, name: &str) -> Option<&Term<Value>> {
             match name {
-                "this" => Some(self.this.as_unknown()),
-                "name" => Some(self.name.as_unknown()),
-                "age" => Some(self.age.as_unknown()),
+                "this" => Some(&self.this),
+                "name" => Some(&self.name),
+                "age" => Some(&self.age),
                 _ => None,
             }
         }
 
-        fn this(&self) -> &Term<Entity> {
-            &self.this
+        fn this(&self) -> Term<Entity> {
+            match &self.this {
+                Term::Constant(v) => Term::Constant(v.clone().try_into().unwrap()),
+                Term::Variable { name, .. } => {
+                    if let Some(name) = name {
+                        Term::var(name)
+                    } else {
+                        Term::blank()
+                    }
+                },
+            }
         }
     }
 
@@ -104,10 +113,19 @@ mod person {
             Attributes
         }
     }
+
+    impl dialog_query::rule::Statements for Match {
+        type IntoIter = std::vec::IntoIter<dialog_query::statement::Statement>;
+
+        fn statements(self) -> Self::IntoIter {
+            // For now return empty - proper implementation would convert Match to statements
+            vec![].into_iter()
+        }
+    }
 }
 
 fn main() {
-    let alice = Match::<Person> {
+    let alice = person::Match {
         this: Term::var("person"),
         name: Term::var("Alice"),
         age: Term::blank(),

@@ -18,7 +18,7 @@ fn test_derive_rule_generates_types() {
     let entity = Term::var("person_entity");
 
     // Test the generated Match struct
-    let person_match = PersonMatch {
+    let person_match = Match::<Person> {
         this: entity.clone(),
         name: Term::var("person_name"),
         birthday: Term::var("person_birthday"),
@@ -31,17 +31,20 @@ fn test_derive_rule_generates_types() {
     // Test that Person implements Concept
     assert_eq!(Person::name(), "person");
 
-    // Test the attributes() method
+    // Test the attributes() method through PersonAttributes
     let attrs = Person::attributes();
+
     assert_eq!(attrs.len(), 2);
-    assert_eq!(attrs[0].namespace, "person");
-    assert_eq!(attrs[0].name, "name");
-    assert_eq!(attrs[0].description, "Name of the person");
-    assert_eq!(attrs[0].data_type(), Some(ValueDataType::String));
-    assert_eq!(attrs[1].namespace, "person");
-    assert_eq!(attrs[1].name, "birthday");
-    assert_eq!(attrs[1].description, "Birthday of the person");
-    assert_eq!(attrs[1].data_type(), Some(ValueDataType::UnsignedInt));
+    assert_eq!(attrs[0].0, "name");
+    assert_eq!(attrs[0].1.namespace, "person");
+    assert_eq!(attrs[0].1.name, "name");
+    assert_eq!(attrs[0].1.description, "Name of the person");
+    assert_eq!(attrs[0].1.data_type(), Some(ValueDataType::String));
+    assert_eq!(attrs[1].0, "birthday");
+    assert_eq!(attrs[1].1.namespace, "person");
+    assert_eq!(attrs[1].1.name, "birthday");
+    assert_eq!(attrs[1].1.description, "Birthday of the person");
+    assert_eq!(attrs[1].1.data_type(), Some(ValueDataType::UnsignedInt));
 
     // Test the r#match function
     let _attributes = Person::r#match(entity.clone());

@@ -33,12 +33,10 @@ where
         Self { store, selection }
     }
 
-    pub fn new(store: S) -> Self {
-        Self {
-            store,
-            selection: Stream::once(Ok(Match::new())),
-        }
-    }
+    // pub fn new(store: S) -> Self {
+    //     let selection: M = Stream::once(Ok(Match::new()));
+    //     Self { store, selection }
+    // }
 }
 
 /// Describes cost of the plan execution. Infinity, implies plan is not
@@ -50,20 +48,34 @@ pub enum Cost {
 }
 
 impl Cost {
-    pub fn add(&self, cost: usize) -> Self {
+    pub fn add(&mut self, cost: usize) -> &mut Self {
         match self {
-            Cost::Infinity => Cost::Estimate(cost),
-            Cost::Estimate(total) => Cost::Estimate(total + cost),
-        }
+            Cost::Infinity => {
+                *self = Cost::Estimate(cost);
+            }
+            Cost::Estimate(total) => {
+                *total += cost;
+            }
+        };
+        self
+    }
+    pub fn subtract(&mut self, cost: usize) -> &mut Self {
+        match self {
+            Cost::Infinity => {}
+            Cost::Estimate(total) => {
+                *total -= cost;
+            }
+        };
+        self
     }
 
     /// Add cost to this cost
-    pub fn join(&mut self, cost: &Cost) {
+    pub fn join(&mut self, cost: &Cost) -> &mut Self {
         match self {
             // If current cost is infinity, replace it with the the given
             // cost.
             Cost::Infinity => {
-                std::mem::replace(self, cost.clone());
+                *self = cost.clone();
             }
             // If current cost is estimate, add the given cost to it unless it
             // is infinity.
@@ -74,6 +86,7 @@ impl Cost {
                 }
             },
         };
+        self
     }
 }
 
@@ -84,7 +97,7 @@ pub trait EvaluationPlan: Clone + std::fmt::Debug + ConditionalSend {
     fn cost(&self) -> &Cost;
     /// Execute this plan with the given context and return result frames
     /// This follows the familiar-query pattern where frames flow through the evaluation
-    fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> M
+    fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> impl Selection
     where
         S: ArtifactStore + Clone + Send + 'static,
         M: Selection;

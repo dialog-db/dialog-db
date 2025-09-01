@@ -9,9 +9,9 @@
 // use crate::attribute::{Attribute, Match as AttributeMatch};
 use crate::artifact::{ArtifactStore, Value};
 use crate::concept::Concept;
-use crate::error::QueryResult;
+use crate::error::{QueryError, QueryResult};
 use crate::fact_selector::FactSelector;
-use crate::plan::{EvaluationContext, EvaluationPlan, MatchFrame, Plan};
+use crate::plan::{EvaluationContext, EvaluationPlan, MatchFrame};
 use crate::premise::Premise;
 use crate::selection::Selection;
 use crate::statement::Statement;
@@ -468,83 +468,105 @@ pub struct RetractDerivedRule {
     pub attributes: BTreeMap<String, Term<Value>>,
 }
 
-// impl Concept for DerivedRule {
-//     type Match = DerivedRuleMatch;
-//     type Assert = AssertDerivedRule;
-//     type Retract = RetractDerivedRule;
-//     type Attributes = DerivedRuleAttributes;
+impl Concept for DerivedRule {
+    type Instance = DerivedRule;
+    type Match = DerivedRuleMatch;
+    type Assert = AssertDerivedRule;
+    type Retract = RetractDerivedRule;
+    type Attributes = DerivedRuleAttributes;
 
-//     fn name() -> &'static str {
-//         "DerivedRule"
-//     }
+    fn name() -> &'static str {
+        "DerivedRule"
+    }
 
-//     fn r#match<T: Into<Term<crate::artifact::Entity>>>(this: T) -> Self::Attributes {
-//         DerivedRuleAttributes {
-//             entity: this.into(),
-//             rule: None, // Will be set when used with a specific rule instance
-//         }
-//     }
+    fn r#match<T: Into<Term<crate::artifact::Entity>>>(this: T) -> Self::Attributes {
+        DerivedRuleAttributes {
+            entity: this.into(),
+            rule: None, // Will be set when used with a specific rule instance
+        }
+    }
+}
 
-//     fn attributes() -> &'static [crate::attribute::Attribute<crate::artifact::Value>] {
-//         // TODO: Define actual attributes for DerivedRule in a future stage
-//         // For now, return an empty slice as this is a placeholder implementation
-//         &[]
-//     }
-// }
+impl crate::concept::Match for DerivedRuleMatch {
+    type Instance = DerivedRule;
+    type Attributes = DerivedRuleAttributes;
 
-// impl Rule for DerivedRule {
-//     fn when(terms: Self::Match) -> When {
-//         let mut selectors = Vec::new();
+    fn term_for(&self, name: &str) -> Option<&Term<Value>> {
+        self.attributes.get(name)
+    }
 
-//         // Use the entity from the match pattern
-//         let entity_var = terms.this.clone();
+    fn this(&self) -> Term<crate::artifact::Entity> {
+        self.this.clone()
+    }
+}
 
-//         for (attr_name, _attr_type) in &terms.rule.attributes {
-//             // Create attribute name in the format "namespace/attribute"
-//             let full_attr_name = format!("{}/{}", terms.rule.the, attr_name);
-//             let attr_term = Term::from(
-//                 full_attr_name
-//                     .parse::<crate::artifact::Attribute>()
-//                     .unwrap(),
-//             );
+impl crate::concept::Attributes for DerivedRuleAttributes {
+    fn attributes() -> &'static [(&'static str, crate::attribute::Attribute<Value>)] {
+        // For now, return empty slice as DerivedRule attributes are dynamic
+        &[]
+    }
+}
 
-//             // Get the value variable from the match or create a new one
-//             let value_var = terms
-//                 .attributes
-//                 .get(attr_name)
-//                 .cloned()
-//                 .unwrap_or_else(|| Term::var(attr_name));
+impl crate::concept::Instance for DerivedRule {
+    fn this(&self) -> crate::artifact::Entity {
+        // For now, create a new entity - in practice this would be stored
+        crate::artifact::Entity::new().unwrap()
+    }
+}
 
-//             // Create the fact selector predicate
-//             let selector = crate::fact_selector::FactSelector {
-//                 the: Some(attr_term),
-//                 of: Some(entity_var.clone()),
-//                 is: Some(value_var),
-//                 fact: None,
-//             };
+impl Rule for DerivedRule {
+    fn when(terms: Self::Match) -> When {
+        let mut selectors = Vec::new();
 
-//             selectors.push(selector);
-//         }
+        // Use the entity from the match pattern
+        let entity_var = terms.this.clone();
 
-//         // If we have no attributes, create a tag predicate
-//         if selectors.is_empty() {
-//             let tag_attr = format!("the/{}", terms.rule.the);
-//             let attr_term = Term::from(tag_attr.parse::<crate::artifact::Attribute>().unwrap());
-//             let value_term = Term::from(Value::String(terms.rule.the.clone()));
+        for (attr_name, _attr_type) in &terms.rule.attributes {
+            // Create attribute name in the format "namespace/attribute"
+            let full_attr_name = format!("{}/{}", terms.rule.the, attr_name);
+            let attr_term = Term::from(
+                full_attr_name
+                    .parse::<crate::artifact::Attribute>()
+                    .unwrap(),
+            );
 
-//             let selector = crate::fact_selector::FactSelector {
-//                 the: Some(attr_term),
-//                 of: Some(entity_var),
-//                 is: Some(value_term),
-//                 fact: None,
-//             };
+            // Get the value variable from the match or create a new one
+            let value_var = terms
+                .attributes
+                .get(attr_name)
+                .cloned()
+                .unwrap_or_else(|| Term::var(attr_name));
 
-//             selectors.push(selector);
-//         }
+            // Create the fact selector predicate
+            let selector = crate::fact_selector::FactSelector {
+                the: Some(attr_term),
+                of: Some(entity_var.clone()),
+                is: Some(value_var),
+                fact: None,
+            };
 
-//         When::from(selectors)
-//     }
-// }
+            selectors.push(selector);
+        }
+
+        // If we have no attributes, create a tag predicate
+        if selectors.is_empty() {
+            let tag_attr = format!("the/{}", terms.rule.the);
+            let attr_term = Term::from(tag_attr.parse::<crate::artifact::Attribute>().unwrap());
+            let value_term = Term::from(Value::String(terms.rule.the.clone()));
+
+            let selector = crate::fact_selector::FactSelector {
+                the: Some(attr_term),
+                of: Some(entity_var),
+                is: Some(value_term),
+                fact: None,
+            };
+
+            selectors.push(selector);
+        }
+
+        When::from(selectors)
+    }
+}
 
 /// A match instance for a derived rule
 ///
@@ -603,16 +625,14 @@ pub struct DerivedRuleMatchPlan {
     pub premise_plans: Vec<crate::statement::StatementPlan>,
 }
 
-impl Plan for DerivedRuleMatchPlan {}
 
 impl EvaluationPlan for DerivedRuleMatchPlan {
-    fn cost(&self) -> f64 {
-        // Cost is sum of all premise costs plus a small join overhead
-        let premise_cost: f64 = self.premise_plans.iter().map(|p| p.cost()).sum();
-        premise_cost + (self.premise_plans.len() as f64 * 0.1) // Small join overhead per premise
+    fn cost(&self) -> &crate::plan::Cost {
+        // For now return a static cost
+        &crate::plan::Cost::Estimate(100)
     }
 
-    fn evaluate<S, M>(&self, _context: EvaluationContext<S, M>) -> impl Selection + '_
+    fn evaluate<S, M>(&self, _context: EvaluationContext<S, M>) -> impl Selection
     where
         S: ArtifactStore + Clone + Send + 'static,
         M: Selection + 'static,
@@ -670,10 +690,13 @@ where
     type Plan = RuleApplicationPlan<R>;
 
     fn plan(&self, _scope: &VariableScope) -> QueryResult<Self::Plan> {
-        // For now, create a placeholder rule_match
-        // In practice, this would need to be constructed differently
-        // since Rule no longer has r#match method
-        todo!("RuleApplication needs to be refactored for new Rule trait")
+        // For now, create a simple placeholder plan
+        // In practice, this would need proper rule evaluation logic
+        // We need to create a proper match for the specific rule type R
+        // For now, we'll use a simplified approach
+        Err(QueryError::PlanningError {
+            message: "RuleApplication planning not yet implemented for generic rules".to_string(),
+        })
     }
 }
 
@@ -687,17 +710,17 @@ pub struct RuleApplicationPlan<R: Rule> {
     pub rule_match: R::Match,
 }
 
-impl<R: Rule + Send> Plan for RuleApplicationPlan<R> where R::Match: Send + Premise {}
 
 impl<R: Rule + Send> EvaluationPlan for RuleApplicationPlan<R>
 where
     R::Match: Send + Premise,
 {
-    fn cost(&self) -> f64 {
-        self.application.cost()
+    fn cost(&self) -> &crate::plan::Cost {
+        // For now return a static cost, proper implementation would calculate rule cost
+        &crate::plan::Cost::Estimate(100)
     }
 
-    fn evaluate<S, M>(&self, _context: EvaluationContext<S, M>) -> impl Selection + '_
+    fn evaluate<S, M>(&self, _context: EvaluationContext<S, M>) -> impl Selection
     where
         S: ArtifactStore + Clone + Send + 'static,
         M: Selection + 'static,
@@ -815,9 +838,6 @@ mod tests {
                 assert!(selector.the.is_some());
                 assert!(selector.of.is_some());
                 assert!(selector.is.is_some());
-            }
-            Statement::Query(_) => {
-                // Query statements are also valid
             }
         }
     }

@@ -4,12 +4,12 @@
 //! Statements represent concrete patterns that can be matched against facts
 //! in the knowledge base during rule evaluation.
 
-use crate::concept_selector::{ConceptSelector, ConceptSelectorPlan};
 use crate::error::QueryResult;
 use crate::fact_selector::FactSelector;
 use crate::plan::EvaluationPlan;
 use crate::premise::Premise;
 use crate::syntax::{Syntax, VariableScope};
+use crate::Selection;
 use serde::{Deserialize, Serialize};
 
 /// Statements that can appear in rule conditions (premises)
@@ -64,24 +64,6 @@ pub enum Statement {
     #[serde(rename = "select")]
     Select(FactSelector<crate::artifact::Value>),
     
-    /// Concept query statement - matches concepts by pattern
-    ///
-    /// This statement type allows querying for concept instances in the knowledge base.
-    /// A concept query defines a pattern that matches entities that have been classified
-    /// with a particular concept and satisfy the specified attribute constraints.
-    ///
-    /// # Pattern Matching
-    ///
-    /// Concept queries match on:
-    /// - **Concept**: The concept name (e.g., "Person", "Organization")
-    /// - **Entity**: Which entity has this concept classification
-    /// - **Attributes**: Constraints on the concept's attributes
-    ///
-    /// # Usage Pattern
-    ///
-    /// Created using `Statement::query(selector)` or by constructing
-    /// a ConceptSelector directly.
-    Query(ConceptSelector),
 }
 
 impl Premise for Statement {
@@ -92,10 +74,6 @@ impl Premise for Statement {
             Statement::Select(selector) => {
                 let selector_plan = selector.plan(scope)?;
                 Ok(StatementPlan::Select(selector_plan))
-            }
-            Statement::Query(selector) => {
-                let selector_plan = selector.plan(scope)?;
-                Ok(StatementPlan::Query(selector_plan))
             }
         }
     }
@@ -108,48 +86,28 @@ impl Premise for Statement {
 #[derive(Debug, Clone)]
 pub enum StatementPlan {
     /// Plan for executing a fact selector statement
-    Select(<FactSelector<crate::artifact::Value> as Syntax>::Plan),
+    Select(crate::fact_selector::FactSelectorPlan<crate::artifact::Value>),
     
-    /// Plan for executing a concept query statement
-    Query(ConceptSelectorPlan),
 }
 
-impl crate::plan::Plan for StatementPlan {}
 
 impl EvaluationPlan for StatementPlan {
-    fn cost(&self) -> f64 {
+    fn cost(&self) -> &crate::plan::Cost {
         match self {
             StatementPlan::Select(plan) => plan.cost(),
-            StatementPlan::Query(plan) => plan.cost(),
         }
     }
 
     fn evaluate<S, M>(
         &self,
         context: crate::plan::EvaluationContext<S, M>,
-    ) -> impl crate::Selection + '_
+    ) -> impl Selection
     where
         S: crate::artifact::ArtifactStore + Clone + Send + 'static,
         M: crate::Selection + 'static,
     {
-        let context = context;
-        let plan = self.clone();
-        
-        async_stream::try_stream! {
-            match plan {
-                StatementPlan::Select(plan) => {
-                    let selection = plan.evaluate(context);
-                    for await frame in selection {
-                        yield frame?;
-                    }
-                }
-                StatementPlan::Query(plan) => {
-                    let selection = plan.evaluate(context);
-                    for await frame in selection {
-                        yield frame?;
-                    }
-                }
-            }
+        match self {
+            StatementPlan::Select(plan) => plan.evaluate(context),
         }
     }
 }
@@ -205,19 +163,5 @@ impl Statement {
         })
     }
     
-    /// Create a concept query statement from a ConceptSelector
-    ///
-    /// Use this to query for concept instances in the knowledge base.
-    ///
-    /// # Example
-    ///
-    /// Query for Person concepts:
-    /// ```rust,ignore
-    /// Statement::query(ConceptSelector::new("Person", Term::var("person"))
-    ///     .with_attribute("name", Term::from("Alice")))
-    /// ```
-    pub fn query(selector: ConceptSelector) -> Self {
-        Statement::Query(selector)
-    }
 }
 

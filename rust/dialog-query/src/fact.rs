@@ -387,6 +387,7 @@ mod integration_tests {
 
     use super::*;
     use crate::{Query, Term};
+    use crate::error::QueryResult;
     use anyhow::Result;
     use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value};
     use dialog_storage::MemoryStorageBackend;
@@ -775,7 +776,7 @@ mod integration_tests {
         if let Err(error) = result {
             assert!(error
                 .to_string()
-                .contains("Query trait does not support variables"));
+                .contains("Variable not supported"));
         }
 
         Ok(())

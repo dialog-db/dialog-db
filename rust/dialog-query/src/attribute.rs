@@ -1,4 +1,4 @@
-pub use crate::artifact::Entity;
+pub use crate::artifact::{Entity, Value};
 use crate::artifact::ValueDataType;
 pub use crate::fact_selector::FactSelector;
 pub use crate::term::Term;

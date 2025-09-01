@@ -190,23 +190,28 @@ impl Match {
 
     /// Resolve a variable term into a constant term if this frame has a
     /// binding for it. Otherwise, return the original term.
-    pub fn resolve<T: Scalar>(&self, term: &Term<T>) -> &Term<T>
+    pub fn resolve<T: Scalar>(&self, term: &Term<T>) -> Term<T>
     where
-        T: Scalar,
+        T: std::convert::TryFrom<Value>,
     {
         match term {
             Term::Variable { name, .. } => {
                 if let Some(key) = name {
                     if let Some(value) = self.variables.get(key) {
-                        &Term::Constant(value.into())
+                        if let Ok(converted) = T::try_from(value.clone()) {
+                            Term::Constant(converted)
+                        } else {
+                            // Conversion failed - return original term
+                            term.clone()
+                        }
                     } else {
-                        term
+                        term.clone()
                     }
                 } else {
-                    term
+                    term.clone()
                 }
             }
-            Term::Constant(_) => term,
+            Term::Constant(_) => term.clone(),
         }
     }
 
@@ -241,6 +246,12 @@ pub struct EmptySelection;
 impl EmptySelection {
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl Default for EmptySelection {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

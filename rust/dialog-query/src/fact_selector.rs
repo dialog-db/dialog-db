@@ -18,15 +18,18 @@ use crate::artifact::{
 use crate::error::{QueryError, QueryResult};
 use crate::plan::{Cost, EvaluationContext, EvaluationPlan};
 use crate::query::Query;
-use crate::selection::{Match, Selection as SelectionTrait};
+use crate::selection::{Match, Selection};
 use crate::syntax::Syntax;
 use crate::syntax::VariableScope;
 use crate::term::Term;
 use crate::types::Scalar;
 use crate::{Fact, Premise};
 use async_stream::try_stream;
+// Remove unused import - dialog_storage::Storage doesn't exist
 use futures_util::Stream;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 
 /// FactSelector for pattern matching facts during queries
 ///
@@ -85,6 +88,12 @@ pub struct FactSelector<T: Scalar = Value> {
     pub fact: Option<serde_json::Value>,
 }
 
+const BASE_COST: usize = 100;
+const ENTITY_COST: usize = 500;
+const ATTRIBUTE_COST: usize = 200;
+const VALUE_COST: usize = 300;
+const UNBOUND_COST: usize = BASE_COST + ENTITY_COST + ATTRIBUTE_COST + VALUE_COST;
+
 /// Core FactSelector functionality
 ///
 /// Provides constructor and builder methods for creating fact patterns.
@@ -141,57 +150,69 @@ impl<T: Scalar> FactSelector<T> {
     /// Analyzes the selector and variable scope to create an optimized execution plan.
     /// The plan includes cost estimates and dependency information for query optimization.
     pub fn plan(&self, scope: &VariableScope) -> QueryResult<FactSelectorPlan<T>> {
-        // We estimate cost estimation at 100 even if we know all the variables
-        let mut cost = Cost::Estimate(100);
+        // We start with a cost estimate that assumes nothing is known.
+        let mut cost = UNBOUND_COST;
 
-        // If self.of is not provided or is not in set in the scope we increase
-        // a cost estimate by 500
+        // If self.of is in scope we subtract ENTITY_COST from estimate
         if let Some(of) = &self.of {
-            if !scope.contains(&of) {
-                &cost.add(500);
+            if scope.contains(&of) {
+                cost -= ENTITY_COST;
             }
-        } else {
-            &cost.add(500);
         }
 
-        // If self.the is not provided or is not in set in the scope we increase
-        // a cost estimate by 200
+        // If self.the is in scope we subtract ATTRIBUTE_COST from the cost
         if let Some(the) = &self.the {
-            if !scope.contains(&the) {
-                &cost.add(200);
+            if scope.contains(&the) {
+                cost -= ATTRIBUTE_COST;
             }
-        } else {
-            &cost.add(200);
         }
 
         if let Some(is) = &self.is {
-            if !scope.contains(&is) {
-                &cost.add(300);
+            if scope.contains(&is) {
+                cost -= VALUE_COST;
             }
-        } else {
-            &cost.add(300);
         }
 
-        Ok(FactSelectorPlan {
-            selector: self.clone(),
-            cost,
-        })
+        // if cost is below UNBOUND_COST we have some term in the selector &
+        // during evaluation we will be able to produce constrained selector
+        // in this case we can return a plan, otherwise we return an error
+        if cost < UNBOUND_COST {
+            Ok(FactSelectorPlan {
+                selector: self.clone(),
+                cost: Cost::Estimate(cost),
+            })
+        } else {
+            Err(QueryError::EmptySelector {
+                message: format!("Fact selector must have the, of or is constraint"),
+            })
+        }
     }
 
-    pub fn resolve(&self, frame: &Match) -> Self {
+    pub fn resolve(&self, frame: &Match) -> Self
+    where
+        T: std::convert::TryFrom<Value>,
+    {
         FactSelector {
-            the: self.the.clone().map(|term| frame.resolve(&term).into()),
-            of: self.of.clone().map(|term| frame.resolve(&term).into()),
-            is: self.is.clone().map(|term| frame.resolve(&term).into()),
+            the: self.the.clone().map(|term| frame.resolve(&term)),
+            of: self.of.clone().map(|term| frame.resolve(&term)),
+            is: self.is.clone().map(|term| frame.resolve(&term)),
             fact: None,
         }
+    }
+
+    /// Convert to ArtifactSelector if all terms are constants (no variables)
+    pub fn to_artifact_selector(&self) -> QueryResult<ArtifactSelector<Constrained>> {
+        self.try_into()
     }
 
     pub fn resolve_artifact_selector(
         &self,
         frame: &Match,
-    ) -> Result<ArtifactSelector<Constrained>, QueryError> {
-        return self.resolve(frame).try_into()?;
+    ) -> Result<ArtifactSelector<Constrained>, QueryError>
+    where
+        T: std::convert::TryFrom<Value>,
+    {
+        (&self.resolve(frame)).try_into()
     }
 }
 
@@ -256,68 +277,45 @@ pub struct FactSelectorPlan<T: Scalar = Value> {
     pub cost: Cost,
 }
 
-impl<T: Scalar> Query for FactSelector<T> {
-    fn query<S, M>(&self, store: &S) -> QueryResult<M>
-    where
-        S: ArtifactStore,
-        M: SelectionTrait,
-    {
-        let scope = VariableScope::new();
-        let plan = self.plan(&scope)?;
-        Query::query(&plan, store)
-    }
-}
-
 impl<T> EvaluationPlan for FactSelectorPlan<T>
 where
-    T: Scalar + Into<Value> + Send + PartialEq<Value>,
+    T: Scalar + Into<Value> + Send + PartialEq<Value> + Sync + std::convert::TryFrom<Value>,
 {
-    fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> M
+    fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> impl Selection
     where
         S: ArtifactStore + Clone + Send + 'static,
-        M: SelectionTrait + 'static,
+        M: Selection,
     {
-        // We need to capture context by value to satisfy lifetime requirements
-        let store = context.store;
         let selector = self.selector.clone();
-
-        let selection = try_stream! {
+        try_stream! {
             for await frame in context.selection {
                 let frame = frame?;
-                if let Ok(artifact_selector) = selector.resolve_artifact_selector(&frame) {
-                    let stream = store.select(artifact_selector);
+                let selection = selector.resolve(&frame);
+                for await artifact in context.store.select((&selection).try_into()?) {
+                    let artifact = artifact?;
 
-                    for await artifact in stream {
-                        let artifact = artifact?;
+                    // Create a new frame by unifying the artifact with our pattern
+                    let mut new_frame = frame.clone();
 
-                        // Create a new frame by unifying the artifact with our pattern
-                        let mut new_frame = frame.clone();
-
-                        // Unify entity if we have an entity variable using type-safe unify
-                        if let Some(entity_term) = &selector.of {
-                            new_frame = new_frame.unify(entity_term.clone(), Value::Entity(artifact.of)).map_err(|e| QueryError::FactStore(e.to_string()))?;
-                        }
-
-                        // Unify attribute if we have an attribute variable using type-safe unify
-                        if let Some(attr_term) = &selector.the {
-                            new_frame = new_frame.unify(attr_term.clone(), Value::Symbol(artifact.the)).map_err(|e| QueryError::FactStore(e.to_string()))?;
-                        }
-
-                        // Unify value if we have a value variable using type-safe unify
-                        if let Some(value_term) = &selector.is {
-                            new_frame = new_frame.unify_value(value_term.clone(), artifact.is).map_err(|e| QueryError::FactStore(e.to_string()))?;
-                        }
-
-                        yield new_frame;
+                    // Unify entity if we have an entity variable using type-safe unify
+                    if let Some(entity_term) = &selection.of {
+                        new_frame = new_frame.unify(entity_term.clone(), Value::Entity(artifact.of)).map_err(|e| QueryError::FactStore(e.to_string()))?;
                     }
-                } else {
-                    // If we can't resolve selector, just pass through the frame
-                    yield frame;
+
+                    // Unify attribute if we have an attribute variable using type-safe unify
+                    if let Some(attr_term) = &selection.the {
+                        new_frame = new_frame.unify(attr_term.clone(), Value::Symbol(artifact.the)).map_err(|e| QueryError::FactStore(e.to_string()))?;
+                    }
+
+                    // Unify value if we have a value variable using type-safe unify
+                    if let Some(value_term) = &selection.is {
+                        new_frame = new_frame.unify_value(value_term.clone(), artifact.is).map_err(|e| QueryError::FactStore(e.to_string()))?;
+                    }
+
+                    yield new_frame;
                 }
             }
-        };
-
-        selection.into()
+        }
     }
 
     fn cost(&self) -> &Cost {
@@ -325,11 +323,37 @@ where
     }
 }
 
+impl<T> Query for FactSelectorPlan<T>
+where
+    T: Scalar + Into<Value> + Send + PartialEq<Value> + Sync + std::convert::TryFrom<Value>,
+{
+    fn query<S>(
+        &self,
+        store: &S,
+    ) -> QueryResult<
+        impl futures_core::Stream<
+                Item = Result<dialog_artifacts::Artifact, dialog_artifacts::DialogArtifactsError>,
+            > + 'static,
+    >
+    where
+        S: ArtifactStore,
+    {
+        // Try to convert to ArtifactSelector if all terms are constants
+        match self.try_into() {
+            Ok(artifact_selector) => Ok(store.select(artifact_selector)),
+            Err(_) => Err(crate::error::QueryError::VariableNotSupported {
+                message: "Query trait does not support variables yet - requires constants only"
+                    .to_string(),
+            }),
+        }
+    }
+}
+
 impl<T: Scalar> TryFrom<&FactSelectorPlan<T>> for ArtifactSelector<Constrained> {
     type Error = QueryError;
 
     fn try_from(plan: &FactSelectorPlan<T>) -> Result<Self, Self::Error> {
-        plan.selector.into().try_into()
+        (&plan.selector).try_into()
     }
 }
 
@@ -348,10 +372,39 @@ impl<T: Scalar> TryFrom<&FactSelectorPlan<T>> for ArtifactSelector<Constrained> 
 //     }
 // }
 
-impl<T: Scalar + Into<Value> + Send + PartialEq<Value>> Premise for FactSelector<T> {
+impl<T: Scalar + Into<Value> + Send + PartialEq<Value> + Sync + std::convert::TryFrom<Value>>
+    Premise for FactSelector<T>
+{
     type Plan = FactSelectorPlan<T>;
     fn plan(&self, scope: &VariableScope) -> QueryResult<Self::Plan> {
-        self.plan(scope)
+        // Call the inherent method, not the trait method to avoid recursion
+        FactSelector::plan(self, scope)
+    }
+}
+
+impl<T> crate::query::Query for FactSelector<T>
+where
+    T: Scalar + Into<Value> + Send + PartialEq<Value> + Sync + std::convert::TryFrom<Value>,
+{
+    fn query<S>(
+        &self,
+        store: &S,
+    ) -> QueryResult<
+        impl futures_core::Stream<
+                Item = Result<dialog_artifacts::Artifact, dialog_artifacts::DialogArtifactsError>,
+            > + 'static,
+    >
+    where
+        S: crate::artifact::ArtifactStore,
+    {
+        // Try to convert to ArtifactSelector if all terms are constants
+        match self.try_into() {
+            Ok(artifact_selector) => Ok(store.select(artifact_selector)),
+            Err(_) => Err(crate::error::QueryError::VariableNotSupported {
+                message: "Query trait does not support variables yet - requires constants only"
+                    .to_string(),
+            }),
+        }
     }
 }
 #[cfg(test)]
@@ -660,29 +713,25 @@ mod tests {
             .of(Term::var("entity")) // Variable
             .is(Term::<Value>::var("value")); // Variable
 
-        // Create plan
+        // Create plan - this should fail because all fields are unbound variables
         let scope = VariableScope::new();
-        let plan = fact_selector.plan(&scope)?;
+        let plan_result = fact_selector.plan(&scope);
 
-        // Create evaluation context with initial empty selection
-        let initial_match = Match::new();
-        let initial_selection = stream::iter(vec![Ok(initial_match)]);
-        let context = EvaluationContext::single(artifacts.clone(), initial_selection);
-
-        // Execute the plan - should return empty results because no constants can be resolved
-        let result_stream = plan.evaluate(context);
-        let match_frames: Vec<Match> = result_stream
-            .collect::<Vec<Result<Match, QueryError>>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<Match>, QueryError>>()?;
-
-        // Should have no results or an error - for now we expect it to pass through the input frame
-        // In a proper implementation with constraints, this would return an empty result set
+        // Planning should fail for unexecutable queries
         assert!(
-            !match_frames.is_empty(),
-            "Should pass through initial frame when no constants resolved"
+            plan_result.is_err(),
+            "Planning should fail when all fields are unbound variables"
         );
+
+        // Verify it's the right kind of error
+        if let Err(QueryError::EmptySelector { message }) = plan_result {
+            assert!(
+                message.contains("constraint"),
+                "Should be constraint error"
+            );
+        } else {
+            panic!("Expected EmptySelector error for unexecutable query");
+        }
 
         Ok(())
     }

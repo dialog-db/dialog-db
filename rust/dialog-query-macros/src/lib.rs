@@ -249,7 +249,7 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     
     let struct_name = &input.ident;
-    let module_name_ident = syn::Ident::new(&to_snake_case(&struct_name.to_string()), struct_name.span());
+    let module_name_ident = syn::Ident::new(&to_snake_case_with_underscores(&struct_name.to_string()), struct_name.span());
     
     // Extract fields from the struct
     let fields = match &input.data {
@@ -280,6 +280,8 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
     let mut typed_attributes = Vec::new();
     let mut value_attributes = Vec::new();
     let mut field_names = Vec::new();
+    let mut match_term_conversions = Vec::new();
+    let mut attributes_tuples = Vec::new();
 
     // Generate namespace from struct name (e.g., Person -> "person")
     let namespace = to_snake_case(&struct_name.to_string());
@@ -374,6 +376,26 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
                 }
             }
         });
+
+        // Generate term conversions for Match implementation
+        match_term_conversions.push(quote! {
+            #field_name_lit => {
+                // For now, return None - proper implementation would need term conversion storage
+                None
+            }
+        });
+
+        // Generate attribute tuples for Attributes implementation
+        attributes_tuples.push(quote! {
+            (#field_name_lit, dialog_query::attribute::Attribute {
+                namespace: #module_name_ident::NAMESPACE,
+                name: #field_name_lit,
+                description: #doc_comment_lit,
+                cardinality: dialog_query::attribute::Cardinality::One,
+                data_type: #data_type_value,
+                marker: std::marker::PhantomData,
+            })
+        });
     }
 
     // Generate type names based on struct name (e.g., Person -> PersonMatch, PersonAssert, etc.)
@@ -410,6 +432,7 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
             #(#attributes_fields),*
         }
 
+
         // Module to hold #struct_name-related constants and attributes
         pub mod #module_name_ident {
             use super::*;
@@ -434,10 +457,49 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
             pub static ATTRIBUTES: &[dialog_query::attribute::Attribute<dialog_query::artifact::Value>] = &[
                 #(#value_attributes),*
             ];
+
+            /// Attribute tuples for the Attributes trait implementation
+            pub static ATTRIBUTE_TUPLES: &[(&str, dialog_query::attribute::Attribute<dialog_query::artifact::Value>)] = &[
+                #(#attributes_tuples),*
+            ];
+        }
+
+        // Implement Match trait for the Match struct
+        impl dialog_query::concept::Match for #match_name {
+            type Instance = #struct_name;
+            type Attributes = #attributes_name;
+
+            fn term_for(&self, name: &str) -> Option<&dialog_query::term::Term<dialog_query::artifact::Value>> {
+                match name {
+                    #(#match_term_conversions),*
+                    _ => None
+                }
+            }
+
+            fn this(&self) -> dialog_query::term::Term<dialog_query::artifact::Entity> {
+                self.this.clone()
+            }
+        }
+
+        // Implement Attributes trait
+        impl dialog_query::concept::Attributes for #attributes_name {
+            fn attributes() -> &'static [(&'static str, dialog_query::attribute::Attribute<dialog_query::artifact::Value>)] {
+                #module_name_ident::ATTRIBUTE_TUPLES
+            }
+        }
+
+        // Implement Instance trait for the concept struct
+        impl dialog_query::concept::Instance for #struct_name {
+            fn this(&self) -> dialog_query::artifact::Entity {
+                // For now, we'll panic as we don't have an entity field on the struct
+                // In a real implementation, you might want to add an entity field to the struct
+                panic!("Instance trait implementation requires an entity field on the struct")
+            }
         }
 
         // Implement Concept trait
         impl dialog_query::concept::Concept for #struct_name {
+            type Instance = #struct_name;
             type Match = #match_name;
             type Assert = #assert_name;
             type Retract = #retract_name;  
@@ -445,10 +507,6 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
 
             fn name() -> &'static str {
                 #namespace_lit
-            }
-
-            fn attributes() -> &'static [dialog_query::attribute::Attribute<dialog_query::artifact::Value>] {
-                #module_name_ident::ATTRIBUTES
             }
 
             fn r#match<T: Into<dialog_query::term::Term<dialog_query::artifact::Entity>>>(this: T) -> Self::Attributes {
@@ -504,7 +562,7 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
                 // Start with an empty match frame
                 let initial_match = Match::new();
                 let initial_selection = stream::iter(vec![Ok(initial_match)]);
-                let context = EvaluationContext::new(store.clone(), initial_selection);
+                let context = EvaluationContext::single(store.clone(), initial_selection);
                 
                 // For now, we'll just execute the first plan to demonstrate the pattern
                 // In a complete implementation, we'd need to handle plan joining properly
@@ -536,7 +594,7 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
         }
 
         // Implement Statements for Match to enable it to be used as a premise
-        impl dialog_query::Statements for #match_name {
+        impl dialog_query::rule::Statements for #match_name {
             type IntoIter = std::vec::IntoIter<dialog_query::statement::Statement>;
             
             fn statements(self) -> Self::IntoIter {

@@ -9,11 +9,9 @@
 pub mod artifact;
 pub mod attribute;
 pub mod concept;
-pub mod concept_selector;
 pub mod error;
 pub mod fact;
 pub mod fact_selector;
-pub mod join;
 pub mod plan;
 pub mod premise;
 pub mod query;
@@ -27,7 +25,6 @@ pub mod term;
 pub mod types;
 
 pub use artifact::{Entity, Value, ValueDataType};
-pub use concept_selector::ConceptSelector;
 pub use error::{InconsistencyError, QueryError};
 pub use fact::{assert, retract, Assertion, Claim, Fact, Retraction};
 pub use fact_selector::{FactSelector, FactSelectorPlan};
