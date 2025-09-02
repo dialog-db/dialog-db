@@ -13,6 +13,77 @@ pub trait Selection: Stream<Item = Result<Match, QueryError>> + 'static + Condit
 impl<S> Selection for S where S: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend
 {}
 
+
+/// A collection of matches with set semantics
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchSet {
+    matches: Vec<Match>,
+}
+
+impl MatchSet {
+    pub fn new() -> Self {
+        Self { matches: Vec::new() }
+    }
+
+    pub fn len(&self) -> usize {
+        self.matches.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.matches.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Match> {
+        self.matches.iter()
+    }
+
+    pub fn into_iter(self) -> impl Iterator<Item = Match> {
+        self.matches.into_iter()
+    }
+
+    /// Check if the set contains a match with the given variable bindings
+    pub fn contains_binding(&self, var_name: &str, expected_value: &Value) -> bool {
+        self.matches.iter().any(|m| {
+            m.variables.get(var_name) == Some(expected_value)
+        })
+    }
+
+    /// Check if the set contains a match where all given bindings are present
+    pub fn contains_bindings(&self, bindings: &BTreeMap<String, Value>) -> bool {
+        self.matches.iter().any(|m| {
+            bindings.iter().all(|(var, val)| {
+                m.variables.get(var) == Some(val)
+            })
+        })
+    }
+
+    /// Get all values for a given variable across all matches
+    pub fn values_for(&self, var_name: &str) -> Vec<&Value> {
+        self.matches.iter()
+            .filter_map(|m| m.variables.get(var_name))
+            .collect()
+    }
+
+    /// Check if any match contains the given value for the variable
+    pub fn contains_value_for(&self, var_name: &str, expected_value: &Value) -> bool {
+        self.values_for(var_name).contains(&expected_value)
+    }
+}
+
+impl From<Vec<Match>> for MatchSet {
+    fn from(matches: Vec<Match>) -> Self {
+        Self { matches }
+    }
+}
+
+impl FromIterator<Match> for MatchSet {
+    fn from_iter<T: IntoIterator<Item = Match>>(iter: T) -> Self {
+        Self {
+            matches: iter.into_iter().collect(),
+        }
+    }
+}
+
 /// Extension trait for Selection streams to provide convenient collection methods
 pub trait SelectionExt: Selection {
     /// Collect all matches into a Vec, propagating any errors
@@ -23,11 +94,21 @@ pub trait SelectionExt: Selection {
         use futures_util::TryStreamExt;
         self.try_collect().await
     }
+
+    /// Collect all matches into a MatchSet with set semantics, propagating any errors
+    async fn collect_set(self) -> Result<MatchSet, QueryError>
+    where
+        Self: Sized,
+    {
+        use futures_util::TryStreamExt;
+        let matches: Vec<Match> = self.try_collect().await?;
+        Ok(MatchSet::from(matches))
+    }
 }
 
 impl<S: Selection> SelectionExt for S {}
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Match {
     pub variables: Arc<BTreeMap<String, Value>>,
 }
