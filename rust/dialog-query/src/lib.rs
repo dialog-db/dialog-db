@@ -35,8 +35,7 @@ pub use plan::EvaluationPlan;
 pub use premise::Premise;
 pub use query::Query;
 pub use rule::{
-    Rule, RuleApplication,
-    RuleApplicationPlan, Statements, When,
+    Rule, Statements, When,
 };
 
 pub use dialog_query_macros::Rule;

@@ -7,18 +7,9 @@
 //! and follows the patterns described in the design document at notes/rules.md.
 
 // use crate::attribute::{Attribute, Match as AttributeMatch};
-use crate::artifact::Value;
 use crate::concept::Concept;
-use std::collections::BTreeMap;
-use crate::error::{QueryError, QueryResult};
 use crate::fact_selector::FactSelector;
-use crate::plan::{EvaluationContext, EvaluationPlan, MatchFrame};
-use crate::premise::Premise;
-use crate::query::Store;
-use crate::selection::Selection;
 use crate::statement::Statement;
-use crate::syntax::VariableScope;
-use crate::term::Term;
 
 /// Utility type that simply gets associated type for the relation.
 #[allow(type_alias_bounds)]
@@ -414,84 +405,6 @@ pub trait Rule: Concept {
 }
 
 
-/// Rule application - represents a rule being applied to specific terms
-///
-/// This corresponds to RuleApplication in the TypeScript implementation.
-/// It binds rule variables to specific terms from a query pattern.
-#[derive(Debug, Clone)]
-pub struct RuleApplication<R: Rule> {
-    /// The rule being applied
-    pub rule: R,
-
-    /// The terms this rule is being applied to
-    pub terms: BTreeMap<String, Term<Value>>,
-
-    /// Variable bindings from the application context
-    pub bindings: MatchFrame,
-}
-
-impl<R: Rule> RuleApplication<R> {
-    /// Create a new rule application
-    pub fn new(rule: R, terms: BTreeMap<String, Term<Value>>, bindings: MatchFrame) -> Self {
-        Self {
-            rule,
-            terms,
-            bindings,
-        }
-    }
-
-    /// Get the cost of applying this rule
-    pub fn cost(&self) -> f64 {
-        // Base cost for rule application
-        10.0
-    }
-}
-
-impl<R: Rule + Send> Premise for RuleApplication<R>
-where
-    R::Match: Send + Premise,
-{
-    type Plan = RuleApplicationPlan<R>;
-
-    fn plan(&self, _scope: &VariableScope) -> QueryResult<Self::Plan> {
-        // For now, create a simple placeholder plan
-        // In practice, this would need proper rule evaluation logic
-        // We need to create a proper match for the specific rule type R
-        // For now, we'll use a simplified approach
-        Err(QueryError::PlanningError {
-            message: "RuleApplication planning not yet implemented for generic rules".to_string(),
-        })
-    }
-}
-
-/// Execution plan for rule applications
-#[derive(Debug, Clone)]
-pub struct RuleApplicationPlan<R: Rule> {
-    /// The rule application being planned
-    pub application: RuleApplication<R>,
-
-    /// The rule match instance
-    pub rule_match: R::Match,
-}
-
-impl<R: Rule + Send> EvaluationPlan for RuleApplicationPlan<R>
-where
-    R::Match: Send + Premise,
-{
-    fn cost(&self) -> &crate::plan::Cost {
-        // For now return a static cost, proper implementation would calculate rule cost
-        &crate::plan::Cost::Estimate(100)
-    }
-
-    fn evaluate<S: Store, M: Selection>(
-        &self,
-        _context: EvaluationContext<S, M>,
-    ) -> impl Selection {
-        // For now, return empty selection
-        // Full implementation would evaluate the rule match
-        crate::selection::EmptySelection::new()
-    }
-}
 
 #[cfg(test)]
 mod tests {
