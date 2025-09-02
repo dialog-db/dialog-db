@@ -655,9 +655,10 @@ mod integration_tests {
         Ok(())
     }
 
-    #[cfg(disabled)] // Disabled - needs update for new Query API returning Match instead of Artifact
     #[tokio::test]
     async fn test_complex_queries_with_constants() -> Result<()> {
+        use crate::selection::SelectionExt;
+
         // Setup
         let storage_backend = MemoryStorageBackend::default();
         let mut artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -704,173 +705,327 @@ mod integration_tests {
         let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
         artifacts.commit(stream::iter(instructions)).await?;
 
-        // Query 1: Find all admins by role using Query trait
-        let admin_query = Fact::select().the("user/role").is("admin");
+        // Query 1: Find all admins by role - using constants with variable entity
+        let admin_query = Fact::select()
+            .the("user/role") // Constant attribute
+            .of(Term::var("admin_user")) // Variable entity - should bind
+            .is("admin"); // Constant value
 
-        let admin_results = admin_query
-            .query(&artifacts)?
-            .filter_map(|result| async move { result.ok() })
-            .collect::<Vec<_>>()
-            .await;
+        let admin_results = admin_query.query(&artifacts)?.collect_set().await?;
 
-        assert_eq!(admin_results.len(), 2); // Alice and Charlie
+        assert_eq!(
+            admin_results.len(),
+            2,
+            "Should find Alice and Charlie as admins"
+        );
 
-        // Query 2: Find all user/role facts using Query trait
-        let role_query = Fact::<Value>::select().the("user/role");
+        // Verify that entity variable is bound but constants are not
+        assert!(admin_results.contains_binding("admin_user", &Value::Entity(alice.clone())));
+        assert!(admin_results.contains_binding("admin_user", &Value::Entity(charlie.clone())));
 
-        let role_results = role_query
-            .query(&artifacts)?
-            .filter_map(|result| async move { result.ok() })
-            .collect::<Vec<_>>()
-            .await;
+        // Verify no bindings for constants (role value shouldn't be bound)
+        for match_frame in admin_results.iter() {
+            assert_eq!(
+                match_frame.variables.len(),
+                1,
+                "Only entity variable should be bound"
+            );
+            assert!(
+                match_frame.variables.contains_key("admin_user"),
+                "Entity variable should be bound"
+            );
+        }
 
-        assert_eq!(role_results.len(), 3); // Alice=admin, Bob=user, Charlie=admin
+        // Query 2: Find all user roles with variable entity and value
+        let role_query = Fact::<Value>::select()
+            .the("user/role") // Constant attribute
+            .of(Term::var("user")) // Variable entity
+            .is(Term::var("role")); // Variable value
 
-        let roles: Vec<String> = role_results
-            .iter()
-            .map(|artifact| match &artifact.is {
-                Value::String(s) => s.clone(),
-                _ => panic!("Expected string value"),
-            })
-            .collect();
+        let role_results = role_query.query(&artifacts)?.collect_set().await?;
 
-        assert!(roles.contains(&"admin".to_string()));
-        assert!(roles.contains(&"user".to_string()));
+        assert_eq!(role_results.len(), 3, "Should find all 3 role assignments");
 
-        // Query 3: Find Bob specifically using Query trait
+        // Test set-based contains for both variables
+        assert!(role_results.contains_binding("role", &Value::String("admin".to_string())));
+        assert!(role_results.contains_binding("role", &Value::String("user".to_string())));
+        assert!(role_results.contains_binding("user", &Value::Entity(alice.clone())));
+        assert!(role_results.contains_binding("user", &Value::Entity(bob.clone())));
+        assert!(role_results.contains_binding("user", &Value::Entity(charlie.clone())));
+
+        // Query 3: Find Bob specifically using all constants (no variables)
         let bob_query = Fact::<Value>::select()
-            .the("user/name")
-            .of(bob.clone())
-            .is(Value::String("Bob".to_string()));
+            .the("user/name") // Constant attribute
+            .of(bob.clone()) // Constant entity
+            .is(Value::String("Bob".to_string())); // Constant value
 
-        let bob_results = bob_query
-            .query(&artifacts)?
-            .filter_map(|result| async move { result.ok() })
-            .collect::<Vec<_>>()
-            .await;
+        let bob_results = bob_query.query(&artifacts)?.collect_set().await?;
 
-        assert_eq!(bob_results.len(), 1);
-        assert_eq!(bob_results[0].of, bob);
+        assert_eq!(bob_results.len(), 1, "Should find exactly Bob's name fact");
+
+        // Verify no variables are bound since all terms are constants
+        for match_frame in bob_results.iter() {
+            assert!(
+                match_frame.variables.is_empty(),
+                "No variables should be bound for all-constant query"
+            );
+        }
 
         Ok(())
     }
 
-    #[cfg(disabled)] // Disabled - needs update for new Query API returning Match instead of Artifact
     #[tokio::test]
     async fn test_variable_queries_succeed_with_constants() -> Result<()> {
-        // This test demonstrates that queries with variables succeed if there are constants
-        // Variables are silently skipped, and the query uses only the constant parts
+        use crate::selection::SelectionExt;
 
-        let query_with_variables = Fact::<String>::select()
-            .the("user/name") // This is a constant
-            .of(Term::var("user")) // This is a variable (skipped)
-            .is(Term::<String>::var("name")); // This now works with String type
+        // This test demonstrates that queries with variables work properly -
+        // constants are used for matching, variables get bound in results
 
-        // Setup store for completeness
+        // Setup store with test data
         let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
 
-        // Query trait should succeed, using only the constant "user/name"
-        let result = query_with_variables.query(&artifacts);
-        assert!(result.is_ok());
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        let facts = vec![
+            Fact::assert(
+                "user/name".parse::<Attribute>()?,
+                alice.clone(),
+                Value::String("Alice".to_string()),
+            ),
+            Fact::assert(
+                "user/name".parse::<Attribute>()?,
+                bob.clone(),
+                Value::String("Bob".to_string()),
+            ),
+        ];
+
+        let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
+        artifacts.commit(stream::iter(instructions)).await?;
+
+        let query_with_variables = Fact::<Value>::select()
+            .the("user/name") // Constant - used for matching
+            .of(Term::var("user")) // Variable - gets bound to entities
+            .is(Term::var("name")); // Variable - gets bound to names
+
+        // Query should succeed and return matches with variable bindings
+        let results = query_with_variables
+            .query(&artifacts)?
+            .collect_set()
+            .await?;
+
+        assert_eq!(results.len(), 2, "Should find both Alice and Bob");
+
+        // Verify variable bindings
+        assert!(results.contains_binding("user", &Value::Entity(alice.clone())));
+        assert!(results.contains_binding("user", &Value::Entity(bob.clone())));
+        assert!(results.contains_binding("name", &Value::String("Alice".to_string())));
+        assert!(results.contains_binding("name", &Value::String("Bob".to_string())));
 
         Ok(())
     }
 
-    #[cfg(disabled)] // Disabled - needs update for new Query API returning Match instead of Artifact
     #[tokio::test]
     async fn test_typed_fact_selector_patterns() -> Result<()> {
-        // This test demonstrates the new generic Fact<T>::select() patterns
+        use crate::selection::SelectionExt;
 
-        // Pattern 1: String-typed FactSelector
-        let string_selector = Fact::<String>::select()
-            .the("user/name")
-            .is(Term::<String>::var("name")); // String type is preserved
+        // This test demonstrates that different typed fact selectors work with the new Query API
 
-        // Pattern 2: Value-typed FactSelector (backward compatible)
-        let value_selector = Fact::<Value>::select()
-            .the("user/name")
-            .is(Term::<Value>::var("name"));
-
-        // Pattern 3: Entity-typed FactSelector
-        let entity_selector = Fact::<Entity>::select()
-            .the("user/friend")
-            .is(Term::<Entity>::var("friend"));
-
-        // All should compile and create appropriate FactSelector types
+        // Setup test data
         let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
 
-        // Test that all patterns work with the Query trait
-        let _string_result = string_selector.query(&artifacts);
-        let _value_result = value_selector.query(&artifacts);
-        let _entity_result = entity_selector.query(&artifacts);
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        let facts = vec![
+            Fact::assert(
+                "user/name".parse::<Attribute>()?,
+                alice.clone(),
+                Value::String("Alice".to_string()),
+            ),
+            Fact::assert(
+                "user/friend".parse::<Attribute>()?,
+                alice.clone(),
+                Value::Entity(bob.clone()),
+            ),
+        ];
+
+        let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
+        artifacts.commit(stream::iter(instructions)).await?;
+
+        // Pattern 1: String-typed FactSelector (most common, backward compatible)
+        let value_selector = Fact::select()
+            .the("user/name")
+            .of(Term::var("user"))
+            .is(Term::<String>::var("name"));
+
+        let value_results = value_selector.query(&artifacts)?.collect_set().await?;
+        assert_eq!(value_results.len(), 1);
+        assert!(value_results.contains_binding("user", &Value::Entity(alice.clone())));
+        assert!(value_results.contains_binding("name", &Value::String("Alice".to_string())));
+
+        // Pattern 2: Entity-typed FactSelector for entity values
+        let entity_selector = Fact::<Value>::select()
+            .the("user/friend")
+            .of(alice.clone()) // Constant entity
+            .is(Term::<Value>::var("friend")); // Variable - should bind to Bob
+
+        let entity_results = entity_selector.query(&artifacts)?.collect_set().await?;
+        assert_eq!(entity_results.len(), 1);
+        assert!(entity_results.contains_binding("friend", &Value::Entity(bob.clone())));
+
+        // Verify only the variable is bound, not the constant
+        for match_frame in entity_results.iter() {
+            assert_eq!(
+                match_frame.variables.len(),
+                1,
+                "Only variable should be bound"
+            );
+        }
+
+        // Pattern 3: Test with all constants (no variables)
+        let constant_selector = Fact::<Value>::select()
+            .the("user/name") // Constant
+            .of(alice.clone()) // Constant
+            .is(Value::String("Alice".to_string())); // Constant
+
+        let constant_results = constant_selector.query(&artifacts)?.collect_set().await?;
+        assert_eq!(constant_results.len(), 1);
+
+        // No variables should be bound
+        for match_frame in constant_results.iter() {
+            assert!(
+                match_frame.variables.is_empty(),
+                "No variables should be bound for all-constant query"
+            );
+        }
 
         Ok(())
     }
 
-    #[cfg(disabled)] // Disabled - needs update for new Query API returning Match instead of Artifact
     #[tokio::test]
     async fn test_type_inference_with_string_literals() -> Result<()> {
-        // This test demonstrates how type inference works with string literals
+        use crate::selection::SelectionExt;
 
-        // Pattern 1: When using Fact::select() without type annotation,
-        // string literals infer to String type
-        let inferred_string_query = Fact::select().the("user/name").is("Bob"); // This infers Fact<String> because "Bob" -> Term<String>
+        // This test demonstrates that queries work with different value types and string literals
 
-        // Pattern 2: When you need Value type, be explicit
-        let value_query = Fact::select()
-            .the("user/email")
-            .is(Value::String("alice@example.com".to_string())); // Explicit Value
-
-        // Pattern 3: String-typed selectors work naturally
-        let string_query = Fact::select().the("user/name").is("Bob"); // Type is already String, works naturally
-
-        // Pattern 4: The specific case from line 602 now works with inference!
-        let admin_query = Fact::select().the("user/role").is("admin"); // Infers as Fact<String>
-
-        // All should compile without ambiguity
+        // Setup test data
         let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
 
-        // Verify they work - the inferred query is actually FactSelector<String>
-        let _inferred_result = inferred_string_query.query(&artifacts);
-        let _value_result = value_query.query(&artifacts);
-        let _string_result = string_query.query(&artifacts);
-        let _admin_result = admin_query.query(&artifacts);
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        let facts = vec![
+            Fact::assert(
+                "user/name".parse::<Attribute>()?,
+                alice.clone(),
+                Value::String("Alice".to_string()),
+            ),
+            Fact::assert(
+                "user/name".parse::<Attribute>()?,
+                bob.clone(),
+                Value::String("Bob".to_string()),
+            ),
+            Fact::assert(
+                "user/role".parse::<Attribute>()?,
+                alice.clone(),
+                Value::String("admin".to_string()),
+            ),
+        ];
+
+        let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
+        artifacts.commit(stream::iter(instructions)).await?;
+
+        // Pattern 1: Find Bob by name using string constant
+        let bob_query = Fact::<Value>::select()
+            .the("user/name")
+            .of(Term::var("user")) // Variable - should bind
+            .is(Value::String("Bob".to_string())); // String constant
+
+        let bob_results = bob_query.query(&artifacts)?.collect_set().await?;
+        assert_eq!(bob_results.len(), 1);
+        assert!(bob_results.contains_binding("user", &Value::Entity(bob.clone())));
+
+        // Pattern 2: Find admin using string constant
+        let admin_query = Fact::<Value>::select()
+            .the("user/role")
+            .of(Term::var("admin_user")) // Variable - should bind to Alice
+            .is(Value::String("admin".to_string())); // String constant
+
+        let admin_results = admin_query.query(&artifacts)?.collect_set().await?;
+        assert_eq!(admin_results.len(), 1);
+        assert!(admin_results.contains_binding("admin_user", &Value::Entity(alice.clone())));
+
+        // Pattern 3: Find all names using variable
+        let names_query = Fact::<Value>::select()
+            .the("user/name") // Constant attribute
+            .of(Term::var("user")) // Variable entity
+            .is(Term::var("name")); // Variable value
+
+        let name_results = names_query.query(&artifacts)?.collect_set().await?;
+        assert_eq!(name_results.len(), 2);
+        assert!(name_results.contains_binding("name", &Value::String("Alice".to_string())));
+        assert!(name_results.contains_binding("name", &Value::String("Bob".to_string())));
 
         Ok(())
     }
 
-    #[cfg(disabled)] // Disabled - needs update for new Query API returning Match instead of Artifact
     #[tokio::test]
     async fn test_mixed_constants_and_variables_succeed() -> Result<()> {
-        // Test that queries with mixed constants and variables succeed
-        // Variables are skipped, constants are used
+        use crate::selection::SelectionExt;
+
+        // Test that queries with mixed constants and variables work correctly
+        // Constants are used for matching, variables get bound
 
         let alice = Entity::new()?;
 
-        let mixed_query = Fact::<Value>::select()
-            .the("user/name") // Constant - used
-            .of(alice) // Constant - used
-            .is(Term::<Value>::var("name")); // Variable - skipped
-
-        // Setup store
+        // Setup store with test data
         let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
 
-        let result = mixed_query.query(&artifacts);
+        let facts = vec![Fact::assert(
+            "user/name".parse::<Attribute>()?,
+            alice.clone(),
+            Value::String("Alice".to_string()),
+        )];
 
-        // Should succeed because we have constants (the and of)
-        assert!(result.is_ok());
+        let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
+        artifacts.commit(stream::iter(instructions)).await?;
+
+        let mixed_query = Fact::<Value>::select()
+            .the("user/name") // Constant - used for matching
+            .of(alice.clone()) // Constant - used for matching
+            .is(Term::<Value>::var("name")); // Variable - should bind to "Alice"
+
+        let results = mixed_query.query(&artifacts)?.collect_set().await?;
+
+        assert_eq!(results.len(), 1, "Should find Alice's name fact");
+
+        // Variable should be bound, constants should not create bindings
+        assert!(results.contains_binding("name", &Value::String("Alice".to_string())));
+
+        // Verify only the variable is bound
+        for match_frame in results.iter() {
+            assert_eq!(
+                match_frame.variables.len(),
+                1,
+                "Only variable should be bound"
+            );
+            assert!(
+                match_frame.variables.contains_key("name"),
+                "Name variable should be bound"
+            );
+        }
 
         Ok(())
     }
 
-    #[cfg(disabled)] // Disabled - needs update for new Query API returning Match instead of Artifact
     #[tokio::test]
     async fn test_only_variables_query_fails() -> Result<()> {
-        // Test that queries with ONLY variables and NO constants fail
+        // Test that queries with ONLY variables and NO constants fail during planning
 
         let query_only_vars = Fact::<Value>::select()
             .the(Term::<Attribute>::var("attr")) // Variable
@@ -883,19 +1038,27 @@ mod integration_tests {
 
         let result = query_only_vars.query(&artifacts);
 
-        // Should fail because there are no constants at all
-        assert!(result.is_err());
+        // Should fail because there are no constants at all - this fails during planning
+        assert!(result.is_err(), "Query with only variables should fail");
+
         if let Err(error) = result {
-            assert!(error.to_string().contains("Variable not supported"));
+            // The error should mention that the selector needs constraints
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("constraint") || error_msg.contains("EmptySelector"),
+                "Error should mention constraint requirements: {}",
+                error_msg
+            );
         }
 
         Ok(())
     }
 
-    #[cfg(disabled)] // Disabled - needs update for new Query API returning Match instead of Artifact
     #[tokio::test]
     async fn test_fluent_query_building_and_execution() -> Result<()> {
-        // This test shows how the Query trait enables fluent query building and execution
+        use crate::selection::SelectionExt;
+
+        // This test shows how the Query trait enables fluent query building and execution with Match API
 
         // Setup
         let storage_backend = MemoryStorageBackend::default();
@@ -930,34 +1093,40 @@ mod integration_tests {
         let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
         artifacts.commit(stream::iter(instructions)).await?;
 
-        // Test fluent query building with immediate execution using Query trait
-        let admin_count = Fact::<Value>::select()
+        // Test 1: Find admin users using fluent query building
+        let admin_results = Fact::<Value>::select()
             .the("user/role")
-            .is(Value::String("admin".to_string()))
+            .of(Term::var("admin_user")) // Variable - binds to admin users
+            .is(Value::String("admin".to_string())) // Constant role
             .query(&artifacts)?
-            .filter_map(|result| async move { result.ok() })
-            .collect::<Vec<_>>()
-            .await
-            .len();
+            .collect_set()
+            .await?;
 
-        assert_eq!(admin_count, 1); // Only Alice is admin
+        assert_eq!(admin_results.len(), 1, "Should find one admin (Alice)");
+        assert!(admin_results.contains_binding("admin_user", &Value::Entity(alice.clone())));
 
-        // Test another fluent query using Query trait
-        let user_names: Vec<String> = Fact::<Value>::select()
-            .the("user/name")
+        // Test 2: Find all user names with set-based collection
+        let name_results = Fact::<Value>::select()
+            .the("user/name") // Constant attribute
+            .of(Term::var("user")) // Variable entity
+            .is(Term::var("name")) // Variable name
             .query(&artifacts)?
-            .filter_map(|result| async move {
-                result.ok().and_then(|artifact| match artifact.is {
-                    Value::String(name) => Some(name),
-                    _ => None,
-                })
-            })
-            .collect::<Vec<_>>()
-            .await;
+            .collect_set()
+            .await?;
 
+        assert_eq!(name_results.len(), 2, "Should find both Alice and Bob");
+
+        // Extract names using values_for convenience method
+        let user_names: Vec<&Value> = name_results.values_for("name");
         assert_eq!(user_names.len(), 2);
-        assert!(user_names.contains(&"Alice".to_string()));
-        assert!(user_names.contains(&"Bob".to_string()));
+
+        // Test contains_value_for convenience method
+        assert!(name_results.contains_value_for("name", &Value::String("Alice".to_string())));
+        assert!(name_results.contains_value_for("name", &Value::String("Bob".to_string())));
+
+        // Test that both users are bound
+        assert!(name_results.contains_binding("user", &Value::Entity(alice.clone())));
+        assert!(name_results.contains_binding("user", &Value::Entity(bob.clone())));
 
         Ok(())
     }
