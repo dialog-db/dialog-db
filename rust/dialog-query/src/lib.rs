@@ -35,7 +35,7 @@ pub use plan::EvaluationPlan;
 pub use premise::Premise;
 pub use query::Query;
 pub use rule::{
-    DerivedRule, DerivedRuleMatch, DerivedRuleMatchPlan, Rule, RuleApplication,
+    Rule, RuleApplication,
     RuleApplicationPlan, Statements, When,
 };
 
@@ -57,7 +57,7 @@ pub mod prelude {
     pub use crate::plan::EvaluationPlan;
     pub use crate::premise::Premise;
     pub use crate::query::Query;
-    pub use crate::rule::{DerivedRule, DerivedRuleMatch, Rule, Statements, When};
+    pub use crate::rule::{Rule, Statements, When};
     pub use crate::selector::Selector;
     pub use crate::statement::{Statement, StatementPlan};
     pub use crate::syntax::VariableScope;

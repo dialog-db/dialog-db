@@ -73,10 +73,6 @@ impl<T: IntoValueDataType + Clone + 'static> Default for Type<T> {
     }
 }
 
-// #[test]
-// fn test_type_default() {
-//     let out = Into::<Option<ValueDataType>>::into(PhantomData);
-// }
 
 // impl<T: IntoValueDataType + Clone + 'static> From<PhantomData<T>> for ValueDataType {
 //     fn from(_value: PhantomData<T>) -> Self {
