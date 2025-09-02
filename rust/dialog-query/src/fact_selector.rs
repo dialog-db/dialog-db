@@ -741,7 +741,7 @@ mod tests {
 
         // Setup
         let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
+        let _artifacts = Artifacts::anonymous(storage_backend).await?;
 
         // Create fact selector with all variables (no constants)
         let fact_selector: FactSelector<Value> = FactSelector::new()

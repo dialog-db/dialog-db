@@ -13,7 +13,6 @@ pub trait Selection: Stream<Item = Result<Match, QueryError>> + 'static + Condit
 impl<S> Selection for S where S: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend
 {}
 
-
 /// A collection of matches with set semantics
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchSet {
@@ -22,7 +21,9 @@ pub struct MatchSet {
 
 impl MatchSet {
     pub fn new() -> Self {
-        Self { matches: Vec::new() }
+        Self {
+            matches: Vec::new(),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -43,23 +44,24 @@ impl MatchSet {
 
     /// Check if the set contains a match with the given variable bindings
     pub fn contains_binding(&self, var_name: &str, expected_value: &Value) -> bool {
-        self.matches.iter().any(|m| {
-            m.variables.get(var_name) == Some(expected_value)
-        })
+        self.matches
+            .iter()
+            .any(|m| m.variables.get(var_name) == Some(expected_value))
     }
 
     /// Check if the set contains a match where all given bindings are present
     pub fn contains_bindings(&self, bindings: &BTreeMap<String, Value>) -> bool {
         self.matches.iter().any(|m| {
-            bindings.iter().all(|(var, val)| {
-                m.variables.get(var) == Some(val)
-            })
+            bindings
+                .iter()
+                .all(|(var, val)| m.variables.get(var) == Some(val))
         })
     }
 
     /// Get all values for a given variable across all matches
     pub fn values_for(&self, var_name: &str) -> Vec<&Value> {
-        self.matches.iter()
+        self.matches
+            .iter()
             .filter_map(|m| m.variables.get(var_name))
             .collect()
     }
@@ -87,6 +89,7 @@ impl FromIterator<Match> for MatchSet {
 /// Extension trait for Selection streams to provide convenient collection methods
 pub trait SelectionExt: Selection {
     /// Collect all matches into a Vec, propagating any errors
+    #[allow(async_fn_in_trait)]
     async fn collect_matches(self) -> Result<Vec<Match>, QueryError>
     where
         Self: Sized,
@@ -96,6 +99,7 @@ pub trait SelectionExt: Selection {
     }
 
     /// Collect all matches into a MatchSet with set semantics, propagating any errors
+    #[allow(async_fn_in_trait)]
     async fn collect_set(self) -> Result<MatchSet, QueryError>
     where
         Self: Sized,

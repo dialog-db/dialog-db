@@ -7,7 +7,7 @@
 //! and follows the patterns described in the design document at notes/rules.md.
 
 // use crate::attribute::{Attribute, Match as AttributeMatch};
-use crate::artifact::{ArtifactStore, Value};
+use crate::artifact::Value;
 use crate::concept::Concept;
 use crate::error::{QueryError, QueryResult};
 use crate::fact_selector::FactSelector;
@@ -925,13 +925,11 @@ mod tests {
         assert_eq!(when_result.len(), 2);
 
         // Verify the statements are correct
-        if let Statement::Select(ref selector) = when_result[0] {
-            assert!(selector.the.is_some());
-            assert!(selector.of.is_some());
-            assert!(selector.is.is_some());
-        } else {
-            panic!("Expected FactSelector statement");
-        }
+        let Statement::Select(ref selector) = when_result[0];
+
+        assert!(selector.the.is_some());
+        assert!(selector.of.is_some());
+        assert!(selector.is.is_some());
     }
 
     // #[test]
@@ -1114,13 +1112,10 @@ mod tests {
 
         // Test 7: Verify all statements are correct
         for statement in &when4 {
-            if let Statement::Select(ref selector) = statement {
-                assert!(selector.the.is_some());
-                assert!(selector.of.is_some());
-                assert!(selector.is.is_some());
-            } else {
-                panic!("Expected FactSelector statement");
-            }
+            let Statement::Select(ref selector) = statement;
+            assert!(selector.the.is_some());
+            assert!(selector.of.is_some());
+            assert!(selector.is.is_some());
         }
     }
 
@@ -1167,13 +1162,10 @@ mod tests {
         // Verify all statements are properly converted
         for when_result in [when1, when2, when3] {
             for stmt in when_result {
-                if let Statement::Select(ref selector) = stmt {
-                    assert!(selector.the.is_some());
-                    assert!(selector.of.is_some());
-                    assert!(selector.is.is_some());
-                } else {
-                    panic!("Expected Statement::Select");
-                }
+                let Statement::Select(ref selector) = stmt;
+                assert!(selector.the.is_some());
+                assert!(selector.of.is_some());
+                assert!(selector.is.is_some());
             }
         }
     }

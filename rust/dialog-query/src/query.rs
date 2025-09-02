@@ -84,13 +84,11 @@ impl<E: EvaluationPlan + 'static, P: Premise<Plan = E>> Query for P {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::{
-        ArtifactStore, ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value,
-    };
+    use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value};
     use crate::{Fact, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
-    use futures_util::{stream, StreamExt};
+    use futures_util::stream;
 
     #[tokio::test]
     async fn test_fact_selector_query_trait() -> Result<()> {

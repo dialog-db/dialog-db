@@ -1,9 +1,5 @@
-use dialog_query::artifact::Entity;
-use dialog_query::attribute::Attribute;
-use dialog_query::fact::Scalar;
-use dialog_query::rule::{Match, Rule};
-use dialog_query::{Statement, Statements, Term};
-use std::marker::PhantomData;
+use dialog_query::rule::Statements;
+use dialog_query::Term;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Person {
@@ -15,11 +11,9 @@ mod person {
     pub use super::Person;
     use dialog_query::artifact::{Entity, Value, ValueDataType};
     use dialog_query::attribute::{Attribute, Cardinality};
-    use dialog_query::concept::Concept;
-    use dialog_query::fact::Scalar;
-    use dialog_query::rule::Rule;
+
+    use dialog_query::concept;
     use dialog_query::term::Term;
-    use dialog_query::{concept, selection};
     use std::marker::PhantomData;
 
     pub const NAMESPACE: &'static str = "person";
@@ -93,7 +87,7 @@ mod person {
                     } else {
                         Term::blank()
                     }
-                },
+                }
             }
         }
     }
@@ -109,7 +103,7 @@ mod person {
             NAMESPACE
         }
 
-        fn r#match<T: Into<Term<Entity>>>(this: T) -> Self::Attributes {
+        fn r#match<T: Into<Term<Entity>>>(_this: T) -> Self::Attributes {
             Attributes
         }
     }
@@ -131,6 +125,6 @@ fn main() {
         age: Term::blank(),
     };
 
-    let statements = alice.statements();
+    let _statements = alice.statements();
     // TODO: Implement main function
 }

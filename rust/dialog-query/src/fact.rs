@@ -387,16 +387,15 @@ mod integration_tests {
 
     use super::*;
     use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value};
-    use crate::error::QueryResult;
     use crate::{Query, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
-    use futures_util::{stream, StreamExt};
+    use futures_util::stream;
 
     #[tokio::test]
     async fn test_fact_assert_retract_and_query_with_variables() -> Result<()> {
         use crate::selection::SelectionExt;
-        
+
         // Setup: Create in-memory storage and artifacts store
         let storage_backend = MemoryStorageBackend::default();
         let mut artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -436,19 +435,22 @@ mod integration_tests {
         // Step 4: Test 1 - Named variables should get bound in matches
         let query_with_named_vars = Fact::<Value>::select()
             .the("user/name")
-            .of(Term::var("user"))  // Named variable - should be bound
+            .of(Term::var("user")) // Named variable - should be bound
             .is(Term::var("name")); // Named variable - should be bound
 
-        let matches = query_with_named_vars.query(&artifacts)?.collect_set().await?;
-        
+        let matches = query_with_named_vars
+            .query(&artifacts)?
+            .collect_set()
+            .await?;
+
         assert_eq!(matches.len(), 2, "Should find both Alice and Bob");
-        
+
         // Test .contains() style assertions with set semantics
         assert!(matches.contains_binding("name", &Value::String("Alice".to_string())));
         assert!(matches.contains_binding("name", &Value::String("Bob".to_string())));
         assert!(matches.contains_binding("user", &Value::Entity(alice.clone())));
         assert!(matches.contains_binding("user", &Value::Entity(bob.clone())));
-        
+
         // Test values_for() to get all values and contains_value_for()
         let names = matches.values_for("name");
         assert_eq!(names.len(), 2);
@@ -457,37 +459,47 @@ mod integration_tests {
 
         // Step 5: Test 2 - Unnamed variables should not get bound
         let query_with_wildcards = Fact::<Value>::select()
-            .the("user/email") 
-            .of(Term::blank())  // Unnamed variable (wildcard) - should not be bound
+            .the("user/email")
+            .of(Term::blank()) // Unnamed variable (wildcard) - should not be bound
             .is(Term::blank()); // Unnamed variable (wildcard) - should not be bound
 
-        let wildcard_matches = query_with_wildcards.query(&artifacts)?.collect_set().await?;
-        
+        let wildcard_matches = query_with_wildcards
+            .query(&artifacts)?
+            .collect_set()
+            .await?;
+
         assert_eq!(wildcard_matches.len(), 1, "Should find Alice's email");
-        
+
         // Verify no variables are bound (set should have empty variable maps)
         for match_frame in wildcard_matches.iter() {
-            assert!(match_frame.variables.is_empty(), "Wildcards should not bind variables");
+            assert!(
+                match_frame.variables.is_empty(),
+                "Wildcards should not bind variables"
+            );
         }
 
         // Step 6: Test 3 - Mixed named and unnamed variables
         let mixed_query = Fact::<Value>::select()
             .the("user/name")
-            .of(Term::var("person"))  // Named - should be bound
-            .is(Term::blank());       // Unnamed - should not be bound
+            .of(Term::var("person")) // Named - should be bound
+            .is(Term::blank()); // Unnamed - should not be bound
 
         let mixed_matches = mixed_query.query(&artifacts)?.collect_set().await?;
-        
+
         assert_eq!(mixed_matches.len(), 2, "Should find both users");
-        
+
         // Test that only named variable is bound
         assert!(mixed_matches.contains_binding("person", &Value::Entity(alice.clone())));
         assert!(mixed_matches.contains_binding("person", &Value::Entity(bob.clone())));
-        
+
         // Verify unnamed variable didn't get bound - all matches should only have "person" key
         for match_frame in mixed_matches.iter() {
             let variables: Vec<String> = match_frame.variables.keys().cloned().collect();
-            assert_eq!(variables, vec!["person"], "Only named variable should be bound");
+            assert_eq!(
+                variables,
+                vec!["person"],
+                "Only named variable should be bound"
+            );
         }
 
         Ok(())
@@ -496,7 +508,7 @@ mod integration_tests {
     #[tokio::test]
     async fn test_retraction_workflow() -> Result<()> {
         use crate::selection::SelectionExt;
-        
+
         // Setup
         let storage_backend = MemoryStorageBackend::default();
         let mut artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -517,7 +529,7 @@ mod integration_tests {
         // Step 2: Verify fact exists using constant entity (no variables should be bound)
         let query_constant = Fact::<Value>::select()
             .the("user/name")
-            .of(alice.clone())  // Constant entity
+            .of(alice.clone()) // Constant entity
             .is(Term::var("name")); // Variable value - should be bound
 
         let results = query_constant.query(&artifacts)?.collect_set().await?;
@@ -542,7 +554,7 @@ mod integration_tests {
         // Step 4: Verify fact is gone using the same constant query
         let query2 = Fact::<Value>::select()
             .the("user/name")
-            .of(alice.clone())  // Same constant entity
+            .of(alice.clone()) // Same constant entity
             .is(Term::var("name"));
 
         let results2 = query2.query(&artifacts)?.collect_set().await?;
@@ -555,7 +567,7 @@ mod integration_tests {
     #[tokio::test]
     async fn test_constants_vs_variables_binding() -> Result<()> {
         use crate::selection::SelectionExt;
-        
+
         // Setup
         let storage_backend = MemoryStorageBackend::default();
         let mut artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -565,9 +577,21 @@ mod integration_tests {
 
         // Create facts
         let facts = vec![
-            Fact::assert("user/name".parse::<Attribute>()?, alice.clone(), Value::String("Alice".to_string())),
-            Fact::assert("user/name".parse::<Attribute>()?, bob.clone(), Value::String("Bob".to_string())),
-            Fact::assert("user/age".parse::<Attribute>()?, alice.clone(), Value::UnsignedInt(30)),
+            Fact::assert(
+                "user/name".parse::<Attribute>()?,
+                alice.clone(),
+                Value::String("Alice".to_string()),
+            ),
+            Fact::assert(
+                "user/name".parse::<Attribute>()?,
+                bob.clone(),
+                Value::String("Bob".to_string()),
+            ),
+            Fact::assert(
+                "user/age".parse::<Attribute>()?,
+                alice.clone(),
+                Value::UnsignedInt(30),
+            ),
         ];
 
         let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
@@ -575,43 +599,53 @@ mod integration_tests {
 
         // Test 1: All constants - no variables should be bound
         let all_constants_query = Fact::<Value>::select()
-            .the("user/name")                                    // Constant attribute
-            .of(alice.clone())                                   // Constant entity  
-            .is(Value::String("Alice".to_string()));            // Constant value
+            .the("user/name") // Constant attribute
+            .of(alice.clone()) // Constant entity
+            .is(Value::String("Alice".to_string())); // Constant value
 
         let constant_results = all_constants_query.query(&artifacts)?.collect_set().await?;
-        
+
         assert_eq!(constant_results.len(), 1, "Should find Alice's name fact");
         // No variables should be bound since all terms are constants
         for match_frame in constant_results.iter() {
-            assert!(match_frame.variables.is_empty(), "Constants should not create variable bindings");
+            assert!(
+                match_frame.variables.is_empty(),
+                "Constants should not create variable bindings"
+            );
         }
 
         // Test 2: Mixed constants and variables - only variables should be bound
         let mixed_query = Fact::<Value>::select()
-            .the("user/name")                                    // Constant attribute
-            .of(Term::var("person"))                             // Variable entity - should bind
-            .is(Value::String("Alice".to_string()));            // Constant value
+            .the("user/name") // Constant attribute
+            .of(Term::var("person")) // Variable entity - should bind
+            .is(Value::String("Alice".to_string())); // Constant value
 
         let mixed_results = mixed_query.query(&artifacts)?.collect_set().await?;
-        
+
         assert_eq!(mixed_results.len(), 1, "Should find Alice specifically");
         // Only the entity variable should be bound
         assert!(mixed_results.contains_binding("person", &Value::Entity(alice.clone())));
         // Verify only one variable is bound
         for match_frame in mixed_results.iter() {
-            assert_eq!(match_frame.variables.len(), 1, "Only one variable should be bound");
-            assert!(match_frame.variables.contains_key("person"), "Should bind the entity variable");
+            assert_eq!(
+                match_frame.variables.len(),
+                1,
+                "Only one variable should be bound"
+            );
+            assert!(
+                match_frame.variables.contains_key("person"),
+                "Should bind the entity variable"
+            );
         }
 
         // Test 3: Constant that finds multiple facts via variable
         let find_all_names = Fact::<Value>::select()
-            .the("user/name")                                    // Constant attribute
-            .of(Term::var("person"))                             // Variable entity
-            .is(Term::var("name"));                              // Variable value
+            .the("user/name") // Constant attribute
+            .of(Term::var("person")) // Variable entity
+            .is(Term::var("name")); // Variable value
 
         let all_name_results = find_all_names.query(&artifacts)?.collect_set().await?;
-        
+
         assert_eq!(all_name_results.len(), 2, "Should find both Alice and Bob");
         assert!(all_name_results.contains_binding("person", &Value::Entity(alice.clone())));
         assert!(all_name_results.contains_binding("person", &Value::Entity(bob.clone())));
