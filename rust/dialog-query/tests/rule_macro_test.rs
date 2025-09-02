@@ -1,5 +1,5 @@
 use dialog_query::attribute::Cardinality;
-use dialog_query::concept::{Attributes, Concept, Instance};
+use dialog_query::concept::{Attributes, Concept};
 use dialog_query::rule::Match;
 use dialog_query::{Rule, Statements, Term, ValueDataType};
 
@@ -88,8 +88,8 @@ fn test_concept_generation() {
     let person_query = PersonAttributes::of(Term::var("entity"));
     person_query.name.is("John");
     person_query.birthday.is(1990);
-    
-    // Test calling the trait method directly 
+
+    // Test calling the trait method directly
     let person_query2 = PersonAttributes::of(Term::var("entity2"));
     person_query2.name.is("Jane");
     person_query2.birthday.is(1985);

@@ -7,7 +7,7 @@
 //! and follows the patterns described in the design document at notes/rules.md.
 
 // use crate::attribute::{Attribute, Match as AttributeMatch};
-use crate::artifact::{Entity, Value};
+use crate::artifact::Value;
 use crate::concept::Concept;
 use crate::error::{QueryError, QueryResult};
 use crate::fact_selector::FactSelector;
@@ -46,44 +46,48 @@ pub type Instance<T: Concept> = T::Instance;
 ///
 /// # Usage Patterns
 ///
-/// ```rust,ignore
-/// use dialog_query::{When, FactSelector, Term, Value, when, Rule};
-/// use std::collections::BTreeMap;
+/// ```rust
+/// use dialog_query::{When, FactSelector, Term, Value};
 ///
-/// struct ExampleRule {
-///     selector1: FactSelector<Value>,
-///     selector2: FactSelector<Value>,
-///     selector3: FactSelector<Value>,
+/// // Example of creating When collections with different syntax options
+/// fn demonstrate_when_creation() -> When {
+///     let selector1 = FactSelector::<Value> {
+///         the: Some(Term::from("example/field1".parse::<dialog_artifacts::Attribute>().unwrap())),
+///         of: Some(Term::var("entity")),
+///         is: Some(Term::var("value1")),
+///         fact: None,
+///     };
+///
+///     let selector2 = FactSelector::<Value> {
+///         the: Some(Term::from("example/field2".parse::<dialog_artifacts::Attribute>().unwrap())),
+///         of: Some(Term::var("entity")),
+///         is: Some(Term::var("value2")),
+///         fact: None,
+///     };
+///
+///     // Multiple syntax options for creating When:
+///
+///     // Option 1: Array syntax with From trait - clean and direct
+///     let when1: When = [selector1.clone(), selector2.clone()].into();
+///
+///     // Option 2: Vec syntax
+///     let when2: When = vec![selector1.clone(), selector2.clone()].into();
+///
+///     // Option 3: Operator chaining - reads like logical AND
+///     let when3 = selector1.clone() & selector2.clone();
+///
+///     // All approaches create equivalent When collections
+///     assert_eq!(when1.len(), 2);
+///     assert_eq!(when2.len(), 2);
+///     assert_eq!(when3.len(), 2);
+///
+///     when1
 /// }
 ///
-/// struct ExampleMatch {
-///     selector1: FactSelector<Value>,
-///     selector2: FactSelector<Value>,
-///     selector3: FactSelector<Value>,
-/// }
-///
-/// impl Rule for ExampleRule {
-///     type Match = ExampleMatch;
-///
-///     fn when(terms: Self::Match) -> When {
-///         // Option 1: Array syntax with From trait - clean and direct
-///         [terms.selector1, terms.selector2, terms.selector3].into()
-///
-///         // Option 2: Macro syntax - most concise
-///         // when![terms.selector1, terms.selector2, terms.selector3]
-///
-///         // Option 3: Operator chaining - reads like logical AND
-///         // terms.selector1 & terms.selector2 & terms.selector3
-///     }
-///
-///     fn r#match(&self, variables: BTreeMap<String, Term<Value>>) -> Self::Match {
-///         ExampleMatch {
-///             selector1: self.selector1.clone(),
-///             selector2: self.selector2.clone(),
-///             selector3: self.selector3.clone(),
-///         }
-///     }
-/// }
+/// // For generated Rule structs, use the derive macro and Attributes::of pattern:
+/// // #[derive(Rule, Debug, Clone)]
+/// // struct Person { name: String, age: u32 }
+/// // let query = PersonAttributes::of(Term::var("entity"));
 /// ```
 /// Trait for types that can be converted into multiple statements
 ///
@@ -499,7 +503,7 @@ impl crate::concept::Attributes for DerivedRuleAttributes {
         // For now, return empty slice as DerivedRule attributes are dynamic
         &[]
     }
-    
+
     fn of<T: Into<crate::term::Term<crate::artifact::Entity>>>(entity: T) -> Self {
         DerivedRuleAttributes {
             entity: entity.into(),

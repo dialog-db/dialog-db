@@ -55,8 +55,8 @@ mod person {
         fn attributes() -> &'static [(&'static str, Attribute<Value>)] {
             ATTRIBUTES
         }
-        
-        fn of<T: Into<Term<Entity>>>(entity: T) -> Self {
+
+        fn of<T: Into<Term<Entity>>>(_entity: T) -> Self {
             Attributes
         }
     }
