@@ -1,8 +1,7 @@
 use dialog_query::attribute::Cardinality;
-use dialog_query::concept::Concept;
-use dialog_query::rule::{Match, Rule};
-use dialog_query::*;
-use dialog_query_macros::Rule;
+use dialog_query::concept::{Attributes, Concept, Instance};
+use dialog_query::rule::Match;
+use dialog_query::{Rule, Statements, Term, ValueDataType};
 
 #[derive(Rule, Debug, Clone)]
 pub struct Person {
@@ -46,8 +45,8 @@ fn test_derive_rule_generates_types() {
     assert_eq!(attrs[1].1.description, "Birthday of the person");
     assert_eq!(attrs[1].1.data_type(), Some(ValueDataType::UnsignedInt));
 
-    // Test the r#match function
-    let _attributes = Person::r#match(entity.clone());
+    // Test the new Attributes::of function
+    let _attributes = PersonAttributes::of(entity.clone());
     // The attributes should be created successfully
     assert_eq!(_attributes.name.the(), "person/name");
     assert_eq!(_attributes.birthday.the(), "person/birthday");
@@ -58,6 +57,9 @@ fn test_derive_rule_generates_types() {
         _attributes.birthday.attribute.description,
         "Birthday of the person"
     );
+
+    // Test fluent API
+    _attributes.name.is("John Doe");
 
     // Test that Person implements Rule
     let test_match = Match::<Person> {
@@ -78,4 +80,17 @@ fn test_static_attributes_generation() {
     assert_eq!(PERSON_NAME.name, "name");
     assert_eq!(PERSON_BIRTHDAY.namespace, "person");
     assert_eq!(PERSON_BIRTHDAY.name, "birthday");
+}
+
+#[test]
+fn test_concept_generation() {
+    // Test the new Attributes::of approach
+    let person_query = PersonAttributes::of(Term::var("entity"));
+    person_query.name.is("John");
+    person_query.birthday.is(1990);
+    
+    // Test calling the trait method directly 
+    let person_query2 = PersonAttributes::of(Term::var("entity2"));
+    person_query2.name.is("Jane");
+    person_query2.birthday.is(1985);
 }

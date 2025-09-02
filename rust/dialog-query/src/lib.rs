@@ -26,6 +26,8 @@ pub mod term;
 pub mod types;
 
 pub use artifact::{Entity, Value, ValueDataType};
+pub use attribute::{Attribute, Cardinality};
+pub use concept::Concept;
 pub use error::{InconsistencyError, QueryError};
 pub use fact::{assert, retract, Assertion, Claim, Fact, Retraction};
 pub use fact_selector::{FactSelector, FactSelectorPlan};
@@ -36,6 +38,8 @@ pub use rule::{
     DerivedRule, DerivedRuleMatch, DerivedRuleMatchPlan, Rule, RuleApplication,
     RuleApplicationPlan, Statements, When,
 };
+
+pub use dialog_query_macros::Rule;
 pub use selection::{Match, MatchSet, Selection, SelectionExt};
 pub use selector::Selector;
 pub use statement::{Statement, StatementPlan};
@@ -43,20 +47,6 @@ pub use stream::*;
 pub use syntax::VariableScope;
 pub use term::*;
 pub use types::IntoValueDataType;
-
-/// Cardinality indicates whether an attribute can have one or many values
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Cardinality {
-    One,
-    Many,
-}
-
-/// Trait for attribute types that can be used in relations
-pub trait Attribute {
-    fn name() -> &'static str;
-    fn cardinality() -> Cardinality;
-    fn value_type() -> ValueDataType;
-}
 
 /// Re-export commonly used types
 pub mod prelude {

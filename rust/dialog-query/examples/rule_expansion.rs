@@ -55,6 +55,10 @@ mod person {
         fn attributes() -> &'static [(&'static str, Attribute<Value>)] {
             ATTRIBUTES
         }
+        
+        fn of<T: Into<Term<Entity>>>(entity: T) -> Self {
+            Attributes
+        }
     }
 
     pub struct Assert;
@@ -101,10 +105,6 @@ mod person {
 
         fn name() -> &'static str {
             NAMESPACE
-        }
-
-        fn r#match<T: Into<Term<Entity>>>(_this: T) -> Self::Attributes {
-            Attributes
         }
     }
 

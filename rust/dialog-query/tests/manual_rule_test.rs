@@ -134,15 +134,6 @@ impl Concept for Person {
     fn name() -> &'static str {
         "person"
     }
-
-    fn r#match<T: Into<Term<Entity>>>(this: T) -> Self::Attributes {
-        let entity = this.into();
-        PersonAttributes {
-            this: entity.clone(),
-            name: person::NAME_ATTR.of(entity.clone()),
-            age: person::AGE_ATTR.of(entity),
-        }
-    }
 }
 
 impl ConceptMatch for PersonMatch {
@@ -162,6 +153,15 @@ impl ConceptMatch for PersonMatch {
 impl Attributes for PersonAttributes {
     fn attributes() -> &'static [(&'static str, Attribute<Value>)] {
         person::ATTRIBUTE_TUPLES
+    }
+    
+    fn of<T: Into<Term<Entity>>>(entity: T) -> Self {
+        let entity = entity.into();
+        PersonAttributes {
+            this: entity.clone(),
+            name: person::NAME_ATTR.of(entity.clone()),
+            age: person::AGE_ATTR.of(entity),
+        }
     }
 }
 
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn test_person_match_creation() {
         let entity = Term::var("person_entity");
-        let attributes = Person::r#match(entity.clone());
+        let attributes = PersonAttributes::of(entity.clone());
 
         // Verify the attributes object is created correctly
         assert_eq!(attributes.name.the(), "person/name");
@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(conditions.len(), 2);
 
         // 3. Alternative: Use the fluent API
-        let query = Person::r#match(Term::var("person"));
+        let query = PersonAttributes::of(Term::var("person"));
         let name_selector = query.name.is("Alice");
         let age_selector = query.age.is(30u32);
 

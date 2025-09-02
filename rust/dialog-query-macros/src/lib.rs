@@ -295,6 +295,14 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
             fn attributes() -> &'static [(&'static str, dialog_query::attribute::Attribute<dialog_query::artifact::Value>)] {
                 #attribute_tuples_name
             }
+            
+            fn of<T: Into<dialog_query::term::Term<dialog_query::artifact::Entity>>>(entity: T) -> Self {
+                let entity = entity.into();
+                #attributes_name {
+                    this: entity.clone(),
+                    #(#attribute_init_fields),*
+                }
+            }
         }
 
         // Implement Instance trait for the concept struct
@@ -316,14 +324,6 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
 
             fn name() -> &'static str {
                 #namespace_lit
-            }
-
-            fn r#match<T: Into<dialog_query::term::Term<dialog_query::artifact::Entity>>>(this: T) -> Self::Attributes {
-                let entity = this.into();
-                #attributes_name {
-                    this: entity.clone(),
-                    #(#attribute_init_fields),*
-                }
             }
         }
 
