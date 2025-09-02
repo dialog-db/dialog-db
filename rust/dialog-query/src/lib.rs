@@ -36,7 +36,7 @@ pub use rule::{
     DerivedRule, DerivedRuleMatch, DerivedRuleMatchPlan, Rule, RuleApplication,
     RuleApplicationPlan, Statements, When,
 };
-pub use selection::{Match, Selection};
+pub use selection::{Match, Selection, SelectionExt};
 pub use selector::Selector;
 pub use statement::{Statement, StatementPlan};
 pub use stream::*;

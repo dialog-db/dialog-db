@@ -13,6 +13,20 @@ pub trait Selection: Stream<Item = Result<Match, QueryError>> + 'static + Condit
 impl<S> Selection for S where S: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend
 {}
 
+/// Extension trait for Selection streams to provide convenient collection methods
+pub trait SelectionExt: Selection {
+    /// Collect all matches into a Vec, propagating any errors
+    async fn collect_matches(self) -> Result<Vec<Match>, QueryError>
+    where
+        Self: Sized,
+    {
+        use futures_util::TryStreamExt;
+        self.try_collect().await
+    }
+}
+
+impl<S: Selection> SelectionExt for S {}
+
 #[derive(Clone, Debug)]
 pub struct Match {
     pub variables: Arc<BTreeMap<String, Value>>,

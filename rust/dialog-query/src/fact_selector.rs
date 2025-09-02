@@ -11,7 +11,7 @@
 //! The selector supports both direct querying (when all terms are constants) and
 //! pattern matching evaluation (when variables are involved).
 
-use crate::artifact::{ArtifactSelector, ArtifactStore, Attribute, Constrained, Entity, Value};
+use crate::artifact::{ArtifactSelector, Attribute, Constrained, Entity, Value};
 use crate::error::{QueryError, QueryResult};
 use crate::plan::{Cost, EvaluationContext, EvaluationPlan};
 use crate::query::Store;

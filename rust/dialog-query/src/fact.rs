@@ -393,9 +393,10 @@ mod integration_tests {
     use dialog_storage::MemoryStorageBackend;
     use futures_util::{stream, StreamExt};
 
-    #[cfg(disabled)] // Disabled - needs update for new Query API returning Match instead of Artifact
     #[tokio::test]
-    async fn test_fact_assert_retract_and_query_constants() -> Result<()> {
+    async fn test_fact_assert_retract_and_query_with_variables() -> Result<()> {
+        use crate::selection::SelectionExt;
+        
         // Setup: Create in-memory storage and artifacts store
         let storage_backend = MemoryStorageBackend::default();
         let mut artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -432,64 +433,61 @@ mod integration_tests {
 
         artifacts.commit(stream::iter(instructions)).await?;
 
-        // Step 4: Query using Fact::select DSL with Query trait
-
-        // Query 1: Find Alice specifically by name using Query trait
-        let alice_query = Fact::select()
+        // Step 4: Test 1 - Named variables should get bound in matches
+        let query_with_named_vars = Fact::<Value>::select()
             .the("user/name")
-            .of(alice.clone())
-            .is(Value::String("Alice".to_string()));
+            .of(Term::var("user"))  // Named variable - should be bound
+            .is(Term::var("name")); // Named variable - should be bound
 
-        let alice_results = alice_query
-            .query(&artifacts)?
-            .filter_map(|result| async move { result.ok() })
-            .collect::<Vec<_>>()
-            .await;
+        let matches = query_with_named_vars.query(&artifacts)?.collect_matches().await?;
+        
+        assert_eq!(matches.len(), 2, "Should find both Alice and Bob");
+        
+        // Verify both matches have the named variables bound
+        for match_frame in &matches {
+            let user_entity: Entity = match_frame.get(&Term::var("user"))?;
+            let name_value: String = match_frame.get(&Term::var("name"))?;
+            
+            // Should be either Alice or Bob
+            assert!(name_value == "Alice" || name_value == "Bob");
+            if name_value == "Alice" {
+                assert_eq!(user_entity, alice);
+            } else {
+                assert_eq!(user_entity, bob);
+            }
+        }
 
-        assert_eq!(alice_results.len(), 1);
-        assert_eq!(alice_results[0].of, alice);
-        assert_eq!(alice_results[0].is, Value::String("Alice".to_string()));
+        // Step 5: Test 2 - Unnamed variables should not get bound
+        let query_with_wildcards = Fact::<Value>::select()
+            .the("user/email") 
+            .of(Term::blank())  // Unnamed variable (wildcard) - should not be bound
+            .is(Term::blank()); // Unnamed variable (wildcard) - should not be bound
 
-        // Query 2: Find Alice's email specifically using Query trait
-        let alice_email_query = Fact::select()
-            .the("user/email")
-            .of(alice.clone())
-            .is("alice@example.com");
+        let wildcard_matches = query_with_wildcards.query(&artifacts)?.collect_matches().await?;
+        
+        assert_eq!(wildcard_matches.len(), 1, "Should find Alice's email");
+        
+        // Verify the match frame is empty (no variables bound)
+        assert!(wildcard_matches[0].variables.is_empty(), "Wildcards should not bind variables");
 
-        let alice_email_results = alice_email_query
-            .query(&artifacts)?
-            .filter_map(|result| async move { result.ok() })
-            .collect::<Vec<_>>()
-            .await;
+        // Step 6: Test 3 - Mixed named and unnamed variables
+        let mixed_query = Fact::<Value>::select()
+            .the("user/name")
+            .of(Term::var("person"))  // Named - should be bound
+            .is(Term::blank());       // Unnamed - should not be bound
 
-        assert_eq!(alice_email_results.len(), 1);
-        assert_eq!(
-            alice_email_results[0].is,
-            Value::String("alice@example.com".to_string())
-        );
-
-        // Query 3: Find all facts with user/name attribute using Query trait
-        let all_names_query = Fact::<String>::select().the("user/name");
-
-        let all_names_results = all_names_query
-            .query(&artifacts)?
-            .filter_map(|result| async move { result.ok() })
-            .collect::<Vec<_>>()
-            .await;
-
-        assert_eq!(all_names_results.len(), 2); // Alice and Bob
-
-        // Verify we have both names
-        let names: Vec<String> = all_names_results
-            .iter()
-            .map(|artifact| match &artifact.is {
-                Value::String(s) => s.clone(),
-                _ => panic!("Expected string value"),
-            })
-            .collect();
-
-        assert!(names.contains(&"Alice".to_string()));
-        assert!(names.contains(&"Bob".to_string()));
+        let mixed_matches = mixed_query.query(&artifacts)?.collect_matches().await?;
+        
+        assert_eq!(mixed_matches.len(), 2, "Should find both users");
+        
+        for match_frame in &mixed_matches {
+            let person_entity: Entity = match_frame.get(&Term::var("person"))?;
+            assert!(person_entity == alice || person_entity == bob);
+            
+            // Verify unnamed variable didn't get bound
+            let variables: Vec<String> = match_frame.variables.keys().cloned().collect();
+            assert_eq!(variables, vec!["person"], "Only named variable should be bound");
+        }
 
         Ok(())
     }
