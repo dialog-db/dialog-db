@@ -11,25 +11,18 @@
 //! The selector supports both direct querying (when all terms are constants) and
 //! pattern matching evaluation (when variables are involved).
 
-use crate::artifact::{
-    Artifact, ArtifactSelector, ArtifactStore, Attribute, Constrained, DialogArtifactsError,
-    Entity, Value,
-};
+use crate::artifact::{ArtifactSelector, ArtifactStore, Attribute, Constrained, Entity, Value};
 use crate::error::{QueryError, QueryResult};
 use crate::plan::{Cost, EvaluationContext, EvaluationPlan};
-use crate::query::Query;
+use crate::query::Store;
 use crate::selection::{Match, Selection};
-use crate::syntax::Syntax;
 use crate::syntax::VariableScope;
 use crate::term::Term;
 use crate::types::Scalar;
-use crate::{Fact, Premise};
+use crate::Premise;
 use async_stream::try_stream;
 // Remove unused import - dialog_storage::Storage doesn't exist
-use futures_util::Stream;
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::marker::PhantomData;
 
 /// FactSelector for pattern matching facts during queries
 ///
@@ -281,11 +274,7 @@ impl<T> EvaluationPlan for FactSelectorPlan<T>
 where
     T: Scalar + Into<Value> + Send + PartialEq<Value> + Sync + std::convert::TryFrom<Value>,
 {
-    fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> impl Selection
-    where
-        S: ArtifactStore + Clone + Send + 'static,
-        M: Selection,
-    {
+    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
         let selector = self.selector.clone();
         try_stream! {
             for await frame in context.selection {
@@ -323,31 +312,24 @@ where
     }
 }
 
-impl<T> Query for FactSelectorPlan<T>
-where
-    T: Scalar + Into<Value> + Send + PartialEq<Value> + Sync + std::convert::TryFrom<Value>,
-{
-    fn query<S>(
-        &self,
-        store: &S,
-    ) -> QueryResult<
-        impl futures_core::Stream<
-                Item = Result<dialog_artifacts::Artifact, dialog_artifacts::DialogArtifactsError>,
-            > + 'static,
-    >
-    where
-        S: ArtifactStore,
-    {
-        // Try to convert to ArtifactSelector if all terms are constants
-        match self.try_into() {
-            Ok(artifact_selector) => Ok(store.select(artifact_selector)),
-            Err(_) => Err(crate::error::QueryError::VariableNotSupported {
-                message: "Query trait does not support variables yet - requires constants only"
-                    .to_string(),
-            }),
-        }
-    }
-}
+// impl<T> Query for FactSelectorPlan<T>
+// where
+//     T: Scalar + Into<Value> + Send + PartialEq<Value> + Sync + std::convert::TryFrom<Value>,
+// {
+//     fn query<S>(&self, store: &S) -> QueryResult<impl Selection>
+//     where
+//         S: ArtifactStore,
+//     {
+//         // Try to convert to ArtifactSelector if all terms are constants
+//         match self.try_into() {
+//             Ok(artifact_selector) => Ok(store.select(artifact_selector)),
+//             Err(_) => Err(crate::error::QueryError::VariableNotSupported {
+//                 message: "Query trait does not support variables yet - requires constants only"
+//                     .to_string(),
+//             }),
+//         }
+//     }
+// }
 
 impl<T: Scalar> TryFrom<&FactSelectorPlan<T>> for ArtifactSelector<Constrained> {
     type Error = QueryError;
@@ -382,31 +364,85 @@ impl<T: Scalar + Into<Value> + Send + PartialEq<Value> + Sync + std::convert::Tr
     }
 }
 
-impl<T> crate::query::Query for FactSelector<T>
-where
-    T: Scalar + Into<Value> + Send + PartialEq<Value> + Sync + std::convert::TryFrom<Value>,
-{
-    fn query<S>(
-        &self,
-        store: &S,
-    ) -> QueryResult<
-        impl futures_core::Stream<
-                Item = Result<dialog_artifacts::Artifact, dialog_artifacts::DialogArtifactsError>,
-            > + 'static,
-    >
-    where
-        S: crate::artifact::ArtifactStore,
-    {
-        // Try to convert to ArtifactSelector if all terms are constants
-        match self.try_into() {
-            Ok(artifact_selector) => Ok(store.select(artifact_selector)),
-            Err(_) => Err(crate::error::QueryError::VariableNotSupported {
-                message: "Query trait does not support variables yet - requires constants only"
-                    .to_string(),
-            }),
-        }
-    }
-}
+// impl<T> crate::query::Query for FactSelector<T>
+// where
+//     T: Scalar + Into<Value> + Send + PartialEq<Value> + Sync + std::convert::TryFrom<Value>,
+// {
+//     fn query<S>(&self, store: &S) -> QueryResult<impl Selection>
+//     where
+//         S: crate::query::Store,
+//     {
+//         // Create a plan to validate the query (will return error for invalid queries)
+//         let scope = VariableScope::new();
+//         let _plan = self.plan(&scope)?;
+
+//         // Clone the selector to avoid lifetime issues and inline the evaluation logic
+//         let selector = self.clone();
+//         let store = store.clone();
+
+//         let selection = try_stream! {
+//             // Create initial selection with empty frame (like EvaluationPlan does)
+//             let initial_selection = crate::plan::fresh(store.clone()).selection;
+
+//             for await frame in initial_selection {
+//                 let frame = frame?;
+//                 let resolved_selector = selector.resolve(&frame);
+
+//                 for await artifact in store.select((&resolved_selector).try_into()?) {
+//                     let artifact = artifact?;
+
+//                     // Create a new frame by unifying the artifact with our pattern
+//                     let mut new_frame = frame.clone();
+
+//                     // Unify entity if we have an entity variable
+//                     if let Some(entity_term) = &resolved_selector.of {
+//                         new_frame = new_frame.unify(entity_term.clone(), Value::Entity(artifact.of)).map_err(|e| QueryError::FactStore(e.to_string()))?;
+//                     }
+
+//                     // Unify attribute if we have an attribute variable
+//                     if let Some(attr_term) = &resolved_selector.the {
+//                         new_frame = new_frame.unify(attr_term.clone(), Value::Symbol(artifact.the)).map_err(|e| QueryError::FactStore(e.to_string()))?;
+//                     }
+
+//                     // Unify value if we have a value variable
+//                     if let Some(value_term) = &resolved_selector.is {
+//                         new_frame = new_frame.unify_value(value_term.clone(), artifact.is).map_err(|e| QueryError::FactStore(e.to_string()))?;
+//                     }
+
+//                     yield new_frame;
+//                 }
+//             }
+//         };
+
+//         Ok(selection)
+//     }
+// }
+
+// impl<T> crate::query::Query for FactSelector<T>
+// where
+//     T: Scalar + Into<Value> + Send + PartialEq<Value> + Sync + std::convert::TryFrom<Value>,
+// {
+//     fn query<S>(
+//         &self,
+//         store: &S,
+//     ) -> QueryResult<
+//         impl futures_core::Stream<
+//                 Item = Result<dialog_artifacts::Artifact, dialog_artifacts::DialogArtifactsError>,
+//             > + 'static,
+//     >
+//     where
+//         S: crate::artifact::ArtifactStore,
+//     {
+//         // Try to convert to ArtifactSelector if all terms are constants
+//         match self.try_into() {
+//             Ok(artifact_selector) => Ok(store.select(artifact_selector)),
+//             Err(_) => Err(crate::error::QueryError::VariableNotSupported {
+//                 message: "Query trait does not support variables yet - requires constants only"
+//                     .to_string(),
+//             }),
+//         }
+//     }
+// }
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -725,10 +761,7 @@ mod tests {
 
         // Verify it's the right kind of error
         if let Err(QueryError::EmptySelector { message }) = plan_result {
-            assert!(
-                message.contains("constraint"),
-                "Should be constraint error"
-            );
+            assert!(message.contains("constraint"), "Should be constraint error");
         } else {
             panic!("Expected EmptySelector error for unexecutable query");
         }

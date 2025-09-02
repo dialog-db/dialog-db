@@ -1,10 +1,16 @@
 //! Query execution plans - traits and context for evaluation
 
 use crate::artifact::ArtifactStore;
-use crate::{Match, Query, Selection};
+use crate::query::Store;
+use crate::{Match, Selection};
 use dialog_common::ConditionalSend;
-use futures_core::Stream;
+use futures_util::stream;
 use std::collections::BTreeMap;
+
+pub fn fresh<S: ArtifactStore>(store: S) -> EvaluationContext<S, impl Selection> {
+    let selection = stream::once(async move { Ok(Match::new()) });
+    EvaluationContext { store, selection }
+}
 
 /// A single result frame with variable bindings
 /// Equivalent to MatchFrame in TypeScript: Map<Variable, Scalar>
@@ -33,10 +39,11 @@ where
         Self { store, selection }
     }
 
-    // pub fn new(store: S) -> Self {
-    //     let selection: M = Stream::once(Ok(Match::new()));
-    //     Self { store, selection }
-    // }
+    pub fn new(store: S) -> EvaluationContext<S, impl Selection> {
+        let selection = stream::once(async move { Ok(Match::new()) });
+
+        EvaluationContext { store, selection }
+    }
 }
 
 /// Describes cost of the plan execution. Infinity, implies plan is not
@@ -97,8 +104,5 @@ pub trait EvaluationPlan: Clone + std::fmt::Debug + ConditionalSend {
     fn cost(&self) -> &Cost;
     /// Execute this plan with the given context and return result frames
     /// This follows the familiar-query pattern where frames flow through the evaluation
-    fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> impl Selection
-    where
-        S: ArtifactStore + Clone + Send + 'static,
-        M: Selection;
+    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection;
 }

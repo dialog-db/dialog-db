@@ -6,10 +6,11 @@
 
 use crate::error::QueryResult;
 use crate::fact_selector::FactSelector;
-use crate::plan::EvaluationPlan;
+use crate::plan::{EvaluationContext, EvaluationPlan};
 use crate::premise::Premise;
-use crate::syntax::{Syntax, VariableScope};
-use crate::Selection;
+use crate::query::Store;
+use crate::selection::Selection;
+use crate::syntax::VariableScope;
 use serde::{Deserialize, Serialize};
 
 /// Statements that can appear in rule conditions (premises)
@@ -63,7 +64,6 @@ pub enum Statement {
     /// - `Statement::fact(the, of, is)`
     #[serde(rename = "select")]
     Select(FactSelector<crate::artifact::Value>),
-    
 }
 
 impl Premise for Statement {
@@ -87,9 +87,7 @@ impl Premise for Statement {
 pub enum StatementPlan {
     /// Plan for executing a fact selector statement
     Select(crate::fact_selector::FactSelectorPlan<crate::artifact::Value>),
-    
 }
-
 
 impl EvaluationPlan for StatementPlan {
     fn cost(&self) -> &crate::plan::Cost {
@@ -98,14 +96,7 @@ impl EvaluationPlan for StatementPlan {
         }
     }
 
-    fn evaluate<S, M>(
-        &self,
-        context: crate::plan::EvaluationContext<S, M>,
-    ) -> impl Selection
-    where
-        S: crate::artifact::ArtifactStore + Clone + Send + 'static,
-        M: crate::Selection + 'static,
-    {
+    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
         match self {
             StatementPlan::Select(plan) => plan.evaluate(context),
         }
@@ -162,6 +153,4 @@ impl Statement {
             fact: None,
         })
     }
-    
 }
-

@@ -25,7 +25,7 @@ mod match_functionality_test {
         }
     }
     
-    impl Syntax for TestNameMatch {
+    impl Premise for TestNameMatch {
         type Plan = FactSelectorPlan<String>;
         
         fn plan(&self, scope: &VariableScope) -> QueryResult<Self::Plan> {
@@ -46,7 +46,7 @@ mod match_functionality_test {
             is: "Alice".to_string().into(),
         };
         
-        // Should implement Syntax
+        // Should implement Premise
         let scope = VariableScope::new();
         let _plan = match_pattern.plan(&scope).unwrap();
         

@@ -537,11 +537,11 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
             /// 
             /// This is a convenience method that executes the query plan and converts
             /// MatchFrames back to concept instances.
-            pub async fn query<S: dialog_query::artifact::ArtifactStore + Clone + Send + 'static>(
+            pub async fn query<S: dialog_query::query::Store>(
                 &self,
                 store: S,
             ) -> dialog_query::error::QueryResult<Vec<#struct_name>> {
-                use dialog_query::syntax::{VariableScope, Syntax};
+                use dialog_query::syntax::VariableScope;
                 use dialog_query::plan::{EvaluationContext, EvaluationPlan};
                 use dialog_query::selection::Match;
                 use dialog_query::premise::Premise;

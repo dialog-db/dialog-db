@@ -2,9 +2,17 @@
 
 use crate::artifact::ArtifactStore;
 use crate::error::QueryResult;
-use crate::plan::{EvaluationContext, EvaluationPlan};
+use crate::plan::{fresh, EvaluationPlan};
 use crate::premise::Premise;
 use crate::{Selection, VariableScope};
+
+/// Convenience trait alias for stores that can be used with the Query API
+///
+/// This combines all the required bounds in one place to avoid repetition
+pub trait Store: ArtifactStore + Clone + Send + Sync + 'static {}
+
+/// Blanket implementation - any type that satisfies the bounds automatically implements QueryStore
+impl<T> Store for T where T: ArtifactStore + Clone + Send + Sync + 'static {}
 
 /// A trait for types that can query an ArtifactStore
 ///
@@ -38,37 +46,40 @@ pub trait Query {
     /// Execute the query against the provided store
     ///
     /// Returns a stream of artifacts that match the query criteria.
-    fn query<S>(
-        &self,
-        store: &S,
-    ) -> QueryResult<
-        impl futures_core::Stream<
-                Item = Result<dialog_artifacts::Artifact, dialog_artifacts::DialogArtifactsError>,
-            > + 'static,
-    >
-    where
-        S: ArtifactStore;
+    fn query<S: Store>(&self, store: &S) -> QueryResult<impl Selection>;
 }
 
-// impl<Plan: EvaluationPlan> Query for Plan {
-//     fn query<S: ArtifactStore + Clone + Send + 'static, M: Selection>(
-//         &self,
-//         store: &S,
-//     ) -> QueryResult<M> {
-//         Ok(self.evaluate(EvaluationContext::new(store.clone())))
-//     }
-// }
+pub trait PlannedQuery {
+    /// Execute the query against the provided store
+    ///
+    /// Returns a stream of artifacts that match the query criteria.
+    fn query<S: Store>(&self, store: &S) -> QueryResult<impl Selection>;
+}
 
-// impl<Plan: EvaluationPlan, P: Premise<Plan = Plan>> Query for P {
-//     fn query<S: ArtifactStore + Clone + Send + 'static, M: Selection>(
-//         &self,
-//         store: &S,
-//     ) -> QueryResult<M> {
-//         let scope = VariableScope::new();
-//         let plan = self.plan(&scope)?;
-//         plan.query(store)
-//     }
-// }
+impl<Plan: EvaluationPlan> PlannedQuery for Plan {
+    fn query<S: Store>(&self, store: &S) -> QueryResult<impl Selection> {
+        let store = store.clone();
+        let context = fresh(store);
+        let selection = self.evaluate(context);
+        Ok(selection)
+    }
+}
+
+impl<E: EvaluationPlan + 'static, P: Premise<Plan = E>> Query for P {
+    fn query<S: Store>(&self, store: &S) -> QueryResult<impl Selection> {
+        let scope = VariableScope::new();
+        let plan = self.plan(&scope)?.to_owned();
+        let store = store.to_owned();
+
+        let selection = async_stream::try_stream! {
+            for await match_frame in plan.query(&store)? {
+                yield match_frame?;
+            }
+        };
+
+        Ok(selection)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -164,7 +175,7 @@ mod tests {
 
         async fn execute_query<Q: Query>(
             query: Q,
-            store: &(impl ArtifactStore + Clone + Send + 'static),
+            store: &(impl Store + 'static),
         ) -> Result<Vec<crate::artifact::Artifact>> {
             let result = query.query(store);
             // Should succeed with constants, returns empty stream for now

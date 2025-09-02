@@ -2,13 +2,12 @@ use crate::artifact::{Entity, Value};
 use crate::attribute::Attribute;
 use crate::error::{QueryError, QueryResult};
 use crate::plan::{Cost, EvaluationContext, EvaluationPlan};
-use crate::Selection;
 use crate::premise::Premise;
-use crate::selection::Selection as SelectionTrait;
-use crate::statement::Statement;
+use crate::query::Store;
 use crate::term::Term;
+use crate::Selection;
 use crate::VariableScope;
-use crate::{FactSelector, FactSelectorPlan, Statements};
+use crate::{FactSelector, FactSelectorPlan};
 use dialog_artifacts::Instruction;
 use std::collections::{HashMap, HashSet};
 
@@ -130,16 +129,8 @@ impl EvaluationPlan for Plan {
     fn cost(&self) -> &Cost {
         &self.cost
     }
-    fn evaluate<S, M>(&self, context: EvaluationContext<S, M>) -> impl Selection
-    where
-        S: crate::artifact::ArtifactStore + Clone + Send + 'static,
-        M: SelectionTrait + 'static,
-    {
-        let store = context.store;
-
-        // This implementation needs to be redesigned for the new trait signature
-        // For now, return the input selection unchanged
-        context.selection
+    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+        crate::and::join(self.conjuncts.clone(), context)
     }
 }
 
@@ -163,7 +154,7 @@ pub trait Attributes {
 /// using a cost-based greedy algorithm that respects data dependencies.
 fn optimal_join_ordering(
     conjuncts: Vec<FactSelectorPlan<Value>>,
-    scope: &VariableScope,
+    _scope: &VariableScope,
 ) -> QueryResult<Vec<FactSelectorPlan<Value>>> {
     if conjuncts.is_empty() {
         return Ok(vec![]);

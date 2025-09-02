@@ -6,6 +6,7 @@
 //! This crate implements the core query planning and execution functionality,
 //! designed to be equivalent to the TypeScript query engine in @query/.
 
+pub mod and;
 pub mod artifact;
 pub mod attribute;
 pub mod concept;
@@ -39,7 +40,7 @@ pub use selection::{Match, Selection};
 pub use selector::Selector;
 pub use statement::{Statement, StatementPlan};
 pub use stream::*;
-pub use syntax::{Syntax, VariableScope};
+pub use syntax::VariableScope;
 pub use term::*;
 pub use types::IntoValueDataType;
 
@@ -57,7 +58,6 @@ pub trait Attribute {
     fn value_type() -> ValueDataType;
 }
 
-
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::artifact::{Value, ValueDataType};
@@ -70,7 +70,7 @@ pub mod prelude {
     pub use crate::rule::{DerivedRule, DerivedRuleMatch, Rule, Statements, When};
     pub use crate::selector::Selector;
     pub use crate::statement::{Statement, StatementPlan};
-    pub use crate::syntax::{Syntax, VariableScope};
+    pub use crate::syntax::VariableScope;
     pub use crate::term::Term;
     pub use crate::types::IntoValueDataType;
     // Macros are automatically available due to #[macro_export]

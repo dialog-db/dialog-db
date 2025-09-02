@@ -13,6 +13,7 @@ use crate::error::{QueryError, QueryResult};
 use crate::fact_selector::FactSelector;
 use crate::plan::{EvaluationContext, EvaluationPlan, MatchFrame};
 use crate::premise::Premise;
+use crate::query::Store;
 use crate::selection::Selection;
 use crate::statement::Statement;
 use crate::syntax::VariableScope;
@@ -625,18 +626,16 @@ pub struct DerivedRuleMatchPlan {
     pub premise_plans: Vec<crate::statement::StatementPlan>,
 }
 
-
 impl EvaluationPlan for DerivedRuleMatchPlan {
     fn cost(&self) -> &crate::plan::Cost {
         // For now return a static cost
         &crate::plan::Cost::Estimate(100)
     }
 
-    fn evaluate<S, M>(&self, _context: EvaluationContext<S, M>) -> impl Selection
-    where
-        S: ArtifactStore + Clone + Send + 'static,
-        M: Selection + 'static,
-    {
+    fn evaluate<S: Store, M: Selection>(
+        &self,
+        _context: EvaluationContext<S, M>,
+    ) -> impl Selection {
         // This implements basic rule evaluation by joining premise predicates
         //
         // The algorithm would be:
@@ -710,7 +709,6 @@ pub struct RuleApplicationPlan<R: Rule> {
     pub rule_match: R::Match,
 }
 
-
 impl<R: Rule + Send> EvaluationPlan for RuleApplicationPlan<R>
 where
     R::Match: Send + Premise,
@@ -720,11 +718,10 @@ where
         &crate::plan::Cost::Estimate(100)
     }
 
-    fn evaluate<S, M>(&self, _context: EvaluationContext<S, M>) -> impl Selection
-    where
-        S: ArtifactStore + Clone + Send + 'static,
-        M: Selection + 'static,
-    {
+    fn evaluate<S: Store, M: Selection>(
+        &self,
+        _context: EvaluationContext<S, M>,
+    ) -> impl Selection {
         // For now, return empty selection
         // Full implementation would evaluate the rule match
         crate::selection::EmptySelection::new()
