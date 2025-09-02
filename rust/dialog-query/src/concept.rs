@@ -50,8 +50,17 @@ pub trait Concept: Clone + std::fmt::Debug {
     /// Create an attributes pattern for querying this concept
     ///
     /// This method enables fluent query building with .is() and .not() methods:
-    /// ```rust,ignore
+    /// ```rust
+    /// use dialog_query::concept::Concept;
+    /// use dialog_query::rule::Rule as RuleTrait;
     /// use dialog_query::Term;
+    /// use dialog_query_macros::Rule;
+    ///
+    /// #[derive(Rule, Debug, Clone)]
+    /// pub struct Person {
+    ///     name: String,
+    ///     age: u32,
+    /// }
     ///
     /// let person_query = Person::r#match(Term::var("entity"));
     /// // person_query.name.is("John").age.not(25);  // Future API

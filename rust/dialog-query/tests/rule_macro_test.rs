@@ -71,7 +71,11 @@ fn test_derive_rule_generates_types() {
 }
 
 #[test]
-fn test_namespace_generation() {
-    // Test that namespace constant is generated correctly
-    assert_eq!(person::NAMESPACE, "person");
+fn test_static_attributes_generation() {
+    // Test that static attributes are generated correctly with prefixed names
+    // The prefixed attributes should exist and be accessible
+    assert_eq!(PERSON_NAME.namespace, "person");
+    assert_eq!(PERSON_NAME.name, "name");
+    assert_eq!(PERSON_BIRTHDAY.namespace, "person");
+    assert_eq!(PERSON_BIRTHDAY.name, "birthday");
 }
