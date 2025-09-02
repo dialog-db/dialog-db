@@ -1,217 +1,9 @@
-//! Procedural macros for generating relation attribute structs and rule definitions
+//! Procedural macros for generating rule definitions
 
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput, Data, Fields, Type, Attribute, Meta, Expr, Lit};
 
-/// Procedural macro to generate attribute structs from an enum definition.
-///
-/// # Example
-/// ```ignore
-/// use dialog_query_macros::relation;
-/// 
-/// #[relation]
-/// enum Employee {
-///     Name(String),
-///     Job(String), 
-///     Salary(u32),
-///     #[many]
-///     Address(String),
-/// }
-/// 
-/// // This generates a module `Employee` containing:
-/// // - Name, Job, Salary, Address structs (no prefixes!)
-/// // - Each struct implements Attribute trait
-/// // - You can use Employee::Name::new("John"), etc.
-/// ```
-#[proc_macro_attribute]
-pub fn relation(_args: TokenStream, input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    
-    let enum_name = &input.ident;
-    
-    let variants = match &input.data {
-        Data::Enum(data_enum) => &data_enum.variants,
-        _ => {
-            return syn::Error::new_spanned(&input, "relation can only be applied to enums")
-                .to_compile_error()
-                .into();
-        }
-    };
-    
-    let mut structs = Vec::new();
-    
-    for variant in variants {
-        let variant_name = &variant.ident;
-        
-        // Check if variant has #[many] attribute
-        let has_many = variant.attrs.iter().any(|attr| {
-            attr.path().is_ident("many")
-        });
-        
-        let cardinality = if has_many {
-            quote! { dialog_query::Cardinality::Many }
-        } else {
-            quote! { dialog_query::Cardinality::One }
-        };
-        
-        // Get the type from the variant
-        let field_type = match &variant.fields {
-            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-                &fields.unnamed.first().unwrap().ty
-            }
-            _ => {
-                return syn::Error::new_spanned(variant, "Variants must have exactly one unnamed field")
-                    .to_compile_error()
-                    .into();
-            }
-        };
-        
-        let value_data_type = type_to_value_data_type(field_type);
-        
-        // Convert enum and variant names for the attribute name
-        // Enum uses dots, variant uses underscores: SimpleRelation::Name -> simple.relation/name
-        let enum_dotted = to_snake_case(&enum_name.to_string());
-        let variant_snake = to_snake_case_with_underscores(&variant_name.to_string());
-        let attribute_name = format!("{}/{}", enum_dotted, variant_snake);
-        let attribute_name_lit = syn::LitStr::new(&attribute_name, proc_macro2::Span::call_site());
-        
-        
-        let struct_def = quote! {
-            #[doc = concat!("Attribute struct for ", stringify!(#variant_name))]
-            pub struct #variant_name(pub #field_type);
-            
-            impl dialog_query::Attribute for #variant_name {
-                fn name() -> &'static str {
-                    #attribute_name_lit
-                }
-                
-                fn cardinality() -> dialog_query::Cardinality {
-                    #cardinality
-                }
-                
-                fn value_type() -> dialog_query::artifact::ValueDataType {
-                    #value_data_type
-                }
-            }
-            
-            impl #variant_name {
-                #[doc = concat!("Create a new ", stringify!(#variant_name), " attribute")]
-                pub fn new(value: impl Into<#field_type>) -> Self {
-                    Self(value.into())
-                }
-                
-                /// Get the inner value
-                pub fn value(&self) -> &#field_type {
-                    &self.0
-                }
-                
-                /// Consume the attribute and return the inner value
-                pub fn into_value(self) -> #field_type {
-                    self.0
-                }
-            }
-
-        };
-        
-        structs.push(struct_def);
-    }
-    
-    let expanded = quote! {
-        // Replace the original enum with a module containing the generated structs
-        #[allow(non_snake_case)]
-        pub mod #enum_name {
-            use super::*;
-            use dialog_query;
-            
-            #(#structs)*
-        }
-    };
-    
-    TokenStream::from(expanded)
-}
-
-fn type_to_value_data_type(ty: &Type) -> proc_macro2::TokenStream {
-    let type_str = quote!(#ty).to_string().replace(" ", "");
-    
-    match type_str.as_str() {
-        "String" => quote! { dialog_query::artifact::ValueDataType::String },
-        "&str" | "str" => quote! { dialog_query::artifact::ValueDataType::String },
-        "bool" => quote! { dialog_query::artifact::ValueDataType::Boolean },
-        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => quote! { dialog_query::artifact::ValueDataType::UnsignedInt },
-        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => quote! { dialog_query::artifact::ValueDataType::SignedInt },
-        "f32" | "f64" => quote! { dialog_query::artifact::ValueDataType::Float },
-        "Vec<u8>" => quote! { dialog_query::artifact::ValueDataType::Bytes },
-        "dialog_artifacts::Entity" | "Entity" => quote! { dialog_query::artifact::ValueDataType::Entity },
-        "dialog_artifacts::Attribute" | "Attribute" => quote! { dialog_query::artifact::ValueDataType::Symbol },
-        _ => {
-            // For unknown types, default to String to avoid compile-time errors
-            // This matches the behavior of the original unwrap_or(ValueDataType::String)
-            quote! { dialog_query::artifact::ValueDataType::String }
-        }
-    }
-}
-
-
-/// Extract doc comments from attributes
-fn extract_doc_comments(attrs: &[Attribute]) -> String {
-    let mut docs = Vec::new();
-    
-    for attr in attrs {
-        match &attr.meta {
-            Meta::NameValue(nv) if nv.path.is_ident("doc") => {
-                if let Expr::Lit(expr_lit) = &nv.value {
-                    if let Lit::Str(lit) = &expr_lit.lit {
-                        // Trim leading space that rustdoc adds
-                        let doc = lit.value();
-                        let trimmed = doc.trim_start_matches(' ');
-                        docs.push(trimmed.to_string());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    
-    // Join multiple doc comment lines with spaces and trim
-    docs.join(" ").trim().to_string()
-}
-
-fn to_snake_case(s: &str) -> String {
-    let mut result = String::new();
-    let mut chars = s.chars().peekable();
-    
-    while let Some(ch) = chars.next() {
-        if ch.is_uppercase() {
-            if !result.is_empty() {
-                result.push('.');
-            }
-            result.push(ch.to_lowercase().next().unwrap());
-        } else {
-            result.push(ch);
-        }
-    }
-    
-    result
-}
-
-fn to_snake_case_with_underscores(s: &str) -> String {
-    let mut result = String::new();
-    let mut chars = s.chars().peekable();
-    
-    while let Some(ch) = chars.next() {
-        if ch.is_uppercase() {
-            if !result.is_empty() {
-                result.push('_');
-            }
-            result.push(ch.to_lowercase().next().unwrap());
-        } else {
-            result.push(ch);
-        }
-    }
-    
-    result
-}
 
 /// Derive macro to generate Rule implementation from a struct definition.
 ///
@@ -219,11 +11,9 @@ fn to_snake_case_with_underscores(s: &str) -> String {
 /// including Match, Assert, Retract, and Attributes types.
 ///
 /// # Example
-/// ```ignore
-/// use dialog_query_macros::Rule;
-/// use dialog_query::concept::Concept;
-/// use dialog_query::Statements;
 /// 
+/// This macro transforms input like:
+/// ```text
 /// #[derive(Rule, Debug, Clone)]
 /// pub struct Person {
 ///     /// Name of the person
@@ -231,19 +21,24 @@ fn to_snake_case_with_underscores(s: &str) -> String {
 ///     /// Birthday of the person  
 ///     pub birthday: u32,
 /// }
-/// 
-/// // This generates:
-/// // - person::Match struct for querying
-/// // - person::Assert struct for conclusions
-/// // - person::Retract struct for retractions  
-/// // - person::Attributes struct for fluent queries
-/// // - Concept and Rule trait implementations
-/// 
-/// // Now you can use the generated types:
-/// let person_entity = dialog_query::Term::var("person");
-/// let attributes = Person::r#match(person_entity.clone());
-/// assert_eq!(Person::name(), "person");
 /// ```
+/// 
+/// Into generated code that creates:
+/// - person::Match struct for querying
+/// - person::Assert struct for conclusions
+/// - person::Retract struct for retractions  
+/// - person::Attributes struct for fluent queries
+/// - Concept and Rule trait implementations
+/// 
+/// To see complete working examples with the generated code, check the tests in the main dialog-query crate.
+/// 
+/// # Generated Types
+/// 
+/// For a struct `Person` with fields `name: String` and `age: u32`, this generates:
+/// - `person::Match`: Query pattern with `Term<String>` and `Term<u32>` fields
+/// - `person::Assert`: Assertion pattern for rule conclusions  
+/// - `person::Retract`: Retraction pattern for removing facts
+/// - `person::Attributes`: Fluent query builder with type-safe attribute matchers
 #[proc_macro_derive(Rule)]
 pub fn derive_rule(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -626,4 +421,85 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+fn type_to_value_data_type(ty: &Type) -> proc_macro2::TokenStream {
+    let type_str = quote!(#ty).to_string().replace(" ", "");
+    
+    match type_str.as_str() {
+        "String" => quote! { dialog_query::artifact::ValueDataType::String },
+        "&str" | "str" => quote! { dialog_query::artifact::ValueDataType::String },
+        "bool" => quote! { dialog_query::artifact::ValueDataType::Boolean },
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => quote! { dialog_query::artifact::ValueDataType::UnsignedInt },
+        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => quote! { dialog_query::artifact::ValueDataType::SignedInt },
+        "f32" | "f64" => quote! { dialog_query::artifact::ValueDataType::Float },
+        "Vec<u8>" => quote! { dialog_query::artifact::ValueDataType::Bytes },
+        "dialog_artifacts::Entity" | "Entity" => quote! { dialog_query::artifact::ValueDataType::Entity },
+        "dialog_artifacts::Attribute" | "Attribute" => quote! { dialog_query::artifact::ValueDataType::Symbol },
+        _ => {
+            // For unknown types, default to String to avoid compile-time errors
+            // This matches the behavior of the original unwrap_or(ValueDataType::String)
+            quote! { dialog_query::artifact::ValueDataType::String }
+        }
+    }
+}
+
+/// Extract doc comments from attributes
+fn extract_doc_comments(attrs: &[Attribute]) -> String {
+    let mut docs = Vec::new();
+    
+    for attr in attrs {
+        match &attr.meta {
+            Meta::NameValue(nv) if nv.path.is_ident("doc") => {
+                if let Expr::Lit(expr_lit) = &nv.value {
+                    if let Lit::Str(lit) = &expr_lit.lit {
+                        // Trim leading space that rustdoc adds
+                        let doc = lit.value();
+                        let trimmed = doc.trim_start_matches(' ');
+                        docs.push(trimmed.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    // Join multiple doc comment lines with spaces and trim
+    docs.join(" ").trim().to_string()
+}
+
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+    
+    while let Some(ch) = chars.next() {
+        if ch.is_uppercase() {
+            if !result.is_empty() {
+                result.push('.');
+            }
+            result.push(ch.to_lowercase().next().unwrap());
+        } else {
+            result.push(ch);
+        }
+    }
+    
+    result
+}
+
+fn to_snake_case_with_underscores(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+    
+    while let Some(ch) = chars.next() {
+        if ch.is_uppercase() {
+            if !result.is_empty() {
+                result.push('_');
+            }
+            result.push(ch.to_lowercase().next().unwrap());
+        } else {
+            result.push(ch);
+        }
+    }
+    
+    result
 }
