@@ -24,4 +24,11 @@ pub trait Premise: Clone + std::fmt::Debug {
     /// Variable scope tracks which variables are already bound in the current
     /// context.
     fn plan(&self, scope: &VariableScope) -> PlanResult<Self::Plan>;
+
+    /// Return the variables that affect this premise's planning
+    ///
+    /// This is used for caching optimization - when variables are added to scope,
+    /// only premises that depend on those variables need to have their cached
+    /// plans invalidated and recomputed.
+    fn cells(&self) -> VariableScope;
 }

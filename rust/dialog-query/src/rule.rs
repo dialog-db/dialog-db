@@ -442,7 +442,7 @@ mod tests {
 
         // Should successfully create a plan
         match plan {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(_) => panic!("Expected ready plan"),
         }
     }
@@ -518,11 +518,13 @@ mod tests {
         assert_eq!(when_result.len(), 2);
 
         // Verify the statements are correct
-        let Statement::Select(ref selector) = when_result[0];
-
-        assert!(selector.the.is_some());
-        assert!(selector.of.is_some());
-        assert!(selector.is.is_some());
+        match &when_result[0] {
+            Statement::Select(selector) => {
+                assert!(selector.the.is_some());
+                assert!(selector.of.is_some());
+                assert!(selector.is.is_some());
+            }
+        }
     }
 
     #[test]
@@ -582,10 +584,13 @@ mod tests {
 
         // Test 7: Verify all statements are correct
         for statement in &when4 {
-            let Statement::Select(ref selector) = statement;
-            assert!(selector.the.is_some());
-            assert!(selector.of.is_some());
-            assert!(selector.is.is_some());
+            match statement {
+                Statement::Select(selector) => {
+                    assert!(selector.the.is_some());
+                    assert!(selector.of.is_some());
+                    assert!(selector.is.is_some());
+                }
+            }
         }
     }
 
@@ -632,10 +637,13 @@ mod tests {
         // Verify all statements are properly converted
         for when_result in [when1, when2, when3] {
             for stmt in when_result {
-                let Statement::Select(ref selector) = stmt;
-                assert!(selector.the.is_some());
-                assert!(selector.of.is_some());
-                assert!(selector.is.is_some());
+                match stmt {
+                    Statement::Select(ref selector) => {
+                        assert!(selector.the.is_some());
+                        assert!(selector.of.is_some());
+                        assert!(selector.is.is_some());
+                    }
+                }
             }
         }
     }

@@ -31,6 +31,10 @@ mod match_functionality_test {
         fn plan(&self, scope: &VariableScope) -> PlanResult<Self::Plan> {
             self.to_fact_selector().plan(scope)
         }
+
+        fn cells(&self) -> VariableScope {
+            self.to_fact_selector().cells()
+        }
     }
 
     // Query implementation removed due to lifetime issues - this is not essential for the core functionality

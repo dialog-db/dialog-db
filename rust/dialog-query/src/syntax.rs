@@ -1,5 +1,6 @@
 //! Syntax trait for query forms
 
+use crate::artifact::Value;
 use crate::fact::Scalar;
 use crate::term::Term;
 use std::collections::BTreeSet;
@@ -18,6 +19,10 @@ impl VariableScope {
         }
     }
 
+    pub fn size(&self) -> usize {
+        self.bound_variables.len()
+    }
+
     pub fn add<T: Scalar>(mut self, variable: &Term<T>) -> Self {
         if let Term::Variable {
             name: Some(name), ..
@@ -26,6 +31,30 @@ impl VariableScope {
             self.bound_variables.insert(name.clone());
         }
         self
+    }
+
+    pub fn extend(&mut self, other: impl IntoIterator<Item = Term<Value>>) -> VariableScope {
+        let mut delta = std::collections::BTreeSet::new();
+
+        for variable in other {
+            if let Term::Variable {
+                name: Some(name), ..
+            } = variable
+            {
+                if !self.bound_variables.contains(&name) {
+                    delta.insert(name.clone());
+                }
+                self.bound_variables.insert(name);
+            }
+        }
+
+        VariableScope {
+            bound_variables: delta,
+        }
+    }
+
+    pub fn intersects(&self, other: &VariableScope) -> bool {
+        !self.bound_variables.is_disjoint(&other.bound_variables)
     }
 
     pub fn contains<T: Scalar>(&self, term: &Term<T>) -> bool {
@@ -40,5 +69,18 @@ impl VariableScope {
                 name: Some(name), ..
             } => self.bound_variables.contains(name),
         }
+    }
+}
+
+impl IntoIterator for VariableScope {
+    type Item = Term<crate::artifact::Value>;
+    type IntoIter = std::vec::IntoIter<Term<crate::artifact::Value>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.bound_variables
+            .into_iter()
+            .map(|var| Term::<crate::artifact::Value>::var(&var))
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 }

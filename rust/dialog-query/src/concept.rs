@@ -1,15 +1,15 @@
 use crate::artifact::{Entity, Value};
 use crate::attribute::Attribute;
-use crate::error::{QueryError, QueryResult};
-use crate::plan::{Cost, EvaluationContext, EvaluationPlan, PlanResult, Solution};
+use crate::plan::{EvaluationContext, EvaluationPlan, PlanOrdering, PlanResult};
 use crate::premise::Premise;
 use crate::query::Store;
+use crate::statement::Statement;
 use crate::term::Term;
+use crate::FactSelector;
 use crate::Selection;
 use crate::VariableScope;
-use crate::{FactSelector, FactSelectorPlan};
 use dialog_artifacts::Instruction;
-use std::collections::{HashMap, HashSet};
+use serde::{Deserialize, Serialize};
 
 /// Concept is a set of attributes associated with entity representing an
 /// abstract idea. It is a tool for the domain modeling and in some regard
@@ -75,12 +75,11 @@ pub trait Match {
 }
 
 impl<T: Match + Clone + std::fmt::Debug> Premise for T {
-    type Plan = ConceptPlan;
+    type Plan = JoinPlan;
 
     fn plan(&self, scope: &VariableScope) -> PlanResult<Self::Plan> {
-        // Step 1: Create all conjunct plans
-        let mut all_conjuncts: Vec<FactSelectorPlan<Value>> = vec![];
-        let mut solutions: Vec<Solution> = vec![];
+        // Step 1: Create statement premises for each attribute
+        let mut statements = Vec::new();
         let entity = self.this();
 
         for (name, attribute) in T::Attributes::attributes() {
@@ -90,61 +89,30 @@ impl<T: Match + Clone + std::fmt::Debug> Premise for T {
                 .of(entity.clone())
                 .is(term.clone());
 
-            match select.plan(&scope) {
-                Ok(conjunct) => {
-                    all_conjuncts.push(conjunct);
-                }
-                Err(plan_error) => {
-                    solutions.extend(plan_error.solutions);
-                }
+            statements.push(Statement::select(select));
+        }
+
+        // Step 2: Create a Join premise and plan it
+        let join_premise = Join::new(statements);
+        join_premise.plan(scope)
+    }
+
+    fn cells(&self) -> VariableScope {
+        // Collect cells from all attributes
+        let mut cells = VariableScope::new();
+        let entity = self.this();
+
+        // Add the entity variable
+        cells = cells.add(&entity);
+
+        // Add variables from each attribute term
+        for (name, _attribute) in T::Attributes::attributes() {
+            if let Some(term) = self.term_for(name) {
+                cells = cells.add(term);
             }
         }
 
-        // If we have any pending conjuncts, return error
-        if !solutions.is_empty() {
-            return Err(crate::plan::PlanError {
-                description: "Cannot create concept plan due to unbound variables".to_string(),
-                solutions,
-            });
-        }
-
-        // Step 2: Calculate total cost
-        let mut total_cost = Cost::Estimate(0);
-        for conjunct in &all_conjuncts {
-            total_cost.join(conjunct.cost());
-        }
-
-        Ok(ConceptPlan {
-            cost: total_cost,
-            conjuncts: all_conjuncts,
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ConceptPlan {
-    cost: Cost,
-    conjuncts: Vec<FactSelectorPlan<Value>>,
-}
-
-impl EvaluationPlan for ConceptPlan {
-    fn cost(&self) -> &Cost {
-        &self.cost
-    }
-
-    fn provides(&self) -> VariableScope {
-        let mut scope = VariableScope::new();
-        for conjunct in &self.conjuncts {
-            let conjunct_scope = conjunct.provides();
-            for var in conjunct_scope.bound_variables {
-                scope = scope.add(&Term::<Value>::var(&var));
-            }
-        }
-        scope
-    }
-
-    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
-        crate::and::join(self.conjuncts.clone(), context)
+        cells
     }
 }
 
@@ -165,177 +133,168 @@ pub trait Attributes {
     fn of<T: Into<Term<Entity>>>(entity: T) -> Self;
 }
 
-/// Implements optimal join ordering algorithm inspired by Join.plan in JS
-///
-/// This function takes a list of conjunct plans and orders them for optimal execution
-/// using a cost-based greedy algorithm that respects data dependencies.
-fn optimal_join_ordering(
-    conjuncts: Vec<FactSelectorPlan<Value>>,
-    _scope: &VariableScope,
-) -> QueryResult<Vec<FactSelectorPlan<Value>>> {
-    if conjuncts.is_empty() {
-        return Ok(vec![]);
+/// Join premise that combines multiple premises and orders them optimally
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Join {
+    premises: Vec<Statement>,
+}
+
+impl Join {
+    /// Create a new Join from a collection of premises
+    pub fn new(premises: Vec<Statement>) -> Self {
+        Self { premises }
     }
+}
 
-    // Step 1: Analyze dependencies and costs
-    let mut bound_variables: HashSet<String> = HashSet::new();
-    let mut ready: Vec<(usize, &FactSelectorPlan<Value>)> = Vec::new();
-    let mut blocked: HashMap<String, Vec<usize>> = HashMap::new();
+/// Plan for executing a Join premise
+#[derive(Debug, Clone)]
+pub struct JoinPlan {
+    cost: usize,
+    ordered_premises: Vec<crate::statement::StatementPlan>,
+}
 
-    // Initialize bound variables from the current scope
-    // TODO: Extract variable names from scope - for now assume none are bound
+/// Cached premise with all computed data
+#[derive(Debug, Clone)]
+struct CachedPlan<'a> {
+    premise: &'a Statement,
+    cells: VariableScope,
+    result: PlanResult<crate::statement::StatementPlan>,
+}
 
-    // Step 2: Categorize conjuncts as ready or blocked
-    for (index, conjunct) in conjuncts.iter().enumerate() {
-        let required_vars = extract_required_variables(conjunct);
-        let unbound_vars: Vec<String> = required_vars
-            .iter()
-            .filter(|var| !bound_variables.contains(*var))
-            .cloned()
-            .collect();
+impl<'a> CachedPlan<'a> {
+    fn recompute(&mut self, scope: &VariableScope) -> &Self {
+        self.result = self.premise.plan(scope);
+        self
+    }
+}
 
-        if unbound_vars.is_empty() {
-            // This conjunct can execute immediately
-            ready.push((index, conjunct));
-        } else {
-            // This conjunct is blocked waiting for variables
-            for var in unbound_vars {
-                blocked.entry(var).or_insert_with(Vec::new).push(index);
-            }
+/// Create a planning error from cached premises that failed to plan
+fn create_planning_error(cached_premises: &[CachedPlan]) -> crate::plan::PlanError {
+    let mut all_solutions = Vec::new();
+    for cached in cached_premises {
+        if let Err(plan_error) = &cached.result {
+            all_solutions.extend(plan_error.solutions.clone());
         }
     }
 
-    // Step 3: Greedy selection algorithm
-    let mut ordered_indices: Vec<usize> = Vec::new();
-    let mut processed: HashSet<usize> = HashSet::new();
+    crate::plan::PlanError {
+        description: format!(
+            "Cannot plan remaining {} premises - missing required variables",
+            cached_premises.len()
+        ),
+        solutions: all_solutions,
+    }
+}
 
-    while !ready.is_empty() {
-        // Find the ready conjunct with the lowest estimated cost
-        let best_index = find_lowest_cost_ready(&ready);
-        let (conjunct_index, conjunct) = ready.remove(best_index);
+impl Premise for Join {
+    type Plan = JoinPlan;
 
-        // Add to ordered execution plan
-        ordered_indices.push(conjunct_index);
-        processed.insert(conjunct_index);
+    fn cells(&self) -> VariableScope {
+        let mut cells = VariableScope::new();
+        for premise in &self.premises {
+            cells.extend(premise.cells());
+        }
+        cells
+    }
 
-        // Step 4: Update bound variables and check for newly ready conjuncts
-        let output_vars = extract_output_variables(conjunct);
-        for var in output_vars {
-            bound_variables.insert(var.clone());
+    fn plan(&self, scope: &VariableScope) -> PlanResult<Self::Plan> {
+        let mut local = scope.clone();
+        let mut conjuncts = Vec::new();
+        let mut cost = 0usize;
 
-            // Check if any blocked conjuncts can now become ready
-            if let Some(blocked_indices) = blocked.remove(&var) {
-                for blocked_index in blocked_indices {
-                    if processed.contains(&blocked_index) {
-                        continue;
+        // First iteration: compute everything and populate cache
+        let mut cache: Vec<CachedPlan> = Vec::new();
+        let mut best: Option<(crate::statement::StatementPlan, usize)> = None;
+
+        for (index, premise) in self.premises.iter().enumerate() {
+            let cells = premise.cells();
+            let result = premise.plan(&local);
+
+            // Check if this is the best plan so far
+            if let Ok(plan) = &result {
+                if let Some((ref top, _)) = best {
+                    if plan.cmp(top) == std::cmp::Ordering::Less {
+                        best = Some((plan.clone(), index));
                     }
+                } else {
+                    best = Some((plan.clone(), index));
+                }
+            }
 
-                    let blocked_conjunct = &conjuncts[blocked_index];
-                    let still_required: Vec<String> = extract_required_variables(blocked_conjunct)
-                        .iter()
-                        .filter(|v| !bound_variables.contains(*v))
-                        .cloned()
-                        .collect();
+            cache.push(CachedPlan {
+                premise,
+                cells,
+                result,
+            });
+        }
 
-                    if still_required.is_empty() {
-                        ready.push((blocked_index, blocked_conjunct));
-                    } else {
-                        // Still blocked on other variables
-                        for still_blocked_var in still_required {
-                            blocked
-                                .entry(still_blocked_var)
-                                .or_insert_with(Vec::new)
-                                .push(blocked_index);
+        // If we found a plannable premise in first iteration, process it
+        let mut delta = if let Some((plan, index)) = best {
+            cost += plan.cost();
+            let delta = local.extend(plan.provides());
+            conjuncts.push(plan);
+            cache.remove(index);
+            delta
+        } else {
+            return Err(create_planning_error(&cache));
+        };
+
+        // Subsequent iterations: use cached data with delta optimization
+        while !cache.is_empty() {
+            let mut best: Option<(crate::statement::StatementPlan, usize)> = None;
+
+            for (index, cached) in cache.iter_mut().enumerate() {
+                // Check if we need to recompute based on delta
+                if cached.cells.intersects(&delta) {
+                    cached.recompute(&local);
+                }
+
+                if let Ok(plan) = &cached.result {
+                    if let Some((top, _)) = &best {
+                        if plan.cmp(top) == std::cmp::Ordering::Less {
+                            best = Some((plan.clone(), index));
                         }
+                    } else {
+                        best = Some((plan.clone(), index));
                     }
                 }
             }
+
+            if let Some((plan, index)) = best {
+                cost += plan.cost();
+                delta = local.extend(plan.provides());
+                conjuncts.push(plan);
+                cache.remove(index);
+            } else {
+                return Err(create_planning_error(&cache));
+            }
         }
-    }
 
-    // Step 5: Check for unresolvable dependencies
-    if ordered_indices.len() != conjuncts.len() {
-        let unprocessed: Vec<usize> = (0..conjuncts.len())
-            .filter(|i| !processed.contains(i))
-            .collect();
-        return Err(QueryError::PlanningError {
-            message: format!(
-                "Cannot resolve dependencies for conjuncts at indices: {:?}. \
-                These conjuncts have circular dependencies or depend on unbound variables.",
-                unprocessed
-            ),
-        });
-    }
-
-    // Step 6: Return conjuncts in optimal order
-    let ordered_conjuncts = ordered_indices
-        .into_iter()
-        .map(|i| conjuncts[i].clone())
-        .collect();
-
-    Ok(ordered_conjuncts)
-}
-
-/// Find the index of the ready conjunct with the lowest estimated cost
-fn find_lowest_cost_ready(ready: &[(usize, &FactSelectorPlan<Value>)]) -> usize {
-    let mut best_index = 0;
-    let mut best_cost = estimate_cost(ready[0].1);
-
-    for (i, (_, conjunct)) in ready.iter().enumerate().skip(1) {
-        let cost = estimate_cost(conjunct);
-        if cost < best_cost {
-            best_cost = cost;
-            best_index = i;
-        }
-    }
-
-    best_index
-}
-
-/// Estimate execution cost of a conjunct plan
-fn estimate_cost(plan: &FactSelectorPlan<Value>) -> u32 {
-    match plan.cost() {
-        Cost::Infinity => u32::MAX,
-        Cost::Estimate(cost) => *cost as u32,
+        Ok(JoinPlan {
+            cost,
+            ordered_premises: conjuncts,
+        })
     }
 }
 
-/// Extract variables that must be bound for this conjunct to execute
-/// Based on the FactSelector pattern, looks for variable terms
-fn extract_required_variables(plan: &FactSelectorPlan<Value>) -> Vec<String> {
-    let mut vars = Vec::new();
-    let selector = &plan.selector;
-
-    // Check entity variable (of)
-    if let Some(term) = &selector.of {
-        if let Some(var_name) = term.name() {
-            vars.push(var_name.to_string());
-        }
+impl EvaluationPlan for JoinPlan {
+    fn cost(&self) -> usize {
+        self.cost
     }
 
-    // Check attribute variable (the) - less common but possible
-    if let Some(term) = &selector.the {
-        if let Some(var_name) = term.name() {
-            vars.push(var_name.to_string());
+    fn provides(&self) -> VariableScope {
+        let mut scope = VariableScope::new();
+        for premise in &self.ordered_premises {
+            scope.extend(premise.provides());
         }
+        scope
     }
 
-    // Check value variable (is)
-    if let Some(term) = &selector.is {
-        if let Some(var_name) = term.name() {
-            vars.push(var_name.to_string());
-        }
+    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+        // Convert statement plans to evaluation plans
+        let eval_plans: Vec<crate::statement::StatementPlan> = self.ordered_premises.clone();
+        crate::and::join(eval_plans, context)
     }
-
-    vars
-}
-
-/// Extract variables that will be bound after this conjunct executes
-/// These are the variables that appear in the conjunct's output
-fn extract_output_variables(plan: &FactSelectorPlan<Value>) -> Vec<String> {
-    // For fact selectors, the output variables are the same as input variables
-    // since fact selection binds the variables it matches
-    extract_required_variables(plan)
 }
 
 #[cfg(test)]
@@ -638,8 +597,8 @@ mod tests {
         // The actual planning algorithm may have issues but that's not what we're testing here
         match plan_result {
             Ok(plan) => {
-                // Should have conjuncts for each attribute (name and age)
-                assert_eq!(plan.conjuncts.len(), 2);
+                // Should have premises for each attribute (name and age)
+                assert_eq!(plan.ordered_premises.len(), 2);
             }
             Err(_) => {
                 // Planning failed due to dependency resolution issues in our test setup

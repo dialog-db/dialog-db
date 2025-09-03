@@ -13,7 +13,7 @@
 
 use crate::artifact::{ArtifactSelector, Attribute, Constrained, Entity, Value};
 use crate::error::{QueryError, QueryResult};
-use crate::plan::{Cost, EvaluationContext, EvaluationPlan, PlanError, PlanResult, Solution};
+use crate::plan::{EvaluationContext, EvaluationPlan, PlanError, PlanResult, Solution};
 use crate::query::Store;
 use crate::selection::{Match, Selection};
 use crate::syntax::VariableScope;
@@ -175,7 +175,7 @@ impl<T: Scalar> FactSelector<T> {
         if cost < UNBOUND_COST {
             Ok(FactSelectorPlan {
                 selector: self.clone(),
-                cost: Cost::Estimate(cost),
+                cost,
             })
         } else {
             // Create solutions for each unbound term
@@ -298,7 +298,7 @@ pub struct FactSelectorPlan<T: Scalar = Value> {
     /// The fact selector operation to execute
     pub selector: FactSelector<T>,
     /// Cost estimate for this operation
-    pub cost: Cost,
+    pub cost: usize,
 }
 
 impl<T> EvaluationPlan for FactSelectorPlan<T>
@@ -355,8 +355,8 @@ where
         }
     }
 
-    fn cost(&self) -> &Cost {
-        &self.cost
+    fn cost(&self) -> usize {
+        self.cost
     }
 }
 
@@ -375,6 +375,20 @@ impl<T: Scalar + Into<Value> + Send + PartialEq<Value> + Sync + std::convert::Tr
     fn plan(&self, scope: &VariableScope) -> PlanResult<Self::Plan> {
         // Call the inherent method, not the trait method to avoid recursion
         FactSelector::plan(self, scope)
+    }
+    
+    fn cells(&self) -> VariableScope {
+        let mut cells = VariableScope::new();
+        if let Some(term) = &self.the {
+            cells = cells.add(term);
+        }
+        if let Some(term) = &self.of {
+            cells = cells.add(term);
+        }
+        if let Some(term) = &self.is {
+            cells = cells.add(term);
+        }
+        cells
     }
 }
 

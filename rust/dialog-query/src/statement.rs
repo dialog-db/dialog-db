@@ -4,7 +4,9 @@
 //! Statements represent concrete patterns that can be matched against facts
 //! in the knowledge base during rule evaluation.
 
-use crate::fact_selector::FactSelector;
+use crate::artifact::Value;
+use crate::concept::{Join, JoinPlan};
+use crate::fact_selector::{FactSelector, FactSelectorPlan};
 use crate::plan::{EvaluationContext, EvaluationPlan, PlanResult};
 use crate::premise::Premise;
 use crate::query::Store;
@@ -62,7 +64,9 @@ pub enum Statement {
     /// - `Statement::fact_selector(selector)`
     /// - `Statement::fact(the, of, is)`
     #[serde(rename = "select")]
-    Select(FactSelector<crate::artifact::Value>),
+    Select(FactSelector<Value>),
+    // #[serde(rename = "realize")]
+    // Realize(Join),
 }
 
 impl Premise for Statement {
@@ -70,16 +74,21 @@ impl Premise for Statement {
 
     fn plan(&self, scope: &VariableScope) -> PlanResult<Self::Plan> {
         match self {
-            Statement::Select(selector) => {
-                match selector.plan(scope) {
-                    Ok(selector_plan) => {
-                        Ok(StatementPlan::Select(selector_plan))
-                    },
-                    Err(plan_error) => {
-                        Err(plan_error)
-                    }
-                }
-            }
+            Statement::Select(selector) => match selector.plan(scope) {
+                Ok(selector_plan) => Ok(StatementPlan::Select(selector_plan)),
+                Err(plan_error) => Err(plan_error),
+            },
+            // Statement::Realize(join) => match join.plan(scope) {
+            //     Ok(join_plan) => Ok(StatementPlan::Realize(join_plan)),
+            //     Err(plan_error) => Err(plan_error),
+            // },
+        }
+    }
+
+    fn cells(&self) -> VariableScope {
+        match self {
+            Statement::Select(selector) => selector.cells(),
+            // Statement::Realize(join) => join.cells(),
         }
     }
 }
@@ -91,25 +100,44 @@ impl Premise for Statement {
 #[derive(Debug, Clone)]
 pub enum StatementPlan {
     /// Plan for executing a fact selector statement
-    Select(crate::fact_selector::FactSelectorPlan<crate::artifact::Value>),
+    Select(FactSelectorPlan<Value>),
+    // Plan for realizing concepts
+    // Realize(JoinPlan),
 }
 
 impl EvaluationPlan for StatementPlan {
-    fn cost(&self) -> &crate::plan::Cost {
+    fn cost(&self) -> usize {
         match self {
             StatementPlan::Select(plan) => plan.cost(),
+            // StatementPlan::Realize(plan) => plan.cost(),
         }
     }
 
     fn provides(&self) -> VariableScope {
         match self {
             StatementPlan::Select(plan) => plan.provides(),
+            // StatementPlan::Realize(plan) => plan.provides(),
         }
     }
 
     fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
-        match self {
-            StatementPlan::Select(plan) => plan.evaluate(context),
+        use async_stream::try_stream;
+        let me = self.clone();
+
+        try_stream! {
+
+            match me {
+                StatementPlan::Select(plan) => {
+                    for await frame in plan.clone().evaluate(context) {
+                        yield frame?;
+                    }
+                }
+                // StatementPlan::Realize(plan) => {
+                //     for await frame in plan.evaluate(context) {
+                //         yield frame?;
+                //     }
+                // }
+            };
         }
     }
 }
@@ -128,9 +156,13 @@ impl Statement {
     ///
     /// Create a statement using a FactSelector builder:
     /// `Statement::fact_selector(FactSelector::new().the(attr).of(entity).is(value))`
-    pub fn select(selector: FactSelector<crate::artifact::Value>) -> Self {
+    pub fn select(selector: FactSelector<Value>) -> Self {
         Statement::Select(selector)
     }
+
+    // pub fn realize(join: Join) -> Self {
+    //     Statement::Realize(join)
+    // }
 
     /// Create a fact selector from individual terms (the most common pattern)
     ///
