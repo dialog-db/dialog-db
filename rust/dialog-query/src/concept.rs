@@ -3,7 +3,7 @@ use crate::attribute::Attribute;
 use crate::plan::{EvaluationContext, EvaluationPlan, PlanOrdering, PlanResult};
 use crate::premise::Premise;
 use crate::query::Store;
-use crate::statement::Statement;
+use crate::statement::{Statement, StatementPlan};
 use crate::term::Term;
 use crate::FactSelector;
 use crate::Selection;
@@ -150,7 +150,7 @@ impl Join {
 #[derive(Debug, Clone)]
 pub struct JoinPlan {
     cost: usize,
-    ordered_premises: Vec<crate::statement::StatementPlan>,
+    ordered_premises: Vec<StatementPlan>,
 }
 
 /// Cached premise with all computed data
@@ -158,7 +158,7 @@ pub struct JoinPlan {
 struct CachedPlan<'a> {
     premise: &'a Statement,
     cells: VariableScope,
-    result: PlanResult<crate::statement::StatementPlan>,
+    result: PlanResult<StatementPlan>,
 }
 
 impl<'a> CachedPlan<'a> {

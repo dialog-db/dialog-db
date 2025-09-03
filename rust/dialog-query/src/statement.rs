@@ -5,14 +5,18 @@
 //! in the knowledge base during rule evaluation.
 
 use crate::artifact::Value;
-use crate::concept::{Join, JoinPlan};
 use crate::fact_selector::{FactSelector, FactSelectorPlan};
 use crate::plan::{EvaluationContext, EvaluationPlan, PlanResult};
 use crate::premise::Premise;
 use crate::query::Store;
 use crate::selection::Selection;
 use crate::syntax::VariableScope;
+use crate::{Attribute, QueryError, Term};
+use async_stream::try_stream;
+use dialog_common::ConditionalSend;
+use futures_core::Stream;
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
 
 /// Statements that can appear in rule conditions (premises)
 ///
@@ -22,41 +26,49 @@ use serde::{Deserialize, Serialize};
 ///
 /// # Design Philosophy
 ///
-/// Statements follow the datalog tradition where rule conditions are built from
-/// atomic statements that can be:
-/// - Fact selectors (match facts in the knowledge base)
-/// - Future: Negations, aggregations, built-in predicates, etc.
+/// The Statement enum follows the familiar-query pattern where different types of
+/// logical operations are represented as discrete types that implement common traits.
+/// This allows for compositional rule building while maintaining type safety.
+///
+/// # Variants
+///
+/// - `Select`: Matches facts against a pattern using FactSelector
+/// - `Realize`: (Commented out) Would execute concept realizations through Join operations
 ///
 /// # Usage in Rules
 ///
-/// Statements are primarily created within rule `when()` methods using
-/// array literal syntax for clean, readable rule definitions.
+/// Statements are typically created using the convenience constructors:
+/// - `Statement::select()` - Create from a FactSelector
+/// - `Statement::fact()` - Create a fact selector from individual terms
 ///
-/// # Current Implementation
+/// # JSON Serialization
 ///
-/// Currently focused on fact selectors for the initial implementation.
-/// The design allows for easy extension with additional statement types
-/// as needed (negation, aggregation, built-ins, etc.).
+/// Statements serialize to JSON with a `type` field indicating the variant:
+/// ```json
+/// {
+///   "type": "select",
+///   "the": "person/name",
+///   "of": {"?": {"name": "user"}},
+///   "is": "Alice"
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum Statement {
-    /// Fact selector statement - matches facts by pattern
+    /// Fact selection statement
     ///
-    /// This is the fundamental building block for rule conditions. A fact selector
-    /// defines a pattern that must match against facts stored in the knowledge base.
+    /// Matches facts in the knowledge base against a pattern. This is the most
+    /// common type of statement, used for querying and joining facts.
     ///
-    /// # Pattern Matching
-    ///
-    /// Fact selectors can match on any combination of:
-    /// - **Attribute** (the): What property/relationship (e.g., "person/name")
-    /// - **Entity** (of): Which entity the fact is about
-    /// - **Value** (is): What value the property has
-    ///
-    /// # Variable Binding
-    ///
-    /// Use variables to create joins between statements. When multiple statements
-    /// use the same variable name (like "person"), they create a join condition
-    /// that ensures the statements match the same entity.
+    /// # JSON Structure
+    /// ```json
+    /// {
+    ///   "type": "select",
+    ///   "the": "attribute_name",
+    ///   "of": {"?": {"name": "entity_var"}},
+    ///   "is": "constant_or_variable"
+    /// }
+    /// ```
     ///
     /// # Usage Pattern
     ///
@@ -65,8 +77,142 @@ pub enum Statement {
     /// - `Statement::fact(the, of, is)`
     #[serde(rename = "select")]
     Select(FactSelector<Value>),
-    // #[serde(rename = "realize")]
-    // Realize(Join),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expression {
+    Select {
+        facts: Vec<FactSelector<Value>>,
+    },
+    ApplyRule {
+        /// Rule identifier (concept name)
+        rule: String,
+        /// Set of terms applied to the rule
+        terms: Vec<(String, Term<Value>)>,
+    },
+    ApplyFormula {
+        /// Fact identifier (concept name)
+        formula: String,
+        /// Set of terms applied to the formula
+        terms: Vec<(String, Term<Value>)>,
+    },
+}
+
+pub trait Out<T>: Stream<Item = Result<T, QueryError>> + 'static + ConditionalSend {}
+
+impl<T, S> Out<T> for S where S: Stream<Item = Result<T, QueryError>> + 'static + ConditionalSend {}
+
+pub trait ContextExt {
+    fn rules(&self, name: &String) -> impl Out<Rule>;
+    fn formulas(&self, name: &String) -> impl Out<Formula>;
+}
+
+impl<S: Store, M: Selection> ContextExt for EvaluationContext<S, M> {
+    fn rules(&self, _name: &String) -> impl Out<Rule> {
+        try_stream! {
+            yield unimplemented!()
+        }
+    }
+
+    fn formulas(&self, _name: &String) -> impl Out<Formula> {
+        try_stream! {
+            yield Formula { name: "example".to_string() }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Formula {
+    pub name: String,
+}
+
+impl Formula {
+    pub fn run(&self) -> impl Selection {
+        try_stream! {
+            yield unimplemented!()
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Rule {
+    pub name: String,
+    pub head: Vec<(String, Attribute<Value>)>,
+    pub body: Vec<Expression>,
+}
+
+impl Rule {
+    pub fn execute<S: Store, M: Selection>(
+        &self,
+        _context: EvaluationContext<S, M>,
+    ) -> impl Selection {
+        try_stream! {
+            yield unimplemented!()
+        }
+    }
+}
+
+impl Expression {
+    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+        let expression = self.clone(); // Move the expression out of self
+        let ctx = &context;
+        try_stream! {
+            match expression {
+                Expression::Select { facts } => {
+                    // For Select expressions with multiple facts, we should join them
+                    // This is simplified - in practice you'd want proper join planning
+                    let store = context.store;
+                    // let mut current_selection: std::pin::Pin<Box<dyn Selection>> = Box::pin(context.selection);
+                    let mut selection: std::pin::Pin<Box<dyn Selection>> = Box::pin(context.selection);
+
+                    for selector in facts {
+                        let scope = VariableScope::new();
+                        let plan = selector.plan(&scope)?;
+                        // current_selection = Box::pin(plan.evaluate(*ctx));
+
+                        let context = EvaluationContext { selection, store: store.clone() };
+                        let new_selection = Box::pin(plan.evaluate(context));
+                        selection = new_selection;
+                    }
+
+                    for await frame in selection {
+                        yield frame?;
+                    }
+                },
+                Expression::ApplyRule { rule, terms: _ } => {
+                    let rules = context.rules(&rule);
+                    let store = context.store.clone();
+                    let mut selection: std::pin::Pin<Box<dyn Selection>> = Box::pin(context.selection);
+
+                    for await each in rules {
+                        let rule = each?;
+                        let rule_context = EvaluationContext {
+                            store: store.clone(),
+                            selection,
+                        };
+                        let rule_selection = Box::pin(rule.execute(rule_context));
+
+                        selection = rule_selection;
+                    }
+
+                    for await frame in selection {
+                        yield frame?;
+                    }
+                },
+                Expression::ApplyFormula { formula, terms: _ } => {
+                    let formulas = context.formulas(&formula);
+                    for await result in formulas {
+                        let formula = result?;
+                        let selection = Box::pin(formula.run());
+                        for await frame in selection {
+                            yield frame?;
+                        }
+                    }
+                },
+
+            }
+        }
+    }
 }
 
 impl Premise for Statement {
@@ -78,17 +224,12 @@ impl Premise for Statement {
                 Ok(selector_plan) => Ok(StatementPlan::Select(selector_plan)),
                 Err(plan_error) => Err(plan_error),
             },
-            // Statement::Realize(join) => match join.plan(scope) {
-            //     Ok(join_plan) => Ok(StatementPlan::Realize(join_plan)),
-            //     Err(plan_error) => Err(plan_error),
-            // },
         }
     }
 
     fn cells(&self) -> VariableScope {
         match self {
             Statement::Select(selector) => selector.cells(),
-            // Statement::Realize(join) => join.cells(),
         }
     }
 }
@@ -101,43 +242,24 @@ impl Premise for Statement {
 pub enum StatementPlan {
     /// Plan for executing a fact selector statement
     Select(FactSelectorPlan<Value>),
-    // Plan for realizing concepts
-    // Realize(JoinPlan),
 }
 
 impl EvaluationPlan for StatementPlan {
     fn cost(&self) -> usize {
         match self {
             StatementPlan::Select(plan) => plan.cost(),
-            // StatementPlan::Realize(plan) => plan.cost(),
         }
     }
 
     fn provides(&self) -> VariableScope {
         match self {
             StatementPlan::Select(plan) => plan.provides(),
-            // StatementPlan::Realize(plan) => plan.provides(),
         }
     }
 
     fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
-        use async_stream::try_stream;
-        let me = self.clone();
-
-        try_stream! {
-
-            match me {
-                StatementPlan::Select(plan) => {
-                    for await frame in plan.clone().evaluate(context) {
-                        yield frame?;
-                    }
-                }
-                // StatementPlan::Realize(plan) => {
-                //     for await frame in plan.evaluate(context) {
-                //         yield frame?;
-                //     }
-                // }
-            };
+        match self {
+            StatementPlan::Select(plan) => plan.evaluate(context),
         }
     }
 }
@@ -159,10 +281,6 @@ impl Statement {
     pub fn select(selector: FactSelector<Value>) -> Self {
         Statement::Select(selector)
     }
-
-    // pub fn realize(join: Join) -> Self {
-    //     Statement::Realize(join)
-    // }
 
     /// Create a fact selector from individual terms (the most common pattern)
     ///
