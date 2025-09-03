@@ -1045,7 +1045,7 @@ mod integration_tests {
             // The error should mention that the selector needs constraints
             let error_msg = error.to_string();
             assert!(
-                error_msg.contains("constraint") || error_msg.contains("EmptySelector"),
+                error_msg.contains("bound term"),
                 "Error should mention constraint requirements: {}",
                 error_msg
             );

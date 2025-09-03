@@ -6,7 +6,6 @@
 //! The design is based on the TypeScript implementation in @query/src/plan/rule.js
 //! and follows the patterns described in the design document at notes/rules.md.
 
-// use crate::attribute::{Attribute, Match as AttributeMatch};
 use crate::concept::Concept;
 use crate::fact_selector::FactSelector;
 use crate::statement::Statement;
@@ -404,8 +403,6 @@ pub trait Rule: Concept {
     fn when(terms: Self::Match) -> When;
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,7 +411,6 @@ mod tests {
     use crate::statement::Statement;
     use crate::syntax::VariableScope;
     use crate::term::Term;
-
 
     #[test]
     fn test_statement_fact_selector() {
@@ -445,7 +441,10 @@ mod tests {
         let plan = statement.plan(&scope);
 
         // Should successfully create a plan
-        assert!(plan.is_ok());
+        match plan {
+            Ok(_) => {},
+            Err(_) => panic!("Expected ready plan"),
+        }
     }
 
     #[test]
@@ -525,7 +524,6 @@ mod tests {
         assert!(selector.of.is_some());
         assert!(selector.is.is_some());
     }
-
 
     #[test]
     fn test_new_when_api_comprehensive() {
@@ -641,5 +639,4 @@ mod tests {
             }
         }
     }
-
 }

@@ -5,8 +5,7 @@
 //!
 //! Note: Premises are only used in rule conditions (the "when" part), not in conclusions.
 
-use crate::error::QueryResult;
-use crate::plan::EvaluationPlan;
+use crate::plan::{EvaluationPlan, PlanResult};
 use crate::syntax::VariableScope;
 
 /// A premise that can be used in rule conditions
@@ -24,5 +23,5 @@ pub trait Premise: Clone + std::fmt::Debug {
     /// The plan describes how to evaluate this premise against a knowledge base.
     /// Variable scope tracks which variables are already bound in the current
     /// context.
-    fn plan(&self, scope: &VariableScope) -> QueryResult<Self::Plan>;
+    fn plan(&self, scope: &VariableScope) -> PlanResult<Self::Plan>;
 }

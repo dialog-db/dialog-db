@@ -4,9 +4,8 @@
 //! Statements represent concrete patterns that can be matched against facts
 //! in the knowledge base during rule evaluation.
 
-use crate::error::QueryResult;
 use crate::fact_selector::FactSelector;
-use crate::plan::{EvaluationContext, EvaluationPlan};
+use crate::plan::{EvaluationContext, EvaluationPlan, PlanResult};
 use crate::premise::Premise;
 use crate::query::Store;
 use crate::selection::Selection;
@@ -69,11 +68,17 @@ pub enum Statement {
 impl Premise for Statement {
     type Plan = StatementPlan;
 
-    fn plan(&self, scope: &VariableScope) -> QueryResult<Self::Plan> {
+    fn plan(&self, scope: &VariableScope) -> PlanResult<Self::Plan> {
         match self {
             Statement::Select(selector) => {
-                let selector_plan = selector.plan(scope)?;
-                Ok(StatementPlan::Select(selector_plan))
+                match selector.plan(scope) {
+                    Ok(selector_plan) => {
+                        Ok(StatementPlan::Select(selector_plan))
+                    },
+                    Err(plan_error) => {
+                        Err(plan_error)
+                    }
+                }
             }
         }
     }
@@ -93,6 +98,12 @@ impl EvaluationPlan for StatementPlan {
     fn cost(&self) -> &crate::plan::Cost {
         match self {
             StatementPlan::Select(plan) => plan.cost(),
+        }
+    }
+
+    fn provides(&self) -> VariableScope {
+        match self {
+            StatementPlan::Select(plan) => plan.provides(),
         }
     }
 

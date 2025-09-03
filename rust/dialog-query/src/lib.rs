@@ -28,17 +28,15 @@ pub mod types;
 pub use artifact::{Entity, Value, ValueDataType};
 pub use attribute::{Attribute, Cardinality};
 pub use concept::Concept;
+pub use dialog_query_macros::Rule;
 pub use error::{InconsistencyError, QueryError};
 pub use fact::{assert, retract, Assertion, Claim, Fact, Retraction};
 pub use fact_selector::{FactSelector, FactSelectorPlan};
 pub use plan::EvaluationPlan;
 pub use premise::Premise;
 pub use query::Query;
-pub use rule::{
-    Rule, Statements, When,
-};
+pub use rule::{Rule, Statements, When};
 
-pub use dialog_query_macros::Rule;
 pub use selection::{Match, MatchSet, Selection, SelectionExt};
 pub use selector::Selector;
 pub use statement::{Statement, StatementPlan};

@@ -5,7 +5,7 @@ use crate::term::Term;
 use std::collections::BTreeSet;
 
 /// Tracks variable bindings during query planning
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariableScope {
     /// Set of variables that have already been bound.
     pub bound_variables: BTreeSet<String>,
@@ -16,6 +16,16 @@ impl VariableScope {
         Self {
             bound_variables: BTreeSet::new(),
         }
+    }
+
+    pub fn add<T: Scalar>(mut self, variable: &Term<T>) -> Self {
+        if let Term::Variable {
+            name: Some(name), ..
+        } = variable
+        {
+            self.bound_variables.insert(name.clone());
+        }
+        self
     }
 
     pub fn contains<T: Scalar>(&self, term: &Term<T>) -> bool {

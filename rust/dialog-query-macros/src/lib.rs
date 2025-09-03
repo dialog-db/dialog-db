@@ -295,7 +295,7 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
             fn attributes() -> &'static [(&'static str, dialog_query::attribute::Attribute<dialog_query::artifact::Value>)] {
                 #attribute_tuples_name
             }
-            
+
             fn of<T: Into<dialog_query::term::Term<dialog_query::artifact::Entity>>>(entity: T) -> Self {
                 let entity = entity.into();
                 #attributes_name {

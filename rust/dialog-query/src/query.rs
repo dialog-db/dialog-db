@@ -44,7 +44,7 @@ impl<Plan: EvaluationPlan> PlannedQuery for Plan {
 impl<E: EvaluationPlan + 'static, P: Premise<Plan = E>> Query for P {
     fn query<S: Store>(&self, store: &S) -> QueryResult<impl Selection> {
         let scope = VariableScope::new();
-        let plan = self.plan(&scope)?.to_owned();
+        let plan = self.plan(&scope)?;
         let store = store.to_owned();
 
         let selection = async_stream::try_stream! {

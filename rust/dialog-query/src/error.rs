@@ -2,6 +2,7 @@
 
 use crate::artifact::{DialogArtifactsError, Value, ValueDataType};
 use thiserror::Error;
+use crate::plan::PlanError;
 
 /// Errors that can occur during query planning and execution
 #[derive(Error, Debug, Clone, PartialEq)]
@@ -68,6 +69,14 @@ impl From<serde_json::Error> for QueryError {
 impl From<DialogArtifactsError> for QueryError {
     fn from(value: DialogArtifactsError) -> Self {
         QueryError::FactStore(format!("{value}"))
+    }
+}
+
+impl From<PlanError> for QueryError {
+    fn from(err: PlanError) -> Self {
+        QueryError::PlanningError {
+            message: err.description,
+        }
     }
 }
 

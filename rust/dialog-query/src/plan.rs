@@ -2,13 +2,15 @@
 
 use crate::artifact::ArtifactStore;
 use crate::query::Store;
+use crate::syntax::VariableScope;
 use crate::{Match, Selection};
 use dialog_common::ConditionalSend;
-use futures_util::stream;
+use futures_util::stream::once;
 use std::collections::BTreeMap;
+use thiserror::Error;
 
 pub fn fresh<S: ArtifactStore>(store: S) -> EvaluationContext<S, impl Selection> {
-    let selection = stream::once(async move { Ok(Match::new()) });
+    let selection = once(async move { Ok(Match::new()) });
     EvaluationContext { store, selection }
 }
 
@@ -40,7 +42,7 @@ where
     }
 
     pub fn new(store: S) -> EvaluationContext<S, impl Selection> {
-        let selection = stream::once(async move { Ok(Match::new()) });
+        let selection = once(async move { Ok(Match::new()) });
 
         EvaluationContext { store, selection }
     }
@@ -102,7 +104,26 @@ impl Cost {
 pub trait EvaluationPlan: Clone + std::fmt::Debug + ConditionalSend {
     /// Get the estimated cost of executing this plan
     fn cost(&self) -> &Cost;
+    /// Set of variables that this plan will bind
+    fn provides(&self) -> VariableScope;
     /// Execute this plan with the given context and return result frames
     /// This follows the familiar-query pattern where frames flow through the evaluation
     fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection;
+}
+
+/// Possible solutution to planning error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Solution {
+    /// Set of variables that need to be bound before plan can be completed.
+    pub requires: VariableScope,
+}
+
+pub type PlanResult<P> = Result<P, PlanError>;
+
+/// Errors that can occur during query planning and execution
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
+#[error("Can not plan query due to unsatisfied dependency")]
+pub struct PlanError {
+    pub description: String,
+    pub solutions: Vec<Solution>,
 }

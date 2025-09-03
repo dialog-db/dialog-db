@@ -73,7 +73,6 @@ impl<T: IntoValueDataType + Clone + 'static> Default for Type<T> {
     }
 }
 
-
 // impl<T: IntoValueDataType + Clone + 'static> From<PhantomData<T>> for ValueDataType {
 //     fn from(_value: PhantomData<T>) -> Self {
 //         T::into_value_data_type()
@@ -134,6 +133,10 @@ where
     /// Check if this term is a variable (named or unnamed)
     pub fn is_variable(&self) -> bool {
         matches!(self, Term::Variable { .. })
+    }
+
+    pub fn is_named_variable(&self) -> bool {
+        matches!(self, Term::Variable { name: Some(_), .. })
     }
 
     /// Check if this term is a constant value
@@ -413,6 +416,16 @@ where
 {
     fn from(term: &Term<T>) -> Self {
         term.clone()
+    }
+}
+
+impl<T: Scalar> From<&Option<Term<T>>> for Term<T> {
+    fn from(term: &Option<Term<T>>) -> Self {
+        if let Some(term) = term {
+            term.clone()
+        } else {
+            Term::blank()
+        }
     }
 }
 
