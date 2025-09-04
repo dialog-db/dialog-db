@@ -1,11 +1,9 @@
 use crate::artifact::Value;
 use crate::attribute::Attribute;
 use crate::fact_selector::FactSelector;
-// use crate::plan::{EvaluationContext, EvaluationPlan};
-// use crate::query::Store;
-// use crate::stream::fork_stream;
 use crate::term::Term;
-use dialog_artifacts::{Entity, ValueDataType};
+use dialog_artifacts::ValueDataType;
+use futures_util::stream::Select;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use thiserror::Error;
@@ -22,6 +20,10 @@ impl Terms {
     pub fn get(&self, name: &str) -> Option<&Term<Value>> {
         self.0.get(name)
     }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.contains_key(name)
+    }
 }
 
 /// Represents a conclusion of the rule as a set of attribute descriptors keyed
@@ -29,26 +31,42 @@ impl Terms {
 /// facts with a shared entity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Conclusion {
-    /// Every conclusion is required to have an entity to associate attributes
-    /// with.
-    this: Attribute<Entity>,
     /// Map of all attributes this entity should have to reach this conclusion.
     attributes: HashMap<String, Attribute<Value>>,
+}
+impl Conclusion {
+    pub fn contains(&self, name: &str) -> bool {
+        name == "this" || self.attributes.contains_key(name)
+    }
+
+    /// Finds a parameter that is absent from the provided dependencies.
+    pub fn absent(&self, dependencies: &Dependencies) -> Option<&str> {
+        if !dependencies.contains("this") {
+            Some("this")
+        } else {
+            self.attributes
+                .keys()
+                .find(|name| !dependencies.contains(name))
+                .map(|name| name.as_str())
+        }
+    }
 }
 
 /// Query planner analyzes each premise to identify it's dependencies and budget
 /// required to perform them. This struct represents result of succesful analysis.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Analysis {
+    /// Base execution cost which does not include added costs captured in the
+    /// dependencies.
+    cost: usize,
     dependencies: Dependencies,
-    budget: usize,
 }
 
 /// Represents a deductive rule that can be applied creating a premise.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeductiveRule {
     /// Rule identifier used to look rules up by.
-    name: String,
+    operator: String,
     /// Conclusion that this rule reaches if all premises hold. This is
     /// typically what datalog calls rule head.
     conclusion: Conclusion,
@@ -72,6 +90,7 @@ impl DeductiveRule {
     /// budget. It also verifies that all rule parameters are utilized by the
     /// rule premises and returns an error if any are not.
     fn analyze(&self) -> Result<Analysis, AnalyzerError> {
+        let conclusion = &self.conclusion;
         // We will collect rule dependencies and compute their levels based on
         // their use in the rule premises.
         let mut dependencies = Dependencies::new();
@@ -80,14 +99,13 @@ impl DeductiveRule {
         // in order to identify if there are any unresolvable dependencies
         // and in the local rule budget.
         let mut variables = Dependencies::new();
-        let parameters = self.parameters();
 
         let mut budget: usize = 0;
         // Analyze each premise and account their dependencies into the rule's
         // dependencies and budget.
         for premise in self.premises.iter() {
             let analysis = premise.analyze()?;
-            budget += analysis.budget;
+            budget += analysis.cost;
 
             // Go over every dependency of every premise and estimate their
             // cost for the rule. If dependency is a parameter of the rule
@@ -95,7 +113,7 @@ impl DeductiveRule {
             // captures them in the internal dependencies in order to reflect
             // it in the budget.
             for (name, dependency) in analysis.dependencies.iter() {
-                if parameters.contains(name) {
+                if conclusion.contains(name) {
                     dependencies.update(name.to_string(), dependency);
                 } else {
                     variables.update(name.to_string(), dependency);
@@ -111,13 +129,12 @@ impl DeductiveRule {
         // the rule definition. We can introduce `discard` operator in the
         // future where rule author may intentionally require a parameter it is
         // not utilizing.
-        parameters
-            .iter()
-            .find(|parameter| !dependencies.contains(parameter))
+        conclusion
+            .absent(&dependencies)
             .map_or(Ok(()), |parameter| {
                 Err(AnalyzerError::UnusedParameter {
                     rule: self.clone(),
-                    parameter: parameter.clone(),
+                    parameter: parameter.to_string(),
                 })
             })?;
 
@@ -127,7 +144,7 @@ impl DeductiveRule {
         // can provide it, which makes it impossible to execute such a rule.
         variables
             .iter()
-            .find(|(_, level)| matches!(level, Level::Required))
+            .find(|(_, level)| matches!(level, Requirement::Required))
             .map_or(Ok(()), |(variable, _)| {
                 Err(AnalyzerError::RequiredLocalVariable {
                     rule: self.clone(),
@@ -138,14 +155,14 @@ impl DeductiveRule {
         // If we got this far we know all the dependencies and can estimate a
         // overall budget for the rule execution.
         Ok(Analysis {
-            budget: budget + variables.cost(),
+            cost: budget + variables.cost(),
             dependencies,
         })
     }
 }
 impl Display for DeductiveRule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {{", self.name);
+        write!(f, "{} {{", self.operator);
         for (name, attribute) in self.conclusion.attributes.iter() {
             write!(f, "{}: {},", name, attribute.data_type)?;
         }
@@ -165,6 +182,8 @@ pub enum AnalyzerError {
         rule: DeductiveRule,
         parameter: String,
     },
+    #[error("Formula {formula} application omits required cell \"{cell}\"")]
+    RequiredCell { formula: Formula, cell: String },
     #[error("Rule {rule} makes use of local {variable} that no premise can provide")]
     RequiredLocalVariable {
         rule: DeductiveRule,
@@ -189,11 +208,11 @@ impl RuleApplication {
         let analysis = self.rule.analyze()?;
         let mut dependencies = Dependencies::new();
 
-        for (parameter, level) in analysis.dependencies.iter() {
-            match level {
+        for (parameter, requirement) in analysis.dependencies.iter() {
+            match requirement {
                 // If some of the parameters is a required dependency of the
                 // rule, but it was not applied rule application is invalid.
-                Level::Required => {
+                Requirement::Required => {
                     self.terms
                         .get(parameter)
                         .ok_or_else(|| AnalyzerError::RequiredParameter {
@@ -203,7 +222,7 @@ impl RuleApplication {
                 }
                 // If dependency is not required and applied term is not a
                 // constant we propagate it into dependencies.
-                Level::Desired(desire) => {
+                Requirement::Derived(desire) => {
                     if let Some(Term::Variable { .. }) = self.terms.get(parameter) {
                         dependencies.desire(parameter.to_string(), *desire);
                     }
@@ -213,7 +232,7 @@ impl RuleApplication {
 
         Ok(Analysis {
             dependencies,
-            budget: analysis.budget,
+            cost: analysis.cost,
         })
     }
     fn plan(&self) -> Plan {
@@ -222,27 +241,31 @@ impl RuleApplication {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Formula {
-    operator: String,
-    cells: Cells,
-}
-
+/// Represents a set of named cells that formula operates on. Each cell also
+/// describes whether it is required or optional and cost of it's omission.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cells(HashMap<String, Cell>);
 
+/// Describes a cell of the formula.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Cell {
-    /// Reads from this cell
-    Input { data_type: ValueDataType },
-    /// Writes to this cell
-    Output { data_type: ValueDataType },
-    /// Reads if provided, writes if not provided
-    Modal { data_type: ValueDataType },
+pub struct Cell {
+    pub description: &'static str,
+    pub requirement: Requirement,
+    pub data_type: ValueDataType,
+}
+
+impl Cells {
+    fn new() -> Self {
+        Cells(HashMap::new())
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Cell)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Dependencies(HashMap<String, Level>);
+pub struct Dependencies(HashMap<String, Requirement>);
 impl Dependencies {
     fn new() -> Self {
         Dependencies(HashMap::new())
@@ -251,29 +274,33 @@ impl Dependencies {
         self.0
             .values()
             .filter_map(|d| match d {
-                Level::Desired(cost) => Some(*cost),
+                Requirement::Derived(cost) => Some(*cost),
                 _ => None,
             })
             .sum()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &Level)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Requirement)> {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
     }
 
     pub fn desire(&mut self, dependency: String, cost: usize) {
         let Dependencies(content) = self;
         if let Some(existing) = content.get(&dependency) {
-            if let Level::Desired(prior) = existing {
-                content.insert(dependency, Level::Desired(cost.max(*prior)));
+            if let Requirement::Derived(prior) = existing {
+                content.insert(dependency, Requirement::Derived(cost.max(*prior)));
             }
         } else {
-            content.insert(dependency, Level::Desired(cost));
+            content.insert(dependency, Requirement::Derived(cost));
         }
     }
 
+    pub fn provide(&mut self, dependency: String) {
+        self.desire(dependency, 0);
+    }
+
     pub fn require(&mut self, dependency: String) {
-        self.0.insert(dependency, Level::Required);
+        self.0.insert(dependency, Requirement::Required);
     }
 
     /// Alters the dependency level to the lowest between current and provided
@@ -282,20 +309,20 @@ impl Dependencies {
     /// fulfill the requirement with a lower budget it will likely be picked
     /// to execute ahead of the ones that are more expensive, hence actual level
     /// is lower (🤔 perhaps average would be more accurate).
-    pub fn update(&mut self, dependency: String, level: &Level) {
+    pub fn update(&mut self, dependency: String, requirement: &Requirement) {
         let Dependencies(content) = self;
         if let Some(existing) = content.get(&dependency) {
-            if let Level::Desired(prior) = existing {
-                if let Level::Desired(desire) = level {
-                    content.insert(dependency, Level::Desired(*prior.min(desire)));
+            if let Requirement::Derived(prior) = existing {
+                if let Requirement::Derived(desire) = requirement {
+                    content.insert(dependency, Requirement::Derived(*prior.min(desire)));
                 }
             } else {
-                content.insert(dependency, level.clone());
+                content.insert(dependency, requirement.clone());
             }
         }
         // If dependency was previously assumed to be required it is no longer
         else {
-            content.insert(dependency, level.clone());
+            content.insert(dependency, requirement.clone());
         }
     }
 
@@ -304,101 +331,192 @@ impl Dependencies {
         content.contains_key(dependency)
     }
 
-    pub fn required(&self) -> impl Iterator<Item = (&str, &Level)> {
+    pub fn required(&self) -> impl Iterator<Item = (&str, &Requirement)> {
         self.0.iter().filter_map(|(k, v)| match v {
-            Level::Required => Some((k.as_str(), v)),
-            Level::Desired(_) => None,
+            Requirement::Required => Some((k.as_str(), v)),
+            Requirement::Derived(_) => None,
         })
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Level {
-    /// Required dependency must be satisfied
+enum Requirement {
+    /// Dependency that must be provided
     Required,
-    /// Desired dependency, the higher the number the higher the
-    /// cost of omitting it.
-    Desired(usize),
+    /// Dependency that could be provided. If not provided it will be derived.
+    /// Number represents cost of the deriviation.
+    Derived(usize),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Formula {
+    /// Unique identifier for the formula.
+    operator: String,
+    /// Set of operands this formula operates on.
+    operands: Cells,
+
+    /// Base cost of applying this formula.
+    cost: usize,
+}
+impl Formula {
+    pub fn new(operator: String, operands: Cells, cost: usize) -> Self {
+        Formula {
+            operator,
+            operands,
+            cost,
+        }
+    }
+}
+impl Display for Formula {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {{", self.operator);
+        for (name, cell) in self.operands.iter() {
+            write!(f, "{}: {},", name, cell.data_type)?;
+        }
+        write!(f, "}}")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FormulaApplication {
-    operator: Formula,
+    formula: Formula,
     terms: Terms,
+}
+impl FormulaApplication {
+    pub fn new(formula: Formula, terms: Terms) -> Self {
+        FormulaApplication { formula, terms }
+    }
+
+    pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
+        let mut dependencies = Dependencies::new();
+
+        // Iterate over all the operands of the formula and to capture
+        // requirements. If required operand is not provided in this
+        // application we raise an error, because this is not a valid
+        // application.
+        for (name, cell) in self.formula.operands.iter() {
+            match cell.requirement {
+                // If cell is required but not provided we raise an error
+                // Otherwise we capture requirement in our dependencies
+                Requirement::Required => {
+                    if !self.terms.contains(name) {
+                        Err(AnalyzerError::RequiredCell {
+                            formula: self.formula.clone(),
+                            cell: name.into(),
+                        })
+                    } else {
+                        dependencies.update(name.into(), &cell.requirement);
+                        Ok(())
+                    }
+                }
+                // If cell can be derived we simply update our dependencies with
+                // the cell's requirement.
+                Requirement::Derived(_) => {
+                    dependencies.update(name.into(), &cell.requirement);
+                    Ok(())
+                }
+            }?;
+
+            dependencies.update(name.to_string(), &cell.requirement);
+        }
+
+        Ok(Analysis {
+            dependencies,
+            cost: self.formula.cost,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Premise {
-    /// Statement who's evaluation results are included in the output. This is
-    /// basically every possible statement that is not a negation.
-    Include(Statement),
+    /// Fact selection.
+    Select(FactSelector),
+    /// Rule application
+    ApplyRule(RuleApplication),
+    /// Formula application
+    ApplyFormula(FormulaApplication),
     /// Statement that exclude matches from the selection. This is basically
     /// a negetated statement.
-    Exclude(Statement),
+    Exclude(Application),
 }
 
 impl Premise {
     fn analyze(&self) -> Result<Analysis, AnalyzerError> {
         match self {
-            Premise::Include(statement) => statement.analyze(),
-            Premise::Exclude(statement) => statement.analyze(),
+            Premise::Select(selector) => selector.analyze(),
+            Premise::ApplyFormula(application) => application.analyze(),
+            Premise::ApplyRule(application) => application.analyze(),
+            // Negation requires that all of the underlying dependencies to be
+            // derived before the execution. That is why we mark all of the
+            // underlying dependencies as required.
+            Premise::Exclude(statement) => {
+                let mut dependencies = Dependencies::new();
+                let analysis = statement.analyze()?;
+                for (name, _) in analysis.dependencies.iter() {
+                    dependencies.require(name.into());
+                }
+
+                Ok(Analysis {
+                    dependencies,
+                    cost: analysis.cost,
+                })
+            }
         }
+    }
+}
+
+impl FactSelector {
+    fn analyze(&self) -> Result<Analysis, AnalyzerError> {
+        let mut dependencies = Dependencies::new();
+
+        if let Some(Term::Variable {
+            name: Some(name), ..
+        }) = &self.the
+        {
+            dependencies.desire(name.clone(), 200)
+        }
+
+        if let Some(Term::Variable {
+            name: Some(name), ..
+        }) = &self.of
+        {
+            dependencies.desire(name.clone(), 500)
+        }
+
+        if let Some(Term::Variable {
+            name: Some(name), ..
+        }) = &self.is
+        {
+            dependencies.desire(name.clone(), 300)
+        }
+
+        Ok(Analysis {
+            dependencies,
+            cost: 100,
+        })
     }
 }
 
 /// Statements that can be used by the rules.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Statement {
+pub enum Application {
     /// Fact selection.
     Select(FactSelector),
     /// Rule application
     ApplyRule(RuleApplication),
+    /// Formula application
+    ApplyFormula(FormulaApplication),
 }
 
-impl Statement {
+impl Application {
     fn analyze(&self) -> Result<Analysis, AnalyzerError> {
         match self {
-            Statement::Select(selector) => {
-                let mut dependencies = Dependencies::new();
-
-                if let Some(Term::Variable {
-                    name: Some(name), ..
-                }) = &selector.the
-                {
-                    dependencies.desire(name.clone(), 200)
-                }
-
-                if let Some(Term::Variable {
-                    name: Some(name), ..
-                }) = &selector.of
-                {
-                    dependencies.desire(name.clone(), 500)
-                }
-
-                if let Some(Term::Variable {
-                    name: Some(name), ..
-                }) = &selector.is
-                {
-                    dependencies.desire(name.clone(), 300)
-                }
-
-                Ok(Analysis {
-                    dependencies,
-                    budget: 100,
-                })
-            }
-            Statement::ApplyRule(application) => application.analyze(),
+            Application::Select(selector) => selector.analyze(),
+            Application::ApplyRule(application) => application.analyze(),
+            Application::ApplyFormula(application) => application.analyze(),
         }
     }
 }
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Operator {
-    Rule(DeductiveRule),
-    Formula(Formula),
-}
-
-impl Conclusion {}
 
 impl Terms {
     fn constants(&self) -> HashMap<String, Value> {
