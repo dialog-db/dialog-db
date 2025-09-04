@@ -53,6 +53,26 @@ impl VariableScope {
         }
     }
 
+    pub fn union(self, other: impl IntoIterator<Item = Term<Value>>) -> VariableScope {
+        self.clone().extend(other)
+    }
+
+    pub fn intersection(self, other: impl IntoIterator<Item = Term<Value>>) -> VariableScope {
+        let mut intersection = Self::new();
+        for variable in other {
+            if let Term::Variable {
+                name: Some(name), ..
+            } = variable
+            {
+                if !self.bound_variables.contains(&name) {
+                    intersection.bound_variables.insert(name.clone());
+                }
+            }
+        }
+
+        intersection
+    }
+
     pub fn intersects(&self, other: &VariableScope) -> bool {
         !self.bound_variables.is_disjoint(&other.bound_variables)
     }

@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 /// - `Some(Term::Constant(...))`: Must match exact value
 /// - `Some(Term::TypedVariable(...))`: Binds to any matching value
 /// - `Some(Term::Any)`: Matches any value without binding
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     bound = "T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Serialize + for<'a> Deserialize<'a> + 'static"
 )]
@@ -293,7 +293,7 @@ impl<T: Scalar> TryFrom<&FactSelector<T>> for ArtifactSelector<Constrained> {
 }
 
 /// Execution plan for a fact selector operation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactSelectorPlan<T: Scalar = Value> {
     /// The fact selector operation to execute
     pub selector: FactSelector<T>,
@@ -376,7 +376,7 @@ impl<T: Scalar + Into<Value> + Send + PartialEq<Value> + Sync + std::convert::Tr
         // Call the inherent method, not the trait method to avoid recursion
         FactSelector::plan(self, scope)
     }
-    
+
     fn cells(&self) -> VariableScope {
         let mut cells = VariableScope::new();
         if let Some(term) = &self.the {

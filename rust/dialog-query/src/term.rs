@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 /// - Anonymous typed variable `Term<String>`: `{ "?": { "type": "String" } }`
 /// - Anonymous untyped variable `Term<Value>`: `{ "?": {} }`
 /// - Constants: Plain JSON values (e.g., `"Alice"`, `42`, `true`)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Term<T>
 where
     T: IntoValueDataType + Clone + 'static,
@@ -63,7 +63,7 @@ where
 
 /// Wrapper around PhantomData<T> with additional functionality so it can
 /// be converted to and from Option<ValueDataType>.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(into = "Option<ValueDataType>", from = "Option<ValueDataType>")]
 pub struct Type<T: IntoValueDataType + Clone + 'static>(PhantomData<T>);
 

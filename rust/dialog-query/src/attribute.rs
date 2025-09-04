@@ -1,5 +1,5 @@
-pub use crate::artifact::{Entity, Value};
 use crate::artifact::ValueDataType;
+pub use crate::artifact::{Entity, Value};
 pub use crate::fact_selector::FactSelector;
 pub use crate::term::Term;
 pub use crate::types::{IntoValueDataType, Scalar};
@@ -12,7 +12,7 @@ pub enum Cardinality {
     Many,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Attribute<T: Scalar> {
     pub namespace: &'static str,
     pub name: &'static str,
