@@ -1,25 +1,25 @@
 use crate::artifact::Value;
 use crate::attribute::Attribute;
 use crate::fact_selector::FactSelector;
-use crate::plan::{EvaluationContext, EvaluationPlan};
-use crate::query::Store;
-use crate::stream::fork_stream;
+// use crate::plan::{EvaluationContext, EvaluationPlan};
+// use crate::query::Store;
+// use crate::stream::fork_stream;
 use crate::term::Term;
 use dialog_artifacts::{Entity, ValueDataType};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use thiserror::Error;
 
 /// Represents set of bindings used in the rule or formula applications. It is
 /// effectively a map of terms (constant or variable) keyed by parameter names.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Terms(HashMap<&'static str, Term<Value>>);
+pub struct Terms(HashMap<String, Term<Value>>);
 impl Terms {
     pub fn new() -> Self {
         Self(HashMap::new())
     }
     /// Returns the term associated with the given parameter name, if has one.
-    pub fn get(&self, name: &'static str) -> Option<&Term<Value>> {
+    pub fn get(&self, name: &str) -> Option<&Term<Value>> {
         self.0.get(name)
     }
 }
@@ -33,7 +33,7 @@ pub struct Conclusion {
     /// with.
     this: Attribute<Entity>,
     /// Map of all attributes this entity should have to reach this conclusion.
-    attributes: HashMap<&'static str, Attribute<Value>>,
+    attributes: HashMap<String, Attribute<Value>>,
 }
 
 /// Query planner analyzes each premise to identify it's dependencies and budget
@@ -48,7 +48,7 @@ pub struct Analysis {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeductiveRule {
     /// Rule identifier used to look rules up by.
-    name: &'static str,
+    name: String,
     /// Conclusion that this rule reaches if all premises hold. This is
     /// typically what datalog calls rule head.
     conclusion: Conclusion,
@@ -58,15 +58,14 @@ pub struct DeductiveRule {
 }
 impl DeductiveRule {
     /// Returns the names of the parameters for this rule.
-    fn parameters(&self) -> Vec<&'static str> {
+    fn parameters(&self) -> HashSet<String> {
         let Conclusion { attributes, .. } = &self.conclusion;
-        let mut bindings = Vec::new();
+        let mut params = HashSet::new();
         for (name, _) in attributes.iter() {
-            bindings.push(*name);
+            params.insert(name.clone());
         }
-        bindings.push("this");
-
-        bindings
+        params.insert("this".to_string());
+        params
     }
 
     /// Analyzes this rule identifying its dependencies and estimated execution
@@ -81,7 +80,7 @@ impl DeductiveRule {
         // in order to identify if there are any unresolvable dependencies
         // and in the local rule budget.
         let mut variables = Dependencies::new();
-        let paramaters = self.parameters();
+        let parameters = self.parameters();
 
         let mut budget: usize = 0;
         // Analyze each premise and account their dependencies into the rule's
@@ -96,10 +95,10 @@ impl DeductiveRule {
             // captures them in the internal dependencies in order to reflect
             // it in the budget.
             for (name, dependency) in analysis.dependencies.iter() {
-                if paramaters.contains(&name) {
-                    dependencies.update(name, dependency);
+                if parameters.contains(name) {
+                    dependencies.update(name.to_string(), dependency);
                 } else {
-                    variables.update(name, dependency);
+                    variables.update(name.to_string(), dependency);
                 }
             }
         }
@@ -112,13 +111,13 @@ impl DeductiveRule {
         // the rule definition. We can introduce `discard` operator in the
         // future where rule author may intentionally require a parameter it is
         // not utilizing.
-        paramaters
+        parameters
             .iter()
-            .find(|parameter| dependencies.contains(parameter))
+            .find(|parameter| !dependencies.contains(parameter))
             .map_or(Ok(()), |parameter| {
                 Err(AnalyzerError::UnusedParameter {
                     rule: self.clone(),
-                    parameter,
+                    parameter: parameter.clone(),
                 })
             })?;
 
@@ -132,7 +131,7 @@ impl DeductiveRule {
             .map_or(Ok(()), |(variable, _)| {
                 Err(AnalyzerError::RequiredLocalVariable {
                     rule: self.clone(),
-                    variable,
+                    variable: variable.to_string(),
                 })
             })?;
 
@@ -159,17 +158,17 @@ pub enum AnalyzerError {
     #[error("Rule {rule} does not makes use of the \"{parameter}\" parameter")]
     UnusedParameter {
         rule: DeductiveRule,
-        parameter: &'static str,
+        parameter: String,
     },
     #[error("Rule {rule} application omits required parameter \"{parameter}\"")]
     RequiredParameter {
         rule: DeductiveRule,
-        parameter: &'static str,
+        parameter: String,
     },
     #[error("Rule {rule} makes use of local {variable} that no premise can provide")]
     RequiredLocalVariable {
         rule: DeductiveRule,
-        variable: &'static str,
+        variable: String,
     },
 }
 
@@ -199,14 +198,14 @@ impl RuleApplication {
                         .get(parameter)
                         .ok_or_else(|| AnalyzerError::RequiredParameter {
                             rule: self.rule.clone(),
-                            parameter,
+                            parameter: parameter.to_string(),
                         })?;
                 }
                 // If dependency is not required and applied term is not a
                 // constant we propagate it into dependencies.
                 Level::Desired(desire) => {
                     if let Some(Term::Variable { .. }) = self.terms.get(parameter) {
-                        dependencies.desire(parameter, *desire);
+                        dependencies.desire(parameter.to_string(), *desire);
                     }
                 }
             }
@@ -218,19 +217,19 @@ impl RuleApplication {
         })
     }
     fn plan(&self) -> Plan {
-        let constants = self.terms.constants();
+        let _constants = self.terms.constants();
         Plan::None
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Formula {
-    operator: &'static str,
+    operator: String,
     cells: Cells,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Cells(HashMap<&'static str, Cell>);
+pub struct Cells(HashMap<String, Cell>);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cell {
@@ -243,7 +242,7 @@ pub enum Cell {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Dependencies(HashMap<&'static str, Level>);
+pub struct Dependencies(HashMap<String, Level>);
 impl Dependencies {
     fn new() -> Self {
         Dependencies(HashMap::new())
@@ -258,13 +257,13 @@ impl Dependencies {
             .sum()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&'static str, &Level)> {
-        self.0.iter().map(|(k, v)| (*k, v))
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Level)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    pub fn desire(&mut self, dependency: &'static str, cost: usize) {
+    pub fn desire(&mut self, dependency: String, cost: usize) {
         let Dependencies(content) = self;
-        if let Some(existing) = content.get(dependency) {
+        if let Some(existing) = content.get(&dependency) {
             if let Level::Desired(prior) = existing {
                 content.insert(dependency, Level::Desired(cost.max(*prior)));
             }
@@ -273,7 +272,7 @@ impl Dependencies {
         }
     }
 
-    pub fn require(&mut self, dependency: &'static str) {
+    pub fn require(&mut self, dependency: String) {
         self.0.insert(dependency, Level::Required);
     }
 
@@ -283,9 +282,9 @@ impl Dependencies {
     /// fulfill the requirement with a lower budget it will likely be picked
     /// to execute ahead of the ones that are more expensive, hence actual level
     /// is lower (🤔 perhaps average would be more accurate).
-    pub fn update(&mut self, dependency: &'static str, level: &Level) {
+    pub fn update(&mut self, dependency: String, level: &Level) {
         let Dependencies(content) = self;
-        if let Some(existing) = content.get(dependency) {
+        if let Some(existing) = content.get(&dependency) {
             if let Level::Desired(prior) = existing {
                 if let Level::Desired(desire) = level {
                     content.insert(dependency, Level::Desired(*prior.min(desire)));
@@ -300,14 +299,14 @@ impl Dependencies {
         }
     }
 
-    pub fn contains(&self, dependency: &'static str) -> bool {
+    pub fn contains(&self, dependency: &str) -> bool {
         let Dependencies(content) = self;
         content.contains_key(dependency)
     }
 
-    pub fn required(&self) -> impl Iterator<Item = (&'static str, &Level)> {
+    pub fn required(&self) -> impl Iterator<Item = (&str, &Level)> {
         self.0.iter().filter_map(|(k, v)| match v {
-            Level::Required => Some((*k, v)),
+            Level::Required => Some((k.as_str(), v)),
             Level::Desired(_) => None,
         })
     }
@@ -364,23 +363,23 @@ impl Statement {
 
                 if let Some(Term::Variable {
                     name: Some(name), ..
-                }) = selector.the
+                }) = &selector.the
                 {
-                    dependencies.desire(&name, 200)
+                    dependencies.desire(name.clone(), 200)
                 }
 
                 if let Some(Term::Variable {
                     name: Some(name), ..
-                }) = selector.of
+                }) = &selector.of
                 {
-                    dependencies.desire(&name, 500)
+                    dependencies.desire(name.clone(), 500)
                 }
 
                 if let Some(Term::Variable {
                     name: Some(name), ..
                 }) = &selector.is
                 {
-                    dependencies.desire(name, 300)
+                    dependencies.desire(name.clone(), 300)
                 }
 
                 Ok(Analysis {
@@ -402,12 +401,12 @@ pub enum Operator {
 impl Conclusion {}
 
 impl Terms {
-    fn constants(&self) -> HashMap<&'static str, Value> {
+    fn constants(&self) -> HashMap<String, Value> {
         let Terms(terms) = self;
         let mut constants = HashMap::new();
         for (name, term) in terms.iter() {
             if let Term::Constant(value) = term {
-                constants.insert(*name, value.clone());
+                constants.insert(name.clone(), value.clone());
             }
         }
         constants
