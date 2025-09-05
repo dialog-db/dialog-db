@@ -35,9 +35,9 @@ pub use dialog_query_macros::Rule;
 pub use error::{InconsistencyError, QueryError};
 pub use fact::{assert, retract, Assertion, Claim, Fact, Retraction};
 pub use fact_selector::{FactSelector, FactSelectorPlan};
-pub use plan::EvaluationPlan;
+pub use plan::{EvaluationContext, EvaluationPlan};
 pub use premise::Premise;
-pub use query::Query;
+pub use query::{Query, Store};
 pub use rule::{Rule, Statements, When};
 
 pub use selection::{Match, MatchSet, Selection, SelectionExt};

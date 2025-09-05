@@ -128,13 +128,14 @@ impl Match {
     pub fn get<T>(&self, term: &Term<T>) -> Result<T, InconsistencyError>
     where
         T: Scalar + std::convert::TryFrom<Value>,
-        InconsistencyError: From<<T as std::convert::TryFrom<Value>>::Error>,
     {
         match term {
             Term::Variable { name, .. } => {
                 if let Some(key) = name {
                     if let Some(value) = self.variables.get(key) {
-                        T::try_from(value.clone()).map_err(Into::into)
+                        T::try_from(value.clone()).map_err(|_| {
+                            InconsistencyError::TypeError("Can not convert to Value type".into())
+                        })
                     } else {
                         Err(InconsistencyError::UnboundVariableError(key.clone()))
                     }

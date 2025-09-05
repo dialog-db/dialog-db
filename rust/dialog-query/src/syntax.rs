@@ -3,24 +3,24 @@
 use crate::artifact::Value;
 use crate::fact::Scalar;
 use crate::term::Term;
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 
 /// Tracks variable bindings during query planning
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariableScope {
     /// Set of variables that have already been bound.
-    pub bound_variables: BTreeSet<String>,
+    pub variables: HashSet<String>,
 }
 
 impl VariableScope {
     pub fn new() -> Self {
         Self {
-            bound_variables: BTreeSet::new(),
+            variables: HashSet::new(),
         }
     }
 
     pub fn size(&self) -> usize {
-        self.bound_variables.len()
+        self.variables.len()
     }
 
     pub fn add<T: Scalar>(mut self, variable: &Term<T>) -> Self {
@@ -28,29 +28,27 @@ impl VariableScope {
             name: Some(name), ..
         } = variable
         {
-            self.bound_variables.insert(name.clone());
+            self.variables.insert(name.clone());
         }
         self
     }
 
     pub fn extend(&mut self, other: impl IntoIterator<Item = Term<Value>>) -> VariableScope {
-        let mut delta = std::collections::BTreeSet::new();
+        let mut delta = HashSet::new();
 
         for variable in other {
             if let Term::Variable {
                 name: Some(name), ..
             } = variable
             {
-                if !self.bound_variables.contains(&name) {
+                if !self.variables.contains(&name) {
                     delta.insert(name.clone());
                 }
-                self.bound_variables.insert(name);
+                self.variables.insert(name);
             }
         }
 
-        VariableScope {
-            bound_variables: delta,
-        }
+        VariableScope { variables: delta }
     }
 
     pub fn union(self, other: impl IntoIterator<Item = Term<Value>>) -> VariableScope {
@@ -64,8 +62,8 @@ impl VariableScope {
                 name: Some(name), ..
             } = variable
             {
-                if !self.bound_variables.contains(&name) {
-                    intersection.bound_variables.insert(name.clone());
+                if !self.variables.contains(&name) {
+                    intersection.variables.insert(name.clone());
                 }
             }
         }
@@ -74,7 +72,7 @@ impl VariableScope {
     }
 
     pub fn intersects(&self, other: &VariableScope) -> bool {
-        !self.bound_variables.is_disjoint(&other.bound_variables)
+        !self.variables.is_disjoint(&other.variables)
     }
 
     pub fn contains<T: Scalar>(&self, term: &Term<T>) -> bool {
@@ -87,7 +85,7 @@ impl VariableScope {
             // Otherwise we just check if the variable name is in the bound set.
             Term::Variable {
                 name: Some(name), ..
-            } => self.bound_variables.contains(name),
+            } => self.variables.contains(name),
         }
     }
 }
@@ -97,7 +95,7 @@ impl IntoIterator for VariableScope {
     type IntoIter = std::vec::IntoIter<Term<crate::artifact::Value>>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.bound_variables
+        self.variables
             .into_iter()
             .map(|var| Term::<crate::artifact::Value>::var(&var))
             .collect::<Vec<_>>()

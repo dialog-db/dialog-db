@@ -1,9 +1,11 @@
-use crate::artifact::Value;
 use crate::attribute::Attribute;
+use crate::error::InconsistencyError;
 use crate::fact_selector::FactSelector;
-use crate::term::Term;
+use crate::selection::Match;
+use crate::VariableScope;
+use crate::{EvaluationContext, Selection, Store, Term, Value};
+use async_stream::try_stream;
 use dialog_artifacts::ValueDataType;
-use futures_util::stream::Select;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use thiserror::Error;
@@ -21,8 +23,16 @@ impl Terms {
         self.0.get(name)
     }
 
+    pub fn insert(&mut self, name: String, term: Term<Value>) {
+        self.0.insert(name, term);
+    }
+
     pub fn contains(&self, name: &str) -> bool {
         self.0.contains_key(name)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Term<Value>)> {
+        self.0.iter()
     }
 }
 
@@ -159,6 +169,11 @@ impl DeductiveRule {
             dependencies,
         })
     }
+
+    fn apply(&self, terms: Terms) -> Result<RuleApplication, AnalyzerError> {
+        let application = RuleApplication::new(self.clone(), terms);
+        application.analyze().and(Ok(application))
+    }
 }
 impl Display for DeductiveRule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -191,6 +206,27 @@ pub enum AnalyzerError {
     },
 }
 
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum PlanError {
+    #[error("Rule {rule} does not makes use of the \"{parameter}\" parameter")]
+    UnusedParameter {
+        rule: DeductiveRule,
+        parameter: String,
+    },
+    #[error("Rule {rule} application omits required parameter \"{parameter}\"")]
+    RequiredParameter {
+        rule: DeductiveRule,
+        parameter: String,
+    },
+    #[error("Formula {formula} application omits required cell \"{cell}\"")]
+    RequiredCell { formula: Formula, cell: String },
+    #[error("Rule {rule} makes use of local {variable} that no premise can provide")]
+    RequiredLocalVariable {
+        rule: DeductiveRule,
+        variable: String,
+    },
+}
+
 /// Represents a rule application with the terms applied to corresponding
 /// rule parameters.
 #[derive(Debug, Clone, PartialEq)]
@@ -202,6 +238,9 @@ pub struct RuleApplication {
 }
 
 impl RuleApplication {
+    fn new(rule: DeductiveRule, terms: Terms) -> Self {
+        RuleApplication { rule, terms }
+    }
     fn analyze(&self) -> Result<Analysis, AnalyzerError> {
         // First we analyze the rule itself identifying its dependencies and
         // execution budget.
@@ -261,6 +300,11 @@ impl Cells {
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Cell)> {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    pub fn add(&mut self, name: String, cell: Cell) -> &mut Self {
+        self.0.insert(name, cell);
+        self
     }
 }
 
@@ -337,6 +381,13 @@ impl Dependencies {
             Requirement::Derived(_) => None,
         })
     }
+
+    pub fn resolve(&self, name: &str) -> Requirement {
+        match self.0.get(name) {
+            Some(requirement) => requirement.clone(),
+            None => Requirement::Derived(0),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -346,6 +397,12 @@ enum Requirement {
     /// Dependency that could be provided. If not provided it will be derived.
     /// Number represents cost of the deriviation.
     Derived(usize),
+}
+
+impl Requirement {
+    pub fn is_required(&self) -> bool {
+        matches!(self, Requirement::Required)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -359,14 +416,43 @@ pub struct Formula {
     cost: usize,
 }
 impl Formula {
-    pub fn new(operator: String, operands: Cells, cost: usize) -> Self {
+    pub fn new(operator: &str) -> Self {
         Formula {
-            operator,
-            operands,
-            cost,
+            operator: operator.to_string(),
+            operands: Cells::new(),
+            cost: 0,
+        }
+    }
+
+    fn with_cell(&mut self, name: &str, cell: Cell) -> &mut Self {
+        self.operands.add(name.into(), cell);
+        self
+    }
+
+    pub fn apply(&self, terms: Terms) -> Result<FormulaApplication, AnalyzerError> {
+        let application = FormulaApplication::new(self.clone(), terms);
+        application.analyze().and(Ok(application))
+    }
+
+    pub fn provide<Apply: FormulaImplementation>(&self, apply: Apply) -> FormulaProvider<Apply> {
+        FormulaProvider {
+            formula: self.clone(),
+            provider: apply,
         }
     }
 }
+
+trait FormulaImplementation: Fn(&mut FormulaContext) -> Result<(), FormulaEvaluationError> {}
+impl<Apply: FormulaImplementation> FormulaImplementation for Apply {}
+
+pub struct FormulaProvider<Apply>
+where
+    Apply: FormulaImplementation,
+{
+    formula: Formula,
+    provider: Apply,
+}
+
 impl Display for Formula {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} {{", self.operator);
@@ -425,6 +511,105 @@ impl FormulaApplication {
             cost: self.formula.cost,
         })
     }
+
+    pub fn plan(&self, scope: VariableScope) -> Result<Plan, PlanError> {
+        Ok(Plan::None)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FormulaApplicationPlan {
+    analysis: Analysis,
+    terms: Terms,
+    scope: VariableScope,
+}
+impl FormulaApplicationPlan {
+    /// Resolves Terms from the given source. When term already a constant it
+    /// ensures that it is consistent with the constant value in the source.
+    /// When term is a variable it attempts to resolve the constant from the
+    /// source. If source does not contain a value for the parameter it copies
+    /// variable into returned terms unless it is a required parameter. If
+    /// parameter is required and value is not present in source
+    /// InconsistencyError is returned.
+    pub fn resolve(&self, source: Match) -> Result<Terms, InconsistencyError> {
+        let mut parameters = self.terms.clone();
+        let dependencies = &self.analysis.dependencies;
+        for (name, parameter) in self.terms.iter() {
+            match parameter {
+                Term::Constant(_) => {
+                    parameters.insert(name.clone(), parameter.clone());
+                }
+                Term::Variable { .. } => match source.get(parameter) {
+                    Ok(value) => {
+                        parameters.insert(name.clone(), Term::Constant(value));
+                    }
+                    Err(error) => {
+                        let requirement = dependencies.resolve(name);
+                        match requirement {
+                            Requirement::Required => {
+                                Err(error)?;
+                            }
+                            Requirement::Derived(_) => {
+                                parameters.insert(name.clone(), parameter.clone());
+                            }
+                        }
+                    }
+                },
+            }
+        }
+
+        Ok(parameters)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FormulaContext(HashMap<String, Value>);
+impl FormulaContext {
+    fn read(&self, name: &str) -> Result<Value, FormulaEvaluationError> {
+        self.0
+            .get(name)
+            .cloned()
+            .ok_or(FormulaEvaluationError::ReadError {
+                name: name.to_string(),
+            })
+    }
+    fn write(&mut self, name: &str, value: Value) -> Result<(), FormulaEvaluationError> {
+        self.0.insert(name.to_string(), value);
+        Ok(())
+    }
+}
+
+#[derive(Error, Debug, Clone, PartialEq)]
+enum FormulaEvaluationError {
+    #[error("Required cell '{name}' has no value")]
+    ReadError { name: String },
+}
+
+#[test]
+fn define_inc_formula() {
+    let formula = Formula::new("inc")
+        .with_cell(
+            "of",
+            Cell {
+                description: &"Increment operation",
+                requirement: Requirement::Required,
+                data_type: ValueDataType::SignedInt,
+            },
+        )
+        .with_cell(
+            "is",
+            Cell {
+                description: &"Incremented result",
+                requirement: Requirement::Derived(0),
+                data_type: ValueDataType::SignedInt,
+            },
+        );
+
+    formula.provide(|cells| {
+        let of = cells.read("of")?;
+
+        cells.write("is", of + 1)
+    });
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -462,6 +647,24 @@ impl Premise {
                 })
             }
         }
+    }
+}
+
+impl From<FormulaApplication> for Premise {
+    fn from(application: FormulaApplication) -> Self {
+        Premise::ApplyFormula(application)
+    }
+}
+
+impl From<RuleApplication> for Premise {
+    fn from(application: RuleApplication) -> Self {
+        Premise::ApplyRule(application)
+    }
+}
+
+impl From<FactSelector> for Premise {
+    fn from(selector: FactSelector) -> Self {
+        Premise::Select(selector)
     }
 }
 
@@ -516,6 +719,28 @@ impl Application {
             Application::ApplyFormula(application) => application.analyze(),
         }
     }
+
+    fn not(&self) -> Premise {
+        Premise::Exclude(self.clone())
+    }
+}
+
+impl From<RuleApplication> for Application {
+    fn from(application: RuleApplication) -> Self {
+        Application::ApplyRule(application)
+    }
+}
+
+impl From<FormulaApplication> for Application {
+    fn from(application: FormulaApplication) -> Self {
+        Application::ApplyFormula(application)
+    }
+}
+
+impl From<FactSelector> for Application {
+    fn from(selector: FactSelector) -> Self {
+        Application::Select(selector)
+    }
 }
 
 impl Terms {
@@ -533,4 +758,5 @@ impl Terms {
 
 enum Plan {
     None,
+    Formula(FormulaApplicationPlan),
 }

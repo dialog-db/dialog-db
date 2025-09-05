@@ -3,7 +3,6 @@ use crate::query::Store;
 use crate::syntax::VariableScope;
 use crate::Selection;
 use async_stream::try_stream;
-use futures_util::stream::Iter;
 
 /// A composable join structure that can represent zero, one, or two evaluation plans
 #[derive(Debug, Clone)]
