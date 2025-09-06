@@ -5,9 +5,11 @@ use crate::selection::Match;
 use crate::VariableScope;
 use crate::{EvaluationContext, Selection, Store, Term, Value};
 use async_stream::try_stream;
+use box_dyn;
 use dialog_artifacts::ValueDataType;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
+use std::{fmt::Debug, hash::Hash};
 use thiserror::Error;
 
 /// Represents set of bindings used in the rule or formula applications. It is
@@ -219,7 +221,30 @@ pub enum PlanError {
         parameter: String,
     },
     #[error("Formula {formula} application omits required cell \"{cell}\"")]
-    RequiredCell { formula: Formula, cell: String },
+    OmitsRequiredCell { formula: Formula, cell: String },
+    #[error(
+        "Formula {formula} application can not pass blank '_' variable in required cell \"{cell}\""
+    )]
+    BlankRequiredCell { formula: Formula, cell: String },
+
+    #[error(
+        "Formula {formula} application passes '{variable}' unbound variable into a required cell \"{cell}\""
+    )]
+    UnboundRequiredCell {
+        formula: Formula,
+        cell: String,
+        variable: String,
+    },
+
+    #[error(
+        "Formula {formula} application passes unbound {parameter} into a required cell \"{cell}\""
+    )]
+    UnboundFormulaParameter {
+        formula: Formula,
+        cell: String,
+        parameter: Term<Value>,
+    },
+
     #[error("Rule {rule} makes use of local {variable} that no premise can provide")]
     RequiredLocalVariable {
         rule: DeductiveRule,
@@ -288,6 +313,7 @@ pub struct Cells(HashMap<String, Cell>);
 /// Describes a cell of the formula.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
+    pub name: &'static str,
     pub description: &'static str,
     pub requirement: Requirement,
     pub data_type: ValueDataType,
@@ -300,6 +326,10 @@ impl Cells {
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Cell)> {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Cell> {
+        self.0.get(name)
     }
 
     pub fn add(&mut self, name: String, cell: Cell) -> &mut Self {
@@ -414,7 +444,9 @@ pub struct Formula {
 
     /// Base cost of applying this formula.
     cost: usize,
+    // code: Box<dyn Operator>,
 }
+
 impl Formula {
     pub fn new(operator: &str) -> Self {
         Formula {
@@ -513,15 +545,45 @@ impl FormulaApplication {
     }
 
     pub fn plan(&self, scope: VariableScope) -> Result<Plan, PlanError> {
-        Ok(Plan::None)
+        let mut total = self.formula.cost;
+        for (name, cell) in self.formula.operands.iter() {
+            match cell.requirement {
+                Requirement::Required => {
+                    let parameter = self.terms.get(name).ok_or(PlanError::OmitsRequiredCell {
+                        formula: self.formula.clone(),
+                        cell: name.into(),
+                    })?;
+
+                    // If parameter is not in scope, we can not plan this formula
+                    if !scope.contains(parameter) {
+                        Err(PlanError::UnboundFormulaParameter {
+                            formula: self.formula.clone(),
+                            parameter: parameter.clone(),
+                            cell: name.into(),
+                        })?;
+                    }
+                }
+                Requirement::Derived(cost) => {
+                    total += cost;
+                }
+            }
+        }
+
+        // If we have parameters for all required cells, we can plan this
+        // formula
+        Ok(Plan::Formula(FormulaApplicationPlan {
+            formula: self.formula.clone(),
+            terms: self.terms.clone(),
+            cost: total,
+        }))
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FormulaApplicationPlan {
-    analysis: Analysis,
+    formula: Formula,
     terms: Terms,
-    scope: VariableScope,
+    cost: usize,
 }
 impl FormulaApplicationPlan {
     /// Resolves Terms from the given source. When term already a constant it
@@ -533,28 +595,31 @@ impl FormulaApplicationPlan {
     /// InconsistencyError is returned.
     pub fn resolve(&self, source: Match) -> Result<Terms, InconsistencyError> {
         let mut parameters = self.terms.clone();
-        let dependencies = &self.analysis.dependencies;
         for (name, parameter) in self.terms.iter() {
             match parameter {
                 Term::Constant(_) => {
                     parameters.insert(name.clone(), parameter.clone());
                 }
-                Term::Variable { .. } => match source.get(parameter) {
-                    Ok(value) => {
-                        parameters.insert(name.clone(), Term::Constant(value));
-                    }
-                    Err(error) => {
-                        let requirement = dependencies.resolve(name);
-                        match requirement {
-                            Requirement::Required => {
-                                Err(error)?;
-                            }
-                            Requirement::Derived(_) => {
-                                parameters.insert(name.clone(), parameter.clone());
+                Term::Variable { .. } => {
+                    match source.get(parameter) {
+                        Ok(value) => {
+                            parameters.insert(name.clone(), Term::Constant(value));
+                        }
+                        Err(error) => {
+                            if let Some(Cell { requirement, .. }) = self.formula.operands.get(name)
+                            {
+                                match requirement {
+                                    Requirement::Required => {
+                                        Err(error)?;
+                                    }
+                                    Requirement::Derived(_) => {
+                                        parameters.insert(name.clone(), parameter.clone());
+                                    }
+                                }
                             }
                         }
-                    }
-                },
+                    };
+                }
             }
         }
 
@@ -585,32 +650,34 @@ enum FormulaEvaluationError {
     ReadError { name: String },
 }
 
-#[test]
-fn define_inc_formula() {
-    let formula = Formula::new("inc")
-        .with_cell(
-            "of",
-            Cell {
-                description: &"Increment operation",
-                requirement: Requirement::Required,
-                data_type: ValueDataType::SignedInt,
-            },
-        )
-        .with_cell(
-            "is",
-            Cell {
-                description: &"Incremented result",
-                requirement: Requirement::Derived(0),
-                data_type: ValueDataType::SignedInt,
-            },
-        );
+// #[test]
+// fn define_inc_formula() {
+//     let formula = Formula::new("inc")
+//         .with_cell(
+//             "of",
+//             Cell {
+//                 name: &"of",
+//                 description: &"Increment operation",
+//                 requirement: Requirement::Required,
+//                 data_type: ValueDataType::SignedInt,
+//             },
+//         )
+//         .with_cell(
+//             "is",
+//             Cell {
+//                 name: &"is",
+//                 description: &"Incremented result",
+//                 requirement: Requirement::Derived(0),
+//                 data_type: ValueDataType::SignedInt,
+//             },
+//         );
 
-    formula.provide(|cells| {
-        let of = cells.read("of")?;
+//     formula.provide(|cells| {
+//         let of = cells.read("of")?;
 
-        cells.write("is", of + 1)
-    });
-}
+//         cells.write("is", of + 1)
+//     });
+// }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Premise {

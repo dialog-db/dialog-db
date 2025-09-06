@@ -14,6 +14,7 @@ pub mod deductive_rule;
 pub mod error;
 pub mod fact;
 pub mod fact_selector;
+pub mod formula;
 pub mod join;
 pub mod plan;
 pub mod planner;
@@ -40,6 +41,7 @@ pub use premise::Premise;
 pub use query::{Query, Store};
 pub use rule::{Rule, Statements, When};
 
+pub use async_stream::try_stream;
 pub use selection::{Match, MatchSet, Selection, SelectionExt};
 pub use selector::Selector;
 pub use statement::{Statement, StatementPlan};

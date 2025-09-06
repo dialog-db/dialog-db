@@ -57,6 +57,7 @@ impl EvaluationPlan for Combinator {
             Combinator::And(left, right) => left.provides().union(right.provides()),
             Combinator::Or(left, right) => left.provides().intersection(right.provides()),
             Combinator::Not(_) => VariableScope::new(),
+            Combinator::Deduce { name: _, terms: _ } => unimplemented!("Not implemented yet"),
         }
     }
 
@@ -121,6 +122,7 @@ impl EvaluationPlan for Combinator {
                         yield frame;
                     }
                 }
+                Combinator::Deduce { name: _, terms: _ } => unimplemented!("Not implemented yet"),
             }
         }
     }
