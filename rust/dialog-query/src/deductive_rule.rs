@@ -5,7 +5,6 @@ use crate::selection::Match;
 use crate::VariableScope;
 use crate::{EvaluationContext, Selection, Store, Term, Value};
 use async_stream::try_stream;
-use box_dyn;
 use dialog_artifacts::ValueDataType;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
