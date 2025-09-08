@@ -176,9 +176,9 @@
 //! ```
 
 use crate::cursor::Cursor;
-use crate::deductive_rule::{Analysis, AnalyzerError, Dependencies, Requirement, Terms};
-use crate::ValueDataType;
+use crate::deductive_rule::{Analysis, AnalyzerError, Dependencies, PlanError, Requirement, Terms};
 use crate::{try_stream, EvaluationContext, Match, QueryError, Selection, Store, Term, Value};
+use crate::{ValueDataType, VariableScope};
 use thiserror::Error;
 
 /// Errors that can occur during formula evaluation
@@ -450,18 +450,28 @@ impl FormulaApplication {
         })
     }
 
-    pub fn plan(&self) -> Result<Self, AnalyzerError> {
+    pub fn plan(&self, scope: &VariableScope) -> Result<Self, PlanError> {
         // We ensure that all terms for all required formula parametrs are
         // applied, otherwise we fail.
         for (name, requirement) in self.dependencies.iter() {
             match requirement {
                 Requirement::Required => {
-                    if !self.terms.contains(name) {
-                        Err(AnalyzerError::RequiredCell {
+                    if let Some(term) = self.terms.get(name) {
+                        if scope.contains(&term) {
+                            Ok(())
+                        } else {
+                            Err(PlanError::UnboundFormulaParameter {
+                                formula: self.name,
+                                cell: name.into(),
+                                parameter: term.clone(),
+                            })
+                        }
+                    } else {
+                        Err(PlanError::OmitsRequiredCell {
                             formula: self.name,
                             cell: name.into(),
-                        })?;
-                    }
+                        })
+                    }?;
                 }
                 Requirement::Derived(_) => {}
             }

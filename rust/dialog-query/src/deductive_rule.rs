@@ -1,15 +1,11 @@
 use crate::attribute::Attribute;
-use crate::error::InconsistencyError;
 use crate::fact_selector::FactSelector;
-use crate::formula::{Formula, FormulaApplication, FormulaEvaluationError};
-use crate::selection::Match;
-use crate::VariableScope;
-use crate::{EvaluationContext, Selection, Store, Term, Value};
-use async_stream::try_stream;
+use crate::formula::FormulaApplication;
+use crate::plan::Solution;
+use crate::{FactSelectorPlan, Term, Value, VariableScope};
 use dialog_artifacts::ValueDataType;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
-use std::hash::Hash;
 use thiserror::Error;
 
 /// Represents set of bindings used in the rule or formula applications. It is
@@ -88,7 +84,7 @@ pub struct DeductiveRule {
 }
 impl DeductiveRule {
     /// Returns the names of the parameters for this rule.
-    fn parameters(&self) -> HashSet<String> {
+    pub fn parameters(&self) -> HashSet<String> {
         let Conclusion { attributes, .. } = &self.conclusion;
         let mut params = HashSet::new();
         for (name, _) in attributes.iter() {
@@ -101,7 +97,7 @@ impl DeductiveRule {
     /// Analyzes this rule identifying its dependencies and estimated execution
     /// budget. It also verifies that all rule parameters are utilized by the
     /// rule premises and returns an error if any are not.
-    fn analyze(&self) -> Result<Analysis, AnalyzerError> {
+    pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
         let conclusion = &self.conclusion;
         // We will collect rule dependencies and compute their levels based on
         // their use in the rule premises.
@@ -112,12 +108,12 @@ impl DeductiveRule {
         // and in the local rule budget.
         let mut variables = Dependencies::new();
 
-        let mut budget: usize = 0;
+        let mut cost: usize = 0;
         // Analyze each premise and account their dependencies into the rule's
         // dependencies and budget.
         for premise in self.premises.iter() {
             let analysis = premise.analyze()?;
-            budget += analysis.cost;
+            cost += analysis.cost;
 
             // Go over every dependency of every premise and estimate their
             // cost for the rule. If dependency is a parameter of the rule
@@ -164,15 +160,15 @@ impl DeductiveRule {
                 })
             })?;
 
-        // If we got this far we know all the dependencies and can estimate a
-        // overall budget for the rule execution.
+        // If we got this far we know all the dependencies and have an estimate
+        // cost of executions.
         Ok(Analysis {
-            cost: budget + variables.cost(),
+            cost: cost + variables.cost(),
             dependencies,
         })
     }
 
-    fn apply(&self, terms: Terms) -> Result<RuleApplication, AnalyzerError> {
+    pub fn apply(&self, terms: Terms) -> Result<RuleApplication, AnalyzerError> {
         let application = RuleApplication::new(self.clone(), terms);
         application.analyze().and(Ok(application))
     }
@@ -200,12 +196,31 @@ pub enum AnalyzerError {
         parameter: String,
     },
     #[error("Formula {formula} application omits required cell \"{cell}\"")]
-    RequiredCell { formula: &'static str, cell: String },
+    OmitsRequiredCell { formula: &'static str, cell: String },
     #[error("Rule {rule} makes use of local {variable} that no premise can provide")]
     RequiredLocalVariable {
         rule: DeductiveRule,
         variable: String,
     },
+}
+
+impl From<AnalyzerError> for PlanError {
+    fn from(error: AnalyzerError) -> Self {
+        match error {
+            AnalyzerError::UnusedParameter { rule, parameter } => {
+                PlanError::UnusedParameter { rule, parameter }
+            }
+            AnalyzerError::RequiredParameter { rule, parameter } => {
+                PlanError::OmitsRequiredParameter { rule, parameter }
+            }
+            AnalyzerError::OmitsRequiredCell { formula, cell } => {
+                PlanError::OmitsRequiredCell { formula, cell }
+            }
+            AnalyzerError::RequiredLocalVariable { rule, variable } => {
+                PlanError::RequiredLocalVariable { rule, variable }
+            }
+        }
+    }
 }
 
 #[derive(Error, Debug, Clone, PartialEq)]
@@ -216,9 +231,22 @@ pub enum PlanError {
         parameter: String,
     },
     #[error("Rule {rule} application omits required parameter \"{parameter}\"")]
-    RequiredParameter {
+    OmitsRequiredParameter {
         rule: DeductiveRule,
         parameter: String,
+    },
+    #[error("Rule {rule} makes use of local {variable} that no premise can provide")]
+    RequiredLocalVariable {
+        rule: DeductiveRule,
+        variable: String,
+    },
+    #[error(
+        "Formula {rule} application passes unbound {term} into a required parameter \"{parameter}\""
+    )]
+    UnboundRuleParameter {
+        rule: DeductiveRule,
+        parameter: String,
+        term: Term<Value>,
     },
     #[error("Formula {formula} application omits required cell \"{cell}\"")]
     OmitsRequiredCell { formula: &'static str, cell: String },
@@ -245,10 +273,10 @@ pub enum PlanError {
         parameter: Term<Value>,
     },
 
-    #[error("Rule {rule} makes use of local {variable} that no premise can provide")]
-    RequiredLocalVariable {
-        rule: DeductiveRule,
-        variable: String,
+    #[error("Can not plan query due to unsatisfied dependency")]
+    UnsatisfiedDependency {
+        description: String,
+        solutions: Vec<Solution>,
     },
 }
 
@@ -299,10 +327,55 @@ impl RuleApplication {
             cost: analysis.cost,
         })
     }
-    fn plan(&self) -> Plan {
-        let _constants = self.terms.constants();
-        Plan::None
+    fn plan(&self, scope: &VariableScope) -> Result<RuleApplicationPlan, PlanError> {
+        let analysis = self.analyze().map_err(PlanError::from)?;
+        let mut cost = analysis.cost;
+        for (name, requirement) in analysis.dependencies.iter() {
+            let parameter = self.terms.get(name);
+            match requirement {
+                Requirement::Required => {
+                    if let Some(term) = parameter {
+                        if scope.contains(&term) {
+                            Ok(())
+                        } else {
+                            Err(PlanError::UnboundRuleParameter {
+                                rule: self.rule.clone(),
+                                parameter: name.into(),
+                                term: term.clone(),
+                            })
+                        }
+                    } else {
+                        Err(PlanError::OmitsRequiredParameter {
+                            rule: self.rule.clone(),
+                            parameter: name.into(),
+                        })
+                    }?;
+                }
+                Requirement::Derived(estimate) => {
+                    if let Some(term) = parameter {
+                        if (!scope.contains(&term)) {
+                            cost += estimate;
+                        }
+                    } else {
+                        cost += estimate;
+                    }
+                }
+            }
+        }
+
+        Ok(RuleApplicationPlan {
+            cost,
+            terms: self.terms.clone(),
+            rule: self.rule.clone(),
+        })
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleApplicationPlan {
+    pub cost: usize,
+    pub terms: Terms,
+    pub rule: DeductiveRule,
 }
 
 /// Represents a set of named cells that formula operates on. Each cell also
@@ -435,177 +508,47 @@ impl Requirement {
     }
 }
 
-// impl Display for Formula {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         write!(f, "{} {{", self.operator);
-//         for (name, cell) in self.operands.iter() {
-//             write!(f, "{}: {},", name, cell.data_type)?;
-//         }
-//         write!(f, "}}")
-//     }
-// }
-
-// impl FormulaApplication {
-//     pub fn new(formula: Formula, terms: Terms) -> Self {
-//         FormulaApplication { formula, terms }
-//     }
-
-//     pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
-//         let mut dependencies = Dependencies::new();
-
-//         // Iterate over all the operands of the formula and to capture
-//         // requirements. If required operand is not provided in this
-//         // application we raise an error, because this is not a valid
-//         // application.
-//         for (name, cell) in self.formula.operands.iter() {
-//             match cell.requirement {
-//                 // If cell is required but not provided we raise an error
-//                 // Otherwise we capture requirement in our dependencies
-//                 Requirement::Required => {
-//                     if !self.terms.contains(name) {
-//                         Err(AnalyzerError::RequiredCell {
-//                             formula: self.formula.clone(),
-//                             cell: name.into(),
-//                         })
-//                     } else {
-//                         dependencies.update(name.into(), &cell.requirement);
-//                         Ok(())
-//                     }
-//                 }
-//                 // If cell can be derived we simply update our dependencies with
-//                 // the cell's requirement.
-//                 Requirement::Derived(_) => {
-//                     dependencies.update(name.into(), &cell.requirement);
-//                     Ok(())
-//                 }
-//             }?;
-
-//             dependencies.update(name.to_string(), &cell.requirement);
-//         }
-
-//         Ok(Analysis {
-//             dependencies,
-//             cost: self.formula.cost,
-//         })
-//     }
-
-//     pub fn plan(&self, scope: VariableScope) -> Result<Plan, PlanError> {
-//         let mut total = self.formula.cost;
-//         for (name, cell) in self.formula.operands.iter() {
-//             match cell.requirement {
-//                 Requirement::Required => {
-//                     let parameter = self.terms.get(name).ok_or(PlanError::OmitsRequiredCell {
-//                         formula: self.formula.clone(),
-//                         cell: name.into(),
-//                     })?;
-
-//                     // If parameter is not in scope, we can not plan this formula
-//                     if !scope.contains(parameter) {
-//                         Err(PlanError::UnboundFormulaParameter {
-//                             formula: self.formula.clone(),
-//                             parameter: parameter.clone(),
-//                             cell: name.into(),
-//                         })?;
-//                     }
-//                 }
-//                 Requirement::Derived(cost) => {
-//                     total += cost;
-//                 }
-//             }
-//         }
-
-//         // If we have parameters for all required cells, we can plan this
-//         // formula
-//         Ok(Plan::Formula(FormulaApplicationPlan {
-//             formula: self.formula.clone(),
-//             terms: self.terms.clone(),
-//             cost: total,
-//         }))
-//     }
-// }
-
-// #[test]
-// fn define_inc_formula() {
-//     let formula = Formula::new("inc")
-//         .with_cell(
-//             "of",
-//             Cell {
-//                 name: &"of",
-//                 description: &"Increment operation",
-//                 requirement: Requirement::Required,
-//                 data_type: ValueDataType::SignedInt,
-//             },
-//         )
-//         .with_cell(
-//             "is",
-//             Cell {
-//                 name: &"is",
-//                 description: &"Incremented result",
-//                 requirement: Requirement::Derived(0),
-//                 data_type: ValueDataType::SignedInt,
-//             },
-//         );
-
-//     formula.provide(|cells| {
-//         let of = cells.read("of")?;
-
-//         cells.write("is", of + 1)
-//     });
-// }
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Premise {
-    /// Fact selection.
-    Select(FactSelector),
-    /// Rule application
-    ApplyRule(RuleApplication),
-    /// Formula application
-    ApplyFormula(FormulaApplication),
+    Apply(Application),
     /// Statement that exclude matches from the selection. This is basically
     /// a negetated statement.
-    Exclude(Application),
+    Exclude(Negation),
 }
 
 impl Premise {
+    pub fn plan(&self, scope: &VariableScope) -> Result<Plan, PlanError> {
+        match self {
+            Premise::Apply(application) => application.plan(scope).map(Plan::Application),
+            Premise::Exclude(negation) => negation.plan(scope).map(Plan::Negation),
+        }
+    }
     fn analyze(&self) -> Result<Analysis, AnalyzerError> {
         match self {
-            Premise::Select(selector) => selector.analyze(),
-            Premise::ApplyFormula(application) => application.analyze(),
-            Premise::ApplyRule(application) => application.analyze(),
+            Premise::Apply(application) => application.analyze(),
             // Negation requires that all of the underlying dependencies to be
             // derived before the execution. That is why we mark all of the
             // underlying dependencies as required.
-            Premise::Exclude(statement) => {
-                let mut dependencies = Dependencies::new();
-                let analysis = statement.analyze()?;
-                for (name, _) in analysis.dependencies.iter() {
-                    dependencies.require(name.into());
-                }
-
-                Ok(Analysis {
-                    dependencies,
-                    cost: analysis.cost,
-                })
-            }
+            Premise::Exclude(negation) => negation.analyze(),
         }
     }
 }
 
 impl From<FormulaApplication> for Premise {
     fn from(application: FormulaApplication) -> Self {
-        Premise::ApplyFormula(application)
+        Premise::Apply(Application::ApplyFormula(application))
     }
 }
 
 impl From<RuleApplication> for Premise {
     fn from(application: RuleApplication) -> Self {
-        Premise::ApplyRule(application)
+        Premise::Apply(Application::ApplyRule(application))
     }
 }
 
 impl From<FactSelector> for Premise {
     fn from(selector: FactSelector) -> Self {
-        Premise::Select(selector)
+        Premise::Apply(Application::Select(selector))
     }
 }
 
@@ -643,6 +586,35 @@ impl FactSelector {
 
 /// Statements that can be used by the rules.
 #[derive(Debug, Clone, PartialEq)]
+pub struct Negation(Application);
+
+impl Negation {
+    pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
+        let Negation(application) = self;
+        let mut dependencies = Dependencies::new();
+        let analysis = application.analyze()?;
+        for (name, _) in analysis.dependencies.iter() {
+            dependencies.require(name.into());
+        }
+
+        Ok(Analysis {
+            dependencies,
+            cost: analysis.cost,
+        })
+    }
+    fn plan(&self, scope: &VariableScope) -> Result<NegationPlan, PlanError> {
+        let Negation(application) = self;
+        let plan = application.plan(&scope)?;
+
+        Ok(NegationPlan(plan))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NegationPlan(ApplicationPlan);
+
+/// Statements that can be used by the rules.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Application {
     /// Fact selection.
     Select(FactSelector),
@@ -661,8 +633,27 @@ impl Application {
         }
     }
 
-    fn not(&self) -> Premise {
-        Premise::Exclude(self.clone())
+    fn plan(&self, scope: &VariableScope) -> Result<ApplicationPlan, PlanError> {
+        match self {
+            Application::Select(select) => select
+                .plan(&scope)
+                .map(ApplicationPlan::Select)
+                .map_err(|e| PlanError::UnsatisfiedDependency {
+                    description: e.description,
+                    solutions: e.solutions,
+                }),
+            Application::ApplyRule(application) => {
+                application.plan(scope).map(ApplicationPlan::Rule)
+            }
+
+            Application::ApplyFormula(application) => {
+                application.plan(scope).map(ApplicationPlan::Formula)
+            }
+        }
+    }
+
+    pub fn not(&self) -> Premise {
+        Premise::Exclude(Negation(self.clone()))
     }
 }
 
@@ -697,7 +688,15 @@ impl Terms {
     }
 }
 
-pub enum Plan {
-    None,
+#[derive(Debug, Clone, PartialEq)]
+pub enum ApplicationPlan {
+    Select(FactSelectorPlan),
+    Rule(RuleApplicationPlan),
     Formula(FormulaApplication),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Plan {
+    Application(ApplicationPlan),
+    Negation(NegationPlan),
 }
