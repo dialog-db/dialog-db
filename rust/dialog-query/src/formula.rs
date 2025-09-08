@@ -1,26 +1,221 @@
-//! Formula2 system - A refined approach to formula evaluation
+//! Formula system for type-safe data transformations in queries
 //!
-//! This module implements the Formula2 trait system as outlined in the notes/formula.md
-//! specification, providing a type-safe and efficient way to define and execute formulas.
+//! This module provides a powerful and extensible system for defining formulas that
+//! transform data during query evaluation. Formulas enable computed fields, data
+//! transformations, and complex calculations while maintaining type safety.
+//!
+//! # Overview
+//!
+//! The formula system consists of several key components:
+//!
+//! - **[`Formula`] trait** - The core trait that all formulas must implement
+//! - **[`Compute`] trait** - Optional trait for formulas that compute outputs from inputs
+//! - **[`FormulaApplication`]** - Represents a formula bound to specific term mappings
+//! - **[`Cursor`](crate::cursor::Cursor)** - Provides read/write access during evaluation
+//! - **[`Cast`](crate::value::Cast)** - Type conversion between Value and Rust types
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────────┐
+//! │   User Query    │
+//! └────────┬────────┘
+//!          │ Terms mapping: {of: ?x, with: ?y, is: ?result}
+//!          ▼
+//! ┌─────────────────┐
+//! │FormulaApplication│
+//! └────────┬────────┘
+//!          │ For each input Match
+//!          ▼
+//! ┌─────────────────┐
+//! │     Cursor      │ Reads: ?x → 5, ?y → 3
+//! └────────┬────────┘
+//!          │
+//!          ▼
+//! ┌─────────────────┐
+//! │  Formula Logic  │ Computes: 5 + 3 = 8
+//! └────────┬────────┘
+//!          │
+//!          ▼
+//! ┌─────────────────┐
+//! │  Write Results  │ Writes: ?result → 8
+//! └─────────────────┘
+//! ```
+//!
+//! # Example: Sum Formula
+//!
+//! Here's a complete example of implementing a Sum formula:
+//!
+//! ```ignore
+//! use dialog_query::formula::{Formula, Compute, FormulaApplication};
+//! use dialog_query::{Term, Terms, Match, Value, cursor::Cursor};
+//!
+//! // 1. Define the formula struct with input and output fields
+//! #[derive(Debug, Clone)]
+//! struct Sum {
+//!     of: u32,      // Input field
+//!     with: u32,    // Input field
+//!     is: u32,      // Output field (computed)
+//! }
+//!
+//! // 2. Define the input type
+//! struct SumInput {
+//!     of: u32,
+//!     with: u32,
+//! }
+//!
+//! // 3. Implement conversion from Cursor to Input
+//! impl TryFrom<Cursor> for SumInput {
+//!     type Error = FormulaEvaluationError;
+//!
+//!     fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+//!         Ok(SumInput {
+//!             of: cursor.read("of")?,
+//!             with: cursor.read("with")?,
+//!         })
+//!     }
+//! }
+//!
+//! // 4. Implement the Compute trait for the logic
+//! impl Compute for Sum {
+//!     fn compute(input: Self::Input) -> Vec<Self> {
+//!         vec![Sum {
+//!             of: input.of,
+//!             with: input.with,
+//!             is: input.of + input.with,  // The actual computation
+//!         }]
+//!     }
+//! }
+//!
+//! // 5. Implement the Formula trait
+//! impl Formula for Sum {
+//!     type Input = SumInput;
+//!     type Match = ();  // Not used yet, for future macro generation
+//!
+//!     fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
+//!         let input = Self::Input::try_from(cursor.clone())?;
+//!         Ok(Self::compute(input))
+//!     }
+//!
+//!     fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
+//!         cursor.write("is", &Value::UnsignedInt(self.is as u64))
+//!     }
+//! }
+//!
+//! // 6. Use the formula in a query
+//! let mut terms = Terms::new();
+//! terms.insert("of".to_string(), Term::var("x"));
+//! terms.insert("with".to_string(), Term::var("y"));
+//! terms.insert("is".to_string(), Term::var("result"));
+//!
+//! let formula_app = Sum::apply(terms);
+//!
+//! // Apply to a match with x=5, y=3
+//! let input_match = Match::new()
+//!     .set(Term::var("x"), 5u32)?
+//!     .set(Term::var("y"), 3u32)?;
+//!
+//! let results = formula_app.expand(input_match)?;
+//! assert_eq!(results[0].get::<u32>(&Term::var("result"))?, 8);
+//! ```
+//!
+//! # Design Principles
+//!
+//! 1. **Type Safety** - Formulas work with strongly typed inputs and outputs
+//! 2. **Composability** - Formulas can be chained and combined in queries
+//! 3. **Separation of Concerns** - Logic (Compute) is separate from I/O (Cursor)
+//! 4. **Error Handling** - Clear error types for all failure modes
+//! 5. **Performance** - Zero-cost abstractions where possible
+//!
+//! # Future Enhancements
+//!
+//! The formula system is designed to support future macro generation that will
+//! automatically derive the boilerplate code, making formula definition as simple as:
+//!
+//! ```ignore
+//! #[derive(Formula)]
+//! struct Sum {
+//!     of: u32,
+//!     with: u32,
+//!     #[computed]
+//!     is: u32,
+//! }
+//!
+//! impl Compute for Sum {
+//!     fn compute(input: Self::Input) -> Vec<Self> {
+//!         vec![Sum {
+//!             of: input.of,
+//!             with: input.with,
+//!             is: input.of + input.with,
+//!         }]
+//!     }
+//! }
+//! ```
 
+use crate::cursor::Cursor;
 use crate::deductive_rule::Terms;
+use crate::value::Cast;
 use crate::{try_stream, EvaluationContext, Match, QueryError, Selection, Store, Term, Value};
 use std::marker::PhantomData;
 use thiserror::Error;
 
 /// Errors that can occur during formula evaluation
+///
+/// These errors cover all failure modes in the formula system, from missing
+/// parameters to type mismatches. Each error provides detailed context to
+/// help diagnose issues during development and debugging.
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum FormulaEvaluationError {
-    // TODO: Capture formula somehow here.
+    /// A required parameter is not present in the term mapping
+    ///
+    /// This occurs when a formula tries to read a parameter that wasn't
+    /// provided in the Terms mapping when the formula was applied.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut terms = Terms::new();
+    /// // Missing "with" parameter!
+    /// terms.insert("of".to_string(), Term::var("x"));
+    ///
+    /// let app = Sum::apply(terms);
+    /// // Will fail with RequiredParameter { parameter: "with" }
+    /// ```
     #[error("Formula application omits required parameter \"{parameter}\"")]
     RequiredParameter { parameter: String },
-    /// A required variable was not found in the input
+
+    /// A variable required by the formula is not bound in the input match
+    ///
+    /// This occurs when the formula's parameter is mapped to a variable,
+    /// but that variable has no value in the current match frame.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let input = Match::new();
+    /// // Variable ?x is not bound!
+    /// let result = formula.expand(input);
+    /// // Fails with UnboundVariable for parameter "of" → Term::var("x")
+    /// ```
     #[error("Variable {term} for '{parameter}' required parameter is not bound")]
     UnboundVariable {
         parameter: String,
         term: Term<Value>,
     },
 
+    /// Attempt to write a value that conflicts with an existing binding
+    ///
+    /// This occurs when a formula tries to write a value to a variable
+    /// that already has a different value bound to it. This maintains
+    /// logical consistency in the query evaluation.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let input = Match::new()
+    ///     .set(Term::var("result"), 10)?; // Already bound to 10
+    ///
+    /// // Formula tries to write 8 to ?result
+    /// let result = sum_formula.expand(input);
+    /// // Fails with VariableInconsistency
+    /// ```
     #[error(
         "Variable for the '{parameter}' is bound to {actual} which is inconsistent with value being set: {expected}"
     )]
@@ -30,150 +225,103 @@ pub enum FormulaEvaluationError {
         expected: Term<Value>,
     },
 
-    /// Type mismatch when reading from Match
+    /// Type conversion failed when casting a Value to the requested type
+    ///
+    /// This occurs when using the Cast trait to convert a Value to a
+    /// specific Rust type, but the Value's actual type is incompatible.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let value = Value::String("hello".to_string());
+    /// let number: u32 = u32::try_cast(&value)?;
+    /// // Fails with TypeMismatch { expected: "u32", actual: "String" }
+    /// ```
     #[error("Type mismatch: expected {expected}, got {actual}")]
     TypeMismatch { expected: String, actual: String },
 }
 
-/// A cursor for reading from and writing to matches with term mappings
-#[derive(Debug, Clone, PartialEq)]
-pub struct Cursor {
-    pub source: Match,
-    pub terms: Terms,
-}
-
-impl Cursor {
-    pub fn new(source: Match, terms: Terms) -> Self {
-        Self { source, terms }
-    }
-
-    /// Read a typed value from the cursor using field name
-    pub fn read<T: Cast>(&self, key: &str) -> Result<T, FormulaEvaluationError> {
-        let term =
-            self.terms
-                .get(key)
-                .ok_or_else(|| FormulaEvaluationError::RequiredParameter {
-                    parameter: key.into(),
-                })?;
-
-        let value = self.source.resolve_value(term).map_err(|_| {
-            FormulaEvaluationError::UnboundVariable {
-                term: term.clone(),
-                parameter: key.into(),
-            }
-        })?;
-
-        T::try_cast(&value)
-    }
-
-    /// Write a value to the cursor using field name
-    pub fn write(&mut self, key: &str, value: &Value) -> Result<(), FormulaEvaluationError> {
-        if let Some(term) = self.terms.get(key) {
-            self.source = self
-                .source
-                // TODO: Better align error types
-                .unify_value(term.clone(), value.clone())
-                .map_err(|_| FormulaEvaluationError::VariableInconsistency {
-                    parameter: key.into(),
-                    expected: term.clone(),
-                    actual: self.source.resolve(term),
-                })?;
-        }
-
-        Ok(())
-    }
-}
-
-/// Trait for casting values from the generic Value type to specific types
-pub trait Cast: Sized {
-    fn try_cast(value: &Value) -> Result<Self, FormulaEvaluationError>;
-}
-
-impl Cast for u32 {
-    fn try_cast(value: &Value) -> Result<Self, FormulaEvaluationError> {
-        match value {
-            Value::UnsignedInt(n) => Ok(*n as u32),
-            _ => Err(FormulaEvaluationError::TypeMismatch {
-                expected: "u32".into(),
-                actual: value.data_type().to_string(),
-            }),
-        }
-    }
-}
-
-impl Cast for i32 {
-    fn try_cast(value: &Value) -> Result<Self, FormulaEvaluationError> {
-        match value {
-            Value::SignedInt(n) => Ok(*n as i32),
-            Value::UnsignedInt(n) => Ok(*n as i32),
-            _ => Err(FormulaEvaluationError::TypeMismatch {
-                expected: "i32".into(),
-                actual: value.data_type().to_string(),
-            }),
-        }
-    }
-}
-
-impl Cast for String {
-    fn try_cast(value: &Value) -> Result<Self, FormulaEvaluationError> {
-        match value {
-            Value::String(s) => Ok(s.clone()),
-            _ => Err(FormulaEvaluationError::TypeMismatch {
-                expected: "String".into(),
-                actual: value.data_type().to_string(),
-            }),
-        }
-    }
-}
-
-impl Cast for bool {
-    fn try_cast(value: &Value) -> Result<Self, FormulaEvaluationError> {
-        match value {
-            // The Value enum doesn't have a Bool variant, so we handle it as a string or int
-            Value::String(s) => match s.as_str() {
-                "true" => Ok(true),
-                "false" => Ok(false),
-                _ => Err(FormulaEvaluationError::TypeMismatch {
-                    expected: "bool".into(),
-                    actual: format!("String({})", s),
-                }),
-            },
-            Value::UnsignedInt(n) => Ok(*n != 0),
-            Value::SignedInt(n) => Ok(*n != 0),
-            _ => Err(FormulaEvaluationError::TypeMismatch {
-                expected: "bool".into(),
-                actual: value.data_type().to_string(),
-            }),
-        }
-    }
-}
-
-impl Cast for f64 {
-    fn try_cast(value: &Value) -> Result<Self, FormulaEvaluationError> {
-        match value {
-            Value::Float(f) => Ok(*f),
-            Value::SignedInt(i) => Ok(*i as f64),
-            Value::UnsignedInt(u) => Ok(*u as f64),
-            _ => Err(FormulaEvaluationError::TypeMismatch {
-                expected: "f64".into(),
-                actual: value.data_type().to_string(),
-            }),
-        }
-    }
-}
-
-/// The main Formula2 trait
+/// Core trait for implementing formulas in the query system
+///
+/// The `Formula` trait defines the interface that all formulas must implement.
+/// It provides a type-safe way to transform data during query evaluation.
+///
+/// # Type Parameters
+///
+/// - `Input`: The input type that can be constructed from a [`Cursor`].
+///   This type should contain all the fields the formula needs to read.
+/// - `Match`: Currently unused, reserved for future macro generation that
+///   will create match patterns for formula applications.
+///
+/// # Implementation Guide
+///
+/// To implement a formula:
+///
+/// 1. Define an input type that implements `TryFrom<Cursor>`
+/// 2. Implement `derive` to create output instances from input
+/// 3. Implement `write` to write computed values back to the cursor
+///
+/// Most formulas should also implement the [`Compute`] trait to separate
+/// the computation logic from the I/O operations.
+///
+/// # Example
+///
+/// See the module-level documentation for a complete example.
 pub trait Formula: Sized {
+    /// The input type for this formula
+    ///
+    /// This type must be constructible from a Cursor and should contain
+    /// all the fields that the formula needs to read from the input.
     type Input: TryFrom<Cursor, Error = FormulaEvaluationError>;
+
+    /// Match type for future pattern matching support
+    ///
+    /// Currently unused. In future versions, this will be used by macros
+    /// to generate pattern matching code for formula applications in queries.
     type Match;
 
-    /// Derive output instances from cursor input
+    /// Derive output instances from the input cursor
+    ///
+    /// This method is responsible for:
+    /// 1. Reading input values from the cursor
+    /// 2. Performing the formula's computation
+    /// 3. Returning the computed output instances
+    ///
+    /// Most implementations will delegate to `Compute::compute` after
+    /// extracting the input from the cursor.
+    ///
+    /// # Arguments
+    /// * `cursor` - The cursor providing access to input values
+    ///
+    /// # Returns
+    /// * `Ok(Vec<Self>)` - One or more output instances
+    /// * `Err(_)` - If reading inputs fails or computation cannot proceed
+    ///
+    /// # Note
+    /// Returning a `Vec` allows formulas to produce multiple outputs for
+    /// a single input, enabling one-to-many transformations.
     fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError>;
 
-    /// Write this formula's output to the cursor
+    /// Write this formula instance's output values to the cursor
+    ///
+    /// This method is called for each output instance produced by `derive`
+    /// to write the computed values back to the cursor.
+    ///
+    /// # Arguments
+    /// * `cursor` - The cursor to write output values to
+    ///
+    /// # Returns
+    /// * `Ok(())` - If all writes succeeded
+    /// * `Err(_)` - If writing fails (e.g., due to inconsistency)
     fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError>;
 
     /// Convert derived outputs to Match instances
+    ///
+    /// This method orchestrates the full formula evaluation:
+    /// 1. Calls `derive` to compute outputs
+    /// 2. For each output, clones the cursor and calls `write`
+    /// 3. Collects the resulting matches
+    ///
+    /// This default implementation should work for most formulas.
     fn derive_match(cursor: &Cursor) -> Result<Vec<Match>, FormulaEvaluationError> {
         let outputs = Self::derive(cursor)?;
         let mut results = Vec::new();
@@ -188,6 +336,21 @@ pub trait Formula: Sized {
     }
 
     /// Create a formula application with term bindings
+    ///
+    /// This method binds the formula to specific term mappings, creating
+    /// a [`FormulaApplication`] that can be evaluated over streams of matches.
+    ///
+    /// # Arguments
+    /// * `terms` - Mapping from formula parameter names to query terms
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut terms = Terms::new();
+    /// terms.insert("x".to_string(), Term::var("input"));
+    /// terms.insert("y".to_string(), Term::var("output"));
+    ///
+    /// let app = MyFormula::apply(terms);
+    /// ```
     fn apply(terms: Terms) -> FormulaApplication<Self> {
         FormulaApplication {
             terms,

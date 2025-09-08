@@ -10,6 +10,7 @@ pub mod and;
 pub mod artifact;
 pub mod attribute;
 pub mod concept;
+pub mod cursor;
 pub mod deductive_rule;
 pub mod error;
 pub mod fact;
@@ -28,6 +29,7 @@ pub mod stream;
 pub mod syntax;
 pub mod term;
 pub mod types;
+pub mod value;
 
 pub use artifact::{Entity, Value, ValueDataType};
 pub use attribute::{Attribute, Cardinality};
