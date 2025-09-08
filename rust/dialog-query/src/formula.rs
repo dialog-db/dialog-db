@@ -10,8 +10,9 @@
 //!
 //! - **[`Formula`] trait** - The core trait that all formulas must implement
 //! - **[`Compute`] trait** - Optional trait for formulas that compute outputs from inputs
-//! - **[`FormulaApplication`]** - Represents a formula bound to specific term mappings
+//! - **[`FormulaApplication`]** - Non-generic formula bound to term mappings, integrable with rules
 //! - **[`Cursor`](crate::cursor::Cursor)** - Provides read/write access during evaluation
+//! - **[`Dependencies`](crate::deductive_rule::Dependencies)** - Declares parameter requirements
 //! - **Standard `TryFrom<Value>`** - Type conversion between Value and Rust types
 //!
 //! # Architecture
@@ -48,7 +49,7 @@
 //!
 //! ```
 //! use dialog_query::formula::{Formula, Compute, FormulaApplication, FormulaEvaluationError};
-//! use dialog_query::deductive_rule::Terms;
+//! use dialog_query::deductive_rule::{Terms, Dependencies};
 //! use dialog_query::cursor::Cursor;
 //! use dialog_query::{Term, Match, Value};
 //!
@@ -94,6 +95,18 @@
 //!     type Input = SumInput;
 //!     type Match = ();  // Not used yet, for future macro generation
 //!
+//!     fn name() -> &'static str {
+//!         "sum"
+//!     }
+//!
+//!     fn dependencies() -> Dependencies {
+//!         let mut deps = Dependencies::new();
+//!         deps.require("of".to_string());
+//!         deps.require("with".to_string());
+//!         deps.provide("is".to_string());
+//!         deps
+//!     }
+//!
 //!     fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
 //!         let input = Self::Input::try_from(cursor.clone())?;
 //!         Ok(Self::compute(input))
@@ -124,10 +137,18 @@
 //! # Design Principles
 //!
 //! 1. **Type Safety** - Formulas work with strongly typed inputs and outputs
-//! 2. **Composability** - Formulas can be chained and combined in queries
-//! 3. **Separation of Concerns** - Logic (Compute) is separate from I/O (Cursor)
-//! 4. **Error Handling** - Clear error types for all failure modes
-//! 5. **Performance** - Zero-cost abstractions where possible
+//! 2. **Integration** - Non-generic applications integrate seamlessly with rule system
+//! 3. **Composability** - Formulas can be chained and combined in queries and rules
+//! 4. **Separation of Concerns** - Logic (Compute) is separate from I/O (Cursor)
+//! 5. **Dependency Declaration** - Clear parameter requirements for planning
+//! 6. **Error Handling** - Clear error types for all failure modes
+//! 7. **Performance** - Zero-cost abstractions where possible
+//!
+//! # Integration with Deductive Rules
+//!
+//! The non-generic `FormulaApplication` design allows formulas to be seamlessly integrated
+//! with the deductive rule system. Formulas can now be used as premises in rules,
+//! participate in query planning, and be stored alongside other rule applications.
 //!
 //! # Future Enhancements
 //!
@@ -282,8 +303,10 @@ pub enum FormulaEvaluationError {
 /// To implement a formula:
 ///
 /// 1. Define an input type that implements `TryFrom<Cursor>`
-/// 2. Implement `derive` to create output instances from input
-/// 3. Implement `write` to write computed values back to the cursor
+/// 2. Implement `name()` to return the formula's identifier
+/// 3. Implement `dependencies()` to declare parameter requirements
+/// 4. Implement `derive` to create output instances from input
+/// 5. Implement `write` to write computed values back to the cursor
 ///
 /// Most formulas should also implement the [`Compute`] trait to separate
 /// the computation logic from the I/O operations.
@@ -366,7 +389,8 @@ pub trait Formula: Sized + Clone {
     /// Create a formula application with term bindings
     ///
     /// This method binds the formula to specific term mappings, creating
-    /// a [`FormulaApplication`] that can be evaluated over streams of matches.
+    /// a non-generic [`FormulaApplication`] that can be evaluated over streams of matches
+    /// and integrated with the deductive rule system.
     ///
     /// # Arguments
     /// * `terms` - Mapping from formula parameter names to query terms
@@ -374,10 +398,11 @@ pub trait Formula: Sized + Clone {
     /// # Example
     /// ```ignore
     /// let mut terms = Terms::new();
-    /// terms.insert("x".to_string(), Term::var("input"));
-    /// terms.insert("y".to_string(), Term::var("output"));
+    /// terms.insert("of".to_string(), Term::var("input1"));
+    /// terms.insert("with".to_string(), Term::var("input2"));
+    /// terms.insert("is".to_string(), Term::var("output"));
     ///
-    /// let app = MyFormula::apply(terms);
+    /// let app = Sum::apply(terms);
     /// ```
     fn apply(terms: Terms) -> FormulaApplication {
         FormulaApplication {
@@ -394,12 +419,20 @@ pub trait Compute: Formula + Sized {
     fn compute(input: Self::Input) -> Vec<Self>;
 }
 
-/// Formula application that can be evaluated over a stream of matches
+/// Non-generic formula application that can be evaluated over a stream of matches
+///
+/// This struct represents a formula that has been bound to specific term mappings.
+/// Unlike the previous generic version, this can be stored alongside other applications
+/// in the deductive rule system, allowing formulas to be used as premises in rules.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FormulaApplication {
+    /// Parameter name to term mappings
     pub terms: Terms,
+    /// Formula identifier for error reporting and debugging
     pub name: &'static str,
+    /// Parameter dependencies for planning and analysis
     pub dependencies: Dependencies,
+    /// Function pointer to the formula's computation logic
     pub compute: fn(&mut Cursor) -> Result<Vec<Match>, FormulaEvaluationError>,
 }
 
