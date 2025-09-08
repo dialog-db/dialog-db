@@ -494,7 +494,7 @@ impl Display for Formula {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FormulaApplication {
     formula: Formula,
     terms: Terms,

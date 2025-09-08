@@ -1,8 +1,9 @@
 //! Error types for the query engine
 
 use crate::artifact::{DialogArtifactsError, Value, ValueDataType};
-use thiserror::Error;
 use crate::plan::PlanError;
+use crate::term::Term;
+use thiserror::Error;
 
 /// Errors that can occur during query planning and execution
 #[derive(Error, Debug, Clone, PartialEq)]
@@ -14,6 +15,18 @@ pub enum QueryError {
     /// A rule application is missing required parameters
     #[error("Rule application omits required parameter \"{parameter}\"")]
     MissingRuleParameter { parameter: String },
+
+    /// A formula evaluation error
+    #[error("Formula application omits required parameter: \"{parameter}\"")]
+    RequiredFormulaParamater { parameter: String },
+
+    /// A variable was used inconsistently in a formula
+    #[error("Variable inconsistency: {parameter:?} has actual value {actual:?} but expected {expected:?}")]
+    VariableInconsistency {
+        parameter: String,
+        actual: Term<Value>,
+        expected: Term<Value>,
+    },
 
     /// A variable appears in both input and output of a formula
     #[error("Variable {variable_name:?} cannot appear in both input and output")]
@@ -83,10 +96,10 @@ impl From<PlanError> for QueryError {
 impl From<InconsistencyError> for QueryError {
     fn from(err: InconsistencyError) -> Self {
         match err {
-            InconsistencyError::UnboundVariableError(var) => QueryError::UnboundVariable { 
-                variable_name: var 
-            },
-            _ => QueryError::FactStore(err.to_string())
+            InconsistencyError::UnboundVariableError(var) => {
+                QueryError::UnboundVariable { variable_name: var }
+            }
+            _ => QueryError::FactStore(err.to_string()),
         }
     }
 }

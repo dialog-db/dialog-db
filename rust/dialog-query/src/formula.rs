@@ -1,414 +1,274 @@
-//! Formula system for query evaluation
+//! Formula2 system - A refined approach to formula evaluation
 //!
-//! This module provides a type-safe formula expansion system that allows
-//! for transforming data through user-defined formulas while maintaining
-//! type safety at compile time and enabling dynamic dispatch at runtime.
+//! This module implements the Formula2 trait system as outlined in the notes/formula.md
+//! specification, providing a type-safe and efficient way to define and execute formulas.
 
-use crate::deductive_rule::{
-    AnalyzerError, FormulaApplication as DeductiveFormulaApplication, Terms,
-};
-use crate::{try_stream, EvaluationContext, QueryError, Selection, Store};
-use crate::{Match, Term, Value};
-use std::collections::BTreeMap;
-use std::fmt::{self, Debug, Display};
+use crate::deductive_rule::Terms;
+use crate::{try_stream, EvaluationContext, Match, QueryError, Selection, Store, Term, Value};
 use std::marker::PhantomData;
-use std::sync::Arc;
 use thiserror::Error;
-
-/// Core trait for defining formulas with strongly-typed inputs and outputs.
-///
-/// # Design Decisions
-///
-/// - **Sized + Clone + Debug**: These bounds ensure that formulas can be:
-///   - Stored by value (Sized)
-///   - Cloned for use in async contexts (Clone)
-///   - Inspected for debugging (Debug)
-///
-/// - **Associated types**: Input/Output types provide compile-time type safety
-///   while allowing each formula to define its own data contract
-///
-/// # Example
-/// ```ignore
-/// struct Increment;
-/// impl Formula for Increment {
-///     type Input = IncInput;
-///     type Output = IncOutput;
-///
-///     fn expand(&self, input: Self::Input) -> Result<Vec<Self::Output>, FormulaEvaluationError> {
-///         Ok(vec![IncOutput { value: input.value + 1 }])
-///     }
-/// }
-/// ```
-pub trait Formula: Sized + Clone + Debug {
-    /// The input type this formula expects
-    type Input;
-
-    /// Expands the input into zero or more output values.
-    ///
-    /// Formulas can:
-    /// - Filter (return empty vec)
-    /// - Transform (return single item)
-    /// - Expand (return multiple items)
-    fn expand(terms: Self::Input) -> Result<Vec<Self>, FormulaEvaluationError>;
-
-    /// Converts this formula into a type-erased FormulaApplication.
-    ///
-    /// Creates a FormulaApplication with the given terms for integration
-    /// with the deductive rule system.
-    fn apply(terms: Terms) -> Result<DeductiveFormulaApplication, AnalyzerError>
-    where
-        Self: TryInto<Match, Error = FormulaEvaluationError> + 'static,
-        Self::Input: TryFrom<Match, Error = FormulaEvaluationError>,
-    {
-        // Import necessary types
-        use crate::deductive_rule::{Cells, Formula as DeductiveFormula};
-
-        // Create a basic deductive formula structure
-        let formula = DeductiveFormula::new(std::any::type_name::<Self>());
-
-        // Create a FormulaApplication with the expansion function
-        let mut app = DeductiveFormulaApplication::new(formula, terms);
-        app.expand_fn = Some(create_expand_fn::<Self>());
-        Ok(app)
-    }
-}
 
 /// Errors that can occur during formula evaluation
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum FormulaEvaluationError {
-    /// A required variable was not found in the input Match
-    #[error("Required cell '{name}' has no value")]
-    ReadError { name: String },
+    // TODO: Capture formula somehow here.
+    #[error("Formula application omits required parameter \"{parameter}\"")]
+    RequiredParameter { parameter: String },
+    /// A required variable was not found in the input
+    #[error("Variable {term} for '{parameter}' required parameter is not bound")]
+    UnboundVariable {
+        parameter: String,
+        term: Term<Value>,
+    },
 
-    /// Failed to convert input Match to formula's Input type
-    #[error("Failed to convert input: {message}")]
-    InputConversionError { message: String },
-
-    /// Failed to convert formula's Output type to Match
-    #[error("Failed to convert output: {message}")]
-    OutputConversionError { message: String },
+    #[error(
+        "Variable for the '{parameter}' is bound to {actual} which is inconsistent with value being set: {expected}"
+    )]
+    VariableInconsistency {
+        parameter: String,
+        actual: Term<Value>,
+        expected: Term<Value>,
+    },
 
     /// Type mismatch when reading from Match
     #[error("Type mismatch: expected {expected}, got {actual}")]
     TypeMismatch { expected: String, actual: String },
-
-    /// Generic conversion error with details
-    #[error("Conversion error: {0}")]
-    ConversionError(String),
 }
 
-/// Implementation allowing Box<T> to be used as a Formula where T is a Formula.
-///
-/// This enables heap allocation of formulas when needed, particularly useful
-/// for recursive formula structures or when the formula type isn't known at compile time.
-impl<T: ?Sized> Formula for Box<T>
-where
-    T: Formula,
-{
-    type Input = T::Input;
-
-    fn expand(terms: Self::Input) -> Result<Vec<Self>, FormulaEvaluationError> {
-        T::expand(terms).map(|vec| vec.into_iter().map(Box::new).collect())
-    }
-}
-
-// ============================================================================
-// Example Implementation: Increment Formula
-// ============================================================================
-
-/// Example formula that increments a numeric value
+/// A cursor for reading from and writing to matches with term mappings
 #[derive(Debug, Clone, PartialEq)]
-pub struct Inc {
-    pub of: i32,
-    pub is: i32,
+pub struct Cursor {
+    pub source: Match,
+    pub terms: Terms,
 }
 
-/// Input structure for the Inc formula
-#[derive(Debug)]
-pub struct IncInput {
-    pub of: i32,
-}
-
-impl TryFrom<Match> for IncInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(match_: Match) -> Result<Self, Self::Error> {
-        let of =
-            match_
-                .get::<i32>(&Term::var("of"))
-                .map_err(|_| FormulaEvaluationError::ReadError {
-                    name: "of".to_string(),
-                })?;
-        Ok(IncInput { of })
+impl Cursor {
+    pub fn new(source: Match, terms: Terms) -> Self {
+        Self { source, terms }
     }
-}
 
-impl TryInto<Match> for Inc {
-    type Error = FormulaEvaluationError;
+    /// Read a typed value from the cursor using field name
+    pub fn read<T: Cast>(&self, key: &str) -> Result<T, FormulaEvaluationError> {
+        let term =
+            self.terms
+                .get(key)
+                .ok_or_else(|| FormulaEvaluationError::RequiredParameter {
+                    parameter: key.into(),
+                })?;
 
-    fn try_into(self) -> Result<Match, Self::Error> {
-        let out = Match::new();
-
-        let out = out.set::<i32>(Term::var("is"), self.is).map_err(|e| {
-            FormulaEvaluationError::OutputConversionError {
-                message: format!("Failed to set 'is' field: {:?}", e),
+        let value = self.source.resolve_value(term).map_err(|_| {
+            FormulaEvaluationError::UnboundVariable {
+                term: term.clone(),
+                parameter: key.into(),
             }
         })?;
 
-        let out = out.set::<i32>(Term::var("of"), self.of).map_err(|e| {
-            FormulaEvaluationError::OutputConversionError {
-                message: format!("Failed to set 'of' field: {:?}", e),
-            }
-        })?;
-
-        Ok(out)
-    }
-}
-
-impl Formula for Inc {
-    type Input = IncInput;
-
-    fn expand(input: Self::Input) -> Result<Vec<Self>, FormulaEvaluationError> {
-        // Simple increment operation
-        Ok(vec![Inc {
-            of: input.of.clone(),
-            is: input.of + 1,
-        }])
-    }
-}
-
-/// Extension methods for DeductiveFormulaApplication
-impl DeductiveFormulaApplication {
-    /// Evaluate the formula over a stream of Matches
-    /// This is the main method that should be used for formula evaluation
-    pub fn evaluate<S: Store, M: Selection>(
-        &self,
-        context: EvaluationContext<S, M>,
-    ) -> impl Selection {
-        let terms = self.terms.clone();
-        let expand_fn = self.expand_fn.clone();
-
-        try_stream! {
-            for await source in context.selection {
-                let frame = source?;
-
-                // If we have an expansion function, use it
-                if let Some(expand) = expand_fn {
-                    let outputs = expand(&frame, &terms).map_err(|e| match e {
-                        FormulaEvaluationError::ReadError { name } => {
-                            QueryError::UnboundVariable { variable_name: name }
-                        },
-                        FormulaEvaluationError::InputConversionError { message } => {
-                            QueryError::InvalidTerm { message }
-                        },
-                        FormulaEvaluationError::OutputConversionError { message } => {
-                            QueryError::Serialization { message }
-                        },
-                        FormulaEvaluationError::TypeMismatch { expected, actual } => {
-                            QueryError::InvalidTerm {
-                                message: format!("Type mismatch: expected {}, got {}", expected, actual)
-                            }
-                        },
-                        FormulaEvaluationError::ConversionError(msg) => {
-                            QueryError::InvalidTerm { message: msg }
-                        },
-                    })?;
-
-                    // Yield each output frame
-                    for output in outputs {
-                        yield output;
-                    }
-                } else {
-                    // No expansion function, just pass through
-                    yield frame;
-                }
-            }
-        }
+        T::try_cast(&value)
     }
 
-    /// Expand a single Match through a formula with a given expansion function
-    pub fn expand_with(
-        &self,
-        source: &Match,
-        expand_fn: impl Fn(&Match, &Terms) -> Result<Vec<Match>, FormulaEvaluationError>,
-    ) -> Result<Vec<Match>, FormulaEvaluationError> {
-        expand_fn(source, &self.terms)
-    }
-
-    /// Evaluate the formula over a stream of Matches
-    pub fn evaluate_with<S: Store, M: Selection>(
-        &self,
-        context: EvaluationContext<S, M>,
-        expand_fn: impl Fn(&Match, &Terms) -> Result<Vec<Match>, FormulaEvaluationError>
-            + Send
-            + Sync
-            + 'static,
-    ) -> impl Selection {
-        let terms = self.terms.clone();
-
-        try_stream! {
-            for await source in context.selection {
-                let frame = source?;
-
-                // Apply formula with terms mapping
-                let outputs = expand_fn(&frame, &terms).map_err(|e| match e {
-                    FormulaEvaluationError::ReadError { name } => {
-                        QueryError::UnboundVariable { variable_name: name }
-                    },
-                    FormulaEvaluationError::InputConversionError { message } => {
-                        QueryError::InvalidTerm { message }
-                    },
-                    FormulaEvaluationError::OutputConversionError { message } => {
-                        QueryError::Serialization { message }
-                    },
-                    FormulaEvaluationError::TypeMismatch { expected, actual } => {
-                        QueryError::InvalidTerm {
-                            message: format!("Type mismatch: expected {}, got {}", expected, actual)
-                        }
-                    },
-                    FormulaEvaluationError::ConversionError(msg) => {
-                        QueryError::InvalidTerm { message: msg }
-                    },
+    /// Write a value to the cursor using field name
+    pub fn write(&mut self, key: &str, value: &Value) -> Result<(), FormulaEvaluationError> {
+        if let Some(term) = self.terms.get(key) {
+            self.source = self
+                .source
+                // TODO: Better align error types
+                .unify_value(term.clone(), value.clone())
+                .map_err(|_| FormulaEvaluationError::VariableInconsistency {
+                    parameter: key.into(),
+                    expected: term.clone(),
+                    actual: self.source.resolve(term),
                 })?;
+        }
 
-                // Yield each output frame
-                for frame in outputs {
-                    yield frame;
-                }
-            }
+        Ok(())
+    }
+}
+
+/// Trait for casting values from the generic Value type to specific types
+pub trait Cast: Sized {
+    fn try_cast(value: &Value) -> Result<Self, FormulaEvaluationError>;
+}
+
+impl Cast for u32 {
+    fn try_cast(value: &Value) -> Result<Self, FormulaEvaluationError> {
+        match value {
+            Value::UnsignedInt(n) => Ok(*n as u32),
+            _ => Err(FormulaEvaluationError::TypeMismatch {
+                expected: "u32".into(),
+                actual: value.data_type().to_string(),
+            }),
         }
     }
 }
 
-/// Helper function to create an expansion function for a specific Formula type
-pub fn create_expand_fn<F>() -> fn(&Match, &Terms) -> Result<Vec<Match>, FormulaEvaluationError>
-where
-    F: Formula,
-    F::Input: TryFrom<Match, Error = FormulaEvaluationError>,
-    F: TryInto<Match, Error = FormulaEvaluationError>,
-{
-    fn expand<F>(source: &Match, terms: &Terms) -> Result<Vec<Match>, FormulaEvaluationError>
-    where
-        F: Formula,
-        F::Input: TryFrom<Match, Error = FormulaEvaluationError>,
-        F: TryInto<Match, Error = FormulaEvaluationError>,
-    {
-        // Read values from source Match using Terms mapping
-        let mut variables = BTreeMap::new();
-
-        // For each term in the mapping, copy the value from source to input
-        for (field_name, term) in terms.iter() {
-            // Try to copy the value from source to input_match
-            // We need to handle this carefully as we don't know the exact type
-            // For now, we'll just try to copy as-is using the internal representation
-            if let Some(var_name) = term.as_variable_name() {
-                if let Some(value) = source.variables.get(var_name) {
-                    variables.insert(field_name.clone(), value.clone());
-                }
-            }
+impl Cast for i32 {
+    fn try_cast(value: &Value) -> Result<Self, FormulaEvaluationError> {
+        match value {
+            Value::SignedInt(n) => Ok(*n as i32),
+            Value::UnsignedInt(n) => Ok(*n as i32),
+            _ => Err(FormulaEvaluationError::TypeMismatch {
+                expected: "i32".into(),
+                actual: value.data_type().to_string(),
+            }),
         }
+    }
+}
 
-        let input_match = Match {
-            variables: Arc::new(variables),
-        };
-        // Convert to typed input
-        let input = F::Input::try_from(input_match)?;
+impl Cast for String {
+    fn try_cast(value: &Value) -> Result<Self, FormulaEvaluationError> {
+        match value {
+            Value::String(s) => Ok(s.clone()),
+            _ => Err(FormulaEvaluationError::TypeMismatch {
+                expected: "String".into(),
+                actual: value.data_type().to_string(),
+            }),
+        }
+    }
+}
 
-        // Apply the formula
-        let outputs = F::expand(input)?;
+impl Cast for bool {
+    fn try_cast(value: &Value) -> Result<Self, FormulaEvaluationError> {
+        match value {
+            // The Value enum doesn't have a Bool variant, so we handle it as a string or int
+            Value::String(s) => match s.as_str() {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                _ => Err(FormulaEvaluationError::TypeMismatch {
+                    expected: "bool".into(),
+                    actual: format!("String({})", s),
+                }),
+            },
+            Value::UnsignedInt(n) => Ok(*n != 0),
+            Value::SignedInt(n) => Ok(*n != 0),
+            _ => Err(FormulaEvaluationError::TypeMismatch {
+                expected: "bool".into(),
+                actual: value.data_type().to_string(),
+            }),
+        }
+    }
+}
 
-        // Convert outputs back to Matches
-        let mut results = Vec::with_capacity(outputs.len());
+impl Cast for f64 {
+    fn try_cast(value: &Value) -> Result<Self, FormulaEvaluationError> {
+        match value {
+            Value::Float(f) => Ok(*f),
+            Value::SignedInt(i) => Ok(*i as f64),
+            Value::UnsignedInt(u) => Ok(*u as f64),
+            _ => Err(FormulaEvaluationError::TypeMismatch {
+                expected: "f64".into(),
+                actual: value.data_type().to_string(),
+            }),
+        }
+    }
+}
+
+/// The main Formula2 trait
+pub trait Formula: Sized {
+    type Input: TryFrom<Cursor, Error = FormulaEvaluationError>;
+    type Match;
+
+    /// Derive output instances from cursor input
+    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError>;
+
+    /// Write this formula's output to the cursor
+    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError>;
+
+    /// Convert derived outputs to Match instances
+    fn derive_match(cursor: &Cursor) -> Result<Vec<Match>, FormulaEvaluationError> {
+        let outputs = Self::derive(cursor)?;
+        let mut results = Vec::new();
+
         for output in outputs {
-            // Start with the source Match to preserve other fields
-            let mut result_vars = (*source.variables).clone();
-
-            // Convert output to Match to get the computed fields
-            let output_match: Match = output.try_into()?;
-
-            eprintln!(
-                "DEBUG: Output match variables: {:?}",
-                output_match.variables
-            );
-
-            // Copy computed fields to result using Terms mapping
-            for (field_name, term) in terms.iter() {
-                if let Some(var_name) = term.as_variable_name() {
-                    if let Some(value) = output_match.variables.get(field_name) {
-                        result_vars.insert(var_name.to_string(), value.clone());
-                    }
-                }
-            }
-
-            let result = Match {
-                variables: Arc::new(result_vars),
-            };
-            results.push(result);
+            let mut out_cursor = cursor.clone();
+            output.write(&mut out_cursor)?;
+            results.push(out_cursor.source);
         }
 
         Ok(results)
     }
 
-    expand::<F>
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_formula_with_evaluate() {
-        // Create Terms mapping
-        let mut terms = Terms::new();
-        terms.insert("of".to_string(), Term::var("x").into());
-        terms.insert("is".to_string(), Term::var("y").into());
-
-        // Create the formula application
-        let app = Inc::apply(terms.clone()).expect("Failed to create formula application");
-
-        // Create input with 'x' = 5
-        let input = Match::new()
-            .set::<i32>(Term::var("x"), 5)
-            .expect("Failed to create input Match");
-
-        // Expand the formula using expand_with
-        let expand_fn = create_expand_fn::<Inc>();
-        let result = app
-            .expand_with(&input, expand_fn)
-            .expect("Formula expansion failed");
-
-        // Verify the result
-        assert_eq!(result.len(), 1);
-        let output = &result[0];
-        assert_eq!(output.get::<i32>(&Term::var("x")).ok(), Some(5));
-        assert_eq!(output.get::<i32>(&Term::var("y")).ok(), Some(6));
+    /// Create a formula application with term bindings
+    fn apply(terms: Terms) -> FormulaApplication<Self> {
+        FormulaApplication {
+            terms,
+            _phantom: PhantomData,
+        }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Sum {
-    of: u32,
-    with: u32,
-    // This is derived from the sum of `of` and `with`.
-    is: u32,
-}
-
-impl Compute for Sum {
-    fn compute(input: Self::Input) -> Vec<Self> {
-        vec![Sum {
-            of: input.of,
-            with: input.with,
-            is: input.of + input.with,
-        }]
-    }
-}
-trait Compute: Formula2 + Sized {
+/// Trait for formulas that can compute their outputs
+pub trait Compute: Formula + Sized {
     fn compute(input: Self::Input) -> Vec<Self>;
 }
 
+/// Formula application that can be evaluated over a stream of matches
+pub struct FormulaApplication<F: Formula> {
+    pub terms: Terms,
+    pub _phantom: PhantomData<F>,
+}
+
+impl<F: Formula> FormulaApplication<F> {
+    /// Expand a single match using this formula
+    pub fn expand(&self, frame: Match) -> Result<Vec<Match>, FormulaEvaluationError> {
+        let cursor = Cursor::new(frame, self.terms.clone());
+        F::derive_match(&cursor)
+    }
+
+    /// Evaluate the formula over a stream of matches
+    pub fn evaluate<S: Store, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
+        let terms = self.terms.clone();
+        try_stream! {
+            for await source in context.selection {
+                let frame = source?;
+                let cursor = Cursor::new(frame, terms.clone());
+                // Map results and omit inconsistent matches
+                let results = match F::derive_match(&cursor) {
+                    Ok(output) => Ok(output),
+                    Err(e) => {
+                        match e {
+                            FormulaEvaluationError::VariableInconsistency { .. } => Ok(vec![]),
+                            FormulaEvaluationError::RequiredParameter { parameter } => {
+                                Err(QueryError::RequiredFormulaParamater { parameter })
+                            },
+                            FormulaEvaluationError::UnboundVariable { parameter, .. } => {
+                                Err(QueryError::UnboundVariable { variable_name: parameter })
+                            },
+                            FormulaEvaluationError::TypeMismatch { expected, actual } => {
+                                Err(QueryError::InvalidTerm {
+                                    message: format!("Type mismatch: expected {}, got {}", expected, actual)
+                                })
+                            },
+                        }
+                    }
+                }?;
+
+                for output in results {
+                    yield output;
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Example: Sum Formula Implementation
+// ============================================================================
+
+/// Example Sum formula that adds two numbers
+#[derive(Debug, Clone)]
+pub struct Sum {
+    pub of: u32,
+    pub with: u32,
+    pub is: u32,
+}
+
+/// Input structure for Sum formula
 pub struct SumInput {
-    of: u32,
-    with: u32,
+    pub of: u32,
+    pub with: u32,
 }
 
 impl TryFrom<Cursor> for SumInput {
@@ -421,13 +281,24 @@ impl TryFrom<Cursor> for SumInput {
     }
 }
 
+/// Match structure for Sum formula (for future macro generation)
 pub struct SumMatch {
-    of: Term<u32>,
-    with: Term<u32>,
-    is: Term<u32>,
+    pub of: Term<u32>,
+    pub with: Term<u32>,
+    pub is: Term<u32>,
 }
 
-impl Formula2 for Sum {
+impl Compute for Sum {
+    fn compute(input: Self::Input) -> Vec<Self> {
+        vec![Sum {
+            of: input.of,
+            with: input.with,
+            is: input.of + input.with,
+        }]
+    }
+}
+
+impl Formula for Sum {
     type Input = SumInput;
     type Match = SumMatch;
 
@@ -440,146 +311,168 @@ impl Formula2 for Sum {
         let value = Value::UnsignedInt(self.is.into());
         cursor.write("is", &value)
     }
-
-    // fn apply(terms: Match) -> FormulaApplication2<Self> {
-    //     FormulaApplication2::new(terms, || {})
-    // }
 }
 
-trait Formula2: Sized {
-    type Input: TryFrom<Cursor, Error = FormulaEvaluationError>;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Term;
 
-    type Match;
+    #[test]
+    fn test_sum_formula_basic() {
+        // Create Terms mapping
+        let mut terms = Terms::new();
+        terms.insert("of".to_string(), Term::var("x").into());
+        terms.insert("with".to_string(), Term::var("y").into());
+        terms.insert("is".to_string(), Term::var("result").into());
 
-    fn derive_match(cursor: &Cursor) -> Result<Vec<Match>, FormulaEvaluationError> {
-        let output = Self::derive(cursor)?;
-        let mut out = cursor.clone();
-        let mut results = Vec::new();
-        for match_item in output {
-            match_item.write(&mut out)?;
-            results.push(out.source.clone());
-        }
-        Ok(results)
+        // Create input match with x=5, y=3
+        let input = Match::new()
+            .set(Term::var("x"), 5u32)
+            .expect("Failed to set x")
+            .set(Term::var("y"), 3u32)
+            .expect("Failed to set y");
+
+        // Create formula application
+        let app = Sum::apply(terms);
+
+        // Expand the formula
+        let results = app.expand(input).expect("Formula expansion failed");
+
+        // Verify results
+        assert_eq!(results.len(), 1);
+        let output = &results[0];
+
+        // Check that x and y are preserved
+        assert_eq!(output.get::<u32>(&Term::var("x")).ok(), Some(5));
+        assert_eq!(output.get::<u32>(&Term::var("y")).ok(), Some(3));
+
+        // Check that result is computed correctly
+        assert_eq!(output.get::<u32>(&Term::var("result")).ok(), Some(8));
     }
 
-    // fn compute(cursor: Cursor) -> Result<Self::Match, FormulaEvaluationError> {
-    //     let input = Self::Input::try_from(cursor)?;
-    //     let output = Self::derive(input);
-    //     output.write(cursor);
-    //     Ok(cursor.source)
-    // }
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError>;
+    #[test]
+    fn test_cursor_read_write() {
+        let mut terms = Terms::new();
+        terms.insert("value".to_string(), Term::var("test").into());
 
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError>;
+        let source = Match::new()
+            .set(Term::var("test"), 42u32)
+            .expect("Failed to create test match");
 
-    fn apply(terms: Terms) -> FormulaApplication2 {
-        FormulaApplication2 {
-            terms,
-            formula: |cursor| Self::derive_match(&cursor),
-        }
-    }
-}
+        let cursor = Cursor::new(source, terms);
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Cursor {
-    pub source: Match,
-    pub terms: Terms,
-}
+        // Test reading
+        let value = cursor.read::<u32>("value").expect("Failed to read value");
+        assert_eq!(value, 42);
 
-impl Cursor {
-    pub fn new(source: Match, terms: Terms) -> Self {
-        Cursor { source, terms }
-    }
+        // Test writing
+        let mut write_cursor = cursor.clone();
+        let new_value = Value::UnsignedInt(100);
+        write_cursor
+            .write("value", &new_value)
+            .expect("Failed to write value");
 
-    pub fn read<T: Cast>(&self, key: &str) -> Result<T, FormulaEvaluationError> {
-        let term = self
-            .terms
-            .get(key)
-            .ok_or(FormulaEvaluationError::ReadError {
-                name: key.to_string(),
-            })?;
-
-        let out = self
-            .source
-            .get(&term)
-            .or(Err(FormulaEvaluationError::ReadError {
-                name: key.to_string(),
-            }))?;
-
-        T::try_cast(&out)
+        let written_value = write_cursor
+            .read::<u32>("value")
+            .expect("Failed to read written value");
+        assert_eq!(written_value, 100);
     }
 
-    pub fn write(&mut self, key: &str, value: &Value) -> Result<(), FormulaEvaluationError> {
-        let term = self
-            .terms
-            .get(key)
-            .ok_or(FormulaEvaluationError::ReadError {
-                name: key.to_string(),
-            })?;
+    #[test]
+    fn test_cast_implementations() {
+        let u32_val = Value::UnsignedInt(42);
+        assert_eq!(u32::try_cast(&u32_val).unwrap(), 42);
 
-        let frame = self.source.clone();
+        let i32_val = Value::SignedInt(-10);
+        assert_eq!(i32::try_cast(&i32_val).unwrap(), -10);
 
-        self.source = frame.unify(term.clone(), value.clone()).or(Err(
-            FormulaEvaluationError::OutputConversionError {
-                message: "Failed to unify term and value".into(),
-            },
-        ))?;
+        let string_val = Value::String("hello".to_string());
+        assert_eq!(String::try_cast(&string_val).unwrap(), "hello");
 
-        Ok(())
-    }
-}
-
-trait Cast: Sized {
-    fn try_cast(value: &Value) -> Result<Self, FormulaEvaluationError>;
-}
-
-impl Cast for u32 {
-    fn try_cast(value: &Value) -> Result<Self, FormulaEvaluationError> {
-        match value {
-            Value::UnsignedInt(n) => Ok(n.clone() as u32),
-            _ => Err(FormulaEvaluationError::TypeMismatch {
-                expected: "i32".into(),
-                actual: value.data_type().to_string(),
-            }),
-        }
-    }
-}
-
-pub struct FormulaApplication2 {
-    pub terms: Terms,
-    pub formula: fn(&Cursor) -> Result<Vec<Match>, FormulaEvaluationError>,
-}
-impl FormulaApplication2 {
-    pub fn expand(&self, frame: Match) -> Result<Vec<Match>, FormulaEvaluationError> {
-        let mut matches = Vec::new();
-        let cursor = Cursor::new(frame, self.terms.clone());
-        for each in (self.formula)(&cursor)? {
-            matches.push(each);
-        }
-
-        Ok(matches)
+        // Test type mismatch
+        let result = u32::try_cast(&string_val);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            FormulaEvaluationError::TypeMismatch { .. }
+        ));
     }
 
-    pub fn evaluate<S: Store, M: Selection>(
-        &self,
-        context: EvaluationContext<S, M>,
-    ) -> impl Selection {
-        let formula = self.formula;
-        let terms = self.terms.clone();
-        try_stream! {
-            for await source in context.selection {
-                let frame = source?;
-                let cursor = Cursor::new(frame, terms.clone());
-                let outputs = formula(&cursor).or(Err(QueryError::PlanningError {
-                    message: "Failed to evaluate formula".into(),
-                }))?;
+    #[test]
+    fn test_sum_formula_missing_input() {
+        let mut terms = Terms::new();
+        terms.insert("of".to_string(), Term::var("x").into());
+        terms.insert("with".to_string(), Term::var("missing").into());
+        terms.insert("is".to_string(), Term::var("result").into());
 
+        let input = Match::new()
+            .set(Term::var("x"), 5u32)
+            .expect("Failed to set x");
 
-                // Yield each output frame
-                for output in outputs {
-                    yield output;
-                }
-            }
-        }
+        let app = Sum::apply(terms);
+        let result = app.expand(input);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            FormulaEvaluationError::UnboundVariable { .. }
+        ));
+    }
+
+    #[test]
+    fn test_sum_formula_multiple_expand() {
+        // Test multiple expansions without the stream complexity
+        let mut terms = Terms::new();
+        terms.insert("of".to_string(), Term::var("a").into());
+        terms.insert("with".to_string(), Term::var("b").into());
+        terms.insert("is".to_string(), Term::var("sum").into());
+
+        let app = Sum::apply(terms);
+
+        // Test first input: 2 + 3 = 5
+        let input1 = Match::new()
+            .set(Term::var("a"), 2u32)
+            .unwrap()
+            .set(Term::var("b"), 3u32)
+            .unwrap();
+
+        let results1 = app.expand(input1).expect("First expansion failed");
+        assert_eq!(results1.len(), 1);
+        let result1 = &results1[0];
+        assert_eq!(result1.get::<u32>(&Term::var("a")).ok(), Some(2));
+        assert_eq!(result1.get::<u32>(&Term::var("b")).ok(), Some(3));
+        assert_eq!(result1.get::<u32>(&Term::var("sum")).ok(), Some(5));
+
+        // Test second input: 10 + 15 = 25
+        let input2 = Match::new()
+            .set(Term::var("a"), 10u32)
+            .unwrap()
+            .set(Term::var("b"), 15u32)
+            .unwrap();
+
+        let results2 = app.expand(input2).expect("Second expansion failed");
+        assert_eq!(results2.len(), 1);
+        let result2 = &results2[0];
+        assert_eq!(result2.get::<u32>(&Term::var("a")).ok(), Some(10));
+        assert_eq!(result2.get::<u32>(&Term::var("b")).ok(), Some(15));
+        assert_eq!(result2.get::<u32>(&Term::var("sum")).ok(), Some(25));
+    }
+
+    #[test]
+    fn test_multiple_cast_types() {
+        // Test various data types
+        let bool_val = Value::String("true".to_string());
+        assert_eq!(bool::try_cast(&bool_val).unwrap(), true);
+
+        let f64_val = Value::Float(3.14);
+        assert_eq!(f64::try_cast(&f64_val).unwrap(), 3.14);
+
+        // Test integer to bool conversion
+        let int_true = Value::UnsignedInt(1);
+        assert_eq!(bool::try_cast(&int_true).unwrap(), true);
+
+        let int_false = Value::UnsignedInt(0);
+        assert_eq!(bool::try_cast(&int_false).unwrap(), false);
     }
 }
