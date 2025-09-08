@@ -7,8 +7,8 @@ use crate::{EvaluationContext, Selection, Store, Term, Value};
 use async_stream::try_stream;
 use dialog_artifacts::ValueDataType;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Display;
-use std::{fmt::Debug, hash::Hash};
+use std::fmt::{Debug, Display};
+use std::hash::Hash;
 use thiserror::Error;
 
 /// Represents set of bindings used in the rule or formula applications. It is
@@ -319,7 +319,7 @@ pub struct Cell {
 }
 
 impl Cells {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Cells(HashMap::new())
     }
 
@@ -420,7 +420,7 @@ impl Dependencies {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Requirement {
+pub enum Requirement {
     /// Dependency that must be provided
     Required,
     /// Dependency that could be provided. If not provided it will be derived.
@@ -437,12 +437,12 @@ impl Requirement {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Formula {
     /// Unique identifier for the formula.
-    operator: String,
+    pub operator: String,
     /// Set of operands this formula operates on.
-    operands: Cells,
+    pub operands: Cells,
 
     /// Base cost of applying this formula.
-    cost: usize,
+    pub cost: usize,
     // code: Box<dyn Operator>,
 }
 
@@ -494,11 +494,12 @@ impl Display for Formula {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 pub struct FormulaApplication {
     formula: Formula,
     terms: Terms,
 }
+
 impl FormulaApplication {
     pub fn new(formula: Formula, terms: Terms) -> Self {
         FormulaApplication { formula, terms }

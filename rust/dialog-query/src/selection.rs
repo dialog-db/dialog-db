@@ -1,12 +1,12 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use crate::artifact::Value;
+use crate::artifact::{Value, ValueDataType};
 use dialog_common::ConditionalSend;
 use futures_core::Stream;
 use std::pin::Pin;
 use std::task;
 
-use crate::{fact::Scalar, InconsistencyError, QueryError, Term};
+use crate::{types::{Scalar, IntoValueDataType}, InconsistencyError, QueryError, Term};
 
 pub trait Selection: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend {}
 
@@ -134,7 +134,13 @@ impl Match {
                 if let Some(key) = name {
                     if let Some(value) = self.variables.get(key) {
                         T::try_from(value.clone()).map_err(|_| {
-                            InconsistencyError::TypeError("Can not convert to Value type".into())
+                            // Create a proper TypeError for type conversion errors
+                            InconsistencyError::TypeConversion(
+                                crate::artifact::TypeError::TypeMismatch(
+                                    T::into_value_data_type().unwrap_or(ValueDataType::Bytes),
+                                    value.data_type()
+                                )
+                            )
                         })
                     } else {
                         Err(InconsistencyError::UnboundVariableError(key.clone()))
