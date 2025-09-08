@@ -12,7 +12,7 @@
 //! - **[`Compute`] trait** - Optional trait for formulas that compute outputs from inputs
 //! - **[`FormulaApplication`]** - Represents a formula bound to specific term mappings
 //! - **[`Cursor`](crate::cursor::Cursor)** - Provides read/write access during evaluation
-//! - **[`Cast`](crate::value::Cast)** - Type conversion between Value and Rust types
+//! - **Standard `TryFrom<Value>`** - Type conversion between Value and Rust types
 //!
 //! # Architecture
 //!
@@ -46,9 +46,11 @@
 //!
 //! Here's a complete example of implementing a Sum formula:
 //!
-//! ```ignore
-//! use dialog_query::formula::{Formula, Compute, FormulaApplication};
-//! use dialog_query::{Term, Terms, Match, Value, cursor::Cursor};
+//! ```
+//! use dialog_query::formula::{Formula, Compute, FormulaApplication, FormulaEvaluationError};
+//! use dialog_query::deductive_rule::Terms;
+//! use dialog_query::cursor::Cursor;
+//! use dialog_query::{Term, Match, Value};
 //!
 //! // 1. Define the formula struct with input and output fields
 //! #[derive(Debug, Clone)]
@@ -98,7 +100,7 @@
 //!     }
 //!
 //!     fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-//!         cursor.write("is", &Value::UnsignedInt(self.is as u64))
+//!         cursor.write("is", &Value::UnsignedInt(self.is.into()))
 //!     }
 //! }
 //!
@@ -112,11 +114,11 @@
 //!
 //! // Apply to a match with x=5, y=3
 //! let input_match = Match::new()
-//!     .set(Term::var("x"), 5u32)?
-//!     .set(Term::var("y"), 3u32)?;
+//!     .set(Term::var("x"), 5u32).unwrap()
+//!     .set(Term::var("y"), 3u32).unwrap();
 //!
-//! let results = formula_app.expand(input_match)?;
-//! assert_eq!(results[0].get::<u32>(&Term::var("result"))?, 8);
+//! let results = formula_app.expand(input_match).unwrap();
+//! assert_eq!(results[0].get::<u32>(&Term::var("result")).unwrap(), 8);
 //! ```
 //!
 //! # Design Principles
@@ -132,7 +134,7 @@
 //! The formula system is designed to support future macro generation that will
 //! automatically derive the boilerplate code, making formula definition as simple as:
 //!
-//! ```ignore
+//! ```rust,ignore
 //! #[derive(Formula)]
 //! struct Sum {
 //!     of: u32,
@@ -153,10 +155,9 @@
 //! ```
 
 use crate::cursor::Cursor;
-use crate::deductive_rule::Terms;
-use crate::value::Cast;
+use crate::deductive_rule::{Analysis, AnalyzerError, Dependencies, Requirement, Terms};
+use crate::ValueDataType;
 use crate::{try_stream, EvaluationContext, Match, QueryError, Selection, Store, Term, Value};
-use std::marker::PhantomData;
 use thiserror::Error;
 
 /// Errors that can occur during formula evaluation
@@ -172,13 +173,17 @@ pub enum FormulaEvaluationError {
     /// provided in the Terms mapping when the formula was applied.
     ///
     /// # Example
-    /// ```ignore
+    /// ```should_panic
+    /// # use dialog_query::formula::{Sum, Formula};
+    /// # use dialog_query::deductive_rule::Terms;
+    /// # use dialog_query::{Term, Match, Value};
     /// let mut terms = Terms::new();
     /// // Missing "with" parameter!
     /// terms.insert("of".to_string(), Term::var("x"));
     ///
     /// let app = Sum::apply(terms);
-    /// // Will fail with RequiredParameter { parameter: "with" }
+    /// let input = Match::new().set(Term::var("x"), 5u32).unwrap();
+    /// let result = app.expand(input).unwrap(); // Will panic with RequiredParameter
     /// ```
     #[error("Formula application omits required parameter \"{parameter}\"")]
     RequiredParameter { parameter: String },
@@ -189,11 +194,18 @@ pub enum FormulaEvaluationError {
     /// but that variable has no value in the current match frame.
     ///
     /// # Example
-    /// ```ignore
+    /// ```should_panic
+    /// # use dialog_query::formula::{Sum, Formula};
+    /// # use dialog_query::deductive_rule::Terms;
+    /// # use dialog_query::{Term, Match, Value};
+    /// # let mut terms = Terms::new();
+    /// # terms.insert("of".to_string(), Term::var("x"));
+    /// # terms.insert("with".to_string(), Term::var("y"));
+    /// # terms.insert("is".to_string(), Term::var("result"));
+    /// # let app = Sum::apply(terms);
     /// let input = Match::new();
     /// // Variable ?x is not bound!
-    /// let result = formula.expand(input);
-    /// // Fails with UnboundVariable for parameter "of" → Term::var("x")
+    /// let result = app.expand(input).unwrap(); // Will panic with UnboundVariable
     /// ```
     #[error("Variable {term} for '{parameter}' required parameter is not bound")]
     UnboundVariable {
@@ -209,12 +221,22 @@ pub enum FormulaEvaluationError {
     ///
     /// # Example
     /// ```ignore
+    /// # use dialog_query::formula::{Sum, Formula};
+    /// # use dialog_query::deductive_rule::Terms;
+    /// # use dialog_query::{Term, Match, Value};
+    /// # let mut terms = Terms::new();
+    /// # terms.insert("of".to_string(), Term::var("x"));
+    /// # terms.insert("with".to_string(), Term::var("y"));
+    /// # terms.insert("is".to_string(), Term::var("result"));
+    /// # let app = Sum::apply(terms);
     /// let input = Match::new()
-    ///     .set(Term::var("result"), 10)?; // Already bound to 10
+    ///     .set(Term::var("x"), 5u32).unwrap()
+    ///     .set(Term::var("y"), 3u32).unwrap()
+    ///     .set(Term::var("result"), 10u32).unwrap(); // Already bound to 10
     ///
-    /// // Formula tries to write 8 to ?result
-    /// let result = sum_formula.expand(input);
-    /// // Fails with VariableInconsistency
+    /// // Behavior when trying to write to already bound variable is TBD
+    /// let result = app.expand(input);
+    /// // Implementation details for handling inconsistencies are still being refined
     /// ```
     #[error(
         "Variable for the '{parameter}' is bound to {actual} which is inconsistent with value being set: {expected}"
@@ -227,7 +249,7 @@ pub enum FormulaEvaluationError {
 
     /// Type conversion failed when casting a Value to the requested type
     ///
-    /// This occurs when using the Cast trait to convert a Value to a
+    /// This occurs when using `TryFrom<Value>` to convert a Value to a
     /// specific Rust type, but the Value's actual type is incompatible.
     ///
     /// # Example
@@ -237,7 +259,10 @@ pub enum FormulaEvaluationError {
     /// // Fails with TypeMismatch { expected: "u32", actual: "String" }
     /// ```
     #[error("Type mismatch: expected {expected}, got {actual}")]
-    TypeMismatch { expected: String, actual: String },
+    TypeMismatch {
+        expected: ValueDataType,
+        actual: ValueDataType,
+    },
 }
 
 /// Core trait for implementing formulas in the query system
@@ -266,7 +291,7 @@ pub enum FormulaEvaluationError {
 /// # Example
 ///
 /// See the module-level documentation for a complete example.
-pub trait Formula: Sized {
+pub trait Formula: Sized + Clone {
     /// The input type for this formula
     ///
     /// This type must be constructible from a Cursor and should contain
@@ -278,6 +303,10 @@ pub trait Formula: Sized {
     /// Currently unused. In future versions, this will be used by macros
     /// to generate pattern matching code for formula applications in queries.
     type Match;
+
+    fn dependencies() -> Dependencies;
+
+    fn name() -> &'static str;
 
     /// Derive output instances from the input cursor
     ///
@@ -322,14 +351,13 @@ pub trait Formula: Sized {
     /// 3. Collects the resulting matches
     ///
     /// This default implementation should work for most formulas.
-    fn derive_match(cursor: &Cursor) -> Result<Vec<Match>, FormulaEvaluationError> {
+    fn derive_match(cursor: &mut Cursor) -> Result<Vec<Match>, FormulaEvaluationError> {
         let outputs = Self::derive(cursor)?;
         let mut results = Vec::new();
 
         for output in outputs {
-            let mut out_cursor = cursor.clone();
-            output.write(&mut out_cursor)?;
-            results.push(out_cursor.source);
+            output.write(cursor)?;
+            results.push(cursor.source.clone());
         }
 
         Ok(results)
@@ -351,10 +379,12 @@ pub trait Formula: Sized {
     ///
     /// let app = MyFormula::apply(terms);
     /// ```
-    fn apply(terms: Terms) -> FormulaApplication<Self> {
+    fn apply(terms: Terms) -> FormulaApplication {
         FormulaApplication {
             terms,
-            _phantom: PhantomData,
+            name: Self::name(),
+            dependencies: Self::dependencies(),
+            compute: |cursor| Self::derive_match(cursor),
         }
     }
 }
@@ -365,16 +395,46 @@ pub trait Compute: Formula + Sized {
 }
 
 /// Formula application that can be evaluated over a stream of matches
-pub struct FormulaApplication<F: Formula> {
+#[derive(Debug, Clone, PartialEq)]
+pub struct FormulaApplication {
     pub terms: Terms,
-    pub _phantom: PhantomData<F>,
+    pub name: &'static str,
+    pub dependencies: Dependencies,
+    pub compute: fn(&mut Cursor) -> Result<Vec<Match>, FormulaEvaluationError>,
 }
 
-impl<F: Formula> FormulaApplication<F> {
+impl FormulaApplication {
     /// Expand a single match using this formula
     pub fn expand(&self, frame: Match) -> Result<Vec<Match>, FormulaEvaluationError> {
-        let cursor = Cursor::new(frame, self.terms.clone());
-        F::derive_match(&cursor)
+        let mut cursor = Cursor::new(frame, self.terms.clone());
+        (self.compute)(&mut cursor)
+    }
+
+    pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
+        Ok(Analysis {
+            cost: 5,
+            dependencies: self.dependencies.clone(),
+        })
+    }
+
+    pub fn plan(&self) -> Result<Self, AnalyzerError> {
+        // We ensure that all terms for all required formula parametrs are
+        // applied, otherwise we fail.
+        for (name, requirement) in self.dependencies.iter() {
+            match requirement {
+                Requirement::Required => {
+                    if !self.terms.contains(name) {
+                        Err(AnalyzerError::RequiredCell {
+                            formula: self.name,
+                            cell: name.into(),
+                        })?;
+                    }
+                }
+                Requirement::Derived(_) => {}
+            }
+        }
+
+        Ok(self.clone())
     }
 
     /// Evaluate the formula over a stream of matches
@@ -383,12 +443,16 @@ impl<F: Formula> FormulaApplication<F> {
         context: EvaluationContext<S, M>,
     ) -> impl Selection {
         let terms = self.terms.clone();
+        let compute = self.compute;
         try_stream! {
+
             for await source in context.selection {
                 let frame = source?;
-                let cursor = Cursor::new(frame, terms.clone());
+                let mut cursor = Cursor::new(frame, terms.clone());
+                let expansion = compute(&mut cursor);
+                // let expansion = self.expand(frame);
                 // Map results and omit inconsistent matches
-                let results = match F::derive_match(&cursor) {
+                let results = match expansion {
                     Ok(output) => Ok(output),
                     Err(e) => {
                         match e {
@@ -464,6 +528,18 @@ impl Compute for Sum {
 impl Formula for Sum {
     type Input = SumInput;
     type Match = SumMatch;
+
+    fn name() -> &'static str {
+        "sum"
+    }
+    fn dependencies() -> Dependencies {
+        let mut dependencies = Dependencies::new();
+        dependencies.require("of".into());
+        dependencies.require("with".into());
+        dependencies.provide("is".into());
+
+        dependencies
+    }
 
     fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
         let input = Self::Input::try_from(cursor.clone())?;
@@ -543,26 +619,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cast_implementations() {
-        let u32_val = Value::UnsignedInt(42);
-        assert_eq!(u32::try_cast(&u32_val).unwrap(), 42);
-
-        let i32_val = Value::SignedInt(-10);
-        assert_eq!(i32::try_cast(&i32_val).unwrap(), -10);
-
-        let string_val = Value::String("hello".to_string());
-        assert_eq!(String::try_cast(&string_val).unwrap(), "hello");
-
-        // Test type mismatch
-        let result = u32::try_cast(&string_val);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            FormulaEvaluationError::TypeMismatch { .. }
-        ));
-    }
-
-    #[test]
     fn test_sum_formula_missing_input() {
         let mut terms = Terms::new();
         terms.insert("of".to_string(), Term::var("x").into());
@@ -623,19 +679,21 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_cast_types() {
-        // Test various data types
-        let bool_val = Value::String("true".to_string());
-        assert_eq!(bool::try_cast(&bool_val).unwrap(), true);
+    fn test_multiple_try_from_types() {
+        // Test various data types with standard TryFrom<Value>
+        let bool_val = Value::Boolean(true);
+        assert_eq!(bool::try_from(bool_val).unwrap(), true);
 
         let f64_val = Value::Float(3.14);
-        assert_eq!(f64::try_cast(&f64_val).unwrap(), 3.14);
+        assert_eq!(f64::try_from(f64_val).unwrap(), 3.14);
 
-        // Test integer to bool conversion
-        let int_true = Value::UnsignedInt(1);
-        assert_eq!(bool::try_cast(&int_true).unwrap(), true);
+        let string_val = Value::String("hello".to_string());
+        assert_eq!(String::try_from(string_val).unwrap(), "hello");
 
-        let int_false = Value::UnsignedInt(0);
-        assert_eq!(bool::try_cast(&int_false).unwrap(), false);
+        let u32_val = Value::UnsignedInt(42);
+        assert_eq!(u32::try_from(u32_val).unwrap(), 42);
+
+        let i32_val = Value::SignedInt(-10);
+        assert_eq!(i32::try_from(i32_val).unwrap(), -10);
     }
 }

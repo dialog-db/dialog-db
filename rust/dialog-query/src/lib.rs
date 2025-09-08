@@ -29,7 +29,6 @@ pub mod stream;
 pub mod syntax;
 pub mod term;
 pub mod types;
-pub mod value;
 
 pub use artifact::{Entity, Value, ValueDataType};
 pub use attribute::{Attribute, Cardinality};

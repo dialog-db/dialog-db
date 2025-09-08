@@ -16,21 +16,26 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
+//! use dialog_query::cursor::Cursor;
+//! use dialog_query::deductive_rule::Terms;
+//! use dialog_query::{Term, Match, Value};
+//!
 //! let mut terms = Terms::new();
 //! terms.insert("x".to_string(), Term::var("input_x"));
 //! terms.insert("result".to_string(), Term::var("output_y"));
 //!
 //! let match_frame = Match::new()
-//!     .set(Term::var("input_x"), 42u32)?;
+//!     .set(Term::var("input_x"), 42u32).unwrap();
 //!
 //! let cursor = Cursor::new(match_frame, terms);
-//! let x_value: u32 = cursor.read("x")?;  // Reads from variable "input_x"
+//! let x_value: u32 = cursor.read("x").unwrap();  // Reads from variable "input_x"
+//! assert_eq!(x_value, 42);
 //! ```
 
+use crate::artifact::TypeError;
 use crate::deductive_rule::Terms;
 use crate::formula::FormulaEvaluationError;
-use crate::value::Cast;
 use crate::{Match, Value};
 
 /// A cursor for reading from and writing to matches during formula evaluation
@@ -45,6 +50,8 @@ pub struct Cursor {
     /// Mapping from parameter names to query terms
     pub terms: Terms,
 }
+
+// TODO: Rename cursor
 
 impl Cursor {
     /// Create a new cursor from a match and term mappings
@@ -61,10 +68,10 @@ impl Cursor {
     /// This method:
     /// 1. Looks up the parameter name in the terms mapping
     /// 2. Resolves the corresponding term to get its value
-    /// 3. Casts the value to the requested type
+    /// 3. Converts the value to the requested type
     ///
     /// # Type Parameters
-    /// * `T` - The type to cast the value to (must implement `Cast`)
+    /// * `T` - The type to convert the value to (must implement `TryFrom<Value>`)
     ///
     /// # Arguments
     /// * `key` - The formula parameter name
@@ -73,14 +80,29 @@ impl Cursor {
     /// * `Ok(T)` - The value cast to the requested type
     /// * `Err(RequiredParameter)` - If the parameter is not in the terms mapping
     /// * `Err(UnboundVariable)` - If the term's variable is not bound
-    /// * `Err(TypeMismatch)` - If the value cannot be cast to type T
+    /// * `Err(TypeMismatch)` - If the value cannot be converted to type T
     ///
     /// # Example
-    /// ```ignore
-    /// let x: u32 = cursor.read("x")?;
-    /// let name: String = cursor.read("name")?;
     /// ```
-    pub fn read<T: Cast>(&self, key: &str) -> Result<T, FormulaEvaluationError> {
+    /// # use dialog_query::cursor::Cursor;
+    /// # use dialog_query::deductive_rule::Terms;
+    /// # use dialog_query::{Term, Match, Value};
+    /// # let mut terms = Terms::new();
+    /// # terms.insert("x".to_string(), Term::var("test_x"));
+    /// # terms.insert("name".to_string(), Term::var("test_name"));
+    /// # let match_frame = Match::new()
+    /// #     .set(Term::var("test_x"), 42u32).unwrap()
+    /// #     .set(Term::var("test_name"), "hello".to_string()).unwrap();
+    /// # let cursor = Cursor::new(match_frame, terms);
+    /// let x: u32 = cursor.read("x").unwrap();
+    /// let name: String = cursor.read("name").unwrap();
+    /// assert_eq!(x, 42);
+    /// assert_eq!(name, "hello");
+    /// ```
+    pub fn read<T: TryFrom<Value, Error = TypeError>>(
+        &self,
+        key: &str,
+    ) -> Result<T, FormulaEvaluationError> {
         let term =
             self.terms
                 .get(key)
@@ -95,7 +117,10 @@ impl Cursor {
             }
         })?;
 
-        T::try_cast(&value)
+        T::try_from(value).map_err(|e| {
+            let TypeError::TypeMismatch(expected, actual) = e;
+            FormulaEvaluationError::TypeMismatch { expected, actual }
+        })
     }
 
     /// Write a value to the cursor using a parameter name
@@ -117,8 +142,17 @@ impl Cursor {
     /// * `Err(VariableInconsistency)` - If the term is already bound to a different value
     ///
     /// # Example
-    /// ```ignore
-    /// cursor.write("result", &Value::UnsignedInt(42))?;
+    /// ```
+    /// # use dialog_query::cursor::Cursor;
+    /// # use dialog_query::deductive_rule::Terms;
+    /// # use dialog_query::{Term, Match, Value};
+    /// # let mut terms = Terms::new();
+    /// # terms.insert("result".to_string(), Term::var("output"));
+    /// # let match_frame = Match::new();
+    /// # let mut cursor = Cursor::new(match_frame, terms);
+    /// cursor.write("result", &Value::UnsignedInt(42)).unwrap();
+    /// let result: u32 = cursor.read("result").unwrap();
+    /// assert_eq!(result, 42);
     /// ```
     pub fn write(&mut self, key: &str, value: &Value) -> Result<(), FormulaEvaluationError> {
         if let Some(term) = self.terms.get(key) {

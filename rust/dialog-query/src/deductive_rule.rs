@@ -1,6 +1,7 @@
 use crate::attribute::Attribute;
 use crate::error::InconsistencyError;
 use crate::fact_selector::FactSelector;
+use crate::formula::{Formula, FormulaApplication, FormulaEvaluationError};
 use crate::selection::Match;
 use crate::VariableScope;
 use crate::{EvaluationContext, Selection, Store, Term, Value};
@@ -69,8 +70,8 @@ impl Conclusion {
 pub struct Analysis {
     /// Base execution cost which does not include added costs captured in the
     /// dependencies.
-    cost: usize,
-    dependencies: Dependencies,
+    pub cost: usize,
+    pub dependencies: Dependencies,
 }
 
 /// Represents a deductive rule that can be applied creating a premise.
@@ -199,7 +200,7 @@ pub enum AnalyzerError {
         parameter: String,
     },
     #[error("Formula {formula} application omits required cell \"{cell}\"")]
-    RequiredCell { formula: Formula, cell: String },
+    RequiredCell { formula: &'static str, cell: String },
     #[error("Rule {rule} makes use of local {variable} that no premise can provide")]
     RequiredLocalVariable {
         rule: DeductiveRule,
@@ -220,17 +221,17 @@ pub enum PlanError {
         parameter: String,
     },
     #[error("Formula {formula} application omits required cell \"{cell}\"")]
-    OmitsRequiredCell { formula: Formula, cell: String },
+    OmitsRequiredCell { formula: &'static str, cell: String },
     #[error(
         "Formula {formula} application can not pass blank '_' variable in required cell \"{cell}\""
     )]
-    BlankRequiredCell { formula: Formula, cell: String },
+    BlankRequiredCell { formula: &'static str, cell: String },
 
     #[error(
         "Formula {formula} application passes '{variable}' unbound variable into a required cell \"{cell}\""
     )]
     UnboundRequiredCell {
-        formula: Formula,
+        formula: &'static str,
         cell: String,
         variable: String,
     },
@@ -239,7 +240,7 @@ pub enum PlanError {
         "Formula {formula} application passes unbound {parameter} into a required cell \"{cell}\""
     )]
     UnboundFormulaParameter {
-        formula: Formula,
+        formula: &'static str,
         cell: String,
         parameter: Term<Value>,
     },
@@ -262,10 +263,10 @@ pub struct RuleApplication {
 }
 
 impl RuleApplication {
-    fn new(rule: DeductiveRule, terms: Terms) -> Self {
+    pub fn new(rule: DeductiveRule, terms: Terms) -> Self {
         RuleApplication { rule, terms }
     }
-    fn analyze(&self) -> Result<Analysis, AnalyzerError> {
+    pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
         // First we analyze the rule itself identifying its dependencies and
         // execution budget.
         let analysis = self.rule.analyze()?;
@@ -340,10 +341,10 @@ impl Cells {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dependencies(HashMap<String, Requirement>);
 impl Dependencies {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Dependencies(HashMap::new())
     }
-    fn cost(&self) -> usize {
+    pub fn cost(&self) -> usize {
         self.0
             .values()
             .filter_map(|d| match d {
@@ -434,221 +435,94 @@ impl Requirement {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Formula {
-    /// Unique identifier for the formula.
-    pub operator: String,
-    /// Set of operands this formula operates on.
-    pub operands: Cells,
+// impl Display for Formula {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         write!(f, "{} {{", self.operator);
+//         for (name, cell) in self.operands.iter() {
+//             write!(f, "{}: {},", name, cell.data_type)?;
+//         }
+//         write!(f, "}}")
+//     }
+// }
 
-    /// Base cost of applying this formula.
-    pub cost: usize,
-    // code: Box<dyn Operator>,
-}
+// impl FormulaApplication {
+//     pub fn new(formula: Formula, terms: Terms) -> Self {
+//         FormulaApplication { formula, terms }
+//     }
 
-impl Formula {
-    pub fn new(operator: &str) -> Self {
-        Formula {
-            operator: operator.to_string(),
-            operands: Cells::new(),
-            cost: 0,
-        }
-    }
+//     pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
+//         let mut dependencies = Dependencies::new();
 
-    fn with_cell(&mut self, name: &str, cell: Cell) -> &mut Self {
-        self.operands.add(name.into(), cell);
-        self
-    }
+//         // Iterate over all the operands of the formula and to capture
+//         // requirements. If required operand is not provided in this
+//         // application we raise an error, because this is not a valid
+//         // application.
+//         for (name, cell) in self.formula.operands.iter() {
+//             match cell.requirement {
+//                 // If cell is required but not provided we raise an error
+//                 // Otherwise we capture requirement in our dependencies
+//                 Requirement::Required => {
+//                     if !self.terms.contains(name) {
+//                         Err(AnalyzerError::RequiredCell {
+//                             formula: self.formula.clone(),
+//                             cell: name.into(),
+//                         })
+//                     } else {
+//                         dependencies.update(name.into(), &cell.requirement);
+//                         Ok(())
+//                     }
+//                 }
+//                 // If cell can be derived we simply update our dependencies with
+//                 // the cell's requirement.
+//                 Requirement::Derived(_) => {
+//                     dependencies.update(name.into(), &cell.requirement);
+//                     Ok(())
+//                 }
+//             }?;
 
-    pub fn apply(&self, terms: Terms) -> Result<FormulaApplication, AnalyzerError> {
-        let application = FormulaApplication::new(self.clone(), terms);
-        application.analyze().and(Ok(application))
-    }
+//             dependencies.update(name.to_string(), &cell.requirement);
+//         }
 
-    pub fn provide<Apply: FormulaImplementation>(&self, apply: Apply) -> FormulaProvider<Apply> {
-        FormulaProvider {
-            formula: self.clone(),
-            provider: apply,
-        }
-    }
-}
+//         Ok(Analysis {
+//             dependencies,
+//             cost: self.formula.cost,
+//         })
+//     }
 
-trait FormulaImplementation: Fn(&mut FormulaContext) -> Result<(), FormulaEvaluationError> {}
-impl<Apply: FormulaImplementation> FormulaImplementation for Apply {}
+//     pub fn plan(&self, scope: VariableScope) -> Result<Plan, PlanError> {
+//         let mut total = self.formula.cost;
+//         for (name, cell) in self.formula.operands.iter() {
+//             match cell.requirement {
+//                 Requirement::Required => {
+//                     let parameter = self.terms.get(name).ok_or(PlanError::OmitsRequiredCell {
+//                         formula: self.formula.clone(),
+//                         cell: name.into(),
+//                     })?;
 
-pub struct FormulaProvider<Apply>
-where
-    Apply: FormulaImplementation,
-{
-    formula: Formula,
-    provider: Apply,
-}
+//                     // If parameter is not in scope, we can not plan this formula
+//                     if !scope.contains(parameter) {
+//                         Err(PlanError::UnboundFormulaParameter {
+//                             formula: self.formula.clone(),
+//                             parameter: parameter.clone(),
+//                             cell: name.into(),
+//                         })?;
+//                     }
+//                 }
+//                 Requirement::Derived(cost) => {
+//                     total += cost;
+//                 }
+//             }
+//         }
 
-impl Display for Formula {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {{", self.operator);
-        for (name, cell) in self.operands.iter() {
-            write!(f, "{}: {},", name, cell.data_type)?;
-        }
-        write!(f, "}}")
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FormulaApplication {
-    formula: Formula,
-    terms: Terms,
-}
-
-impl FormulaApplication {
-    pub fn new(formula: Formula, terms: Terms) -> Self {
-        FormulaApplication { formula, terms }
-    }
-
-    pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
-        let mut dependencies = Dependencies::new();
-
-        // Iterate over all the operands of the formula and to capture
-        // requirements. If required operand is not provided in this
-        // application we raise an error, because this is not a valid
-        // application.
-        for (name, cell) in self.formula.operands.iter() {
-            match cell.requirement {
-                // If cell is required but not provided we raise an error
-                // Otherwise we capture requirement in our dependencies
-                Requirement::Required => {
-                    if !self.terms.contains(name) {
-                        Err(AnalyzerError::RequiredCell {
-                            formula: self.formula.clone(),
-                            cell: name.into(),
-                        })
-                    } else {
-                        dependencies.update(name.into(), &cell.requirement);
-                        Ok(())
-                    }
-                }
-                // If cell can be derived we simply update our dependencies with
-                // the cell's requirement.
-                Requirement::Derived(_) => {
-                    dependencies.update(name.into(), &cell.requirement);
-                    Ok(())
-                }
-            }?;
-
-            dependencies.update(name.to_string(), &cell.requirement);
-        }
-
-        Ok(Analysis {
-            dependencies,
-            cost: self.formula.cost,
-        })
-    }
-
-    pub fn plan(&self, scope: VariableScope) -> Result<Plan, PlanError> {
-        let mut total = self.formula.cost;
-        for (name, cell) in self.formula.operands.iter() {
-            match cell.requirement {
-                Requirement::Required => {
-                    let parameter = self.terms.get(name).ok_or(PlanError::OmitsRequiredCell {
-                        formula: self.formula.clone(),
-                        cell: name.into(),
-                    })?;
-
-                    // If parameter is not in scope, we can not plan this formula
-                    if !scope.contains(parameter) {
-                        Err(PlanError::UnboundFormulaParameter {
-                            formula: self.formula.clone(),
-                            parameter: parameter.clone(),
-                            cell: name.into(),
-                        })?;
-                    }
-                }
-                Requirement::Derived(cost) => {
-                    total += cost;
-                }
-            }
-        }
-
-        // If we have parameters for all required cells, we can plan this
-        // formula
-        Ok(Plan::Formula(FormulaApplicationPlan {
-            formula: self.formula.clone(),
-            terms: self.terms.clone(),
-            cost: total,
-        }))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FormulaApplicationPlan {
-    formula: Formula,
-    terms: Terms,
-    cost: usize,
-}
-impl FormulaApplicationPlan {
-    /// Resolves Terms from the given source. When term already a constant it
-    /// ensures that it is consistent with the constant value in the source.
-    /// When term is a variable it attempts to resolve the constant from the
-    /// source. If source does not contain a value for the parameter it copies
-    /// variable into returned terms unless it is a required parameter. If
-    /// parameter is required and value is not present in source
-    /// InconsistencyError is returned.
-    pub fn resolve(&self, source: Match) -> Result<Terms, InconsistencyError> {
-        let mut parameters = self.terms.clone();
-        for (name, parameter) in self.terms.iter() {
-            match parameter {
-                Term::Constant(_) => {
-                    parameters.insert(name.clone(), parameter.clone());
-                }
-                Term::Variable { .. } => {
-                    match source.get(parameter) {
-                        Ok(value) => {
-                            parameters.insert(name.clone(), Term::Constant(value));
-                        }
-                        Err(error) => {
-                            if let Some(Cell { requirement, .. }) = self.formula.operands.get(name)
-                            {
-                                match requirement {
-                                    Requirement::Required => {
-                                        Err(error)?;
-                                    }
-                                    Requirement::Derived(_) => {
-                                        parameters.insert(name.clone(), parameter.clone());
-                                    }
-                                }
-                            }
-                        }
-                    };
-                }
-            }
-        }
-
-        Ok(parameters)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FormulaContext(HashMap<String, Value>);
-impl FormulaContext {
-    fn read(&self, name: &str) -> Result<Value, FormulaEvaluationError> {
-        self.0
-            .get(name)
-            .cloned()
-            .ok_or(FormulaEvaluationError::ReadError {
-                name: name.to_string(),
-            })
-    }
-    fn write(&mut self, name: &str, value: Value) -> Result<(), FormulaEvaluationError> {
-        self.0.insert(name.to_string(), value);
-        Ok(())
-    }
-}
-
-#[derive(Error, Debug, Clone, PartialEq)]
-enum FormulaEvaluationError {
-    #[error("Required cell '{name}' has no value")]
-    ReadError { name: String },
-}
+//         // If we have parameters for all required cells, we can plan this
+//         // formula
+//         Ok(Plan::Formula(FormulaApplicationPlan {
+//             formula: self.formula.clone(),
+//             terms: self.terms.clone(),
+//             cost: total,
+//         }))
+//     }
+// }
 
 // #[test]
 // fn define_inc_formula() {
@@ -823,7 +697,7 @@ impl Terms {
     }
 }
 
-enum Plan {
+pub enum Plan {
     None,
-    Formula(FormulaApplicationPlan),
+    Formula(FormulaApplication),
 }
