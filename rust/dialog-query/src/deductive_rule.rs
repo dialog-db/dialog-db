@@ -28,14 +28,18 @@ impl Terms {
         self.0.get(name)
     }
 
+    /// Inserts a new term binding for the given parameter name.
+    /// If the parameter already exists, it will be overwritten.
     pub fn insert(&mut self, name: String, term: Term<Value>) {
         self.0.insert(name, term);
     }
 
+    /// Checks if a term binding exists for the given parameter name.
     pub fn contains(&self, name: &str) -> bool {
         self.0.contains_key(name)
     }
 
+    /// Returns an iterator over all parameter-term pairs in this binding set.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Term<Value>)> {
         self.0.iter()
     }
@@ -50,6 +54,9 @@ pub struct Conclusion {
     attributes: HashMap<String, Attribute<Value>>,
 }
 impl Conclusion {
+    /// Checks if the conclusion includes the given parameter name.
+    /// The special "this" parameter is always considered present as it represents
+    /// the entity that the conclusion applies to.
     pub fn contains(&self, name: &str) -> bool {
         name == "this" || self.attributes.contains_key(name)
     }
@@ -175,6 +182,9 @@ impl DeductiveRule {
         })
     }
 
+    /// Creates a rule application by binding the provided terms to this rule's parameters.
+    /// Validates that all required parameters are provided and returns an error if the
+    /// application would be invalid.
     pub fn apply(&self, terms: Terms) -> Result<RuleApplication, AnalyzerError> {
         let application = RuleApplication::new(self.clone(), terms);
         application.analyze().and(Ok(application))
@@ -190,21 +200,32 @@ impl Display for DeductiveRule {
     }
 }
 
-/// Represents a deductive rule that can be applied creating a premise.
+/// Represents a concept which is a set of attributes that define an entity type.
+/// Concepts are similar to tables in relational databases but are more flexible
+/// as they can be derived from rules rather than just stored directly.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Concept {
-    /// Concept identifier uset to look concepts up by.
+    /// Concept identifier used to look concepts up by.
     pub operator: String,
+    /// Map of attribute names to their definitions for this concept.
     pub attributes: HashMap<String, Attribute<Value>>,
 }
 
+/// Represents an application of a concept with specific term bindings.
+/// This is used when querying for entities that match a concept pattern.
+/// Note: The name has a typo (should be ConceptApplication) but is kept for compatibility.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConcetApplication {
+    /// The term bindings for this concept application.
     pub terms: Terms,
+    /// The concept being applied.
     pub concept: Concept,
 }
 
 impl ConcetApplication {
+    /// Analyzes this concept application to determine its dependencies and execution cost.
+    /// All concept applications require the "this" entity parameter and desire all
+    /// concept attributes as dependencies.
     fn analyze(&self) -> Result<Analysis, AnalyzerError> {
         let mut dependencies = Dependencies::new();
         dependencies.desire("this".into(), ENTITY_COST);
@@ -219,6 +240,9 @@ impl ConcetApplication {
         })
     }
 
+    /// Creates an execution plan for this concept application.
+    /// Converts the concept application into a set of fact selector premises
+    /// that can be executed to find matching entities.
     fn plan(&self, scope: &VariableScope) -> Result<ConceptPlan, PlanError> {
         let mut provides = VariableScope::new();
         let mut cost = 0;
@@ -295,10 +319,16 @@ impl Display for ConcetApplication {
     }
 }
 
+/// Execution plan for a concept application.
+/// Contains the cost estimate, variables that will be provided by execution,
+/// and the individual sub-plans that need to be executed and joined.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConceptPlan {
+    /// Estimated execution cost for this plan.
     pub cost: usize,
+    /// Variables that will be bound by executing this plan.
     pub provides: VariableScope,
+    /// Individual sub-plans that must all succeed for the concept to match.
     pub conjuncts: Vec<Plan>,
 }
 impl EvaluationPlan for ConceptPlan {
@@ -314,20 +344,28 @@ impl EvaluationPlan for ConceptPlan {
     }
 }
 
+/// Errors that can occur during rule or formula analysis.
+/// These errors indicate structural problems with rules that would prevent execution.
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum AnalyzerError {
+    /// A rule parameter is defined in the conclusion but never used by any premise.
+    /// This indicates a likely error in the rule definition.
     #[error("Rule {rule} does not makes use of the \"{parameter}\" parameter")]
     UnusedParameter {
         rule: DeductiveRule,
         parameter: String,
     },
+    /// A rule application is missing a required parameter that the rule needs.
     #[error("Rule {rule} application omits required parameter \"{parameter}\"")]
     RequiredParameter {
         rule: DeductiveRule,
         parameter: String,
     },
+    /// A formula application is missing a required cell value.
     #[error("Formula {formula} application omits required cell \"{cell}\"")]
     OmitsRequiredCell { formula: &'static str, cell: String },
+    /// A rule uses a local variable that cannot be satisfied by any premise.
+    /// This makes the rule impossible to execute.
     #[error("Rule {rule} makes use of local {variable} that no premise can provide")]
     RequiredLocalVariable {
         rule: DeductiveRule,
@@ -354,6 +392,8 @@ impl From<AnalyzerError> for PlanError {
     }
 }
 
+/// Errors that can occur during query planning.
+/// These errors indicate problems that prevent creating a valid execution plan.
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum PlanError {
     #[error("Rule {rule} does not makes use of the \"{parameter}\" parameter")]
@@ -440,9 +480,13 @@ pub struct RuleApplication {
 }
 
 impl RuleApplication {
+    /// Creates a new rule application with the given rule and term bindings.
     pub fn new(rule: DeductiveRule, terms: Terms) -> Self {
         RuleApplication { rule, terms }
     }
+    
+    /// Analyzes this rule application to validate term bindings and compute dependencies.
+    /// Ensures all required parameters are provided and propagates variable dependencies.
     pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
         // First we analyze the rule itself identifying its dependencies and
         // execution budget.
@@ -476,6 +520,9 @@ impl RuleApplication {
             cost: analysis.cost,
         })
     }
+    /// Creates an execution plan for this rule application.
+    /// Validates that all required variables are in scope and plans execution
+    /// of all rule premises in optimal order.
     fn plan(&self, scope: &VariableScope) -> Result<RuleApplicationPlan, PlanError> {
         let mut provides = VariableScope::new();
         let analysis = self.analyze().map_err(PlanError::from)?;
@@ -537,10 +584,15 @@ impl Display for RuleApplication {
     }
 }
 
+/// Query planner that optimizes the order of premise execution based on cost
+/// and dependency analysis. Uses a state machine approach to iteratively
+/// select the best premise to execute next.
 pub enum Planner<'a> {
+    /// Initial state with unprocessed premises.
     Idle {
         premises: &'a Vec<Premise>,
     },
+    /// Processing state with cached candidates and current scope.
     Active {
         candidates: Vec<PlanCandidate<'a>>,
         scope: VariableScope,
@@ -548,9 +600,13 @@ pub enum Planner<'a> {
 }
 
 impl<'a> Planner<'a> {
+    /// Creates a new planner for the given premises.
     pub fn new(premises: &'a Vec<Premise>) -> Self {
         Self::Idle { premises }
     }
+    
+    /// Helper to create a planning error from failed candidates.
+    /// Returns the first error found, or UnexpectedError if none.
     fn fail(candidates: &[PlanCandidate]) -> Result<Plan, PlanError> {
         for candidate in candidates {
             match &candidate.result {
@@ -564,6 +620,7 @@ impl<'a> Planner<'a> {
         return Err(PlanError::UnexpectedError);
     }
 
+    /// Checks if planning is complete (all premises have been planned).
     fn done(&self) -> bool {
         match self {
             Self::Idle { .. } => false,
@@ -571,6 +628,8 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// Creates an optimized execution plan for all premises.
+    /// Returns the total cost and ordered list of sub-plans to execute.
     pub fn plan(&mut self, scope: &VariableScope) -> Result<(usize, Vec<Plan>), PlanError> {
         let plan = self.top(scope)?;
         let mut cost = plan.cost();
@@ -590,6 +649,8 @@ impl<'a> Planner<'a> {
 
         Ok((cost, conjuncts))
     }
+    /// Selects and returns the best premise to execute next based on cost.
+    /// Updates the planner state by removing the selected premise from candidates.
     fn top(&mut self, differential: &VariableScope) -> Result<Plan, PlanError> {
         match self {
             Planner::Idle { premises } => {
@@ -668,34 +729,49 @@ impl<'a> Planner<'a> {
     }
 }
 
-/// Cached premise with all computed data
+/// Represents a premise candidate during query planning.
+/// Caches the premise's dependencies and planning result to avoid recomputation.
 #[derive(Debug, Clone)]
 pub struct PlanCandidate<'a> {
+    /// Reference to the premise being planned.
     pub premise: &'a Premise,
+    /// Variables that this premise depends on.
     pub dependencies: VariableScope,
+    /// Cached planning result for this premise.
     pub result: Result<Plan, PlanError>,
 }
 
 impl<'a> PlanCandidate<'a> {
+    /// Re-plans this premise with the given scope and updates the cached result.
     fn plan(&mut self, scope: &VariableScope) -> &Self {
         self.result = self.premise.plan(scope);
         self
     }
 }
 
+/// Execution plan for a rule application.
+/// Contains all information needed to execute the rule and produce results.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuleApplicationPlan {
+    /// Total estimated execution cost.
     pub cost: usize,
+    /// Term bindings for the rule parameters.
     pub terms: Terms,
+    /// Ordered list of sub-plans to execute.
     pub conjuncts: Vec<Plan>,
+    /// Variables that will be provided by this plan.
     pub provides: VariableScope,
+    /// The rule being executed.
     pub rule: DeductiveRule,
 }
 
 impl RuleApplicationPlan {
+    /// Evaluates this rule application plan against the provided context.
     pub fn eval<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
         Self::eval_helper(context.store, context.selection, self.conjuncts.clone())
     }
+    
+    /// Helper function that recursively evaluates conjuncts in order.
     pub fn eval_helper<S: Store, M: Selection>(
         store: S,
         source: M,
@@ -744,25 +820,36 @@ impl EvaluationPlan for RuleApplicationPlan {
     }
 }
 
+/// Represents a join operation that combines multiple query plans.
+/// Uses a recursive structure to chain plans together.
 #[derive(Debug, Clone)]
 pub enum Join {
+    /// Base case - passes through the selection unchanged.
     Identity,
+    /// Recursive case - joins a plan with the rest of the join chain.
     Join(Box<Join>, Plan),
 }
 
 impl Join {
+    /// Creates a new empty join (identity).
     pub fn new() -> Self {
         Join::Identity
     }
+    
+    /// Creates a join from a vector of plans by chaining them together.
     pub fn from(plans: Vec<Plan>) -> Self {
         plans
             .into_iter()
             .fold(Join::Identity, |join, plan| join.and(plan))
     }
+    
+    /// Adds a plan to this join chain.
     pub fn and(self, plan: Plan) -> Self {
         Join::Join(Box::new(self), plan)
     }
 
+    /// Evaluates the join by executing each plan in sequence,
+    /// feeding the output of one plan as input to the next.
     pub fn evaluate<S: Store, M: Selection>(
         self,
         context: EvaluationContext<S, M>,
@@ -799,44 +886,59 @@ impl Join {
 // yield_all function removed as it's no longer needed
 
 /// Represents a set of named cells that formula operates on. Each cell also
-/// describes whether it is required or optional and cost of it's omission.
+/// describes whether it is required or optional and cost of its omission.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cells(HashMap<String, Cell>);
 
-/// Describes a cell of the formula.
+/// Describes a cell of the formula - a named parameter with type and requirement info.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
+    /// Name of the cell parameter.
     pub name: &'static str,
+    /// Human-readable description of what this cell represents.
     pub description: &'static str,
+    /// Whether this cell is required or can be derived.
     pub requirement: Requirement,
+    /// Expected data type for values in this cell.
     pub data_type: ValueDataType,
 }
 
 impl Cells {
+    /// Creates a new empty cell collection.
     pub fn new() -> Self {
         Cells(HashMap::new())
     }
 
+    /// Returns an iterator over all cells as (name, cell) pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Cell)> {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
     }
 
+    /// Gets a cell by name if it exists.
     pub fn get(&self, name: &str) -> Option<&Cell> {
         self.0.get(name)
     }
 
+    /// Adds a new cell to this collection.
     pub fn add(&mut self, name: String, cell: Cell) -> &mut Self {
         self.0.insert(name, cell);
         self
     }
 }
 
+/// Tracks dependencies and their requirement levels for rules and formulas.
+/// Used during analysis to determine execution costs and validate requirements.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dependencies(HashMap<String, Requirement>);
+
 impl Dependencies {
+    /// Creates a new empty dependency set.
     pub fn new() -> Self {
         Dependencies(HashMap::new())
     }
+    
+    /// Calculates the total cost of all derived dependencies.
+    /// Required dependencies don't contribute to cost as they must be provided.
     pub fn cost(&self) -> usize {
         self.0
             .values()
@@ -847,10 +949,13 @@ impl Dependencies {
             .sum()
     }
 
+    /// Returns an iterator over all dependencies as (name, requirement) pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Requirement)> {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
     }
 
+    /// Adds or updates a derived dependency with the given cost.
+    /// If dependency already exists as derived, keeps the maximum cost.
     pub fn desire(&mut self, dependency: String, cost: usize) {
         let Dependencies(content) = self;
         if let Some(existing) = content.get(&dependency) {
@@ -862,10 +967,12 @@ impl Dependencies {
         }
     }
 
+    /// Marks a dependency as provided (zero cost derived).
     pub fn provide(&mut self, dependency: String) {
         self.desire(dependency, 0);
     }
 
+    /// Marks a dependency as required - must be provided externally.
     pub fn require(&mut self, dependency: String) {
         self.0.insert(dependency, Requirement::Required);
     }
@@ -893,11 +1000,13 @@ impl Dependencies {
         }
     }
 
+    /// Checks if a dependency exists in this set.
     pub fn contains(&self, dependency: &str) -> bool {
         let Dependencies(content) = self;
         content.contains_key(dependency)
     }
 
+    /// Returns an iterator over only the required dependencies.
     pub fn required(&self) -> impl Iterator<Item = (&str, &Requirement)> {
         self.0.iter().filter_map(|(k, v)| match v {
             Requirement::Required => Some((k.as_str(), v)),
@@ -905,6 +1014,7 @@ impl Dependencies {
         })
     }
 
+    /// Gets the requirement level for a dependency, defaulting to Derived(0) if not present.
     pub fn resolve(&self, name: &str) -> Requirement {
         match self.0.get(name) {
             Some(requirement) => requirement.clone(),
@@ -913,36 +1023,43 @@ impl Dependencies {
     }
 }
 
+/// Represents the requirement level for a dependency in a rule or formula.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Requirement {
-    /// Dependency that must be provided
+    /// Dependency that must be provided externally - cannot be derived.
     Required,
     /// Dependency that could be provided. If not provided it will be derived.
-    /// Number represents cost of the deriviation.
+    /// Number represents cost of the derivation.
     Derived(usize),
 }
 
 impl Requirement {
+    /// Checks if this is a required (non-derivable) dependency.
     pub fn is_required(&self) -> bool {
         matches!(self, Requirement::Required)
     }
 }
 
+/// Represents a premise in a rule - a condition that must be satisfied.
+/// Can be either a positive application or a negated exclusion.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Premise {
+    /// A positive premise that produces matches.
     Apply(Application),
-    /// Statement that exclude matches from the selection. This is basically
-    /// a negetated statement.
+    /// A negated premise that excludes matches from the selection.
     Exclude(Negation),
 }
 
 impl Premise {
+    /// Creates an execution plan for this premise within the given variable scope.
     pub fn plan(&self, scope: &VariableScope) -> Result<Plan, PlanError> {
         match self {
             Premise::Apply(application) => application.plan(scope).map(Plan::Application),
             Premise::Exclude(negation) => negation.plan(scope).map(Plan::Negation),
         }
     }
+    
+    /// Analyzes this premise to determine its dependencies and cost.
     fn analyze(&self) -> Result<Analysis, AnalyzerError> {
         match self {
             Premise::Apply(application) => application.analyze(),
@@ -1021,11 +1138,14 @@ impl FactSelector {
 
 // FactSelectorPlan's EvaluationPlan implementation is in fact_selector.rs
 
-/// Statements that can be used by the rules.
+/// Represents a negated application that excludes matching results.
+/// Used in rules to specify conditions that must NOT hold.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Negation(Application);
 
 impl Negation {
+    /// Analyzes this negation to determine dependencies and cost.
+    /// All dependencies become required since negation must fully evaluate its condition.
     pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
         let Negation(application) = self;
         let mut dependencies = Dependencies::new();
@@ -1039,6 +1159,7 @@ impl Negation {
             cost: analysis.cost,
         })
     }
+    /// Creates an execution plan for this negation within the given variable scope.
     fn plan(&self, scope: &VariableScope) -> Result<NegationPlan, PlanError> {
         let Negation(application) = self;
         let plan = application.plan(&scope)?;
@@ -1054,13 +1175,18 @@ impl Display for Negation {
     }
 }
 
+/// Execution plan for a negated application.
+/// Does not provide any variables since negation only filters matches.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NegationPlan {
+    /// The underlying application plan that will be negated
     pub application: ApplicationPlan,
+    /// Variables provided by this plan (always empty for negation)
     pub provides: VariableScope,
 }
 
 impl NegationPlan {
+    /// Creates a new negation plan from an application plan.
     pub fn not(application: ApplicationPlan) -> Self {
         Self {
             application,
@@ -1070,20 +1196,22 @@ impl NegationPlan {
     // evaluate method is now part of the EvaluationPlan trait implementation
 }
 
-/// Statements that can be used by the rules.
+/// Represents different types of applications that can be used as premises in rules.
+/// Each variant corresponds to a different kind of query operation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Application {
-    /// Fact selection.
+    /// Direct fact selection from the knowledge base
     Select(FactSelector),
-    /// Concept selection
+    /// Concept realization - matching entities against concept patterns
     Realize(ConcetApplication),
-    /// Rule application
+    /// Application of another deductive rule
     ApplyRule(RuleApplication),
-    /// Formula application
+    /// Application of a formula for computation
     ApplyFormula(FormulaApplication),
 }
 
 impl Application {
+    /// Analyzes this application to determine its dependencies and base cost.
     fn analyze(&self) -> Result<Analysis, AnalyzerError> {
         match self {
             Application::Select(selector) => selector.analyze(),
@@ -1093,6 +1221,7 @@ impl Application {
         }
     }
 
+    /// Creates an execution plan for this application within the given variable scope.
     fn plan(&self, scope: &VariableScope) -> Result<ApplicationPlan, PlanError> {
         match self {
             Application::Select(select) => select.plan(&scope).map(ApplicationPlan::Select),
@@ -1107,6 +1236,7 @@ impl Application {
         }
     }
 
+    /// Creates a negated premise from this application.
     pub fn not(&self) -> Premise {
         Premise::Exclude(Negation(self.clone()))
     }
@@ -1154,24 +1284,35 @@ impl Terms {
     }
 }
 
+/// Execution plan for different types of applications.
+/// Contains the optimized execution strategy for each application type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ApplicationPlan {
+    /// Plan for fact selection operations
     Select(FactSelectorPlan),
+    /// Plan for concept realization operations  
     Concept(ConceptPlan),
+    /// Plan for rule application operations
     Rule(RuleApplicationPlan),
+    /// Plan for formula application operations
     Formula(FormulaApplicationPlan),
 }
 
 impl ApplicationPlan {
+    /// Converts this application plan into a negated plan.
     pub fn not(self) -> NegationPlan {
         NegationPlan::not(self)
     }
     // evaluate method is now part of the EvaluationPlan trait implementation
 }
 
+/// Top-level execution plan that can be either a positive application or a negation.
+/// Used by the query planner to organize premise execution.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Plan {
+    /// Positive application that produces matches
     Application(ApplicationPlan),
+    /// Negative application that filters out matches
     Negation(NegationPlan),
 }
 
@@ -1311,6 +1452,364 @@ impl EvaluationPlan for NegationPlan {
 
                 yield frame;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artifact::ValueDataType;
+    use crate::attribute::Attribute;
+    use crate::term::Term;
+    
+    #[test]
+    fn test_terms_basic_operations() {
+        let mut terms = Terms::new();
+        
+        // Test insertion and retrieval
+        let name_term = Term::var("name");
+        terms.insert("name".to_string(), name_term.clone());
+        
+        assert_eq!(terms.get("name"), Some(&name_term));
+        assert_eq!(terms.get("nonexistent"), None);
+        assert!(terms.contains("name"));
+        assert!(!terms.contains("nonexistent"));
+        
+        // Test iteration
+        let collected: Vec<_> = terms.iter().collect();
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].0, &"name".to_string());
+        assert_eq!(collected[0].1, &name_term);
+    }
+
+    #[test]
+    fn test_conclusion_operations() {
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "name".to_string(), 
+            Attribute::new("person", "name", "Person name", ValueDataType::String)
+        );
+        attributes.insert(
+            "age".to_string(), 
+            Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt)
+        );
+        
+        let conclusion = Conclusion { attributes };
+        
+        // Test contains method - should include "this" parameter
+        assert!(conclusion.contains("this"));
+        assert!(conclusion.contains("name"));
+        assert!(conclusion.contains("age"));
+        assert!(!conclusion.contains("height"));
+        
+        // Test absent method
+        let mut dependencies = Dependencies::new();
+        dependencies.desire("name".into(), 100);
+        
+        // Should find "this" as absent since it's not in dependencies
+        assert_eq!(conclusion.absent(&dependencies), Some("this"));
+        
+        dependencies.desire("this".into(), 100);
+        // Now should find "age" as absent
+        assert_eq!(conclusion.absent(&dependencies), Some("age"));
+        
+        dependencies.desire("age".into(), 100);
+        // Now nothing should be absent
+        assert_eq!(conclusion.absent(&dependencies), None);
+    }
+
+    #[test]
+    fn test_dependencies_operations() {
+        let mut deps = Dependencies::new();
+        
+        // Test basic operations
+        assert!(!deps.contains("test"));
+        assert_eq!(deps.resolve("test"), Requirement::Derived(0)); // Default value
+        
+        // Test desire
+        deps.desire("test".into(), 100);
+        assert!(deps.contains("test"));
+        assert_eq!(deps.resolve("test"), Requirement::Derived(100));
+        
+        // Test require
+        deps.require("required".into());
+        assert_eq!(deps.resolve("required"), Requirement::Required);
+        
+        // Test provide
+        deps.provide("provided".into());
+        assert_eq!(deps.resolve("provided"), Requirement::Derived(0));
+        
+        // Test iteration
+        let items: Vec<_> = deps.iter().collect();
+        assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn test_dependencies_update_logic() {
+        let mut deps = Dependencies::new();
+        
+        // Test updating derived with derived - should take minimum cost
+        deps.desire("cost".into(), 50);
+        deps.update("cost".into(), &Requirement::Derived(200));
+        assert_eq!(deps.resolve("cost"), Requirement::Derived(50)); // Takes minimum
+        
+        // Test updating derived with lower cost - should take the new lower cost
+        deps.update("cost".into(), &Requirement::Derived(25));
+        assert_eq!(deps.resolve("cost"), Requirement::Derived(25));
+        
+        // Test that Required dependency gets overridden when updated with Derived
+        deps.require("required_test".into());
+        deps.update("required_test".into(), &Requirement::Derived(100));
+        assert_eq!(deps.resolve("required_test"), Requirement::Derived(100));
+        
+        // Test adding new dependency via update
+        deps.update("new_dep".into(), &Requirement::Derived(75));
+        assert_eq!(deps.resolve("new_dep"), Requirement::Derived(75));
+    }
+
+    #[test]
+    fn test_concept_creation() {
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "name".to_string(),
+            Attribute::new("person", "name", "Person name", ValueDataType::String)
+        );
+        
+        let concept = Concept {
+            operator: "person".to_string(),
+            attributes,
+        };
+        
+        assert_eq!(concept.operator, "person");
+        assert_eq!(concept.attributes.len(), 1);
+        assert!(concept.attributes.contains_key("name"));
+    }
+
+    #[test]
+    fn test_concept_application_analysis() {
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "name".to_string(),
+            Attribute::new("person", "name", "Person name", ValueDataType::String)
+        );
+        attributes.insert(
+            "age".to_string(),
+            Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt)
+        );
+        
+        let concept = Concept {
+            operator: "person".to_string(),
+            attributes,
+        };
+        
+        let mut terms = Terms::new();
+        terms.insert("name".to_string(), Term::var("person_name"));
+        terms.insert("age".to_string(), Term::var("person_age"));
+        
+        let concept_app = ConcetApplication { terms, concept };
+        
+        let analysis = concept_app.analyze().expect("Analysis should succeed");
+        
+        assert_eq!(analysis.cost, BASE_COST);
+        assert!(analysis.dependencies.contains("this"));
+        assert!(analysis.dependencies.contains("name"));
+        assert!(analysis.dependencies.contains("age"));
+        // Check that we have the expected dependencies
+        let deps_count = analysis.dependencies.iter().count();
+        assert_eq!(deps_count, 3);
+    }
+
+    #[test]
+    fn test_deductive_rule_parameters() {
+        let mut conclusion_attributes = HashMap::new();
+        conclusion_attributes.insert(
+            "name".to_string(),
+            Attribute::new("person", "name", "Person name", ValueDataType::String)
+        );
+        conclusion_attributes.insert(
+            "age".to_string(), 
+            Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt)
+        );
+        
+        let rule = DeductiveRule {
+            operator: "adult".to_string(),
+            conclusion: Conclusion { attributes: conclusion_attributes },
+            premises: vec![],
+        };
+        
+        let params = rule.parameters();
+        assert!(params.contains("this"));
+        assert!(params.contains("name"));
+        assert!(params.contains("age"));
+        assert_eq!(params.len(), 3);
+    }
+
+    #[test]
+    fn test_requirement_properties() {
+        let required = Requirement::Required;
+        let derived = Requirement::Derived(100);
+        
+        assert!(required.is_required());
+        assert!(!derived.is_required());
+    }
+
+    #[test]
+    fn test_premise_construction() {
+        let fact_selector = FactSelector::new()
+            .the("person/name")
+            .of(Term::var("person"))
+            .is(crate::artifact::Value::String("Alice".to_string()));
+        
+        let premise = Premise::from(fact_selector);
+        
+        match premise {
+            Premise::Apply(Application::Select(_)) => {
+                // Expected case
+            }
+            _ => panic!("Expected Select application"),
+        }
+    }
+
+    #[test]
+    fn test_analysis_structure() {
+        let mut deps = Dependencies::new();
+        deps.desire("test".into(), 50);
+        
+        let analysis = Analysis {
+            cost: 100,
+            dependencies: deps,
+        };
+        
+        assert_eq!(analysis.cost, 100);
+        assert!(analysis.dependencies.contains("test"));
+    }
+
+    #[test] 
+    fn test_planner_creation() {
+        let premises = vec![];
+        let planner = Planner::new(&premises);
+        
+        match planner {
+            Planner::Idle { premises: p } => {
+                assert_eq!(p.len(), 0);
+            }
+            _ => panic!("Expected Idle state"),
+        }
+    }
+
+    #[test]
+    fn test_plan_candidate_structure() {
+        let fact_selector = FactSelector::new().the("test/attr");
+        let premise = Premise::from(fact_selector);
+        
+        let candidate = PlanCandidate {
+            premise: &premise,
+            dependencies: VariableScope::new(),
+            result: Err(PlanError::UnexpectedError),
+        };
+        
+        // Test that the structure exists and can be created
+        assert!(matches!(candidate.result, Err(PlanError::UnexpectedError)));
+    }
+
+    #[test]
+    fn test_error_types() {
+        // Test AnalyzerError creation
+        let rule = DeductiveRule {
+            operator: "test".to_string(),
+            conclusion: Conclusion { attributes: HashMap::new() },
+            premises: vec![],
+        };
+        
+        let analyzer_error = AnalyzerError::UnusedParameter {
+            rule: rule.clone(),
+            parameter: "test_param".to_string(),
+        };
+        
+        // Test conversion to PlanError
+        let plan_error: PlanError = analyzer_error.into();
+        match &plan_error {
+            PlanError::UnusedParameter { rule: r, parameter } => {
+                assert_eq!(r.operator, "test");
+                assert_eq!(parameter, "test_param");
+            }
+            _ => panic!("Expected UnusedParameter variant"),
+        }
+        
+        // Test conversion to QueryError
+        let query_error: QueryError = plan_error.into();
+        match query_error {
+            QueryError::PlanningError { .. } => {
+                // Expected
+            }
+            _ => panic!("Expected PlanningError variant"),
+        }
+    }
+
+    #[test]
+    fn test_application_variants() {
+        // Test Select application
+        let selector = FactSelector::new().the("test/attr");
+        let app = Application::Select(selector);
+        
+        match app {
+            Application::Select(_) => {
+                // Expected
+            }
+            _ => panic!("Expected Select variant"),
+        }
+        
+        // Test other variants exist
+        let mut terms = Terms::new();
+        terms.insert("test".to_string(), Term::var("test_var"));
+        let concept = Concept {
+            operator: "test".to_string(),
+            attributes: HashMap::new(),
+        };
+        let concept_app = Application::Realize(ConcetApplication { terms, concept });
+        
+        match concept_app {
+            Application::Realize(_) => {
+                // Expected
+            }
+            _ => panic!("Expected Realize variant"),
+        }
+    }
+
+    #[test]
+    fn test_join_operations() {
+        let join = Join::new();
+        match join {
+            Join::Identity => {
+                // Expected initial state
+            }
+            _ => panic!("Expected Identity variant"),
+        }
+        
+        // Test building joins
+        let plans = vec![];
+        let join_from_plans = Join::from(plans);
+        match join_from_plans {
+            Join::Identity => {
+                // Expected for empty vec
+            }
+            _ => panic!("Expected Identity for empty plans"),
+        }
+    }
+
+    #[test]
+    fn test_negation_construction() {
+        let selector = FactSelector::new().the("test/attr");
+        let app = Application::Select(selector);
+        let negation = Negation(app);
+        
+        // Test that negation wraps the application
+        match negation {
+            Negation(Application::Select(_)) => {
+                // Expected
+            }
+            _ => panic!("Expected wrapped Select application"),
         }
     }
 }

@@ -136,7 +136,7 @@ impl Premises for When {
 impl IntoIterator for When {
     type Item = Premise;
     type IntoIter = std::vec::IntoIter<Premise>;
-    
+
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
     }
@@ -145,7 +145,7 @@ impl IntoIterator for When {
 impl<'a> IntoIterator for &'a When {
     type Item = &'a Premise;
     type IntoIter = std::slice::Iter<'a, Premise>;
-    
+
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
     }

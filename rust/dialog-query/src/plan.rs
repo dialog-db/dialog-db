@@ -3,6 +3,7 @@
 use crate::artifact::ArtifactStore;
 use crate::query::Store;
 use crate::syntax::VariableScope;
+use crate::Value;
 use crate::{Match, Selection};
 use dialog_common::ConditionalSend;
 use futures_util::stream::once;
@@ -15,7 +16,7 @@ pub fn fresh<S: ArtifactStore>(store: S) -> EvaluationContext<S, impl Selection>
 
 /// A single result frame with variable bindings
 /// Equivalent to MatchFrame in TypeScript: Map<Variable, Scalar>
-pub type MatchFrame = BTreeMap<String, crate::artifact::Value>;
+pub type MatchFrame = BTreeMap<String, Value>;
 
 /// Evaluation context passed to plans during execution
 /// Based on TypeScript EvaluationContext in @query/src/api.ts
@@ -44,57 +45,6 @@ where
         let selection = once(async move { Ok(Match::new()) });
 
         EvaluationContext { store, selection }
-    }
-}
-
-/// Describes cost of the plan execution. Infinity, implies plan is not
-/// executable because some of the input variables are not bound.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Cost {
-    Infinity,
-    Estimate(usize),
-}
-
-impl Cost {
-    pub fn add(&mut self, cost: usize) -> &mut Self {
-        match self {
-            Cost::Infinity => {
-                *self = Cost::Estimate(cost);
-            }
-            Cost::Estimate(total) => {
-                *total += cost;
-            }
-        };
-        self
-    }
-    pub fn subtract(&mut self, cost: usize) -> &mut Self {
-        match self {
-            Cost::Infinity => {}
-            Cost::Estimate(total) => {
-                *total -= cost;
-            }
-        };
-        self
-    }
-
-    /// Add cost to this cost
-    pub fn join(&mut self, cost: &Cost) -> &mut Self {
-        match self {
-            // If current cost is infinity, replace it with the the given
-            // cost.
-            Cost::Infinity => {
-                *self = cost.clone();
-            }
-            // If current cost is estimate, add the given cost to it unless it
-            // is infinity.
-            Cost::Estimate(total) => match cost {
-                Cost::Infinity => {}
-                Cost::Estimate(cost) => {
-                    *total += cost;
-                }
-            },
-        };
-        self
     }
 }
 
@@ -129,12 +79,3 @@ impl<T: EvaluationPlan> PlanOrdering for T {
         }
     }
 }
-
-/// Possible solutution to planning error.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Solution {
-    /// Set of variables that need to be bound before plan can be completed.
-    pub requires: VariableScope,
-}
-
-pub type PlanResult<P> = Result<P, crate::deductive_rule::PlanError>;
