@@ -38,7 +38,7 @@ impl EvaluationPlan for Combinator {
             // }
             Combinator::Deduce { name, terms } => {
                 for (id, term) in terms {
-                    if (term.is_named_variable()) {
+                    if term.is_named_variable() {
                         // Handle named variable case
                     }
                 }

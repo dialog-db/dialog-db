@@ -6,7 +6,7 @@
 
 use crate::artifact::Value;
 use crate::fact_selector::{FactSelector, FactSelectorPlan};
-use crate::plan::{EvaluationContext, EvaluationPlan, PlanResult};
+use crate::plan::{EvaluationContext, EvaluationPlan, PlanError, PlanResult};
 use crate::premise::Premise;
 use crate::query::Store;
 use crate::selection::Selection;
@@ -16,7 +16,6 @@ use async_stream::try_stream;
 use dialog_common::ConditionalSend;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
 
 /// Statements that can appear in rule conditions (premises)
 ///
@@ -222,7 +221,9 @@ impl Premise for Statement {
         match self {
             Statement::Select(selector) => match selector.plan(scope) {
                 Ok(selector_plan) => Ok(StatementPlan::Select(selector_plan)),
-                Err(plan_error) => Err(plan_error),
+                Err(plan_error) => Err(PlanError {
+                    description: format!("{}", plan_error),
+                }),
             },
         }
     }

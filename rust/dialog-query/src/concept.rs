@@ -170,19 +170,11 @@ impl<'a> CachedPlan<'a> {
 
 /// Create a planning error from cached premises that failed to plan
 fn create_planning_error(cached_premises: &[CachedPlan]) -> crate::plan::PlanError {
-    let mut all_solutions = Vec::new();
-    for cached in cached_premises {
-        if let Err(plan_error) = &cached.result {
-            all_solutions.extend(plan_error.solutions.clone());
-        }
-    }
-
     crate::plan::PlanError {
         description: format!(
             "Cannot plan remaining {} premises - missing required variables",
             cached_premises.len()
         ),
-        solutions: all_solutions,
     }
 }
 

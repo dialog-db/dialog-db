@@ -23,7 +23,7 @@ impl VariableScope {
         self.variables.len()
     }
 
-    pub fn add<T: Scalar>(mut self, variable: &Term<T>) -> Self {
+    pub fn add<T: Scalar>(&mut self, variable: &Term<T>) -> &mut Self {
         if let Term::Variable {
             name: Some(name), ..
         } = variable
@@ -98,6 +98,20 @@ impl IntoIterator for VariableScope {
         self.variables
             .into_iter()
             .map(|var| Term::<crate::artifact::Value>::var(&var))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+}
+
+impl IntoIterator for &VariableScope {
+    type Item = Term<crate::artifact::Value>;
+    type IntoIter = std::vec::IntoIter<Term<crate::artifact::Value>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let vars = &self.variables;
+
+        vars.into_iter()
+            .map(|var| Term::<crate::artifact::Value>::var(var))
             .collect::<Vec<_>>()
             .into_iter()
     }

@@ -23,6 +23,12 @@ impl Compute for Sum {
     }
 }
 
+
+
+
+
+
+
 trait Compute:Formula {
     fn compute(input: Self::Input) -> Vec<Self>;
 }

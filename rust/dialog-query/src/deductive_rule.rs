@@ -1,12 +1,18 @@
+use crate::artifact::ValueDataType;
 use crate::attribute::Attribute;
 use crate::fact_selector::FactSelector;
-use crate::formula::FormulaApplication;
+use crate::formula::{FormulaApplication, FormulaApplicationPlan};
 use crate::plan::Solution;
-use crate::{FactSelectorPlan, Term, Value, VariableScope};
-use dialog_artifacts::ValueDataType;
+use crate::try_stream;
+use crate::{EvaluationContext, Selection, Store, Term, Value};
+use crate::{FactSelectorPlan, VariableScope};
+use core::cmp::Ordering;
+use futures_util::{stream, TryStreamExt};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
+use std::usize;
 use thiserror::Error;
+use tokio::io::Empty;
 
 /// Represents set of bindings used in the rule or formula applications. It is
 /// effectively a map of terms (constant or variable) keyed by parameter names.
@@ -273,11 +279,11 @@ pub enum PlanError {
         parameter: Term<Value>,
     },
 
-    #[error("Can not plan query due to unsatisfied dependency")]
-    UnsatisfiedDependency {
-        description: String,
-        solutions: Vec<Solution>,
-    },
+    #[error("Fact application {selector} requires at least one bound parameter")]
+    UnconstrainedSelector { selector: FactSelector },
+
+    #[error("Unexpected error occured while planning a rule")]
+    UnexpectedError,
 }
 
 /// Represents a rule application with the terms applied to corresponding
@@ -328,8 +334,10 @@ impl RuleApplication {
         })
     }
     fn plan(&self, scope: &VariableScope) -> Result<RuleApplicationPlan, PlanError> {
+        let mut provides = VariableScope::new();
         let analysis = self.analyze().map_err(PlanError::from)?;
-        let mut cost = analysis.cost;
+        // analyze dependencies and make sure that all required dependencies
+        // are provided
         for (name, requirement) in analysis.dependencies.iter() {
             let parameter = self.terms.get(name);
             match requirement {
@@ -351,23 +359,171 @@ impl RuleApplication {
                         })
                     }?;
                 }
-                Requirement::Derived(estimate) => {
+                Requirement::Derived(_) => {
+                    // If requirement can be derived and was not provided
+                    // we add it to the provided set
                     if let Some(term) = parameter {
-                        if (!scope.contains(&term)) {
-                            cost += estimate;
+                        if !scope.contains(&term) {
+                            provides.add(&term);
                         }
-                    } else {
-                        cost += estimate;
                     }
                 }
             }
         }
 
+        let mut planner = Planner::Idle { rule: &self.rule };
+        let (cost, conjuncts) = planner.plan(scope)?;
+
         Ok(RuleApplicationPlan {
             cost,
+            provides,
+            conjuncts,
             terms: self.terms.clone(),
             rule: self.rule.clone(),
         })
+    }
+}
+
+enum Planner<'a> {
+    Idle {
+        rule: &'a DeductiveRule,
+    },
+    Active {
+        candidates: Vec<PlanCandidate<'a>>,
+        scope: VariableScope,
+    },
+}
+
+impl<'a> Planner<'a> {
+    fn fail(candidates: &[PlanCandidate]) -> Result<Plan, PlanError> {
+        for candidate in candidates {
+            match &candidate.result {
+                Err(error) => {
+                    return Err(error.clone());
+                }
+                _ => {}
+            }
+        }
+
+        return Err(PlanError::UnexpectedError);
+    }
+
+    fn done(&self) -> bool {
+        match self {
+            Self::Idle { .. } => false,
+            Self::Active { candidates, .. } => candidates.len() > 0,
+        }
+    }
+
+    fn plan(&mut self, scope: &VariableScope) -> Result<(usize, Vec<Plan>), PlanError> {
+        let plan = self.top(scope)?;
+        let mut cost = plan.cost();
+
+        let mut scope = scope.clone();
+        let mut delta = scope.extend(plan.provides());
+        let mut conjuncts = vec![plan];
+
+        while !self.done() {
+            let plan = self.top(&delta)?;
+
+            cost += plan.cost();
+            delta = scope.extend(plan.provides());
+
+            conjuncts.push(plan);
+        }
+
+        Ok((cost, conjuncts))
+    }
+    fn top(&mut self, differential: &VariableScope) -> Result<Plan, PlanError> {
+        match self {
+            Planner::Idle { rule } => {
+                let mut best: Option<(Plan, usize)> = None;
+                let mut candidates = vec![];
+                for (index, premise) in rule.premises.iter().enumerate() {
+                    let analysis = premise.analyze()?;
+                    let result = premise.plan(differential);
+
+                    // Check if this is the best plan so far
+                    if let Ok(plan) = &result {
+                        if let Some((top, _)) = &best {
+                            if plan < top {
+                                best = Some((plan.clone(), index));
+                            }
+                        } else {
+                            best = Some((plan.clone(), index));
+                        }
+                    }
+
+                    let mut dependencies = VariableScope::new();
+
+                    for (name, _) in analysis.dependencies.iter() {
+                        dependencies.variables.insert(name.into());
+                    }
+
+                    candidates.push(PlanCandidate {
+                        premise,
+                        dependencies,
+                        result,
+                    });
+                }
+
+                if let Some((plan, index)) = best {
+                    candidates.remove(index);
+                    *self = Planner::Active {
+                        candidates,
+                        scope: differential.clone(),
+                    };
+
+                    Ok(plan)
+                } else {
+                    Self::fail(&candidates)
+                }
+            }
+            Planner::Active {
+                candidates, scope, ..
+            } => {
+                let mut best: Option<(Plan, usize)> = None;
+                for (index, candidate) in candidates.iter_mut().enumerate() {
+                    // Check if we need to recompute based on delta
+                    if candidate.dependencies.intersects(&differential) {
+                        candidate.plan(&scope);
+                    }
+
+                    if let Ok(plan) = &candidate.result {
+                        if let Some((top, _)) = &best {
+                            if plan < top {
+                                best = Some((plan.clone(), index));
+                            }
+                        } else {
+                            best = Some((plan.clone(), index));
+                        }
+                    }
+                }
+
+                if let Some((plan, index)) = best {
+                    candidates.remove(index);
+
+                    Ok(plan)
+                } else {
+                    Self::fail(&candidates)
+                }
+            }
+        }
+    }
+}
+
+/// Cached premise with all computed data
+#[derive(Debug, Clone)]
+struct PlanCandidate<'a> {
+    premise: &'a Premise,
+    dependencies: VariableScope,
+    result: Result<Plan, PlanError>,
+}
+
+impl<'a> PlanCandidate<'a> {
+    fn plan(&mut self, scope: &VariableScope) -> &Self {
+        self.result = self.premise.plan(scope);
+        self
     }
 }
 
@@ -375,7 +531,67 @@ impl RuleApplication {
 pub struct RuleApplicationPlan {
     pub cost: usize,
     pub terms: Terms,
+    pub conjuncts: Vec<Plan>,
+    pub provides: VariableScope,
     pub rule: DeductiveRule,
+}
+
+impl EvaluationPlan for RuleApplicationPlan {
+    fn cost(&self) -> usize {
+        self.cost
+    }
+    fn provides(&self) -> &'_ VariableScope {
+        &self.provides
+    }
+}
+
+struct And(Plan, Plan);
+impl And {
+    pub fn evaluate<S: Store, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
+        let Self(left, right) = self;
+
+        let store = context.store.clone();
+        let selection = left.evaluate(context);
+        let output = right.evaluate(EvaluationContext { selection, store });
+        try_stream! {
+            for await each in output {
+                yield each?;
+            }
+        }
+    }
+}
+
+impl RuleApplicationPlan {
+    pub fn evaluate<S: Store, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
+        let rule = self.rule.clone();
+        let conjuncts = self.conjuncts.clone();
+
+        let mut selection = yield_all(context.selection);
+        let store = context.store;
+        for conjunct in conjuncts {
+            let output = conjunct.evaluate(EvaluationContext {
+                selection,
+                store: store.clone(),
+            });
+            selection = yield_all(output);
+        }
+
+        selection
+    }
+}
+
+fn yield_all<M: Selection>(source: M) -> impl Selection {
+    try_stream! {
+        for await each in source {
+            yield each?;
+        }
+    }
 }
 
 /// Represents a set of named cells that formula operates on. Each cell also
@@ -584,6 +800,15 @@ impl FactSelector {
     }
 }
 
+impl EvaluationPlan for FactSelectorPlan {
+    fn cost(&self) -> usize {
+        self.cost
+    }
+    fn provides(&self) -> &'_ VariableScope {
+        &self.provides
+    }
+}
+
 /// Statements that can be used by the rules.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Negation(Application);
@@ -606,12 +831,48 @@ impl Negation {
         let Negation(application) = self;
         let plan = application.plan(&scope)?;
 
-        Ok(NegationPlan(plan))
+        Ok(plan.not())
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct NegationPlan(ApplicationPlan);
+pub struct NegationPlan {
+    pub application: ApplicationPlan,
+    pub provides: VariableScope,
+}
+
+impl NegationPlan {
+    pub fn not(application: ApplicationPlan) -> Self {
+        Self {
+            application,
+            provides: VariableScope::new(),
+        }
+    }
+    pub fn evaluate<S: Store, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
+        let plan = self.application.clone();
+        try_stream! {
+            for await each in context.selection {
+                let frame = each?;
+                let not = frame.clone();
+                let output = plan.evaluate(EvaluationContext {
+                    selection: stream::once(async move { Ok(not)}),
+                    store: context.store.clone()
+                });
+
+                tokio::pin!(output);
+
+                if let Ok(Some(_)) = output.try_next().await {
+                    continue;
+                }
+
+                yield frame;
+            }
+        }
+    }
+}
 
 /// Statements that can be used by the rules.
 #[derive(Debug, Clone, PartialEq)]
@@ -635,13 +896,7 @@ impl Application {
 
     fn plan(&self, scope: &VariableScope) -> Result<ApplicationPlan, PlanError> {
         match self {
-            Application::Select(select) => select
-                .plan(&scope)
-                .map(ApplicationPlan::Select)
-                .map_err(|e| PlanError::UnsatisfiedDependency {
-                    description: e.description,
-                    solutions: e.solutions,
-                }),
+            Application::Select(select) => select.plan(&scope).map(ApplicationPlan::Select),
             Application::ApplyRule(application) => {
                 application.plan(scope).map(ApplicationPlan::Rule)
             }
@@ -676,7 +931,7 @@ impl From<FactSelector> for Application {
 }
 
 impl Terms {
-    fn constants(&self) -> HashMap<String, Value> {
+    pub fn constants(&self) -> HashMap<String, Value> {
         let Terms(terms) = self;
         let mut constants = HashMap::new();
         for (name, term) in terms.iter() {
@@ -692,11 +947,140 @@ impl Terms {
 pub enum ApplicationPlan {
     Select(FactSelectorPlan),
     Rule(RuleApplicationPlan),
-    Formula(FormulaApplication),
+    Formula(FormulaApplicationPlan),
+}
+
+impl ApplicationPlan {
+    pub fn not(self) -> NegationPlan {
+        NegationPlan::not(self)
+    }
+    pub fn evaluate<S: Store, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
+        let source = self.clone();
+        try_stream! {
+            match source {
+                ApplicationPlan::Select(plan) => {
+                    for await each in plan.evaluate(context) {
+                        yield each?;
+                    }
+                }
+                ApplicationPlan::Formula(plan) => {
+                    for await each in plan.evaluate(context) {
+                        yield each?;
+                    }
+                }
+                ApplicationPlan::Rule(plan) => {
+                    for await each in plan.evaluate(context) {
+                        yield each?;
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Plan {
     Application(ApplicationPlan),
     Negation(NegationPlan),
+}
+
+impl Plan {
+    pub fn evaluate<S: Store, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
+        let source = self.clone();
+        try_stream! {
+            match source {
+                Plan::Application(plan) => {
+                    for await output in plan.evaluate(context) {
+                        yield output?
+                    }
+                },
+                Plan::Negation(plan) => {
+                    for await output in plan.evaluate(context) {
+                        yield output?
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl PartialOrd for Plan {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (self, other) {
+            (Plan::Application(_), Plan::Negation(_)) => Some(core::cmp::Ordering::Less),
+            (Plan::Negation(_), Plan::Application(_)) => Some(core::cmp::Ordering::Greater),
+            (Plan::Application(left), Plan::Application(right)) => left.partial_cmp(right),
+            (Plan::Negation(left), Plan::Negation(right)) => left.partial_cmp(right),
+        }
+    }
+}
+
+impl PartialOrd for ApplicationPlan {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.cost().partial_cmp(&other.cost())
+    }
+}
+
+impl PartialOrd for NegationPlan {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.cost().partial_cmp(&other.cost())
+    }
+}
+
+pub trait EvaluationPlan {
+    fn cost(&self) -> usize;
+    fn provides(&self) -> &'_ VariableScope;
+
+    // Execute this plan with the given context and return result frames
+    // This follows the familiar-query pattern where frames flow through the evaluation
+    // fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection;
+}
+
+impl EvaluationPlan for Plan {
+    fn cost(&self) -> usize {
+        match self {
+            Plan::Application(plan) => plan.cost(),
+            Plan::Negation(plan) => plan.cost(),
+        }
+    }
+
+    fn provides(&self) -> &'_ VariableScope {
+        match self {
+            Plan::Application(plan) => plan.provides(),
+            Plan::Negation(plan) => plan.provides(),
+        }
+    }
+}
+
+impl EvaluationPlan for ApplicationPlan {
+    fn cost(&self) -> usize {
+        match self {
+            ApplicationPlan::Select(plan) => plan.cost(),
+            ApplicationPlan::Formula(plan) => plan.cost(),
+            ApplicationPlan::Rule(plan) => plan.cost(),
+        }
+    }
+    fn provides(&self) -> &'_ VariableScope {
+        match self {
+            ApplicationPlan::Select(plan) => plan.provides(),
+            ApplicationPlan::Formula(plan) => plan.provides(),
+            ApplicationPlan::Rule(plan) => plan.provides(),
+        }
+    }
+}
+
+impl EvaluationPlan for NegationPlan {
+    fn cost(&self) -> usize {
+        let Self { application, .. } = self;
+        application.cost()
+    }
+    fn provides(&self) -> &'_ VariableScope {
+        &self.provides
+    }
 }

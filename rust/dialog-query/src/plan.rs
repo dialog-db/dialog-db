@@ -145,5 +145,4 @@ pub type PlanResult<P> = Result<P, PlanError>;
 #[error("Can not plan query due to unsatisfied dependency")]
 pub struct PlanError {
     pub description: String,
-    pub solutions: Vec<Solution>,
 }

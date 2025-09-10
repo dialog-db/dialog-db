@@ -406,6 +406,7 @@ pub trait Formula: Sized + Clone {
     /// ```
     fn apply(terms: Terms) -> FormulaApplication {
         FormulaApplication {
+            cost: 5,
             terms,
             name: Self::name(),
             dependencies: Self::dependencies(),
@@ -426,6 +427,7 @@ pub trait Compute: Formula + Sized {
 /// in the deductive rule system, allowing formulas to be used as premises in rules.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FormulaApplication {
+    pub cost: usize,
     /// Parameter name to term mappings
     pub terms: Terms,
     /// Formula identifier for error reporting and debugging
@@ -450,20 +452,23 @@ impl FormulaApplication {
         })
     }
 
-    pub fn plan(&self, scope: &VariableScope) -> Result<Self, PlanError> {
+    pub fn plan(&self, scope: &VariableScope) -> Result<FormulaApplicationPlan, PlanError> {
+        let mut cost = self.cost;
+        let mut provides = VariableScope::new();
         // We ensure that all terms for all required formula parametrs are
         // applied, otherwise we fail.
         for (name, requirement) in self.dependencies.iter() {
+            let term = self.terms.get(name);
             match requirement {
                 Requirement::Required => {
-                    if let Some(term) = self.terms.get(name) {
-                        if scope.contains(&term) {
+                    if let Some(parameter) = term {
+                        if scope.contains(&parameter) {
                             Ok(())
                         } else {
                             Err(PlanError::UnboundFormulaParameter {
                                 formula: self.name,
                                 cell: name.into(),
-                                parameter: term.clone(),
+                                parameter: parameter.clone(),
                             })
                         }
                     } else {
@@ -473,13 +478,50 @@ impl FormulaApplication {
                         })
                     }?;
                 }
-                Requirement::Derived(_) => {}
+                Requirement::Derived(estimate) => match term {
+                    Some(term) => {
+                        provides.add(term);
+                    }
+                    None => {
+                        cost += estimate;
+                    }
+                },
             }
         }
 
-        Ok(self.clone())
+        Ok(FormulaApplicationPlan {
+            cost,
+            provides,
+            terms: self.terms.clone(),
+            name: self.name,
+            dependencies: self.dependencies.clone(),
+            compute: self.compute,
+        })
     }
+}
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct FormulaApplicationPlan {
+    pub cost: usize,
+    /// Number of bindings it provides on evaluation
+    pub provides: VariableScope,
+    /// Parameter name to term mappings
+    pub terms: Terms,
+    /// Formula identifier for error reporting and debugging
+    pub name: &'static str,
+    /// Parameter dependencies for planning and analysis
+    pub dependencies: Dependencies,
+    /// Function pointer to the formula's computation logic
+    pub compute: fn(&mut Cursor) -> Result<Vec<Match>, FormulaEvaluationError>,
+}
+
+impl FormulaApplicationPlan {
+    pub fn cost(&self) -> usize {
+        self.cost
+    }
+    pub fn provides(&self) -> &'_ VariableScope {
+        &self.provides
+    }
     /// Evaluate the formula over a stream of matches
     pub fn evaluate<S: Store, M: Selection>(
         &self,
@@ -522,7 +564,6 @@ impl FormulaApplication {
         }
     }
 }
-
 // ============================================================================
 // Example: Sum Formula Implementation
 // ============================================================================
