@@ -2,16 +2,18 @@ use crate::artifact::ValueDataType;
 use crate::attribute::Attribute;
 use crate::fact_selector::FactSelector;
 use crate::formula::{FormulaApplication, FormulaApplicationPlan};
-use crate::plan::Solution;
+use crate::plan::EvaluationPlan;
 use crate::try_stream;
 use crate::{EvaluationContext, Selection, Store, Term, Value};
 use crate::{FactSelectorPlan, VariableScope};
 use core::cmp::Ordering;
+use dialog_common::ConditionalSend;
 use futures_util::{stream, TryStreamExt};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
 use std::usize;
 use thiserror::Error;
+use tokio;
 use tokio::io::Empty;
 
 /// Represents set of bindings used in the rule or formula applications. It is
@@ -540,59 +542,58 @@ impl EvaluationPlan for RuleApplicationPlan {
     fn cost(&self) -> usize {
         self.cost
     }
-    fn provides(&self) -> &'_ VariableScope {
-        &self.provides
+    fn provides(&self) -> VariableScope {
+        self.provides.clone()
+    }
+    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+        let join = Join::from(self.conjuncts.clone());
+        join.evaluate(context)
     }
 }
 
-struct And(Plan, Plan);
-impl And {
-    pub fn evaluate<S: Store, M: Selection>(
-        &self,
-        context: EvaluationContext<S, M>,
-    ) -> impl Selection {
-        let Self(left, right) = self;
+#[derive(Debug, Clone)]
+pub enum Join {
+    Identity,
+    Join(Box<Join>, Plan),
+}
 
-        let store = context.store.clone();
-        let selection = left.evaluate(context);
-        let output = right.evaluate(EvaluationContext { selection, store });
+impl Join {
+    fn new() -> Self {
+        Join::Identity
+    }
+    fn from(plans: Vec<Plan>) -> Self {
+        plans
+            .into_iter()
+            .fold(Join::Identity, |join, plan| join.and(plan))
+    }
+    fn and(self, plan: Plan) -> Self {
+        Join::Join(Box::new(self), plan)
+    }
+
+    fn evaluate<S: Store, M: Selection>(self, context: EvaluationContext<S, M>) -> impl Selection {
         try_stream! {
-            for await each in output {
-                yield each?;
+            match self {
+                Join::Identity => {
+                    for await each in context.selection {
+                        yield each?;
+                    }
+                }
+                Join::Join(left, right) => {
+                    let store = context.store.clone();
+                    let selection = left.evaluate(context);
+                    let output = right.evaluate(EvaluationContext { selection, store });
+                    for await each in output {
+                        yield each?;
+                    }
+                }
             }
         }
     }
 }
 
-impl RuleApplicationPlan {
-    pub fn evaluate<S: Store, M: Selection>(
-        &self,
-        context: EvaluationContext<S, M>,
-    ) -> impl Selection {
-        let rule = self.rule.clone();
-        let conjuncts = self.conjuncts.clone();
+// The evaluate method is now part of the EvaluationPlan trait implementation above
 
-        let mut selection = yield_all(context.selection);
-        let store = context.store;
-        for conjunct in conjuncts {
-            let output = conjunct.evaluate(EvaluationContext {
-                selection,
-                store: store.clone(),
-            });
-            selection = yield_all(output);
-        }
-
-        selection
-    }
-}
-
-fn yield_all<M: Selection>(source: M) -> impl Selection {
-    try_stream! {
-        for await each in source {
-            yield each?;
-        }
-    }
-}
+// yield_all function removed as it's no longer needed
 
 /// Represents a set of named cells that formula operates on. Each cell also
 /// describes whether it is required or optional and cost of it's omission.
@@ -800,14 +801,7 @@ impl FactSelector {
     }
 }
 
-impl EvaluationPlan for FactSelectorPlan {
-    fn cost(&self) -> usize {
-        self.cost
-    }
-    fn provides(&self) -> &'_ VariableScope {
-        &self.provides
-    }
-}
+// FactSelectorPlan's EvaluationPlan implementation is in fact_selector.rs
 
 /// Statements that can be used by the rules.
 #[derive(Debug, Clone, PartialEq)]
@@ -848,30 +842,7 @@ impl NegationPlan {
             provides: VariableScope::new(),
         }
     }
-    pub fn evaluate<S: Store, M: Selection>(
-        &self,
-        context: EvaluationContext<S, M>,
-    ) -> impl Selection {
-        let plan = self.application.clone();
-        try_stream! {
-            for await each in context.selection {
-                let frame = each?;
-                let not = frame.clone();
-                let output = plan.evaluate(EvaluationContext {
-                    selection: stream::once(async move { Ok(not)}),
-                    store: context.store.clone()
-                });
-
-                tokio::pin!(output);
-
-                if let Ok(Some(_)) = output.try_next().await {
-                    continue;
-                }
-
-                yield frame;
-            }
-        }
-    }
+    // evaluate method is now part of the EvaluationPlan trait implementation
 }
 
 /// Statements that can be used by the rules.
@@ -954,31 +925,7 @@ impl ApplicationPlan {
     pub fn not(self) -> NegationPlan {
         NegationPlan::not(self)
     }
-    pub fn evaluate<S: Store, M: Selection>(
-        &self,
-        context: EvaluationContext<S, M>,
-    ) -> impl Selection {
-        let source = self.clone();
-        try_stream! {
-            match source {
-                ApplicationPlan::Select(plan) => {
-                    for await each in plan.evaluate(context) {
-                        yield each?;
-                    }
-                }
-                ApplicationPlan::Formula(plan) => {
-                    for await each in plan.evaluate(context) {
-                        yield each?;
-                    }
-                }
-                ApplicationPlan::Rule(plan) => {
-                    for await each in plan.evaluate(context) {
-                        yield each?;
-                    }
-                }
-            }
-        }
-    }
+    // evaluate method is now part of the EvaluationPlan trait implementation
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -987,28 +934,7 @@ pub enum Plan {
     Negation(NegationPlan),
 }
 
-impl Plan {
-    pub fn evaluate<S: Store, M: Selection>(
-        &self,
-        context: EvaluationContext<S, M>,
-    ) -> impl Selection {
-        let source = self.clone();
-        try_stream! {
-            match source {
-                Plan::Application(plan) => {
-                    for await output in plan.evaluate(context) {
-                        yield output?
-                    }
-                },
-                Plan::Negation(plan) => {
-                    for await output in plan.evaluate(context) {
-                        yield output?
-                    }
-                }
-            }
-        }
-    }
-}
+// evaluate method is now part of the EvaluationPlan trait implementation
 
 impl PartialOrd for Plan {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -1033,14 +959,7 @@ impl PartialOrd for NegationPlan {
     }
 }
 
-pub trait EvaluationPlan {
-    fn cost(&self) -> usize;
-    fn provides(&self) -> &'_ VariableScope;
-
-    // Execute this plan with the given context and return result frames
-    // This follows the familiar-query pattern where frames flow through the evaluation
-    // fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection;
-}
+// EvaluationPlan trait is imported from crate::plan module
 
 impl EvaluationPlan for Plan {
     fn cost(&self) -> usize {
@@ -1050,10 +969,28 @@ impl EvaluationPlan for Plan {
         }
     }
 
-    fn provides(&self) -> &'_ VariableScope {
+    fn provides(&self) -> VariableScope {
         match self {
             Plan::Application(plan) => plan.provides(),
             Plan::Negation(plan) => plan.provides(),
+        }
+    }
+
+    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+        let source = self.clone();
+        try_stream! {
+            match source {
+                Plan::Application(plan) => {
+                    for await output in plan.evaluate(context) {
+                        yield output?
+                    }
+                },
+                Plan::Negation(plan) => {
+                    for await output in plan.evaluate(context) {
+                        yield output?
+                    }
+                }
+            }
         }
     }
 }
@@ -1066,11 +1003,34 @@ impl EvaluationPlan for ApplicationPlan {
             ApplicationPlan::Rule(plan) => plan.cost(),
         }
     }
-    fn provides(&self) -> &'_ VariableScope {
+    fn provides(&self) -> VariableScope {
         match self {
             ApplicationPlan::Select(plan) => plan.provides(),
             ApplicationPlan::Formula(plan) => plan.provides(),
             ApplicationPlan::Rule(plan) => plan.provides(),
+        }
+    }
+
+    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+        let source = self.clone();
+        try_stream! {
+            match source {
+                ApplicationPlan::Select(plan) => {
+                    for await each in plan.evaluate(context) {
+                        yield each?;
+                    }
+                }
+                ApplicationPlan::Formula(plan) => {
+                    for await each in plan.evaluate(context) {
+                        yield each?;
+                    }
+                }
+                ApplicationPlan::Rule(plan) => {
+                    for await each in plan.evaluate(context) {
+                        yield each?;
+                    }
+                }
+            }
         }
     }
 }
@@ -1080,7 +1040,29 @@ impl EvaluationPlan for NegationPlan {
         let Self { application, .. } = self;
         application.cost()
     }
-    fn provides(&self) -> &'_ VariableScope {
-        &self.provides
+    fn provides(&self) -> VariableScope {
+        self.provides.clone()
+    }
+
+    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+        let plan = self.application.clone();
+        try_stream! {
+            for await each in context.selection {
+                let frame = each?;
+                let not = frame.clone();
+                let output = plan.evaluate(EvaluationContext {
+                    selection: stream::once(async move { Ok(not)}),
+                    store: context.store.clone()
+                });
+
+                tokio::pin!(output);
+
+                if let Ok(Some(_)) = output.try_next().await {
+                    continue;
+                }
+
+                yield frame;
+            }
+        }
     }
 }
