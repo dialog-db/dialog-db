@@ -11,6 +11,8 @@
 //! The core insight is that Rust's type system provides static type information
 //! that we can reflect into the dynamic ValueDataType enum used by dialog-artifacts.
 
+use dialog_common::ConditionalSend;
+
 use crate::artifact::{Attribute, Entity, Value, ValueDataType};
 
 /// Trait for types that can provide ValueDataType metadata
@@ -111,7 +113,9 @@ impl IntoValueDataType for Value {
     }
 }
 
-pub trait Scalar: IntoValueDataType + Clone + std::fmt::Debug + 'static {
+pub trait Scalar:
+    IntoValueDataType + Clone + std::fmt::Debug + 'static + ConditionalSend + TryFrom<Value>
+{
     /// Can be used to convert scalars into boxed value. It is intentionally
     /// different from `From<Scalar> impl Value` to avoid unintentional
     /// type erasure.

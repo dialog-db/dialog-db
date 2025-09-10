@@ -1,7 +1,7 @@
 use dialog_query::attribute::Cardinality;
 use dialog_query::concept::{Attributes, Concept};
 use dialog_query::rule::Match;
-use dialog_query::{Rule, Statements, Term, ValueDataType};
+use dialog_query::{Rule, Premises, Term, ValueDataType};
 
 #[derive(Rule, Debug, Clone)]
 pub struct Person {

@@ -105,7 +105,7 @@ pub trait EvaluationPlan: Clone + std::fmt::Debug + ConditionalSend {
     /// Get the estimated cost of executing this plan
     fn cost(&self) -> usize;
     /// Set of variables that this plan will bind
-    fn provides(&self) -> VariableScope;
+    fn provides(&self) -> &VariableScope;
     /// Execute this plan with the given context and return result frames
     /// This follows the familiar-query pattern where frames flow through the evaluation
     fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection;

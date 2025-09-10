@@ -2,7 +2,7 @@ use dialog_query::artifact::{Entity, Value, ValueDataType};
 use dialog_query::attribute::{Attribute, Cardinality, Match};
 use dialog_query::concept::{Attributes, Concept, Instance, Instructions, Match as ConceptMatch};
 use dialog_query::fact_selector::FactSelector;
-use dialog_query::rule::{Rule, Statements, When};
+use dialog_query::rule::{Premises, Rule, When};
 use dialog_query::statement::Statement;
 use dialog_query::term::Term;
 use dialog_query::types::Scalar;
@@ -154,7 +154,7 @@ impl Attributes for PersonAttributes {
     fn attributes() -> &'static [(&'static str, Attribute<Value>)] {
         person::ATTRIBUTE_TUPLES
     }
-    
+
     fn of<T: Into<Term<Entity>>>(entity: T) -> Self {
         let entity = entity.into();
         PersonAttributes {
@@ -172,10 +172,10 @@ impl Instance for Person {
     }
 }
 
-impl Statements for PersonMatch {
+impl Premises for PersonMatch {
     type IntoIter = std::vec::IntoIter<Statement>;
 
-    fn statements(self) -> Self::IntoIter {
+    fn premises(self) -> Self::IntoIter {
         Person::when(self).into_iter()
     }
 }
@@ -343,7 +343,7 @@ mod tests {
         };
 
         // Test that PersonMatch can be used as Statements
-        let statements: Vec<Statement> = person_match.statements().collect();
+        let statements: Vec<Statement> = person_match.premises().collect();
         assert_eq!(statements.len(), 2);
 
         // Verify the generated statements

@@ -1,4 +1,4 @@
-use dialog_query::rule::Statements;
+use dialog_query::rule::Premises;
 use dialog_query::Term;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,10 +108,10 @@ mod person {
         }
     }
 
-    impl dialog_query::rule::Statements for Match {
+    impl dialog_query::rule::Premises for Match {
         type IntoIter = std::vec::IntoIter<dialog_query::statement::Statement>;
 
-        fn statements(self) -> Self::IntoIter {
+        fn premises(self) -> Self::IntoIter {
             // For now return empty - proper implementation would convert Match to statements
             vec![].into_iter()
         }
@@ -125,6 +125,6 @@ fn main() {
         age: Term::blank(),
     };
 
-    let _statements = alice.statements();
+    let _statements = alice.premises();
     // TODO: Implement main function
 }

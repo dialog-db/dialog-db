@@ -1,10 +1,9 @@
 //! Query trait for polymorphic querying across different store types
 
 use crate::artifact::ArtifactStore;
-use crate::error::QueryResult;
+pub use crate::error::QueryResult;
 use crate::plan::{fresh, EvaluationPlan};
-use crate::premise::Premise;
-use crate::{Selection, VariableScope};
+use crate::Selection;
 
 /// Convenience trait alias for stores that can be used with the Query API
 ///
@@ -37,22 +36,6 @@ impl<Plan: EvaluationPlan> PlannedQuery for Plan {
         let store = store.clone();
         let context = fresh(store);
         let selection = self.evaluate(context);
-        Ok(selection)
-    }
-}
-
-impl<E: EvaluationPlan + 'static, P: Premise<Plan = E>> Query for P {
-    fn query<S: Store>(&self, store: &S) -> QueryResult<impl Selection> {
-        let scope = VariableScope::new();
-        let plan = self.plan(&scope)?;
-        let store = store.to_owned();
-
-        let selection = async_stream::try_stream! {
-            for await match_frame in plan.query(&store)? {
-                yield match_frame?;
-            }
-        };
-
         Ok(selection)
     }
 }

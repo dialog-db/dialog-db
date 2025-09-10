@@ -6,7 +6,10 @@ use futures_core::Stream;
 use std::pin::Pin;
 use std::task;
 
-use crate::{types::{Scalar, IntoValueDataType}, InconsistencyError, QueryError, Term};
+use crate::{
+    types::{IntoValueDataType, Scalar},
+    InconsistencyError, QueryError, Term,
+};
 
 pub trait Selection: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend {}
 
@@ -138,8 +141,8 @@ impl Match {
                             InconsistencyError::TypeConversion(
                                 crate::artifact::TypeError::TypeMismatch(
                                     T::into_value_data_type().unwrap_or(ValueDataType::Bytes),
-                                    value.data_type()
-                                )
+                                    value.data_type(),
+                                ),
                             )
                         })
                     } else {
@@ -296,10 +299,7 @@ impl Match {
 
     /// Resolve a variable term into a constant term if this frame has a
     /// binding for it. Otherwise, return the original term.
-    pub fn resolve<T: Scalar>(&self, term: &Term<T>) -> Term<T>
-    where
-        T: std::convert::TryFrom<Value>,
-    {
+    pub fn resolve<T: Scalar>(&self, term: &Term<T>) -> Term<T> {
         match term {
             Term::Variable { name, .. } => {
                 if let Some(key) = name {

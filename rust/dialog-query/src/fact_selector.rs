@@ -15,7 +15,7 @@ use crate::artifact::{ArtifactSelector, Attribute, Constrained, Entity, Value};
 use crate::deductive_rule::PlanError;
 use crate::error::{QueryError, QueryResult};
 use crate::plan::{EvaluationContext, EvaluationPlan, PlanResult};
-use crate::query::Store;
+use crate::query::{PlannedQuery, Query, Store};
 use crate::selection::{Match, Selection};
 use crate::syntax::VariableScope;
 use crate::term::Term;
@@ -83,11 +83,31 @@ pub struct FactSelector<T: Scalar = Value> {
     pub fact: Option<serde_json::Value>,
 }
 
-const BASE_COST: usize = 100;
-const ENTITY_COST: usize = 500;
-const ATTRIBUTE_COST: usize = 200;
-const VALUE_COST: usize = 300;
-const UNBOUND_COST: usize = BASE_COST + ENTITY_COST + ATTRIBUTE_COST + VALUE_COST;
+impl Display for FactSelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Fact {{")?;
+
+        if let Some(the) = &self.the {
+            write!(f, "the: {},", the)?;
+        }
+
+        if let Some(of) = &self.of {
+            write!(f, "the: {},", of)?;
+        }
+
+        if let Some(is) = &self.is {
+            write!(f, "the: {},", is)?;
+        }
+
+        write!(f, "}}")
+    }
+}
+
+pub const BASE_COST: usize = 100;
+pub const ENTITY_COST: usize = 500;
+pub const ATTRIBUTE_COST: usize = 200;
+pub const VALUE_COST: usize = 300;
+pub const UNBOUND_COST: usize = BASE_COST + ENTITY_COST + ATTRIBUTE_COST + VALUE_COST;
 
 /// Core FactSelector functionality
 ///
@@ -144,10 +164,7 @@ impl<T: Scalar> FactSelector<T> {
     ///
     /// Analyzes the selector and variable scope to create an optimized execution plan.
     /// The plan includes cost estimates and dependency information for query optimization.
-    pub fn plan(&self, scope: &VariableScope) -> Result<FactSelectorPlan<T>, PlanError>
-    where
-        T: Into<Value> + Send + PartialEq<Value> + Sync + std::convert::TryFrom<Value>,
-    {
+    pub fn plan(&self, scope: &VariableScope) -> Result<FactSelectorPlan<T>, PlanError> {
         // We start with a cost estimate that assumes nothing is known.
         let mut cost = UNBOUND_COST;
         let mut provides = VariableScope::new();
@@ -190,10 +207,7 @@ impl<T: Scalar> FactSelector<T> {
         }
     }
 
-    pub fn resolve(&self, frame: &Match) -> Self
-    where
-        T: std::convert::TryFrom<Value>,
-    {
+    pub fn resolve(&self, frame: &Match) -> Self {
         FactSelector {
             the: self.the.clone().map(|term| frame.resolve(&term)),
             of: self.of.clone().map(|term| frame.resolve(&term)),
@@ -210,28 +224,8 @@ impl<T: Scalar> FactSelector<T> {
     pub fn resolve_artifact_selector(
         &self,
         frame: &Match,
-    ) -> Result<ArtifactSelector<Constrained>, QueryError>
-    where
-        T: std::convert::TryFrom<Value>,
-    {
+    ) -> Result<ArtifactSelector<Constrained>, QueryError> {
         (&self.resolve(frame)).try_into()
-    }
-}
-
-impl<T: Scalar> Display for FactSelector<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Fact {{");
-        if let Some(the) = &self.the {
-            write!(f, "the: {},", the)?;
-        }
-        if let Some(of) = &self.of {
-            write!(f, "of: {},", of)?;
-        }
-        if let Some(is) = &self.is {
-            write!(f, "of: {},", is)?;
-        }
-
-        write!(f, "}}")
     }
 }
 
@@ -298,6 +292,14 @@ impl<T: Scalar> From<&FactSelector<T>> for FactSelector<Value> {
     }
 }
 
+impl<T: Scalar> Query for FactSelector<T> {
+    fn query<S: Store>(&self, store: &S) -> QueryResult<impl Selection> {
+        let scope = &VariableScope::new();
+        let plan = self.plan(&scope).map_err(|e| QueryError::from(e))?;
+        plan.query(store)
+    }
+}
+
 /// Execution plan for a fact selector operation
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactSelectorPlan<T: Scalar = Value> {
@@ -351,12 +353,9 @@ impl<T: Scalar> FactSelectorPlan<T> {
     }
 }
 
-impl<T> EvaluationPlan for FactSelectorPlan<T>
-where
-    T: Scalar + Into<Value> + Send + PartialEq<Value> + Sync + std::convert::TryFrom<Value>,
-{
-    fn provides(&self) -> VariableScope {
-        self.provides.clone()
+impl<T: Scalar> EvaluationPlan for FactSelectorPlan<T> {
+    fn provides(&self) -> &VariableScope {
+        &self.provides
     }
 
     fn cost(&self) -> usize {
@@ -364,7 +363,7 @@ where
     }
 
     fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
-        self.evaluate(context)
+        FactSelectorPlan::evaluate(self, context)
     }
 }
 
@@ -376,29 +375,13 @@ impl<T: Scalar> TryFrom<&FactSelectorPlan<T>> for ArtifactSelector<Constrained> 
     }
 }
 
-impl<T: Scalar + Into<Value> + Send + PartialEq<Value> + Sync + std::convert::TryFrom<Value>>
-    Premise for FactSelector<T>
-{
+impl<T: Scalar> Premise for FactSelector<T> {
     type Plan = FactSelectorPlan<T>;
     fn plan(&self, scope: &VariableScope) -> PlanResult<Self::Plan> {
         // Call the inherent method, not the trait method to avoid recursion
         FactSelector::plan(self, scope).map_err(|error| crate::plan::PlanError {
             description: format!("{}", error),
         })
-    }
-
-    fn cells(&self) -> VariableScope {
-        let mut cells = VariableScope::new();
-        if let Some(term) = &self.the {
-            cells.add(term);
-        }
-        if let Some(term) = &self.of {
-            cells.add(term);
-        }
-        if let Some(term) = &self.is {
-            cells.add(term);
-        }
-        cells
     }
 }
 

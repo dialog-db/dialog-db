@@ -179,6 +179,7 @@ use crate::cursor::Cursor;
 use crate::deductive_rule::{Analysis, AnalyzerError, Dependencies, PlanError, Requirement, Terms};
 use crate::{try_stream, EvaluationContext, Match, QueryError, Selection, Store, Term, Value};
 use crate::{ValueDataType, VariableScope};
+use std::fmt::Display;
 use thiserror::Error;
 
 /// Errors that can occur during formula evaluation
@@ -500,6 +501,16 @@ impl FormulaApplication {
     }
 }
 
+impl Display for FormulaApplication {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {{", self.name)?;
+        for (name, term) in self.terms.iter() {
+            write!(f, "{}: {},", name, term)?;
+        }
+        write!(f, "}}")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FormulaApplicationPlan {
     pub cost: usize,
@@ -519,7 +530,7 @@ impl FormulaApplicationPlan {
     pub fn cost(&self) -> usize {
         self.cost
     }
-    pub fn provides(&self) -> &'_ VariableScope {
+    pub fn provides(&self) -> &VariableScope {
         &self.provides
     }
     /// Evaluate the formula over a stream of matches
