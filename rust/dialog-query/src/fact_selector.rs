@@ -14,13 +14,12 @@
 use crate::artifact::{ArtifactSelector, Attribute, Constrained, Entity, Value};
 use crate::deductive_rule::PlanError;
 use crate::error::{QueryError, QueryResult};
-use crate::plan::{EvaluationContext, EvaluationPlan, PlanResult};
-use crate::query::{PlannedQuery, Query, Store};
+use crate::plan::{EvaluationContext, EvaluationPlan};
+use crate::query::{Query, Store};
 use crate::selection::{Match, Selection};
 use crate::syntax::VariableScope;
 use crate::term::Term;
 use crate::types::Scalar;
-use crate::Premise;
 use async_stream::try_stream;
 use std::fmt::Display;
 // Remove unused import - dialog_storage::Storage doesn't exist
@@ -294,9 +293,18 @@ impl<T: Scalar> From<&FactSelector<T>> for FactSelector<Value> {
 
 impl<T: Scalar> Query for FactSelector<T> {
     fn query<S: Store>(&self, store: &S) -> QueryResult<impl Selection> {
+        use crate::try_stream;
+        
         let scope = &VariableScope::new();
         let plan = self.plan(&scope).map_err(|e| QueryError::from(e))?;
-        plan.query(store)
+        let context = crate::plan::fresh(store.clone());
+        
+        // Use try_stream to create a stream that owns the plan
+        Ok(try_stream! {
+            for await result in plan.evaluate(context) {
+                yield result?;
+            }
+        })
     }
 }
 
@@ -375,15 +383,6 @@ impl<T: Scalar> TryFrom<&FactSelectorPlan<T>> for ArtifactSelector<Constrained> 
     }
 }
 
-impl<T: Scalar> Premise for FactSelector<T> {
-    type Plan = FactSelectorPlan<T>;
-    fn plan(&self, scope: &VariableScope) -> PlanResult<Self::Plan> {
-        // Call the inherent method, not the trait method to avoid recursion
-        FactSelector::plan(self, scope).map_err(|error| crate::plan::PlanError {
-            description: format!("{}", error),
-        })
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -560,10 +559,7 @@ mod tests {
     // Tests from fact_selector_test.rs
     use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction};
     use crate::syntax::VariableScope;
-    use crate::{
-        plan::{EvaluationContext, EvaluationPlan},
-        Fact,
-    };
+    use crate::{plan::EvaluationContext, Fact};
     use crate::{selection::Match, QueryError};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;

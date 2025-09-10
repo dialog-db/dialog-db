@@ -1,7 +1,7 @@
 use dialog_query::attribute::Cardinality;
 use dialog_query::concept::{Attributes, Concept};
-use dialog_query::rule::Match;
-use dialog_query::{Rule, Premises, Term, ValueDataType};
+use dialog_query::rule::{Match, Premises};
+use dialog_query::{Rule, Term, ValueDataType};
 
 #[derive(Rule, Debug, Clone)]
 pub struct Person {
@@ -23,8 +23,8 @@ fn test_derive_rule_generates_types() {
         birthday: Term::var("person_birthday"),
     };
 
-    // Test that Match implements Statements
-    let statements: Vec<_> = person_match.statements().collect();
+    // Test that Match implements Premises
+    let statements: Vec<_> = person_match.premises().collect();
     assert_eq!(statements.len(), 2); // Should have 2 statements for name and birthday
 
     // Test that Person implements Concept

@@ -3,7 +3,8 @@ use dialog_query::attribute::{Attribute, Cardinality, Match};
 use dialog_query::concept::{Attributes, Concept, Instance, Instructions, Match as ConceptMatch};
 use dialog_query::fact_selector::FactSelector;
 use dialog_query::rule::{Premises, Rule, When};
-use dialog_query::statement::Statement;
+use dialog_query::deductive_rule::Premise;
+use dialog_query::deductive_rule;
 use dialog_query::term::Term;
 use dialog_query::types::Scalar;
 use std::marker::PhantomData;
@@ -173,7 +174,7 @@ impl Instance for Person {
 }
 
 impl Premises for PersonMatch {
-    type IntoIter = std::vec::IntoIter<Statement>;
+    type IntoIter = std::vec::IntoIter<Premise>;
 
     fn premises(self) -> Self::IntoIter {
         Person::when(self).into_iter()
@@ -323,11 +324,23 @@ mod tests {
         // Each statement should be a FactSelector
         for statement in &when_statements {
             match statement {
-                Statement::Select(selector) => {
+                Premise::Apply(deductive_rule::Application::Select(selector)) => {
                     assert!(selector.the.is_some());
                     assert!(selector.of.is_some());
                     assert!(selector.is.is_some());
                     assert!(selector.fact.is_none());
+                }
+                Premise::Apply(deductive_rule::Application::ApplyRule(_)) => {
+                    panic!("Unexpected ApplyRule premise in test");
+                }
+                Premise::Apply(deductive_rule::Application::ApplyFormula(_)) => {
+                    panic!("Unexpected ApplyFormula premise in test");
+                }
+                Premise::Apply(deductive_rule::Application::Realize(_)) => {
+                    panic!("Unexpected Realize premise in test");
+                }
+                Premise::Exclude(_) => {
+                    panic!("Unexpected Exclude premise in test");
                 }
             }
         }
@@ -343,16 +356,28 @@ mod tests {
         };
 
         // Test that PersonMatch can be used as Statements
-        let statements: Vec<Statement> = person_match.premises().collect();
+        let statements: Vec<Premise> = person_match.premises().collect();
         assert_eq!(statements.len(), 2);
 
         // Verify the generated statements
         for statement in statements {
             match statement {
-                Statement::Select(selector) => {
+                Premise::Apply(deductive_rule::Application::Select(selector)) => {
                     assert!(selector.the.is_some());
                     assert!(selector.of.is_some());
                     assert!(selector.is.is_some());
+                }
+                Premise::Apply(deductive_rule::Application::ApplyRule(_)) => {
+                    panic!("Unexpected ApplyRule premise in test");
+                }
+                Premise::Apply(deductive_rule::Application::ApplyFormula(_)) => {
+                    panic!("Unexpected ApplyFormula premise in test");
+                }
+                Premise::Apply(deductive_rule::Application::Realize(_)) => {
+                    panic!("Unexpected Realize premise in test");
+                }
+                Premise::Exclude(_) => {
+                    panic!("Unexpected Exclude premise in test");
                 }
             }
         }

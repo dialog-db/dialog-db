@@ -1,12 +1,11 @@
-use crate::artifact::ValueDataType;
+use crate::artifact::{Entity, ValueDataType};
 use crate::attribute::Attribute;
 use crate::fact_selector::FactSelector;
 use crate::fact_selector::{BASE_COST, ENTITY_COST, VALUE_COST};
 use crate::formula::{FormulaApplication, FormulaApplicationPlan};
 use crate::plan::EvaluationPlan;
-use crate::Entity;
 use crate::{try_stream, QueryError};
-use crate::{EvaluationContext, Selection, Store, Term, Value};
+use crate::{EvaluationContext, Match, Selection, Store, Term, Type, Value};
 use crate::{FactSelectorPlan, VariableScope};
 use core::cmp::Ordering;
 use futures_util::{stream, TryStreamExt};
@@ -230,12 +229,27 @@ impl ConcetApplication {
             }
         }
 
-        let this = self
-            .terms
-            .get("this")
-            // TODO: We need properly unique identifier here, but we can pun
-            // on that for now.
-            .unwrap_or(&Term::var(&format!("this_{}", self.concept.operator)));
+        // Convert the "this" term from Term<Value> to Term<Entity>
+        let this_entity: Term<Entity> = if let Some(this_value) = self.terms.get("this") {
+            match this_value {
+                Term::Variable { name, .. } => Term::<Entity>::Variable {
+                    name: name.clone(),
+                    _type: Type::default(),
+                },
+                Term::Constant(value) => {
+                    // If it's a constant, it should be an Entity value
+                    if let Value::Entity(entity) = value {
+                        Term::Constant(entity.clone())
+                    } else {
+                        // Fallback to a variable if not an entity
+                        Term::<Entity>::var(&format!("this_{}", self.concept.operator))
+                    }
+                }
+            }
+        } else {
+            // Create a unique variable if "this" is not provided
+            Term::<Entity>::var(&format!("this_{}", self.concept.operator))
+        };
 
         let mut premises = vec![];
 
@@ -252,7 +266,7 @@ impl ConcetApplication {
 
                 let select = FactSelector::new()
                     .the(attribute.the())
-                    .of(&this.into())
+                    .of(this_entity.clone())
                     .is(term.clone());
 
                 premises.push(select.into());
@@ -260,10 +274,10 @@ impl ConcetApplication {
         }
 
         let mut planner = Planner::new(&premises);
-        let (cost, conjuncts) = planner.plan(scope)?;
+        let (added_cost, conjuncts) = planner.plan(scope)?;
 
         Ok(ConceptPlan {
-            cost,
+            cost: cost + added_cost,
             provides,
             conjuncts,
         })
@@ -553,7 +567,7 @@ impl<'a> Planner<'a> {
     fn done(&self) -> bool {
         match self {
             Self::Idle { .. } => false,
-            Self::Active { candidates, .. } => candidates.len() > 0,
+            Self::Active { candidates, .. } => candidates.len() == 0,
         }
     }
 
@@ -656,10 +670,10 @@ impl<'a> Planner<'a> {
 
 /// Cached premise with all computed data
 #[derive(Debug, Clone)]
-struct PlanCandidate<'a> {
-    premise: &'a Premise,
-    dependencies: VariableScope,
-    result: Result<Plan, PlanError>,
+pub struct PlanCandidate<'a> {
+    pub premise: &'a Premise,
+    pub dependencies: VariableScope,
+    pub result: Result<Plan, PlanError>,
 }
 
 impl<'a> PlanCandidate<'a> {
@@ -679,10 +693,10 @@ pub struct RuleApplicationPlan {
 }
 
 impl RuleApplicationPlan {
-    fn eval<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+    pub fn eval<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
         Self::eval_helper(context.store, context.selection, self.conjuncts.clone())
     }
-    fn eval_helper<S: Store, M: Selection>(
+    pub fn eval_helper<S: Store, M: Selection>(
         store: S,
         source: M,
         conjuncts: Vec<Plan>,
@@ -737,36 +751,46 @@ pub enum Join {
 }
 
 impl Join {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Join::Identity
     }
-    fn from(plans: Vec<Plan>) -> Self {
+    pub fn from(plans: Vec<Plan>) -> Self {
         plans
             .into_iter()
             .fold(Join::Identity, |join, plan| join.and(plan))
     }
-    fn and(self, plan: Plan) -> Self {
+    pub fn and(self, plan: Plan) -> Self {
         Join::Join(Box::new(self), plan)
     }
 
-    fn evaluate<S: Store, M: Selection>(self, context: EvaluationContext<S, M>) -> impl Selection {
-        try_stream! {
-            match self {
-                Join::Identity => {
+    pub fn evaluate<S: Store, M: Selection>(
+        self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
+        use futures_util::stream::BoxStream;
+
+        fn evaluate_recursive<S: Store, M: Selection>(
+            join: Join,
+            context: EvaluationContext<S, M>,
+        ) -> BoxStream<'static, Result<Match, QueryError>> {
+            match join {
+                Join::Identity => Box::pin(try_stream! {
                     for await each in context.selection {
                         yield each?;
                     }
-                }
-                Join::Join(left, right) => {
+                }),
+                Join::Join(left, right) => Box::pin(try_stream! {
                     let store = context.store.clone();
-                    let selection = left.evaluate(context);
+                    let selection = evaluate_recursive(*left, context);
                     let output = right.evaluate(EvaluationContext { selection, store });
                     for await each in output {
                         yield each?;
                     }
-                }
+                }),
             }
         }
+
+        evaluate_recursive(self, context)
     }
 }
 

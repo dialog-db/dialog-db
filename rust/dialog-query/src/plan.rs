@@ -7,7 +7,6 @@ use crate::{Match, Selection};
 use dialog_common::ConditionalSend;
 use futures_util::stream::once;
 use std::collections::BTreeMap;
-use thiserror::Error;
 
 pub fn fresh<S: ArtifactStore>(store: S) -> EvaluationContext<S, impl Selection> {
     let selection = once(async move { Ok(Match::new()) });
@@ -138,11 +137,4 @@ pub struct Solution {
     pub requires: VariableScope,
 }
 
-pub type PlanResult<P> = Result<P, PlanError>;
-
-/// Errors that can occur during query planning and execution
-#[derive(Error, Debug, Clone, PartialEq, Eq)]
-#[error("Can not plan query due to unsatisfied dependency")]
-pub struct PlanError {
-    pub description: String,
-}
+pub type PlanResult<P> = Result<P, crate::deductive_rule::PlanError>;

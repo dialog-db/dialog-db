@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::task;
 
 use crate::{
-    types::{IntoValueDataType, Scalar},
+    types::Scalar,
     InconsistencyError, QueryError, Term,
 };
 

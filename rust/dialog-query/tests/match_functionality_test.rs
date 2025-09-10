@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod match_functionality_test {
     use dialog_query::artifact::Entity;
-    use dialog_query::plan::PlanResult;
+    use dialog_query::deductive_rule::{Premise, Application};
     use dialog_query::syntax::VariableScope;
     use dialog_query::*;
 
@@ -25,15 +25,12 @@ mod match_functionality_test {
         }
     }
 
-    impl Premise for TestNameMatch {
-        type Plan = FactSelectorPlan<String>;
-
-        fn plan(&self, scope: &VariableScope) -> PlanResult<Self::Plan> {
-            self.to_fact_selector().plan(scope)
-        }
-
-        fn cells(&self) -> VariableScope {
-            self.to_fact_selector().cells()
+    impl From<TestNameMatch> for Premise {
+        fn from(test_match: TestNameMatch) -> Self {
+            // Convert String-typed FactSelector to Value-typed and then to Premise
+            let selector = test_match.to_fact_selector();
+            let generic_selector = FactSelector::from(&selector);
+            Premise::Apply(Application::Select(generic_selector))
         }
     }
 
@@ -50,9 +47,10 @@ mod match_functionality_test {
             is: "Alice".to_string().into(),
         };
 
-        // Should implement Premise
+        // Should be convertible to Premise and then plan
         let scope = VariableScope::new();
-        let _plan = match_pattern.plan(&scope).unwrap();
+        let premise: Premise = match_pattern.clone().into();
+        let _plan = premise.plan(&scope).unwrap();
 
         // Test with variable
         let match_with_var = TestNameMatch {

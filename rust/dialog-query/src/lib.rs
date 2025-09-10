@@ -16,7 +16,6 @@ pub mod fact;
 pub mod fact_selector;
 pub mod formula;
 pub mod plan;
-pub mod premise;
 pub mod query;
 pub mod rule;
 pub mod selection;
@@ -29,12 +28,12 @@ pub mod types;
 pub use artifact::{Entity, Value, ValueDataType};
 pub use attribute::{Attribute, Cardinality};
 pub use concept::Concept;
+pub use deductive_rule::Premise;
 pub use dialog_query_macros::Rule;
 pub use error::{InconsistencyError, QueryError};
 pub use fact::{assert, retract, Assertion, Claim, Fact, Retraction};
 pub use fact_selector::{FactSelector, FactSelectorPlan};
 pub use plan::{EvaluationContext, EvaluationPlan};
-pub use premise::Premise;
 pub use query::{Query, Store};
 pub use rule::{Premises, Rule, When};
 
@@ -49,11 +48,11 @@ pub use types::IntoValueDataType;
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::artifact::{Value, ValueDataType};
+    pub use crate::deductive_rule::Premise;
     pub use crate::error::QueryError;
     pub use crate::fact::{Assertion, Fact, Retraction};
     pub use crate::fact_selector::{FactSelector, FactSelectorPlan};
     pub use crate::plan::EvaluationPlan;
-    pub use crate::premise::Premise;
     pub use crate::query::Query;
     pub use crate::rule::{Premises, Rule, When};
     pub use crate::selector::Selector;

@@ -27,15 +27,15 @@ pub type Instance<T: Concept> = T::Instance;
 /// # Design Goal
 ///
 /// Enable clean, readable rule definitions through multiple ergonomic approaches:
-/// - Array syntax: `[premise1, premise2].into()` (works with any `T: Statements`)
+/// - Array syntax: `[premise1, premise2].into()` (works with any `T: Into<Premise>`)
 /// - Macro syntax: `when![premise1, premise2]`
-/// - Operator chaining: `premise1 & premise2 & premise3`
+/// - Vec syntax: `vec![premise1, premise2].into()`
 /// - Mixed approaches for maximum flexibility
 ///
 /// # Usage Patterns
 ///
 /// ```rust
-/// use dialog_query::{When, FactSelector, Term, Value};
+/// use dialog_query::{When, FactSelector, Term, Value, when};
 ///
 /// // Example of creating When collections with different syntax options
 /// fn demonstrate_when_creation() -> When {
@@ -61,8 +61,8 @@ pub type Instance<T: Concept> = T::Instance;
 ///     // Option 2: Vec syntax
 ///     let when2: When = vec![selector1.clone(), selector2.clone()].into();
 ///
-///     // Option 3: Operator chaining - reads like logical AND
-///     let when3 = selector1.clone() & selector2.clone();
+///     // Option 3: Macro syntax - clean and readable
+///     let when3: When = when![selector1.clone(), selector2.clone()];
 ///
 ///     // All approaches create equivalent When collections
 ///     assert_eq!(when1.len(), 2);
@@ -130,6 +130,24 @@ impl Premises for When {
     type IntoIter = std::vec::IntoIter<Premise>;
     fn premises(self) -> Self::IntoIter {
         self.0.into_iter()
+    }
+}
+
+impl IntoIterator for When {
+    type Item = Premise;
+    type IntoIter = std::vec::IntoIter<Premise>;
+    
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a When {
+    type Item = &'a Premise;
+    type IntoIter = std::slice::Iter<'a, Premise>;
+    
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
     }
 }
 
@@ -225,9 +243,9 @@ pub trait Rule: Concept {
     /// # Return Pattern
     ///
     /// Return premises using the clean When syntax:
-    /// - `When::from([premise1, premise2])` - Array syntax
+    /// - `[premise1, premise2].into()` - Array syntax
     /// - `when![premise1, premise2]` - Macro syntax
-    /// - `premise1 & premise2` - Operator chaining
+    /// - `vec![premise1, premise2].into()` - Vec syntax
     ///
     /// # Implementation Notes
     ///
@@ -243,7 +261,7 @@ mod tests {
     use super::*;
     use crate::artifact::Value;
     use crate::deductive_rule::{Application, Premise};
-    use crate::syntax::VariableScope;
+    use crate::fact_selector::FactSelector;
     use crate::term::Term;
 
     #[test]

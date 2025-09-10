@@ -8,7 +8,8 @@ use crate::deductive_rule::{
 };
 use crate::error::QueryError;
 use crate::fact_selector::{BASE_COST, ENTITY_COST, VALUE_COST};
-use crate::query::{PlannedQuery, Query, QueryResult, Store};
+use crate::plan::EvaluationPlan;
+use crate::query::{Query, QueryResult, Store};
 use crate::term::Term;
 use crate::FactSelector;
 use crate::Selection;
@@ -155,9 +156,19 @@ pub trait Match {
 
 impl<T: Match> Query for T {
     fn query<S: Store>(&self, store: &S) -> QueryResult<impl Selection> {
+        use crate::try_stream;
+
         let scope = VariableScope::new();
+
+        // Use try_stream to create a stream that owns the plan
         let plan = self.plan(&scope).map_err(|error| QueryError::from(error))?;
-        plan.query(store)
+        let context = crate::plan::fresh(store.clone());
+
+        Ok(try_stream! {
+            for await result in plan.evaluate(context) {
+                yield result?;
+            }
+        })
     }
 }
 
@@ -487,6 +498,44 @@ mod tests {
         }
     }
 
+    // Implement Rule for Person to support when() method
+    impl crate::rule::Rule for Person {
+        fn when(terms: Self::Match) -> crate::rule::When {
+            use crate::fact_selector::FactSelector;
+
+            // Create fact selectors for each attribute
+            let name_selector = FactSelector::<Value> {
+                the: Some(Term::from(
+                    "person/name".parse::<crate::artifact::Attribute>().unwrap(),
+                )),
+                of: Some(terms.this.clone()),
+                is: Some(terms.name),
+                fact: None,
+            };
+
+            let age_selector = FactSelector::<Value> {
+                the: Some(Term::from(
+                    "person/age".parse::<crate::artifact::Attribute>().unwrap(),
+                )),
+                of: Some(terms.this),
+                is: Some(terms.age),
+                fact: None,
+            };
+
+            [name_selector, age_selector].into()
+        }
+    }
+
+    // Implement Premises for PersonMatch
+    impl crate::rule::Premises for PersonMatch {
+        type IntoIter = std::vec::IntoIter<crate::deductive_rule::Premise>;
+
+        fn premises(self) -> Self::IntoIter {
+            use crate::rule::Rule;
+            Person::when(self).into_iter()
+        }
+    }
+
     // Implement Attributes for PersonAttributes
     impl Attributes for PersonAttributes {
         fn attributes() -> &'static [(&'static str, Attribute<Value>)] {
@@ -679,9 +728,8 @@ mod tests {
 
     #[test]
     fn test_match_premise_planning() {
-        // Test that PersonMatch can be used as a Premise
-        use crate::premise::Premise;
-        use crate::syntax::VariableScope;
+        // Test that PersonMatch can be used through Premises trait
+        use crate::rule::Premises;
 
         // Create a PersonMatch with all constants to avoid dependency resolution issues
         let entity_const = Term::from(Entity::new().unwrap());
@@ -694,22 +742,11 @@ mod tests {
             age: age_const,
         };
 
-        let scope = VariableScope::new();
-        let plan_result = person_match.plan(&scope);
+        // PersonMatch should implement Premises trait and generate individual premises
+        let premises: Vec<_> = person_match.clone().premises().collect();
 
-        // For now, let's just test that we can create the PersonMatch and call plan
-        // The actual planning algorithm may have issues but that's not what we're testing here
-        match plan_result {
-            Ok(plan) => {
-                // Should have premises for each attribute (name and age)
-                assert_eq!(plan.conjuncts.len(), 2);
-            }
-            Err(_) => {
-                // Planning failed due to dependency resolution issues in our test setup
-                // This is okay for now - we're primarily testing the Concept trait implementation
-                // The main thing is that PersonMatch implements Premise trait correctly
-            }
-        }
+        // Should have premises for each attribute (name and age)
+        assert_eq!(premises.len(), 2);
 
         // Test that PersonMatch correctly implements Match trait methods
         assert_eq!(person_match.term_for("name").unwrap().is_constant(), true);
@@ -843,10 +880,10 @@ mod tests {
             age: Term::var("age"),
         };
 
-        // This should work but currently fails due to planner issues
+        // This should work with the planner fix
         let results = person_query.query(&artifacts)?.collect_set().await?;
 
-        // If it works, we should find both Alice and Bob
+        // Should find both Alice and Bob (not Mallory who has no age)
         assert_eq!(results.len(), 2, "Should find both people");
 
         // Verify we got the right people
@@ -882,7 +919,6 @@ mod tests {
         assert_eq!(person_match.term_for("nonexistent"), None);
 
         // Test 2: Verify that PersonMatch can be used as a Premise
-        use crate::premise::Premise;
         use crate::syntax::VariableScope;
 
         let scope = VariableScope::new();

@@ -1,7 +1,6 @@
 //! Error types for the query engine
 
 use crate::artifact::{DialogArtifactsError, Value, ValueDataType};
-use crate::plan::PlanError;
 use crate::term::Term;
 use thiserror::Error;
 
@@ -85,13 +84,6 @@ impl From<DialogArtifactsError> for QueryError {
     }
 }
 
-impl From<PlanError> for QueryError {
-    fn from(err: PlanError) -> Self {
-        QueryError::PlanningError {
-            message: err.description,
-        }
-    }
-}
 
 impl From<InconsistencyError> for QueryError {
     fn from(err: InconsistencyError) -> Self {
