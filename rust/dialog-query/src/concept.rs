@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use crate::attribute::Attribute;
 use crate::deductive_rule::{
-    Analysis, AnalyzerError, Application, ConceptPlan, ConcetApplication, Dependencies, PlanError,
-    Planner, Premise, Requirement,
+    Analysis, AnalyzerError, Application, ConceptPlan, ConcetApplication, PlanError, Planner,
+    Premise,
 };
 use crate::error::QueryError;
 use crate::fact_selector::{BASE_COST, ENTITY_COST, VALUE_COST};
@@ -13,7 +13,7 @@ use crate::term::Term;
 use crate::FactSelector;
 use crate::Selection;
 use crate::VariableScope;
-use crate::{Entity, Parameters, Value};
+use crate::{Dependencies, Entity, Parameters, Requirement, Value};
 use dialog_artifacts::Instruction;
 
 /// Concept is a set of attributes associated with entity representing an

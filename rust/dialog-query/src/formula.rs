@@ -175,9 +175,9 @@
 //! ```
 
 use crate::cursor::Cursor;
-use crate::deductive_rule::{Analysis, AnalyzerError, Dependencies, PlanError, Requirement};
+use crate::deductive_rule::{Analysis, AnalyzerError, PlanError};
 use crate::{try_stream, EvaluationContext, Match, QueryError, Selection, Store, Term, Value};
-use crate::{Parameters, ValueDataType, VariableScope};
+use crate::{Dependencies, Parameters, Requirement, ValueDataType, VariableScope};
 use std::fmt::Display;
 use thiserror::Error;
 
