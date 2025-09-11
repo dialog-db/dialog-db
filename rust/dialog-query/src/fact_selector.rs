@@ -294,11 +294,11 @@ impl<T: Scalar> From<&FactSelector<T>> for FactSelector<Value> {
 impl<T: Scalar> Query for FactSelector<T> {
     fn query<S: Store>(&self, store: &S) -> QueryResult<impl Selection> {
         use crate::try_stream;
-        
+
         let scope = &VariableScope::new();
         let plan = self.plan(&scope).map_err(|e| QueryError::from(e))?;
         let context = crate::plan::fresh(store.clone());
-        
+
         // Use try_stream to create a stream that owns the plan
         Ok(try_stream! {
             for await result in plan.evaluate(context) {
@@ -382,7 +382,6 @@ impl<T: Scalar> TryFrom<&FactSelectorPlan<T>> for ArtifactSelector<Constrained> 
         (&plan.selector).try_into()
     }
 }
-
 
 #[cfg(test)]
 mod tests {

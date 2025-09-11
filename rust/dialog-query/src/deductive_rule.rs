@@ -3,9 +3,10 @@ use crate::attribute::Attribute;
 use crate::fact_selector::FactSelector;
 use crate::fact_selector::{BASE_COST, ENTITY_COST, VALUE_COST};
 use crate::formula::{FormulaApplication, FormulaApplicationPlan};
+use crate::join::Join;
 use crate::plan::EvaluationPlan;
 use crate::{try_stream, QueryError};
-use crate::{EvaluationContext, Match, Selection, Store, Term, Type, Value};
+use crate::{EvaluationContext, Selection, Store, Term, Type, Value};
 use crate::{FactSelectorPlan, VariableScope};
 use core::cmp::Ordering;
 use futures_util::{stream, TryStreamExt};
@@ -484,7 +485,7 @@ impl RuleApplication {
     pub fn new(rule: DeductiveRule, terms: Terms) -> Self {
         RuleApplication { rule, terms }
     }
-    
+
     /// Analyzes this rule application to validate term bindings and compute dependencies.
     /// Ensures all required parameters are provided and propagates variable dependencies.
     pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
@@ -589,9 +590,7 @@ impl Display for RuleApplication {
 /// select the best premise to execute next.
 pub enum Planner<'a> {
     /// Initial state with unprocessed premises.
-    Idle {
-        premises: &'a Vec<Premise>,
-    },
+    Idle { premises: &'a Vec<Premise> },
     /// Processing state with cached candidates and current scope.
     Active {
         candidates: Vec<PlanCandidate<'a>>,
@@ -604,7 +603,7 @@ impl<'a> Planner<'a> {
     pub fn new(premises: &'a Vec<Premise>) -> Self {
         Self::Idle { premises }
     }
-    
+
     /// Helper to create a planning error from failed candidates.
     /// Returns the first error found, or UnexpectedError if none.
     fn fail(candidates: &[PlanCandidate]) -> Result<Plan, PlanError> {
@@ -770,7 +769,7 @@ impl RuleApplicationPlan {
     pub fn eval<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
         Self::eval_helper(context.store, context.selection, self.conjuncts.clone())
     }
-    
+
     /// Helper function that recursively evaluates conjuncts in order.
     pub fn eval_helper<S: Store, M: Selection>(
         store: S,
@@ -817,67 +816,6 @@ impl EvaluationPlan for RuleApplicationPlan {
     fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
         let join = Join::from(self.conjuncts.clone());
         join.evaluate(context)
-    }
-}
-
-/// Represents a join operation that combines multiple query plans.
-/// Uses a recursive structure to chain plans together.
-#[derive(Debug, Clone)]
-pub enum Join {
-    /// Base case - passes through the selection unchanged.
-    Identity,
-    /// Recursive case - joins a plan with the rest of the join chain.
-    Join(Box<Join>, Plan),
-}
-
-impl Join {
-    /// Creates a new empty join (identity).
-    pub fn new() -> Self {
-        Join::Identity
-    }
-    
-    /// Creates a join from a vector of plans by chaining them together.
-    pub fn from(plans: Vec<Plan>) -> Self {
-        plans
-            .into_iter()
-            .fold(Join::Identity, |join, plan| join.and(plan))
-    }
-    
-    /// Adds a plan to this join chain.
-    pub fn and(self, plan: Plan) -> Self {
-        Join::Join(Box::new(self), plan)
-    }
-
-    /// Evaluates the join by executing each plan in sequence,
-    /// feeding the output of one plan as input to the next.
-    pub fn evaluate<S: Store, M: Selection>(
-        self,
-        context: EvaluationContext<S, M>,
-    ) -> impl Selection {
-        use futures_util::stream::BoxStream;
-
-        fn evaluate_recursive<S: Store, M: Selection>(
-            join: Join,
-            context: EvaluationContext<S, M>,
-        ) -> BoxStream<'static, Result<Match, QueryError>> {
-            match join {
-                Join::Identity => Box::pin(try_stream! {
-                    for await each in context.selection {
-                        yield each?;
-                    }
-                }),
-                Join::Join(left, right) => Box::pin(try_stream! {
-                    let store = context.store.clone();
-                    let selection = evaluate_recursive(*left, context);
-                    let output = right.evaluate(EvaluationContext { selection, store });
-                    for await each in output {
-                        yield each?;
-                    }
-                }),
-            }
-        }
-
-        evaluate_recursive(self, context)
     }
 }
 
@@ -936,7 +874,7 @@ impl Dependencies {
     pub fn new() -> Self {
         Dependencies(HashMap::new())
     }
-    
+
     /// Calculates the total cost of all derived dependencies.
     /// Required dependencies don't contribute to cost as they must be provided.
     pub fn cost(&self) -> usize {
@@ -1058,7 +996,7 @@ impl Premise {
             Premise::Exclude(negation) => negation.plan(scope).map(Plan::Negation),
         }
     }
-    
+
     /// Analyzes this premise to determine its dependencies and cost.
     fn analyze(&self) -> Result<Analysis, AnalyzerError> {
         match self {
@@ -1271,26 +1209,13 @@ impl From<FactSelector> for Application {
     }
 }
 
-impl Terms {
-    pub fn constants(&self) -> HashMap<String, Value> {
-        let Terms(terms) = self;
-        let mut constants = HashMap::new();
-        for (name, term) in terms.iter() {
-            if let Term::Constant(value) = term {
-                constants.insert(name.clone(), value.clone());
-            }
-        }
-        constants
-    }
-}
-
 /// Execution plan for different types of applications.
 /// Contains the optimized execution strategy for each application type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ApplicationPlan {
     /// Plan for fact selection operations
     Select(FactSelectorPlan),
-    /// Plan for concept realization operations  
+    /// Plan for concept realization operations
     Concept(ConceptPlan),
     /// Plan for rule application operations
     Rule(RuleApplicationPlan),
@@ -1462,20 +1387,20 @@ mod tests {
     use crate::artifact::ValueDataType;
     use crate::attribute::Attribute;
     use crate::term::Term;
-    
+
     #[test]
     fn test_terms_basic_operations() {
         let mut terms = Terms::new();
-        
+
         // Test insertion and retrieval
         let name_term = Term::var("name");
         terms.insert("name".to_string(), name_term.clone());
-        
+
         assert_eq!(terms.get("name"), Some(&name_term));
         assert_eq!(terms.get("nonexistent"), None);
         assert!(terms.contains("name"));
         assert!(!terms.contains("nonexistent"));
-        
+
         // Test iteration
         let collected: Vec<_> = terms.iter().collect();
         assert_eq!(collected.len(), 1);
@@ -1487,33 +1412,33 @@ mod tests {
     fn test_conclusion_operations() {
         let mut attributes = HashMap::new();
         attributes.insert(
-            "name".to_string(), 
-            Attribute::new("person", "name", "Person name", ValueDataType::String)
+            "name".to_string(),
+            Attribute::new("person", "name", "Person name", ValueDataType::String),
         );
         attributes.insert(
-            "age".to_string(), 
-            Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt)
+            "age".to_string(),
+            Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt),
         );
-        
+
         let conclusion = Conclusion { attributes };
-        
+
         // Test contains method - should include "this" parameter
         assert!(conclusion.contains("this"));
         assert!(conclusion.contains("name"));
         assert!(conclusion.contains("age"));
         assert!(!conclusion.contains("height"));
-        
+
         // Test absent method
         let mut dependencies = Dependencies::new();
         dependencies.desire("name".into(), 100);
-        
+
         // Should find "this" as absent since it's not in dependencies
         assert_eq!(conclusion.absent(&dependencies), Some("this"));
-        
+
         dependencies.desire("this".into(), 100);
         // Now should find "age" as absent
         assert_eq!(conclusion.absent(&dependencies), Some("age"));
-        
+
         dependencies.desire("age".into(), 100);
         // Now nothing should be absent
         assert_eq!(conclusion.absent(&dependencies), None);
@@ -1522,24 +1447,24 @@ mod tests {
     #[test]
     fn test_dependencies_operations() {
         let mut deps = Dependencies::new();
-        
+
         // Test basic operations
         assert!(!deps.contains("test"));
         assert_eq!(deps.resolve("test"), Requirement::Derived(0)); // Default value
-        
+
         // Test desire
         deps.desire("test".into(), 100);
         assert!(deps.contains("test"));
         assert_eq!(deps.resolve("test"), Requirement::Derived(100));
-        
+
         // Test require
         deps.require("required".into());
         assert_eq!(deps.resolve("required"), Requirement::Required);
-        
+
         // Test provide
         deps.provide("provided".into());
         assert_eq!(deps.resolve("provided"), Requirement::Derived(0));
-        
+
         // Test iteration
         let items: Vec<_> = deps.iter().collect();
         assert_eq!(items.len(), 3);
@@ -1548,21 +1473,21 @@ mod tests {
     #[test]
     fn test_dependencies_update_logic() {
         let mut deps = Dependencies::new();
-        
+
         // Test updating derived with derived - should take minimum cost
         deps.desire("cost".into(), 50);
         deps.update("cost".into(), &Requirement::Derived(200));
         assert_eq!(deps.resolve("cost"), Requirement::Derived(50)); // Takes minimum
-        
+
         // Test updating derived with lower cost - should take the new lower cost
         deps.update("cost".into(), &Requirement::Derived(25));
         assert_eq!(deps.resolve("cost"), Requirement::Derived(25));
-        
+
         // Test that Required dependency gets overridden when updated with Derived
         deps.require("required_test".into());
         deps.update("required_test".into(), &Requirement::Derived(100));
         assert_eq!(deps.resolve("required_test"), Requirement::Derived(100));
-        
+
         // Test adding new dependency via update
         deps.update("new_dep".into(), &Requirement::Derived(75));
         assert_eq!(deps.resolve("new_dep"), Requirement::Derived(75));
@@ -1573,14 +1498,14 @@ mod tests {
         let mut attributes = HashMap::new();
         attributes.insert(
             "name".to_string(),
-            Attribute::new("person", "name", "Person name", ValueDataType::String)
+            Attribute::new("person", "name", "Person name", ValueDataType::String),
         );
-        
+
         let concept = Concept {
             operator: "person".to_string(),
             attributes,
         };
-        
+
         assert_eq!(concept.operator, "person");
         assert_eq!(concept.attributes.len(), 1);
         assert!(concept.attributes.contains_key("name"));
@@ -1591,26 +1516,26 @@ mod tests {
         let mut attributes = HashMap::new();
         attributes.insert(
             "name".to_string(),
-            Attribute::new("person", "name", "Person name", ValueDataType::String)
+            Attribute::new("person", "name", "Person name", ValueDataType::String),
         );
         attributes.insert(
             "age".to_string(),
-            Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt)
+            Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt),
         );
-        
+
         let concept = Concept {
             operator: "person".to_string(),
             attributes,
         };
-        
+
         let mut terms = Terms::new();
         terms.insert("name".to_string(), Term::var("person_name"));
         terms.insert("age".to_string(), Term::var("person_age"));
-        
+
         let concept_app = ConcetApplication { terms, concept };
-        
+
         let analysis = concept_app.analyze().expect("Analysis should succeed");
-        
+
         assert_eq!(analysis.cost, BASE_COST);
         assert!(analysis.dependencies.contains("this"));
         assert!(analysis.dependencies.contains("name"));
@@ -1625,19 +1550,21 @@ mod tests {
         let mut conclusion_attributes = HashMap::new();
         conclusion_attributes.insert(
             "name".to_string(),
-            Attribute::new("person", "name", "Person name", ValueDataType::String)
+            Attribute::new("person", "name", "Person name", ValueDataType::String),
         );
         conclusion_attributes.insert(
-            "age".to_string(), 
-            Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt)
+            "age".to_string(),
+            Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt),
         );
-        
+
         let rule = DeductiveRule {
             operator: "adult".to_string(),
-            conclusion: Conclusion { attributes: conclusion_attributes },
+            conclusion: Conclusion {
+                attributes: conclusion_attributes,
+            },
             premises: vec![],
         };
-        
+
         let params = rule.parameters();
         assert!(params.contains("this"));
         assert!(params.contains("name"));
@@ -1649,7 +1576,7 @@ mod tests {
     fn test_requirement_properties() {
         let required = Requirement::Required;
         let derived = Requirement::Derived(100);
-        
+
         assert!(required.is_required());
         assert!(!derived.is_required());
     }
@@ -1660,9 +1587,9 @@ mod tests {
             .the("person/name")
             .of(Term::var("person"))
             .is(crate::artifact::Value::String("Alice".to_string()));
-        
+
         let premise = Premise::from(fact_selector);
-        
+
         match premise {
             Premise::Apply(Application::Select(_)) => {
                 // Expected case
@@ -1675,21 +1602,21 @@ mod tests {
     fn test_analysis_structure() {
         let mut deps = Dependencies::new();
         deps.desire("test".into(), 50);
-        
+
         let analysis = Analysis {
             cost: 100,
             dependencies: deps,
         };
-        
+
         assert_eq!(analysis.cost, 100);
         assert!(analysis.dependencies.contains("test"));
     }
 
-    #[test] 
+    #[test]
     fn test_planner_creation() {
         let premises = vec![];
         let planner = Planner::new(&premises);
-        
+
         match planner {
             Planner::Idle { premises: p } => {
                 assert_eq!(p.len(), 0);
@@ -1702,13 +1629,13 @@ mod tests {
     fn test_plan_candidate_structure() {
         let fact_selector = FactSelector::new().the("test/attr");
         let premise = Premise::from(fact_selector);
-        
+
         let candidate = PlanCandidate {
             premise: &premise,
             dependencies: VariableScope::new(),
             result: Err(PlanError::UnexpectedError),
         };
-        
+
         // Test that the structure exists and can be created
         assert!(matches!(candidate.result, Err(PlanError::UnexpectedError)));
     }
@@ -1718,15 +1645,17 @@ mod tests {
         // Test AnalyzerError creation
         let rule = DeductiveRule {
             operator: "test".to_string(),
-            conclusion: Conclusion { attributes: HashMap::new() },
+            conclusion: Conclusion {
+                attributes: HashMap::new(),
+            },
             premises: vec![],
         };
-        
+
         let analyzer_error = AnalyzerError::UnusedParameter {
             rule: rule.clone(),
             parameter: "test_param".to_string(),
         };
-        
+
         // Test conversion to PlanError
         let plan_error: PlanError = analyzer_error.into();
         match &plan_error {
@@ -1736,7 +1665,7 @@ mod tests {
             }
             _ => panic!("Expected UnusedParameter variant"),
         }
-        
+
         // Test conversion to QueryError
         let query_error: QueryError = plan_error.into();
         match query_error {
@@ -1752,14 +1681,14 @@ mod tests {
         // Test Select application
         let selector = FactSelector::new().the("test/attr");
         let app = Application::Select(selector);
-        
+
         match app {
             Application::Select(_) => {
                 // Expected
             }
             _ => panic!("Expected Select variant"),
         }
-        
+
         // Test other variants exist
         let mut terms = Terms::new();
         terms.insert("test".to_string(), Term::var("test_var"));
@@ -1768,7 +1697,7 @@ mod tests {
             attributes: HashMap::new(),
         };
         let concept_app = Application::Realize(ConcetApplication { terms, concept });
-        
+
         match concept_app {
             Application::Realize(_) => {
                 // Expected
@@ -1786,7 +1715,7 @@ mod tests {
             }
             _ => panic!("Expected Identity variant"),
         }
-        
+
         // Test building joins
         let plans = vec![];
         let join_from_plans = Join::from(plans);
@@ -1803,7 +1732,7 @@ mod tests {
         let selector = FactSelector::new().the("test/attr");
         let app = Application::Select(selector);
         let negation = Negation(app);
-        
+
         // Test that negation wraps the application
         match negation {
             Negation(Application::Select(_)) => {

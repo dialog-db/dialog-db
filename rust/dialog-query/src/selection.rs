@@ -2,14 +2,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::artifact::{Value, ValueDataType};
 use dialog_common::ConditionalSend;
-use futures_core::Stream;
+
+use futures_util::stream::Stream;
 use std::pin::Pin;
 use std::task;
 
-use crate::{
-    types::Scalar,
-    InconsistencyError, QueryError, Term,
-};
+use crate::{types::Scalar, InconsistencyError, QueryError, Term};
 
 pub trait Selection: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend {}
 

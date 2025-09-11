@@ -6,6 +6,7 @@
 //! This crate implements the core query planning and execution functionality,
 //! designed to be equivalent to the TypeScript query engine in @query/.
 
+pub mod and;
 pub mod artifact;
 pub mod attribute;
 pub mod concept;
@@ -15,6 +16,7 @@ pub mod error;
 pub mod fact;
 pub mod fact_selector;
 pub mod formula;
+pub mod join;
 pub mod plan;
 pub mod query;
 pub mod rule;
