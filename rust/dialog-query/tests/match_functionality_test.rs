@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod match_functionality_test {
     use dialog_query::artifact::Entity;
-    use dialog_query::deductive_rule::{Premise, Application};
     use dialog_query::syntax::VariableScope;
     use dialog_query::*;
+    use dialog_query::{Application, Premise};
 
     // This test demonstrates the Match struct functionality that was requested.
     // It shows how Match structs work with the generic FactSelector<T> system

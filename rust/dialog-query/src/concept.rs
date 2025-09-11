@@ -1,18 +1,19 @@
 use std::collections::HashMap;
 
+use crate::analyzer::Analysis;
+use crate::application::{ConcetApplication, Join};
 use crate::attribute::Attribute;
-use crate::deductive_rule::{
-    Analysis, AnalyzerError, Application, ConceptPlan, ConcetApplication, PlanError, Planner,
-    Premise,
-};
-use crate::error::QueryError;
+use crate::error::{AnalyzerError, PlanError, QueryError};
 use crate::fact_selector::{BASE_COST, ENTITY_COST, VALUE_COST};
+use crate::plan::ConceptPlan;
 use crate::plan::EvaluationPlan;
+use crate::predicate;
 use crate::query::{Query, QueryResult, Store};
 use crate::term::Term;
 use crate::FactSelector;
 use crate::Selection;
 use crate::VariableScope;
+use crate::{Application, Premise};
 use crate::{Dependencies, Entity, Parameters, Requirement, Value};
 use dialog_artifacts::Instruction;
 
@@ -127,8 +128,8 @@ pub trait Match {
             }
         }
 
-        let mut planner = Planner::new(&premises);
-        let (cost, conjuncts) = planner.plan(scope)?;
+        let mut join = Join::new(&premises);
+        let (cost, conjuncts) = join.plan(scope)?;
 
         Ok(ConceptPlan {
             cost,
@@ -137,7 +138,7 @@ pub trait Match {
         })
     }
 
-    fn conpect(&self) -> crate::deductive_rule::Concept {
+    fn conpect(&self) -> predicate::Concept {
         let mut attributes = HashMap::new();
         let mut operator = None;
         for (name, attribute) in Self::Attributes::attributes() {
@@ -147,7 +148,7 @@ pub trait Match {
             attributes.insert(name.to_string(), attribute.clone());
         }
 
-        crate::deductive_rule::Concept {
+        predicate::Concept {
             operator: operator.unwrap_or("".to_string()),
             attributes,
         }
@@ -528,7 +529,7 @@ mod tests {
 
     // Implement Premises for PersonMatch
     impl crate::rule::Premises for PersonMatch {
-        type IntoIter = std::vec::IntoIter<crate::deductive_rule::Premise>;
+        type IntoIter = std::vec::IntoIter<crate::premise::Premise>;
 
         fn premises(self) -> Self::IntoIter {
             use crate::rule::Rule;

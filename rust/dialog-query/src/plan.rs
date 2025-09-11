@@ -1,13 +1,87 @@
 //! Query execution plans - traits and context for evaluation
 
-use crate::artifact::ArtifactStore;
-use crate::query::Store;
-use crate::syntax::VariableScope;
-use crate::Value;
-use crate::{Match, Selection};
-use dialog_common::ConditionalSend;
-use futures_util::stream::once;
+pub use crate::artifact::ArtifactStore;
+pub use crate::query::Store;
+pub use crate::{try_stream, Match, Selection, Value};
+pub use dialog_common::ConditionalSend;
+pub use futures_util::stream::once;
 use std::collections::BTreeMap;
+
+pub mod application;
+pub mod concept;
+pub mod fact;
+pub mod formula;
+
+pub mod join;
+pub mod negation;
+pub mod rule;
+pub use futures_util::{stream, TryStreamExt};
+
+pub use super::parameters::Parameters;
+pub use super::syntax::VariableScope;
+pub use application::ApplicationPlan;
+pub use concept::ConceptPlan;
+pub use core::cmp::Ordering;
+pub use fact::FactApplicationPlan;
+pub use formula::FormulaApplicationPlan;
+pub use join::Join;
+pub use negation::NegationPlan;
+pub use rule::RuleApplicationPlan;
+
+/// Top-level execution plan that can be either a positive application or a negation.
+/// Used by the query planner to organize premise execution.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Plan {
+    /// Positive application that produces matches
+    Application(ApplicationPlan),
+    /// Negative application that filters out matches
+    Negation(NegationPlan),
+}
+
+impl EvaluationPlan for Plan {
+    fn cost(&self) -> usize {
+        match self {
+            Plan::Application(plan) => plan.cost(),
+            Plan::Negation(plan) => plan.cost(),
+        }
+    }
+
+    fn provides(&self) -> &VariableScope {
+        match self {
+            Plan::Application(plan) => plan.provides(),
+            Plan::Negation(plan) => plan.provides(),
+        }
+    }
+
+    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+        let source = self.clone();
+        try_stream! {
+            match source {
+                Plan::Application(plan) => {
+                    for await output in plan.evaluate(context) {
+                        yield output?
+                    }
+                },
+                Plan::Negation(plan) => {
+                    for await output in plan.evaluate(context) {
+                        yield output?
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl PartialOrd for Plan {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (self, other) {
+            (Plan::Application(_), Plan::Negation(_)) => Some(core::cmp::Ordering::Less),
+            (Plan::Negation(_), Plan::Application(_)) => Some(core::cmp::Ordering::Greater),
+            (Plan::Application(left), Plan::Application(right)) => left.partial_cmp(right),
+            (Plan::Negation(left), Plan::Negation(right)) => left.partial_cmp(right),
+        }
+    }
+}
 
 pub fn fresh<S: ArtifactStore>(store: S) -> EvaluationContext<S, impl Selection> {
     let selection = once(async move { Ok(Match::new()) });

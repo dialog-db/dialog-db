@@ -7,7 +7,7 @@
 //! and follows the patterns described in the design document at notes/rules.md.
 
 use crate::concept::Concept;
-use crate::deductive_rule::Premise;
+use crate::premise::Premise;
 
 /// Utility type that simply gets associated type for the relation.
 #[allow(type_alias_bounds)]
@@ -260,9 +260,9 @@ pub trait Rule: Concept {
 mod tests {
     use super::*;
     use crate::artifact::Value;
-    use crate::deductive_rule::{Application, Premise};
     use crate::fact_selector::FactSelector;
     use crate::term::Term;
+    use crate::{Application, Premise};
 
     #[test]
     fn test_when_array_literal_api() {

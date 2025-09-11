@@ -1,0 +1,191 @@
+//! Comprehensive test demonstrating the query helper method functionality
+
+use anyhow::Result;
+use dialog_query::{
+    artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Value},
+    rule::{Match, Rule as RuleTrait},
+    term::Term,
+    Fact,
+};
+use dialog_query_macros::Rule;
+use dialog_storage::MemoryStorageBackend;
+use futures_util::stream;
+
+#[derive(Rule, Debug, Clone)]
+pub struct Person {
+    pub name: String,
+}
+
+#[derive(Rule, Debug, Clone, PartialEq)]
+pub struct Employee {
+    pub name: String,
+    pub department: String,
+}
+
+#[tokio::test]
+async fn test_single_attribute_query_works() -> Result<()> {
+    let storage_backend = MemoryStorageBackend::default();
+    let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+
+    let alice = Entity::new()?;
+    let bob = Entity::new()?;
+
+    let facts = vec![
+        Fact::assert(
+            "person/name".parse::<Attribute>()?,
+            alice.clone(),
+            Value::String("Alice".into()),
+        ),
+        Fact::assert(
+            "person/name".parse::<Attribute>()?,
+            bob.clone(),
+            Value::String("Bob".into()),
+        ),
+    ];
+
+    artifacts
+        .commit(stream::iter(facts.into_iter().map(Into::into)))
+        .await?;
+
+    // ✅ This works: Single attribute with constant
+    let alice_query = PersonMatch {
+        this: Term::var("person"),
+        name: "Alice".into(),
+    };
+
+    let results = alice_query.query(artifacts.clone()).await?;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].name, "Alice");
+    println!("✅ Single-attribute constant query: WORKS");
+
+    // ✅ This works: Single attribute with variable
+    let all_people_query = PersonMatch {
+        this: Term::var("person"),
+        name: Term::var("name"),
+    };
+
+    let all_results = all_people_query.query(artifacts).await?;
+    assert_eq!(all_results.len(), 2);
+    println!("✅ Single-attribute variable query: WORKS");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_multi_attribute_constant_query_works() -> Result<()> {
+    let storage_backend = MemoryStorageBackend::default();
+    let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+
+    let alice = Entity::new()?;
+    let bob = Entity::new()?;
+
+    let facts = vec![
+        Fact::assert(
+            "employee/name".parse::<Attribute>()?,
+            alice.clone(),
+            Value::String("Alice".into()),
+        ),
+        Fact::assert(
+            "employee/department".parse::<Attribute>()?,
+            alice.clone(),
+            Value::String("Engineering".into()),
+        ),
+        Fact::assert(
+            "employee/name".parse::<Attribute>()?,
+            bob.clone(),
+            Value::String("Bob".into()),
+        ),
+        Fact::assert(
+            "employee/department".parse::<Attribute>()?,
+            bob.clone(),
+            Value::String("Sales".into()),
+        ),
+    ];
+
+    artifacts
+        .commit(stream::iter(facts.into_iter().map(Into::into)))
+        .await?;
+
+    // ✅ This works: Multi-attribute with all constants
+    let alice_engineering_query = Match::<Employee> {
+        this: Term::var("employee"),
+        name: "Alice".into(),
+        department: "Engineering".into(),
+    };
+
+    let results = alice_engineering_query.query(artifacts).await?;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].name, "Alice");
+    assert_eq!(results[0].department, "Engineering");
+    assert_eq!(
+        results[0],
+        Employee {
+            name: "Alice".into(),
+            department: "Engineering".into(),
+        }
+    );
+    println!("✅ Multi-attribute constant query: WORKS");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_multi_attribute_variable_query_limitation() -> Result<()> {
+    let storage_backend = MemoryStorageBackend::default();
+    let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+
+    let alice = Entity::new()?;
+    let bob = Entity::new()?;
+
+    let facts = vec![
+        Fact::assert(
+            "employee/name".parse::<Attribute>()?,
+            alice.clone(),
+            Value::String("Alice".into()),
+        ),
+        Fact::assert(
+            "employee/department".parse::<Attribute>()?,
+            alice.clone(),
+            Value::String("Engineering".into()),
+        ),
+        Fact::assert(
+            "employee/name".parse::<Attribute>()?,
+            bob.clone(),
+            Value::String("Bob".into()),
+        ),
+        Fact::assert(
+            "employee/department".parse::<Attribute>()?,
+            bob.clone(),
+            Value::String("Sales".into()),
+        ),
+    ];
+
+    artifacts
+        .commit(stream::iter(facts.into_iter().map(Into::into)))
+        .await?;
+
+    // ⚠️ This has limitations: Multi-attribute with mixed constants and variables
+    let engineering_query = EmployeeMatch {
+        this: Term::var("employee"),
+        name: Term::var("name"),          // Variable to capture
+        department: "Engineering".into(), // Constant to filter
+    };
+
+    match engineering_query.query(artifacts).await {
+        Ok(results) => {
+            // Currently this might return more results than expected
+            // because we only execute the first plan (probably the name plan)
+            // instead of properly joining all plans
+            println!(
+                "⚠️  Multi-attribute variable query returned {} results",
+                results.len()
+            );
+            println!("⚠️  This demonstrates the current limitation in plan joining");
+        }
+        Err(e) => {
+            println!("❌ Multi-attribute variable query failed: {}", e);
+        }
+    }
+
+    Ok(())
+}

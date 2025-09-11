@@ -353,7 +353,7 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
                 use dialog_query::syntax::VariableScope;
                 use dialog_query::plan::{EvaluationContext, EvaluationPlan};
                 use dialog_query::selection::Match;
-                use dialog_query::deductive_rule::Premise;
+                use dialog_query::premise::Premise;
                 use futures_util::{stream, StreamExt, TryStreamExt};
                 use dialog_query::term::Term;
 
@@ -404,7 +404,7 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
 
         // Implement Premises for Match to enable it to be used as a premise
         impl dialog_query::rule::Premises for #match_name {
-            type IntoIter = std::vec::IntoIter<dialog_query::deductive_rule::Premise>;
+            type IntoIter = std::vec::IntoIter<dialog_query::Premise>;
 
             fn premises(self) -> Self::IntoIter {
                 #struct_name::when(self).into_iter()

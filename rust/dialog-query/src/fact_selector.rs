@@ -12,8 +12,7 @@
 //! pattern matching evaluation (when variables are involved).
 
 use crate::artifact::{ArtifactSelector, Attribute, Constrained, Entity, Value};
-use crate::deductive_rule::PlanError;
-use crate::error::{QueryError, QueryResult};
+use crate::error::{PlanError, QueryError, QueryResult};
 use crate::plan::{EvaluationContext, EvaluationPlan};
 use crate::query::{Query, Store};
 use crate::selection::{Match, Selection};

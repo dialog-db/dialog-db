@@ -33,7 +33,7 @@
 //! ```
 
 use crate::artifact::TypeError;
-use crate::formula::FormulaEvaluationError;
+use crate::error::FormulaEvaluationError;
 use crate::{Match, Parameters, Value};
 
 /// A cursor for reading from and writing to matches during formula evaluation

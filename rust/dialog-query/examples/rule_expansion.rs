@@ -109,7 +109,7 @@ mod person {
     }
 
     impl dialog_query::rule::Premises for Match {
-        type IntoIter = std::vec::IntoIter<dialog_query::deductive_rule::Premise>;
+        type IntoIter = std::vec::IntoIter<dialog_query::Premise>;
 
         fn premises(self) -> Self::IntoIter {
             // For now return empty - proper implementation would convert Match to statements

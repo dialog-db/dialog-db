@@ -1,4 +1,4 @@
-use crate::deductive_rule::Plan;
+use super::Plan;
 use crate::{try_stream, EvaluationContext, EvaluationPlan, Selection, Store};
 use core::pin::Pin;
 
@@ -53,5 +53,26 @@ impl Join {
                 },
             }
         })
+    }
+}
+
+#[test]
+fn test_join_operations() {
+    let join = Join::new();
+    match join {
+        Join::Identity => {
+            // Expected initial state
+        }
+        _ => panic!("Expected Identity variant"),
+    }
+
+    // Test building joins
+    let plans = vec![];
+    let join_from_plans = Join::from(plans);
+    match join_from_plans {
+        Join::Identity => {
+            // Expected for empty vec
+        }
+        _ => panic!("Expected Identity for empty plans"),
     }
 }
