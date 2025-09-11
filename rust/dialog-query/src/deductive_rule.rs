@@ -4,6 +4,7 @@ use crate::fact_selector::FactSelector;
 use crate::fact_selector::{BASE_COST, ENTITY_COST, VALUE_COST};
 use crate::formula::{FormulaApplication, FormulaApplicationPlan};
 use crate::join::Join;
+use crate::parameters::Parameters;
 use crate::plan::EvaluationPlan;
 use crate::{try_stream, QueryError};
 use crate::{EvaluationContext, Selection, Store, Term, Type, Value};
@@ -15,36 +16,6 @@ use std::fmt::{Debug, Display};
 use std::usize;
 use thiserror::Error;
 use tokio;
-
-/// Represents set of bindings used in the rule or formula applications. It is
-/// effectively a map of terms (constant or variable) keyed by parameter names.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Terms(HashMap<String, Term<Value>>);
-impl Terms {
-    pub fn new() -> Self {
-        Self(HashMap::new())
-    }
-    /// Returns the term associated with the given parameter name, if has one.
-    pub fn get(&self, name: &str) -> Option<&Term<Value>> {
-        self.0.get(name)
-    }
-
-    /// Inserts a new term binding for the given parameter name.
-    /// If the parameter already exists, it will be overwritten.
-    pub fn insert(&mut self, name: String, term: Term<Value>) {
-        self.0.insert(name, term);
-    }
-
-    /// Checks if a term binding exists for the given parameter name.
-    pub fn contains(&self, name: &str) -> bool {
-        self.0.contains_key(name)
-    }
-
-    /// Returns an iterator over all parameter-term pairs in this binding set.
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &Term<Value>)> {
-        self.0.iter()
-    }
-}
 
 /// Represents a conclusion of the rule as a set of attribute descriptors keyed
 /// by the rule parameter name. It is effectively describes decomposition into
@@ -186,7 +157,7 @@ impl DeductiveRule {
     /// Creates a rule application by binding the provided terms to this rule's parameters.
     /// Validates that all required parameters are provided and returns an error if the
     /// application would be invalid.
-    pub fn apply(&self, terms: Terms) -> Result<RuleApplication, AnalyzerError> {
+    pub fn apply(&self, terms: Parameters) -> Result<RuleApplication, AnalyzerError> {
         let application = RuleApplication::new(self.clone(), terms);
         application.analyze().and(Ok(application))
     }
@@ -218,7 +189,7 @@ pub struct Concept {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConcetApplication {
     /// The term bindings for this concept application.
-    pub terms: Terms,
+    pub terms: Parameters,
     /// The concept being applied.
     pub concept: Concept,
 }
@@ -475,14 +446,14 @@ impl From<PlanError> for QueryError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuleApplication {
     /// Applied terms
-    terms: Terms,
+    terms: Parameters,
     /// Rule being applied
     rule: DeductiveRule,
 }
 
 impl RuleApplication {
     /// Creates a new rule application with the given rule and term bindings.
-    pub fn new(rule: DeductiveRule, terms: Terms) -> Self {
+    pub fn new(rule: DeductiveRule, terms: Parameters) -> Self {
         RuleApplication { rule, terms }
     }
 
@@ -755,7 +726,7 @@ pub struct RuleApplicationPlan {
     /// Total estimated execution cost.
     pub cost: usize,
     /// Term bindings for the rule parameters.
-    pub terms: Terms,
+    pub terms: Parameters,
     /// Ordered list of sub-plans to execute.
     pub conjuncts: Vec<Plan>,
     /// Variables that will be provided by this plan.
@@ -1344,26 +1315,6 @@ mod tests {
     use crate::term::Term;
 
     #[test]
-    fn test_terms_basic_operations() {
-        let mut terms = Terms::new();
-
-        // Test insertion and retrieval
-        let name_term = Term::var("name");
-        terms.insert("name".to_string(), name_term.clone());
-
-        assert_eq!(terms.get("name"), Some(&name_term));
-        assert_eq!(terms.get("nonexistent"), None);
-        assert!(terms.contains("name"));
-        assert!(!terms.contains("nonexistent"));
-
-        // Test iteration
-        let collected: Vec<_> = terms.iter().collect();
-        assert_eq!(collected.len(), 1);
-        assert_eq!(collected[0].0, &"name".to_string());
-        assert_eq!(collected[0].1, &name_term);
-    }
-
-    #[test]
     fn test_conclusion_operations() {
         let mut attributes = HashMap::new();
         attributes.insert(
@@ -1483,7 +1434,7 @@ mod tests {
             attributes,
         };
 
-        let mut terms = Terms::new();
+        let mut terms = Parameters::new();
         terms.insert("name".to_string(), Term::var("person_name"));
         terms.insert("age".to_string(), Term::var("person_age"));
 
@@ -1645,7 +1596,7 @@ mod tests {
         }
 
         // Test other variants exist
-        let mut terms = Terms::new();
+        let mut terms = Parameters::new();
         terms.insert("test".to_string(), Term::var("test_var"));
         let concept = Concept {
             operator: "test".to_string(),

@@ -18,25 +18,23 @@
 //!
 //! ```
 //! use dialog_query::cursor::Cursor;
-//! use dialog_query::deductive_rule::Terms;
-//! use dialog_query::{Term, Match, Value};
+//! use dialog_query::{Term, Match, Value, Parameters};
 //!
-//! let mut terms = Terms::new();
-//! terms.insert("x".to_string(), Term::var("input_x"));
-//! terms.insert("result".to_string(), Term::var("output_y"));
+//! let mut parameters = Parameters::new();
+//! parameters.insert("x".to_string(), Term::var("input_x"));
+//! parameters.insert("result".to_string(), Term::var("output_y"));
 //!
-//! let match_frame = Match::new()
+//! let source = Match::new()
 //!     .set(Term::var("input_x"), 42u32).unwrap();
 //!
-//! let cursor = Cursor::new(match_frame, terms);
-//! let x_value: u32 = cursor.read("x").unwrap();  // Reads from variable "input_x"
-//! assert_eq!(x_value, 42);
+//! let cursor = Cursor::new(source, parameters);
+//! let x: u32 = cursor.read("x").unwrap();  // Reads from variable "input_x"
+//! assert_eq!(x, 42);
 //! ```
 
 use crate::artifact::TypeError;
-use crate::deductive_rule::Terms;
 use crate::formula::FormulaEvaluationError;
-use crate::{Match, Value};
+use crate::{Match, Parameters, Value};
 
 /// A cursor for reading from and writing to matches during formula evaluation
 ///
@@ -48,7 +46,7 @@ pub struct Cursor {
     /// The current match containing variable bindings
     pub source: Match,
     /// Mapping from parameter names to query terms
-    pub terms: Terms,
+    pub terms: Parameters,
 }
 
 // TODO: Rename cursor
@@ -59,7 +57,7 @@ impl Cursor {
     /// # Arguments
     /// * `source` - The match containing current variable bindings
     /// * `terms` - Mapping from formula parameter names to query terms
-    pub fn new(source: Match, terms: Terms) -> Self {
+    pub fn new(source: Match, terms: Parameters) -> Self {
         Self { source, terms }
     }
 
@@ -85,15 +83,14 @@ impl Cursor {
     /// # Example
     /// ```
     /// # use dialog_query::cursor::Cursor;
-    /// # use dialog_query::deductive_rule::Terms;
-    /// # use dialog_query::{Term, Match, Value};
-    /// # let mut terms = Terms::new();
-    /// # terms.insert("x".to_string(), Term::var("test_x"));
-    /// # terms.insert("name".to_string(), Term::var("test_name"));
-    /// # let match_frame = Match::new()
+    /// # use dialog_query::{Term, Match, Value, Parameters};
+    /// # let mut parameters = Parameters::new();
+    /// # parameters.insert("x".to_string(), Term::var("test_x"));
+    /// # parameters.insert("name".to_string(), Term::var("test_name"));
+    /// # let input = Match::new()
     /// #     .set(Term::var("test_x"), 42u32).unwrap()
     /// #     .set(Term::var("test_name"), "hello".to_string()).unwrap();
-    /// # let cursor = Cursor::new(match_frame, terms);
+    /// # let cursor = Cursor::new(input, parameters);
     /// let x: u32 = cursor.read("x").unwrap();
     /// let name: String = cursor.read("name").unwrap();
     /// assert_eq!(x, 42);
@@ -144,12 +141,11 @@ impl Cursor {
     /// # Example
     /// ```
     /// # use dialog_query::cursor::Cursor;
-    /// # use dialog_query::deductive_rule::Terms;
-    /// # use dialog_query::{Term, Match, Value};
-    /// # let mut terms = Terms::new();
-    /// # terms.insert("result".to_string(), Term::var("output"));
-    /// # let match_frame = Match::new();
-    /// # let mut cursor = Cursor::new(match_frame, terms);
+    /// # use dialog_query::{Term, Match, Value, Parameters};
+    /// # let mut parameters = Parameters::new();
+    /// # parameters.insert("result".to_string(), Term::var("output"));
+    /// # let source = Match::new();
+    /// # let mut cursor = Cursor::new(source, parameters);
     /// cursor.write("result", &Value::UnsignedInt(42)).unwrap();
     /// let result: u32 = cursor.read("result").unwrap();
     /// assert_eq!(result, 42);
@@ -180,7 +176,7 @@ impl Cursor {
     /// Get an immutable reference to the terms mapping
     ///
     /// This exposes the mapping between parameter names and query terms.
-    pub fn terms(&self) -> &Terms {
+    pub fn terms(&self) -> &Parameters {
         &self.terms
     }
 }
@@ -192,7 +188,7 @@ mod tests {
 
     #[test]
     fn test_cursor_read_write() {
-        let mut terms = Terms::new();
+        let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("test").into());
 
         let source = Match::new()
@@ -220,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_cursor_missing_parameter() {
-        let terms = Terms::new(); // Empty terms
+        let terms = Parameters::new(); // Empty terms
         let source = Match::new();
         let cursor = Cursor::new(source, terms);
 
@@ -233,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_cursor_unbound_variable() {
-        let mut terms = Terms::new();
+        let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("unbound").into());
 
         let source = Match::new(); // No bindings

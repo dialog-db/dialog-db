@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 
-use crate::artifact::{Entity, Value};
 use crate::attribute::Attribute;
 use crate::deductive_rule::{
     Analysis, AnalyzerError, Application, ConceptPlan, ConcetApplication, Dependencies, PlanError,
-    Planner, Premise, Requirement, Terms,
+    Planner, Premise, Requirement,
 };
 use crate::error::QueryError;
 use crate::fact_selector::{BASE_COST, ENTITY_COST, VALUE_COST};
@@ -14,6 +13,7 @@ use crate::term::Term;
 use crate::FactSelector;
 use crate::Selection;
 use crate::VariableScope;
+use crate::{Entity, Parameters, Value};
 use dialog_artifacts::Instruction;
 
 /// Concept is a set of attributes associated with entity representing an
@@ -172,7 +172,7 @@ impl<T: Match> Query for T {
     }
 }
 
-impl<T: Match> From<T> for Terms {
+impl<T: Match> From<T> for Parameters {
     fn from(source: T) -> Self {
         let mut terms = Self::new();
         if let Some(term) = source.term_for("this") {

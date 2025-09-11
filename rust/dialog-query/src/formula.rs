@@ -48,10 +48,9 @@
 //! Here's a complete example of implementing a Sum formula:
 //!
 //! ```
+//! use dialog_query::{Parameters, Term, Match, Value, Dependencies};
 //! use dialog_query::formula::{Formula, Compute, FormulaApplication, FormulaEvaluationError};
-//! use dialog_query::deductive_rule::{Terms, Dependencies};
 //! use dialog_query::cursor::Cursor;
-//! use dialog_query::{Term, Match, Value};
 //!
 //! // 1. Define the formula struct with input and output fields
 //! #[derive(Debug, Clone)]
@@ -118,19 +117,19 @@
 //! }
 //!
 //! // 6. Use the formula in a query
-//! let mut terms = Terms::new();
-//! terms.insert("of".to_string(), Term::var("x"));
-//! terms.insert("with".to_string(), Term::var("y"));
-//! terms.insert("is".to_string(), Term::var("result"));
+//! let mut parameters = Parameters::new();
+//! parameters.insert("of".to_string(), Term::var("x"));
+//! parameters.insert("with".to_string(), Term::var("y"));
+//! parameters.insert("is".to_string(), Term::var("result"));
 //!
-//! let formula_app = Sum::apply(terms);
+//! let sum = Sum::apply(parameters);
 //!
 //! // Apply to a match with x=5, y=3
-//! let input_match = Match::new()
+//! let source = Match::new()
 //!     .set(Term::var("x"), 5u32).unwrap()
 //!     .set(Term::var("y"), 3u32).unwrap();
 //!
-//! let results = formula_app.expand(input_match).unwrap();
+//! let results = sum.derive(source).unwrap();
 //! assert_eq!(results[0].get::<u32>(&Term::var("result")).unwrap(), 8);
 //! ```
 //!
@@ -176,9 +175,9 @@
 //! ```
 
 use crate::cursor::Cursor;
-use crate::deductive_rule::{Analysis, AnalyzerError, Dependencies, PlanError, Requirement, Terms};
+use crate::deductive_rule::{Analysis, AnalyzerError, Dependencies, PlanError, Requirement};
 use crate::{try_stream, EvaluationContext, Match, QueryError, Selection, Store, Term, Value};
-use crate::{ValueDataType, VariableScope};
+use crate::{Parameters, ValueDataType, VariableScope};
 use std::fmt::Display;
 use thiserror::Error;
 
@@ -197,15 +196,14 @@ pub enum FormulaEvaluationError {
     /// # Example
     /// ```should_panic
     /// # use dialog_query::formula::{Sum, Formula};
-    /// # use dialog_query::deductive_rule::Terms;
-    /// # use dialog_query::{Term, Match, Value};
-    /// let mut terms = Terms::new();
+    /// # use dialog_query::{Term, Match, Value, Parameters};
+    /// let mut parameters = Parameters::new();
     /// // Missing "with" parameter!
-    /// terms.insert("of".to_string(), Term::var("x"));
+    /// parameters.insert("of".to_string(), Term::var("x"));
     ///
-    /// let app = Sum::apply(terms);
+    /// let sum = Sum::apply(parameters);
     /// let input = Match::new().set(Term::var("x"), 5u32).unwrap();
-    /// let result = app.expand(input).unwrap(); // Will panic with RequiredParameter
+    /// let result = sum.derive(input).unwrap(); // Will panic with RequiredParameter
     /// ```
     #[error("Formula application omits required parameter \"{parameter}\"")]
     RequiredParameter { parameter: String },
@@ -218,16 +216,15 @@ pub enum FormulaEvaluationError {
     /// # Example
     /// ```should_panic
     /// # use dialog_query::formula::{Sum, Formula};
-    /// # use dialog_query::deductive_rule::Terms;
-    /// # use dialog_query::{Term, Match, Value};
-    /// # let mut terms = Terms::new();
-    /// # terms.insert("of".to_string(), Term::var("x"));
-    /// # terms.insert("with".to_string(), Term::var("y"));
-    /// # terms.insert("is".to_string(), Term::var("result"));
-    /// # let app = Sum::apply(terms);
+    /// # use dialog_query::{Term, Match, Value, Parameters};
+    /// # let mut parameters = Parameters::new();
+    /// # parameters.insert("of".to_string(), Term::var("x"));
+    /// # parameters.insert("with".to_string(), Term::var("y"));
+    /// # parameters.insert("is".to_string(), Term::var("result"));
+    /// # let sum = Sum::apply(parameters);
     /// let input = Match::new();
     /// // Variable ?x is not bound!
-    /// let result = app.expand(input).unwrap(); // Will panic with UnboundVariable
+    /// let result = sum.derive(input).unwrap(); // Will panic with UnboundVariable
     /// ```
     #[error("Variable {term} for '{parameter}' required parameter is not bound")]
     UnboundVariable {
@@ -405,10 +402,10 @@ pub trait Formula: Sized + Clone {
     ///
     /// let app = Sum::apply(terms);
     /// ```
-    fn apply(terms: Terms) -> FormulaApplication {
+    fn apply(terms: Parameters) -> FormulaApplication {
         FormulaApplication {
             cost: 5,
-            terms,
+            parameters: terms,
             name: Self::name(),
             dependencies: Self::dependencies(),
             compute: |cursor| Self::derive_match(cursor),
@@ -428,21 +425,25 @@ pub trait Compute: Formula + Sized {
 /// in the deductive rule system, allowing formulas to be used as premises in rules.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FormulaApplication {
-    pub cost: usize,
-    /// Parameter name to term mappings
-    pub terms: Terms,
-    /// Formula identifier for error reporting and debugging
+    /// Formula identifier being applied
     pub name: &'static str,
+    /// Parameter of the application keyed by names
+    pub parameters: Parameters,
+
     /// Parameter dependencies for planning and analysis
     pub dependencies: Dependencies,
+
+    /// Base cost of evalutaion not accounting for the dependencies
+    pub cost: usize,
+
     /// Function pointer to the formula's computation logic
     pub compute: fn(&mut Cursor) -> Result<Vec<Match>, FormulaEvaluationError>,
 }
 
 impl FormulaApplication {
-    /// Expand a single match using this formula
-    pub fn expand(&self, frame: Match) -> Result<Vec<Match>, FormulaEvaluationError> {
-        let mut cursor = Cursor::new(frame, self.terms.clone());
+    /// Computes a single match using this formula
+    pub fn derive(&self, input: Match) -> Result<Vec<Match>, FormulaEvaluationError> {
+        let mut cursor = Cursor::new(input, self.parameters.clone());
         (self.compute)(&mut cursor)
     }
 
@@ -455,11 +456,12 @@ impl FormulaApplication {
 
     pub fn plan(&self, scope: &VariableScope) -> Result<FormulaApplicationPlan, PlanError> {
         let mut cost = self.cost;
-        let mut provides = VariableScope::new();
+        let mut derives = VariableScope::new();
         // We ensure that all terms for all required formula parametrs are
-        // applied, otherwise we fail.
+        // applied, otherwise we fail. We also identify all the dependencies
+        // that formula will derive.
         for (name, requirement) in self.dependencies.iter() {
-            let term = self.terms.get(name);
+            let term = self.parameters.get(name);
             match requirement {
                 Requirement::Required => {
                     if let Some(parameter) = term {
@@ -481,7 +483,7 @@ impl FormulaApplication {
                 }
                 Requirement::Derived(estimate) => match term {
                     Some(term) => {
-                        provides.add(term);
+                        derives.add(term);
                     }
                     None => {
                         cost += estimate;
@@ -491,12 +493,9 @@ impl FormulaApplication {
         }
 
         Ok(FormulaApplicationPlan {
+            application: self.clone(),
             cost,
-            provides,
-            terms: self.terms.clone(),
-            name: self.name,
-            dependencies: self.dependencies.clone(),
-            compute: self.compute,
+            derives,
         })
     }
 }
@@ -504,7 +503,7 @@ impl FormulaApplication {
 impl Display for FormulaApplication {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} {{", self.name)?;
-        for (name, term) in self.terms.iter() {
+        for (name, term) in self.parameters.iter() {
             write!(f, "{}: {},", name, term)?;
         }
         write!(f, "}}")
@@ -513,17 +512,16 @@ impl Display for FormulaApplication {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FormulaApplicationPlan {
+    /// Planned formula application
+    pub application: FormulaApplication,
+
+    /// Cost of evalutaion in a scope where all of the non `dervider`
+    /// `dependencies` are bound.
     pub cost: usize,
-    /// Number of bindings it provides on evaluation
-    pub provides: VariableScope,
-    /// Parameter name to term mappings
-    pub terms: Terms,
-    /// Formula identifier for error reporting and debugging
-    pub name: &'static str,
-    /// Parameter dependencies for planning and analysis
-    pub dependencies: Dependencies,
-    /// Function pointer to the formula's computation logic
-    pub compute: fn(&mut Cursor) -> Result<Vec<Match>, FormulaEvaluationError>,
+
+    /// Set of terms that will be derived by this application during
+    /// after evaluation
+    pub derives: VariableScope,
 }
 
 impl FormulaApplicationPlan {
@@ -531,15 +529,15 @@ impl FormulaApplicationPlan {
         self.cost
     }
     pub fn provides(&self) -> &VariableScope {
-        &self.provides
+        &self.derives
     }
     /// Evaluate the formula over a stream of matches
     pub fn evaluate<S: Store, M: Selection>(
         &self,
         context: EvaluationContext<S, M>,
     ) -> impl Selection {
-        let terms = self.terms.clone();
-        let compute = self.compute;
+        let terms = self.application.parameters.clone();
+        let compute = self.application.compute;
         try_stream! {
 
             for await source in context.selection {
@@ -655,7 +653,7 @@ mod tests {
     #[test]
     fn test_sum_formula_basic() {
         // Create Terms mapping
-        let mut terms = Terms::new();
+        let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x").into());
         terms.insert("with".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
@@ -671,7 +669,7 @@ mod tests {
         let app = Sum::apply(terms);
 
         // Expand the formula
-        let results = app.expand(input).expect("Formula expansion failed");
+        let results = app.derive(input).expect("Formula expansion failed");
 
         // Verify results
         assert_eq!(results.len(), 1);
@@ -687,7 +685,7 @@ mod tests {
 
     #[test]
     fn test_cursor_read_write() {
-        let mut terms = Terms::new();
+        let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("test").into());
 
         let source = Match::new()
@@ -715,7 +713,7 @@ mod tests {
 
     #[test]
     fn test_sum_formula_missing_input() {
-        let mut terms = Terms::new();
+        let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x").into());
         terms.insert("with".to_string(), Term::var("missing").into());
         terms.insert("is".to_string(), Term::var("result").into());
@@ -725,7 +723,7 @@ mod tests {
             .expect("Failed to set x");
 
         let app = Sum::apply(terms);
-        let result = app.expand(input);
+        let result = app.derive(input);
 
         assert!(result.is_err());
         assert!(matches!(
@@ -737,7 +735,7 @@ mod tests {
     #[test]
     fn test_sum_formula_multiple_expand() {
         // Test multiple expansions without the stream complexity
-        let mut terms = Terms::new();
+        let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("a").into());
         terms.insert("with".to_string(), Term::var("b").into());
         terms.insert("is".to_string(), Term::var("sum").into());
@@ -751,7 +749,7 @@ mod tests {
             .set(Term::var("b"), 3u32)
             .unwrap();
 
-        let results1 = app.expand(input1).expect("First expansion failed");
+        let results1 = app.derive(input1).expect("First expansion failed");
         assert_eq!(results1.len(), 1);
         let result1 = &results1[0];
         assert_eq!(result1.get::<u32>(&Term::var("a")).ok(), Some(2));
@@ -765,7 +763,7 @@ mod tests {
             .set(Term::var("b"), 15u32)
             .unwrap();
 
-        let results2 = app.expand(input2).expect("Second expansion failed");
+        let results2 = app.derive(input2).expect("Second expansion failed");
         assert_eq!(results2.len(), 1);
         let result2 = &results2[0];
         assert_eq!(result2.get::<u32>(&Term::var("a")).ok(), Some(10));
