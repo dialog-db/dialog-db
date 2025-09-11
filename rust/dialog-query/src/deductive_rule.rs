@@ -1,4 +1,4 @@
-use crate::artifact::{Entity, ValueDataType};
+use crate::artifact::Entity;
 use crate::attribute::Attribute;
 use crate::fact_selector::FactSelector;
 use crate::fact_selector::{BASE_COST, ENTITY_COST, VALUE_COST};
@@ -816,51 +816,6 @@ impl EvaluationPlan for RuleApplicationPlan {
     fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
         let join = Join::from(self.conjuncts.clone());
         join.evaluate(context)
-    }
-}
-
-// The evaluate method is now part of the EvaluationPlan trait implementation above
-
-// yield_all function removed as it's no longer needed
-
-/// Represents a set of named cells that formula operates on. Each cell also
-/// describes whether it is required or optional and cost of its omission.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Cells(HashMap<String, Cell>);
-
-/// Describes a cell of the formula - a named parameter with type and requirement info.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Cell {
-    /// Name of the cell parameter.
-    pub name: &'static str,
-    /// Human-readable description of what this cell represents.
-    pub description: &'static str,
-    /// Whether this cell is required or can be derived.
-    pub requirement: Requirement,
-    /// Expected data type for values in this cell.
-    pub data_type: ValueDataType,
-}
-
-impl Cells {
-    /// Creates a new empty cell collection.
-    pub fn new() -> Self {
-        Cells(HashMap::new())
-    }
-
-    /// Returns an iterator over all cells as (name, cell) pairs.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &Cell)> {
-        self.0.iter().map(|(k, v)| (k.as_str(), v))
-    }
-
-    /// Gets a cell by name if it exists.
-    pub fn get(&self, name: &str) -> Option<&Cell> {
-        self.0.get(name)
-    }
-
-    /// Adds a new cell to this collection.
-    pub fn add(&mut self, name: String, cell: Cell) -> &mut Self {
-        self.0.insert(name, cell);
-        self
     }
 }
 
