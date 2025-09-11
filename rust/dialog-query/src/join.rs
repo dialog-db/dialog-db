@@ -1,5 +1,6 @@
 use crate::deductive_rule::Plan;
-use crate::{try_stream, EvaluationContext, EvaluationPlan, Match, QueryError, Selection, Store};
+use crate::{try_stream, EvaluationContext, EvaluationPlan, Selection, Store};
+use core::pin::Pin;
 
 /// Represents a join operation that combines multiple query plans.
 /// Uses a recursive structure to chain plans together.
@@ -34,30 +35,23 @@ impl Join {
     pub fn evaluate<S: Store, M: Selection>(
         self,
         context: EvaluationContext<S, M>,
-    ) -> impl Selection {
-        use futures_util::stream::BoxStream;
-
-        fn evaluate_recursive<S: Store, M: Selection>(
-            join: Join,
-            context: EvaluationContext<S, M>,
-        ) -> BoxStream<'static, Result<Match, QueryError>> {
-            match join {
-                Join::Identity => Box::pin(try_stream! {
+    ) -> Pin<Box<dyn Selection>> {
+        Box::pin(try_stream! {
+            match self {
+                Join::Identity => {
                     for await each in context.selection {
                         yield each?;
                     }
-                }),
-                Join::Join(left, right) => Box::pin(try_stream! {
+                },
+                Join::Join(left, right) => {
                     let store = context.store.clone();
-                    let selection = evaluate_recursive(*left, context);
+                    let selection = left.evaluate(context);
                     let output = right.evaluate(EvaluationContext { selection, store });
                     for await each in output {
                         yield each?;
                     }
-                }),
+                },
             }
-        }
-
-        evaluate_recursive(self, context)
+        })
     }
 }
