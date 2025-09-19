@@ -14,7 +14,9 @@ where
     T: crate::types::Scalar,
 {
     fn collect_instructions(self) -> Vec<Instruction> {
-        self.into_iter().flat_map(|claim| -> Vec<Instruction> { claim.into() }).collect()
+        self.into_iter()
+            .flat_map(|claim| -> Vec<Instruction> { claim.into() })
+            .collect()
     }
 }
 
@@ -78,7 +80,7 @@ mod tests {
     #[tokio::test]
     async fn test_session() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value};
-        use crate::Fact;
+        use crate::{Fact, Term};
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -125,12 +127,7 @@ mod tests {
         );
         attributes.insert(
             "age".into(),
-            Attribute::new(
-                &"person",
-                &"age",
-                &"person age",
-                ValueDataType::UnsignedInt,
-            ),
+            Attribute::new(&"person", &"age", &"person age", ValueDataType::UnsignedInt),
         );
 
         let person = predicate::Concept {
@@ -138,16 +135,29 @@ mod tests {
             attributes,
         };
 
-        // The issue is here - we need parameters to bind to make a valid plan
-        let mut parameters = Parameters::new();
-        parameters.insert("name".to_string(), Value::String("Alice".to_string()).into()); // Add a constraint
-        
-        let application = person.apply(parameters);
+        let name = Term::var("name");
+        let age = Term::var("age");
+        let mut params = Parameters::new();
+        params.insert("name".into(), name.clone());
+        params.insert("age".into(), age.clone());
+
+        // Let's test with empty parameters first to see the exact error
+        let application = person.apply(params);
 
         let plan = application.plan(&VariableScope::new())?;
 
         let selection = plan.query(&session.store)?.collect_matches().await?;
-        assert_eq!(selection.len(), 1); // Should find just Alice now
+        assert_eq!(selection.len(), 2); // Should find just Alice and Bob
+
+        if let [alice, bob] = selection.as_slice() {
+            assert_eq!(alice.get(&name)?, Value::String("Alice".into()));
+            assert_eq!(alice.get(&age)?, Value::UnsignedInt(25));
+
+            assert_eq!(bob.get(&name)?, Value::String("Bob".into()));
+            assert_eq!(bob.get(&age)?, Value::UnsignedInt(30));
+        } else {
+            panic!("expected two matches");
+        }
 
         Ok(())
     }
