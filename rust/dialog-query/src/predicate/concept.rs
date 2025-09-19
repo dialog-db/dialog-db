@@ -1,4 +1,5 @@
-use crate::{Attribute, Value};
+use crate::application::ConcetApplication;
+use crate::{Application, Attribute, Parameters, Value};
 use std::collections::HashMap;
 
 /// Represents a concept which is a set of attributes that define an entity type.
@@ -10,4 +11,13 @@ pub struct Concept {
     pub operator: String,
     /// Map of attribute names to their definitions for this concept.
     pub attributes: HashMap<String, Attribute<Value>>,
+}
+
+impl Concept {
+    pub fn apply(&self, parameters: Parameters) -> Application {
+        Application::Realize(ConcetApplication {
+            terms: parameters,
+            concept: self.clone(),
+        })
+    }
 }

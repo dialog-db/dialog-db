@@ -26,6 +26,7 @@ pub mod query;
 pub mod rule;
 pub mod selection;
 pub mod selector;
+pub mod session;
 pub mod stream;
 pub mod syntax;
 pub mod term;

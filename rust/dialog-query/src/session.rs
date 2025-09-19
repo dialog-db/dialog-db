@@ -1,0 +1,154 @@
+use dialog_common::ConditionalSend;
+
+use crate::artifact::{ArtifactStoreMutExt, DialogArtifactsError};
+use dialog_artifacts::Instruction;
+
+/// A trait for collections of instruction-producing items
+pub trait Changes: ConditionalSend {
+    fn collect_instructions(self) -> Vec<Instruction>;
+}
+
+// Implement Changes for Vec<Claim<T>>
+impl<T> Changes for Vec<crate::fact::Claim<T>>
+where
+    T: crate::types::Scalar,
+{
+    fn collect_instructions(self) -> Vec<Instruction> {
+        self.into_iter().flat_map(|claim| -> Vec<Instruction> { claim.into() }).collect()
+    }
+}
+
+// Implement Changes for single Claim<T>
+impl<T> Changes for crate::fact::Claim<T>
+where
+    T: crate::types::Scalar,
+{
+    fn collect_instructions(self) -> Vec<Instruction> {
+        let vec: Vec<Instruction> = self.into();
+        vec
+    }
+}
+
+// Implement Changes for Vec<Instruction>
+impl Changes for Vec<Instruction> {
+    fn collect_instructions(self) -> Vec<Instruction> {
+        self
+    }
+}
+
+// Implement Changes for single Instruction
+impl Changes for Instruction {
+    fn collect_instructions(self) -> Vec<Instruction> {
+        vec![self]
+    }
+}
+
+pub struct Session<S>
+where
+    S: ArtifactStoreMutExt + ConditionalSend,
+{
+    store: S,
+}
+
+impl<S: ArtifactStoreMutExt + ConditionalSend> Session<S> {
+    pub fn open(store: S) -> Self {
+        Session { store }
+    }
+
+    pub async fn commit<C: Changes>(&mut self, changes: C) -> Result<(), DialogArtifactsError> {
+        let instructions = changes.collect_instructions();
+        ArtifactStoreMutExt::commit(&mut self.store, instructions).await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, marker::PhantomData};
+
+    use dialog_artifacts::{ArtifactStore, ValueDataType};
+    use futures_util::{task::UnsafeFutureObj, StreamExt};
+
+    use crate::{
+        predicate, query::PlannedQuery, Attribute, Parameters, SelectionExt, VariableScope,
+    };
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_session() -> anyhow::Result<()> {
+        use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value};
+        use crate::Fact;
+        use dialog_storage::MemoryStorageBackend;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store);
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        let mallory = Entity::new()?;
+
+        session
+            .commit(vec![
+                Fact::assert(
+                    "person/name".parse::<ArtifactAttribute>()?,
+                    alice.clone(),
+                    Value::String("Alice".to_string()),
+                ),
+                Fact::assert(
+                    "person/age".parse::<ArtifactAttribute>()?,
+                    alice.clone(),
+                    Value::UnsignedInt(25),
+                ),
+                Fact::assert(
+                    "person/name".parse::<ArtifactAttribute>()?,
+                    bob.clone(),
+                    Value::String("Bob".to_string()),
+                ),
+                Fact::assert(
+                    "person/age".parse::<ArtifactAttribute>()?,
+                    bob.clone(),
+                    Value::UnsignedInt(30),
+                ),
+                Fact::assert(
+                    "person/name".parse::<ArtifactAttribute>()?,
+                    mallory.clone(),
+                    Value::String("Mallory".to_string()),
+                ),
+            ])
+            .await?;
+
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "name".into(),
+            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+        );
+        attributes.insert(
+            "age".into(),
+            Attribute::new(
+                &"person",
+                &"age",
+                &"person age",
+                ValueDataType::UnsignedInt,
+            ),
+        );
+
+        let person = predicate::Concept {
+            operator: "person".into(),
+            attributes,
+        };
+
+        // The issue is here - we need parameters to bind to make a valid plan
+        let mut parameters = Parameters::new();
+        parameters.insert("name".to_string(), Value::String("Alice".to_string()).into()); // Add a constraint
+        
+        let application = person.apply(parameters);
+
+        let plan = application.plan(&VariableScope::new())?;
+
+        let selection = plan.query(&session.store)?.collect_matches().await?;
+        assert_eq!(selection.len(), 1); // Should find just Alice now
+
+        Ok(())
+    }
+}

@@ -49,6 +49,26 @@ pub enum Claim<T = Value> {
     },
 }
 
+impl<T: Scalar> From<Claim<T>> for Vec<Instruction> {
+    fn from(claim: Claim<T>) -> Self {
+        let instruction = match claim {
+            Claim::Assertion { the, of, is } => Instruction::Assert(Artifact {
+                the,
+                of,
+                is: is.as_value(),
+                cause: None,
+            }),
+            Claim::Retraction { the, of, is } => Instruction::Retract(Artifact {
+                the,
+                of,
+                is: is.as_value(),
+                cause: None,
+            }),
+        };
+        vec![instruction]
+    }
+}
+
 /// A fact represents persisted data with a cause - can be an assertion or retraction
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Fact<T = Value> {

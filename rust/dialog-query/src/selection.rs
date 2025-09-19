@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use crate::artifact::{Value, ValueDataType};
 use dialog_common::ConditionalSend;
 
-use futures_util::stream::Stream;
+pub use futures_util::stream::Stream;
 use std::pin::Pin;
 use std::task;
 
