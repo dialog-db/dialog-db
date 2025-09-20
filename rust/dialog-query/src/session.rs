@@ -178,7 +178,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_matches_complete_conepts() -> anyhow::Result<()> {
-        use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value};
+        use crate::artifact::{
+            Artifacts, Attribute as ArtifactAttribute, Entity, Value, ValueDataType,
+        };
         use crate::{Fact, Term};
         use dialog_storage::MemoryStorageBackend;
 
@@ -224,6 +226,10 @@ mod tests {
             "name".into(),
             Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
         );
+        attributes.insert(
+            "age".into(),
+            Attribute::new(&"person", &"age", &"person age", ValueDataType::UnsignedInt),
+        );
 
         let person = predicate::Concept {
             operator: "person".into(),
@@ -231,10 +237,8 @@ mod tests {
         };
 
         let name = Term::var("name");
-        let age = Term::var("age");
         let mut params = Parameters::new();
         params.insert("name".into(), name.clone());
-        params.insert("age".into(), age.clone());
 
         // Let's test with empty parameters first to see the exact error
         let application = person.apply(params);
@@ -250,7 +254,6 @@ mod tests {
 
         for match_result in selection.iter() {
             let person_name = match_result.get(&name)?;
-            let person_age = match_result.get(&age)?;
 
             match person_name {
                 Value::String(name_str) if name_str == "Alice" => {
@@ -270,16 +273,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_concept_planning_errors() -> anyhow::Result<()> {
-        use crate::artifact::{
-            Artifacts, Attribute as ArtifactAttribute, Entity, Value, ValueDataType,
-        };
-        use crate::{error::PlanError, Fact, Term};
-        use dialog_storage::MemoryStorageBackend;
-
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+    async fn test_concept_planning_empty_parameters() -> anyhow::Result<()> {
+        use crate::artifact::ValueDataType;
+        use crate::error::PlanError;
 
         // Set up concept with attributes
         let mut attributes = HashMap::new();
@@ -297,7 +293,7 @@ mod tests {
             attributes,
         };
 
-        // Test 1: Empty parameters should return UnparameterizedApplication error
+        // Empty parameters should return UnparameterizedApplication error
         let empty_params = Parameters::new();
         let application = person.apply(empty_params);
         let result = application.plan(&VariableScope::new());
@@ -312,7 +308,32 @@ mod tests {
             );
         }
 
-        // Test 2: All blank parameters should return UnparameterizedApplication error
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_concept_planning_all_blank_parameters() -> anyhow::Result<()> {
+        use crate::artifact::ValueDataType;
+        use crate::error::PlanError;
+        use crate::Term;
+
+        // Set up concept with attributes
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "name".into(),
+            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+        );
+        attributes.insert(
+            "age".into(),
+            Attribute::new(&"person", &"age", &"person age", ValueDataType::UnsignedInt),
+        );
+
+        let person = predicate::Concept {
+            operator: "person".into(),
+            attributes,
+        };
+
+        // All blank parameters should return UnparameterizedApplication error
         let mut all_blank_params = Parameters::new();
         all_blank_params.insert("name".into(), Term::blank());
         all_blank_params.insert("age".into(), Term::blank());
@@ -330,17 +351,80 @@ mod tests {
             );
         }
 
-        // Test 3: Parameters that don't match concept attributes should return UnparameterizedApplication
-        let mut no_match_params = Parameters::new();
-        no_match_params.insert("this".into(), Term::var("entity")); // Non-blank "this"
-        no_match_params.insert("unknown_param".into(), Term::var("x"));
+        Ok(())
+    }
 
-        let application = person.apply(no_match_params);
+    #[tokio::test]
+    async fn test_concept_planning_only_this_parameter() -> anyhow::Result<()> {
+        use crate::artifact::ValueDataType;
+        use crate::error::PlanError;
+        use crate::Term;
+
+        // Set up concept with attributes
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "name".into(),
+            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+        );
+        attributes.insert(
+            "age".into(),
+            Attribute::new(&"person", &"age", &"person age", ValueDataType::UnsignedInt),
+        );
+
+        let person = predicate::Concept {
+            operator: "person".into(),
+            attributes,
+        };
+
+        // Only "this" parameter provided - should fail since it doesn't constrain any attributes
+        let mut only_this_params = Parameters::new();
+        only_this_params.insert("this".into(), Term::var("entity")); // Non-blank "this"
+
+        let application = person.apply(only_this_params);
+        let result = application.plan(&VariableScope::new());
+
+        // Should succeed because "this" parameter provides a constraint
+        assert!(
+            result.is_ok(),
+            "Only 'this' parameter should succeed, got: {:?}",
+            result
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_concept_planning_unknown_parameters() -> anyhow::Result<()> {
+        use crate::artifact::ValueDataType;
+        use crate::error::PlanError;
+        use crate::Term;
+
+        // Set up concept with attributes
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "name".into(),
+            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+        );
+        attributes.insert(
+            "age".into(),
+            Attribute::new(&"person", &"age", &"person age", ValueDataType::UnsignedInt),
+        );
+
+        let person = predicate::Concept {
+            operator: "person".into(),
+            attributes,
+        };
+
+        // Unknown parameters only (no "this" or concept attributes) should fail
+        let mut unknown_params = Parameters::new();
+        unknown_params.insert("unknown_param".into(), Term::var("x"));
+
+        let application = person.apply(unknown_params);
         let result = application.plan(&VariableScope::new());
 
         assert!(result.is_err());
         if let Err(PlanError::UnparameterizedApplication) = result {
-            // Expected error - even though "this" is non-blank, no premises can be generated
+            // Expected error - no meaningful parameters for this concept
         } else {
             panic!(
                 "Expected UnparameterizedApplication error, got: {:?}",
@@ -348,18 +432,42 @@ mod tests {
             );
         }
 
-        // Test 4: Mixed case - some parameters match, some don't, but at least one matches (should succeed)
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_concept_planning_mixed_parameters() -> anyhow::Result<()> {
+        use crate::artifact::ValueDataType;
+        use crate::Term;
+
+        // Set up concept with attributes
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "name".into(),
+            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+        );
+        attributes.insert(
+            "age".into(),
+            Attribute::new(&"person", &"age", &"person age", ValueDataType::UnsignedInt),
+        );
+
+        let person = predicate::Concept {
+            operator: "person".into(),
+            attributes,
+        };
+
+        // Mixed case - valid parameters with some matching attributes (should succeed)
         let mut mixed_params = Parameters::new();
         mixed_params.insert("name".into(), Term::var("person_name")); // This matches
-        mixed_params.insert("unknown_param".into(), Term::var("x")); // This doesn't match
+        mixed_params.insert("age".into(), Term::blank()); // This matches but is blank
 
         let application = person.apply(mixed_params);
         let result = application.plan(&VariableScope::new());
 
-        // Should succeed because at least one parameter matches
+        // Should succeed because we have at least one non-blank parameter
         assert!(
             result.is_ok(),
-            "Mixed parameters with at least one match should succeed, got: {:?}",
+            "Mixed parameters with at least one non-blank should succeed, got: {:?}",
             result
         );
 
