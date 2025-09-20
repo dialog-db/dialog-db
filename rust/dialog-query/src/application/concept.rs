@@ -81,9 +81,8 @@ impl ConcetApplication {
         // go over dependencies to add all the terms that will be derived
         // by the application to the `provides` list.
         for (name, attribute) in self.concept.attributes.iter() {
-            let parameter = self.terms.get(name);
             // If parameter was not provided we add it to the provides set
-            if let Some(term) = parameter {
+            let select = if let Some(term) = self.terms.get(name) {
                 // Track if we have any non-blank parameters
                 if !term.is_blank() {
                     parameterized = true;
@@ -94,22 +93,20 @@ impl ConcetApplication {
                     cost += VALUE_COST
                 }
 
-                let select = FactApplication::new()
+                FactApplication::new()
                     .the(attribute.the())
                     .of(this_entity.clone())
-                    .is(term.clone());
-
-                premises.push(select.into());
-            }
+                    .is(term.clone())
+            } else {
+                FactApplication::new()
+                    .the(attribute.the())
+                    .of(this_entity.clone())
+            };
+            premises.push(select.into());
         }
 
         // If we have no non-blank parameters, it's an unparameterized application
         if !parameterized {
-            return Err(PlanError::UnparameterizedApplication);
-        }
-
-        // If we have non-blank parameters but no matching premises, we still need at least one premise
-        if premises.is_empty() {
             return Err(PlanError::UnparameterizedApplication);
         }
 
