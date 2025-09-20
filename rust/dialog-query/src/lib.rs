@@ -10,6 +10,7 @@ pub mod analyzer;
 pub mod application;
 pub mod artifact;
 pub mod attribute;
+pub mod claim;
 pub mod concept;
 pub mod cursor;
 pub mod dependencies;

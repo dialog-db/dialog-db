@@ -1,6 +1,7 @@
 use dialog_common::ConditionalSend;
 
 use crate::artifact::{ArtifactStoreMutExt, DialogArtifactsError};
+use crate::Claim;
 use dialog_artifacts::Instruction;
 
 /// A trait for collections of instruction-producing items
@@ -9,10 +10,7 @@ pub trait Changes: ConditionalSend {
 }
 
 // Implement Changes for Vec<Claim<T>>
-impl<T> Changes for Vec<crate::fact::Claim<T>>
-where
-    T: crate::types::Scalar,
-{
+impl Changes for Vec<Claim> {
     fn collect_instructions(self) -> Vec<Instruction> {
         self.into_iter()
             .flat_map(|claim| -> Vec<Instruction> { claim.into() })
@@ -21,10 +19,7 @@ where
 }
 
 // Implement Changes for single Claim<T>
-impl<T> Changes for crate::fact::Claim<T>
-where
-    T: crate::types::Scalar,
-{
+impl Changes for Claim {
     fn collect_instructions(self) -> Vec<Instruction> {
         let vec: Vec<Instruction> = self.into();
         vec
