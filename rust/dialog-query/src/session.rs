@@ -1,18 +1,74 @@
-use crate::Store;
+//! Database sessions for committing changes
+//!
+//! Sessions provide a high-level interface for committing claims to the database.
 
 use crate::artifact::DialogArtifactsError;
+use crate::Store;
 
+/// A database session for committing changes
+///
+/// Sessions provide a high-level interface for committing claims to the database.
+/// Accepts various input types like `Vec<Claim>`, single claims, or `Claims` collections.
+///
+/// # Examples
+///
+/// ```ignore
+/// use dialog_query::{Session, Fact};
+///
+/// // Open a session
+/// let mut session = Session::open(store);
+///
+/// // Commit individual claims
+/// session.commit(Fact::assert("user/name".parse()?, entity, "Alice".to_string())).await?;
+///
+/// // Commit multiple claims at once
+/// session.commit(vec![
+///     Fact::assert("user/name".parse()?, entity1, "Alice".to_string()),
+///     Fact::assert("user/name".parse()?, entity2, "Bob".to_string()),
+///     Fact::retract("user/email".parse()?, entity1, "old@example.com".to_string()),
+/// ]).await?;
+/// ```
 #[derive(Debug, Clone)]
 pub struct Session<S: Store> {
+    /// The underlying store for database operations
     store: S,
 }
 
 impl<S: Store> Session<S> {
+    /// Open a new session with the provided store
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use dialog_query::Session;
+    ///
+    /// let session = Session::open(artifacts_store);
+    /// ```
     pub fn open(store: S) -> Self {
         Session { store }
     }
 
-    pub async fn commit<I>(&mut self, changes: I) -> Result<(), DialogArtifactsError>
+    /// Transacts changes to the database
+    ///
+    /// Accepts `Vec<Claim>`, single claims, or `Claims` collections.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use dialog_query::{Session, Fact};
+    ///
+    /// let mut session = Session::open(store);
+    ///
+    /// // Transact a vector of claims (preferred API)
+    /// session.transact(vec![
+    ///     Fact::assert("user/name".parse()?, alice, "Alice".to_string()),
+    ///     Fact::assert("user/age".parse()?, alice, 30u32),
+    /// ]).await?;
+    ///
+    /// // Transact a single claim
+    /// session.transact(Fact::retract("user/email".parse()?, alice, "old@example.com".to_string())).await?;
+    /// ```
+    pub async fn transact<I>(&mut self, changes: I) -> Result<(), DialogArtifactsError>
     where
         I: Into<crate::claim::Claims>,
     {
@@ -49,7 +105,7 @@ mod tests {
         let mallory = Entity::new()?;
 
         session
-            .commit(vec![
+            .transact(vec![
                 Fact::assert(
                     "person/name".parse::<ArtifactAttribute>()?,
                     alice.clone(),
@@ -150,7 +206,7 @@ mod tests {
         let mallory = Entity::new()?;
 
         session
-            .commit(vec![
+            .transact(vec![
                 Fact::assert(
                     "person/name".parse::<ArtifactAttribute>()?,
                     alice.clone(),

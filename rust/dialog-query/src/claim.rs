@@ -1,13 +1,90 @@
+//! High-level representations for database changes
+//!
+//! This module provides the `Claim` enum for representing complex database operations
+//! and the `Claims` collection for managing multiple changes. Claims are converted to
+//! low-level `Instruction`s for execution.
+//!
+//! ## Overview
+//!
+//! Claims provide a high-level interface for describing database changes. Different
+//! types of claims (facts, concepts, etc.) can generate different sets of instructions
+//! when committed to the database.
+//!
+//! ```text
+//! ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+//! │   Claims    │ -> │ Instructions│ -> │  Database   │
+//! │ (High-level)│    │ (Low-level) │    │  (Storage)  │
+//! └─────────────┘    └─────────────┘    └─────────────┘
+//! ```
+//!
+//! ## Usage Examples
+//!
+//! ### Basic Usage
+//!
+//! ```ignore
+//! use dialog_query::{Fact, Claims, Session};
+//!
+//! // Create individual claims
+//! let claim1 = Fact::assert("user/name".parse()?, entity, "Alice".to_string());
+//! let claim2 = Fact::assert("user/age".parse()?, entity, 25u32);
+//!
+//! // Commit directly with Vec<Claim> (preferred API)
+//! session.commit(vec![claim1, claim2]).await?;
+//! ```
+//!
+//! ### Advanced Usage
+//!
+//! ```ignore
+//! use dialog_query::{Claims, Fact};
+//! use futures_util::StreamExt;
+//!
+//! // Create claims collection for streaming
+//! let claims = Claims::from(vec![
+//!     Fact::assert("user/name".parse()?, entity1, "Alice".to_string()),
+//!     Fact::assert("user/name".parse()?, entity2, "Bob".to_string()),
+//! ]);
+//!
+//! // Stream instructions asynchronously
+//! let mut instruction_stream = claims;
+//! while let Some(instruction) = instruction_stream.next().await {
+//!     // Process each instruction
+//! }
+//! ```
+//!
+
 pub mod fact;
 pub use crate::artifact::{Artifact, Attribute, Instruction};
 use futures_util::Stream;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// A high-level representation of database changes
+///
+/// Claims describe complex database operations that get converted to low-level
+/// `Instruction`s for execution. Each claim can generate one or more instructions.
+/// Different claim types (facts, concepts, etc.) can represent different kinds
+/// of database operations.
+///
+/// # Examples
+///
+/// ```ignore
+/// use dialog_query::Fact;
+///
+/// // Create an assertion claim  
+/// let claim = Fact::assert("user/name".parse()?, entity, "Alice".to_string());
+///
+/// // Claims automatically convert to a set of instructions
+/// let instructions: Vec<Instruction> = claim.into();
+/// ```
 pub enum Claim {
+    /// A fact-based claim (assertion or retraction)
     Fact(fact::Claim),
 }
 
+/// Convert a Claim into its constituent Instructions
+///
+/// Transforms high-level claims into low-level instructions for database execution.
+/// Each claim type determines how many instructions it generates.
 impl From<Claim> for Vec<Instruction> {
     fn from(claim: Claim) -> Self {
         match claim {
@@ -16,7 +93,23 @@ impl From<Claim> for Vec<Instruction> {
     }
 }
 
-/// Implement IntoIterator for Claim to iterate over its instructions
+/// Iterate over the instructions contained in a Claim
+///
+/// Allows processing each instruction individually when a claim represents
+/// multiple changes.
+///
+/// # Examples
+///
+/// ```ignore
+/// use dialog_query::Fact;
+///
+/// let claim = Fact::assert("user/name".parse()?, entity, "Alice".to_string());
+/// 
+/// // Iterate over all instructions in the claim
+/// for instruction in claim {
+///     println!("Instruction: {:?}", instruction);
+/// }
+/// ```
 impl IntoIterator for Claim {
     type Item = Instruction;
     type IntoIter = std::vec::IntoIter<Instruction>;
@@ -27,11 +120,49 @@ impl IntoIterator for Claim {
     }
 }
 
-/// A newtype wrapper around Vec<Claim> that implements Stream<Item = Instruction>
+/// A collection of Claims for batch processing
+///
+/// `Claims` efficiently manages multiple claims and provides streaming and
+/// iteration over their constituent instructions. Instructions are pre-computed
+/// for predictable performance.
+///
+/// # Examples
+///
+/// ```ignore
+/// use dialog_query::{Fact, Claims};
+/// use futures_util::StreamExt;
+///
+/// let claims = vec![
+///     Fact::assert("user/name".parse()?, entity1, "Alice".to_string()),
+///     Fact::assert("user/name".parse()?, entity2, "Bob".to_string()),
+/// ];
+///
+/// // Convert to Claims for streaming
+/// let claims_stream = Claims::from(claims);
+///
+/// // Stream the instructions
+/// let instructions: Vec<_> = claims_stream.collect().await;
+/// ```
 pub struct Claims {
+    /// Pre-flattened instructions for efficient iteration
     inner: std::vec::IntoIter<Instruction>,
 }
 
+/// Create a Claims collection from multiple claims
+///
+/// # Examples
+///
+/// ```ignore
+/// use dialog_query::{Fact, Claims};
+///
+/// let claims = vec![
+///     Fact::assert("user/name".parse()?, entity1, "Alice".to_string()),
+///     Fact::assert("user/age".parse()?, entity1, 25u32),
+///     Fact::retract("user/email".parse()?, entity2, "old@example.com".to_string()),
+/// ];
+///
+/// let claims_collection = Claims::from(claims);
+/// ```
 impl From<Vec<Claim>> for Claims {
     fn from(claims: Vec<Claim>) -> Self {
         let instructions: Vec<Instruction> = claims
@@ -44,6 +175,16 @@ impl From<Vec<Claim>> for Claims {
     }
 }
 
+/// Create a Claims collection from a single claim
+///
+/// # Examples
+///
+/// ```ignore
+/// use dialog_query::{Fact, Claims};
+///
+/// let claim = Fact::assert("user/name".parse()?, entity, "Alice".to_string());
+/// let claims_collection = Claims::from(claim);
+/// ```
 impl From<Claim> for Claims {
     fn from(claim: Claim) -> Self {
         let instructions: Vec<Instruction> = claim.into_iter().collect();
@@ -53,7 +194,22 @@ impl From<Claim> for Claims {
     }
 }
 
-/// Implement Stream for Claims to stream instructions from all claims
+/// Stream implementation for async iteration over instructions
+///
+/// # Examples
+///
+/// ```ignore
+/// use dialog_query::{Claims, Fact};
+/// use futures_util::StreamExt;
+///
+/// async fn process_claims(claims: Claims) {
+///     let mut stream = claims;
+///     while let Some(instruction) = stream.next().await {
+///         // Process each instruction
+///         println!("Processing: {:?}", instruction);
+///     }
+/// }
+/// ```
 impl Stream for Claims {
     type Item = Instruction;
 
@@ -62,7 +218,25 @@ impl Stream for Claims {
     }
 }
 
-/// Implement IntoIterator for Claims to iterate over instructions
+/// Iterator implementation for synchronous iteration over instructions
+///
+/// # Examples
+///
+/// ```ignore
+/// use dialog_query::{Claims, Fact};
+///
+/// let claims = Claims::from(vec![
+///     Fact::assert("user/name".parse()?, entity, "Alice".to_string()),
+/// ]);
+///
+/// // Collect all instructions
+/// let instructions: Vec<_> = claims.into_iter().collect();
+///
+/// // Or iterate directly
+/// for instruction in Claims::from(vec![claim]) {
+///     println!("Instruction: {:?}", instruction);
+/// }
+/// ```
 impl IntoIterator for Claims {
     type Item = Instruction;
     type IntoIter = std::vec::IntoIter<Instruction>;
@@ -72,4 +246,3 @@ impl IntoIterator for Claims {
     }
 }
 
-// Claims automatically implements ConditionalSend since std::vec::IntoIter<Instruction> is Send
