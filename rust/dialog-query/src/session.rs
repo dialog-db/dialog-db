@@ -177,6 +177,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_matches_complete_conepts() -> anyhow::Result<()> {
+        use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value};
+        use crate::{Fact, Term};
+        use dialog_storage::MemoryStorageBackend;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store);
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        let mallory = Entity::new()?;
+
+        session
+            .commit(vec![
+                Fact::assert(
+                    "person/name".parse::<ArtifactAttribute>()?,
+                    alice.clone(),
+                    Value::String("Alice".to_string()),
+                ),
+                Fact::assert(
+                    "person/age".parse::<ArtifactAttribute>()?,
+                    alice.clone(),
+                    Value::UnsignedInt(25),
+                ),
+                Fact::assert(
+                    "person/name".parse::<ArtifactAttribute>()?,
+                    bob.clone(),
+                    Value::String("Bob".to_string()),
+                ),
+                Fact::assert(
+                    "person/age".parse::<ArtifactAttribute>()?,
+                    bob.clone(),
+                    Value::UnsignedInt(30),
+                ),
+                Fact::assert(
+                    "person/name".parse::<ArtifactAttribute>()?,
+                    mallory.clone(),
+                    Value::String("Mallory".to_string()),
+                ),
+            ])
+            .await?;
+
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "name".into(),
+            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+        );
+
+        let person = predicate::Concept {
+            operator: "person".into(),
+            attributes,
+        };
+
+        let name = Term::var("name");
+        let age = Term::var("age");
+        let mut params = Parameters::new();
+        params.insert("name".into(), name.clone());
+        params.insert("age".into(), age.clone());
+
+        // Let's test with empty parameters first to see the exact error
+        let application = person.apply(params);
+
+        let plan = application.plan(&VariableScope::new())?;
+
+        let selection = plan.query(&session.store)?.collect_matches().await?;
+        assert_eq!(selection.len(), 2); // Should find just Alice and Bob
+
+        // Check that we have both Alice and Bob (order may vary)
+        let mut found_alice = false;
+        let mut found_bob = false;
+
+        for match_result in selection.iter() {
+            let person_name = match_result.get(&name)?;
+            let person_age = match_result.get(&age)?;
+
+            match person_name {
+                Value::String(name_str) if name_str == "Alice" => {
+                    found_alice = true;
+                }
+                Value::String(name_str) if name_str == "Bob" => {
+                    found_bob = true;
+                }
+                _ => panic!("Unexpected person: {:?}", person_name),
+            }
+        }
+
+        assert!(found_alice, "Should find Alice");
+        assert!(found_bob, "Should find Bob");
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_concept_planning_errors() -> anyhow::Result<()> {
         use crate::artifact::{
             Artifacts, Attribute as ArtifactAttribute, Entity, Value, ValueDataType,
