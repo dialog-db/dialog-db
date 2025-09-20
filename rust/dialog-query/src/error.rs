@@ -301,6 +301,9 @@ pub enum PlanError {
     #[error("Fact application {selector} requires at least one bound parameter")]
     UnconstrainedSelector { selector: FactSelector },
 
+    #[error("Application requires at least one non-blank parameter")]
+    UnparameterizedApplication,
+
     #[error("Unexpected error occured while planning a rule")]
     UnexpectedError,
 }

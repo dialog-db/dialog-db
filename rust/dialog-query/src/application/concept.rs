@@ -42,15 +42,20 @@ impl ConcetApplication {
     pub fn plan(&self, scope: &VariableScope) -> Result<ConceptPlan, PlanError> {
         let mut provides = VariableScope::new();
         let mut cost = 0;
-        if let Some(this) = self.terms.get("this") {
-            if !scope.contains(&this) {
-                provides.add(&this);
+        let mut parameterized = false;
+
+        let this_entity: Term<Entity> = if let Some(this_value) = self.terms.get("this") {
+            // Check if "this" parameter is non-blank
+            if !this_value.is_blank() {
+                parameterized = true;
+            }
+
+            if !scope.contains(&this_value) {
+                provides.add(&this_value);
                 cost += ENTITY_COST
             }
-        }
 
-        // Convert the "this" term from Term<Value> to Term<Entity>
-        let this_entity: Term<Entity> = if let Some(this_value) = self.terms.get("this") {
+            // Convert the "this" term from Term<Value> to Term<Entity>
             match this_value {
                 Term::Variable { name, .. } => Term::<Entity>::Variable {
                     name: name.clone(),
@@ -79,6 +84,11 @@ impl ConcetApplication {
             let parameter = self.terms.get(name);
             // If parameter was not provided we add it to the provides set
             if let Some(term) = parameter {
+                // Track if we have any non-blank parameters
+                if !term.is_blank() {
+                    parameterized = true;
+                }
+
                 if !scope.contains(&term) {
                     provides.add(&term);
                     cost += VALUE_COST
@@ -91,6 +101,16 @@ impl ConcetApplication {
 
                 premises.push(select.into());
             }
+        }
+
+        // If we have no non-blank parameters, it's an unparameterized application
+        if !parameterized {
+            return Err(PlanError::UnparameterizedApplication);
+        }
+
+        // If we have non-blank parameters but no matching premises, we still need at least one premise
+        if premises.is_empty() {
+            return Err(PlanError::UnparameterizedApplication);
         }
 
         let mut join = Join::new(&premises);

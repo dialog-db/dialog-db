@@ -48,6 +48,7 @@ pub use predicate::{Compute, DeductiveRule, Formula};
 pub use premise::Premise;
 pub use query::{Query, Store};
 pub use rule::{Premises, Rule, When};
+pub use session::Session;
 
 pub use async_stream::try_stream;
 pub use selection::{Match, MatchSet, Selection, SelectionExt};
