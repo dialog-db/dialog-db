@@ -45,6 +45,7 @@ mod tests {
     use super::*;
     use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value};
     use crate::{Fact, Term};
+    use crate::session::Changes;
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
     use futures_util::stream;
@@ -77,7 +78,7 @@ mod tests {
             ),
         ];
 
-        let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
+        let instructions = facts.collect_instructions();
         artifacts.commit(stream::iter(instructions)).await?;
 
         // Step 2: Test Query trait on FactSelector with constants
@@ -151,7 +152,7 @@ mod tests {
             Value::String("Alice".to_string()),
         )];
 
-        let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
+        let instructions = facts.collect_instructions();
         artifacts.commit(stream::iter(instructions)).await?;
 
         // Test with FactSelector
@@ -200,7 +201,7 @@ mod tests {
             ),
         ];
 
-        let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
+        let instructions = facts.collect_instructions();
         artifacts.commit(stream::iter(instructions)).await?;
 
         // Test fluent query building - should succeed with constants

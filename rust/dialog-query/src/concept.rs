@@ -15,6 +15,7 @@ use crate::Selection;
 use crate::VariableScope;
 use crate::{Application, Premise};
 use crate::{Dependencies, Entity, Parameters, Requirement, Value};
+use crate::session::Changes;
 use dialog_artifacts::Instruction;
 
 /// Concept is a set of attributes associated with entity representing an
@@ -871,7 +872,7 @@ mod tests {
             ),
         ];
 
-        let instructions: Vec<_> = facts.into_iter().map(Into::into).collect();
+        let instructions = facts.collect_instructions();
         artifacts.commit(stream::iter(instructions)).await?;
 
         // This is the real test - using PersonMatch to query for people
@@ -957,7 +958,7 @@ mod tests {
             Value::String("Alice".to_string()),
         )];
 
-        let instructions: Vec<_> = facts.into_iter().map(Into::into).collect();
+        let instructions = facts.collect_instructions();
         artifacts.commit(stream::iter(instructions)).await?;
 
         // Test: Search for non-existent person using individual fact selector

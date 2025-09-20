@@ -166,6 +166,7 @@ impl From<fact::Claim> for Instruction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::Changes;
 
     #[test]
     fn test_fact_assert() {
@@ -213,7 +214,8 @@ mod tests {
             entity.clone(),
             Value::String("Alice".to_string()),
         );
-        let instruction: Instruction = claim.into();
+        let instructions = claim.collect_instructions();
+        let instruction = instructions.into_iter().next().unwrap();
 
         match instruction {
             Instruction::Assert(artifact) => {
@@ -234,7 +236,8 @@ mod tests {
             entity.clone(),
             Value::String("Alice".to_string()),
         );
-        let instruction: Instruction = claim.into();
+        let instructions = claim.collect_instructions();
+        let instruction = instructions.into_iter().next().unwrap();
 
         match instruction {
             Instruction::Retract(artifact) => {
@@ -264,8 +267,10 @@ mod tests {
         );
 
         // Convert to instructions for committing
-        let assert_instruction: Instruction = assertion_claim.into();
-        let retract_instruction: Instruction = retraction_claim.into();
+        let assert_instructions = assertion_claim.collect_instructions();
+        let assert_instruction = assert_instructions.into_iter().next().unwrap();
+        let retract_instructions = retraction_claim.collect_instructions();
+        let retract_instruction = retract_instructions.into_iter().next().unwrap();
 
         // Verify they're the right types
         assert!(matches!(assert_instruction, Instruction::Assert(_)));
@@ -363,6 +368,7 @@ mod integration_tests {
     use super::*;
     use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value};
     use crate::{Query, Term};
+    use crate::session::Changes;
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
     use futures_util::stream;
@@ -399,11 +405,8 @@ mod integration_tests {
         );
 
         // Step 3: Convert to instructions and commit to artifacts store
-        let instructions = vec![
-            Instruction::from(alice_name),
-            Instruction::from(alice_email),
-            Instruction::from(bob_name),
-        ];
+        let claims = vec![alice_name, alice_email, bob_name];
+        let instructions = claims.collect_instructions();
 
         artifacts.commit(stream::iter(instructions)).await?;
 
@@ -497,8 +500,9 @@ mod integration_tests {
             Value::String("Alice".to_string()),
         );
 
+        let instructions = alice_name.collect_instructions();
         artifacts
-            .commit(stream::iter(vec![Instruction::from(alice_name)]))
+            .commit(stream::iter(instructions))
             .await?;
 
         // Step 2: Verify fact exists using constant entity (no variables should be bound)
@@ -522,8 +526,9 @@ mod integration_tests {
             Value::String("Alice".to_string()),
         );
 
+        let instructions = retraction.collect_instructions();
         artifacts
-            .commit(stream::iter(vec![Instruction::from(retraction)]))
+            .commit(stream::iter(instructions))
             .await?;
 
         // Step 4: Verify fact is gone using the same constant query
@@ -569,7 +574,7 @@ mod integration_tests {
             ),
         ];
 
-        let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
+        let instructions = facts.collect_instructions();
         artifacts.commit(stream::iter(instructions)).await?;
 
         // Test 1: All constants - no variables should be bound
@@ -677,7 +682,7 @@ mod integration_tests {
             ),
         ];
 
-        let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
+        let instructions = facts.collect_instructions();
         artifacts.commit(stream::iter(instructions)).await?;
 
         // Query 1: Find all admins by role - using constants with variable entity
@@ -776,7 +781,7 @@ mod integration_tests {
             ),
         ];
 
-        let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
+        let instructions = facts.collect_instructions();
         artifacts.commit(stream::iter(instructions)).await?;
 
         let query_with_variables = Fact::<Value>::select()
@@ -827,7 +832,7 @@ mod integration_tests {
             ),
         ];
 
-        let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
+        let instructions = facts.collect_instructions();
         artifacts.commit(stream::iter(instructions)).await?;
 
         // Pattern 1: String-typed FactSelector (most common, backward compatible)
@@ -911,7 +916,7 @@ mod integration_tests {
             ),
         ];
 
-        let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
+        let instructions = facts.collect_instructions();
         artifacts.commit(stream::iter(instructions)).await?;
 
         // Pattern 1: Find Bob by name using string constant
@@ -967,7 +972,7 @@ mod integration_tests {
             Value::String("Alice".to_string()),
         )];
 
-        let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
+        let instructions = facts.collect_instructions();
         artifacts.commit(stream::iter(instructions)).await?;
 
         let mixed_query = Fact::<Value>::select()
@@ -1065,7 +1070,7 @@ mod integration_tests {
             ),
         ];
 
-        let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
+        let instructions = facts.collect_instructions();
         artifacts.commit(stream::iter(instructions)).await?;
 
         // Test 1: Find admin users using fluent query building

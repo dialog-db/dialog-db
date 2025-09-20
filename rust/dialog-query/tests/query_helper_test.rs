@@ -4,6 +4,7 @@ use anyhow::Result;
 use dialog_query::{
     artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Value},
     rule::Rule as RuleTrait,
+    session::Changes,
     term::Term,
     Fact, Rule,
 };
@@ -39,7 +40,7 @@ async fn test_person_concept_basic() -> Result<()> {
         ),
     ];
 
-    let instructions = facts.into_iter().map(Into::into).collect::<Vec<_>>();
+    let instructions = facts.collect_instructions();
     artifacts.commit(stream::iter(instructions)).await?;
 
     // Step 2: Create match patterns for querying

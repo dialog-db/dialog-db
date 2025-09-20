@@ -13,10 +13,3 @@ impl From<Claim> for Vec<Instruction> {
     }
 }
 
-impl From<Claim> for Instruction {
-    fn from(claim: Claim) -> Self {
-        match claim {
-            Claim::Fact(claim) => claim.into(),
-        }
-    }
-}

@@ -558,6 +558,7 @@ mod tests {
     use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction};
     use crate::syntax::VariableScope;
     use crate::{plan::EvaluationContext, Fact};
+    use crate::session::Changes;
     use crate::{selection::Match, QueryError};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
@@ -602,7 +603,7 @@ mod tests {
             ),
         ];
 
-        let instructions: Vec<Instruction> = facts.into_iter().map(Instruction::from).collect();
+        let instructions = facts.collect_instructions();
         artifacts.commit(stream::iter(instructions)).await?;
 
         // Step 2: Create fact selector with constants (following familiar-query pattern)
