@@ -1,4 +1,4 @@
-use super::{EvaluationContext, EvaluationPlan, Join, Plan, Selection, Store, VariableScope};
+use super::{EvaluationContext, EvaluationPlan, Join, Plan, Selection, Source, VariableScope};
 
 /// Execution plan for a concept application.
 /// Contains the cost estimate, variables that will be provided by execution,
@@ -19,7 +19,10 @@ impl EvaluationPlan for ConceptPlan {
     fn provides(&self) -> &VariableScope {
         &self.provides
     }
-    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+    fn evaluate<S: Source, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
         let join = Join::from(self.conjuncts.clone());
         join.evaluate(context)
     }

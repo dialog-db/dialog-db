@@ -36,6 +36,7 @@ pub mod types;
 pub use application::Application;
 pub use artifact::{Entity, Value, ValueDataType};
 pub use attribute::{Attribute, Cardinality};
+pub use claim::Claims;
 pub use concept::Concept;
 pub use dependencies::{Dependencies, Requirement};
 pub use dialog_query_macros::Rule;
@@ -47,7 +48,7 @@ pub use parameters::Parameters;
 pub use plan::{EvaluationContext, EvaluationPlan};
 pub use predicate::{Compute, DeductiveRule, Formula};
 pub use premise::Premise;
-pub use query::{Query, Store};
+pub use query::{Query, Source, Store};
 pub use rule::{Premises, Rule, When};
 pub use session::Session;
 

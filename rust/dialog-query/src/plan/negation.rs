@@ -1,6 +1,6 @@
 pub use super::{
     stream, try_stream, ApplicationPlan, EvaluationContext, EvaluationPlan, Ordering, Selection,
-    Store, TryStreamExt, VariableScope,
+    Source, TryStreamExt, VariableScope,
 };
 
 /// Execution plan for a negated application.
@@ -41,7 +41,10 @@ impl EvaluationPlan for NegationPlan {
         &self.provides
     }
 
-    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+    fn evaluate<S: Source, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
         let plan = self.application.clone();
         try_stream! {
             for await each in context.selection {

@@ -4,9 +4,8 @@ use anyhow::Result;
 use dialog_query::{
     artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Value},
     rule::{Match, Rule as RuleTrait},
-    session::Changes,
     term::Term,
-    Fact,
+    Fact, Claims,
 };
 use dialog_query_macros::Rule;
 use dialog_storage::MemoryStorageBackend;
@@ -45,7 +44,7 @@ async fn test_single_attribute_query_works() -> Result<()> {
     ];
 
     artifacts
-        .commit(stream::iter(facts.collect_instructions()))
+        .commit(Claims::from(facts))
         .await?;
 
     // ✅ This works: Single attribute with constant
@@ -104,7 +103,7 @@ async fn test_multi_attribute_constant_query_works() -> Result<()> {
     ];
 
     artifacts
-        .commit(stream::iter(facts.collect_instructions()))
+        .commit(Claims::from(facts))
         .await?;
 
     // ✅ This works: Multi-attribute with all constants
@@ -162,7 +161,7 @@ async fn test_multi_attribute_variable_query_limitation() -> Result<()> {
     ];
 
     artifacts
-        .commit(stream::iter(facts.collect_instructions()))
+        .commit(Claims::from(facts))
         .await?;
 
     // ⚠️ This has limitations: Multi-attribute with mixed constants and variables

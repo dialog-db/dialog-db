@@ -4,9 +4,8 @@ use anyhow::Result;
 use dialog_query::{
     artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Value},
     rule::Rule as RuleTrait,
-    session::Changes,
     term::Term,
-    Fact, Rule,
+    Claims, Fact, Rule,
 };
 use dialog_storage::MemoryStorageBackend;
 use futures_util::stream;
@@ -40,8 +39,7 @@ async fn test_person_concept_basic() -> Result<()> {
         ),
     ];
 
-    let instructions = facts.collect_instructions();
-    artifacts.commit(stream::iter(instructions)).await?;
+    artifacts.commit(Claims::from(facts)).await?;
 
     // Step 2: Create match patterns for querying
     let alice_match = PersonMatch {

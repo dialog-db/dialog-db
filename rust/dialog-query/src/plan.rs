@@ -1,7 +1,7 @@
 //! Query execution plans - traits and context for evaluation
 
 pub use crate::artifact::ArtifactStore;
-pub use crate::query::Store;
+pub use crate::query::Source;
 pub use crate::{try_stream, Match, Selection, Value};
 pub use dialog_common::ConditionalSend;
 pub use futures_util::stream::once;
@@ -53,7 +53,10 @@ impl EvaluationPlan for Plan {
         }
     }
 
-    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+    fn evaluate<S: Source, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
         let source = self.clone();
         try_stream! {
             match source {
@@ -131,7 +134,8 @@ pub trait EvaluationPlan: Clone + std::fmt::Debug + ConditionalSend {
     fn provides(&self) -> &VariableScope;
     /// Execute this plan with the given context and return result frames
     /// This follows the familiar-query pattern where frames flow through the evaluation
-    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection;
+    fn evaluate<S: Source, M: Selection>(&self, context: EvaluationContext<S, M>)
+        -> impl Selection;
 }
 
 /// Local ordering trait for EvaluationPlan types

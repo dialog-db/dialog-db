@@ -1,5 +1,5 @@
 use super::Plan;
-use crate::{try_stream, EvaluationContext, EvaluationPlan, Selection, Store};
+use crate::{try_stream, EvaluationContext, EvaluationPlan, Selection, Source};
 use core::pin::Pin;
 
 /// Represents a join operation that combines multiple query plans.
@@ -32,7 +32,7 @@ impl Join {
 
     /// Evaluates the join by executing each plan in sequence,
     /// feeding the output of one plan as input to the next.
-    pub fn evaluate<S: Store, M: Selection>(
+    pub fn evaluate<S: Source, M: Selection>(
         self,
         context: EvaluationContext<S, M>,
     ) -> Pin<Box<dyn Selection>> {

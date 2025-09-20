@@ -1,6 +1,8 @@
 //! Query trait for polymorphic querying across different store types
 
-use crate::artifact::ArtifactStore;
+pub use dialog_common::ConditionalSend;
+
+use crate::artifact::{ArtifactStore, ArtifactStoreMut};
 pub use crate::error::QueryResult;
 use crate::plan::{fresh, EvaluationPlan};
 use crate::Selection;
@@ -8,10 +10,14 @@ use crate::Selection;
 /// Convenience trait alias for stores that can be used with the Query API
 ///
 /// This combines all the required bounds in one place to avoid repetition
-pub trait Store: ArtifactStore + Clone + Send + Sync + 'static {}
+pub trait Source: ArtifactStore + Clone + Send + Sync + 'static {}
 
 /// Blanket implementation - any type that satisfies the bounds automatically implements QueryStore
-impl<T> Store for T where T: ArtifactStore + Clone + Send + Sync + 'static {}
+impl<T> Source for T where T: ArtifactStore + Clone + Send + Sync + 'static {}
+
+pub trait Store: ArtifactStoreMut + Clone + ConditionalSend {}
+/// Blanket implementation - any type that satisfies the bounds automatically implements QueryStore
+impl<T> Store for T where T: ArtifactStoreMut + Clone + ConditionalSend {}
 
 /// A trait for types that can query an ArtifactStore
 ///
@@ -21,18 +27,18 @@ pub trait Query {
     /// Execute the query against the provided store
     ///
     /// Returns a stream of artifacts that match the query criteria.
-    fn query<S: Store>(&self, store: &S) -> QueryResult<impl Selection>;
+    fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection>;
 }
 
 pub trait PlannedQuery {
     /// Execute the query against the provided store
     ///
     /// Returns a stream of artifacts that match the query criteria.
-    fn query<S: Store>(&self, store: &S) -> QueryResult<impl Selection>;
+    fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection>;
 }
 
 impl<Plan: EvaluationPlan> PlannedQuery for Plan {
-    fn query<S: Store>(&self, store: &S) -> QueryResult<impl Selection> {
+    fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
         let store = store.clone();
         let context = fresh(store);
         let selection = self.evaluate(context);
@@ -44,8 +50,7 @@ impl<Plan: EvaluationPlan> PlannedQuery for Plan {
 mod tests {
     use super::*;
     use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value};
-    use crate::{Fact, Term};
-    use crate::session::Changes;
+    use crate::{Claims, Fact, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
     use futures_util::stream;
@@ -78,8 +83,7 @@ mod tests {
             ),
         ];
 
-        let instructions = facts.collect_instructions();
-        artifacts.commit(stream::iter(instructions)).await?;
+        artifacts.commit(Claims::from(facts)).await?;
 
         // Step 2: Test Query trait on FactSelector with constants
 
@@ -133,7 +137,7 @@ mod tests {
 
         async fn execute_query<Q: Query>(
             query: Q,
-            store: &(impl Store + 'static),
+            store: &(impl Source + 'static),
         ) -> Result<Vec<crate::artifact::Artifact>> {
             let result = query.query(store);
             // Should succeed with constants, returns empty stream for now
@@ -152,8 +156,7 @@ mod tests {
             Value::String("Alice".to_string()),
         )];
 
-        let instructions = facts.collect_instructions();
-        artifacts.commit(stream::iter(instructions)).await?;
+        artifacts.commit(Claims::from(facts)).await?;
 
         // Test with FactSelector
         let fact_selector = Fact::<Value>::select().the("user/name").of(alice.clone());
@@ -201,8 +204,7 @@ mod tests {
             ),
         ];
 
-        let instructions = facts.collect_instructions();
-        artifacts.commit(stream::iter(instructions)).await?;
+        artifacts.commit(Claims::from(facts)).await?;
 
         // Test fluent query building - should succeed with constants
         let admin_result = Fact::<Value>::select()

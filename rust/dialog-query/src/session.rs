@@ -1,60 +1,23 @@
-use dialog_common::ConditionalSend;
+use crate::Store;
 
-use crate::artifact::{ArtifactStoreMutExt, DialogArtifactsError};
-use crate::Claim;
-use dialog_artifacts::Instruction;
+use crate::artifact::DialogArtifactsError;
 
-/// A trait for collections of instruction-producing items
-pub trait Changes: ConditionalSend {
-    fn collect_instructions(self) -> Vec<Instruction>;
-}
-
-// Implement Changes for Vec<Claim<T>>
-impl Changes for Vec<Claim> {
-    fn collect_instructions(self) -> Vec<Instruction> {
-        self.into_iter()
-            .flat_map(|claim| -> Vec<Instruction> { claim.into() })
-            .collect()
-    }
-}
-
-// Implement Changes for single Claim<T>
-impl Changes for Claim {
-    fn collect_instructions(self) -> Vec<Instruction> {
-        let vec: Vec<Instruction> = self.into();
-        vec
-    }
-}
-
-// Implement Changes for Vec<Instruction>
-impl Changes for Vec<Instruction> {
-    fn collect_instructions(self) -> Vec<Instruction> {
-        self
-    }
-}
-
-// Implement Changes for single Instruction
-impl Changes for Instruction {
-    fn collect_instructions(self) -> Vec<Instruction> {
-        vec![self]
-    }
-}
-
-pub struct Session<S>
-where
-    S: ArtifactStoreMutExt + ConditionalSend,
-{
+#[derive(Debug, Clone)]
+pub struct Session<S: Store> {
     store: S,
 }
 
-impl<S: ArtifactStoreMutExt + ConditionalSend> Session<S> {
+impl<S: Store> Session<S> {
     pub fn open(store: S) -> Self {
         Session { store }
     }
 
-    pub async fn commit<C: Changes>(&mut self, changes: C) -> Result<(), DialogArtifactsError> {
-        let instructions = changes.collect_instructions();
-        ArtifactStoreMutExt::commit(&mut self.store, instructions).await?;
+    pub async fn commit<I>(&mut self, changes: I) -> Result<(), DialogArtifactsError>
+    where
+        I: Into<crate::claim::Claims>,
+    {
+        let claims: crate::claim::Claims = changes.into();
+        self.store.commit(claims).await?;
         Ok(())
     }
 }

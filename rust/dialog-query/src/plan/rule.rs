@@ -1,4 +1,4 @@
-use super::{Plan, Selection, Store, VariableScope};
+use super::{Plan, Selection, Source, VariableScope};
 use crate::plan::Join;
 use crate::predicate::DeductiveRule;
 use crate::{try_stream, EvaluationContext, EvaluationPlan, Parameters};
@@ -21,12 +21,15 @@ pub struct RuleApplicationPlan {
 
 impl RuleApplicationPlan {
     /// Evaluates this rule application plan against the provided context.
-    pub fn eval<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+    pub fn eval<S: Source, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
         Self::eval_helper(context.store, context.selection, self.conjuncts.clone())
     }
 
     /// Helper function that recursively evaluates conjuncts in order.
-    pub fn eval_helper<S: Store, M: Selection>(
+    pub fn eval_helper<S: Source, M: Selection>(
         store: S,
         source: M,
         conjuncts: Vec<Plan>,
@@ -68,7 +71,10 @@ impl EvaluationPlan for RuleApplicationPlan {
     fn provides(&self) -> &VariableScope {
         &self.provides
     }
-    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+    fn evaluate<S: Source, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
         let join = Join::from(self.conjuncts.clone());
         join.evaluate(context)
     }

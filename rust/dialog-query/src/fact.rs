@@ -1,6 +1,6 @@
 //! Fact, Assertion, Retraction, and Claim types for the dialog-query system
 
-pub use super::claim::{fact, Claim};
+pub use super::claim::{fact, Claim, Claims};
 pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Instruction, Value};
 pub use crate::types::Scalar;
 use serde::{Deserialize, Serialize};
@@ -166,7 +166,6 @@ impl From<fact::Claim> for Instruction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::Changes;
 
     #[test]
     fn test_fact_assert() {
@@ -214,8 +213,7 @@ mod tests {
             entity.clone(),
             Value::String("Alice".to_string()),
         );
-        let instructions = claim.collect_instructions();
-        let instruction = instructions.into_iter().next().unwrap();
+        let instruction = claim.into_iter().next().unwrap();
 
         match instruction {
             Instruction::Assert(artifact) => {
@@ -236,8 +234,7 @@ mod tests {
             entity.clone(),
             Value::String("Alice".to_string()),
         );
-        let instructions = claim.collect_instructions();
-        let instruction = instructions.into_iter().next().unwrap();
+        let instruction = claim.into_iter().next().unwrap();
 
         match instruction {
             Instruction::Retract(artifact) => {
@@ -267,10 +264,8 @@ mod tests {
         );
 
         // Convert to instructions for committing
-        let assert_instructions = assertion_claim.collect_instructions();
-        let assert_instruction = assert_instructions.into_iter().next().unwrap();
-        let retract_instructions = retraction_claim.collect_instructions();
-        let retract_instruction = retract_instructions.into_iter().next().unwrap();
+        let assert_instruction = assertion_claim.into_iter().next().unwrap();
+        let retract_instruction = retraction_claim.into_iter().next().unwrap();
 
         // Verify they're the right types
         assert!(matches!(assert_instruction, Instruction::Assert(_)));
@@ -368,7 +363,6 @@ mod integration_tests {
     use super::*;
     use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value};
     use crate::{Query, Term};
-    use crate::session::Changes;
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
     use futures_util::stream;
@@ -406,9 +400,7 @@ mod integration_tests {
 
         // Step 3: Convert to instructions and commit to artifacts store
         let claims = vec![alice_name, alice_email, bob_name];
-        let instructions = claims.collect_instructions();
-
-        artifacts.commit(stream::iter(instructions)).await?;
+        artifacts.commit(Claims::from(claims)).await?;
 
         // Step 4: Test 1 - Named variables should get bound in matches
         let query_with_named_vars = Fact::<Value>::select()
@@ -500,9 +492,8 @@ mod integration_tests {
             Value::String("Alice".to_string()),
         );
 
-        let instructions = alice_name.collect_instructions();
         artifacts
-            .commit(stream::iter(instructions))
+            .commit(Claims::from(alice_name))
             .await?;
 
         // Step 2: Verify fact exists using constant entity (no variables should be bound)
@@ -526,9 +517,8 @@ mod integration_tests {
             Value::String("Alice".to_string()),
         );
 
-        let instructions = retraction.collect_instructions();
         artifacts
-            .commit(stream::iter(instructions))
+            .commit(Claims::from(retraction))
             .await?;
 
         // Step 4: Verify fact is gone using the same constant query
@@ -574,8 +564,7 @@ mod integration_tests {
             ),
         ];
 
-        let instructions = facts.collect_instructions();
-        artifacts.commit(stream::iter(instructions)).await?;
+        artifacts.commit(Claims::from(facts)).await?;
 
         // Test 1: All constants - no variables should be bound
         let all_constants_query = Fact::<Value>::select()
@@ -682,8 +671,7 @@ mod integration_tests {
             ),
         ];
 
-        let instructions = facts.collect_instructions();
-        artifacts.commit(stream::iter(instructions)).await?;
+        artifacts.commit(Claims::from(facts)).await?;
 
         // Query 1: Find all admins by role - using constants with variable entity
         let admin_query = Fact::select()
@@ -781,8 +769,7 @@ mod integration_tests {
             ),
         ];
 
-        let instructions = facts.collect_instructions();
-        artifacts.commit(stream::iter(instructions)).await?;
+        artifacts.commit(Claims::from(facts)).await?;
 
         let query_with_variables = Fact::<Value>::select()
             .the("user/name") // Constant - used for matching
@@ -832,8 +819,7 @@ mod integration_tests {
             ),
         ];
 
-        let instructions = facts.collect_instructions();
-        artifacts.commit(stream::iter(instructions)).await?;
+        artifacts.commit(Claims::from(facts)).await?;
 
         // Pattern 1: String-typed FactSelector (most common, backward compatible)
         let value_selector = Fact::select()
@@ -916,8 +902,7 @@ mod integration_tests {
             ),
         ];
 
-        let instructions = facts.collect_instructions();
-        artifacts.commit(stream::iter(instructions)).await?;
+        artifacts.commit(Claims::from(facts)).await?;
 
         // Pattern 1: Find Bob by name using string constant
         let bob_query = Fact::<Value>::select()
@@ -972,8 +957,7 @@ mod integration_tests {
             Value::String("Alice".to_string()),
         )];
 
-        let instructions = facts.collect_instructions();
-        artifacts.commit(stream::iter(instructions)).await?;
+        artifacts.commit(Claims::from(facts)).await?;
 
         let mixed_query = Fact::<Value>::select()
             .the("user/name") // Constant - used for matching
@@ -1070,8 +1054,7 @@ mod integration_tests {
             ),
         ];
 
-        let instructions = facts.collect_instructions();
-        artifacts.commit(stream::iter(instructions)).await?;
+        artifacts.commit(Claims::from(facts)).await?;
 
         // Test 1: Find admin users using fluent query building
         let admin_results = Fact::<Value>::select()

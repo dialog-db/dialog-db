@@ -1,4 +1,4 @@
-pub use super::{try_stream, EvaluationContext, Selection, Store, VariableScope};
+pub use super::{try_stream, EvaluationContext, Selection, Source, VariableScope};
 pub use crate::application::FormulaApplication;
 pub use crate::cursor::Cursor;
 pub use crate::error::{FormulaEvaluationError, QueryError};
@@ -25,7 +25,7 @@ impl FormulaApplicationPlan {
         &self.derives
     }
     /// Evaluate the formula over a stream of matches
-    pub fn evaluate<S: Store, M: Selection>(
+    pub fn evaluate<S: Source, M: Selection>(
         &self,
         context: EvaluationContext<S, M>,
     ) -> impl Selection {

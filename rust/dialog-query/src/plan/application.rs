@@ -1,6 +1,6 @@
 pub use super::{
     application, try_stream, ConceptPlan, EvaluationContext, EvaluationPlan, FactApplicationPlan,
-    FormulaApplicationPlan, NegationPlan, Ordering, RuleApplicationPlan, Selection, Store,
+    FormulaApplicationPlan, NegationPlan, Ordering, RuleApplicationPlan, Selection, Source,
     VariableScope,
 };
 
@@ -44,7 +44,10 @@ impl EvaluationPlan for ApplicationPlan {
         }
     }
 
-    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+    fn evaluate<S: Source, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
         let source = self.clone();
         try_stream! {
             match source {

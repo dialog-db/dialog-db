@@ -14,7 +14,7 @@
 use crate::artifact::{ArtifactSelector, Attribute, Constrained, Entity, Value};
 use crate::error::{PlanError, QueryError, QueryResult};
 use crate::plan::{EvaluationContext, EvaluationPlan};
-use crate::query::{Query, Store};
+use crate::query::{Query, Source};
 use crate::selection::{Match, Selection};
 use crate::syntax::VariableScope;
 use crate::term::Term;
@@ -291,7 +291,7 @@ impl<T: Scalar> From<&FactSelector<T>> for FactSelector<Value> {
 }
 
 impl<T: Scalar> Query for FactSelector<T> {
-    fn query<S: Store>(&self, store: &S) -> QueryResult<impl Selection> {
+    fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
         use crate::try_stream;
 
         let scope = &VariableScope::new();
@@ -323,7 +323,7 @@ impl<T: Scalar> FactSelectorPlan<T> {
         self.cost
     }
 
-    pub fn evaluate<S: Store, M: Selection>(
+    pub fn evaluate<S: Source, M: Selection>(
         &self,
         context: EvaluationContext<S, M>,
     ) -> impl Selection {
@@ -369,7 +369,10 @@ impl<T: Scalar> EvaluationPlan for FactSelectorPlan<T> {
         self.cost
     }
 
-    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
+    fn evaluate<S: Source, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
         FactSelectorPlan::evaluate(self, context)
     }
 }
@@ -556,9 +559,9 @@ mod tests {
 
     // Tests from fact_selector_test.rs
     use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction};
+    use crate::claim::Claims;
     use crate::syntax::VariableScope;
     use crate::{plan::EvaluationContext, Fact};
-    use crate::session::Changes;
     use crate::{selection::Match, QueryError};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
@@ -603,8 +606,7 @@ mod tests {
             ),
         ];
 
-        let instructions = facts.collect_instructions();
-        artifacts.commit(stream::iter(instructions)).await?;
+        artifacts.commit(Claims::from(facts)).await?;
 
         // Step 2: Create fact selector with constants (following familiar-query pattern)
         let fact_selector: FactSelector<Value> = FactSelector::new()

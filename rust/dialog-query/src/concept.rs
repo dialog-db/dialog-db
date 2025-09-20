@@ -3,19 +3,19 @@ use std::collections::HashMap;
 use crate::analyzer::Analysis;
 use crate::application::{ConcetApplication, Join};
 use crate::attribute::Attribute;
+use crate::claim::Claims;
 use crate::error::{AnalyzerError, PlanError, QueryError};
 use crate::fact_selector::{BASE_COST, ENTITY_COST, VALUE_COST};
 use crate::plan::ConceptPlan;
 use crate::plan::EvaluationPlan;
 use crate::predicate;
-use crate::query::{Query, QueryResult, Store};
+use crate::query::{Query, QueryResult, Source};
 use crate::term::Term;
 use crate::FactSelector;
 use crate::Selection;
 use crate::VariableScope;
 use crate::{Application, Premise};
 use crate::{Dependencies, Entity, Parameters, Requirement, Value};
-use crate::session::Changes;
 use dialog_artifacts::Instruction;
 
 /// Concept is a set of attributes associated with entity representing an
@@ -157,7 +157,7 @@ pub trait Match {
 }
 
 impl<T: Match> Query for T {
-    fn query<S: Store>(&self, store: &S) -> QueryResult<impl Selection> {
+    fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
         use crate::try_stream;
 
         let scope = VariableScope::new();
@@ -872,8 +872,7 @@ mod tests {
             ),
         ];
 
-        let instructions = facts.collect_instructions();
-        artifacts.commit(stream::iter(instructions)).await?;
+        artifacts.commit(Claims::from(facts)).await?;
 
         // This is the real test - using PersonMatch to query for people
         let person_query = PersonMatch {
@@ -958,8 +957,7 @@ mod tests {
             Value::String("Alice".to_string()),
         )];
 
-        let instructions = facts.collect_instructions();
-        artifacts.commit(stream::iter(instructions)).await?;
+        artifacts.commit(Claims::from(facts)).await?;
 
         // Test: Search for non-existent person using individual fact selector
         let missing_query = Fact::<Value>::select()
