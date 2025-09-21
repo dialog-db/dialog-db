@@ -74,6 +74,7 @@ impl_into_value_data_type!(String, ValueDataType::String);
 impl_into_value_data_type!(bool, ValueDataType::Boolean);
 
 // Unsigned integer types (all map to UnsignedInt)
+impl_into_value_data_type!(usize, ValueDataType::UnsignedInt);
 impl_into_value_data_type!(u128, ValueDataType::UnsignedInt);
 impl_into_value_data_type!(u64, ValueDataType::UnsignedInt);
 impl_into_value_data_type!(u32, ValueDataType::UnsignedInt);
@@ -131,6 +132,12 @@ impl Scalar for bool {
 impl Scalar for String {
     fn as_value(&self) -> Value {
         Value::from(self.to_owned())
+    }
+}
+
+impl Scalar for usize {
+    fn as_value(&self) -> Value {
+        Value::UnsignedInt(self.to_owned() as u128)
     }
 }
 

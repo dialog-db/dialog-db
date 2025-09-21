@@ -65,7 +65,7 @@ where
 
     /// Create an assertion claim from individual components
     pub fn assert<The: Into<Attribute>, Of: Into<Entity>>(the: The, of: Of, is: T) -> Claim {
-        Claim::Fact(fact::Claim::Assertion {
+        Claim::Fact(fact::Claim::Assert {
             the: the.into(),
             of: of.into(),
             is: is.as_value(),
@@ -74,7 +74,7 @@ where
 
     /// Create a retraction claim from individual components
     pub fn retract<The: Into<Attribute>, Of: Into<Entity>>(the: The, of: Of, is: T) -> Claim {
-        Claim::Fact(fact::Claim::Retraction {
+        Claim::Fact(fact::Claim::Retract {
             the: the.into(),
             of: of.into(),
             is: is.as_value(),
@@ -88,7 +88,7 @@ pub fn assert<The: Into<Attribute>, Of: Into<Entity>, Is: Scalar>(
     of: Of,
     is: Is,
 ) -> Claim {
-    Claim::Fact(fact::Claim::Assertion {
+    Claim::Fact(fact::Claim::Assert {
         the: the.into(),
         of: of.into(),
         is: is.as_value(),
@@ -101,7 +101,7 @@ pub fn retract<The: Into<Attribute>, Of: Into<Entity>, Is: Scalar>(
     of: Of,
     is: Is,
 ) -> Claim {
-    Claim::Fact(fact::Claim::Retraction {
+    Claim::Fact(fact::Claim::Retract {
         the: the.into(),
         of: of.into(),
         is: is.as_value(),
@@ -138,7 +138,7 @@ impl From<Retraction> for Instruction {
 impl From<fact::Claim> for Instruction {
     fn from(claim: fact::Claim) -> Self {
         match claim {
-            fact::Claim::Assertion { the, of, is } => {
+            fact::Claim::Assert { the, of, is } => {
                 let artifact = Artifact {
                     the,
                     of,
@@ -147,7 +147,7 @@ impl From<fact::Claim> for Instruction {
                 };
                 Instruction::Assert(artifact)
             }
-            fact::Claim::Retraction { the, of, is } => {
+            fact::Claim::Retract { the, of, is } => {
                 let artifact = Artifact {
                     the,
                     of,
@@ -177,7 +177,7 @@ mod tests {
         );
 
         match claim {
-            Claim::Fact(fact::Claim::Assertion { the, of, is }) => {
+            Claim::Fact(fact::Claim::Assert { the, of, is }) => {
                 assert_eq!(the.to_string(), "user/name");
                 assert_eq!(of, entity);
                 assert_eq!(is, Value::String("Alice".to_string()));
@@ -196,7 +196,7 @@ mod tests {
         );
 
         match claim {
-            Claim::Fact(fact::Claim::Retraction { the, of, is }) => {
+            Claim::Fact(fact::Claim::Retract { the, of, is }) => {
                 assert_eq!(the.to_string(), "user/name");
                 assert_eq!(of, entity);
                 assert_eq!(is, Value::String("Alice".to_string()));
@@ -284,7 +284,7 @@ mod tests {
         );
 
         match string_claim {
-            Claim::Fact(fact::Claim::Assertion { the, of, is }) => {
+            Claim::Fact(fact::Claim::Assert { the, of, is }) => {
                 assert_eq!(the.to_string(), "user/name");
                 assert_eq!(of, entity);
                 assert_eq!(is, Value::String("Alice".to_string()));
@@ -300,7 +300,7 @@ mod tests {
         );
 
         match number_claim {
-            Claim::Fact(fact::Claim::Retraction { the, of, is }) => {
+            Claim::Fact(fact::Claim::Retract { the, of, is }) => {
                 assert_eq!(the.to_string(), "user/age");
                 assert_eq!(of, entity);
                 assert_eq!(is, Value::UnsignedInt(25u128));
@@ -321,7 +321,7 @@ mod tests {
         );
 
         match claim {
-            Claim::Fact(fact::Claim::Assertion { the, of, is }) => {
+            Claim::Fact(fact::Claim::Assert { the, of, is }) => {
                 assert_eq!(the.to_string(), "user/name");
                 assert_eq!(of, entity);
                 assert_eq!(is, Value::String("Alice".to_string()));
@@ -337,7 +337,7 @@ mod tests {
         );
 
         match string_claim {
-            Claim::Fact(fact::Claim::Assertion { the, of, is }) => {
+            Claim::Fact(fact::Claim::Assert { the, of, is }) => {
                 assert_eq!(the.to_string(), "user/email");
                 assert_eq!(of, entity);
                 assert_eq!(is, Value::String("alice@example.com".to_string()));
@@ -492,9 +492,7 @@ mod integration_tests {
             Value::String("Alice".to_string()),
         );
 
-        artifacts
-            .commit(Claims::from(alice_name))
-            .await?;
+        artifacts.commit(Claims::from(alice_name)).await?;
 
         // Step 2: Verify fact exists using constant entity (no variables should be bound)
         let query_constant = Fact::<Value>::select()
@@ -517,9 +515,7 @@ mod integration_tests {
             Value::String("Alice".to_string()),
         );
 
-        artifacts
-            .commit(Claims::from(retraction))
-            .await?;
+        artifacts.commit(Claims::from(retraction)).await?;
 
         // Step 4: Verify fact is gone using the same constant query
         let query2 = Fact::<Value>::select()

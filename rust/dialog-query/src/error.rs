@@ -326,3 +326,15 @@ impl From<AnalyzerError> for PlanError {
         }
     }
 }
+
+/// Errors that can occur during query planning and execution
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum SchemaError {
+    #[error("Expected {expected} type but got {actual:?} instead")]
+    TypeError {
+        expected: ValueDataType,
+        actual: Value,
+    },
+    #[error("Property {property} must be provided")]
+    MissingProperty { property: String },
+}

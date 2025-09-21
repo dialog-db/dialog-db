@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Represents proposed changes to entity-attribute-value triples.
 /// Claims follow the EAV pattern:
-/// - `the` - attribute (predicate/property)  
+/// - `the` - attribute (predicate/property)
 /// - `of` - entity (subject)
 /// - `is` - value (object)
 ///
@@ -40,7 +40,7 @@ pub enum Claim {
     ///
     /// When committed, this creates a new fact with the specified
     /// entity-attribute-value triple.
-    Assertion {
+    Assert {
         /// The attribute (predicate) - what property is being asserted
         the: Attribute,
         /// The entity (subject) - what entity the property applies to
@@ -52,7 +52,7 @@ pub enum Claim {
     ///
     /// When committed, this removes an existing fact with the specified
     /// entity-attribute-value triple.
-    Retraction {
+    Retract {
         /// The attribute (predicate) - what property is being retracted
         the: Attribute,
         /// The entity (subject) - what entity the property applies to
@@ -60,6 +60,27 @@ pub enum Claim {
         /// The value (object) - what value the property had
         is: Value,
     },
+}
+
+impl Claim {
+    pub fn the(&self) -> &'_ Attribute {
+        match self {
+            Self::Assert { the, .. } => the,
+            Self::Retract { the, .. } => the,
+        }
+    }
+    pub fn of(&self) -> &'_ Entity {
+        match self {
+            Self::Assert { of, .. } => of,
+            Self::Retract { of, .. } => of,
+        }
+    }
+    pub fn is(&self) -> &'_ Value {
+        match self {
+            Self::Assert { is, .. } => is,
+            Self::Retract { is, .. } => is,
+        }
+    }
 }
 
 /// Convert fact claims to database instructions
@@ -85,13 +106,13 @@ pub enum Claim {
 impl From<Claim> for Vec<Instruction> {
     fn from(claim: Claim) -> Self {
         let instruction = match claim {
-            Claim::Assertion { the, of, is } => Instruction::Assert(Artifact {
+            Claim::Assert { the, of, is } => Instruction::Assert(Artifact {
                 the,
                 of,
                 is,
                 cause: None,
             }),
-            Claim::Retraction { the, of, is } => Instruction::Retract(Artifact {
+            Claim::Retract { the, of, is } => Instruction::Retract(Artifact {
                 the,
                 of,
                 is,

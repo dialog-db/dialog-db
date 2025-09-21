@@ -80,7 +80,7 @@ impl<S: Store> Session<S> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, marker::PhantomData};
+    use std::{collections::HashMap, fs::Permissions, marker::PhantomData};
 
     use dialog_artifacts::{ArtifactStore, ValueDataType};
     use futures_util::{task::UnsafeFutureObj, StreamExt};
@@ -513,6 +513,89 @@ mod tests {
         println!("Empty parameters error: {}", error_message);
         assert!(error_message.contains("requires at least one non-blank parameter"));
         assert!(!error_message.contains("Unexpected error"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_assert_concept() -> anyhow::Result<()> {
+        use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value};
+        use crate::{Fact, Term};
+        use dialog_storage::MemoryStorageBackend;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store);
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        let mallory = Entity::new()?;
+
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "name".into(),
+            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+        );
+        attributes.insert(
+            "age".into(),
+            Attribute::new(&"person", &"age", &"person age", ValueDataType::UnsignedInt),
+        );
+
+        let person = predicate::Concept {
+            operator: "person".into(),
+            attributes,
+        };
+
+        let alice = person
+            .new()?
+            .with("name", "Alice".to_string())
+            .with("age", 25usize)
+            .assert()?;
+
+        let bob = person
+            .new()?
+            .with("name", "Bob".to_string())
+            .with("age", 30usize)
+            .assert()?;
+
+        session.transact(vec![alice, bob]).await?;
+
+        let name = Term::var("name");
+        let age = Term::var("age");
+        let mut params = Parameters::new();
+        params.insert("name".into(), name.clone());
+        params.insert("age".into(), age.clone());
+
+        // Let's test with empty parameters first to see the exact error
+        let application = person.apply(params);
+
+        let plan = application.plan(&VariableScope::new())?;
+
+        let selection = plan.query(&session.store)?.collect_matches().await?;
+        assert_eq!(selection.len(), 2); // Should find just Alice and Bob
+
+        // Check that we have both Alice and Bob (order may vary)
+        let mut found_alice = false;
+        let mut found_bob = false;
+
+        for match_result in selection.iter() {
+            let person_name = match_result.get(&name)?;
+            let person_age = match_result.get(&age)?;
+
+            match person_name {
+                Value::String(name_str) if name_str == "Alice" => {
+                    assert_eq!(person_age, Value::UnsignedInt(25));
+                    found_alice = true;
+                }
+                Value::String(name_str) if name_str == "Bob" => {
+                    assert_eq!(person_age, Value::UnsignedInt(30));
+                    found_bob = true;
+                }
+                _ => panic!("Unexpected person: {:?}", person_name),
+            }
+        }
+
+        assert!(found_alice, "Should find Alice");
+        assert!(found_bob, "Should find Bob");
 
         Ok(())
     }

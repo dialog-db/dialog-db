@@ -272,6 +272,22 @@ impl TryFrom<Value> for bool {
     }
 }
 
+impl TryFrom<Value> for usize {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::UnsignedInt(uint) => usize::try_from(uint).map_err(|_| {
+                TypeError::TypeMismatch(ValueDataType::UnsignedInt, value.data_type())
+            }),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::UnsignedInt,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
 impl TryFrom<Value> for u128 {
     type Error = TypeError;
 
@@ -342,6 +358,21 @@ impl TryFrom<Value> for u8 {
             Value::UnsignedInt(uint) => u8::try_from(uint).map_err(|_| {
                 TypeError::TypeMismatch(ValueDataType::UnsignedInt, value.data_type())
             }),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::UnsignedInt,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for isize {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::SignedInt(uint) => isize::try_from(uint)
+                .map_err(|_| TypeError::TypeMismatch(ValueDataType::SignedInt, value.data_type())),
             _ => Err(TypeError::TypeMismatch(
                 ValueDataType::UnsignedInt,
                 value.data_type(),

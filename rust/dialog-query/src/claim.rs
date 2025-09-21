@@ -52,8 +52,11 @@
 //! ```
 //!
 
+pub mod concept;
 pub mod fact;
+
 pub use crate::artifact::{Artifact, Attribute, Instruction};
+use dialog_artifacts::Entity;
 use futures_util::Stream;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -70,15 +73,26 @@ use std::task::{Context, Poll};
 /// ```ignore
 /// use dialog_query::Fact;
 ///
-/// // Create an assertion claim  
+/// // Create an assertion claim
 /// let claim = Fact::assert("user/name".parse()?, entity, "Alice".to_string());
 ///
 /// // Claims automatically convert to a set of instructions
 /// let instructions: Vec<Instruction> = claim.into();
 /// ```
+#[derive(Debug, Clone)]
 pub enum Claim {
     /// A fact-based claim (assertion or retraction)
     Fact(fact::Claim),
+    Concept(concept::ConceptClaim),
+}
+
+impl Claim {
+    pub fn this(&self) -> &'_ Entity {
+        match self {
+            Self::Concept(claim) => claim.this(),
+            Self::Fact(claim) => claim.of(),
+        }
+    }
 }
 
 /// Convert a Claim into its constituent Instructions
@@ -89,10 +103,16 @@ impl From<Claim> for Vec<Instruction> {
     fn from(claim: Claim) -> Self {
         match claim {
             Claim::Fact(claim) => claim.into(),
+            Claim::Concept(claim) => claim.into(),
         }
     }
 }
 
+impl From<fact::Claim> for Claim {
+    fn from(claim: fact::Claim) -> Self {
+        Claim::Fact(claim)
+    }
+}
 /// Iterate over the instructions contained in a Claim
 ///
 /// Allows processing each instruction individually when a claim represents
@@ -104,7 +124,7 @@ impl From<Claim> for Vec<Instruction> {
 /// use dialog_query::Fact;
 ///
 /// let claim = Fact::assert("user/name".parse()?, entity, "Alice".to_string());
-/// 
+///
 /// // Iterate over all instructions in the claim
 /// for instruction in claim {
 ///     println!("Instruction: {:?}", instruction);
@@ -245,4 +265,3 @@ impl IntoIterator for Claims {
         self.inner
     }
 }
-

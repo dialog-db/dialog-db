@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use crate::analyzer::Analysis;
 use crate::application::{ConcetApplication, Join};
 use crate::attribute::Attribute;
-use crate::claim::Claims;
 use crate::error::{AnalyzerError, PlanError, QueryError};
 use crate::fact_selector::{BASE_COST, ENTITY_COST, VALUE_COST};
 use crate::plan::ConceptPlan;
@@ -421,10 +420,9 @@ mod tests {
     use crate::artifact::{Value, ValueDataType};
     use crate::selection::SelectionExt;
     use crate::term::Term;
-    use crate::{Fact, Query};
+    use crate::{Fact, Query, Claims};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
-    use futures_util::stream;
 
     // Define a Person concept for testing using raw concept API
     #[derive(Debug, Clone)]
