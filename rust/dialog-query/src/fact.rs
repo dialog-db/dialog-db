@@ -361,11 +361,10 @@ mod integration_tests {
     //! Fact::assert/retract → commit → Fact::select → query
 
     use super::*;
-    use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value};
+    use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Value};
     use crate::{Query, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
-    use futures_util::stream;
 
     #[tokio::test]
     async fn test_fact_assert_retract_and_query_with_variables() -> Result<()> {

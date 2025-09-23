@@ -558,7 +558,7 @@ mod tests {
     }
 
     // Tests from fact_selector_test.rs
-    use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction};
+    use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity};
     use crate::claim::Claims;
     use crate::syntax::VariableScope;
     use crate::{plan::EvaluationContext, Fact};

@@ -117,9 +117,6 @@ impl Requirement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::ValueDataType;
-    use crate::attribute::Attribute;
-    use crate::term::Term;
 
     #[test]
     fn test_dependencies_operations() {

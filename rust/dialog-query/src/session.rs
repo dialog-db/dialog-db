@@ -80,10 +80,9 @@ impl<S: Store> Session<S> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fs::Permissions, marker::PhantomData};
+    use std::collections::HashMap;
 
-    use dialog_artifacts::{ArtifactStore, ValueDataType};
-    use futures_util::{task::UnsafeFutureObj, StreamExt};
+    use dialog_artifacts::ValueDataType;
 
     use crate::{
         predicate, query::PlannedQuery, Attribute, Parameters, SelectionExt, VariableScope,
@@ -371,7 +370,6 @@ mod tests {
     #[tokio::test]
     async fn test_concept_planning_only_this_parameter() -> anyhow::Result<()> {
         use crate::artifact::ValueDataType;
-        use crate::error::PlanError;
         use crate::Term;
 
         // Set up concept with attributes
@@ -491,7 +489,6 @@ mod tests {
     #[tokio::test]
     async fn test_improved_error_messages() -> anyhow::Result<()> {
         use crate::artifact::ValueDataType;
-        use crate::{error::PlanError, Term};
 
         // Set up concept
         let mut attributes = HashMap::new();
@@ -519,16 +516,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_assert_concept() -> anyhow::Result<()> {
-        use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value};
-        use crate::{Fact, Term};
+        use crate::artifact::{Artifacts, Value};
+        use crate::Term;
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
         let store = Artifacts::anonymous(backend).await?;
         let mut session = Session::open(store);
-        let alice = Entity::new()?;
-        let bob = Entity::new()?;
-        let mallory = Entity::new()?;
 
         let mut attributes = HashMap::new();
         attributes.insert(

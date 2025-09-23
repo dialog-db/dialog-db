@@ -8,7 +8,6 @@ use dialog_query::{
     Claims, Fact, Rule,
 };
 use dialog_storage::MemoryStorageBackend;
-use futures_util::stream;
 
 #[derive(Rule, Debug, Clone)]
 pub struct Person {
