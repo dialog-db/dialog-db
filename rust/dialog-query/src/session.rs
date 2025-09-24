@@ -2,8 +2,10 @@
 //!
 //! Sessions provide a high-level interface for committing claims to the database.
 
+use std::collections::HashMap;
+
 use crate::artifact::DialogArtifactsError;
-use crate::Store;
+use crate::{DeductiveRule, Store};
 
 /// A database session for committing changes
 ///
@@ -32,6 +34,8 @@ use crate::Store;
 pub struct Session<S: Store> {
     /// The underlying store for database operations
     store: S,
+    /// Registry of the rules
+    rules: HashMap<String, Vec<DeductiveRule>>,
 }
 
 impl<S: Store> Session<S> {
@@ -45,7 +49,23 @@ impl<S: Store> Session<S> {
     /// let session = Session::open(artifacts_store);
     /// ```
     pub fn open(store: S) -> Self {
-        Session { store }
+        Session {
+            store,
+            rules: HashMap::new(),
+        }
+    }
+
+    /// Install a new rule into the session
+    pub fn install(mut self, rule: DeductiveRule) -> Self {
+        if let Some(rules) = self.rules.get_mut(&rule.operator) {
+            if !rules.contains(&rule) {
+                rules.push(rule);
+            }
+        } else {
+            self.rules.insert(rule.operator.clone(), vec![rule.clone()]);
+        }
+
+        self
     }
 
     /// Transacts changes to the database

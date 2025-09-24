@@ -54,6 +54,7 @@
 
 pub mod concept;
 pub mod fact;
+pub mod rule;
 
 pub use crate::artifact::{Artifact, Attribute, Instruction};
 use dialog_artifacts::Entity;

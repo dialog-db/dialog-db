@@ -98,7 +98,7 @@ impl Dependencies {
 }
 
 /// Represents the requirement level for a dependency in a rule or formula.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Requirement {
     /// Dependency that must be provided externally - cannot be derived.
     Required,

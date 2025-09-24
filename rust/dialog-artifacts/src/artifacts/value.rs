@@ -783,7 +783,9 @@ pub enum TypeError {
     wasm_bindgen::prelude::wasm_bindgen
 )]
 #[repr(u8)]
-#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash,
+)]
 pub enum ValueDataType {
     /// A byte buffer
     #[default]

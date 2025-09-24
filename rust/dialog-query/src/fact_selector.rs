@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 /// - `Some(Term::Constant(...))`: Must match exact value
 /// - `Some(Term::TypedVariable(...))`: Binds to any matching value
 /// - `Some(Term::Any)`: Matches any value without binding
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(
     bound = "T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Serialize + for<'a> Deserialize<'a> + 'static"
 )]

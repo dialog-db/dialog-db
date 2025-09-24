@@ -6,7 +6,7 @@ use crate::{DialogArtifactsError, ENTITY_LENGTH, Uri};
 
 /// An [`Entity`] is the subject part of a semantic triple. An [`Entity`] can
 /// be embodied by any valid [`Uri`].
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(into = "String", try_from = "String")]
 pub struct Entity(Uri, [u8; ENTITY_LENGTH]);
 
