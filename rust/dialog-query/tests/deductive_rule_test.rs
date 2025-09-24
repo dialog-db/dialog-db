@@ -4,14 +4,14 @@ use dialog_query::application::{ConcetApplication, PlanCandidate};
 use dialog_query::artifact::ValueDataType;
 use dialog_query::attribute::Attribute;
 use dialog_query::error::{AnalyzerError, PlanError, QueryError};
-use dialog_query::predicate::{Concept, Conclusion, DeductiveRule, FactSelector};
+use dialog_query::predicate::{Concept, DeductiveRule, FactSelector};
 use dialog_query::term::Term;
 use dialog_query::Negation;
 use dialog_query::{Application, Dependencies, Parameters, Premise, Value, VariableScope};
 use std::collections::HashMap;
 
 #[test]
-fn test_conclusion_operations() {
+fn test_concept_as_conclusion_operations() {
     let mut attributes = HashMap::new();
     attributes.insert(
         "name".to_string(),
@@ -22,28 +22,31 @@ fn test_conclusion_operations() {
         Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt),
     );
 
-    let conclusion = Conclusion { attributes };
+    let concept = Concept {
+        operator: "person".to_string(),
+        attributes,
+    };
 
     // Test contains method - should include "this" parameter
-    assert!(conclusion.contains("this"));
-    assert!(conclusion.contains("name"));
-    assert!(conclusion.contains("age"));
-    assert!(!conclusion.contains("height"));
+    assert!(concept.contains("this"));
+    assert!(concept.contains("name"));
+    assert!(concept.contains("age"));
+    assert!(!concept.contains("height"));
 
     // Test absent method
     let mut dependencies = Dependencies::new();
     dependencies.desire("name".into(), 100);
 
     // Should find "this" as absent since it's not in dependencies
-    assert_eq!(conclusion.absent(&dependencies), Some("this"));
+    assert_eq!(concept.absent(&dependencies), Some("this"));
 
     dependencies.desire("this".into(), 100);
     // Now should find "age" as absent
-    assert_eq!(conclusion.absent(&dependencies), Some("age"));
+    assert_eq!(concept.absent(&dependencies), Some("age"));
 
     dependencies.desire("age".into(), 100);
     // Now nothing should be absent
-    assert_eq!(conclusion.absent(&dependencies), None);
+    assert_eq!(concept.absent(&dependencies), None);
 }
 
 #[test]
@@ -111,8 +114,8 @@ fn test_deductive_rule_parameters() {
     );
 
     let rule = DeductiveRule {
-        operator: "adult".to_string(),
-        conclusion: Conclusion {
+        conclusion: Concept {
+            operator: "adult".to_string(),
             attributes: conclusion_attributes,
         },
         premises: vec![],
@@ -175,8 +178,8 @@ fn test_plan_candidate_structure() {
 fn test_error_types() {
     // Test AnalyzerError creation
     let rule = DeductiveRule {
-        operator: "test".to_string(),
-        conclusion: Conclusion {
+        conclusion: Concept {
+            operator: "test".to_string(),
             attributes: HashMap::new(),
         },
         premises: vec![],
@@ -191,7 +194,7 @@ fn test_error_types() {
     let plan_error: PlanError = analyzer_error.into();
     match &plan_error {
         PlanError::UnusedParameter { rule: r, parameter } => {
-            assert_eq!(r.operator, "test");
+            assert_eq!(r.conclusion.operator, "test");
             assert_eq!(parameter, "test_param");
         }
         _ => panic!("Expected UnusedParameter variant"),

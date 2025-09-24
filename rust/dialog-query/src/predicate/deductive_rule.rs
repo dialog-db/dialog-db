@@ -1,47 +1,17 @@
 pub use crate::analyzer::{Analysis, AnalyzerError};
 pub use crate::application::RuleApplication;
+pub use crate::predicate::Concept;
 pub use crate::premise::Premise;
 pub use crate::{Attribute, Dependencies, Parameters, Requirement, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::Display;
-
-/// Represents a conclusion of the rule as a set of attribute descriptors keyed
-/// by the rule parameter name. It is effectively describes decomposition into
-/// facts with a shared entity.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Conclusion {
-    /// Map of all attributes this entity should have to reach this conclusion.
-    pub attributes: HashMap<String, Attribute<Value>>,
-}
-impl Conclusion {
-    /// Checks if the conclusion includes the given parameter name.
-    /// The special "this" parameter is always considered present as it represents
-    /// the entity that the conclusion applies to.
-    pub fn contains(&self, name: &str) -> bool {
-        name == "this" || self.attributes.contains_key(name)
-    }
-
-    /// Finds a parameter that is absent from the provided dependencies.
-    pub fn absent(&self, dependencies: &Dependencies) -> Option<&str> {
-        if !dependencies.contains("this") {
-            Some("this")
-        } else {
-            self.attributes
-                .keys()
-                .find(|name| !dependencies.contains(name))
-                .map(|name| name.as_str())
-        }
-    }
-}
 
 /// Represents a deductive rule that can be applied creating a premise.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeductiveRule {
-    /// Rule identifier used to look rules up by.
-    pub operator: String,
     /// Conclusion that this rule reaches if all premises hold. This is
     /// typically what datalog calls rule head.
-    pub conclusion: Conclusion,
+    pub conclusion: Concept,
     /// Premises that must hold for rule to reach it's conclusion. Typically
     /// datalog calls these rule body.
     pub premises: Vec<Premise>,
@@ -49,9 +19,8 @@ pub struct DeductiveRule {
 impl DeductiveRule {
     /// Returns the names of the parameters for this rule.
     pub fn parameters(&self) -> HashSet<String> {
-        let Conclusion { attributes, .. } = &self.conclusion;
         let mut params = HashSet::new();
-        for (name, _) in attributes.iter() {
+        for (name, _) in self.conclusion.attributes.iter() {
             params.insert(name.clone());
         }
         params.insert("this".to_string());
@@ -142,7 +111,7 @@ impl DeductiveRule {
 }
 impl Display for DeductiveRule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {{", self.operator)?;
+        write!(f, "{} {{", self.conclusion.operator)?;
         for (name, attribute) in self.conclusion.attributes.iter() {
             write!(f, "{}: {},", name, attribute.data_type)?;
         }

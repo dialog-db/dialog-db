@@ -57,12 +57,13 @@ impl<S: Store> Session<S> {
 
     /// Install a new rule into the session
     pub fn install(mut self, rule: DeductiveRule) -> Self {
-        if let Some(rules) = self.rules.get_mut(&rule.operator) {
+        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator) {
             if !rules.contains(&rule) {
                 rules.push(rule);
             }
         } else {
-            self.rules.insert(rule.operator.clone(), vec![rule.clone()]);
+            self.rules
+                .insert(rule.conclusion.operator.clone(), vec![rule.clone()]);
         }
 
         self

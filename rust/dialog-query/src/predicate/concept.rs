@@ -4,7 +4,7 @@ use crate::attribute::Relation;
 use crate::claim::concept::ConceptClaim;
 use crate::error::SchemaError;
 use crate::fact::Scalar;
-use crate::{Application, Attribute, Claim, Entity, Parameters, Value};
+use crate::{Application, Attribute, Claim, Dependencies, Entity, Parameters, Value};
 use dialog_artifacts::DialogArtifactsError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -87,6 +87,25 @@ impl From<Instance> for Vec<Artifact> {
 }
 
 impl Concept {
+    /// Checks if the concept includes the given parameter name.
+    /// The special "this" parameter is always considered present as it represents
+    /// the entity that the concept applies to.
+    pub fn contains(&self, name: &str) -> bool {
+        name == "this" || self.attributes.contains_key(name)
+    }
+
+    /// Finds a parameter that is absent from the provided dependencies.
+    pub fn absent(&self, dependencies: &Dependencies) -> Option<&str> {
+        if !dependencies.contains("this") {
+            Some("this")
+        } else {
+            self.attributes
+                .keys()
+                .find(|name| !dependencies.contains(name))
+                .map(|name| name.as_str())
+        }
+    }
+
     /// Creates an application for this concept.
     pub fn apply(&self, parameters: Parameters) -> Application {
         Application::Realize(ConcetApplication {

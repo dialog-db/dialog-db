@@ -113,7 +113,7 @@ impl RuleApplication {
 
 impl Display for RuleApplication {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {{", self.rule.operator)?;
+        write!(f, "{} {{", self.rule.conclusion.operator)?;
         for (name, term) in self.terms.iter() {
             write!(f, "{}: {},", name, term)?;
         }
