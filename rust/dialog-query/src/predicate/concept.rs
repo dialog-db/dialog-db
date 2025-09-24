@@ -20,31 +20,57 @@ pub struct Concept {
     pub attributes: HashMap<String, Attribute<Value>>,
 }
 
+/// A model representing the data for a concept instance before validation.
+///
+/// This is an intermediate representation that holds raw values for each attribute
+/// before they are validated against the concept's schema and converted into an Instance.
 #[derive(Debug, Clone)]
 pub struct Model {
+    /// The entity that this model represents
     pub this: Entity,
+    /// Raw attribute values keyed by attribute name
     pub attributes: HashMap<String, Value>,
 }
 
+/// A validated instance of a concept.
+///
+/// This represents a concept instance that has been validated against its schema,
+/// with all attributes properly typed and confirmed to exist. Can be converted
+/// to artifacts for storage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Instance {
+    /// The entity this instance represents
     this: Entity,
+    /// The validated relations (attribute-value pairs) for this instance
     with: Vec<Relation>,
 }
 impl Instance {
+    /// Returns a reference to the entity this instance represents.
     pub fn this(&self) -> &'_ Entity {
         &self.this
     }
+
+    /// Returns a reference to the validated relations for this instance.
     pub fn relations(&self) -> &'_ Vec<Relation> {
         &self.with
     }
 
+    /// Converts this instance into a vector of artifacts for storage.
+    ///
+    /// This is a convenience method that delegates to the `From` implementation.
     pub fn into_artifacts(self) -> Vec<Artifact> {
         self.into()
     }
 }
 
 impl From<Instance> for Vec<Artifact> {
+    /// Converts a concept instance into a vector of artifacts.
+    ///
+    /// Each relation in the instance becomes an artifact with:
+    /// - `the`: The attribute identifier from the relation
+    /// - `of`: The entity this instance represents
+    /// - `is`: The value from the relation
+    /// - `cause`: None (no causal information)
     fn from(value: Instance) -> Self {
         let mut artifacts = vec![];
         for relation in value.with {
@@ -61,6 +87,7 @@ impl From<Instance> for Vec<Artifact> {
 }
 
 impl Concept {
+    /// Creates an application for this concept.
     pub fn apply(&self, parameters: Parameters) -> Application {
         Application::Realize(ConcetApplication {
             terms: parameters,
@@ -68,6 +95,23 @@ impl Concept {
         })
     }
 
+    /// Validates a model against this concept's schema and creates an instance.
+    ///
+    /// This method:
+    /// 1. Checks that all required attributes are present in the model
+    /// 2. Validates that each attribute value matches the expected data type
+    /// 3. Creates relations for each validated attribute-value pair
+    ///
+    /// # Arguments
+    /// * `model` - The model containing raw attribute values to validate
+    ///
+    /// # Returns
+    /// * `Ok(Instance)` - A validated instance if all attributes conform to schema
+    /// * `Err(SchemaError)` - If any attribute is missing or has wrong type
+    ///
+    /// # Errors
+    /// * `SchemaError::MissingProperty` - If a required attribute is missing
+    /// * `SchemaError::TypeError` - If an attribute value has the wrong type
     pub fn conform(&self, model: Model) -> Result<Instance, SchemaError> {
         let mut relations = vec![];
         for (name, attribute) in &self.attributes {
@@ -86,30 +130,83 @@ impl Concept {
         })
     }
 
+    /// Creates a builder for editing an existing entity with this concept's schema.
+    ///
+    /// # Arguments
+    /// * `entity` - The entity to edit
+    ///
+    /// # Returns
+    /// A builder that can be used to set attribute values for the entity
     pub fn edit(&self, entity: Entity) -> Builder {
         Builder::edit(entity, &self)
     }
+
+    /// Creates a builder for creating a new entity with this concept's schema.
+    ///
+    /// # Returns
+    /// * `Ok(Builder)` - A builder for the new entity
+    /// * `Err(DialogArtifactsError)` - If entity creation fails
     pub fn new(&self) -> Result<Builder, DialogArtifactsError> {
         Builder::new(self)
     }
 
+    /// Creates an assertion claim for a model validated against this concept.
+    ///
+    /// # Arguments
+    /// * `model` - The model to validate and assert
+    ///
+    /// # Returns
+    /// * `Ok(ConceptClaim)` - An assertion claim for the validated instance
+    /// * `Err(SchemaError)` - If model validation fails
     pub fn assert(&self, model: Model) -> Result<ConceptClaim, SchemaError> {
         Ok(ConceptClaim::Assert(self.conform(model)?))
     }
+
+    /// Creates a retraction claim for a model validated against this concept.
+    ///
+    /// # Arguments
+    /// * `model` - The model to validate and retract
+    ///
+    /// # Returns
+    /// * `Ok(ConceptClaim)` - A retraction claim for the validated instance
+    /// * `Err(SchemaError)` - If model validation fails
     pub fn retract(&self, model: Model) -> Result<ConceptClaim, SchemaError> {
         Ok(ConceptClaim::Retract(self.conform(model)?))
     }
 }
 
+/// A builder for constructing concept instances with validation.
+///
+/// The builder pattern allows for step-by-step construction of a concept instance,
+/// setting attribute values one by one before final validation and conversion to claims.
 #[derive(Debug, Clone)]
 pub struct Builder<'a> {
+    /// Reference to the concept schema this builder validates against
     concept: &'a Concept,
+    /// The model being built with attribute values
     model: Model,
 }
 impl<'a> Builder<'a> {
+    /// Creates a new builder for a fresh entity.
+    ///
+    /// # Arguments
+    /// * `concept` - The concept schema to validate against
+    ///
+    /// # Returns
+    /// * `Ok(Builder)` - A new builder with a fresh entity
+    /// * `Err(DialogArtifactsError)` - If entity creation fails
     pub fn new(concept: &'a Concept) -> Result<Self, DialogArtifactsError> {
         Ok(Self::edit(Entity::new()?, concept))
     }
+
+    /// Creates a new builder for editing an existing entity.
+    ///
+    /// # Arguments
+    /// * `this` - The entity to edit
+    /// * `concept` - The concept schema to validate against
+    ///
+    /// # Returns
+    /// A new builder for the specified entity
     pub fn edit(this: Entity, concept: &'a Concept) -> Self {
         Builder {
             concept,
@@ -120,19 +217,50 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Sets an attribute value for the concept instance being built.
+    ///
+    /// # Arguments
+    /// * `name` - The name of the attribute to set
+    /// * `value` - The value to set (must implement Scalar)
+    ///
+    /// # Returns
+    /// Self for method chaining
+    ///
+    /// # Example
+    /// ```ignore
+    /// let instance = concept.new()?
+    ///     .with("name", "Alice")
+    ///     .with("age", 30)
+    ///     .build()?;
+    /// ```
     pub fn with<T: Scalar>(mut self, name: &str, value: T) -> Self {
         self.model.attributes.insert(name.into(), value.as_value());
         self
     }
 
+    /// Builds and validates the concept instance.
+    ///
+    /// # Returns
+    /// * `Ok(Instance)` - A validated instance if all attributes are valid
+    /// * `Err(SchemaError)` - If validation fails
     pub fn build(self) -> Result<Instance, SchemaError> {
         self.concept.conform(self.model)
     }
 
+    /// Builds the instance and creates an assertion claim.
+    ///
+    /// # Returns
+    /// * `Ok(Claim)` - An assertion claim for the validated instance
+    /// * `Err(SchemaError)` - If validation fails
     pub fn assert(self) -> Result<Claim, SchemaError> {
         Ok(ConceptClaim::Assert(self.build()?).into())
     }
 
+    /// Builds the instance and creates a retraction claim.
+    ///
+    /// # Returns
+    /// * `Ok(Claim)` - A retraction claim for the validated instance
+    /// * `Err(SchemaError)` - If validation fails
     pub fn retract(self) -> Result<Claim, SchemaError> {
         Ok(ConceptClaim::Retract(self.build()?).into())
     }
