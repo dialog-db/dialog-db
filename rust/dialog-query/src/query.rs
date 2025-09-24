@@ -7,13 +7,37 @@ pub use crate::error::QueryResult;
 use crate::plan::{fresh, EvaluationPlan};
 use crate::Selection;
 
-/// Convenience trait alias for stores that can be used with the Query API
-///
-/// This combines all the required bounds in one place to avoid repetition
-pub trait Source: ArtifactStore + Clone + Send + Sync + 'static {}
+use crate::predicate::DeductiveRule;
 
-/// Blanket implementation - any type that satisfies the bounds automatically implements QueryStore
-impl<T> Source for T where T: ArtifactStore + Clone + Send + Sync + 'static {}
+/// Source trait for stores that support both artifact storage and rule resolution
+///
+/// This trait extends ArtifactStore with rule resolution capabilities, allowing
+/// query evaluation to access both stored facts and registered deductive rules.
+/// This enables rule-based inference during query execution.
+pub trait Source: ArtifactStore + Clone + Send + Sync + 'static {
+    /// Resolve rules for the given operator
+    ///
+    /// Returns all deductive rules that have conclusions matching the given operator.
+    /// This enables concept evaluation to discover and apply relevant rules when
+    /// facts are not directly available in the store.
+    ///
+    /// # Arguments
+    /// * `operator` - The concept operator to find rules for
+    ///
+    /// # Returns
+    /// A vector of DeductiveRule instances whose conclusions match the operator
+    fn resolve_rules(&self, operator: &str) -> Vec<DeductiveRule>;
+}
+
+// Note: Source implementations must be provided explicitly by each artifact store type.
+// The Session type provides rule resolution by maintaining a rule registry.
+// Other artifact stores should implement Source with empty rule resolution.
+
+// Note: Source implementations are provided by Session and QuerySession.
+// For basic artifact stores, use Session::open() to enable rule-aware querying:
+//
+//   let session = Session::open(artifacts);
+//   let results = concept.query(&session)?;
 
 pub trait Store: ArtifactStoreMut + Clone + ConditionalSend {}
 /// Blanket implementation - any type that satisfies the bounds automatically implements QueryStore
@@ -50,7 +74,7 @@ impl<Plan: EvaluationPlan> PlannedQuery for Plan {
 mod tests {
     use super::*;
     use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Value};
-    use crate::{Claims, Fact, Term};
+    use crate::{Claims, Fact, Session, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -93,19 +117,22 @@ mod tests {
             .is(Value::String("Alice".to_string()));
 
         // Use the Query trait method - should succeed since all fields are constants
-        let result = alice_query.query(&artifacts);
+        let session = Session::open(artifacts.clone());
+        let result = alice_query.query(&session);
         assert!(result.is_ok()); // Should succeed with constants, returns empty stream
 
         // Query 2: Find all user/name facts using Query trait
         let all_names_query = Fact::<Value>::select().the("user/name");
 
-        let result = all_names_query.query(&artifacts);
+        let session = Session::open(artifacts.clone());
+        let result = all_names_query.query(&session);
         assert!(result.is_ok()); // Should succeed with constants
 
         // Query 3: Find Alice's email using Query trait
         let email_query = Fact::<Value>::select().the("user/email").of(alice.clone());
 
-        let result = email_query.query(&artifacts);
+        let session = Session::open(artifacts);
+        let result = email_query.query(&session);
         assert!(result.is_ok()); // Should succeed with constants
 
         Ok(())
@@ -124,7 +151,8 @@ mod tests {
             .is(Term::<Value>::var("name")); // Variable - skipped
 
         // Should succeed since planning validation only rejects all-unbound queries, and this has a constant
-        let result = variable_query.query(&artifacts);
+        let session = Session::open(artifacts);
+        let result = variable_query.query(&session);
         assert!(result.is_ok());
 
         Ok(())
@@ -160,7 +188,8 @@ mod tests {
         // Test with FactSelector
         let fact_selector = Fact::<Value>::select().the("user/name").of(alice.clone());
 
-        let results = execute_query(fact_selector, &artifacts).await?;
+        let session = Session::open(artifacts);
+        let results = execute_query(fact_selector, &session).await?;
         assert_eq!(results.len(), 0); // Empty since evaluation returns empty stream
 
         // Could also test with FactSelectorPlan if we had a way to create one easily
@@ -206,14 +235,16 @@ mod tests {
         artifacts.commit(Claims::from(facts)).await?;
 
         // Test fluent query building - should succeed with constants
+        let session = Session::open(artifacts.clone());
         let admin_result = Fact::<Value>::select()
             .the("user/role")
             .is(Value::String("admin".to_string()))
-            .query(&artifacts);
+            .query(&session);
         assert!(admin_result.is_ok());
 
         // Test another fluent query - should also succeed
-        let names_result = Fact::<Value>::select().the("user/name").query(&artifacts);
+        let session = Session::open(artifacts);
+        let names_result = Fact::<Value>::select().the("user/name").query(&session);
         assert!(names_result.is_ok());
 
         Ok(())

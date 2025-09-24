@@ -5,7 +5,7 @@ use dialog_query::{
     artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Value},
     rule::Rule as RuleTrait,
     term::Term,
-    Claims, Fact, Rule,
+    Claims, Fact, Rule, Session,
 };
 use dialog_storage::MemoryStorageBackend;
 
@@ -47,7 +47,8 @@ async fn test_person_concept_basic() -> Result<()> {
     };
 
     // Test the new convenient query method
-    match alice_match.query(artifacts).await {
+    let session = Session::open(artifacts);
+    match alice_match.query(session).await {
         Ok(people) => {
             assert_eq!(people.len(), 1);
             assert_eq!(people[0].name, "Alice");

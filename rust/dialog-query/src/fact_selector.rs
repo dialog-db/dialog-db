@@ -561,7 +561,7 @@ mod tests {
     use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity};
     use crate::claim::Claims;
     use crate::syntax::VariableScope;
-    use crate::{plan::EvaluationContext, Fact};
+    use crate::{plan::EvaluationContext, Fact, Session};
     use crate::{selection::Match, QueryError};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
@@ -623,7 +623,8 @@ mod tests {
         // Step 4: Create evaluation context with initial empty selection
         let initial_match = Match::new();
         let initial_selection = stream::iter(vec![Ok(initial_match)]);
-        let context = EvaluationContext::single(artifacts.clone(), initial_selection);
+        let session = Session::open(artifacts.clone());
+        let context = EvaluationContext::single(session, initial_selection);
 
         // Step 5: Execute the plan using familiar-query pattern
         let result_stream = plan.evaluate(context);

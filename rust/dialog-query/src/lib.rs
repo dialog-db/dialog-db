@@ -33,6 +33,7 @@ pub mod syntax;
 pub mod term;
 pub mod types;
 
+
 pub use application::Application;
 pub use artifact::{Entity, Value, ValueDataType};
 pub use attribute::{Attribute, Cardinality};
@@ -50,7 +51,7 @@ pub use predicate::{Compute, DeductiveRule, Formula};
 pub use premise::Premise;
 pub use query::{Query, Source, Store};
 pub use rule::{Premises, Rule, When};
-pub use session::Session;
+pub use session::{QuerySession, Session};
 
 pub use async_stream::try_stream;
 pub use selection::{Match, MatchSet, Selection, SelectionExt};

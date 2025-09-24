@@ -5,7 +5,7 @@ use dialog_query::{
     artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Value},
     rule::{Match, Rule as RuleTrait},
     term::Term,
-    Claims, Fact,
+    Claims, Fact, Session,
 };
 use dialog_query_macros::Rule;
 use dialog_storage::MemoryStorageBackend;
@@ -50,7 +50,8 @@ async fn test_single_attribute_query_works() -> Result<()> {
         name: "Alice".into(),
     };
 
-    let results = alice_query.query(artifacts.clone()).await?;
+    let session = Session::open(artifacts.clone());
+    let results = alice_query.query(session).await?;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name, "Alice");
     println!("✅ Single-attribute constant query: WORKS");
@@ -61,7 +62,8 @@ async fn test_single_attribute_query_works() -> Result<()> {
         name: Term::var("name"),
     };
 
-    let all_results = all_people_query.query(artifacts).await?;
+    let session = Session::open(artifacts);
+    let all_results = all_people_query.query(session).await?;
     assert_eq!(all_results.len(), 2);
     println!("✅ Single-attribute variable query: WORKS");
 
@@ -108,7 +110,8 @@ async fn test_multi_attribute_constant_query_works() -> Result<()> {
         department: "Engineering".into(),
     };
 
-    let results = alice_engineering_query.query(artifacts).await?;
+    let session = Session::open(artifacts);
+    let results = alice_engineering_query.query(session).await?;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name, "Alice");
     assert_eq!(results[0].department, "Engineering");
@@ -164,7 +167,8 @@ async fn test_multi_attribute_variable_query_limitation() -> Result<()> {
         department: "Engineering".into(), // Constant to filter
     };
 
-    match engineering_query.query(artifacts).await {
+    let session = Session::open(artifacts);
+    match engineering_query.query(session).await {
         Ok(results) => {
             // Currently this might return more results than expected
             // because we only execute the first plan (probably the name plan)

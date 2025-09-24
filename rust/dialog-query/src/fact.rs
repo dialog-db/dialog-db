@@ -362,7 +362,7 @@ mod integration_tests {
 
     use super::*;
     use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Value};
-    use crate::{Query, Term};
+    use crate::{Query, Session, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -408,7 +408,7 @@ mod integration_tests {
             .is(Term::var("name")); // Named variable - should be bound
 
         let matches = query_with_named_vars
-            .query(&artifacts)?
+            .query(&Session::open(artifacts.clone()))?
             .collect_set()
             .await?;
 
@@ -433,7 +433,7 @@ mod integration_tests {
             .is(Term::blank()); // Unnamed variable (wildcard) - should not be bound
 
         let wildcard_matches = query_with_wildcards
-            .query(&artifacts)?
+            .query(&Session::open(artifacts.clone()))?
             .collect_set()
             .await?;
 
@@ -453,7 +453,10 @@ mod integration_tests {
             .of(Term::var("person")) // Named - should be bound
             .is(Term::blank()); // Unnamed - should not be bound
 
-        let mixed_matches = mixed_query.query(&artifacts)?.collect_set().await?;
+        let mixed_matches = mixed_query
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
 
         assert_eq!(mixed_matches.len(), 2, "Should find both users");
 
@@ -499,7 +502,10 @@ mod integration_tests {
             .of(alice.clone()) // Constant entity
             .is(Term::var("name")); // Variable value - should be bound
 
-        let results = query_constant.query(&artifacts)?.collect_set().await?;
+        let results = query_constant
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
 
         assert_eq!(results.len(), 1);
         // Only the variable should be bound, not the constant
@@ -522,7 +528,10 @@ mod integration_tests {
             .of(alice.clone()) // Same constant entity
             .is(Term::var("name"));
 
-        let results2 = query2.query(&artifacts)?.collect_set().await?;
+        let results2 = query2
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
 
         assert_eq!(results2.len(), 0, "Fact should be retracted");
 
@@ -567,7 +576,10 @@ mod integration_tests {
             .of(alice.clone()) // Constant entity
             .is(Value::String("Alice".to_string())); // Constant value
 
-        let constant_results = all_constants_query.query(&artifacts)?.collect_set().await?;
+        let constant_results = all_constants_query
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
 
         assert_eq!(constant_results.len(), 1, "Should find Alice's name fact");
         // No variables should be bound since all terms are constants
@@ -584,7 +596,10 @@ mod integration_tests {
             .of(Term::var("person")) // Variable entity - should bind
             .is(Value::String("Alice".to_string())); // Constant value
 
-        let mixed_results = mixed_query.query(&artifacts)?.collect_set().await?;
+        let mixed_results = mixed_query
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
 
         assert_eq!(mixed_results.len(), 1, "Should find Alice specifically");
         // Only the entity variable should be bound
@@ -608,7 +623,10 @@ mod integration_tests {
             .of(Term::var("person")) // Variable entity
             .is(Term::var("name")); // Variable value
 
-        let all_name_results = find_all_names.query(&artifacts)?.collect_set().await?;
+        let all_name_results = find_all_names
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
 
         assert_eq!(all_name_results.len(), 2, "Should find both Alice and Bob");
         assert!(all_name_results.contains_binding("person", &Value::Entity(alice.clone())));
@@ -674,7 +692,10 @@ mod integration_tests {
             .of(Term::var("admin_user")) // Variable entity - should bind
             .is("admin"); // Constant value
 
-        let admin_results = admin_query.query(&artifacts)?.collect_set().await?;
+        let admin_results = admin_query
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
 
         assert_eq!(
             admin_results.len(),
@@ -705,7 +726,10 @@ mod integration_tests {
             .of(Term::var("user")) // Variable entity
             .is(Term::var("role")); // Variable value
 
-        let role_results = role_query.query(&artifacts)?.collect_set().await?;
+        let role_results = role_query
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
 
         assert_eq!(role_results.len(), 3, "Should find all 3 role assignments");
 
@@ -722,7 +746,10 @@ mod integration_tests {
             .of(bob.clone()) // Constant entity
             .is(Value::String("Bob".to_string())); // Constant value
 
-        let bob_results = bob_query.query(&artifacts)?.collect_set().await?;
+        let bob_results = bob_query
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
 
         assert_eq!(bob_results.len(), 1, "Should find exactly Bob's name fact");
 
@@ -773,7 +800,7 @@ mod integration_tests {
 
         // Query should succeed and return matches with variable bindings
         let results = query_with_variables
-            .query(&artifacts)?
+            .query(&Session::open(artifacts.clone()))?
             .collect_set()
             .await?;
 
@@ -822,7 +849,10 @@ mod integration_tests {
             .of(Term::var("user"))
             .is(Term::<String>::var("name"));
 
-        let value_results = value_selector.query(&artifacts)?.collect_set().await?;
+        let value_results = value_selector
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
         assert_eq!(value_results.len(), 1);
         assert!(value_results.contains_binding("user", &Value::Entity(alice.clone())));
         assert!(value_results.contains_binding("name", &Value::String("Alice".to_string())));
@@ -833,7 +863,10 @@ mod integration_tests {
             .of(alice.clone()) // Constant entity
             .is(Term::<Value>::var("friend")); // Variable - should bind to Bob
 
-        let entity_results = entity_selector.query(&artifacts)?.collect_set().await?;
+        let entity_results = entity_selector
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
         assert_eq!(entity_results.len(), 1);
         assert!(entity_results.contains_binding("friend", &Value::Entity(bob.clone())));
 
@@ -852,7 +885,10 @@ mod integration_tests {
             .of(alice.clone()) // Constant
             .is(Value::String("Alice".to_string())); // Constant
 
-        let constant_results = constant_selector.query(&artifacts)?.collect_set().await?;
+        let constant_results = constant_selector
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
         assert_eq!(constant_results.len(), 1);
 
         // No variables should be bound
@@ -905,7 +941,10 @@ mod integration_tests {
             .of(Term::var("user")) // Variable - should bind
             .is(Value::String("Bob".to_string())); // String constant
 
-        let bob_results = bob_query.query(&artifacts)?.collect_set().await?;
+        let bob_results = bob_query
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
         assert_eq!(bob_results.len(), 1);
         assert!(bob_results.contains_binding("user", &Value::Entity(bob.clone())));
 
@@ -915,7 +954,10 @@ mod integration_tests {
             .of(Term::var("admin_user")) // Variable - should bind to Alice
             .is(Value::String("admin".to_string())); // String constant
 
-        let admin_results = admin_query.query(&artifacts)?.collect_set().await?;
+        let admin_results = admin_query
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
         assert_eq!(admin_results.len(), 1);
         assert!(admin_results.contains_binding("admin_user", &Value::Entity(alice.clone())));
 
@@ -925,7 +967,10 @@ mod integration_tests {
             .of(Term::var("user")) // Variable entity
             .is(Term::var("name")); // Variable value
 
-        let name_results = names_query.query(&artifacts)?.collect_set().await?;
+        let name_results = names_query
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
         assert_eq!(name_results.len(), 2);
         assert!(name_results.contains_binding("name", &Value::String("Alice".to_string())));
         assert!(name_results.contains_binding("name", &Value::String("Bob".to_string())));
@@ -959,7 +1004,10 @@ mod integration_tests {
             .of(alice.clone()) // Constant - used for matching
             .is(Term::<Value>::var("name")); // Variable - should bind to "Alice"
 
-        let results = mixed_query.query(&artifacts)?.collect_set().await?;
+        let results = mixed_query
+            .query(&Session::open(artifacts.clone()))?
+            .collect_set()
+            .await?;
 
         assert_eq!(results.len(), 1, "Should find Alice's name fact");
 
@@ -995,7 +1043,7 @@ mod integration_tests {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
-        let result = query_only_vars.query(&artifacts);
+        let result = query_only_vars.query(&Session::open(artifacts.clone()));
 
         // Should fail because there are no constants at all - this fails during planning
         assert!(result.is_err(), "Query with only variables should fail");
@@ -1056,7 +1104,7 @@ mod integration_tests {
             .the("user/role")
             .of(Term::var("admin_user")) // Variable - binds to admin users
             .is(Value::String("admin".to_string())) // Constant role
-            .query(&artifacts)?
+            .query(&Session::open(artifacts.clone()))?
             .collect_set()
             .await?;
 
@@ -1068,7 +1116,7 @@ mod integration_tests {
             .the("user/name") // Constant attribute
             .of(Term::var("user")) // Variable entity
             .is(Term::var("name")) // Variable name
-            .query(&artifacts)?
+            .query(&Session::open(artifacts.clone()))?
             .collect_set()
             .await?;
 

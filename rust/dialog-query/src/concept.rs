@@ -420,7 +420,7 @@ mod tests {
     use crate::artifact::{Value, ValueDataType};
     use crate::selection::SelectionExt;
     use crate::term::Term;
-    use crate::{Fact, Query, Claims};
+    use crate::{Claims, Fact, Query, Session};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -880,7 +880,8 @@ mod tests {
         };
 
         // This should work with the planner fix
-        let results = person_query.query(&artifacts)?.collect_set().await?;
+        let session = Session::open(artifacts);
+        let results = person_query.query(&session)?.collect_set().await?;
 
         // Should find both Alice and Bob (not Mallory who has no age)
         assert_eq!(results.len(), 2, "Should find both people");
@@ -963,7 +964,8 @@ mod tests {
             .of(Term::var("person"))
             .is(Value::String("NonExistent".to_string()));
 
-        let no_results = missing_query.query(&artifacts)?.collect_set().await?;
+        let session = Session::open(artifacts);
+        let no_results = missing_query.query(&session)?.collect_set().await?;
         assert_eq!(no_results.len(), 0, "Should find no non-existent people");
 
         Ok(())

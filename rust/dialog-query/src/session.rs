@@ -1,10 +1,13 @@
-//! Database sessions for committing changes
+//! Database sessions and query sessions
 //!
-//! Sessions provide a high-level interface for committing claims to the database.
+//! This module provides two main types:
+//! - `Session`: For committing changes and rule-aware querying
+//! - `QuerySession`: For read-only rule-aware querying
 
 use std::collections::HashMap;
 
-use crate::artifact::DialogArtifactsError;
+use crate::artifact::{ArtifactStore, DialogArtifactsError};
+use crate::query::Source;
 use crate::{DeductiveRule, Store};
 
 /// A database session for committing changes
@@ -99,6 +102,144 @@ impl<S: Store> Session<S> {
     }
 }
 
+/// A read-only query session that provides rule-aware querying capabilities
+///
+/// QuerySession is a lighter-weight alternative to Session that focuses purely on querying
+/// with rule resolution support. It can be created from any ArtifactStore and provides
+/// an explicit way to enable rule-based inference during queries.
+///
+/// # Examples
+///
+/// ```ignore
+/// use dialog_query::{QuerySession, Fact};
+///
+/// // Convert an artifact store to a query session
+/// let query_session: QuerySession<_> = artifacts.into();
+///
+/// // Query with rule resolution
+/// let results = concept.query(&query_session)?;
+///
+/// // Install rules for more advanced querying
+/// let query_session = query_session.install(adult_rule);
+/// ```
+#[derive(Debug, Clone)]
+pub struct QuerySession<S: ArtifactStore> {
+    /// The underlying store for read operations
+    store: S,
+    /// Registry of the rules for inference
+    rules: HashMap<String, Vec<DeductiveRule>>,
+}
+
+impl<S: ArtifactStore> QuerySession<S> {
+    /// Create a new query session wrapping the provided store
+    ///
+    /// The query session starts with no rules and can have rules installed later.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use dialog_query::QuerySession;
+    ///
+    /// let query_session = QuerySession::new(artifacts);
+    /// ```
+    pub fn new(store: S) -> Self {
+        Self {
+            store,
+            rules: HashMap::new(),
+        }
+    }
+
+    /// Install a deductive rule into the query session
+    ///
+    /// Rules are indexed by their conclusion operator and can be used during
+    /// query evaluation to derive facts that aren't directly stored.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let query_session = QuerySession::new(artifacts)
+    ///     .install(adult_rule)
+    ///     .install(senior_rule);
+    /// ```
+    pub fn install(mut self, rule: DeductiveRule) -> Self {
+        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator) {
+            if !rules.contains(&rule) {
+                rules.push(rule);
+            }
+        } else {
+            self.rules
+                .insert(rule.conclusion.operator.clone(), vec![rule]);
+        }
+        self
+    }
+
+    /// Get a reference to the underlying store
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
+    /// Get a reference to the rules registry
+    pub fn rules(&self) -> &HashMap<String, Vec<DeductiveRule>> {
+        &self.rules
+    }
+}
+
+/// Create QuerySession from any ArtifactStore
+impl<S: ArtifactStore + Clone + Send + Sync + 'static> From<S> for QuerySession<S> {
+    fn from(store: S) -> Self {
+        Self::new(store)
+    }
+}
+
+/// Implement Source trait for QuerySession to provide rule resolution capabilities
+impl<S: ArtifactStore + Clone + Send + Sync + 'static> Source for QuerySession<S> {
+    fn resolve_rules(&self, operator: &str) -> Vec<DeductiveRule> {
+        self.rules
+            .get(operator)
+            .map(|rules| rules.clone())
+            .unwrap_or_else(Vec::new)
+    }
+}
+
+/// Forward ArtifactStore methods to the wrapped store
+impl<S: ArtifactStore> ArtifactStore for QuerySession<S> {
+    fn select(
+        &self,
+        artifact_selector: crate::artifact::ArtifactSelector<crate::artifact::Constrained>,
+    ) -> impl futures_core::Stream<
+        Item = Result<crate::artifact::Artifact, crate::artifact::DialogArtifactsError>,
+    > + crate::artifact::ConditionalSend
+           + 'static {
+        self.store.select(artifact_selector)
+    }
+}
+
+/// Implement Source trait for Session to provide rule resolution capabilities
+///
+/// This implementation allows Session to be used directly with the Query trait
+/// while providing access to both stored artifacts and registered rules.
+impl<S: Store + Sync + 'static> Source for Session<S> {
+    fn resolve_rules(&self, operator: &str) -> Vec<DeductiveRule> {
+        self.rules
+            .get(operator)
+            .map(|rules| rules.clone())
+            .unwrap_or_else(Vec::new)
+    }
+}
+
+/// Forward ArtifactStore methods to the wrapped store
+impl<S: Store> crate::artifact::ArtifactStore for Session<S> {
+    fn select(
+        &self,
+        artifact_selector: crate::artifact::ArtifactSelector<crate::artifact::Constrained>,
+    ) -> impl futures_core::Stream<
+        Item = Result<crate::artifact::Artifact, crate::artifact::DialogArtifactsError>,
+    > + crate::artifact::ConditionalSend
+           + 'static {
+        self.store.select(artifact_selector)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -180,7 +321,7 @@ mod tests {
 
         let plan = application.plan(&VariableScope::new())?;
 
-        let selection = plan.query(&session.store)?.collect_matches().await?;
+        let selection = plan.query(&session)?.collect_matches().await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
 
         // Check that we have both Alice and Bob (order may vary)
@@ -279,7 +420,7 @@ mod tests {
 
         let plan = application.plan(&VariableScope::new())?;
 
-        let selection = plan.query(&session.store)?.collect_matches().await?;
+        let selection = plan.query(&session)?.collect_matches().await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
 
         // Check that we have both Alice and Bob (order may vary)
@@ -585,7 +726,7 @@ mod tests {
 
         let plan = application.plan(&VariableScope::new())?;
 
-        let selection = plan.query(&session.store)?.collect_matches().await?;
+        let selection = plan.query(&session)?.collect_matches().await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
 
         // Check that we have both Alice and Bob (order may vary)
