@@ -27,14 +27,14 @@ pub trait Query {
     /// Execute the query against the provided store
     ///
     /// Returns a stream of artifacts that match the query criteria.
-    fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection>;
+    fn query<S: Source>(&self, source: &S) -> QueryResult<impl Selection>;
 }
 
 pub trait PlannedQuery {
     /// Execute the query against the provided store
     ///
     /// Returns a stream of artifacts that match the query criteria.
-    fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection>;
+    fn query<S: Source>(&self, source: &S) -> QueryResult<impl Selection>;
 }
 
 impl<Plan: EvaluationPlan> PlannedQuery for Plan {

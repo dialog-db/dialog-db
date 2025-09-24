@@ -1,6 +1,5 @@
 //! Query execution plans - traits and context for evaluation
 
-pub use crate::artifact::ArtifactStore;
 pub use crate::query::Source;
 pub use crate::{try_stream, Match, Selection, Value};
 pub use dialog_common::ConditionalSend;
@@ -86,7 +85,7 @@ impl PartialOrd for Plan {
     }
 }
 
-pub fn fresh<S: ArtifactStore>(store: S) -> EvaluationContext<S, impl Selection> {
+pub fn fresh<S: Source>(store: S) -> EvaluationContext<S, impl Selection> {
     let selection = once(async move { Ok(Match::new()) });
     EvaluationContext { store, selection }
 }
@@ -99,7 +98,7 @@ pub type MatchFrame = BTreeMap<String, Value>;
 /// Based on TypeScript EvaluationContext in @query/src/api.ts
 pub struct EvaluationContext<S, M>
 where
-    S: ArtifactStore,
+    S: Source,
     M: Selection,
 {
     /// Current selection of frames being processed (equivalent to frames in familiar-query)
@@ -110,7 +109,7 @@ where
 
 impl<S, M> EvaluationContext<S, M>
 where
-    S: ArtifactStore,
+    S: Source,
     M: Selection,
 {
     /// Create a new evaluation context
