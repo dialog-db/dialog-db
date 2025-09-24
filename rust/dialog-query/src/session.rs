@@ -561,13 +561,13 @@ mod tests {
         };
 
         let alice = person
-            .new()?
+            .create()?
             .with("name", "Alice".to_string())
             .with("age", 25usize)
             .assert()?;
 
         let bob = person
-            .new()?
+            .create()?
             .with("name", "Bob".to_string())
             .with("age", 30usize)
             .assert()?;

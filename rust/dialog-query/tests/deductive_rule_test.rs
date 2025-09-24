@@ -103,21 +103,16 @@ fn test_concept_application_analysis() {
 
 #[test]
 fn test_deductive_rule_parameters() {
-    let mut conclusion_attributes = HashMap::new();
-    conclusion_attributes.insert(
-        "name".to_string(),
-        Attribute::new("person", "name", "Person name", ValueDataType::String),
-    );
-    conclusion_attributes.insert(
-        "age".to_string(),
-        Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt),
-    );
-
     let rule = DeductiveRule {
-        conclusion: Concept {
-            operator: "adult".to_string(),
-            attributes: conclusion_attributes,
-        },
+        conclusion: Concept::new("adult".into())
+            .with(
+                "name",
+                Attribute::new("person", "name", "Person name", ValueDataType::String),
+            )
+            .with(
+                "age",
+                Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt),
+            ),
         premises: vec![],
     };
 

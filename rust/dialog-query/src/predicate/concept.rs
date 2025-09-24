@@ -87,6 +87,18 @@ impl From<Instance> for Vec<Artifact> {
 }
 
 impl Concept {
+    pub fn new(operator: String) -> Self {
+        Concept {
+            operator,
+            attributes: HashMap::new(),
+        }
+    }
+
+    pub fn with(mut self, name: &str, attribute: Attribute<Value>) -> Self {
+        self.attributes.insert(name.into(), attribute);
+        self
+    }
+
     /// Checks if the concept includes the given parameter name.
     /// The special "this" parameter is always considered present as it represents
     /// the entity that the concept applies to.
@@ -165,7 +177,7 @@ impl Concept {
     /// # Returns
     /// * `Ok(Builder)` - A builder for the new entity
     /// * `Err(DialogArtifactsError)` - If entity creation fails
-    pub fn new(&self) -> Result<Builder, DialogArtifactsError> {
+    pub fn create(&self) -> Result<Builder, DialogArtifactsError> {
         Builder::new(self)
     }
 
