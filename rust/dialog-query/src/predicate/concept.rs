@@ -42,7 +42,7 @@ pub struct Instance {
     /// The entity this instance represents
     this: Entity,
     /// The validated relations (attribute-value pairs) for this instance
-    with: Vec<Relation>,
+    pub with: Vec<Relation>,
 }
 impl Instance {
     /// Returns a reference to the entity this instance represents.

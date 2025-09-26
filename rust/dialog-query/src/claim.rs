@@ -57,6 +57,8 @@ pub mod fact;
 pub mod rule;
 
 pub use crate::artifact::{Artifact, Attribute, Instruction};
+pub use crate::session::transaction::{Edit, Transaction, TransactionError};
+pub use self::fact::Relation;
 use dialog_artifacts::Entity;
 use futures_util::Stream;
 use std::pin::Pin;
@@ -96,7 +98,25 @@ impl Claim {
     }
 }
 
-/// Convert a Claim into its constituent Instructions
+impl Edit for Claim {
+    fn merge(self, transaction: &mut Transaction) {
+        match self {
+            Self::Fact(claim) => claim.merge(transaction),
+            Self::Concept(claim) => claim.merge(transaction),
+        }
+    }
+}
+
+impl From<fact::Claim> for Claim {
+    fn from(claim: fact::Claim) -> Self {
+        Claim::Fact(claim)
+    }
+}
+
+/// Convert a Claim into its constituent Instructions (legacy API)
+///
+/// **Deprecated**: Use the `Edit` trait with `claim.merge(&mut transaction)` instead.
+/// This provides better performance and composability.
 ///
 /// Transforms high-level claims into low-level instructions for database execution.
 /// Each claim type determines how many instructions it generates.
@@ -106,12 +126,6 @@ impl From<Claim> for Vec<Instruction> {
             Claim::Fact(claim) => claim.into(),
             Claim::Concept(claim) => claim.into(),
         }
-    }
-}
-
-impl From<fact::Claim> for Claim {
-    fn from(claim: fact::Claim) -> Self {
-        Claim::Fact(claim)
     }
 }
 /// Iterate over the instructions contained in a Claim
@@ -209,6 +223,18 @@ impl From<Vec<Claim>> for Claims {
 impl From<Claim> for Claims {
     fn from(claim: Claim) -> Self {
         let instructions: Vec<Instruction> = claim.into_iter().collect();
+        Claims {
+            inner: instructions.into_iter(),
+        }
+    }
+}
+
+impl Claims {
+    /// Create a Claims collection from pre-generated instructions
+    /// 
+    /// This is used internally by the Transaction system to convert
+    /// instructions back to a streamable Claims collection.
+    pub fn from_instructions(instructions: Vec<Instruction>) -> Self {
         Claims {
             inner: instructions.into_iter(),
         }

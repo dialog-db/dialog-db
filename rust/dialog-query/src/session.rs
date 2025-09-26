@@ -4,11 +4,14 @@
 //! - `Session`: For committing changes and rule-aware querying
 //! - `QuerySession`: For read-only rule-aware querying
 
-use std::collections::HashMap;
+pub mod transaction;
 
 use crate::artifact::{ArtifactStore, DialogArtifactsError};
 use crate::query::Source;
+use crate::session::transaction::{Transaction, TransactionError};
 use crate::{DeductiveRule, Store};
+use std::collections::HashMap;
+use transaction::Edit;
 
 /// A database session for committing changes
 ///
@@ -72,9 +75,53 @@ impl<S: Store> Session<S> {
         self
     }
 
-    /// Transacts changes to the database
+    /// Create a new transaction for imperative API usage
+    ///
+    /// Returns a Transaction that can be used to batch operations before committing.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use dialog_query::{Session, Fact, Relation};
+    ///
+    /// let mut session = Session::open(store);
+    /// let mut transaction = session.edit();
+    ///
+    /// // Add operations to the transaction
+    /// transaction.assert(Relation::new(attr, entity, value));
+    /// transaction.retract(Relation::new(attr2, entity, old_value));
+    ///
+    /// // Commit the transaction
+    /// session.commit(transaction).await?;
+    /// ```
+    pub fn edit(&self) -> Transaction {
+        Transaction::new()
+    }
+
+    /// Commit a transaction to the database
+    ///
+    /// Takes ownership of a Transaction and commits all its operations.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use dialog_query::{Session, Relation};
+    ///
+    /// let mut session = Session::open(store);
+    /// let mut edit = session.edit();
+    ///
+    /// edit.assert(Relation::new(attr, entity, value));
+    /// session.commit(edit).await?;
+    /// ```
+    pub async fn commit(&mut self, transaction: Transaction) -> Result<(), TransactionError> {
+        self.store.commit(transaction.into_stream()).await?;
+        Ok(())
+    }
+
+    /// Legacy method - converts claims to instructions directly
     ///
     /// Accepts `Vec<Claim>`, single claims, or `Claims` collections.
+    /// This method is kept for backwards compatibility.
     ///
     /// # Examples
     ///
@@ -83,21 +130,23 @@ impl<S: Store> Session<S> {
     ///
     /// let mut session = Session::open(store);
     ///
-    /// // Transact a vector of claims (preferred API)
+    /// // Legacy API - use the new transaction-based methods instead
     /// session.transact(vec![
     ///     Fact::assert("user/name".parse()?, alice, "Alice".to_string()),
-    ///     Fact::assert("user/age".parse()?, alice, 30u32),
     /// ]).await?;
-    ///
-    /// // Transact a single claim
-    /// session.transact(Fact::retract("user/email".parse()?, alice, "old@example.com".to_string())).await?;
     /// ```
-    pub async fn transact<I>(&mut self, changes: I) -> Result<(), DialogArtifactsError>
-    where
-        I: Into<crate::claim::Claims>,
-    {
-        let claims: crate::claim::Claims = changes.into();
-        self.store.commit(claims).await?;
+    pub async fn transact<I: IntoIterator<Item = crate::claim::Claim>>(
+        &mut self,
+        changes: I,
+    ) -> Result<(), DialogArtifactsError> {
+        let mut transaction = self.edit();
+        // Go over each change and merge it into the transaction
+        for claim in changes {
+            claim.merge(&mut transaction);
+        }
+
+        // commit transaction.
+        self.store.commit(transaction.into_stream()).await?;
         Ok(())
     }
 }

@@ -52,6 +52,8 @@ pub use premise::Premise;
 pub use query::{Query, Source, Store};
 pub use rule::{Premises, Rule, When};
 pub use session::{QuerySession, Session};
+pub use session::transaction::{Transaction, TransactionError, Edit};
+pub use claim::fact::Relation;
 
 pub use async_stream::try_stream;
 pub use selection::{Match, MatchSet, Selection, SelectionExt};

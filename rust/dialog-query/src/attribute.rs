@@ -1,6 +1,5 @@
 use crate::artifact::ValueDataType;
 pub use crate::artifact::{Attribute as ArtifactsAttribute, Entity, Value};
-pub use crate::claim::concept::Relation;
 use crate::error::SchemaError;
 pub use crate::fact_selector::FactSelector;
 pub use crate::term::Term;
@@ -13,6 +12,14 @@ pub use std::marker::PhantomData;
 pub enum Cardinality {
     One,
     Many,
+}
+
+/// A relation specific to the attribute module containing cardinality information
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Relation {
+    pub the: ArtifactsAttribute,
+    pub is: Value,
+    pub cardinality: Cardinality,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

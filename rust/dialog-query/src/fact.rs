@@ -1,6 +1,7 @@
 //! Fact, Assertion, Retraction, and Claim types for the dialog-query system
 
 pub use super::claim::{fact, Claim, Claims};
+use crate::claim::fact::Relation;
 pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Instruction, Value};
 pub use crate::types::Scalar;
 use serde::{Deserialize, Serialize};
@@ -65,20 +66,14 @@ where
 
     /// Create an assertion claim from individual components
     pub fn assert<The: Into<Attribute>, Of: Into<Entity>>(the: The, of: Of, is: T) -> Claim {
-        Claim::Fact(fact::Claim::Assert {
-            the: the.into(),
-            of: of.into(),
-            is: is.as_value(),
-        })
+        let relation = Relation::new(the.into(), of.into(), is.as_value());
+        Claim::Fact(fact::Claim::Assert(relation))
     }
 
     /// Create a retraction claim from individual components
     pub fn retract<The: Into<Attribute>, Of: Into<Entity>>(the: The, of: Of, is: T) -> Claim {
-        Claim::Fact(fact::Claim::Retract {
-            the: the.into(),
-            of: of.into(),
-            is: is.as_value(),
-        })
+        let relation = Relation::new(the.into(), of.into(), is.as_value());
+        Claim::Fact(fact::Claim::Retract(relation))
     }
 }
 
@@ -88,11 +83,8 @@ pub fn assert<The: Into<Attribute>, Of: Into<Entity>, Is: Scalar>(
     of: Of,
     is: Is,
 ) -> Claim {
-    Claim::Fact(fact::Claim::Assert {
-        the: the.into(),
-        of: of.into(),
-        is: is.as_value(),
-    })
+    let relation = Relation::new(the.into(), of.into(), is.as_value());
+    Claim::Fact(fact::Claim::Assert(relation))
 }
 
 /// Create a generic retraction claim from individual components
@@ -101,11 +93,8 @@ pub fn retract<The: Into<Attribute>, Of: Into<Entity>, Is: Scalar>(
     of: Of,
     is: Is,
 ) -> Claim {
-    Claim::Fact(fact::Claim::Retract {
-        the: the.into(),
-        of: of.into(),
-        is: is.as_value(),
-    })
+    let relation = Relation::new(the.into(), of.into(), is.as_value());
+    Claim::Fact(fact::Claim::Retract(relation))
 }
 
 /// Convert Assertion to Instruction for committing
@@ -134,24 +123,26 @@ impl From<Retraction> for Instruction {
     }
 }
 
-/// Convert Claim to Instruction for committing
+/// Convert Claim to Instruction for committing (legacy API)
+/// 
+/// **Deprecated**: Use the `Edit` trait with `claim.merge(&mut transaction)` instead.
 impl From<fact::Claim> for Instruction {
     fn from(claim: fact::Claim) -> Self {
         match claim {
-            fact::Claim::Assert { the, of, is } => {
+            fact::Claim::Assert(relation) => {
                 let artifact = Artifact {
-                    the,
-                    of,
-                    is: is.into(),
+                    the: relation.the,
+                    of: relation.of,
+                    is: relation.is.into(),
                     cause: None,
                 };
                 Instruction::Assert(artifact)
             }
-            fact::Claim::Retract { the, of, is } => {
+            fact::Claim::Retract(relation) => {
                 let artifact = Artifact {
-                    the,
-                    of,
-                    is: is.into(),
+                    the: relation.the,
+                    of: relation.of,
+                    is: relation.is.into(),
                     cause: None,
                 };
                 Instruction::Retract(artifact)
@@ -177,10 +168,10 @@ mod tests {
         );
 
         match claim {
-            Claim::Fact(fact::Claim::Assert { the, of, is }) => {
-                assert_eq!(the.to_string(), "user/name");
-                assert_eq!(of, entity);
-                assert_eq!(is, Value::String("Alice".to_string()));
+            Claim::Fact(fact::Claim::Assert(relation)) => {
+                assert_eq!(relation.the.to_string(), "user/name");
+                assert_eq!(relation.of, entity);
+                assert_eq!(relation.is, Value::String("Alice".to_string()));
             }
             _ => panic!("Expected Claim::Fact(Assertion)"),
         }
@@ -196,10 +187,10 @@ mod tests {
         );
 
         match claim {
-            Claim::Fact(fact::Claim::Retract { the, of, is }) => {
-                assert_eq!(the.to_string(), "user/name");
-                assert_eq!(of, entity);
-                assert_eq!(is, Value::String("Alice".to_string()));
+            Claim::Fact(fact::Claim::Retract(relation)) => {
+                assert_eq!(relation.the.to_string(), "user/name");
+                assert_eq!(relation.of, entity);
+                assert_eq!(relation.is, Value::String("Alice".to_string()));
             }
             _ => panic!("Expected Claim::Fact(Retraction)"),
         }
@@ -284,10 +275,10 @@ mod tests {
         );
 
         match string_claim {
-            Claim::Fact(fact::Claim::Assert { the, of, is }) => {
-                assert_eq!(the.to_string(), "user/name");
-                assert_eq!(of, entity);
-                assert_eq!(is, Value::String("Alice".to_string()));
+            Claim::Fact(fact::Claim::Assert(relation)) => {
+                assert_eq!(relation.the.to_string(), "user/name");
+                assert_eq!(relation.of, entity);
+                assert_eq!(relation.is, Value::String("Alice".to_string()));
             }
             _ => panic!("Expected Claim::Fact(Assertion)"),
         }
@@ -300,10 +291,10 @@ mod tests {
         );
 
         match number_claim {
-            Claim::Fact(fact::Claim::Retract { the, of, is }) => {
-                assert_eq!(the.to_string(), "user/age");
-                assert_eq!(of, entity);
-                assert_eq!(is, Value::UnsignedInt(25u128));
+            Claim::Fact(fact::Claim::Retract(relation)) => {
+                assert_eq!(relation.the.to_string(), "user/age");
+                assert_eq!(relation.of, entity);
+                assert_eq!(relation.is, Value::UnsignedInt(25u128));
             }
             _ => panic!("Expected Claim::Fact(Retraction)"),
         }
@@ -321,10 +312,10 @@ mod tests {
         );
 
         match claim {
-            Claim::Fact(fact::Claim::Assert { the, of, is }) => {
-                assert_eq!(the.to_string(), "user/name");
-                assert_eq!(of, entity);
-                assert_eq!(is, Value::String("Alice".to_string()));
+            Claim::Fact(fact::Claim::Assert(relation)) => {
+                assert_eq!(relation.the.to_string(), "user/name");
+                assert_eq!(relation.of, entity);
+                assert_eq!(relation.is, Value::String("Alice".to_string()));
             }
             _ => panic!("Expected Claim::Fact(Assertion)"),
         }
@@ -337,10 +328,10 @@ mod tests {
         );
 
         match string_claim {
-            Claim::Fact(fact::Claim::Assert { the, of, is }) => {
-                assert_eq!(the.to_string(), "user/email");
-                assert_eq!(of, entity);
-                assert_eq!(is, Value::String("alice@example.com".to_string()));
+            Claim::Fact(fact::Claim::Assert(relation)) => {
+                assert_eq!(relation.the.to_string(), "user/email");
+                assert_eq!(relation.of, entity);
+                assert_eq!(relation.is, Value::String("alice@example.com".to_string()));
             }
             _ => panic!("Expected Claim::Fact(Assertion)"),
         }
