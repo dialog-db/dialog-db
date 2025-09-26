@@ -48,28 +48,6 @@ impl Edit for ConceptClaim {
     }
 }
 
-/// Convert concept claims to database instructions (legacy API)
-///
-/// **Deprecated**: Use the `Edit` trait with `claim.merge(&mut transaction)` instead.
-/// This provides better performance and composability.
-///
-/// Concept claims can generate multiple instructions (one per attribute)
-impl From<ConceptClaim> for Vec<Instruction> {
-    fn from(claim: ConceptClaim) -> Self {
-        match claim {
-            ConceptClaim::Assert(instance) => instance
-                .into_artifacts()
-                .into_iter()
-                .map(Instruction::Assert)
-                .collect(),
-            ConceptClaim::Retract(instance) => instance
-                .into_artifacts()
-                .into_iter()
-                .map(Instruction::Retract)
-                .collect(),
-        }
-    }
-}
 
 impl From<ConceptClaim> for Claim {
     fn from(claim: ConceptClaim) -> Self {

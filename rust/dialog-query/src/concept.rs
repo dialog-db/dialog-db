@@ -416,13 +416,14 @@ pub trait Attributes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute as ArtifactAttribute};
+    use crate::artifact::{Artifacts, Attribute as ArtifactAttribute};
     use crate::artifact::{Value, ValueDataType};
     use crate::selection::SelectionExt;
     use crate::term::Term;
-    use crate::{Claims, Fact, Query, Session};
+    use crate::{Claim, Fact, Query, Session};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
+
 
     // Define a Person concept for testing using raw concept API
     #[derive(Debug, Clone)]
@@ -870,7 +871,7 @@ mod tests {
             ),
         ];
 
-        artifacts.commit(Claims::from(facts)).await?;
+        let mut session = Session::open(artifacts.clone()); session.transact(facts).await?;
 
         // This is the real test - using PersonMatch to query for people
         let person_query = PersonMatch {
@@ -956,7 +957,7 @@ mod tests {
             Value::String("Alice".to_string()),
         )];
 
-        artifacts.commit(Claims::from(facts)).await?;
+        let mut session = Session::open(artifacts.clone()); session.transact(facts).await?;
 
         // Test: Search for non-existent person using individual fact selector
         let missing_query = Fact::<Value>::select()

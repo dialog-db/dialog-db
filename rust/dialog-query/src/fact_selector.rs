@@ -559,13 +559,13 @@ mod tests {
 
     // Tests from fact_selector_test.rs
     use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity};
-    use crate::claim::Claims;
     use crate::syntax::VariableScope;
-    use crate::{plan::EvaluationContext, Fact, Session};
+    use crate::{plan::EvaluationContext, Claim, Fact, Session};
     use crate::{selection::Match, QueryError};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
     use futures_util::{stream, StreamExt};
+
 
     #[tokio::test]
     async fn test_query_pattern() -> Result<()> {
@@ -606,7 +606,7 @@ mod tests {
             ),
         ];
 
-        artifacts.commit(Claims::from(facts)).await?;
+        let mut session = Session::open(artifacts.clone()); session.transact(facts).await?;
 
         // Step 2: Create fact selector with constants (following familiar-query pattern)
         let fact_selector: FactSelector<Value> = FactSelector::new()

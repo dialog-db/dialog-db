@@ -1,54 +1,51 @@
 //! High-level representations for database changes
 //!
-//! This module provides the `Claim` enum for representing complex database operations
-//! and the `Claims` collection for managing multiple changes. Claims are converted to
-//! low-level `Instruction`s for execution.
+//! This module provides the `Claim` enum for representing complex database operations.
+//! Claims use the modern transaction-based API for efficient batching and streaming.
 //!
 //! ## Overview
 //!
 //! Claims provide a high-level interface for describing database changes. Different
-//! types of claims (facts, concepts, etc.) can generate different sets of instructions
-//! when committed to the database.
+//! types of claims (facts, concepts, etc.) implement the `Edit` trait to merge their
+//! operations into transactions before committing to the database.
 //!
 //! ```text
 //! ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-//! │   Claims    │ -> │ Instructions│ -> │  Database   │
-//! │ (High-level)│    │ (Low-level) │    │  (Storage)  │
+//! │   Claims    │ -> │ Transaction │ -> │  Database   │
+//! │ (High-level)│    │ (Batched)   │    │  (Storage)  │
 //! └─────────────┘    └─────────────┘    └─────────────┘
 //! ```
 //!
 //! ## Usage Examples
 //!
-//! ### Basic Usage
+//! ### Transaction-based API (Preferred)
 //!
 //! ```ignore
-//! use dialog_query::{Fact, Claims, Session};
+//! use dialog_query::{Fact, Session};
 //!
 //! // Create individual claims
 //! let claim1 = Fact::assert("user/name".parse()?, entity, "Alice".to_string());
 //! let claim2 = Fact::assert("user/age".parse()?, entity, 25u32);
 //!
-//! // Commit directly with Vec<Claim> (preferred API)
-//! session.commit(vec![claim1, claim2]).await?;
+//! // Commit using transaction API
+//! let mut session = Session::open(store);
+//! session.transact(vec![claim1, claim2]).await?;
 //! ```
 //!
-//! ### Advanced Usage
+//! ### Transaction Builder API
 //!
 //! ```ignore
-//! use dialog_query::{Claims, Fact};
-//! use futures_util::StreamExt;
+//! use dialog_query::{Session, Relation};
 //!
-//! // Create claims collection for streaming
-//! let claims = Claims::from(vec![
-//!     Fact::assert("user/name".parse()?, entity1, "Alice".to_string()),
-//!     Fact::assert("user/name".parse()?, entity2, "Bob".to_string()),
-//! ]);
+//! let mut session = Session::open(store);
+//! let mut transaction = session.edit();
 //!
-//! // Stream instructions asynchronously
-//! let mut instruction_stream = claims;
-//! while let Some(instruction) = instruction_stream.next().await {
-//!     // Process each instruction
-//! }
+//! // Add operations to transaction
+//! transaction.assert(Relation::new(attr, entity, value));
+//! transaction.retract(Relation::new(attr2, entity, old_value));
+//!
+//! // Commit the transaction
+//! session.commit(transaction).await?;
 //! ```
 //!
 
@@ -56,13 +53,10 @@ pub mod concept;
 pub mod fact;
 pub mod rule;
 
+pub use self::fact::Relation;
 pub use crate::artifact::{Artifact, Attribute, Instruction};
 pub use crate::session::transaction::{Edit, Transaction, TransactionError};
-pub use self::fact::Relation;
 use dialog_artifacts::Entity;
-use futures_util::Stream;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 
 /// A high-level representation of database changes
 ///
@@ -110,185 +104,5 @@ impl Edit for Claim {
 impl From<fact::Claim> for Claim {
     fn from(claim: fact::Claim) -> Self {
         Claim::Fact(claim)
-    }
-}
-
-/// Convert a Claim into its constituent Instructions (legacy API)
-///
-/// **Deprecated**: Use the `Edit` trait with `claim.merge(&mut transaction)` instead.
-/// This provides better performance and composability.
-///
-/// Transforms high-level claims into low-level instructions for database execution.
-/// Each claim type determines how many instructions it generates.
-impl From<Claim> for Vec<Instruction> {
-    fn from(claim: Claim) -> Self {
-        match claim {
-            Claim::Fact(claim) => claim.into(),
-            Claim::Concept(claim) => claim.into(),
-        }
-    }
-}
-/// Iterate over the instructions contained in a Claim
-///
-/// Allows processing each instruction individually when a claim represents
-/// multiple changes.
-///
-/// # Examples
-///
-/// ```ignore
-/// use dialog_query::Fact;
-///
-/// let claim = Fact::assert("user/name".parse()?, entity, "Alice".to_string());
-///
-/// // Iterate over all instructions in the claim
-/// for instruction in claim {
-///     println!("Instruction: {:?}", instruction);
-/// }
-/// ```
-impl IntoIterator for Claim {
-    type Item = Instruction;
-    type IntoIter = std::vec::IntoIter<Instruction>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        let instructions: Vec<Instruction> = self.into();
-        instructions.into_iter()
-    }
-}
-
-/// A collection of Claims for batch processing
-///
-/// `Claims` efficiently manages multiple claims and provides streaming and
-/// iteration over their constituent instructions. Instructions are pre-computed
-/// for predictable performance.
-///
-/// # Examples
-///
-/// ```ignore
-/// use dialog_query::{Fact, Claims};
-/// use futures_util::StreamExt;
-///
-/// let claims = vec![
-///     Fact::assert("user/name".parse()?, entity1, "Alice".to_string()),
-///     Fact::assert("user/name".parse()?, entity2, "Bob".to_string()),
-/// ];
-///
-/// // Convert to Claims for streaming
-/// let claims_stream = Claims::from(claims);
-///
-/// // Stream the instructions
-/// let instructions: Vec<_> = claims_stream.collect().await;
-/// ```
-pub struct Claims {
-    /// Pre-flattened instructions for efficient iteration
-    inner: std::vec::IntoIter<Instruction>,
-}
-
-/// Create a Claims collection from multiple claims
-///
-/// # Examples
-///
-/// ```ignore
-/// use dialog_query::{Fact, Claims};
-///
-/// let claims = vec![
-///     Fact::assert("user/name".parse()?, entity1, "Alice".to_string()),
-///     Fact::assert("user/age".parse()?, entity1, 25u32),
-///     Fact::retract("user/email".parse()?, entity2, "old@example.com".to_string()),
-/// ];
-///
-/// let claims_collection = Claims::from(claims);
-/// ```
-impl From<Vec<Claim>> for Claims {
-    fn from(claims: Vec<Claim>) -> Self {
-        let instructions: Vec<Instruction> = claims
-            .into_iter()
-            .flat_map(|claim| claim.into_iter())
-            .collect();
-        Claims {
-            inner: instructions.into_iter(),
-        }
-    }
-}
-
-/// Create a Claims collection from a single claim
-///
-/// # Examples
-///
-/// ```ignore
-/// use dialog_query::{Fact, Claims};
-///
-/// let claim = Fact::assert("user/name".parse()?, entity, "Alice".to_string());
-/// let claims_collection = Claims::from(claim);
-/// ```
-impl From<Claim> for Claims {
-    fn from(claim: Claim) -> Self {
-        let instructions: Vec<Instruction> = claim.into_iter().collect();
-        Claims {
-            inner: instructions.into_iter(),
-        }
-    }
-}
-
-impl Claims {
-    /// Create a Claims collection from pre-generated instructions
-    /// 
-    /// This is used internally by the Transaction system to convert
-    /// instructions back to a streamable Claims collection.
-    pub fn from_instructions(instructions: Vec<Instruction>) -> Self {
-        Claims {
-            inner: instructions.into_iter(),
-        }
-    }
-}
-
-/// Stream implementation for async iteration over instructions
-///
-/// # Examples
-///
-/// ```ignore
-/// use dialog_query::{Claims, Fact};
-/// use futures_util::StreamExt;
-///
-/// async fn process_claims(claims: Claims) {
-///     let mut stream = claims;
-///     while let Some(instruction) = stream.next().await {
-///         // Process each instruction
-///         println!("Processing: {:?}", instruction);
-///     }
-/// }
-/// ```
-impl Stream for Claims {
-    type Item = Instruction;
-
-    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(self.inner.next())
-    }
-}
-
-/// Iterator implementation for synchronous iteration over instructions
-///
-/// # Examples
-///
-/// ```ignore
-/// use dialog_query::{Claims, Fact};
-///
-/// let claims = Claims::from(vec![
-///     Fact::assert("user/name".parse()?, entity, "Alice".to_string()),
-/// ]);
-///
-/// // Collect all instructions
-/// let instructions: Vec<_> = claims.into_iter().collect();
-///
-/// // Or iterate directly
-/// for instruction in Claims::from(vec![claim]) {
-///     println!("Instruction: {:?}", instruction);
-/// }
-/// ```
-impl IntoIterator for Claims {
-    type Item = Instruction;
-    type IntoIter = std::vec::IntoIter<Instruction>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.inner
     }
 }

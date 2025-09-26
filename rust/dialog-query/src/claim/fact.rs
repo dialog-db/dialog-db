@@ -174,30 +174,3 @@ impl Edit for Claim {
     }
 }
 
-/// Convert fact claims to database instructions (legacy API)
-///
-/// **Deprecated**: Use the `Edit` trait with `claim.merge(&mut transaction)` instead.
-/// This provides better performance and composability.
-///
-/// Each fact claim generates exactly one instruction:
-/// - `Assertion` → `Instruction::Assert`
-/// - `Retraction` → `Instruction::Retract`
-impl From<Claim> for Vec<Instruction> {
-    fn from(claim: Claim) -> Self {
-        let instruction = match claim {
-            Claim::Assert(relation) => Instruction::Assert(Artifact {
-                the: relation.the,
-                of: relation.of,
-                is: relation.is,
-                cause: None,
-            }),
-            Claim::Retract(relation) => Instruction::Retract(Artifact {
-                the: relation.the,
-                of: relation.of,
-                is: relation.is,
-                cause: None,
-            }),
-        };
-        vec![instruction]
-    }
-}

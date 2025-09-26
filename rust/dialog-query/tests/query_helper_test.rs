@@ -5,9 +5,11 @@ use dialog_query::{
     artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Value},
     rule::Rule as RuleTrait,
     term::Term,
-    Claims, Fact, Rule, Session,
+    Claim, Fact, Rule, Session,
 };
 use dialog_storage::MemoryStorageBackend;
+
+/// Helper function to commit claims using the transaction-based API  
 
 #[derive(Rule, Debug, Clone)]
 pub struct Person {
@@ -38,7 +40,8 @@ async fn test_person_concept_basic() -> Result<()> {
         ),
     ];
 
-    artifacts.commit(Claims::from(facts)).await?;
+    let mut session = Session::open(artifacts.clone());
+    session.transact(facts).await?;
 
     // Step 2: Create match patterns for querying
     let alice_match = PersonMatch {

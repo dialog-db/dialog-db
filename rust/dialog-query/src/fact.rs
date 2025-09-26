@@ -1,8 +1,8 @@
 //! Fact, Assertion, Retraction, and Claim types for the dialog-query system
 
-pub use super::claim::{fact, Claim, Claims};
-use crate::claim::fact::Relation;
+pub use super::claim::{fact, Claim};
 pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Instruction, Value};
+use crate::claim::fact::Relation;
 pub use crate::types::Scalar;
 use serde::{Deserialize, Serialize};
 
@@ -124,7 +124,7 @@ impl From<Retraction> for Instruction {
 }
 
 /// Convert Claim to Instruction for committing (legacy API)
-/// 
+///
 /// **Deprecated**: Use the `Edit` trait with `claim.merge(&mut transaction)` instead.
 impl From<fact::Claim> for Instruction {
     fn from(claim: fact::Claim) -> Self {
@@ -388,9 +388,10 @@ mod integration_tests {
             Value::String("Bob".to_string()),
         );
 
-        // Step 3: Convert to instructions and commit to artifacts store
+        // Step 3: Commit using session API
         let claims = vec![alice_name, alice_email, bob_name];
-        artifacts.commit(Claims::from(claims)).await?;
+        let mut session = Session::open(artifacts.clone());
+        session.transact(claims).await?;
 
         // Step 4: Test 1 - Named variables should get bound in matches
         let query_with_named_vars = Fact::<Value>::select()
@@ -485,7 +486,8 @@ mod integration_tests {
             Value::String("Alice".to_string()),
         );
 
-        artifacts.commit(Claims::from(alice_name)).await?;
+        let mut session = Session::open(artifacts.clone());
+        session.transact(vec![alice_name]).await?;
 
         // Step 2: Verify fact exists using constant entity (no variables should be bound)
         let query_constant = Fact::<Value>::select()
@@ -511,7 +513,8 @@ mod integration_tests {
             Value::String("Alice".to_string()),
         );
 
-        artifacts.commit(Claims::from(retraction)).await?;
+        let mut session = Session::open(artifacts.clone());
+        session.transact(vec![retraction]).await?;
 
         // Step 4: Verify fact is gone using the same constant query
         let query2 = Fact::<Value>::select()
@@ -559,7 +562,8 @@ mod integration_tests {
             ),
         ];
 
-        artifacts.commit(Claims::from(facts)).await?;
+        let mut session = Session::open(artifacts.clone());
+        session.transact(facts).await?;
 
         // Test 1: All constants - no variables should be bound
         let all_constants_query = Fact::<Value>::select()
@@ -675,7 +679,8 @@ mod integration_tests {
             ),
         ];
 
-        artifacts.commit(Claims::from(facts)).await?;
+        let mut session = Session::open(artifacts.clone());
+        session.transact(facts).await?;
 
         // Query 1: Find all admins by role - using constants with variable entity
         let admin_query = Fact::select()
@@ -782,7 +787,8 @@ mod integration_tests {
             ),
         ];
 
-        artifacts.commit(Claims::from(facts)).await?;
+        let mut session = Session::open(artifacts.clone());
+        session.transact(facts).await?;
 
         let query_with_variables = Fact::<Value>::select()
             .the("user/name") // Constant - used for matching
@@ -832,7 +838,8 @@ mod integration_tests {
             ),
         ];
 
-        artifacts.commit(Claims::from(facts)).await?;
+        let mut session = Session::open(artifacts.clone());
+        session.transact(facts).await?;
 
         // Pattern 1: String-typed FactSelector (most common, backward compatible)
         let value_selector = Fact::select()
@@ -924,7 +931,8 @@ mod integration_tests {
             ),
         ];
 
-        artifacts.commit(Claims::from(facts)).await?;
+        let mut session = Session::open(artifacts.clone());
+        session.transact(facts).await?;
 
         // Pattern 1: Find Bob by name using string constant
         let bob_query = Fact::<Value>::select()
@@ -988,7 +996,8 @@ mod integration_tests {
             Value::String("Alice".to_string()),
         )];
 
-        artifacts.commit(Claims::from(facts)).await?;
+        let mut session = Session::open(artifacts.clone());
+        session.transact(facts).await?;
 
         let mixed_query = Fact::<Value>::select()
             .the("user/name") // Constant - used for matching
@@ -1088,7 +1097,8 @@ mod integration_tests {
             ),
         ];
 
-        artifacts.commit(Claims::from(facts)).await?;
+        let mut session = Session::open(artifacts.clone());
+        session.transact(facts).await?;
 
         // Test 1: Find admin users using fluent query building
         let admin_results = Fact::<Value>::select()

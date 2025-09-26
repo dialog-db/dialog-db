@@ -74,9 +74,10 @@ impl<Plan: EvaluationPlan> PlannedQuery for Plan {
 mod tests {
     use super::*;
     use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Value};
-    use crate::{Claims, Fact, Session, Term};
+    use crate::{Claim, Fact, Session, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
+
 
     #[tokio::test]
     async fn test_fact_selector_query_trait() -> Result<()> {
@@ -106,7 +107,7 @@ mod tests {
             ),
         ];
 
-        artifacts.commit(Claims::from(facts)).await?;
+        let mut session = Session::open(artifacts.clone()); session.transact(facts).await?;
 
         // Step 2: Test Query trait on FactSelector with constants
 
@@ -183,7 +184,7 @@ mod tests {
             Value::String("Alice".to_string()),
         )];
 
-        artifacts.commit(Claims::from(facts)).await?;
+        let mut session = Session::open(artifacts.clone()); session.transact(facts).await?;
 
         // Test with FactSelector
         let fact_selector = Fact::<Value>::select().the("user/name").of(alice.clone());
@@ -232,7 +233,7 @@ mod tests {
             ),
         ];
 
-        artifacts.commit(Claims::from(facts)).await?;
+        let mut session = Session::open(artifacts.clone()); session.transact(facts).await?;
 
         // Test fluent query building - should succeed with constants
         let session = Session::open(artifacts.clone());

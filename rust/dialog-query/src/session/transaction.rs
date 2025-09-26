@@ -66,14 +66,11 @@ impl Transaction {
     }
 
     /// Add a change operation - mutations simply replace with the latest value
-    fn mutate(&mut self, attribute: &Attribute, entity: &Entity, change: Change) {
-        let entity_changes = self
-            .changes
+    pub(crate) fn mutate(&mut self, attribute: &Attribute, entity: &Entity, change: Change) {
+        self.changes
             .entry(entity.clone())
-            .or_insert_with(HashMap::new);
-
-        // Simply replace with the latest value - no conflict detection
-        entity_changes.insert(attribute.clone(), change);
+            .or_insert_with(HashMap::new)
+            .insert(attribute.clone(), change);
     }
 
     /// Check if the transaction is empty
@@ -81,6 +78,7 @@ impl Transaction {
         self.changes.is_empty()
     }
 
+    /// Convert the transaction into a stream
     pub fn into_stream(self) -> TransactionStream {
         TransactionStream::from(self)
     }

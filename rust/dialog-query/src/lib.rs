@@ -37,7 +37,6 @@ pub mod types;
 pub use application::Application;
 pub use artifact::{Entity, Value, ValueDataType};
 pub use attribute::{Attribute, Cardinality};
-pub use claim::Claims;
 pub use concept::Concept;
 pub use dependencies::{Dependencies, Requirement};
 pub use dialog_query_macros::Rule;
