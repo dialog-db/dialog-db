@@ -420,10 +420,9 @@ mod tests {
     use crate::artifact::{Value, ValueDataType};
     use crate::selection::SelectionExt;
     use crate::term::Term;
-    use crate::{Claim, Fact, Query, Session};
+    use crate::{Fact, Query, Session};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
-
 
     // Define a Person concept for testing using raw concept API
     #[derive(Debug, Clone)]
@@ -836,7 +835,7 @@ mod tests {
         // Test that actually uses PersonMatch to query - this should work with the concept system
 
         let storage_backend = MemoryStorageBackend::default();
-        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
@@ -871,7 +870,8 @@ mod tests {
             ),
         ];
 
-        let mut session = Session::open(artifacts.clone()); session.transact(facts).await?;
+        let mut session = Session::open(artifacts.clone());
+        session.transact(facts).await?;
 
         // This is the real test - using PersonMatch to query for people
         let person_query = PersonMatch {
@@ -946,7 +946,7 @@ mod tests {
         // Test that individual fact selectors work for non-matching queries
 
         let storage_backend = MemoryStorageBackend::default();
-        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
 
@@ -957,7 +957,8 @@ mod tests {
             Value::String("Alice".to_string()),
         )];
 
-        let mut session = Session::open(artifacts.clone()); session.transact(facts).await?;
+        let mut session = Session::open(artifacts.clone());
+        session.transact(facts).await?;
 
         // Test: Search for non-existent person using individual fact selector
         let missing_query = Fact::<Value>::select()

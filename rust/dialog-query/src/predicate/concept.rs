@@ -1,3 +1,4 @@
+pub use crate::analyzer::{Analysis, AnalyzerError};
 use crate::application::ConcetApplication;
 use crate::artifact::Artifact;
 use crate::attribute::Relation;
@@ -92,6 +93,10 @@ impl Concept {
             operator,
             attributes: HashMap::new(),
         }
+    }
+
+    pub fn parameters(&self) -> impl Iterator<Item = &str> {
+        std::iter::once("this").chain(self.attributes.keys().map(|key| key.as_str()))
     }
 
     pub fn with(mut self, name: &str, attribute: Attribute<Value>) -> Self {

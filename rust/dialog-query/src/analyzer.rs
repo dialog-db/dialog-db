@@ -29,6 +29,12 @@ pub enum AnalyzerError {
         rule: DeductiveRule,
         variable: String,
     },
+
+    #[error("Rule {rule} does not bind a variable \"{variable}\"")]
+    UnboundVariable {
+        rule: DeductiveRule,
+        variable: String,
+    },
 }
 
 /// Query planner analyzes each premise to identify it's dependencies and budget

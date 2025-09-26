@@ -32,8 +32,8 @@ impl DeductiveRule {
     /// rule premises and returns an error if any are not.
     pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
         let conclusion = &self.conclusion;
-        // We will collect rule dependencies and compute their levels based on
-        // their use in the rule premises.
+        // We will collect rule dependencies and compute their cost based on
+        // the use in the rule premises.
         let mut dependencies = Dependencies::new();
         // We will collect all internal dependencies which correspond to
         // variable terms that are not shared with outside scope. We do so
@@ -50,39 +50,54 @@ impl DeductiveRule {
 
             // Go over every dependency of every premise and estimate their
             // cost for the rule. If dependency is a parameter of the rule
-            // it updates rule dependency levels accordingly, otherwise it
-            // captures them in the internal dependencies in order to reflect
-            // it in the budget.
+            // updates dependency cost, otherwise it capture in the local
+            // variables to reflect in the total cost
             for (name, dependency) in analysis.dependencies.iter() {
                 if conclusion.contains(name) {
-                    dependencies.update(name.to_string(), dependency);
+                    dependencies.merge(name.into(), dependency);
                 } else {
-                    variables.update(name.to_string(), dependency);
+                    variables.merge(name.into(), dependency);
                 }
             }
         }
 
         // Now that we have processed all premises we expect all the
-        // parameters to be in the dependencies. If there is a parameter
-        // not listed in the dependencies, we raise an error because this rule
-        // is considered invalid - it would imply that parameter is required
-        // input and even then it is completely ignored, suggesting an error in
-        // the rule definition. We can introduce `discard` operator in the
-        // future where rule author may intentionally require a parameter it is
-        // not utilizing.
-        conclusion
-            .absent(&dependencies)
-            .map_or(Ok(()), |parameter| {
+        // parameters to be in the dependencies and all should be derived.
+        // If some parameter is not in the dependencies that implies that
+        // parameter was not used which is an error because it could not be
+        // derived by the rule. If some parameter is required dependency that
+        // implies that formula makes use of it, but there is no premise that
+        // binds it.
+        let mut dependencies = Dependencies::new();
+        for name in conclusion.parameters() {
+            if let Some(dependency) = variables.lookup(name) {
+                match dependency {
+                    // If rule attribute is a required dependency it implies that
+                    // no premise derives it while some formula utilizes it which
+                    // is not allowed.
+                    Requirement::Required => Err(AnalyzerError::UnboundVariable {
+                        rule: self.clone(),
+                        variable: name.to_string(),
+                    }),
+                    // Otherwise add a variable to the dependencies
+                    Requirement::Derived(cost) => {
+                        dependencies.desire(name.into(), cost.clone());
+                        Ok(())
+                    }
+                }
+            }
+            // If there is no dependency on the rule parameter it can not be
+            // derived which indicates that rule definition is invalid.
+            else {
                 Err(AnalyzerError::UnusedParameter {
                     rule: self.clone(),
-                    parameter: parameter.to_string(),
+                    parameter: name.to_string(),
                 })
-            })?;
+            }?;
+        }
 
-        // Next we check if there is a required local variable and if so we
-        // raise an error. If we have such variable it implies that we have a
-        // premise(s) that require this variable, but there is no premise that
-        // can provide it, which makes it impossible to execute such a rule.
+        // Next we check if there is any required variable if so we
+        // raise an error because it can not be derived by this rule.
         variables
             .iter()
             .find(|(_, level)| matches!(level, Requirement::Required))

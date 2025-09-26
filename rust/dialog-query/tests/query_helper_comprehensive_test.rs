@@ -2,14 +2,13 @@
 
 use anyhow::Result;
 use dialog_query::{
-    artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Value},
+    artifact::{Artifacts, Attribute, Entity, Value},
     rule::{Match, Rule as RuleTrait},
     term::Term,
-    Claim, Fact, Session,
+    Fact, Session,
 };
 use dialog_query_macros::Rule;
 use dialog_storage::MemoryStorageBackend;
-
 
 #[derive(Rule, Debug, Clone)]
 pub struct Person {
@@ -25,7 +24,7 @@ pub struct Employee {
 #[tokio::test]
 async fn test_single_attribute_query_works() -> Result<()> {
     let storage_backend = MemoryStorageBackend::default();
-    let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+    let artifacts = Artifacts::anonymous(storage_backend).await?;
 
     let alice = Entity::new()?;
     let bob = Entity::new()?;
@@ -43,7 +42,8 @@ async fn test_single_attribute_query_works() -> Result<()> {
         ),
     ];
 
-    let mut session = Session::open(artifacts.clone()); session.transact(facts).await?;
+    let mut session = Session::open(artifacts.clone());
+    session.transact(facts).await?;
 
     // ✅ This works: Single attribute with constant
     let alice_query = PersonMatch {
@@ -74,7 +74,7 @@ async fn test_single_attribute_query_works() -> Result<()> {
 #[tokio::test]
 async fn test_multi_attribute_constant_query_works() -> Result<()> {
     let storage_backend = MemoryStorageBackend::default();
-    let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+    let artifacts = Artifacts::anonymous(storage_backend).await?;
 
     let alice = Entity::new()?;
     let bob = Entity::new()?;
@@ -102,7 +102,8 @@ async fn test_multi_attribute_constant_query_works() -> Result<()> {
         ),
     ];
 
-    let mut session = Session::open(artifacts.clone()); session.transact(facts).await?;
+    let mut session = Session::open(artifacts.clone());
+    session.transact(facts).await?;
 
     // ✅ This works: Multi-attribute with all constants
     let alice_engineering_query = Match::<Employee> {
@@ -131,7 +132,7 @@ async fn test_multi_attribute_constant_query_works() -> Result<()> {
 #[tokio::test]
 async fn test_multi_attribute_variable_query_limitation() -> Result<()> {
     let storage_backend = MemoryStorageBackend::default();
-    let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+    let artifacts = Artifacts::anonymous(storage_backend).await?;
 
     let alice = Entity::new()?;
     let bob = Entity::new()?;
@@ -159,7 +160,8 @@ async fn test_multi_attribute_variable_query_limitation() -> Result<()> {
         ),
     ];
 
-    let mut session = Session::open(artifacts.clone()); session.transact(facts).await?;
+    let mut session = Session::open(artifacts.clone());
+    session.transact(facts).await?;
 
     // ⚠️ This has limitations: Multi-attribute with mixed constants and variables
     let engineering_query = EmployeeMatch {

@@ -57,7 +57,7 @@ impl Dependencies {
     /// fulfill the requirement with a lower budget it will likely be picked
     /// to execute ahead of the ones that are more expensive, hence actual level
     /// is lower (🤔 perhaps average would be more accurate).
-    pub fn update(&mut self, dependency: String, requirement: &Requirement) {
+    pub fn merge(&mut self, dependency: String, requirement: &Requirement) {
         let Dependencies(content) = self;
         if let Some(existing) = content.get(&dependency) {
             if let Requirement::Derived(prior) = existing {
@@ -86,6 +86,10 @@ impl Dependencies {
             Requirement::Required => Some((k.as_str(), v)),
             Requirement::Derived(_) => None,
         })
+    }
+
+    pub fn lookup(&self, dependency: &str) -> Option<&Requirement> {
+        self.0.get(dependency)
     }
 
     /// Gets the requirement level for a dependency, defaulting to Derived(0) if not present.
@@ -150,20 +154,20 @@ mod tests {
 
         // Test updating derived with derived - should take minimum cost
         deps.desire("cost".into(), 50);
-        deps.update("cost".into(), &Requirement::Derived(200));
+        deps.merge("cost".into(), &Requirement::Derived(200));
         assert_eq!(deps.resolve("cost"), Requirement::Derived(50)); // Takes minimum
 
         // Test updating derived with lower cost - should take the new lower cost
-        deps.update("cost".into(), &Requirement::Derived(25));
+        deps.merge("cost".into(), &Requirement::Derived(25));
         assert_eq!(deps.resolve("cost"), Requirement::Derived(25));
 
         // Test that Required dependency gets overridden when updated with Derived
         deps.require("required_test".into());
-        deps.update("required_test".into(), &Requirement::Derived(100));
+        deps.merge("required_test".into(), &Requirement::Derived(100));
         assert_eq!(deps.resolve("required_test"), Requirement::Derived(100));
 
         // Test adding new dependency via update
-        deps.update("new_dep".into(), &Requirement::Derived(75));
+        deps.merge("new_dep".into(), &Requirement::Derived(75));
         assert_eq!(deps.resolve("new_dep"), Requirement::Derived(75));
     }
 

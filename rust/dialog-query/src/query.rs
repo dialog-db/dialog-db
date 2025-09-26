@@ -73,17 +73,16 @@ impl<Plan: EvaluationPlan> PlannedQuery for Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Value};
-    use crate::{Claim, Fact, Session, Term};
+    use crate::artifact::{Artifacts, Attribute, Entity, Value};
+    use crate::{Fact, Session, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
-
 
     #[tokio::test]
     async fn test_fact_selector_query_trait() -> Result<()> {
         // Setup: Create in-memory storage and artifacts store
         let storage_backend = MemoryStorageBackend::default();
-        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         // Step 1: Create test data
         let alice = Entity::new()?;
@@ -107,7 +106,8 @@ mod tests {
             ),
         ];
 
-        let mut session = Session::open(artifacts.clone()); session.transact(facts).await?;
+        let mut session = Session::open(artifacts.clone());
+        session.transact(facts).await?;
 
         // Step 2: Test Query trait on FactSelector with constants
 
@@ -175,7 +175,7 @@ mod tests {
 
         // Setup
         let storage_backend = MemoryStorageBackend::default();
-        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
         let facts = vec![Fact::assert(
@@ -184,7 +184,8 @@ mod tests {
             Value::String("Alice".to_string()),
         )];
 
-        let mut session = Session::open(artifacts.clone()); session.transact(facts).await?;
+        let mut session = Session::open(artifacts.clone());
+        session.transact(facts).await?;
 
         // Test with FactSelector
         let fact_selector = Fact::<Value>::select().the("user/name").of(alice.clone());
@@ -205,7 +206,7 @@ mod tests {
 
         // Setup
         let storage_backend = MemoryStorageBackend::default();
-        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
@@ -233,7 +234,8 @@ mod tests {
             ),
         ];
 
-        let mut session = Session::open(artifacts.clone()); session.transact(facts).await?;
+        let mut session = Session::open(artifacts.clone());
+        session.transact(facts).await?;
 
         // Test fluent query building - should succeed with constants
         let session = Session::open(artifacts.clone());

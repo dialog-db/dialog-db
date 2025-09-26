@@ -12,13 +12,16 @@ pub mod artifact;
 pub mod attribute;
 pub mod claim;
 pub mod concept;
+pub mod conversions;
 pub mod cursor;
 pub mod dependencies;
 pub mod error;
 pub mod fact;
 pub mod fact_selector;
+pub mod logic;
 pub mod math;
 pub mod negation;
+pub mod strings;
 pub mod parameters;
 pub mod plan;
 pub mod predicate;
@@ -61,6 +64,29 @@ pub use stream::*;
 pub use syntax::VariableScope;
 pub use term::*;
 pub use types::IntoValueDataType;
+
+/// Formula library exports
+pub mod formulas {
+    //! Built-in formulas for common data transformations
+    //! 
+    //! This module provides a comprehensive library of formulas for:
+    //! - Mathematical operations (sum, difference, product, quotient, modulo)
+    //! - String operations (concatenate, length, uppercase, lowercase)  
+    //! - Type conversions (to_string, parse_number)
+    //! - Boolean logic (and, or, not)
+    
+    // Mathematical formulas
+    pub use crate::math::{Sum, Difference, Product, Quotient, Modulo};
+    
+    // String operation formulas
+    pub use crate::strings::{Concatenate, Length, Uppercase, Lowercase};
+    
+    // Type conversion formulas
+    pub use crate::conversions::{ToString, ParseNumber};
+    
+    // Boolean logic formulas
+    pub use crate::logic::{And, Or, Not};
+}
 
 /// Re-export commonly used types
 pub mod prelude {

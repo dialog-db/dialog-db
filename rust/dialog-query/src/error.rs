@@ -245,6 +245,11 @@ pub enum PlanError {
         rule: DeductiveRule,
         parameter: String,
     },
+    #[error("Rule {rule} does not bind a variable \"{variable}\"")]
+    UnboundVariable {
+        rule: DeductiveRule,
+        variable: String,
+    },
     #[error("Rule {rule} application omits required parameter \"{parameter}\"")]
     OmitsRequiredParameter {
         rule: DeductiveRule,
@@ -313,6 +318,9 @@ impl From<AnalyzerError> for PlanError {
         match error {
             AnalyzerError::UnusedParameter { rule, parameter } => {
                 PlanError::UnusedParameter { rule, parameter }
+            }
+            AnalyzerError::UnboundVariable { rule, variable } => {
+                PlanError::UnboundVariable { rule, variable }
             }
             AnalyzerError::RequiredParameter { rule, parameter } => {
                 PlanError::OmitsRequiredParameter { rule, parameter }

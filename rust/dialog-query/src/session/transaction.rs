@@ -4,7 +4,7 @@
 //! Claims can now add operations to a Transaction which accumulates changes and optimizes before committing.
 
 use crate::artifact::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Value};
-use crate::claim::fact::{AsRelation, Relation};
+use crate::claim::fact::AsRelation;
 use futures_util::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -198,6 +198,7 @@ pub trait Edit {
 mod tests {
     use super::*;
     use crate::artifact::{Attribute, Entity, Value};
+    use crate::claim::fact::Relation;
 
     #[test]
     fn test_transaction_basic_operations() -> anyhow::Result<()> {

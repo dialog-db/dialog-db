@@ -2,14 +2,14 @@
 
 use anyhow::Result;
 use dialog_query::{
-    artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Value},
+    artifact::{Artifacts, Attribute, Entity, Value},
     rule::Rule as RuleTrait,
     term::Term,
-    Claim, Fact, Rule, Session,
+    Fact, Rule, Session,
 };
 use dialog_storage::MemoryStorageBackend;
 
-/// Helper function to commit claims using the transaction-based API  
+/// Helper function to commit claims using the transaction-based API
 
 #[derive(Rule, Debug, Clone)]
 pub struct Person {
@@ -21,7 +21,7 @@ pub struct Person {
 async fn test_person_concept_basic() -> Result<()> {
     // Setup: Create in-memory storage and artifacts store
     let storage_backend = MemoryStorageBackend::default();
-    let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+    let artifacts = Artifacts::anonymous(storage_backend).await?;
 
     // Step 1: Create test data
     let alice = Entity::new()?;

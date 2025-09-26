@@ -285,7 +285,7 @@ mod integration_tests {
     //! Fact::assert/retract → commit → Fact::select → query
 
     use super::*;
-    use crate::artifact::{ArtifactStoreMut, Artifacts, Attribute, Entity, Value};
+    use crate::artifact::{Artifacts, Attribute, Entity, Value};
     use crate::{Query, Session, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
@@ -296,7 +296,7 @@ mod integration_tests {
 
         // Setup: Create in-memory storage and artifacts store
         let storage_backend = MemoryStorageBackend::default();
-        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         // Step 1: Create entities for testing
         let alice = Entity::new()?;
@@ -408,7 +408,7 @@ mod integration_tests {
 
         // Setup
         let storage_backend = MemoryStorageBackend::default();
-        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
 
@@ -471,7 +471,7 @@ mod integration_tests {
 
         // Setup
         let storage_backend = MemoryStorageBackend::default();
-        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
@@ -571,7 +571,7 @@ mod integration_tests {
 
         // Setup
         let storage_backend = MemoryStorageBackend::default();
-        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         // Create test data: users with different roles
         let alice = Entity::new()?;
@@ -702,7 +702,7 @@ mod integration_tests {
 
         // Setup store with test data
         let storage_backend = MemoryStorageBackend::default();
-        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
@@ -753,7 +753,7 @@ mod integration_tests {
 
         // Setup test data
         let storage_backend = MemoryStorageBackend::default();
-        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
@@ -841,7 +841,7 @@ mod integration_tests {
 
         // Setup test data
         let storage_backend = MemoryStorageBackend::default();
-        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
@@ -921,7 +921,7 @@ mod integration_tests {
 
         // Setup store with test data
         let storage_backend = MemoryStorageBackend::default();
-        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let facts = vec![Fact::assert(
             "user/name".parse::<Attribute>()?,
@@ -1002,7 +1002,7 @@ mod integration_tests {
 
         // Setup
         let storage_backend = MemoryStorageBackend::default();
-        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
