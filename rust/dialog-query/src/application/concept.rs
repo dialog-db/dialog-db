@@ -4,7 +4,7 @@ use crate::analyzer::{Analysis, AnalyzerError};
 use crate::error::PlanError;
 use crate::plan::ConceptPlan;
 use crate::predicate::Concept;
-use crate::{Dependencies, Entity, Parameters, Term, Type, Value, VariableScope};
+use crate::{Dependencies, Entity, Parameters, Requirement, Term, Type, Value, VariableScope};
 use std::fmt::Display;
 
 /// Represents an application of a concept with specific term bindings.
@@ -36,89 +36,113 @@ impl ConcetApplication {
         })
     }
 
-    /// Creates an execution plan for this concept application.
-    /// Converts the concept application into a set of fact selector premises
-    /// that can be executed to find matching entities.
     pub fn plan(&self, scope: &VariableScope) -> Result<ConceptPlan, PlanError> {
+        let analysis = self.analyze()?;
+        let mut cost = analysis.cost;
         let mut provides = VariableScope::new();
-        let mut cost = 0;
-        let mut parameterized = false;
-
-        let this_entity: Term<Entity> = if let Some(this_value) = self.terms.get("this") {
-            // Check if "this" parameter is non-blank
-            if !this_value.is_blank() {
-                parameterized = true;
-            }
-
-            if !scope.contains(&this_value) {
-                provides.add(&this_value);
-                cost += ENTITY_COST
-            }
-
-            // Convert the "this" term from Term<Value> to Term<Entity>
-            match this_value {
-                Term::Variable { name, .. } => Term::<Entity>::Variable {
-                    name: name.clone(),
-                    _type: Type::default(),
-                },
-                Term::Constant(value) => {
-                    // If it's a constant, it should be an Entity value
-                    if let Value::Entity(entity) = value {
-                        Term::Constant(entity.clone())
-                    } else {
-                        // Fallback to a variable if not an entity
-                        Term::<Entity>::var(&format!("this_{}", self.concept.operator))
-                    }
+        for (name, requirement) in analysis.dependencies.iter() {
+            let term: Term<Value> = Term::var(name);
+            if !scope.contains(&term) {
+                provides.add(&term);
+                // No variable can be required on the concept application
+                if let Requirement::Derived(overhead) = requirement {
+                    cost += overhead;
                 }
             }
-        } else {
-            // Create a unique variable if "this" is not provided
-            Term::<Entity>::var(&format!("this_{}", self.concept.operator))
-        };
-
-        let mut premises = vec![];
-
-        // go over dependencies to add all the terms that will be derived
-        // by the application to the `provides` list.
-        for (name, attribute) in self.concept.attributes.iter() {
-            // If parameter was not provided we add it to the provides set
-            let select = if let Some(term) = self.terms.get(name) {
-                // Track if we have any non-blank parameters
-                if !term.is_blank() {
-                    parameterized = true;
-                }
-
-                if !scope.contains(&term) {
-                    provides.add(&term);
-                    cost += VALUE_COST
-                }
-
-                FactApplication::new()
-                    .the(attribute.the())
-                    .of(this_entity.clone())
-                    .is(term.clone())
-            } else {
-                FactApplication::new()
-                    .the(attribute.the())
-                    .of(this_entity.clone())
-            };
-            premises.push(select.into());
         }
-
-        // If we have no non-blank parameters, it's an unparameterized application
-        if !parameterized {
-            return Err(PlanError::UnparameterizedApplication);
-        }
-
-        let mut join = Join::new(&premises);
-        let (added_cost, conjuncts) = join.plan(scope)?;
 
         Ok(ConceptPlan {
-            cost: cost + added_cost,
+            cost,
             provides,
-            conjuncts,
+            concept: self.concept.clone(),
+            terms: self.terms.clone(),
         })
     }
+
+    // /// Creates an execution plan for this concept application.
+    // /// Converts the concept application into a set of fact selector premises
+    // /// that can be executed to find matching entities.
+    // pub fn plan_legacy(&self, scope: &VariableScope) -> Result<ConceptPlan, PlanError> {
+    //     let mut provides = VariableScope::new();
+    //     let mut cost = 0;
+    //     let mut parameterized = false;
+
+    //     let this_entity: Term<Entity> = if let Some(this_value) = self.terms.get("this") {
+    //         // Check if "this" parameter is non-blank
+    //         if !this_value.is_blank() {
+    //             parameterized = true;
+    //         }
+
+    //         if !scope.contains(&this_value) {
+    //             provides.add(&this_value);
+    //             cost += ENTITY_COST
+    //         }
+
+    //         // Convert the "this" term from Term<Value> to Term<Entity>
+    //         match this_value {
+    //             Term::Variable { name, .. } => Term::<Entity>::Variable {
+    //                 name: name.clone(),
+    //                 _type: Type::default(),
+    //             },
+    //             Term::Constant(value) => {
+    //                 // If it's a constant, it should be an Entity value
+    //                 if let Value::Entity(entity) = value {
+    //                     Term::Constant(entity.clone())
+    //                 } else {
+    //                     // Fallback to a variable if not an entity
+    //                     Term::<Entity>::var(&format!("this_{}", self.concept.operator))
+    //                 }
+    //             }
+    //         }
+    //     } else {
+    //         // Create a unique variable if "this" is not provided
+    //         Term::<Entity>::var(&format!("this_{}", self.concept.operator))
+    //     };
+
+    //     let mut premises = vec![];
+
+    //     // go over dependencies to add all the terms that will be derived
+    //     // by the application to the `provides` list.
+    //     for (name, attribute) in self.concept.attributes.iter() {
+    //         // If parameter was not provided we add it to the provides set
+    //         let select = if let Some(term) = self.terms.get(name) {
+    //             // Track if we have any non-blank parameters
+    //             if !term.is_blank() {
+    //                 parameterized = true;
+    //             }
+
+    //             if !scope.contains(&term) {
+    //                 provides.add(&term);
+    //                 cost += VALUE_COST
+    //             }
+
+    //             FactApplication::new()
+    //                 .the(attribute.the())
+    //                 .of(this_entity.clone())
+    //                 .is(term.clone())
+    //         } else {
+    //             FactApplication::new()
+    //                 .the(attribute.the())
+    //                 .of(this_entity.clone())
+    //         };
+    //         premises.push(select.into());
+    //     }
+
+    //     // If we have no non-blank parameters, it's an unparameterized application
+    //     if !parameterized {
+    //         return Err(PlanError::UnparameterizedApplication);
+    //     }
+
+    //     let mut join = Join::new(&premises);
+    //     let (added_cost, conjuncts) = join.plan(scope)?;
+
+    //     Ok(ConceptPlan {
+    //         concept: self.concept.clone(),
+    //         cost: cost + added_cost,
+    //         provides,
+    //         conjuncts,
+    //     })
+    // }
 }
 
 impl Display for ConcetApplication {

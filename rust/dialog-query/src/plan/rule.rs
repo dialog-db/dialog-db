@@ -25,7 +25,7 @@ impl RuleApplicationPlan {
         &self,
         context: EvaluationContext<S, M>,
     ) -> impl Selection {
-        Self::eval_helper(context.store, context.selection, self.conjuncts.clone())
+        Self::eval_helper(context.source, context.selection, self.conjuncts.clone())
     }
 
     /// Helper function that recursively evaluates conjuncts in order.
@@ -43,7 +43,7 @@ impl RuleApplicationPlan {
                 }
                 [plan, rest @ ..] => {
                     let selection = plan.evaluate(EvaluationContext {
-                        store: store.clone(),
+                        source: store.clone(),
                         selection: source
                     });
 

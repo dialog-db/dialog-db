@@ -2,6 +2,18 @@ use crate::predicate::DeductiveRule;
 use crate::Dependencies;
 use thiserror::Error;
 
+/// A marker type that represents premise that has been analyzed
+#[derive(Clone, Debug)]
+pub struct Analyzed {}
+impl Status for Analyzed {}
+
+/// A marker type that represents premise that has not yet been analyzed
+#[derive(Clone, Debug)]
+pub struct Unanalyzed {}
+impl Status for Unanalyzed {}
+
+trait Status {}
+
 /// Errors that can occur during rule or formula analysis.
 /// These errors indicate structural problems with rules that would prevent execution.
 #[derive(Error, Debug, Clone, PartialEq)]

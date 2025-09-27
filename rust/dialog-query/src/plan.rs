@@ -87,7 +87,10 @@ impl PartialOrd for Plan {
 
 pub fn fresh<S: Source>(store: S) -> EvaluationContext<S, impl Selection> {
     let selection = once(async move { Ok(Match::new()) });
-    EvaluationContext { store, selection }
+    EvaluationContext {
+        source: store,
+        selection,
+    }
 }
 
 /// A single result frame with variable bindings
@@ -104,7 +107,7 @@ where
     /// Current selection of frames being processed (equivalent to frames in familiar-query)
     pub selection: M,
     /// Artifact store for querying facts (equivalent to source/Querier in TypeScript)
-    pub store: S,
+    pub source: S,
 }
 
 impl<S, M> EvaluationContext<S, M>
@@ -114,13 +117,19 @@ where
 {
     /// Create a new evaluation context
     pub fn single(store: S, selection: M) -> Self {
-        Self { store, selection }
+        Self {
+            source: store,
+            selection,
+        }
     }
 
     pub fn new(store: S) -> EvaluationContext<S, impl Selection> {
         let selection = once(async move { Ok(Match::new()) });
 
-        EvaluationContext { store, selection }
+        EvaluationContext {
+            source: store,
+            selection,
+        }
     }
 }
 

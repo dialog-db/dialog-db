@@ -332,7 +332,7 @@ impl<T: Scalar> FactSelectorPlan<T> {
             for await frame in context.selection {
                 let frame = frame?;
                 let selection = selector.resolve(&frame);
-                for await artifact in context.store.select((&selection).try_into()?) {
+                for await artifact in context.source.select((&selection).try_into()?) {
                     let artifact = artifact?;
 
                     // Create a new frame by unifying the artifact with our pattern

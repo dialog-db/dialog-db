@@ -296,7 +296,9 @@ mod tests {
     use dialog_artifacts::ValueDataType;
 
     use crate::{
-        predicate, query::PlannedQuery, Attribute, Parameters, SelectionExt, VariableScope,
+        predicate::{self, Concept},
+        query::PlannedQuery,
+        Attribute, Parameters, SelectionExt, VariableScope,
     };
 
     use super::*;
@@ -801,6 +803,88 @@ mod tests {
 
         assert!(found_alice, "Should find Alice");
         assert!(found_bob, "Should find Bob");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_rule() -> anyhow::Result<()> {
+        use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value};
+        use crate::{Fact, Term};
+        use dialog_storage::MemoryStorageBackend;
+
+        let employee = Concept::new("employee".into())
+            .with(
+                "name",
+                Attribute::new("employee", "name", "Employee Name", ValueDataType::String),
+            )
+            .with(
+                "role",
+                Attribute::new(
+                    "employee",
+                    "job",
+                    "The job title of the employee",
+                    ValueDataType::String,
+                ),
+            );
+
+        let stuff = Concept::new("stuff".into())
+            .with(
+                "name",
+                Attribute::new("stuff", "name", "Stuff Name", ValueDataType::String),
+            )
+            .with(
+                "role",
+                Attribute::new(
+                    "stuff",
+                    "role",
+                    "The role of the stuff member",
+                    ValueDataType::String,
+                ),
+            );
+
+        // employee can be derived from the stuff concept
+        let employee_from_stuff = DeductiveRule {
+            conclusion: employee,
+            premises: vec![
+                Fact::select()
+                    .the("stuff/name")
+                    .of(Term::var("this"))
+                    .is(Term::var("name"))
+                    .into(),
+                Fact::select()
+                    .the("stuff/role")
+                    .of(Term::var("this"))
+                    .is(Term::var("job"))
+                    .into(),
+            ],
+        };
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store).install(employee_from_stuff);
+
+        let alice = stuff
+            .create()?
+            .with("name", "Alice".to_string())
+            .with("role", "manager".to_string())
+            .assert()?;
+        let bob = stuff
+            .create()?
+            .with("name", "Bob".to_string())
+            .with("role", "developer".to_string())
+            .assert()?;
+
+        session.transact(vec![alice, bob]);
+        let mut parameters = Parameters::new();
+        parameters.insert("name".into(), Term::var("name"));
+        parameters.insert("job".into(), Term::var("job"));
+
+        let application = stuff.apply(parameters);
+        let plan = application.plan(&VariableScope::new())?;
+
+        let selection = plan.query(&session)?.collect_matches().await?;
+        assert_eq!(selection.len(), 2);
 
         Ok(())
     }

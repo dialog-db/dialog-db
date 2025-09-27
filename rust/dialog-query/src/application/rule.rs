@@ -46,7 +46,7 @@ impl RuleApplication {
                 // constant we propagate it into dependencies.
                 Requirement::Derived(desire) => {
                     if let Some(Term::Variable { .. }) = self.terms.get(parameter) {
-                        dependencies.desire(parameter.to_string(), *desire);
+                        dependencies.desire(parameter.to_string(), desire);
                     }
                 }
             }

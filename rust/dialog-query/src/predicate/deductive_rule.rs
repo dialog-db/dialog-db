@@ -1,7 +1,8 @@
 pub use crate::analyzer::{Analysis, AnalyzerError};
-pub use crate::application::RuleApplication;
+pub use crate::application::{FactApplication, RuleApplication};
 pub use crate::predicate::Concept;
 pub use crate::premise::Premise;
+use crate::Term;
 pub use crate::{Attribute, Dependencies, Parameters, Requirement, Value};
 use std::collections::HashSet;
 use std::fmt::Display;
@@ -119,9 +120,8 @@ impl DeductiveRule {
     /// Creates a rule application by binding the provided terms to this rule's parameters.
     /// Validates that all required parameters are provided and returns an error if the
     /// application would be invalid.
-    pub fn apply(&self, terms: Parameters) -> Result<RuleApplication, AnalyzerError> {
-        let application = RuleApplication::new(self.clone(), terms);
-        application.analyze().and(Ok(application))
+    pub fn apply(&self, terms: Parameters) -> RuleApplication {
+        RuleApplication::new(self.clone(), terms)
     }
 }
 impl Display for DeductiveRule {
@@ -131,5 +131,27 @@ impl Display for DeductiveRule {
             write!(f, "{}: {},", name, attribute.data_type)?;
         }
         write!(f, "}}")
+    }
+}
+
+impl From<&Concept> for DeductiveRule {
+    fn from(concept: &Concept) -> Self {
+        let mut premises = Vec::new();
+
+        let this = Term::var("this");
+        for (name, attribute) in concept.attributes.iter() {
+            premises.push(
+                FactApplication::new()
+                    .the(attribute.the())
+                    .of(this.clone())
+                    .is(Term::var(name))
+                    .into(),
+            );
+        }
+
+        DeductiveRule {
+            conclusion: concept.clone(),
+            premises,
+        }
     }
 }

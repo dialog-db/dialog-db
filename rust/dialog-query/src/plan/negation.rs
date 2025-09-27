@@ -52,7 +52,7 @@ impl EvaluationPlan for NegationPlan {
                 let not = frame.clone();
                 let output = plan.evaluate(EvaluationContext {
                     selection: stream::once(async move { Ok(not)}),
-                    store: context.store.clone()
+                    source: context.source.clone()
                 });
 
                 tokio::pin!(output);
