@@ -46,7 +46,7 @@ impl Formula for Concatenate {
     type Input = ConcatenateInput;
     type Match = ();
 
-    fn name() -> &'static str {
+    fn operator() -> &'static str {
         "concatenate"
     }
 
@@ -102,7 +102,7 @@ impl Formula for Length {
     type Input = LengthInput;
     type Match = ();
 
-    fn name() -> &'static str {
+    fn operator() -> &'static str {
         "length"
     }
 
@@ -157,7 +157,7 @@ impl Formula for Uppercase {
     type Input = UppercaseInput;
     type Match = ();
 
-    fn name() -> &'static str {
+    fn operator() -> &'static str {
         "uppercase"
     }
 
@@ -212,7 +212,7 @@ impl Formula for Lowercase {
     type Input = LowercaseInput;
     type Match = ();
 
-    fn name() -> &'static str {
+    fn operator() -> &'static str {
         "lowercase"
     }
 

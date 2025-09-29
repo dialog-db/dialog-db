@@ -1,10 +1,15 @@
 pub use super::Application;
 pub use crate::analyzer::Analysis;
+use crate::analyzer::{AnalysisStatus, Environment, Plan as SyntaxPlan, Planner, Stats, Syntax};
 pub use crate::cursor::Cursor;
 pub use crate::error::{AnalyzerError, FormulaEvaluationError, PlanError};
 pub use crate::plan::FormulaApplicationPlan;
+use crate::predicate::formula::{Cell, Cells};
+use crate::Term;
 pub use crate::{Dependencies, Match, Parameters, Requirement, VariableScope};
 use std::fmt::Display;
+
+pub const PARAM_COST: usize = 10;
 
 /// Non-generic formula application that can be evaluated over a stream of matches
 ///
@@ -15,11 +20,11 @@ use std::fmt::Display;
 pub struct FormulaApplication {
     /// Formula identifier being applied
     pub name: &'static str,
+    /// Farmula cells for planning and analysis
+    pub cells: &'static Cells,
+
     /// Parameter of the application keyed by names
     pub parameters: Parameters,
-
-    /// Parameter dependencies for planning and analysis
-    pub dependencies: Dependencies,
 
     /// Base cost of evalutaion not accounting for the dependencies
     pub cost: usize,
@@ -35,11 +40,30 @@ impl FormulaApplication {
         (self.compute)(&mut cursor)
     }
 
-    pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
-        Ok(Analysis {
-            cost: 5,
-            dependencies: self.dependencies.clone(),
-        })
+    pub fn analyze(&self) -> Analysis {
+        let mut analysis = Analysis::new(self.cost);
+        for (name, requirement) in self.dependencies.iter() {
+            match requirement {
+                Requirement::Derived(cost) => {
+                    analysis.desire(self.parameters.get(name), *cost);
+                }
+                // We should be checking this at the application time not
+                // during analysis
+                Requirement::Required => {
+                    // analysis.require(self.parameters.get(name));
+                }
+            }
+        }
+
+        analysis
+    }
+
+    pub fn cost(&self) -> usize {
+        self.cost
+    }
+
+    pub fn dependencies(&self) -> Dependencies {
+        self.dependencies.clone()
     }
 
     pub fn plan(&self, scope: &VariableScope) -> Result<FormulaApplicationPlan, PlanError> {
@@ -81,10 +105,35 @@ impl FormulaApplication {
         }
 
         Ok(FormulaApplicationPlan {
-            application: self.clone(),
-            cost,
+            cost: self.cost,
             derives,
+            application: self.clone(),
         })
+    }
+
+    pub fn compile(self) -> Result<FormulaApplicationAnalysis, AnalyzerError> {
+        Ok(FormulaApplicationAnalysis {
+            analysis: Analysis {
+                cost: self.cost,
+                dependencies: self.dependencies.clone(),
+            },
+            application: self,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FormulaApplicationAnalysis {
+    pub application: FormulaApplication,
+    pub analysis: Analysis,
+}
+
+impl FormulaApplicationAnalysis {
+    pub fn dependencies(&self) -> &Dependencies {
+        &self.analysis.dependencies
+    }
+    pub fn cost(&self) -> usize {
+        self.analysis.cost
     }
 }
 
@@ -100,6 +149,36 @@ impl Display for FormulaApplication {
 
 impl From<FormulaApplication> for Application {
     fn from(application: FormulaApplication) -> Self {
-        Application::ApplyFormula(application)
+        Application::Formula(application)
+    }
+}
+
+impl Planner for FormulaApplication {
+    fn init(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
+        let blank = Term::blank();
+        for (name, cell) in self.cells.iter() {
+            let term = self.parameters.get(name).unwrap_or(&blank);
+            if env.contains(term) {
+                plan.desire(term, 0);
+            } else {
+                match cell.requirement() {
+                    Requirement::Derived(cost) => {
+                        plan.desire(term, *cost);
+                    }
+                    Requirement::Required => {
+                        plan.require(term);
+                    }
+                }
+            }
+        }
+    }
+    fn update(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
+        for (name, _) in self.cells.iter() {
+            if let Some(parameter) = self.parameters.get(name) {
+                if env.contains(parameter) {
+                    plan.desire(parameter, 0);
+                }
+            }
+        }
     }
 }

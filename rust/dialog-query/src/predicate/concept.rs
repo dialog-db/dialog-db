@@ -1,5 +1,5 @@
 pub use crate::analyzer::{Analysis, AnalyzerError};
-use crate::application::ConcetApplication;
+use crate::application::ConceptApplication;
 use crate::artifact::Artifact;
 use crate::attribute::Relation;
 use crate::claim::concept::ConceptClaim;
@@ -10,6 +10,55 @@ use dialog_artifacts::DialogArtifactsError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Attributes(HashMap<String, Attribute<Value>>);
+impl Attributes {
+    /// Returns an iterator over all dependencies as (name, requirement) pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Attribute<Value>)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    pub fn count(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Attribute<Value>> {
+        self.0.get(name)
+    }
+
+    pub fn new() -> Self {
+        Attributes(HashMap::new())
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(|k| k.as_str())
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.contains_key(name)
+    }
+
+    /// Conforms the provided parameters conform to the schema of the cells.
+    pub fn conform(&self, parameters: Parameters) -> Result<Parameters, SchemaError> {
+        for (name, attribute) in self.iter() {
+            let parameter = parameters.get(&name);
+            attribute
+                .conform(parameter)
+                .map_err(|e| e.at(name.into()))?;
+        }
+
+        Ok(parameters)
+    }
+
+    pub fn from<T: Iterator<Item = (&str, Attribute<Value>)>>(attributes: T) -> Self {
+        let mut attributes = Attributes::new();
+        for (name, attribute) in attributes {
+            attributes.0.insert(name.to_string(), attribute);
+        }
+        attributes
+    }
+}
+
 /// Represents a concept which is a set of attributes that define an entity type.
 /// Concepts are similar to tables in relational databases but are more flexible
 /// as they can be derived from rules rather than just stored directly.
@@ -18,7 +67,7 @@ pub struct Concept {
     /// Concept identifier used to look concepts up by.
     pub operator: String,
     /// Map of attribute names to their definitions for this concept.
-    pub attributes: HashMap<String, Attribute<Value>>,
+    pub attributes: Attributes,
 }
 
 /// A model representing the data for a concept instance before validation.
@@ -91,16 +140,20 @@ impl Concept {
     pub fn new(operator: String) -> Self {
         Concept {
             operator,
-            attributes: HashMap::new(),
+            attributes: Attributes::new(),
         }
     }
 
-    pub fn parameters(&self) -> impl Iterator<Item = &str> {
+    pub fn operator(&self) -> &str {
+        &self.operator
+    }
+
+    pub fn operands(&self) -> impl Iterator<Item = &str> {
         std::iter::once("this").chain(self.attributes.keys().map(|key| key.as_str()))
     }
 
     pub fn with(mut self, name: &str, attribute: Attribute<Value>) -> Self {
-        self.attributes.insert(name.into(), attribute);
+        self.attributes.0.insert(name.into(), attribute);
         self
     }
 
@@ -108,7 +161,7 @@ impl Concept {
     /// The special "this" parameter is always considered present as it represents
     /// the entity that the concept applies to.
     pub fn contains(&self, name: &str) -> bool {
-        name == "this" || self.attributes.contains_key(name)
+        name == "this" || self.attributes.contains(name)
     }
 
     /// Finds a parameter that is absent from the provided dependencies.
@@ -124,11 +177,11 @@ impl Concept {
     }
 
     /// Creates an application for this concept.
-    pub fn apply(&self, parameters: Parameters) -> Application {
-        Application::Realize(ConcetApplication {
-            terms: parameters,
+    pub fn apply(&self, parameters: Parameters) -> Result<Application, SchemaError> {
+        Ok(Application::Concept(ConceptApplication {
+            terms: self.attributes.conform(parameters)?,
             concept: self.clone(),
-        })
+        }))
     }
 
     /// Validates a model against this concept's schema and creates an instance.
@@ -152,7 +205,7 @@ impl Concept {
         let mut relations = vec![];
         for (name, attribute) in &self.attributes {
             if let Some(value) = model.attributes.get(name) {
-                let relation = attribute.conform(value.clone())?;
+                let relation = attribute.resolve(value.clone())?;
                 relations.push(relation);
             } else {
                 return Err(SchemaError::MissingProperty {
@@ -309,15 +362,16 @@ mod tests {
 
     #[test]
     fn test_concept_serialization_to_specific_json() {
-        let mut attributes = HashMap::new();
-        attributes.insert(
-            "name".to_string(),
-            Attribute::new("user", "name", "User's name", ValueDataType::String),
-        );
-        attributes.insert(
-            "age".to_string(),
-            Attribute::new("user", "age", "User's age", ValueDataType::UnsignedInt),
-        );
+        let attributes = Attributes::from([
+            (
+                "name",
+                Attribute::new("user", "name", "User's name", ValueDataType::String),
+            ),
+            (
+                "age",
+                Attribute::new("user", "age", "User's age", ValueDataType::UnsignedInt),
+            ),
+        ]);
 
         let concept = Concept {
             operator: "user".to_string(),
@@ -382,7 +436,7 @@ mod tests {
         let concept: Concept = serde_json::from_str(json).expect("Should deserialize");
 
         assert_eq!(concept.operator, "person");
-        assert_eq!(concept.attributes.len(), 2);
+        assert_eq!(concept.attributes.count(), 2);
 
         let email_attr = concept
             .attributes
@@ -405,11 +459,10 @@ mod tests {
 
     #[test]
     fn test_concept_round_trip_serialization() {
-        let mut attributes = HashMap::new();
-        attributes.insert(
-            "score".to_string(),
+        let mut attributes = Attributes::from([(
+            "score",
             Attribute::new("game", "score", "Game score", ValueDataType::UnsignedInt),
-        );
+        )]);
 
         let original = Concept {
             operator: "game".to_string(),
@@ -422,7 +475,7 @@ mod tests {
 
         // Should be identical
         assert_eq!(original.operator, deserialized.operator);
-        assert_eq!(original.attributes.len(), deserialized.attributes.len());
+        assert_eq!(original.attributes.count(), deserialized.attributes.len());
 
         let orig_score = original.attributes.get("score").unwrap();
         let deser_score = deserialized.attributes.get("score").unwrap();

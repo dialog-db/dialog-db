@@ -1,8 +1,11 @@
+use crate::fact::Scalar;
+use crate::Term;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Tracks dependencies and their requirement levels for rules and formulas.
 /// Used during analysis to determine execution costs and validate requirements.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Dependencies(HashMap<String, Requirement>);
 
 impl Dependencies {
@@ -102,7 +105,7 @@ impl Dependencies {
 }
 
 /// Represents the requirement level for a dependency in a rule or formula.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Requirement {
     /// Dependency that must be provided externally - cannot be derived.
     Required,

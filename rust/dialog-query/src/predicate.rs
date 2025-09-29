@@ -12,5 +12,5 @@ pub mod premise;
 
 pub use concept::Concept;
 pub use deductive_rule::DeductiveRule;
-pub use fact::FactSelector;
+pub use fact::Fact;
 pub use formula::{Compute, Formula};

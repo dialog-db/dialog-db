@@ -23,6 +23,8 @@ impl VariableScope {
         self.variables.len()
     }
 
+    /// Adds a variable to the scope. If given term is a constant or a blank
+    /// variable, it is ignored.
     pub fn add<T: Scalar>(&mut self, variable: &Term<T>) -> &mut Self {
         if let Term::Variable {
             name: Some(name), ..
@@ -75,6 +77,10 @@ impl VariableScope {
         !self.variables.is_disjoint(&other.variables)
     }
 
+    /// Returns true if the term is bound in this scope. If term is a constant,
+    /// it is considered bound. If term is a blank variable it can not be bound,
+    /// if term is a named variable and variable is bound in this scope we return
+    /// true.
     pub fn contains<T: Scalar>(&self, term: &Term<T>) -> bool {
         match term {
             // If term is a constant we return true as it is in the scope.

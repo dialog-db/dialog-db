@@ -1,5 +1,12 @@
+use std::{collections::HashMap, usize};
+
+use dialog_artifacts::ValueDataType;
+
 use crate::{
-    cursor::Cursor, error::FormulaEvaluationError, Compute, Dependencies, Formula, Term, Value,
+    cursor::Cursor,
+    error::FormulaEvaluationError,
+    predicate::formula::{Cell, Cells},
+    Compute, Dependencies, Formula, Term, Value,
 };
 
 // ============================================================================
@@ -47,13 +54,32 @@ impl Compute for Sum {
     }
 }
 
+const SUM_CELLS: Cells = Cells::define(|cell| {
+    cell("of", ValueDataType::UnsignedInt)
+        .the("Number to add to")
+        .required();
+
+    cell("with", ValueDataType::UnsignedInt)
+        .the("Number to add")
+        .required();
+
+    cell("is", ValueDataType::UnsignedInt)
+        .the("Sum of numbers")
+        .derived(5);
+});
+
 impl Formula for Sum {
     type Input = SumInput;
     type Match = SumMatch;
 
-    fn name() -> &'static str {
+    fn operator() -> &'static str {
         "sum"
     }
+
+    fn cells() -> &'static Cells {
+        &SUM_CELLS
+    }
+
     fn dependencies() -> Dependencies {
         let mut dependencies = Dependencies::new();
         dependencies.require("of".into());
@@ -115,10 +141,27 @@ impl Formula for Difference {
     type Input = DifferenceInput;
     type Match = ();
 
-    fn name() -> &'static str {
+    fn operator() -> &'static str {
         "difference"
     }
 
+    fn cells(cells: Cells) {
+        cells
+            .cell("of", ValueDataType::UnsignedInt)
+            .the("Number to subtract from")
+            .required();
+
+        cells
+            .cell("subtract", ValueDataType::UnsignedInt)
+            .the("Number to subtract")
+            .required();
+
+        cells
+            .cell("is", ValueDataType::UnsignedInt)
+            .the("Difference")
+            .typed(ValueDataType::UnsignedInt)
+            .derived(2);
+    }
     fn dependencies() -> Dependencies {
         let mut dependencies = Dependencies::new();
         dependencies.require("of".into());
@@ -175,8 +218,28 @@ impl Formula for Product {
     type Input = ProductInput;
     type Match = ();
 
-    fn name() -> &'static str {
+    fn operator() -> &'static str {
         "product"
+    }
+
+    fn cells(cells: Cells) {
+        cells
+            .cell("of", ValueDataType::UnsignedInt)
+            .the("Number to multiply")
+            .typed(ValueDataType::UnsignedInt)
+            .required();
+
+        cells
+            .cell("times", ValueDataType::UnsignedInt)
+            .the("Times to multiply")
+            .typed(ValueDataType::UnsignedInt)
+            .required();
+
+        cells
+            .cell("is", ValueDataType::UnsignedInt)
+            .the("Result of multiplication")
+            .typed(ValueDataType::UnsignedInt)
+            .derived(5);
     }
 
     fn dependencies() -> Dependencies {
@@ -240,7 +303,7 @@ impl Formula for Quotient {
     type Input = QuotientInput;
     type Match = ();
 
-    fn name() -> &'static str {
+    fn operator() -> &'static str {
         "quotient"
     }
 
@@ -250,6 +313,23 @@ impl Formula for Quotient {
         dependencies.require("by".into());
         dependencies.provide("is".into());
         dependencies
+    }
+
+    fn cells(cells: Cells) {
+        cells
+            .cell("of", ValueDataType::UnsignedInt)
+            .the("Number to divide")
+            .derived(5);
+
+        cells
+            .cell("by", ValueDataType::UnsignedInt)
+            .the("Number to divide by")
+            .derived(5);
+
+        cells
+            .cell("is", ValueDataType::UnsignedInt)
+            .the("Result of division")
+            .derived(5);
     }
 
     fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
@@ -305,7 +385,7 @@ impl Formula for Modulo {
     type Input = ModuloInput;
     type Match = ();
 
-    fn name() -> &'static str {
+    fn operator() -> &'static str {
         "modulo"
     }
 
@@ -315,6 +395,21 @@ impl Formula for Modulo {
         dependencies.require("by".into());
         dependencies.provide("is".into());
         dependencies
+    }
+
+    fn cells(cells: Cells) {
+        cells
+            .cell("of", ValueDataType::UnsignedInt)
+            .the("Number to compute module of")
+            .required();
+        cells
+            .cell("by", ValueDataType::UnsignedInt)
+            .the("Number to compute module by")
+            .required();
+        cells
+            .cell("is", ValueDataType::UnsignedInt)
+            .the("Result of modulo operation")
+            .derived(10);
     }
 
     fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
@@ -509,7 +604,9 @@ mod tests {
             .unwrap();
 
         let app = Difference::apply(terms);
-        let results = app.derive(input).expect("Difference underflow should be handled");
+        let results = app
+            .derive(input)
+            .expect("Difference underflow should be handled");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
@@ -573,7 +670,9 @@ mod tests {
             .unwrap();
 
         let app = Quotient::apply(terms);
-        let results = app.derive(input).expect("Division by zero should be handled");
+        let results = app
+            .derive(input)
+            .expect("Division by zero should be handled");
 
         // Should return empty Vec for division by zero
         assert_eq!(results.len(), 0);

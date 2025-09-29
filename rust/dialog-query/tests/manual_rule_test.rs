@@ -324,19 +324,19 @@ mod tests {
         // Each statement should be a FactSelector
         for statement in &when_statements {
             match statement {
-                Premise::Apply(Application::Select(selector)) => {
+                Premise::Apply(Application::Fact(selector)) => {
                     assert!(selector.the.is_some());
                     assert!(selector.of.is_some());
                     assert!(selector.is.is_some());
                     assert!(selector.fact.is_none());
                 }
-                Premise::Apply(Application::ApplyRule(_)) => {
+                Premise::Apply(Application::Rule(_)) => {
                     panic!("Unexpected ApplyRule premise in test");
                 }
-                Premise::Apply(Application::ApplyFormula(_)) => {
+                Premise::Apply(Application::Formula(_)) => {
                     panic!("Unexpected ApplyFormula premise in test");
                 }
-                Premise::Apply(Application::Realize(_)) => {
+                Premise::Apply(Application::Concept(_)) => {
                     panic!("Unexpected Realize premise in test");
                 }
                 Premise::Exclude(_) => {
@@ -362,18 +362,18 @@ mod tests {
         // Verify the generated statements
         for statement in statements {
             match statement {
-                Premise::Apply(Application::Select(selector)) => {
+                Premise::Apply(Application::Fact(selector)) => {
                     assert!(selector.the.is_some());
                     assert!(selector.of.is_some());
                     assert!(selector.is.is_some());
                 }
-                Premise::Apply(Application::ApplyRule(_)) => {
+                Premise::Apply(Application::Rule(_)) => {
                     panic!("Unexpected ApplyRule premise in test");
                 }
-                Premise::Apply(Application::ApplyFormula(_)) => {
+                Premise::Apply(Application::Formula(_)) => {
                     panic!("Unexpected ApplyFormula premise in test");
                 }
-                Premise::Apply(Application::Realize(_)) => {
+                Premise::Apply(Application::Concept(_)) => {
                     panic!("Unexpected Realize premise in test");
                 }
                 Premise::Exclude(_) => {

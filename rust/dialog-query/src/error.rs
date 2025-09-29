@@ -335,14 +335,61 @@ impl From<AnalyzerError> for PlanError {
     }
 }
 
-/// Errors that can occur during query planning and execution
+/// Errors that can occur during compilation of rules or a predicate
+/// application
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum TypeError {
+    #[error("Expected a term with type {expected}, instead got {actual}")]
+    TypeMismatch {
+        expected: ValueDataType,
+        actual: Term<Value>,
+    },
+    #[error("Required term is missing")]
+    OmittedRequirement,
+    #[error("Required term can not be blank")]
+    BlankRequirement,
+}
+impl TypeError {
+    pub fn at(self, binding: String) -> SchemaError {
+        match self {
+            TypeError::TypeMismatch { expected, actual } => SchemaError::TypeError {
+                binding,
+                expected,
+                actual,
+            },
+            TypeError::OmittedRequirement => SchemaError::OmittedRequirement { binding },
+            TypeError::BlankRequirement => SchemaError::BlankRequirement { binding },
+        }
+    }
+}
+
+/// Errors that can occur during compilation of rules or a predicate
+/// application
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum SchemaError {
-    #[error("Expected {expected} type but got {actual:?} instead")]
+    #[error("Expected binding \"{binding}\" with {expected} type, instead got {actual}")]
     TypeError {
+        binding: String,
         expected: ValueDataType,
-        actual: Value,
+        actual: Term<Value>,
     },
-    #[error("Property {property} must be provided")]
-    MissingProperty { property: String },
+    #[error("Required binding \"{binding}\" was omitted")]
+    OmittedRequirement { binding: String },
+
+    #[error("Required binding \"{binding}\" can not be blank")]
+    BlankRequirement { binding: String },
+
+    #[error("Unconstrained fact selector")]
+    UnconstrainedSelector,
+}
+
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum CompileError<'a> {
+    #[error("Required bindings {required} are not bound in the rule environment")]
+    RequiredBindings { required: &'a Required },
+    #[error("Rule {rule} does not bind a variable \"{variable}\"")]
+    UnboundVariable {
+        rule: DeductiveRule,
+        variable: String,
+    },
 }

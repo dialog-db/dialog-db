@@ -291,11 +291,11 @@ mod tests {
         assert_eq!(when_collection.len(), 2);
         assert_eq!(
             when_collection.0[0],
-            Premise::Apply(Application::Select(statement1.clone()))
+            Premise::Apply(Application::Fact(statement1.clone()))
         );
         assert_eq!(
             when_collection.0[1],
-            Premise::Apply(Application::Select(statement2.clone()))
+            Premise::Apply(Application::Fact(statement2.clone()))
         );
 
         // Test single element vecs
@@ -303,7 +303,7 @@ mod tests {
         assert_eq!(single_when.len(), 1);
         assert_eq!(
             single_when.0[0],
-            Premise::Apply(Application::Select(statement1))
+            Premise::Apply(Application::Fact(statement1))
         );
     }
 
@@ -345,7 +345,7 @@ mod tests {
 
         // Verify the statements are correct
         match &when_result.0[0] {
-            Premise::Apply(Application::Select(selector)) => {
+            Premise::Apply(Application::Fact(selector)) => {
                 assert!(selector.the.is_some());
                 assert!(selector.of.is_some());
                 assert!(selector.is.is_some());

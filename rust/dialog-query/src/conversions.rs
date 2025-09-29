@@ -69,7 +69,7 @@ impl Formula for ToString {
     type Input = ToStringInput;
     type Match = ();
 
-    fn name() -> &'static str {
+    fn operator() -> &'static str {
         "to_string"
     }
 
@@ -131,7 +131,7 @@ impl Formula for ParseNumber {
     type Input = ParseNumberInput;
     type Match = ();
 
-    fn name() -> &'static str {
+    fn operator() -> &'static str {
         "parse_number"
     }
 

@@ -109,6 +109,58 @@ impl RuleApplication {
             rule: self.rule.clone(),
         })
     }
+
+    pub fn compile(self) -> Result<RuleApplicationAnalysis, AnalyzerError> {
+        // First we analyze the rule itself identifying its dependencies and
+        // execution budget.
+        let analysis = self.rule.analyze()?;
+        let mut dependencies = Dependencies::new();
+
+        for (parameter, requirement) in analysis.dependencies.iter() {
+            match requirement {
+                // If some of the parameters is a required dependency of the
+                // rule, but it was not applied rule application is invalid.
+                Requirement::Required => {
+                    self.terms
+                        .get(parameter)
+                        .ok_or_else(|| AnalyzerError::RequiredParameter {
+                            rule: self.rule.clone(),
+                            parameter: parameter.to_string(),
+                        })?;
+                }
+                // If dependency is not required and applied term is not a
+                // constant we propagate it into dependencies.
+                Requirement::Derived(desire) => {
+                    if let Some(Term::Variable { .. }) = self.terms.get(parameter) {
+                        dependencies.desire(parameter.to_string(), *desire);
+                    }
+                }
+            }
+        }
+
+        Ok(RuleApplicationAnalysis {
+            application: self,
+            analysis: Analysis {
+                dependencies,
+                cost: analysis.cost,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleApplicationAnalysis {
+    application: RuleApplication,
+    analysis: Analysis,
+}
+
+impl RuleApplicationAnalysis {
+    pub fn dependencies(&self) -> &'_ Dependencies {
+        &self.analysis.dependencies
+    }
+    pub fn cost(&self) -> usize {
+        self.analysis.cost
+    }
 }
 
 impl Display for RuleApplication {
@@ -123,6 +175,6 @@ impl Display for RuleApplication {
 
 impl From<RuleApplication> for Application {
     fn from(application: RuleApplication) -> Self {
-        Application::ApplyRule(application)
+        Application::Rule(application)
     }
 }

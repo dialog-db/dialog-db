@@ -1,6 +1,6 @@
 use dialog_query::analyzer::Analysis;
 use dialog_query::application::fact::BASE_COST;
-use dialog_query::application::{ConcetApplication, PlanCandidate};
+use dialog_query::application::{ConceptApplication, PlanCandidate};
 use dialog_query::artifact::ValueDataType;
 use dialog_query::attribute::Attribute;
 use dialog_query::error::{AnalyzerError, PlanError, QueryError};
@@ -88,7 +88,7 @@ fn test_concept_application_analysis() {
     terms.insert("name".to_string(), Term::var("person_name"));
     terms.insert("age".to_string(), Term::var("person_age"));
 
-    let concept_app = ConcetApplication { terms, concept };
+    let concept_app = ConceptApplication { terms, concept };
 
     let analysis = concept_app.analyze().expect("Analysis should succeed");
 
@@ -133,7 +133,7 @@ fn test_premise_construction() {
     let premise = Premise::from(fact_selector);
 
     match premise {
-        Premise::Apply(Application::Select(_)) => {
+        Premise::Apply(Application::Fact(_)) => {
             // Expected case
         }
         _ => panic!("Expected Select application"),
@@ -209,10 +209,10 @@ fn test_error_types() {
 fn test_application_variants() {
     // Test Select application
     let selector = FactSelector::new().the("test/attr");
-    let app = Application::Select(selector);
+    let app = Application::Fact(selector);
 
     match app {
-        Application::Select(_) => {
+        Application::Fact(_) => {
             // Expected
         }
         _ => panic!("Expected Select variant"),
@@ -225,10 +225,10 @@ fn test_application_variants() {
         operator: "test".to_string(),
         attributes: HashMap::new(),
     };
-    let concept_app = Application::Realize(ConcetApplication { terms, concept });
+    let concept_app = Application::Concept(ConceptApplication { terms, concept });
 
     match concept_app {
-        Application::Realize(_) => {
+        Application::Concept(_) => {
             // Expected
         }
         _ => panic!("Expected Realize variant"),
@@ -238,12 +238,12 @@ fn test_application_variants() {
 #[test]
 fn test_negation_construction() {
     let selector = FactSelector::new().the("test/attr");
-    let app = Application::Select(selector);
+    let app = Application::Fact(selector);
     let negation = Negation(app);
 
     // Test that negation wraps the application
     match negation {
-        Negation(Application::Select(_)) => {
+        Negation(Application::Fact(_)) => {
             // Expected
         }
         _ => panic!("Expected wrapped Select application"),

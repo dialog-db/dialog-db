@@ -30,7 +30,7 @@ mod match_functionality_test {
             // Convert String-typed FactSelector to Value-typed and then to Premise
             let selector = test_match.to_fact_selector();
             let generic_selector = FactSelector::from(&selector);
-            Premise::Apply(Application::Select(generic_selector))
+            Premise::Apply(Application::Fact(generic_selector))
         }
     }
 

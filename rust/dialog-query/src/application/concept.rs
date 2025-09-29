@@ -1,38 +1,98 @@
-use super::fact::{FactApplication, BASE_COST, ENTITY_COST, VALUE_COST};
-use super::Join;
-use crate::analyzer::{Analysis, AnalyzerError};
+use super::fact::{BASE_COST, ENTITY_COST, VALUE_COST};
+use crate::analyzer::{Analysis, AnalyzerError, Stats};
+use crate::analyzer::{AnalysisStatus, Environment, Planner, Syntax};
 use crate::error::PlanError;
+use crate::fact::Scalar;
+use crate::fact_selector::ATTRIBUTE_COST;
+use crate::math::ProductInput;
 use crate::plan::ConceptPlan;
 use crate::predicate::Concept;
-use crate::{Dependencies, Entity, Parameters, Requirement, Term, Type, Value, VariableScope};
+use crate::{
+    dependencies, parameters, Dependencies, Parameters, Requirement, Term, Value, VariableScope,
+};
 use std::fmt::Display;
+use std::os::macos::raw::stat;
+use std::ptr::{with_exposed_provenance, NonNull};
 
 /// Represents an application of a concept with specific term bindings.
 /// This is used when querying for entities that match a concept pattern.
 /// Note: The name has a typo (should be ConceptApplication) but is kept for compatibility.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ConcetApplication {
+pub struct ConceptApplication {
     /// The term bindings for this concept application.
     pub terms: Parameters,
     /// The concept being applied.
     pub concept: Concept,
 }
 
-impl ConcetApplication {
-    /// Analyzes this concept application to determine its dependencies and execution cost.
-    /// All concept applications require the "this" entity parameter and desire all
-    /// concept attributes as dependencies.
-    pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
+impl ConceptApplication {
+    pub fn cost(&self) -> usize {
+        BASE_COST
+    }
+
+    pub fn dependencies(&self) -> Dependencies {
+        let mut dependencies = Dependencies::new();
+        if let Some(Term::Variable {
+            name: Some(name), ..
+        }) = self.terms.get("this")
+        {
+            dependencies.desire(name.into(), ENTITY_COST);
+        }
+
+        for (parameter, _) in self.concept.attributes.iter() {
+            if let Some(Term::Variable {
+                name: Some(name), ..
+            }) = self.terms.get(parameter)
+            {
+                dependencies.desire(name.into(), VALUE_COST);
+            }
+        }
+
+        dependencies
+    }
+
+    pub fn analyze(&self) -> Analysis {
+        let mut analysis = Analysis::new(BASE_COST);
+
+        analysis.desire(self.terms.get("this"), ENTITY_COST);
+
+        for parameter in self.concept.operands() {
+            analysis.desire(self.terms.get(parameter), VALUE_COST);
+        }
+
+        analysis
+    }
+
+    // /// Analyzes this concept application to determine its dependencies and execution cost.
+    // /// All concept applications require the "this" entity parameter and desire all
+    // /// concept attributes as dependencies.
+    // pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
+    //     let mut dependencies = Dependencies::new();
+    //     dependencies.desire("this".into(), ENTITY_COST);
+
+    //     for (name, _) in self.concept.attributes.iter() {
+    //         dependencies.desire(name.to_string(), VALUE_COST);
+    //     }
+
+    //     Ok(Analysis {
+    //         cost: BASE_COST,
+    //         dependencies,
+    //     })
+    // }
+
+    pub fn compile(self) -> Result<ConceptApplicationAnalysis, AnalyzerError> {
         let mut dependencies = Dependencies::new();
         dependencies.desire("this".into(), ENTITY_COST);
-
         for (name, _) in self.concept.attributes.iter() {
             dependencies.desire(name.to_string(), VALUE_COST);
         }
 
-        Ok(Analysis {
-            cost: BASE_COST,
-            dependencies,
+        Ok(ConceptApplicationAnalysis {
+            application: self,
+            analysis: Analysis {
+                cost: BASE_COST,
+                dependencies,
+            },
         })
     }
 
@@ -54,6 +114,7 @@ impl ConcetApplication {
         Ok(ConceptPlan {
             cost,
             provides,
+            dependencies: analysis.dependencies,
             concept: self.concept.clone(),
             terms: self.terms.clone(),
         })
@@ -145,7 +206,46 @@ impl ConcetApplication {
     // }
 }
 
-impl Display for ConcetApplication {
+impl Planner for ConceptApplication {
+    fn init(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
+        let blank = Term::blank();
+        for operand in self.concept.operands() {
+            let term = self.terms.get(operand).unwrap_or(&blank);
+            if env.contains(term) {
+                plan.desire(term, 0);
+            } else {
+                plan.desire(term, VALUE_COST);
+            }
+        }
+    }
+
+    fn update(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
+        let blank = Term::blank();
+        for operand in self.concept.operands() {
+            let term = self.terms.get(operand).unwrap_or(&blank);
+            if env.contains(term) {
+                plan.desire(term, 0);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConceptApplicationAnalysis {
+    pub application: ConceptApplication,
+    pub analysis: Analysis,
+}
+
+impl ConceptApplicationAnalysis {
+    pub fn dependencies(&self) -> &'_ Dependencies {
+        &self.analysis.dependencies
+    }
+    pub fn cost(&self) -> usize {
+        self.analysis.cost
+    }
+}
+
+impl Display for ConceptApplication {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} {{", self.concept.operator)?;
         for (name, term) in self.terms.iter() {
@@ -155,3 +255,29 @@ impl Display for ConcetApplication {
         write!(f, "}}")
     }
 }
+
+// impl Syntax for ConceptApplication {
+//     fn analyze<'a>(&'a self, env: &Environment) -> Stats<'a, Self> {
+//         let mut stats = Stats::new(self, BASE_COST);
+
+//         let blank = Term::blank();
+
+//         // If `this` parameter is not bound in local environment
+//         // we need to mark it as desired.
+//         let this = self.terms.get("this").unwrap_or(&blank);
+//         if !env.locals.contains(this) {
+//             stats.desire(this, ENTITY_COST);
+//         }
+
+//         // Next we need to consider parameters for each attribute
+//         // and mark ones that are not bound in local environment as desired.
+//         for name in self.concept.attributes.keys() {
+//             let parameter = self.terms.get(name).unwrap_or(&blank);
+//             if !env.locals.contains(parameter) {
+//                 stats.desire(parameter, ENTITY_COST);
+//             }
+//         }
+
+//         stats
+//     }
+// }

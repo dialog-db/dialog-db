@@ -5,13 +5,15 @@
 //!
 //! Note: Premises are only used in rule conditions (the "when" part), not in conclusions.
 
-pub use super::application::Application;
+pub use super::application::{Application, ApplicationAnalysis};
 use super::application::{FactApplication, FormulaApplication, RuleApplication};
-pub use super::negation::Negation;
+pub use super::negation::{Negation, NegationAnalysis};
 pub use super::plan::{EvaluationPlan, Plan};
-pub use crate::analyzer::Analysis;
+use crate::analyzer::Planner;
+pub use crate::analyzer::{Analysis, Stats, Syntax};
 pub use crate::error::{AnalyzerError, PlanError};
 pub use crate::syntax::VariableScope;
+pub use crate::Dependencies;
 use std::fmt::Display;
 
 /// Represents a premise in a rule - a condition that must be satisfied.
@@ -25,6 +27,24 @@ pub enum Premise {
 }
 
 impl Premise {
+    pub fn dependencies(&self) -> Dependencies {
+        match self {
+            Premise::Apply(application) => application.dependencies(),
+            Premise::Exclude(negation) => negation.dependencies(),
+        }
+    }
+    pub fn cost(&self) -> usize {
+        match self {
+            Premise::Apply(application) => application.cost(),
+            Premise::Exclude(negation) => negation.cost(),
+        }
+    }
+    pub fn compile(self) -> Result<PremiseAnalysis, AnalyzerError> {
+        match self {
+            Premise::Apply(application) => application.compile().map(PremiseAnalysis::Apply),
+            Premise::Exclude(negation) => negation.compile().map(PremiseAnalysis::Exclude),
+        }
+    }
     /// Creates an execution plan for this premise within the given variable scope.
     pub fn plan(&self, scope: &VariableScope) -> Result<Plan, PlanError> {
         match self {
@@ -34,7 +54,7 @@ impl Premise {
     }
 
     /// Analyzes this premise to determine its dependencies and cost.
-    pub fn analyze(&self) -> Result<Analysis, AnalyzerError> {
+    pub fn analyze(&self) -> Analysis {
         match self {
             Premise::Apply(application) => application.analyze(),
             // Negation requires that all of the underlying dependencies to be
@@ -54,26 +74,102 @@ impl Display for Premise {
     }
 }
 
-impl From<FormulaApplication> for Premise {
-    fn from(application: FormulaApplication) -> Self {
-        Premise::Apply(Application::ApplyFormula(application))
+// impl Syntax for Premise {
+//     fn analyze<'a>(&'a self, env: &crate::analyzer::Environment) -> Stats<'a, Self> {
+//         match self {
+//             Premise::Apply(application) => {
+//                 let Stats {
+//                     cost,
+//                     required,
+//                     desired,
+//                     ..
+//                 } = Syntax::analyze(application, env);
+//                 Stats {
+//                     cost,
+//                     required,
+//                     desired,
+//                     syntax: self,
+//                 }
+//             },
+//             Premise::Exclude(negation) => {
+//                 let Stats {
+//                     cost,
+//                     required,
+//                     desired,
+//                     ..
+//                 } = Syntax::analyze(negation, env);
+//                 Stats {
+//                     cost,
+//                     required,
+//                     desired,
+//                     syntax: self,
+//                 }
+//         }
+//     }
+// }
+
+impl Planner for Premise {
+    fn init(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
+        match self {
+            Self::Apply(application) => Planner::init(application, plan, env),
+            Self::Exclude(negation) => Planner::init(negation, plan, env),
+        }
+    }
+    fn update(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
+        match self {
+            Self::Apply(application) => Planner::update(application, plan, env),
+            Self::Exclude(negation) => Planner::update(negation, plan, env),
+        }
     }
 }
 
-impl From<RuleApplication> for Premise {
-    fn from(application: RuleApplication) -> Self {
-        Premise::Apply(Application::ApplyRule(application))
+#[derive(Debug, Clone, PartialEq)]
+pub enum PremiseAnalysis {
+    Apply(ApplicationAnalysis),
+    Exclude(NegationAnalysis),
+}
+impl PremiseAnalysis {
+    pub fn cost(&self) -> usize {
+        match self {
+            PremiseAnalysis::Apply(application) => application.cost(),
+            PremiseAnalysis::Exclude(application) => application.cost(),
+        }
+    }
+
+    pub fn dependencies(&self) -> &'_ Dependencies {
+        match self {
+            PremiseAnalysis::Apply(application) => application.dependencies(),
+            PremiseAnalysis::Exclude(application) => application.dependencies(),
+        }
+    }
+}
+
+impl From<ApplicationAnalysis> for PremiseAnalysis {
+    fn from(application: ApplicationAnalysis) -> Self {
+        PremiseAnalysis::Apply(application)
+    }
+}
+
+impl From<NegationAnalysis> for PremiseAnalysis {
+    fn from(negation: NegationAnalysis) -> Self {
+        PremiseAnalysis::Exclude(negation)
+    }
+}
+
+impl From<FormulaApplication> for Premise {
+    fn from(application: FormulaApplication) -> Self {
+        Premise::Apply(Application::Formula(application))
     }
 }
 
 impl From<FactApplication> for Premise {
     fn from(selector: FactApplication) -> Self {
-        Premise::Apply(Application::Select(selector))
+        Premise::Apply(Application::Fact(selector))
     }
 }
 
 impl From<&FactApplication> for Premise {
     fn from(selector: &FactApplication) -> Self {
-        Premise::Apply(Application::Select(selector.clone()))
+        Premise::Apply(Application::Fact(selector.clone()))
     }
 }

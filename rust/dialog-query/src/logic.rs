@@ -46,7 +46,7 @@ impl Formula for And {
     type Input = AndInput;
     type Match = ();
 
-    fn name() -> &'static str {
+    fn operator() -> &'static str {
         "and"
     }
 
@@ -106,7 +106,7 @@ impl Formula for Or {
     type Input = OrInput;
     type Match = ();
 
-    fn name() -> &'static str {
+    fn operator() -> &'static str {
         "or"
     }
 
@@ -162,7 +162,7 @@ impl Formula for Not {
     type Input = NotInput;
     type Match = ();
 
-    fn name() -> &'static str {
+    fn operator() -> &'static str {
         "not"
     }
 

@@ -9,7 +9,7 @@ pub use super::{
 #[derive(Debug, Clone, PartialEq)]
 pub enum ApplicationPlan {
     /// Plan for fact selection operations
-    Select(FactApplicationPlan),
+    Fact(FactApplicationPlan),
     /// Plan for concept realization operations
     Concept(ConceptPlan),
     /// Plan for rule application operations
@@ -29,7 +29,7 @@ impl ApplicationPlan {
 impl EvaluationPlan for ApplicationPlan {
     fn cost(&self) -> usize {
         match self {
-            ApplicationPlan::Select(plan) => plan.cost(),
+            ApplicationPlan::Fact(plan) => plan.cost(),
             ApplicationPlan::Concept(plan) => plan.cost(),
             ApplicationPlan::Formula(plan) => plan.cost(),
             ApplicationPlan::Rule(plan) => plan.cost(),
@@ -37,7 +37,7 @@ impl EvaluationPlan for ApplicationPlan {
     }
     fn provides(&self) -> &VariableScope {
         match self {
-            ApplicationPlan::Select(plan) => plan.provides(),
+            ApplicationPlan::Fact(plan) => plan.provides(),
             ApplicationPlan::Concept(plan) => plan.provides(),
             ApplicationPlan::Formula(plan) => plan.provides(),
             ApplicationPlan::Rule(plan) => plan.provides(),
@@ -51,7 +51,7 @@ impl EvaluationPlan for ApplicationPlan {
         let source = self.clone();
         try_stream! {
             match source {
-                ApplicationPlan::Select(plan) => {
+                ApplicationPlan::Fact(plan) => {
                     for await each in plan.evaluate(context) {
                         yield each?;
                     }

@@ -10,6 +10,7 @@ pub mod analyzer;
 pub mod application;
 pub mod artifact;
 pub mod attribute;
+pub mod cell;
 pub mod claim;
 pub mod concept;
 pub mod conversions;
@@ -21,9 +22,9 @@ pub mod fact_selector;
 pub mod logic;
 pub mod math;
 pub mod negation;
-pub mod strings;
 pub mod parameters;
 pub mod plan;
+pub mod planner;
 pub mod predicate;
 pub mod premise;
 pub mod query;
@@ -32,14 +33,15 @@ pub mod selection;
 pub mod selector;
 pub mod session;
 pub mod stream;
+pub mod strings;
 pub mod syntax;
 pub mod term;
 pub mod types;
 
-
 pub use application::Application;
 pub use artifact::{Entity, Value, ValueDataType};
 pub use attribute::{Attribute, Cardinality};
+pub use claim::fact::Relation;
 pub use concept::Concept;
 pub use dependencies::{Dependencies, Requirement};
 pub use dialog_query_macros::Rule;
@@ -53,9 +55,8 @@ pub use predicate::{Compute, DeductiveRule, Formula};
 pub use premise::Premise;
 pub use query::{Query, Source, Store};
 pub use rule::{Premises, Rule, When};
+pub use session::transaction::{Edit, Transaction, TransactionError};
 pub use session::{QuerySession, Session};
-pub use session::transaction::{Transaction, TransactionError, Edit};
-pub use claim::fact::Relation;
 
 pub use async_stream::try_stream;
 pub use selection::{Match, MatchSet, Selection, SelectionExt};
@@ -63,29 +64,29 @@ pub use selector::Selector;
 pub use stream::*;
 pub use syntax::VariableScope;
 pub use term::*;
-pub use types::IntoValueDataType;
+pub use types::{IntoValueDataType, Type};
 
 /// Formula library exports
 pub mod formulas {
     //! Built-in formulas for common data transformations
-    //! 
+    //!
     //! This module provides a comprehensive library of formulas for:
     //! - Mathematical operations (sum, difference, product, quotient, modulo)
-    //! - String operations (concatenate, length, uppercase, lowercase)  
+    //! - String operations (concatenate, length, uppercase, lowercase)
     //! - Type conversions (to_string, parse_number)
     //! - Boolean logic (and, or, not)
-    
+
     // Mathematical formulas
-    pub use crate::math::{Sum, Difference, Product, Quotient, Modulo};
-    
+    pub use crate::math::{Difference, Modulo, Product, Quotient, Sum};
+
     // String operation formulas
-    pub use crate::strings::{Concatenate, Length, Uppercase, Lowercase};
-    
+    pub use crate::strings::{Concatenate, Length, Lowercase, Uppercase};
+
     // Type conversion formulas
-    pub use crate::conversions::{ToString, ParseNumber};
-    
+    pub use crate::conversions::{ParseNumber, ToString};
+
     // Boolean logic formulas
-    pub use crate::logic::{And, Or, Not};
+    pub use crate::logic::{And, Not, Or};
 }
 
 /// Re-export commonly used types

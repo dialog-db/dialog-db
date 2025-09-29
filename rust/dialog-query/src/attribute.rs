@@ -1,9 +1,11 @@
+use crate::application::FactApplication;
 use crate::artifact::ValueDataType;
 pub use crate::artifact::{Attribute as ArtifactsAttribute, Entity, Value};
-use crate::error::SchemaError;
+use crate::error::{SchemaError, TypeError};
 pub use crate::fact_selector::FactSelector;
 pub use crate::term::Term;
 pub use crate::types::{IntoValueDataType, Scalar};
+use crate::Parameters;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use std::marker::PhantomData;
 
@@ -51,6 +53,7 @@ impl<T: Scalar> Attribute<T> {
     pub fn the(&self) -> String {
         format!("{}/{}", self.namespace, self.name)
     }
+
     pub fn of<Of: Into<Term<Entity>>>(&self, term: Of) -> Match<T> {
         Match {
             attribute: self.clone(),
@@ -65,7 +68,35 @@ impl<T: Scalar> Attribute<T> {
         Some(self.data_type)
     }
 
-    pub fn conform(&self, value: Value) -> Result<Relation, SchemaError> {
+    /// Type checks that provided term matches cells content type. If term
+    pub fn check<T: Scalar>(&self, term: &Term<T>) -> Result<&Term<T>, TypeError> {
+        let expected = self.data_type();
+        // First we type check the input to ensure it matches cell's content type
+        if let Some(actual) = term.data_type() {
+            if (&actual != expected) {
+                Err(TypeError::TypeMismatch {
+                    expected: expected.into(),
+                    actual: term.into(),
+                })?;
+            };
+        };
+
+        Ok(term)
+    }
+
+    pub fn conform<T: Scalar>(
+        &self,
+        term: Option<&Term<T>>,
+    ) -> Result<Option<&Term<T>>, TypeError> {
+        // We check that cell type matches term type.
+        if let Some(term) = term {
+            self.check(term)?;
+        }
+
+        Ok(term)
+    }
+
+    pub fn resolve(&self, value: Value) -> Result<Relation, TypeError> {
         if value.data_type() == self.data_type {
             Ok(Relation {
                 the: self.the().parse().unwrap(),
@@ -73,11 +104,37 @@ impl<T: Scalar> Attribute<T> {
                 cardinality: self.cardinality,
             })
         } else {
-            Err(SchemaError::TypeError {
+            Err(TypeError::TypeMismatch {
                 expected: self.data_type,
-                actual: value.clone(),
+                actual: Term::Constant(value),
             })
         }
+    }
+
+    pub fn apply(&self, parameters: Parameters) -> Result<FactApplication, SchemaError> {
+        // Check that type of the `is` parameter matches the attribute's data type
+        self.conform(parameters.get("is"))?;
+
+        // Check that if `this` parameter is provided, it has entity type.
+        if let Some(this) = parameters.get("this") {
+            if let Some(actual) = this.data_type() {
+                if (&actual != Type::Entity) {
+                    Err(TypeError::TypeMismatch {
+                        expected: Type::Entity,
+                        actual: this.into(),
+                    })?;
+                };
+            };
+        }?;
+
+        let blank = Term::blank();
+
+        Ok(FactApplication::new(
+            self.the().parse().expect("Expected a valid attribute"),
+            parameters.get("this").unwrap_or(&blank).into(),
+            parameters.get("is").unwrap_or(&blank).into(),
+            self.cardinality,
+        ))
     }
 }
 

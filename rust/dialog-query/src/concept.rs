@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::analyzer::Analysis;
-use crate::application::{ConcetApplication, Join};
+use crate::application::{ConceptApplication, Join};
 use crate::attribute::Attribute;
 use crate::error::{AnalyzerError, PlanError, QueryError};
 use crate::fact_selector::{BASE_COST, ENTITY_COST, VALUE_COST};
@@ -194,7 +194,7 @@ impl<T: Match> From<T> for Premise {
     fn from(source: T) -> Self {
         let concept = source.conpect();
         let terms = source.into();
-        Premise::Apply(Application::Realize(ConcetApplication { terms, concept }))
+        Premise::Apply(Application::Concept(ConceptApplication { terms, concept }))
     }
 }
 

@@ -175,11 +175,22 @@
 //! }
 //! ```
 
+use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::path::Display;
+
+use crate::types::IntoValueDataType;
+use crate::{term, Term, Type};
+use indexmap::indexmap_with_default;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::analyzer::Required;
 use crate::application::FormulaApplication;
 use crate::cursor::Cursor;
-use crate::error::FormulaEvaluationError;
-use crate::Match;
-use crate::{Dependencies, Parameters};
+use crate::error::{FormulaEvaluationError, SchemaError, TypeError};
+use crate::fact::Scalar;
+use crate::{parameters, Match, Parameters, Requirement};
 
 /// Core trait for implementing formulas in the query system
 ///
@@ -209,7 +220,7 @@ use crate::{Dependencies, Parameters};
 /// # Example
 ///
 /// See the module-level documentation for a complete example.
-pub trait Formula: Sized + Clone {
+pub trait Formula: Sized + Clone + Into<FormulaDescriptor> {
     /// The input type for this formula
     ///
     /// This type must be constructible from a Cursor and should contain
@@ -224,7 +235,13 @@ pub trait Formula: Sized + Clone {
 
     fn dependencies() -> Dependencies;
 
-    fn name() -> &'static str;
+    fn cost() -> usize;
+    fn cells() -> &'static Cells;
+    fn operator() -> &'static str;
+
+    fn operands(&self) -> impl Iterator<Item = &str> {
+        Self::cells().keys()
+    }
 
     /// Derive output instances from the input cursor
     ///
@@ -297,20 +314,220 @@ pub trait Formula: Sized + Clone {
     /// terms.insert("with".to_string(), Term::var("input2"));
     /// terms.insert("is".to_string(), Term::var("output"));
     ///
-    /// let app = Sum::apply(terms);
+    /// let app = Sum::apply(terms)?;
     /// ```
-    fn apply(terms: Parameters) -> FormulaApplication {
-        FormulaApplication {
-            cost: 5,
-            parameters: terms,
-            name: Self::name(),
-            dependencies: Self::dependencies(),
+    fn apply(terms: Parameters) -> Result<FormulaApplication, SchemaError> {
+        let cells = Self::cells();
+
+        Ok(FormulaApplication {
+            name: Self::operator(),
+            cells,
+            cost: Self::cost(),
+            parameters: cells.conform(terms)?,
             compute: |cursor| Self::derive_match(cursor),
-        }
+        })
     }
 }
 
 /// Trait for formulas that can compute their outputs
 pub trait Compute: Formula + Sized {
     fn compute(input: Self::Input) -> Vec<Self>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cell {
+    /// Name of this cell
+    name: &'static str,
+    /// Description of this cell
+    description: &'static str,
+    /// Data type of this cell
+    #[serde(rename = "type")]
+    content_type: Type,
+    /// Requirement for this cell
+    requirement: Requirement,
+}
+
+impl Cell {
+    pub fn new(name: &'static str, content_type: Type) -> Self {
+        Cell {
+            name,
+            description: "",
+            content_type,
+            requirement: Requirement::Derived(5),
+        }
+    }
+
+    pub fn typed(mut self, content_type: Type) -> Self {
+        self.content_type = content_type;
+        self
+    }
+
+    pub fn the(mut self, description: &'static str) -> Self {
+        self.description = description;
+        self
+    }
+
+    pub fn required(mut self) -> Self {
+        self.requirement = Requirement::Required;
+        self
+    }
+
+    pub fn derived(mut self, derivation: usize) -> Self {
+        self.requirement = Requirement::Derived(derivation);
+        self
+    }
+
+    pub fn name(&self) -> &str {
+        self.name
+    }
+
+    pub fn description(&self) -> &str {
+        self.description
+    }
+
+    pub fn content_type(&self) -> &Type {
+        &self.content_type
+    }
+
+    pub fn requirement(&self) -> &Requirement {
+        &self.requirement
+    }
+
+    /// Type checks that provided term matches cells content type. If term
+    pub fn check<T: Scalar>(&self, term: &Term<T>) -> Result<&Term<T>, TypeError> {
+        let expected = self.content_type();
+        // First we type check the input to ensure it matches cell's content type
+        if let Some(actual) = term.data_type() {
+            if (&actual != expected) {
+                Err(TypeError::TypeMismatch {
+                    expected: expected.into(),
+                    actual: term.into(),
+                })?;
+            };
+        };
+
+        Ok(term)
+    }
+
+    pub fn conform<T: Scalar>(
+        &self,
+        term: Option<&Term<T>>,
+    ) -> Result<Option<&Term<T>>, TypeError> {
+        // We check that cell type matches term type.
+        if let Some(term) = term {
+            self.check(term)?;
+        }
+
+        // Verify that required parameter is provided
+        if self.requirement().is_required() {
+            match term {
+                Some(Term::Constant(_)) => Ok(()),
+                Some(Term::Variable { name: Some(_), .. }) => Ok(()),
+                Some(Term::Variable { name: None, .. }) => Err(TypeError::BlankRequirement),
+                None => Err(TypeError::OmittedRequirement),
+            }?;
+        };
+
+        Ok(term)
+    }
+}
+
+impl Display for Cell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.requirement.is_required() {
+            write!(f, "?{}: {}", self.name, self.content_type)
+        } else {
+            write!(f, "{}: {}", self.name, self.content_type)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Cells(HashMap<String, Cell>);
+impl Cells {
+    pub fn define(define: fn(cell: fn(name: &'static str, content_type: Type) -> Cell)) -> Self {
+        let mut cells = Self(HashMap::new());
+        let cell = |name, content_type| {
+            let cell = Cell::new(name, content_type);
+            cells.0.insert(cell.name.into(), cell);
+            cell
+        };
+        define(cell);
+        cells
+    }
+
+    pub fn default() -> Self {
+        Cells(HashMap::new())
+    }
+
+    pub fn new() -> Self {
+        Cells(HashMap::new())
+    }
+
+    pub fn from<T: Iterator<Item = Cell>>(source: T) -> Cells {
+        let mut cells = Self::default();
+        for cell in source {
+            cells.0.insert(cell.name.into(), cell);
+        }
+        cells
+    }
+
+    /// Returns an iterator over all dependencies as (name, requirement) pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Cell)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Cell> {
+        self.0.get(name)
+    }
+
+    pub fn count(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(|k| k.as_str())
+    }
+
+    /// Conforms the provided parameters conform to the schema of the cells.
+    pub fn conform(&self, parameters: Parameters) -> Result<Parameters, SchemaError> {
+        for (name, cell) in self.iter() {
+            let parameter = parameters.get(&name);
+            cell.conform(parameter).map_err(|e| e.at(name.into()))?;
+        }
+
+        Ok(parameters)
+    }
+}
+
+impl Default for Cells {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Iterator<Item = Cell>> From<T> for Cells {
+    fn from(source: T) -> Self {
+        Self::from(source)
+    }
+}
+
+#[test]
+fn test_cells() {
+    let cells = Cells::define(|cell| {
+        cell("name", Type::String).the("name field").required();
+
+        cell("age", Type::UnsignedInt).the("age field").derived(15);
+    });
+
+    assert_eq!(cells.count(), 2);
+    assert_eq!(cells.get("name")?.name(), "name");
+    assert_eq!(cells.get("name")?.content_type(), Type::String);
+    assert_eq!(cells.get("name")?.description(), "name field");
+    assert_eq!(cells.get("name")?.requirement(), &Requirement::Required);
+
+    assert_eq!(cells.get("age")?.name(), "age");
+    assert_eq!(cells.get("age")?.content_type(), Type::UnsignedInt);
+    assert_eq!(cells.get("age")?.description(), "age field");
+    assert_eq!(cells.get("age")?.requirement(), &Requirement::Derived(15));
 }
