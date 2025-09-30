@@ -1,7 +1,7 @@
 use crate::analyzer;
 use crate::analyzer::Planner;
 
-use super::analyzer::Analysis;
+use super::analyzer::LegacyAnalysis;
 use super::application::Application;
 use super::error::PlanError;
 use super::plan::NegationPlan;
@@ -33,10 +33,10 @@ impl Negation {
     }
     /// Analyzes this negation to determine dependencies and cost.
     /// All dependencies become required since negation must fully evaluate its condition.
-    pub fn analyze(&self) -> Analysis {
+    pub fn analyze(&self) -> LegacyAnalysis {
         let Negation(application) = self;
-        let Analysis { cost, dependencies } = application.analyze();
-        let mut analysis = Analysis::new(cost + 100);
+        let LegacyAnalysis { cost, dependencies } = application.analyze();
+        let mut analysis = LegacyAnalysis::new(cost + 100);
         let required = &mut analysis.dependencies;
         for (name, _) in dependencies.iter() {
             required.require(name.into());
@@ -54,12 +54,12 @@ impl Negation {
 }
 
 impl Planner for Negation {
-    fn init(&self, plan: &mut analyzer::SyntaxAnalysis, env: &VariableScope) {
+    fn init(&self, plan: &mut analyzer::Analysis, env: &VariableScope) {
         let Negation(application) = self;
         Planner::init(application, plan, env);
         plan.require_all();
     }
-    fn update(&self, plan: &mut analyzer::SyntaxAnalysis, env: &VariableScope) {
+    fn update(&self, plan: &mut analyzer::Analysis, env: &VariableScope) {
         let Negation(application) = self;
         Planner::update(application, plan, env);
         plan.require_all();

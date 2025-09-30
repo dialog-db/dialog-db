@@ -1,5 +1,4 @@
-pub use crate::analyzer::{Environment, Stats, Syntax};
-use crate::analyzer::{Planner, SyntaxAnalysis};
+use crate::analyzer::{Analysis, Planner};
 use crate::error::CompileError;
 pub use crate::error::{AnalyzerError, PlanError};
 pub use crate::plan::{EvaluationPlan, Plan};
@@ -14,13 +13,13 @@ pub enum Join<'a> {
     Idle { premises: &'a Vec<Premise> },
     /// Processing state with cached candidates and current scope.
     Active {
-        candidates: Vec<(&'a Premise, SyntaxAnalysis)>,
+        candidates: Vec<(&'a Premise, Analysis)>,
     },
 }
 
 pub struct Candidate<'a> {
     /// Things we have inferred during planning of the premise.
-    analysis: SyntaxAnalysis,
+    analysis: Analysis,
     /// Premise that we have analyzed.
     premise: &'a Premise,
 }
@@ -34,16 +33,14 @@ impl<'a> Join<'a> {
     /// Helper to create a planning error from failed candidates.
     /// Returns the first error found, or UnexpectedError if none.
     fn fail(
-        candidates: &[(&'_ Premise, SyntaxAnalysis)],
+        candidates: &[(&'_ Premise, Analysis)],
     ) -> Result<(&'a Premise, VariableScope), CompileError> {
         for (_, plan) in candidates {
             match plan {
-                SyntaxAnalysis::Incomplete { required, .. } => {
-                    Err(CompileError::RequiredBindings {
-                        required: required.clone(),
-                    })
-                }
-                SyntaxAnalysis::Candidate { .. } => Ok(()),
+                Analysis::Incomplete { required, .. } => Err(CompileError::RequiredBindings {
+                    required: required.clone(),
+                }),
+                Analysis::Candidate { .. } => Ok(()),
             }?;
         }
 
@@ -84,7 +81,7 @@ impl<'a> Join<'a> {
         &mut self,
         differential: &VariableScope,
     ) -> Result<(&'_ Premise, VariableScope), CompileError> {
-        let mut best: Option<(usize, &'_ Premise, SyntaxAnalysis, VariableScope, usize)> = None;
+        let mut best: Option<(usize, &'_ Premise, Analysis, VariableScope, usize)> = None;
         match self {
             Join::Idle { premises } => {
                 let mut candidates = vec![];
@@ -93,7 +90,7 @@ impl<'a> Join<'a> {
                     let plan = Planner::plan(premise, &env);
 
                     match &plan {
-                        SyntaxAnalysis::Candidate { cost, desired, .. } => {
+                        Analysis::Candidate { cost, desired, .. } => {
                             if let Some((top, _, _, _, _)) = &best {
                                 if cost < top {
                                     best = Some((
@@ -114,7 +111,7 @@ impl<'a> Join<'a> {
                                 ));
                             }
                         }
-                        SyntaxAnalysis::Incomplete { .. } => {}
+                        Analysis::Incomplete { .. } => {}
                     }
 
                     candidates.push((premise, plan));
@@ -137,7 +134,7 @@ impl<'a> Join<'a> {
                     let plan_copy = plan.clone();
 
                     match &plan_copy {
-                        SyntaxAnalysis::Candidate { cost, desired, .. } => {
+                        Analysis::Candidate { cost, desired, .. } => {
                             let provides = desired.clone().into();
                             if let Some((top, _, _, _, _)) = best {
                                 if *cost < top {
@@ -147,7 +144,7 @@ impl<'a> Join<'a> {
                                 best = Some((*cost, premise, plan_copy, provides, index));
                             }
                         }
-                        SyntaxAnalysis::Incomplete { .. } => {}
+                        Analysis::Incomplete { .. } => {}
                     }
                 }
 

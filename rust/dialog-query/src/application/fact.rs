@@ -1,5 +1,5 @@
-pub use super::{Analysis, Application};
-use crate::analyzer::{Planner, SyntaxAnalysis};
+pub use super::{Application, LegacyAnalysis};
+use crate::analyzer::{Analysis, Planner};
 pub use crate::artifact::Attribute;
 pub use crate::artifact::{ArtifactSelector, Constrained};
 pub use crate::error::AnalyzerError;
@@ -57,8 +57,8 @@ impl FactApplication {
         dependencies
     }
 
-    pub fn analyze(&self) -> Analysis {
-        Analysis::new(0)
+    pub fn analyze(&self) -> LegacyAnalysis {
+        LegacyAnalysis::new(0)
             .desire(Some(&self.the), ATTRIBUTE_COST)
             .desire(Some(&self.of), ENTITY_COST)
             .desire(Some(&self.is), VALUE_COST)
@@ -110,7 +110,7 @@ impl FactApplication {
 }
 
 impl Planner for FactApplication {
-    fn init(&self, analysis: &mut SyntaxAnalysis, env: &VariableScope) {
+    fn init(&self, analysis: &mut Analysis, env: &VariableScope) {
         let (the, of, is) = (
             if env.contains(&self.the) {
                 0
@@ -145,7 +145,7 @@ impl Planner for FactApplication {
             analysis.require(&self.is);
         }
     }
-    fn update(&self, analysis: &mut SyntaxAnalysis, env: &VariableScope) {
+    fn update(&self, analysis: &mut Analysis, env: &VariableScope) {
         // update all the bound variable costs to 0
         if env.contains(&self.the) {
             analysis.desire(&self.the, 0);

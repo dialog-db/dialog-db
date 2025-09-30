@@ -9,8 +9,7 @@ pub use super::application::Application;
 use super::application::{FactApplication, FormulaApplication};
 pub use super::negation::Negation;
 pub use super::plan::{EvaluationPlan, Plan};
-use crate::analyzer::Planner;
-pub use crate::analyzer::{Analysis, Stats, Syntax};
+pub use crate::analyzer::{Analysis, LegacyAnalysis, Planner};
 pub use crate::error::{AnalyzerError, PlanError};
 pub use crate::syntax::VariableScope;
 pub use crate::Dependencies;
@@ -48,7 +47,7 @@ impl Premise {
     }
 
     /// Analyzes this premise to determine its dependencies and cost.
-    pub fn analyze(&self) -> Analysis {
+    pub fn analyze(&self) -> LegacyAnalysis {
         match self {
             Premise::Apply(application) => application.analyze(),
             // Negation requires that all of the underlying dependencies to be
@@ -103,16 +102,16 @@ impl Display for Premise {
 // }
 
 impl Planner for Premise {
-    fn init(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
+    fn init(&self, analysis: &mut Analysis, env: &VariableScope) {
         match self {
-            Self::Apply(application) => Planner::init(application, plan, env),
-            Self::Exclude(negation) => Planner::init(negation, plan, env),
+            Self::Apply(application) => Planner::init(application, analysis, env),
+            Self::Exclude(negation) => Planner::init(negation, analysis, env),
         }
     }
-    fn update(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
+    fn update(&self, analysis: &mut Analysis, env: &VariableScope) {
         match self {
-            Self::Apply(application) => Planner::update(application, plan, env),
-            Self::Exclude(negation) => Planner::update(negation, plan, env),
+            Self::Apply(application) => Planner::update(application, analysis, env),
+            Self::Exclude(negation) => Planner::update(negation, analysis, env),
         }
     }
 }

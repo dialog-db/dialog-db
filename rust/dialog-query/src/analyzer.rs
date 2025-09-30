@@ -1,4 +1,3 @@
-use crate::application::{ConceptApplication, FactApplication, FormulaApplication};
 use crate::error::CompileError;
 use crate::{fact::Scalar, predicate::DeductiveRule};
 use crate::{Dependencies, Term, Value, VariableScope};
@@ -45,16 +44,16 @@ pub enum AnalyzerError {
 /// Query planner analyzes each premise to identify it's dependencies and budget
 /// required to perform them. This struct represents result of succesful analysis.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Analysis {
+pub struct LegacyAnalysis {
     /// Base execution cost which does not include added costs captured in the
     /// dependencies.
     pub cost: usize,
     pub dependencies: Dependencies,
 }
 
-impl Analysis {
+impl LegacyAnalysis {
     pub fn new(cost: usize) -> Self {
-        Analysis {
+        LegacyAnalysis {
             cost,
             dependencies: Dependencies::new(),
         }
@@ -77,132 +76,6 @@ impl Analysis {
         }
 
         self
-    }
-}
-
-/// Syntax forms for our datalog notation.
-pub trait Syntax: Sized {
-    /// Performs analysis of this syntax form in the provided environment.
-    fn analyze<'a>(&'a self, env: &Environment) -> Stats<'a, Self>;
-
-    fn update<'a>(&'a self, stats: &mut Stats<'a, Self>, extension: &VariableScope);
-}
-
-pub struct Environment {
-    pub locals: VariableScope,
-}
-
-pub struct AnalyzedSyntax<'a, Form: Syntax> {
-    pub syntax: &'a Form,
-
-    /// Estimated cost of evaluating this syntax form.
-    pub cost: usize,
-
-    /// Set of variables that need to be bound in the evaluation
-    /// context in order to evaluate this syntax form.
-    pub requires: VariableScope,
-
-    /// Set of variables that will be bound by the evaluation of this
-    /// syntax form
-    pub provides: VariableScope,
-}
-
-pub enum AnalysisStatus<'a, Form: Syntax> {
-    Blocked {
-        syntax: &'a Form,
-        requires: VariableScope,
-    },
-    Candidate {
-        syntax: &'a Form,
-        cost: usize,
-        requires: VariableScope,
-        provides: VariableScope,
-    },
-}
-
-pub enum Plan<'a> {
-    Fact(&'a FactApplication),
-    Concept(&'a ConceptApplication),
-    Formula(&'a FormulaApplication),
-}
-
-pub struct Stats<'a, Form: Syntax> {
-    pub syntax: &'a Form,
-    /// Base cost of evaluating this syntax form regardless of
-    /// all the desired variables.
-    pub cost: usize,
-    /// Set of variable names that are required.
-    pub required: Required,
-    /// Set of variable names mapped to corresponding costs.
-    pub desired: Desired,
-}
-
-impl<'a, Form: Syntax> Stats<'a, Form> {
-    pub fn new(syntax: &'a Form, cost: usize) -> Self {
-        Stats {
-            syntax,
-            cost,
-            required: Required::new(),
-            desired: Desired::new(),
-        }
-    }
-
-    pub fn expense(&mut self, cost: usize) {
-        self.cost += cost;
-    }
-
-    pub fn require<T: Scalar>(&mut self, term: &Term<T>) {
-        self.required.add(term);
-    }
-
-    pub fn desire<T: Scalar>(&mut self, term: &Term<T>, cost: usize) {
-        match term {
-            Term::Variable { name: None, .. } => {
-                self.cost += cost;
-            }
-            Term::Variable {
-                name: Some(name), ..
-            } => {
-                self.desired.0.insert(name.into(), cost);
-            }
-            _ => {}
-        }
-    }
-
-    /// Calculates the total cost of all derived dependencies.
-    /// Required dependencies don't contribute to cost as they must be provided.
-    pub fn estimate(&'a self) -> Result<usize, EstimateError<'a>> {
-        if self.required.count() == 0 {
-            Ok(self.cost + self.desired.total())
-        } else {
-            Err(EstimateError::RequiredParameters {
-                required: &self.required,
-            })
-        }
-    }
-
-    pub fn require_all(&mut self) {
-        for variable in self.desired.0.keys() {
-            self.required.0.insert(variable.clone());
-        }
-        self.desired.0.clear();
-    }
-
-    /// updates analysis by adding new variables to the scope
-    pub fn update(&mut self, scope: &VariableScope) {
-        for variable in scope.into_iter() {
-            self.required.remove(&variable);
-            self.desired.remove(&variable);
-        }
-    }
-}
-impl<'a, Form: Syntax> Stats<'a, Form> {
-    pub fn provides(&self) -> VariableScope {
-        let mut provides = VariableScope::new();
-        for variable in self.desired.iter() {
-            provides.add(&variable);
-        }
-        provides
     }
 }
 
@@ -334,29 +207,6 @@ impl<'a> From<EstimateError<'a>> for CompileError {
     }
 }
 
-// trait Status {}
-
-// #[derive(Debug, Clone)]
-// pub struct Blocked;
-// impl Status for Blocked {}
-
-// #[derive(Debug, Clone)]
-// pub struct Ready;
-// impl Status for Ready {}
-
-// #[derive(Debug, Clone)]
-// pub struct SyntaxAnalysis<Status> {
-//     /// Base cost of evaluating this syntax form regardless of
-//     /// all the desired variables.
-//     pub cost: usize,
-//     /// Set of variable names that are required.
-//     pub required: Required,
-//     /// Set of variable names mapped to corresponding costs.
-//     pub desired: Desired,
-
-//     status: PhantomData<Status>,
-// }
-
 /// Context for a successfully planned premise
 /// Unlike SyntaxAnalysis, this can never be in Incomplete state
 #[derive(Debug, Clone, PartialEq)]
@@ -376,12 +226,12 @@ impl PlanContext {
     }
 }
 
-impl TryFrom<SyntaxAnalysis> for PlanContext {
+impl TryFrom<Analysis> for PlanContext {
     type Error = &'static str;
 
-    fn try_from(analysis: SyntaxAnalysis) -> Result<Self, Self::Error> {
+    fn try_from(analysis: Analysis) -> Result<Self, Self::Error> {
         match analysis {
-            SyntaxAnalysis::Candidate {
+            Analysis::Candidate {
                 cost,
                 desired,
                 depends,
@@ -390,16 +240,16 @@ impl TryFrom<SyntaxAnalysis> for PlanContext {
                 desired,
                 depends,
             }),
-            SyntaxAnalysis::Incomplete { .. } => {
+            Analysis::Incomplete { .. } => {
                 Err("Cannot convert Incomplete SyntaxAnalysis to PlanContext")
             }
         }
     }
 }
 
-impl From<PlanContext> for SyntaxAnalysis {
+impl From<PlanContext> for Analysis {
     fn from(context: PlanContext) -> Self {
-        SyntaxAnalysis::Candidate {
+        Analysis::Candidate {
             cost: context.cost,
             desired: context.desired,
             depends: context.depends,
@@ -408,7 +258,7 @@ impl From<PlanContext> for SyntaxAnalysis {
 }
 
 #[derive(Clone)]
-pub enum SyntaxAnalysis {
+pub enum Analysis {
     /// Plan that can not be evaluated because it has unsatisfied requirements.
     Incomplete {
         cost: usize,
@@ -422,9 +272,9 @@ pub enum SyntaxAnalysis {
         depends: VariableScope,
     },
 }
-impl SyntaxAnalysis {
+impl Analysis {
     pub fn new(cost: usize) -> Self {
-        SyntaxAnalysis::Candidate {
+        Analysis::Candidate {
             cost,
             desired: Desired::new(),
             depends: VariableScope::new(),
@@ -433,41 +283,41 @@ impl SyntaxAnalysis {
 
     pub fn desired(&self) -> &Desired {
         match self {
-            SyntaxAnalysis::Incomplete { desired, .. } => desired,
-            SyntaxAnalysis::Candidate { desired, .. } => desired,
+            Analysis::Incomplete { desired, .. } => desired,
+            Analysis::Candidate { desired, .. } => desired,
         }
     }
 
     pub fn cost(&self) -> &usize {
         match self {
-            SyntaxAnalysis::Incomplete { cost, .. } => cost,
-            SyntaxAnalysis::Candidate { cost, .. } => cost,
+            Analysis::Incomplete { cost, .. } => cost,
+            Analysis::Candidate { cost, .. } => cost,
         }
     }
 
     pub fn depends(&self) -> &VariableScope {
         match self {
-            SyntaxAnalysis::Incomplete { depends, .. } => depends,
-            SyntaxAnalysis::Candidate { depends, .. } => depends,
+            Analysis::Incomplete { depends, .. } => depends,
+            Analysis::Candidate { depends, .. } => depends,
         }
     }
 
     pub fn provides(&self) -> &VariableScope {
         match self {
-            SyntaxAnalysis::Incomplete { depends, .. } => depends,
-            SyntaxAnalysis::Candidate { depends, .. } => depends,
+            Analysis::Incomplete { depends, .. } => depends,
+            Analysis::Candidate { depends, .. } => depends,
         }
     }
 
     pub fn require<T: Scalar>(&mut self, term: &Term<T>) {
         match self {
-            SyntaxAnalysis::Incomplete {
+            Analysis::Incomplete {
                 required, desired, ..
             } => {
                 desired.remove(term);
                 required.add(term);
             }
-            SyntaxAnalysis::Candidate {
+            Analysis::Candidate {
                 cost,
                 desired,
                 depends,
@@ -475,7 +325,7 @@ impl SyntaxAnalysis {
                 desired.remove(term);
                 let mut required = Required::new();
                 required.add(term);
-                *self = SyntaxAnalysis::Incomplete {
+                *self = Analysis::Incomplete {
                     cost: *cost,
                     desired: desired.to_owned(),
                     required,
@@ -489,25 +339,25 @@ impl SyntaxAnalysis {
         match term {
             // if terms is not a named variable we add inflate base cost
             Term::Variable { name: None, .. } => match self {
-                SyntaxAnalysis::Incomplete {
+                Analysis::Incomplete {
                     cost: total,
                     required,
                     desired,
                     depends,
                 } => {
-                    *self = SyntaxAnalysis::Incomplete {
+                    *self = Analysis::Incomplete {
                         cost: *total + cost,
                         desired: desired.to_owned(),
                         required: required.to_owned(),
                         depends: depends.to_owned(),
                     };
                 }
-                SyntaxAnalysis::Candidate {
+                Analysis::Candidate {
                     cost: total,
                     desired,
                     depends,
                 } => {
-                    *self = SyntaxAnalysis::Candidate {
+                    *self = Analysis::Candidate {
                         cost: *total + cost,
                         desired: desired.to_owned(),
                         depends: depends.to_owned(),
@@ -516,7 +366,7 @@ impl SyntaxAnalysis {
             },
             // if term is named variable we update required and desired
             Term::Variable { name: Some(_), .. } => match self {
-                SyntaxAnalysis::Incomplete {
+                Analysis::Incomplete {
                     cost: total,
                     required,
                     desired,
@@ -528,14 +378,14 @@ impl SyntaxAnalysis {
                     // if none of the requirements are left we transition it to
                     // candidate state.
                     if required.count() == 0 {
-                        *self = SyntaxAnalysis::Candidate {
+                        *self = Analysis::Candidate {
                             cost: *total,
                             desired: desired.to_owned(),
                             depends: depends.to_owned(),
                         };
                     }
                 }
-                SyntaxAnalysis::Candidate { desired, .. } => {
+                Analysis::Candidate { desired, .. } => {
                     desired.insert(term, cost);
                 }
             },
@@ -563,7 +413,7 @@ impl SyntaxAnalysis {
             Term::Constant(_) => {}
             Term::Variable { name: Some(_), .. } => {
                 match self {
-                    SyntaxAnalysis::Incomplete {
+                    Analysis::Incomplete {
                         depends,
                         required,
                         desired,
@@ -577,14 +427,14 @@ impl SyntaxAnalysis {
 
                         // If no required left, transition to Candidate
                         if required.count() == 0 {
-                            *self = SyntaxAnalysis::Candidate {
+                            *self = Analysis::Candidate {
                                 cost: *cost,
                                 desired: desired.to_owned(),
                                 depends: depends.to_owned(),
                             };
                         }
                     }
-                    SyntaxAnalysis::Candidate {
+                    Analysis::Candidate {
                         depends, desired, ..
                     } => {
                         // Remove from desired
@@ -609,15 +459,15 @@ impl SyntaxAnalysis {
 /// Syntax forms for our datalog notation.
 pub trait Planner: Sized {
     /// Performs analysis of this syntax form in the provided environment.
-    fn init(&self, plan: &mut SyntaxAnalysis, env: &VariableScope);
-    fn update(&self, plan: &mut SyntaxAnalysis, env: &VariableScope);
+    fn init(&self, plan: &mut Analysis, env: &VariableScope);
+    fn update(&self, plan: &mut Analysis, env: &VariableScope);
 
-    fn plan(&self, env: &VariableScope) -> SyntaxAnalysis {
-        let mut plan = SyntaxAnalysis::new(0);
+    fn plan(&self, env: &VariableScope) -> Analysis {
+        let mut plan = Analysis::new(0);
         self.init(&mut plan, env);
 
         // If plan has no required variables it is a candidate.
-        if let SyntaxAnalysis::Incomplete {
+        if let Analysis::Incomplete {
             cost,
             required,
             desired,
@@ -625,7 +475,7 @@ pub trait Planner: Sized {
         } = &plan
         {
             if required.count() == 0 {
-                plan = SyntaxAnalysis::Candidate {
+                plan = Analysis::Candidate {
                     cost: *cost,
                     desired: desired.clone(),
                     depends: depends.clone(),
@@ -644,10 +494,10 @@ mod tests {
 
     #[test]
     fn test_syntax_analysis_new() {
-        let analysis = SyntaxAnalysis::new(100);
+        let analysis = Analysis::new(100);
 
         match analysis {
-            SyntaxAnalysis::Candidate {
+            Analysis::Candidate {
                 cost,
                 desired,
                 depends,
@@ -662,7 +512,7 @@ mod tests {
 
     #[test]
     fn test_plan_context_from_candidate() {
-        let mut analysis = SyntaxAnalysis::new(100);
+        let mut analysis = Analysis::new(100);
         let term = Term::<Value>::var("y");
         analysis.desire(&term, 10);
 
@@ -675,7 +525,7 @@ mod tests {
 
     #[test]
     fn test_plan_context_from_incomplete_fails() {
-        let mut analysis = SyntaxAnalysis::new(100);
+        let mut analysis = Analysis::new(100);
         let term = Term::<Value>::var("z");
 
         analysis.require(&term);
@@ -686,7 +536,7 @@ mod tests {
 
     #[test]
     fn test_depend_marks_variable_as_bound() {
-        let mut analysis = SyntaxAnalysis::new(100);
+        let mut analysis = Analysis::new(100);
         let term = Term::<Value>::var("bound_var");
 
         analysis.depend(&term);
@@ -702,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_depend_removes_from_desired() {
-        let mut analysis = SyntaxAnalysis::new(50);
+        let mut analysis = Analysis::new(50);
         let term = Term::<Value>::var("var");
 
         // First, desire it
@@ -722,14 +572,14 @@ mod tests {
 
     #[test]
     fn test_depend_removes_from_required_and_transitions() {
-        let mut analysis = SyntaxAnalysis::new(90);
+        let mut analysis = Analysis::new(90);
         let term = Term::<Value>::var("will_be_bound");
 
         // First, require it
         analysis.require(&term);
 
         match &analysis {
-            SyntaxAnalysis::Incomplete { required, .. } => {
+            Analysis::Incomplete { required, .. } => {
                 assert_eq!(required.count(), 1);
             }
             _ => panic!("Should be Incomplete after require"),
@@ -740,7 +590,7 @@ mod tests {
 
         // Should transition to Candidate (no required left)
         match analysis {
-            SyntaxAnalysis::Candidate {
+            Analysis::Candidate {
                 depends, desired, ..
             } => {
                 assert_eq!(depends.size(), 1);
@@ -753,7 +603,7 @@ mod tests {
 
     #[test]
     fn test_mutual_exclusivity_of_categories() {
-        let mut analysis = SyntaxAnalysis::new(100);
+        let mut analysis = Analysis::new(100);
         let term1 = Term::<Value>::var("a");
         let term2 = Term::<Value>::var("b");
         let term3 = Term::<Value>::var("c");
@@ -766,7 +616,7 @@ mod tests {
         analysis.depend(&term3);
 
         match analysis {
-            SyntaxAnalysis::Incomplete {
+            Analysis::Incomplete {
                 depends,
                 desired,
                 required,

@@ -1,6 +1,6 @@
 use super::fact::{BASE_COST, ENTITY_COST, VALUE_COST};
 use crate::analyzer::Planner;
-use crate::analyzer::{Analysis, AnalyzerError};
+use crate::analyzer::{AnalyzerError, LegacyAnalysis};
 use crate::error::PlanError;
 use crate::plan::ConceptPlan;
 use crate::predicate::Concept;
@@ -47,8 +47,8 @@ impl ConceptApplication {
         dependencies
     }
 
-    pub fn analyze(&self) -> Analysis {
-        let mut analysis = Analysis::new(BASE_COST);
+    pub fn analyze(&self) -> LegacyAnalysis {
+        let mut analysis = LegacyAnalysis::new(BASE_COST);
 
         analysis.desire(self.terms.get("this"), ENTITY_COST);
 
@@ -85,7 +85,7 @@ impl ConceptApplication {
 
         Ok(ConceptApplicationAnalysis {
             application: self,
-            analysis: Analysis {
+            analysis: LegacyAnalysis {
                 cost: BASE_COST,
                 dependencies,
             },
@@ -225,7 +225,7 @@ impl ConceptApplication {
 }
 
 impl Planner for ConceptApplication {
-    fn init(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
+    fn init(&self, plan: &mut crate::analyzer::Analysis, env: &VariableScope) {
         let blank = Term::blank();
         for operand in self.concept.operands() {
             let term = self.terms.get(operand).unwrap_or(&blank);
@@ -237,7 +237,7 @@ impl Planner for ConceptApplication {
         }
     }
 
-    fn update(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
+    fn update(&self, plan: &mut crate::analyzer::Analysis, env: &VariableScope) {
         let blank = Term::blank();
         for operand in self.concept.operands() {
             let term = self.terms.get(operand).unwrap_or(&blank);
@@ -251,7 +251,7 @@ impl Planner for ConceptApplication {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConceptApplicationAnalysis {
     pub application: ConceptApplication,
-    pub analysis: Analysis,
+    pub analysis: LegacyAnalysis,
 }
 
 impl ConceptApplicationAnalysis {

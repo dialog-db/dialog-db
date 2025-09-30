@@ -1,4 +1,4 @@
-pub use crate::analyzer::{Analysis, AnalyzerError};
+pub use crate::analyzer::{AnalyzerError, LegacyAnalysis};
 pub use crate::application::{FactApplication, RuleApplication};
 use crate::error::{CompileError, SchemaError};
 pub use crate::planner::Join;
@@ -146,7 +146,7 @@ impl DeductiveRule {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeductiveRuleAnalysis {
-    analysis: Analysis,
+    analysis: LegacyAnalysis,
 }
 
 impl Display for DeductiveRule {

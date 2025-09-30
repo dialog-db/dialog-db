@@ -1,4 +1,4 @@
-use dialog_query::analyzer::Analysis;
+use dialog_query::analyzer::LegacyAnalysis;
 use dialog_query::application::fact::BASE_COST;
 use dialog_query::application::{ConceptApplication, PlanCandidate};
 use dialog_query::artifact::ValueDataType;
@@ -145,7 +145,7 @@ fn test_analysis_structure() {
     let mut deps = Dependencies::new();
     deps.desire("test".into(), 50);
 
-    let analysis = Analysis {
+    let analysis = LegacyAnalysis {
         cost: 100,
         dependencies: deps,
     };

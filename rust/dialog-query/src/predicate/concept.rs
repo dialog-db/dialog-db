@@ -1,4 +1,4 @@
-pub use crate::analyzer::{Analysis, AnalyzerError};
+pub use crate::analyzer::{AnalyzerError, LegacyAnalysis};
 use crate::application::ConceptApplication;
 use crate::artifact::Artifact;
 use crate::attribute::Relation;

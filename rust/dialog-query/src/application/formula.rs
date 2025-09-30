@@ -1,5 +1,5 @@
 pub use super::Application;
-pub use crate::analyzer::Analysis;
+pub use crate::analyzer::LegacyAnalysis;
 use crate::analyzer::Planner;
 pub use crate::cursor::Cursor;
 pub use crate::error::{AnalyzerError, FormulaEvaluationError, PlanError};
@@ -40,8 +40,8 @@ impl FormulaApplication {
         (self.compute)(&mut cursor)
     }
 
-    pub fn analyze(&self) -> Analysis {
-        let mut analysis = Analysis::new(self.cost);
+    pub fn analyze(&self) -> LegacyAnalysis {
+        let mut analysis = LegacyAnalysis::new(self.cost);
         for (name, cell) in self.cells.iter() {
             match cell.requirement() {
                 Requirement::Derived(cost) => {
@@ -125,7 +125,7 @@ impl FormulaApplication {
 
     pub fn compile(self) -> Result<FormulaApplicationAnalysis, AnalyzerError> {
         Ok(FormulaApplicationAnalysis {
-            analysis: Analysis {
+            analysis: LegacyAnalysis {
                 cost: self.cost,
                 dependencies: self.dependencies(),
             },
@@ -137,7 +137,7 @@ impl FormulaApplication {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FormulaApplicationAnalysis {
     pub application: FormulaApplication,
-    pub analysis: Analysis,
+    pub analysis: LegacyAnalysis,
 }
 
 impl FormulaApplicationAnalysis {
@@ -166,7 +166,7 @@ impl From<FormulaApplication> for Application {
 }
 
 impl Planner for FormulaApplication {
-    fn init(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
+    fn init(&self, plan: &mut crate::analyzer::Analysis, env: &VariableScope) {
         let blank = Term::blank();
         for (name, cell) in self.cells.iter() {
             let term = self.parameters.get(name).unwrap_or(&blank);
@@ -184,7 +184,7 @@ impl Planner for FormulaApplication {
             }
         }
     }
-    fn update(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
+    fn update(&self, plan: &mut crate::analyzer::Analysis, env: &VariableScope) {
         for (name, _) in self.cells.iter() {
             if let Some(parameter) = self.parameters.get(name) {
                 if env.contains(parameter) {

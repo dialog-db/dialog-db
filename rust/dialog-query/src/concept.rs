@@ -1,4 +1,4 @@
-use crate::analyzer::Analysis;
+use crate::analyzer::LegacyAnalysis;
 use crate::application::ConceptApplication;
 use crate::attribute::Attribute;
 use crate::error::{AnalyzerError, PlanError, QueryError};
@@ -76,7 +76,7 @@ pub trait Match {
 
     fn this(&self) -> Term<Entity>;
 
-    fn analyze(&self) -> Result<Analysis, AnalyzerError> {
+    fn analyze(&self) -> Result<LegacyAnalysis, AnalyzerError> {
         let mut dependencies = Dependencies::new();
         dependencies.desire("this".into(), ENTITY_COST);
 
@@ -84,7 +84,7 @@ pub trait Match {
             dependencies.desire(name.to_string(), VALUE_COST);
         }
 
-        Ok(Analysis {
+        Ok(LegacyAnalysis {
             cost: BASE_COST,
             dependencies,
         })

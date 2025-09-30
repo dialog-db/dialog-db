@@ -5,7 +5,7 @@ pub mod join;
 pub mod rule;
 
 use crate::analyzer::Planner;
-pub use crate::analyzer::{Analysis, AnalyzerError, Stats, Syntax};
+pub use crate::analyzer::{AnalyzerError, LegacyAnalysis};
 pub use crate::error::PlanError;
 pub use crate::plan::ApplicationPlan;
 pub use crate::premise::{Negation, Premise};
@@ -46,7 +46,7 @@ impl Application {
         }
     }
     /// Analyzes this application to determine its dependencies and base cost.
-    pub fn analyze(&self) -> Analysis {
+    pub fn analyze(&self) -> LegacyAnalysis {
         match self {
             Application::Fact(selector) => selector.analyze(),
             Application::Concept(concept) => concept.analyze(),
@@ -134,14 +134,14 @@ impl Display for Application {
 // }
 
 impl Planner for Application {
-    fn init(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
+    fn init(&self, plan: &mut crate::analyzer::Analysis, env: &VariableScope) {
         match self {
             Application::Fact(application) => Planner::init(application, plan, env),
             Application::Concept(application) => Planner::init(application, plan, env),
             Application::Formula(application) => Planner::init(application, plan, env),
         }
     }
-    fn update(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
+    fn update(&self, plan: &mut crate::analyzer::Analysis, env: &VariableScope) {
         match self {
             Application::Fact(application) => Planner::update(application, plan, env),
             Application::Concept(application) => Planner::update(application, plan, env),
