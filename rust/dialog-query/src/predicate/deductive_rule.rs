@@ -1,4 +1,4 @@
-pub use crate::analyzer::{AnalyzerError, LegacyAnalysis};
+pub use crate::analyzer::{AnalyzerError, LegacyAnalysis, PremisePlan, Viable};
 pub use crate::application::{FactApplication, RuleApplication};
 use crate::error::{CompileError, SchemaError};
 pub use crate::planner::Join;
@@ -15,10 +15,21 @@ pub struct DeductiveRule {
     /// typically what datalog calls rule head.
     pub conclusion: Concept,
     /// Premises that must hold for rule to reach it's conclusion. Typically
-    /// datalog calls these rule body.
-    pub premises: Vec<Premise>,
+    /// datalog calls these rule body. These are guaranteed to be ready plans
+    /// after compilation.
+    pub premises: Vec<PremisePlan<Viable>>,
 }
 impl DeductiveRule {
+    /// Create a new uncompiled rule from a conclusion and premises
+    pub fn new(conclusion: Concept, premises: Vec<Premise>) -> Result<Self, CompileError> {
+        // Convert premises to an intermediate form, then compile
+        let uncompiled = UncompiledDeductiveRule {
+            conclusion,
+            premises,
+        };
+        uncompiled.compile()
+    }
+
     pub fn operator(&self) -> &str {
         &self.conclusion.operator()
     }
@@ -30,28 +41,50 @@ impl DeductiveRule {
         self.conclusion.operands()
     }
 
-    pub fn compile(mut self) -> Result<Self, CompileError> {
+    /// Creates a rule application by binding the provided terms to this rule's parameters.
+    /// Validates that all required parameters are provided and returns an error if the
+    /// application would be invalid.
+    pub fn apply(&self, parameters: Parameters) -> Result<Application, SchemaError> {
+        self.conclusion.apply(parameters)
+    }
+}
+
+/// Internal helper for rules before compilation
+struct UncompiledDeductiveRule {
+    conclusion: Concept,
+    premises: Vec<Premise>,
+}
+
+impl UncompiledDeductiveRule {
+    pub fn compile(self) -> Result<DeductiveRule, CompileError> {
         // We attempt to plan the order of premises in a scope where none of the
         // rule parameters are bound in order to identify most optimal execution
         // order in such scenario or to discover that some premise in the rule
         // is not satisfiable e.g. if formula uses rule parameter in the required
         // cell which is not derived from any other premise.
-        let (conjuncts, derived) = Join::new(&self.premises).plan(&VariableScope::new())?;
-        self.premises = conjuncts;
+        let (premises, derived) = Join::new(&self.premises).plan(&VariableScope::new())?;
 
         // We also verify that every rule parameter was derived by one of the
         // rule premises, otherwise we produce an error since rule evaluation
         // would not be able to bind such parameter.
-        for name in self.operands() {
+        for name in self.conclusion.operands() {
             if !derived.contains(&Term::<Value>::var(name)) {
+                // Create a temporary rule for the error message
+                let temp_rule = DeductiveRule {
+                    conclusion: self.conclusion.clone(),
+                    premises: premises.clone(),
+                };
                 Err(CompileError::UnboundVariable {
-                    rule: self.clone(),
+                    rule: temp_rule,
                     variable: name.to_string(),
                 })?;
             }
         }
 
-        Ok(self)
+        Ok(DeductiveRule {
+            conclusion: self.conclusion,
+            premises,
+        })
     }
 
     // /// Analyzes this rule identifying its dependencies and estimated execution
@@ -135,13 +168,6 @@ impl DeductiveRule {
     //         dependencies,
     //     })
     // }
-
-    /// Creates a rule application by binding the provided terms to this rule's parameters.
-    /// Validates that all required parameters are provided and returns an error if the
-    /// application would be invalid.
-    pub fn apply(&self, parameters: Parameters) -> Result<Application, SchemaError> {
-        self.conclusion.apply(parameters)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,8 +186,10 @@ impl Display for DeductiveRule {
     }
 }
 
-impl From<&Concept> for DeductiveRule {
-    fn from(concept: &Concept) -> Self {
+impl TryFrom<&Concept> for DeductiveRule {
+    type Error = CompileError;
+
+    fn try_from(concept: &Concept) -> Result<Self, Self::Error> {
         use crate::artifact::Entity;
 
         let mut premises = Vec::new();
@@ -180,9 +208,6 @@ impl From<&Concept> for DeductiveRule {
             );
         }
 
-        DeductiveRule {
-            conclusion: concept.clone(),
-            premises,
-        }
+        DeductiveRule::new(concept.clone(), premises)
     }
 }

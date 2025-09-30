@@ -653,4 +653,23 @@ mod tests {
         assert_eq!(string_term.name(), Some("name"));
         assert_eq!(string_term.data_type(), Some(ValueDataType::String));
     }
+
+    #[test]
+    fn test_inference() {
+        let thing = Term::var("hello");
+
+        fn do_thing(term: &Term<String>) {
+            println!("")
+        }
+
+        do_thing(&thing);
+
+        let data_type = thing.data_type();
+
+        assert_eq!(data_type, Some(ValueDataType::String));
+
+        let unknown = Term::<Value>::var("unknown");
+
+        assert_eq!(unknown.data_type(), None);
+    }
 }

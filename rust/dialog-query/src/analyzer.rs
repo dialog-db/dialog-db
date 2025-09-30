@@ -257,6 +257,193 @@ impl From<PlanContext> for Analysis {
     }
 }
 
+/// Status trait marks valid planning states for premises
+pub trait Status: std::fmt::Debug + Clone + PartialEq {}
+
+/// Blocked state - premise has unmet requirements
+#[derive(Debug, Clone, PartialEq)]
+pub struct Incomplete {
+    pub requires: Required,
+}
+impl Status for Incomplete {}
+
+/// Ready state - premise is ready for execution
+#[derive(Debug, Clone, PartialEq)]
+pub struct Viable;
+impl Status for Viable {}
+
+/// A premise with planning state attached
+/// Uses phantom types to enforce that only ready plans can be executed
+#[derive(Debug, Clone, PartialEq)]
+pub struct PremisePlan<State: Status> {
+    premise: crate::premise::Premise,
+    cost: usize,
+    desires: Desired,
+    depends: VariableScope,
+    state: State,
+}
+
+impl PremisePlan<Incomplete> {
+    /// Create a new blocked plan from a premise
+    pub fn new(premise: crate::premise::Premise) -> Self {
+        PremisePlan {
+            premise,
+            cost: 0,
+            desires: Desired::new(),
+            depends: VariableScope::new(),
+            state: Incomplete {
+                requires: Required::new(),
+            },
+        }
+    }
+
+    /// Attempt to transition to Ready state if all requirements are satisfied
+    pub fn try_ready(self) -> Result<PremisePlan<Viable>, Self> {
+        if self.state.requires.count() == 0 {
+            Ok(PremisePlan {
+                premise: self.premise,
+                cost: self.cost,
+                desires: self.desires,
+                depends: self.depends,
+                state: Viable,
+            })
+        } else {
+            Err(self)
+        }
+    }
+
+    /// Access to the required dependencies
+    pub fn required(&self) -> &Required {
+        &self.state.requires
+    }
+}
+
+impl PremisePlan<Viable> {
+    /// Get the variables this plan provides
+    pub fn provides(&self) -> VariableScope {
+        self.desires.clone().into()
+    }
+
+    /// Get the variables this plan depends on
+    pub fn depends(&self) -> &VariableScope {
+        &self.depends
+    }
+
+    /// Extract the premise from this ready plan
+    pub fn into_premise(self) -> crate::premise::Premise {
+        self.premise
+    }
+
+    /// Get a reference to the premise
+    pub fn premise(&self) -> &crate::premise::Premise {
+        &self.premise
+    }
+}
+
+// Common methods available in both states
+impl<State: Status> PremisePlan<State> {
+    pub fn desired(&self) -> &Desired {
+        &self.desires
+    }
+
+    pub fn depends_on(&self) -> &VariableScope {
+        &self.depends
+    }
+
+    pub fn cost(&self) -> usize {
+        self.cost
+    }
+}
+
+// Mutable methods for planning (work on any state)
+impl PremisePlan<Incomplete> {
+    /// Mark a term as required
+    pub fn require<T: Scalar>(&mut self, term: &Term<T>) {
+        self.desires.remove(term);
+        self.state.requires.add(term);
+    }
+
+    /// Mark a term as desired with a cost
+    pub fn desire<T: Scalar>(&mut self, term: &Term<T>, cost: usize) {
+        match term {
+            Term::Variable { name: None, .. } => {
+                self.cost += cost;
+            }
+            Term::Variable { name: Some(_), .. } => {
+                self.state.requires.remove(term);
+                self.desires.insert(term, cost);
+            }
+            _ => {}
+        }
+    }
+
+    /// Mark a variable as bound (already available in the environment)
+    pub fn depend<T: Scalar>(&mut self, term: &Term<T>) {
+        match term {
+            Term::Constant(_) => {}
+            Term::Variable { name: Some(_), .. } => {
+                self.state.requires.remove(term);
+                self.desires.remove(term);
+                self.depends.add(term);
+            }
+            Term::Variable { name: None, .. } => {}
+        }
+    }
+
+    /// Mark all desired variables as required
+    pub fn require_all(&mut self) {
+        let terms: Vec<_> = self
+            .desires
+            .entries()
+            .filter(|(_, cost)| *cost > 0)
+            .map(|(term, _)| term)
+            .collect();
+        for term in terms {
+            self.require(&term);
+        }
+    }
+}
+
+/// Convert Analysis + Premise into PremisePlan
+impl Analysis {
+    pub fn into_plan(self, premise: crate::premise::Premise) -> PremisePlan<Incomplete> {
+        match self {
+            Analysis::Incomplete {
+                cost,
+                required,
+                desired,
+                depends,
+            } => PremisePlan {
+                premise,
+                cost,
+                desires: desired,
+                depends,
+                state: Incomplete { requires: required },
+            },
+            Analysis::Candidate {
+                cost,
+                desired,
+                depends,
+            } => PremisePlan {
+                premise,
+                cost,
+                desires: desired,
+                depends,
+                state: Incomplete {
+                    requires: Required::new(),
+                },
+            },
+        }
+    }
+
+    pub fn into_ready_plan(
+        self,
+        premise: crate::premise::Premise,
+    ) -> Result<PremisePlan<Viable>, PremisePlan<Incomplete>> {
+        self.into_plan(premise).try_ready()
+    }
+}
+
 #[derive(Clone)]
 pub enum Analysis {
     /// Plan that can not be evaluated because it has unsatisfied requirements.
@@ -458,31 +645,16 @@ impl Analysis {
 
 /// Syntax forms for our datalog notation.
 pub trait Planner: Sized {
-    /// Performs analysis of this syntax form in the provided environment.
+    /// Performs initial analysis of this syntax form in the provided environment.
     fn init(&self, plan: &mut Analysis, env: &VariableScope);
+
+    /// Updates analysis when new bindings become available in the environment.
     fn update(&self, plan: &mut Analysis, env: &VariableScope);
 
+    /// Create a plan for this syntax form
     fn plan(&self, env: &VariableScope) -> Analysis {
         let mut plan = Analysis::new(0);
         self.init(&mut plan, env);
-
-        // If plan has no required variables it is a candidate.
-        if let Analysis::Incomplete {
-            cost,
-            required,
-            desired,
-            depends,
-        } = &plan
-        {
-            if required.count() == 0 {
-                plan = Analysis::Candidate {
-                    cost: *cost,
-                    desired: desired.clone(),
-                    depends: depends.clone(),
-                };
-            }
-        }
-
         plan
     }
 }

@@ -1,4 +1,4 @@
-use crate::analyzer::{Analysis, Planner};
+use crate::analyzer::{Analysis, Planner, PremisePlan, Viable};
 use crate::error::CompileError;
 pub use crate::error::{AnalyzerError, PlanError};
 pub use crate::plan::{EvaluationPlan, Plan};
@@ -56,24 +56,33 @@ impl<'a> Join<'a> {
     }
 
     /// Creates an optimized execution plan for all premises.
-    /// Returns the total cost and ordered list of sub-plans to execute.
+    /// Returns ordered list of ready plans and the final variable scope.
     pub fn plan(
         &mut self,
         scope: &VariableScope,
-    ) -> Result<(Vec<Premise>, VariableScope), CompileError> {
+    ) -> Result<(Vec<PremisePlan<Viable>>, VariableScope), CompileError> {
         let mut bound = scope.clone();
         let mut delta = scope.clone();
-        let mut conjuncts = vec![];
+        let mut plans = vec![];
 
         while !self.done() {
             let (premise, provides) = self.top(&delta)?;
 
-            delta = bound.extend(provides);
+            delta = bound.extend(&provides);
 
-            conjuncts.push(premise.to_owned());
+            // Create a ready plan from the premise
+            // We know it's ready because top() only returns Analysis::Candidate
+            let analysis = Planner::plan(premise, &bound);
+            let ready_plan = analysis
+                .into_ready_plan(premise.clone())
+                .expect("Premise from top() should be ready");
+
+            plans.push(ready_plan);
+
+            bound = delta.clone();
         }
 
-        Ok((conjuncts, bound))
+        Ok((plans, bound))
     }
     /// Selects and returns the best premise to execute next based on cost.
     /// Updates the planner state by removing the selected premise from candidates.

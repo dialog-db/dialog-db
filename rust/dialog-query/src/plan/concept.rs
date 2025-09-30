@@ -35,7 +35,7 @@ impl EvaluationPlan for ConceptPlan {
         &self,
         context: EvaluationContext<S, M>,
     ) -> impl Selection {
-        let implicit = DeductiveRule::from(&self.concept);
+        let implicit = DeductiveRule::try_from(&self.concept).expect("Failed to compile implicit rule");
         let mut scope = VariableScope::new();
         let application = implicit.apply(self.terms.clone()).expect("Failed to apply rule");
         for (name, term) in self.terms.iter() {
