@@ -358,16 +358,68 @@ impl<'a> From<EstimateError<'a>> for CompileError {
 //     status: PhantomData<Status>,
 // }
 
+/// Context for a successfully planned premise
+/// Unlike SyntaxAnalysis, this can never be in Incomplete state
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanContext {
+    pub cost: usize,
+    pub desired: Desired,
+    pub depends: VariableScope,
+}
+
+impl PlanContext {
+    pub fn provides(&self) -> VariableScope {
+        self.desired.clone().into()
+    }
+
+    pub fn depends(&self) -> &VariableScope {
+        &self.depends
+    }
+}
+
+impl TryFrom<SyntaxAnalysis> for PlanContext {
+    type Error = &'static str;
+
+    fn try_from(analysis: SyntaxAnalysis) -> Result<Self, Self::Error> {
+        match analysis {
+            SyntaxAnalysis::Candidate {
+                cost,
+                desired,
+                depends,
+            } => Ok(PlanContext {
+                cost,
+                desired,
+                depends,
+            }),
+            SyntaxAnalysis::Incomplete { .. } => {
+                Err("Cannot convert Incomplete SyntaxAnalysis to PlanContext")
+            }
+        }
+    }
+}
+
+impl From<PlanContext> for SyntaxAnalysis {
+    fn from(context: PlanContext) -> Self {
+        SyntaxAnalysis::Candidate {
+            cost: context.cost,
+            desired: context.desired,
+            depends: context.depends,
+        }
+    }
+}
+
 pub enum SyntaxAnalysis {
     /// Plan that can not be evaluated because it has unsatisfied requirements.
     Incomplete {
         cost: usize,
         required: Required,
         desired: Desired,
+        depends: VariableScope,
     },
     Candidate {
         cost: usize,
         desired: Desired,
+        depends: VariableScope,
     },
 }
 impl SyntaxAnalysis {
@@ -375,6 +427,7 @@ impl SyntaxAnalysis {
         SyntaxAnalysis::Candidate {
             cost,
             desired: Desired::new(),
+            depends: VariableScope::new(),
         }
     }
 
@@ -384,10 +437,25 @@ impl SyntaxAnalysis {
             SyntaxAnalysis::Candidate { desired, .. } => desired,
         }
     }
+
     pub fn cost(&self) -> &usize {
         match self {
             SyntaxAnalysis::Incomplete { cost, .. } => cost,
             SyntaxAnalysis::Candidate { cost, .. } => cost,
+        }
+    }
+
+    pub fn depends(&self) -> &VariableScope {
+        match self {
+            SyntaxAnalysis::Incomplete { depends, .. } => depends,
+            SyntaxAnalysis::Candidate { depends, .. } => depends,
+        }
+    }
+
+    pub fn provides(&self) -> &VariableScope {
+        match self {
+            SyntaxAnalysis::Incomplete { desired, .. } => desired,
+            SyntaxAnalysis::Candidate { desired, .. } => desired,
         }
     }
 
@@ -399,7 +467,11 @@ impl SyntaxAnalysis {
                 desired.remove(term);
                 required.add(term);
             }
-            SyntaxAnalysis::Candidate { cost, desired } => {
+            SyntaxAnalysis::Candidate {
+                cost,
+                desired,
+                depends,
+            } => {
                 desired.remove(term);
                 let mut required = Required::new();
                 required.add(term);
@@ -407,6 +479,7 @@ impl SyntaxAnalysis {
                     cost: *cost,
                     desired: desired.to_owned(),
                     required,
+                    depends: depends.to_owned(),
                 };
             }
         }
@@ -420,20 +493,24 @@ impl SyntaxAnalysis {
                     cost: total,
                     required,
                     desired,
+                    depends,
                 } => {
                     *self = SyntaxAnalysis::Incomplete {
                         cost: total + *cost,
                         desired: desired.to_owned(),
                         required: required.to_owned(),
+                        depends: depends.to_owned(),
                     };
                 }
                 SyntaxAnalysis::Candidate {
                     cost: total,
                     desired,
+                    depends,
                 } => {
                     *self = SyntaxAnalysis::Candidate {
                         cost: total + *cost,
                         desired: desired.to_owned(),
+                        depends: depends.to_owned(),
                     };
                 }
             },
@@ -443,6 +520,7 @@ impl SyntaxAnalysis {
                     cost: total,
                     required,
                     desired,
+                    depends,
                 } => {
                     required.remove(term);
                     desired.insert(term, cost);
@@ -453,6 +531,7 @@ impl SyntaxAnalysis {
                         *self = SyntaxAnalysis::Candidate {
                             cost: *total,
                             desired: desired.to_owned(),
+                            depends: depends.to_owned(),
                         };
                     }
                 }
@@ -495,13 +574,21 @@ pub trait Planner: Sized {
             cost,
             required,
             desired,
+            depends,
         } = plan
         {
             if required.count() == 0 {
-                *plan = SyntaxAnalysis::Candidate { cost, desired };
+                *plan = SyntaxAnalysis::Candidate {
+                    cost,
+                    desired,
+                    depends,
+                };
             }
         }
 
         plan
     }
 }
+
+#[cfg(test)]
+mod tests;

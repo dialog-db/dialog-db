@@ -14,6 +14,9 @@ pub mod formula;
 pub mod join;
 pub mod negation;
 pub mod rule;
+
+#[cfg(test)]
+mod tests;
 pub use futures_util::{stream, TryStreamExt};
 
 pub use super::parameters::Parameters;
@@ -90,6 +93,7 @@ pub fn fresh<S: Source>(store: S) -> EvaluationContext<S, impl Selection> {
     EvaluationContext {
         source: store,
         selection,
+        scope: VariableScope::new(),
     }
 }
 
@@ -108,6 +112,8 @@ where
     pub selection: M,
     /// Artifact store for querying facts (equivalent to source/Querier in TypeScript)
     pub source: S,
+    /// Variables that are bound at this evaluation point
+    pub scope: VariableScope,
 }
 
 impl<S, M> EvaluationContext<S, M>
@@ -115,11 +121,12 @@ where
     S: Source,
     M: Selection,
 {
-    /// Create a new evaluation context
-    pub fn single(store: S, selection: M) -> Self {
+    /// Create a new evaluation context with given scope
+    pub fn single(store: S, selection: M, scope: VariableScope) -> Self {
         Self {
             source: store,
             selection,
+            scope,
         }
     }
 
@@ -129,6 +136,19 @@ where
         EvaluationContext {
             source: store,
             selection,
+            scope: VariableScope::new(),
+        }
+    }
+
+    /// Create a new context with updated scope
+    pub fn with_scope(&self, scope: VariableScope) -> EvaluationContext<S, M>
+    where
+        M: Clone,
+    {
+        EvaluationContext {
+            source: self.source.clone(),
+            selection: self.selection.clone(),
+            scope,
         }
     }
 }

@@ -44,7 +44,8 @@ impl RuleApplicationPlan {
                 [plan, rest @ ..] => {
                     let selection = plan.evaluate(EvaluationContext {
                         source: store.clone(),
-                        selection: source
+                        selection: source,
+                        scope: VariableScope::new(),
                     });
 
 

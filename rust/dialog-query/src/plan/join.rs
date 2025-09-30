@@ -44,9 +44,14 @@ impl Join {
                     }
                 },
                 Join::Join(left, right) => {
-                    let store = context.source.clone();
+                    let source = context.source.clone();
+                    let scope = context.scope.clone();
                     let selection = left.evaluate(context);
-                    let output = right.evaluate(EvaluationContext { selection, source });
+                    let output = right.evaluate(EvaluationContext {
+                        selection,
+                        source,
+                        scope,
+                    });
                     for await each in output {
                         yield each?;
                     }
