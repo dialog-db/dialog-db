@@ -5,7 +5,7 @@ use crate::attribute::Relation;
 use crate::claim::concept::ConceptClaim;
 use crate::error::SchemaError;
 use crate::fact::Scalar;
-use crate::{Application, Attribute, Claim, Dependencies, Entity, Parameters, Value};
+use crate::{Application, Attribute, Claim, Dependencies, Entity, Parameters, Schema, Type, Value};
 use dialog_artifacts::DialogArtifactsError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -56,6 +56,23 @@ impl Attributes {
             attributes.0.insert(name, attribute);
         }
         attributes
+    }
+}
+
+impl From<&Attributes> for Schema<Attribute<Value>> {
+    fn from(attributes: &Attributes) -> Self {
+        let mut schema: Schema<Attribute<Value>> = Schema::new();
+        for (name, attribute) in attributes.iter() {
+            schema.insert(name.into(), attribute.clone());
+        }
+
+        if schema.get("this").is_none() {
+            schema.insert(
+                "this".into(),
+                Attribute::new("object", "this", "Entity", Type::Entity),
+            );
+        }
+        schema
     }
 }
 
@@ -150,6 +167,10 @@ impl Concept {
 
     pub fn operands(&self) -> impl Iterator<Item = &str> {
         std::iter::once("this").chain(self.attributes.keys().map(|key| key.as_ref()))
+    }
+
+    pub fn schema(&self) -> Schema<Attribute<Value>> {
+        (&self.attributes).into()
     }
 
     pub fn with(mut self, name: &str, attribute: Attribute<Value>) -> Self {

@@ -178,13 +178,14 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 
-use crate::{Term, Type};
+use crate::{Descriptor, Term, Type};
 use serde::{Deserialize, Serialize};
 
 use crate::application::FormulaApplication;
 use crate::cursor::Cursor;
 use crate::error::{FormulaEvaluationError, SchemaError, TypeError};
 use crate::fact::Scalar;
+use crate::Schema;
 use crate::{Dependencies, Match, Parameters, Requirement};
 
 /// Core trait for implementing formulas in the query system
@@ -233,6 +234,10 @@ pub trait Formula: Sized + Clone {
     fn cost() -> usize;
     fn cells() -> &'static Cells;
     fn operator() -> &'static str;
+
+    fn schema() -> Schema<Cell> {
+        Self::cells().into()
+    }
 
     fn operands(&self) -> impl Iterator<Item = &str> {
         Self::cells().keys()
@@ -438,6 +443,18 @@ impl Display for Cell {
     }
 }
 
+impl Descriptor for Cell {
+    fn content_type(&self) -> Option<Type> {
+        Some(self.content_type)
+    }
+    fn requirement(&self) -> &Requirement {
+        self.requirement()
+    }
+    fn description(&self) -> &str {
+        self.description()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Cells(HashMap<String, Cell>);
@@ -510,6 +527,16 @@ impl Default for Cells {
 impl<T: Iterator<Item = Cell>> From<T> for Cells {
     fn from(source: T) -> Self {
         Self::from(source)
+    }
+}
+
+impl From<&Cells> for Schema<Cell> {
+    fn from(cells: &Cells) -> Self {
+        let mut schema = Schema::<Cell>::new();
+        for (name, cell) in cells.iter() {
+            schema.insert(name.into(), cell.clone());
+        }
+        schema
     }
 }
 
