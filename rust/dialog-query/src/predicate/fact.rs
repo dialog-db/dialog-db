@@ -47,29 +47,38 @@ impl Fact {
             Err(SchemaError::UnconstrainedSelector)
         } else {
             // Convert Term<Value> to typed terms
-            let the_term = the.as_ref().map(|t| match t {
-                Term::Variable { name, .. } => Term::<Attribute>::Variable {
-                    name: name.clone(),
-                    _type: Default::default(),
-                },
-                Term::Constant(v) => match v {
-                    Value::Symbol(s) => Term::Constant(s.clone()),
-                    _ => Term::blank(),
-                },
-            }).unwrap_or_else(|_| Term::blank());
+            let the_term = the
+                .as_ref()
+                .map(|t| match t {
+                    Term::Variable { name, .. } => Term::<Attribute>::Variable {
+                        name: name.clone(),
+                        content_type: Default::default(),
+                    },
+                    Term::Constant(v) => match v {
+                        Value::Symbol(s) => Term::Constant(s.clone()),
+                        _ => Term::blank(),
+                    },
+                })
+                .unwrap_or_else(|_| Term::blank());
 
-            let of_term = of.as_ref().map(|t| match t {
-                Term::Variable { name, .. } => Term::<Entity>::Variable {
-                    name: name.clone(),
-                    _type: Default::default(),
-                },
-                Term::Constant(v) => match v {
-                    Value::Entity(e) => Term::Constant(e.clone()),
-                    _ => Term::blank(),
-                },
-            }).unwrap_or_else(|_| Term::blank());
+            let of_term = of
+                .as_ref()
+                .map(|t| match t {
+                    Term::Variable { name, .. } => Term::<Entity>::Variable {
+                        name: name.clone(),
+                        content_type: Default::default(),
+                    },
+                    Term::Constant(v) => match v {
+                        Value::Entity(e) => Term::Constant(e.clone()),
+                        _ => Term::blank(),
+                    },
+                })
+                .unwrap_or_else(|_| Term::blank());
 
-            let is_term = is.as_ref().map(|t| (*t).clone()).unwrap_or_else(|_| Term::blank());
+            let is_term = is
+                .as_ref()
+                .map(|t| (*t).clone())
+                .unwrap_or_else(|_| Term::blank());
 
             Ok(Selector {
                 the: the_term,

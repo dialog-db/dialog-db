@@ -3,9 +3,12 @@
 //! This module provides formulas for converting between different types,
 //! including string conversion and number parsing operations.
 
+use crate::{
+    cursor::Cursor, error::FormulaEvaluationError, predicate::formula::Cells, Compute,
+    Dependencies, Formula, Type, Value,
+};
+
 use std::sync::OnceLock;
-use dialog_artifacts::ValueDataType;
-use crate::{cursor::Cursor, error::FormulaEvaluationError, predicate::formula::Cells, Compute, Dependencies, Formula, Value};
 
 // ============================================================================
 // Type Conversion Operations: ToString, ParseNumber
@@ -80,11 +83,11 @@ impl Formula for ToString {
     fn cells() -> &'static Cells {
         TO_STRING_CELLS.get_or_init(|| {
             Cells::define(|cell| {
-                cell("value", ValueDataType::String)  // Note: accepts any type
+                cell("value", Type::String) // Note: accepts any type
                     .the("Value to convert")
                     .required();
 
-                cell("is", ValueDataType::String)
+                cell("is", Type::String)
                     .the("String representation")
                     .derived(1);
             })
@@ -162,11 +165,9 @@ impl Formula for ParseNumber {
     fn cells() -> &'static Cells {
         PARSE_NUMBER_CELLS.get_or_init(|| {
             Cells::define(|cell| {
-                cell("text", ValueDataType::String)
-                    .the("String to parse")
-                    .required();
+                cell("text", Type::String).the("String to parse").required();
 
-                cell("is", ValueDataType::UnsignedInt)
+                cell("is", Type::UnsignedInt)
                     .the("Parsed number")
                     .derived(2);
             })
@@ -208,7 +209,7 @@ mod tests {
 
         let input = Match::new().set(Term::var("num"), 42u32).unwrap();
 
-        let app = ToString::apply(terms);
+        let app = ToString::apply(terms)?;
         let results = app.derive(input).expect("ToString failed");
 
         assert_eq!(results.len(), 1);
@@ -227,7 +228,7 @@ mod tests {
 
         let input = Match::new().set(Term::var("bool"), true).unwrap();
 
-        let app = ToString::apply(terms);
+        let app = ToString::apply(terms)?;
         let results = app.derive(input).expect("ToString failed");
 
         assert_eq!(results.len(), 1);
@@ -248,7 +249,7 @@ mod tests {
             .set(Term::var("text"), "hello".to_string())
             .unwrap();
 
-        let app = ToString::apply(terms);
+        let app = ToString::apply(terms)?;
         let results = app.derive(input).expect("ToString failed");
 
         assert_eq!(results.len(), 1);
@@ -270,7 +271,7 @@ mod tests {
             .set(Term::var("entity"), entity.clone())
             .unwrap();
 
-        let app = ToString::apply(terms);
+        let app = ToString::apply(terms)?;
         let results = app.derive(input).expect("ToString failed");
 
         assert_eq!(results.len(), 1);
@@ -291,7 +292,7 @@ mod tests {
             .set(Term::var("str"), "123".to_string())
             .unwrap();
 
-        let app = ParseNumber::apply(terms);
+        let app = ParseNumber::apply(terms)?;
         let results = app.derive(input).expect("ParseNumber failed");
 
         assert_eq!(results.len(), 1);
@@ -309,7 +310,7 @@ mod tests {
             .set(Term::var("str"), "  456  ".to_string())
             .unwrap();
 
-        let app = ParseNumber::apply(terms);
+        let app = ParseNumber::apply(terms)?;
         let results = app.derive(input).expect("ParseNumber failed");
 
         assert_eq!(results.len(), 1);
@@ -327,7 +328,7 @@ mod tests {
             .set(Term::var("str"), "not a number".to_string())
             .unwrap();
 
-        let app = ParseNumber::apply(terms);
+        let app = ParseNumber::apply(terms)?;
         let results = app
             .derive(input)
             .expect("ParseNumber should handle invalid input");
@@ -344,7 +345,7 @@ mod tests {
 
         let input = Match::new().set(Term::var("str"), "".to_string()).unwrap();
 
-        let app = ParseNumber::apply(terms);
+        let app = ParseNumber::apply(terms)?;
         let results = app
             .derive(input)
             .expect("ParseNumber should handle empty string");
@@ -363,7 +364,7 @@ mod tests {
             .set(Term::var("str"), "-123".to_string())
             .unwrap();
 
-        let app = ParseNumber::apply(terms);
+        let app = ParseNumber::apply(terms)?;
         let results = app
             .derive(input)
             .expect("ParseNumber should handle negative input");

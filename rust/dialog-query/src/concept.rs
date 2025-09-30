@@ -417,7 +417,7 @@ pub trait Attributes {
 mod tests {
     use super::*;
     use crate::artifact::{Artifacts, Attribute as ArtifactAttribute};
-    use crate::artifact::{Value, ValueDataType};
+    use crate::artifact::{Type, Value};
     use crate::selection::SelectionExt;
     use crate::term::Term;
     use crate::{Fact, Query, Session};
@@ -546,21 +546,11 @@ mod tests {
                     [
                         (
                             "name",
-                            Attribute::new(
-                                "person",
-                                "name",
-                                "Person's name",
-                                ValueDataType::String,
-                            ),
+                            Attribute::new("person", "name", "Person's name", Type::String),
                         ),
                         (
                             "age",
-                            Attribute::new(
-                                "person",
-                                "age",
-                                "Person's age",
-                                ValueDataType::UnsignedInt,
-                            ),
+                            Attribute::new("person", "age", "Person's age", Type::UnsignedInt),
                         ),
                     ]
                 });

@@ -3,9 +3,11 @@
 //! This module provides formulas for common string operations including
 //! concatenation, length calculation, case conversion, and basic string processing.
 
+use crate::{
+    cursor::Cursor, error::FormulaEvaluationError, predicate::formula::Cells, Compute,
+    Dependencies, Formula, Type, Value,
+};
 use std::sync::OnceLock;
-use dialog_artifacts::ValueDataType;
-use crate::{cursor::Cursor, error::FormulaEvaluationError, predicate::formula::Cells, Compute, Dependencies, Formula, Value};
 
 // ============================================================================
 // String Operations: Concatenate, Length, Uppercase, Lowercase
@@ -57,15 +59,11 @@ impl Formula for Concatenate {
     fn cells() -> &'static Cells {
         CONCATENATE_CELLS.get_or_init(|| {
             Cells::define(|cell| {
-                cell("first", ValueDataType::String)
-                    .the("First string")
-                    .required();
+                cell("first", Type::String).the("First string").required();
 
-                cell("second", ValueDataType::String)
-                    .the("Second string")
-                    .required();
+                cell("second", Type::String).the("Second string").required();
 
-                cell("is", ValueDataType::String)
+                cell("is", Type::String)
                     .the("Concatenated string")
                     .derived(2);
             })
@@ -137,11 +135,9 @@ impl Formula for Length {
     fn cells() -> &'static Cells {
         LENGTH_CELLS.get_or_init(|| {
             Cells::define(|cell| {
-                cell("of", ValueDataType::String)
-                    .the("String to measure")
-                    .required();
+                cell("of", Type::String).the("String to measure").required();
 
-                cell("is", ValueDataType::UnsignedInt)
+                cell("is", Type::UnsignedInt)
                     .the("Length of string")
                     .derived(1);
             })
@@ -212,13 +208,9 @@ impl Formula for Uppercase {
     fn cells() -> &'static Cells {
         UPPERCASE_CELLS.get_or_init(|| {
             Cells::define(|cell| {
-                cell("of", ValueDataType::String)
-                    .the("String to convert")
-                    .required();
+                cell("of", Type::String).the("String to convert").required();
 
-                cell("is", ValueDataType::String)
-                    .the("Uppercase string")
-                    .derived(1);
+                cell("is", Type::String).the("Uppercase string").derived(1);
             })
         })
     }
@@ -287,13 +279,9 @@ impl Formula for Lowercase {
     fn cells() -> &'static Cells {
         LOWERCASE_CELLS.get_or_init(|| {
             Cells::define(|cell| {
-                cell("of", ValueDataType::String)
-                    .the("String to convert")
-                    .required();
+                cell("of", Type::String).the("String to convert").required();
 
-                cell("is", ValueDataType::String)
-                    .the("Lowercase string")
-                    .derived(1);
+                cell("is", Type::String).the("Lowercase string").derived(1);
             })
         })
     }

@@ -360,18 +360,18 @@ impl<'a> Builder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::ValueDataType;
+    use crate::artifact::Type;
 
     #[test]
     fn test_concept_serialization_to_specific_json() {
         let attributes = Attributes::from([
             (
                 "name",
-                Attribute::new("user", "name", "User's name", ValueDataType::String),
+                Attribute::new("user", "name", "User's name", Type::String),
             ),
             (
                 "age",
-                Attribute::new("user", "age", "User's age", ValueDataType::UnsignedInt),
+                Attribute::new("user", "age", "User's age", Type::UnsignedInt),
             ),
         ]);
 
@@ -447,7 +447,7 @@ mod tests {
         assert_eq!(email_attr.namespace, "person");
         assert_eq!(email_attr.name, "email");
         assert_eq!(email_attr.description, "Person's email address");
-        assert_eq!(email_attr.data_type, ValueDataType::String);
+        assert_eq!(email_attr.content_type, Type::String);
 
         let active_attr = concept
             .attributes
@@ -456,14 +456,14 @@ mod tests {
         assert_eq!(active_attr.namespace, "person");
         assert_eq!(active_attr.name, "active");
         assert_eq!(active_attr.description, "Whether person is active");
-        assert_eq!(active_attr.data_type, ValueDataType::Boolean);
+        assert_eq!(active_attr.content_type, Type::Boolean);
     }
 
     #[test]
     fn test_concept_round_trip_serialization() {
         let mut attributes = Attributes::from([(
             "score",
-            Attribute::new("game", "score", "Game score", ValueDataType::UnsignedInt),
+            Attribute::new("game", "score", "Game score", Type::UnsignedInt),
         )]);
 
         let original = Concept {
@@ -477,13 +477,13 @@ mod tests {
 
         // Should be identical
         assert_eq!(original.operator, deserialized.operator);
-        assert_eq!(original.attributes.count(), deserialized.attributes.len());
+        assert_eq!(original.attributes.count(), deserialized.attributes.count());
 
         let orig_score = original.attributes.get("score").unwrap();
         let deser_score = deserialized.attributes.get("score").unwrap();
         assert_eq!(orig_score.namespace, deser_score.namespace);
         assert_eq!(orig_score.name, deser_score.name);
         assert_eq!(orig_score.description, deser_score.description);
-        assert_eq!(orig_score.data_type, deser_score.data_type);
+        assert_eq!(orig_score.content_type, deser_score.content_type);
     }
 }

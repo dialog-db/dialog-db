@@ -1,14 +1,13 @@
-use std::collections::HashMap;
+use anyhow::Result;
 use dialog_query::{
+    artifact::{Artifacts, Type},
     predicate::{Concept, DeductiveRule},
     query::Source,
     session::{QuerySession, Session},
-    artifact::{Artifacts, ValueDataType},
     Attribute,
 };
 use dialog_storage::MemoryStorageBackend;
-use anyhow::Result;
-
+use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_session_source_rule_resolution() -> Result<()> {
@@ -24,11 +23,11 @@ async fn test_session_source_rule_resolution() -> Result<()> {
     let mut attributes = HashMap::new();
     attributes.insert(
         "name".into(),
-        Attribute::new("adult", "name", "Adult name", ValueDataType::String),
+        Attribute::new("adult", "name", "Adult name", Type::String),
     );
     attributes.insert(
-        "age".into(),  
-        Attribute::new("adult", "age", "Adult age", ValueDataType::UnsignedInt),
+        "age".into(),
+        Attribute::new("adult", "age", "Adult age", Type::UnsignedInt),
     );
 
     let adult_conclusion = Concept {
@@ -60,7 +59,7 @@ async fn test_session_source_rule_resolution() -> Result<()> {
 #[tokio::test]
 async fn test_source_trait_compatibility() -> Result<()> {
     // Test that both QuerySession and Session can be used polymorphically as a Source
-    
+
     async fn query_with_source<S: Source>(source: &S, operator: &str) -> Vec<DeductiveRule> {
         source.resolve_rules(operator)
     }
@@ -75,13 +74,13 @@ async fn test_source_trait_compatibility() -> Result<()> {
         conclusion: concept,
         premises: vec![],
     };
-    
+
     let query_session = query_session.install(rule.clone());
     let rules = query_with_source(&query_session, "test").await;
     assert_eq!(rules.len(), 1);
     assert_eq!(rules[0].conclusion.operator, "test");
 
-    // Test with Session  
+    // Test with Session
     let mut session = Session::open(artifacts);
     session = session.install(rule.clone());
     let rules = query_with_source(&session, "test").await;
@@ -94,25 +93,29 @@ async fn test_source_trait_compatibility() -> Result<()> {
 #[tokio::test]
 async fn test_multiple_rules_same_operator() -> Result<()> {
     // Test that multiple rules for the same operator are stored and resolved correctly
-    
+
     let backend = MemoryStorageBackend::default();
     let artifacts = Artifacts::anonymous(backend).await?;
-    
+
     // Test with QuerySession
     let query_session: QuerySession<_> = artifacts.into();
 
     // Create two different rules for the same concept
-    let concept1 = Concept::new("person".into())
-        .with("name", Attribute::new("person", "name", "Person name", ValueDataType::String));
-        
-    let concept2 = Concept::new("person".into())
-        .with("age", Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt));
+    let concept1 = Concept::new("person".into()).with(
+        "name",
+        Attribute::new("person", "name", "Person name", Type::String),
+    );
+
+    let concept2 = Concept::new("person".into()).with(
+        "age",
+        Attribute::new("person", "age", "Person age", Type::UnsignedInt),
+    );
 
     let rule1 = DeductiveRule {
         conclusion: concept1,
         premises: vec![],
     };
-    
+
     let rule2 = DeductiveRule {
         conclusion: concept2,
         premises: vec![],
@@ -124,7 +127,7 @@ async fn test_multiple_rules_same_operator() -> Result<()> {
     // Should resolve both rules for "person"
     let rules = query_session.resolve_rules("person");
     assert_eq!(rules.len(), 2);
-    
+
     // Both rules should have the same operator but different attributes
     for rule in &rules {
         assert_eq!(rule.conclusion.operator, "person");
@@ -136,7 +139,7 @@ async fn test_multiple_rules_same_operator() -> Result<()> {
 #[tokio::test]
 async fn test_explicit_conversion_pattern() -> Result<()> {
     // Test the explicit conversion pattern: artifacts.into() for QuerySession
-    
+
     let backend = MemoryStorageBackend::default();
     let artifacts = Artifacts::anonymous(backend).await?;
 
@@ -146,9 +149,11 @@ async fn test_explicit_conversion_pattern() -> Result<()> {
     assert_eq!(query_session.rules().len(), 0);
 
     // Test 2: Conversion with rule installation
-    let adult_concept = Concept::new("adult".into())
-        .with("name", Attribute::new("person", "name", "Adult name", ValueDataType::String));
-    
+    let adult_concept = Concept::new("adult".into()).with(
+        "name",
+        Attribute::new("person", "name", "Adult name", Type::String),
+    );
+
     let adult_rule = DeductiveRule {
         conclusion: adult_concept,
         premises: vec![],
@@ -156,7 +161,7 @@ async fn test_explicit_conversion_pattern() -> Result<()> {
 
     let query_session: QuerySession<_> = artifacts.into();
     let query_session = query_session.install(adult_rule.clone());
-    
+
     let resolved_rules = query_session.resolve_rules("adult");
     assert_eq!(resolved_rules.len(), 1);
     assert_eq!(resolved_rules[0].conclusion.operator, "adult");

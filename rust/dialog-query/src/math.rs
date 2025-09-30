@@ -1,10 +1,8 @@
 use std::{sync::OnceLock, usize};
 
-use dialog_artifacts::ValueDataType;
-
 use crate::{
     cursor::Cursor, error::FormulaEvaluationError, predicate::formula::Cells, Compute,
-    Dependencies, Formula, Term, Value,
+    Dependencies, Formula, Term, Type, Value,
 };
 
 // ============================================================================
@@ -65,15 +63,15 @@ impl Formula for Sum {
     fn cells() -> &'static Cells {
         SUM_CELLS.get_or_init(|| {
             Cells::define(|cell| {
-                cell("of", ValueDataType::UnsignedInt)
+                cell("of", Type::UnsignedInt)
                     .the("Number to add to")
                     .required();
 
-                cell("with", ValueDataType::UnsignedInt)
+                cell("with", Type::UnsignedInt)
                     .the("Number to add")
                     .required();
 
-                cell("is", ValueDataType::UnsignedInt)
+                cell("is", Type::UnsignedInt)
                     .the("Sum of numbers")
                     .derived(5);
             })
@@ -154,17 +152,15 @@ impl Formula for Difference {
     fn cells() -> &'static Cells {
         DIFFERENCE_CELLS.get_or_init(|| {
             Cells::define(|cell| {
-                cell("of", ValueDataType::UnsignedInt)
+                cell("of", Type::UnsignedInt)
                     .the("Number to subtract from")
                     .required();
 
-                cell("subtract", ValueDataType::UnsignedInt)
+                cell("subtract", Type::UnsignedInt)
                     .the("Number to subtract")
                     .required();
 
-                cell("is", ValueDataType::UnsignedInt)
-                    .the("Difference")
-                    .derived(2);
+                cell("is", Type::UnsignedInt).the("Difference").derived(2);
             })
         })
     }
@@ -238,15 +234,15 @@ impl Formula for Product {
     fn cells() -> &'static Cells {
         PRODUCT_CELLS.get_or_init(|| {
             Cells::define(|cell| {
-                cell("of", ValueDataType::UnsignedInt)
+                cell("of", Type::UnsignedInt)
                     .the("Number to multiply")
                     .required();
 
-                cell("times", ValueDataType::UnsignedInt)
+                cell("times", Type::UnsignedInt)
                     .the("Times to multiply")
                     .required();
 
-                cell("is", ValueDataType::UnsignedInt)
+                cell("is", Type::UnsignedInt)
                     .the("Result of multiplication")
                     .derived(5);
             })
@@ -327,15 +323,15 @@ impl Formula for Quotient {
     fn cells() -> &'static Cells {
         QUOTIENT_CELLS.get_or_init(|| {
             Cells::define(|cell| {
-                cell("of", ValueDataType::UnsignedInt)
+                cell("of", Type::UnsignedInt)
                     .the("Number to divide")
                     .required();
 
-                cell("by", ValueDataType::UnsignedInt)
+                cell("by", Type::UnsignedInt)
                     .the("Number to divide by")
                     .required();
 
-                cell("is", ValueDataType::UnsignedInt)
+                cell("is", Type::UnsignedInt)
                     .the("Result of division")
                     .derived(5);
             })
@@ -416,15 +412,15 @@ impl Formula for Modulo {
     fn cells() -> &'static Cells {
         MODULO_CELLS.get_or_init(|| {
             Cells::define(|cell| {
-                cell("of", ValueDataType::UnsignedInt)
+                cell("of", Type::UnsignedInt)
                     .the("Number to compute modulo of")
                     .required();
 
-                cell("by", ValueDataType::UnsignedInt)
+                cell("by", Type::UnsignedInt)
                     .the("Number to compute modulo by")
                     .required();
 
-                cell("is", ValueDataType::UnsignedInt)
+                cell("is", Type::UnsignedInt)
                     .the("Result of modulo operation")
                     .derived(10);
             })
@@ -476,7 +472,7 @@ mod tests {
             .expect("Failed to set y");
 
         // Create formula application
-        let app = Sum::apply(terms);
+        let app = Sum::apply(terms)?;
 
         // Expand the formula
         let results = app.derive(input).expect("Formula expansion failed");
@@ -532,7 +528,7 @@ mod tests {
             .set(Term::var("x"), 5u32)
             .expect("Failed to set x");
 
-        let app = Sum::apply(terms);
+        let app = Sum::apply(terms)?;
         let result = app.derive(input);
 
         assert!(result.is_err());
@@ -550,7 +546,7 @@ mod tests {
         terms.insert("with".to_string(), Term::var("b").into());
         terms.insert("is".to_string(), Term::var("sum").into());
 
-        let app = Sum::apply(terms);
+        let app = Sum::apply(terms)?;
 
         // Test first input: 2 + 3 = 5
         let input1 = Match::new()
@@ -613,7 +609,7 @@ mod tests {
             .set(Term::var("y"), 3u32)
             .unwrap();
 
-        let app = Difference::apply(terms);
+        let app = Difference::apply(terms)?;
         let results = app.derive(input).expect("Difference failed");
 
         assert_eq!(results.len(), 1);
@@ -634,7 +630,7 @@ mod tests {
             .set(Term::var("y"), 10u32)
             .unwrap();
 
-        let app = Difference::apply(terms);
+        let app = Difference::apply(terms)?;
         let results = app
             .derive(input)
             .expect("Difference underflow should be handled");
@@ -658,7 +654,7 @@ mod tests {
             .set(Term::var("y"), 7u32)
             .unwrap();
 
-        let app = Product::apply(terms);
+        let app = Product::apply(terms)?;
         let results = app.derive(input).expect("Product failed");
 
         assert_eq!(results.len(), 1);
@@ -679,7 +675,7 @@ mod tests {
             .set(Term::var("y"), 3u32)
             .unwrap();
 
-        let app = Quotient::apply(terms);
+        let app = Quotient::apply(terms)?;
         let results = app.derive(input).expect("Quotient failed");
 
         assert_eq!(results.len(), 1);
@@ -700,7 +696,7 @@ mod tests {
             .set(Term::var("y"), 0u32)
             .unwrap();
 
-        let app = Quotient::apply(terms);
+        let app = Quotient::apply(terms)?;
         let results = app
             .derive(input)
             .expect("Division by zero should be handled");
@@ -722,7 +718,7 @@ mod tests {
             .set(Term::var("y"), 5u32)
             .unwrap();
 
-        let app = Modulo::apply(terms);
+        let app = Modulo::apply(terms)?;
         let results = app.derive(input).expect("Modulo failed");
 
         assert_eq!(results.len(), 1);
@@ -743,7 +739,7 @@ mod tests {
             .set(Term::var("y"), 0u32)
             .unwrap();
 
-        let app = Modulo::apply(terms);
+        let app = Modulo::apply(terms)?;
         let results = app.derive(input).expect("Modulo by zero should be handled");
 
         // Should return empty Vec for modulo by zero

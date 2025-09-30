@@ -1,7 +1,7 @@
 use dialog_query::analyzer::LegacyAnalysis;
 use dialog_query::application::fact::BASE_COST;
 use dialog_query::application::{ConceptApplication, PlanCandidate};
-use dialog_query::artifact::ValueDataType;
+use dialog_query::artifact::Type;
 use dialog_query::attribute::Attribute;
 use dialog_query::error::{AnalyzerError, PlanError, QueryError};
 use dialog_query::predicate::{Concept, DeductiveRule, FactSelector};
@@ -15,11 +15,11 @@ fn test_concept_as_conclusion_operations() {
     let mut attributes = HashMap::new();
     attributes.insert(
         "name".to_string(),
-        Attribute::new("person", "name", "Person name", ValueDataType::String),
+        Attribute::new("person", "name", "Person name", Type::String),
     );
     attributes.insert(
         "age".to_string(),
-        Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt),
+        Attribute::new("person", "age", "Person age", Type::UnsignedInt),
     );
 
     let concept = Concept {
@@ -54,7 +54,7 @@ fn test_concept_creation() {
     let mut attributes = HashMap::new();
     attributes.insert(
         "name".to_string(),
-        Attribute::new("person", "name", "Person name", ValueDataType::String),
+        Attribute::new("person", "name", "Person name", Type::String),
     );
 
     let concept = Concept {
@@ -72,11 +72,11 @@ fn test_concept_application_analysis() {
     let mut attributes = HashMap::new();
     attributes.insert(
         "name".to_string(),
-        Attribute::new("person", "name", "Person name", ValueDataType::String),
+        Attribute::new("person", "name", "Person name", Type::String),
     );
     attributes.insert(
         "age".to_string(),
-        Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt),
+        Attribute::new("person", "age", "Person age", Type::UnsignedInt),
     );
 
     let concept = Concept {
@@ -107,11 +107,11 @@ fn test_deductive_rule_parameters() {
         conclusion: Concept::new("adult".into())
             .with(
                 "name",
-                Attribute::new("person", "name", "Person name", ValueDataType::String),
+                Attribute::new("person", "name", "Person name", Type::String),
             )
             .with(
                 "age",
-                Attribute::new("person", "age", "Person age", ValueDataType::UnsignedInt),
+                Attribute::new("person", "age", "Person age", Type::UnsignedInt),
             ),
         premises: vec![],
     };

@@ -293,12 +293,10 @@ impl<S: Store> crate::artifact::ArtifactStore for Session<S> {
 mod tests {
     use std::collections::HashMap;
 
-    use dialog_artifacts::ValueDataType;
-
     use crate::{
         predicate::{self, Concept},
         query::PlannedQuery,
-        Attribute, Parameters, SelectionExt, VariableScope,
+        Attribute, Parameters, SelectionExt, Type, VariableScope,
     };
 
     use super::*;
@@ -349,11 +347,11 @@ mod tests {
         let mut attributes = HashMap::new();
         attributes.insert(
             "name".into(),
-            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+            Attribute::new(&"person", &"name", &"person name", Type::String),
         );
         attributes.insert(
             "age".into(),
-            Attribute::new(&"person", &"age", &"person age", ValueDataType::UnsignedInt),
+            Attribute::new(&"person", &"age", &"person age", Type::UnsignedInt),
         );
 
         let person = predicate::Concept {
@@ -368,7 +366,7 @@ mod tests {
         params.insert("age".into(), age.clone());
 
         // Let's test with empty parameters first to see the exact error
-        let application = person.apply(params);
+        let application = person.apply(params)?;
 
         let plan = application.plan(&VariableScope::new())?;
 
@@ -404,9 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_matches_complete_conepts() -> anyhow::Result<()> {
-        use crate::artifact::{
-            Artifacts, Attribute as ArtifactAttribute, Entity, Value, ValueDataType,
-        };
+        use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Type, Value};
         use crate::{Fact, Term};
         use dialog_storage::MemoryStorageBackend;
 
@@ -450,11 +446,11 @@ mod tests {
         let mut attributes = HashMap::new();
         attributes.insert(
             "name".into(),
-            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+            Attribute::new(&"person", &"name", &"person name", Type::String),
         );
         attributes.insert(
             "age".into(),
-            Attribute::new(&"person", &"age", &"person age", ValueDataType::UnsignedInt),
+            Attribute::new(&"person", &"age", &"person age", Type::UnsignedInt),
         );
 
         let person = predicate::Concept {
@@ -467,7 +463,7 @@ mod tests {
         params.insert("name".into(), name.clone());
 
         // Let's test with empty parameters first to see the exact error
-        let application = person.apply(params);
+        let application = person.apply(params)?;
 
         let plan = application.plan(&VariableScope::new())?;
 
@@ -500,18 +496,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_concept_planning_empty_parameters() -> anyhow::Result<()> {
-        use crate::artifact::ValueDataType;
+        use crate::artifact::Type;
         use crate::error::PlanError;
 
         // Set up concept with attributes
         let mut attributes = HashMap::new();
         attributes.insert(
             "name".into(),
-            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+            Attribute::new(&"person", &"name", &"person name", Type::String),
         );
         attributes.insert(
             "age".into(),
-            Attribute::new(&"person", &"age", &"person age", ValueDataType::UnsignedInt),
+            Attribute::new(&"person", &"age", &"person age", Type::UnsignedInt),
         );
 
         let person = predicate::Concept {
@@ -521,7 +517,7 @@ mod tests {
 
         // Empty parameters should return UnparameterizedApplication error
         let empty_params = Parameters::new();
-        let application = person.apply(empty_params);
+        let application = person.apply(empty_params)?;
         let result = application.plan(&VariableScope::new());
 
         assert!(result.is_err());
@@ -539,7 +535,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concept_planning_all_blank_parameters() -> anyhow::Result<()> {
-        use crate::artifact::ValueDataType;
+        use crate::artifact::Type;
         use crate::error::PlanError;
         use crate::Term;
 
@@ -547,11 +543,11 @@ mod tests {
         let mut attributes = HashMap::new();
         attributes.insert(
             "name".into(),
-            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+            Attribute::new(&"person", &"name", &"person name", Type::String),
         );
         attributes.insert(
             "age".into(),
-            Attribute::new(&"person", &"age", &"person age", ValueDataType::UnsignedInt),
+            Attribute::new(&"person", &"age", &"person age", Type::UnsignedInt),
         );
 
         let person = predicate::Concept {
@@ -564,7 +560,7 @@ mod tests {
         all_blank_params.insert("name".into(), Term::blank());
         all_blank_params.insert("age".into(), Term::blank());
 
-        let application = person.apply(all_blank_params);
+        let application = person.apply(all_blank_params)?;
         let result = application.plan(&VariableScope::new());
 
         assert!(result.is_err());
@@ -582,18 +578,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_concept_planning_only_this_parameter() -> anyhow::Result<()> {
-        use crate::artifact::ValueDataType;
+        use crate::artifact::Type;
         use crate::Term;
 
         // Set up concept with attributes
         let mut attributes = HashMap::new();
         attributes.insert(
             "name".into(),
-            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+            Attribute::new(&"person", &"name", &"person name", Type::String),
         );
         attributes.insert(
             "age".into(),
-            Attribute::new(&"person", &"age", &"person age", ValueDataType::UnsignedInt),
+            Attribute::new(&"person", &"age", &"person age", Type::UnsignedInt),
         );
 
         let person = predicate::Concept {
@@ -605,7 +601,7 @@ mod tests {
         let mut only_this_params = Parameters::new();
         only_this_params.insert("this".into(), Term::var("entity")); // Non-blank "this"
 
-        let application = person.apply(only_this_params);
+        let application = person.apply(only_this_params)?;
         let result = application.plan(&VariableScope::new());
 
         // Should succeed because "this" parameter provides a constraint
@@ -620,7 +616,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concept_planning_unknown_parameters() -> anyhow::Result<()> {
-        use crate::artifact::ValueDataType;
+        use crate::artifact::Type;
         use crate::error::PlanError;
         use crate::Term;
 
@@ -628,11 +624,11 @@ mod tests {
         let mut attributes = HashMap::new();
         attributes.insert(
             "name".into(),
-            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+            Attribute::new(&"person", &"name", &"person name", Type::String),
         );
         attributes.insert(
             "age".into(),
-            Attribute::new(&"person", &"age", &"person age", ValueDataType::UnsignedInt),
+            Attribute::new(&"person", &"age", &"person age", Type::UnsignedInt),
         );
 
         let person = predicate::Concept {
@@ -644,7 +640,7 @@ mod tests {
         let mut unknown_params = Parameters::new();
         unknown_params.insert("unknown_param".into(), Term::var("x"));
 
-        let application = person.apply(unknown_params);
+        let application = person.apply(unknown_params)?;
         let result = application.plan(&VariableScope::new());
 
         assert!(result.is_err());
@@ -662,18 +658,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_concept_planning_mixed_parameters() -> anyhow::Result<()> {
-        use crate::artifact::ValueDataType;
+        use crate::artifact::Type;
         use crate::Term;
 
         // Set up concept with attributes
         let mut attributes = HashMap::new();
         attributes.insert(
             "name".into(),
-            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+            Attribute::new(&"person", &"name", &"person name", Type::String),
         );
         attributes.insert(
             "age".into(),
-            Attribute::new(&"person", &"age", &"person age", ValueDataType::UnsignedInt),
+            Attribute::new(&"person", &"age", &"person age", Type::UnsignedInt),
         );
 
         let person = predicate::Concept {
@@ -686,7 +682,7 @@ mod tests {
         mixed_params.insert("name".into(), Term::var("person_name")); // This matches
         mixed_params.insert("age".into(), Term::blank()); // This matches but is blank
 
-        let application = person.apply(mixed_params);
+        let application = person.apply(mixed_params)?;
         let result = application.plan(&VariableScope::new());
 
         // Should succeed because we have at least one non-blank parameter
@@ -701,13 +697,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_improved_error_messages() -> anyhow::Result<()> {
-        use crate::artifact::ValueDataType;
+        use crate::artifact::Type;
 
         // Set up concept
         let mut attributes = HashMap::new();
         attributes.insert(
             "name".into(),
-            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+            Attribute::new(&"person", &"name", &"person name", Type::String),
         );
 
         let person = predicate::Concept {
@@ -716,7 +712,7 @@ mod tests {
         };
 
         // Test that error messages are now helpful instead of "UnexpectedError"
-        let empty_application = person.apply(Parameters::new());
+        let empty_application = person.apply(Parameters::new())?;
         let error = empty_application.plan(&VariableScope::new()).unwrap_err();
 
         let error_message = error.to_string();
@@ -740,11 +736,11 @@ mod tests {
         let mut attributes = HashMap::new();
         attributes.insert(
             "name".into(),
-            Attribute::new(&"person", &"name", &"person name", ValueDataType::String),
+            Attribute::new(&"person", &"name", &"person name", Type::String),
         );
         attributes.insert(
             "age".into(),
-            Attribute::new(&"person", &"age", &"person age", ValueDataType::UnsignedInt),
+            Attribute::new(&"person", &"age", &"person age", Type::UnsignedInt),
         );
 
         let person = predicate::Concept {
@@ -773,7 +769,7 @@ mod tests {
         params.insert("age".into(), age.clone());
 
         // Let's test with empty parameters first to see the exact error
-        let application = person.apply(params);
+        let application = person.apply(params)?;
 
         let plan = application.plan(&VariableScope::new())?;
 
@@ -816,7 +812,7 @@ mod tests {
         let employee = Concept::new("employee".into())
             .with(
                 "name",
-                Attribute::new("employee", "name", "Employee Name", ValueDataType::String),
+                Attribute::new("employee", "name", "Employee Name", Type::String),
             )
             .with(
                 "role",
@@ -824,14 +820,14 @@ mod tests {
                     "employee",
                     "job",
                     "The job title of the employee",
-                    ValueDataType::String,
+                    Type::String,
                 ),
             );
 
         let stuff = Concept::new("stuff".into())
             .with(
                 "name",
-                Attribute::new("stuff", "name", "Stuff Name", ValueDataType::String),
+                Attribute::new("stuff", "name", "Stuff Name", Type::String),
             )
             .with(
                 "role",
@@ -839,7 +835,7 @@ mod tests {
                     "stuff",
                     "role",
                     "The role of the stuff member",
-                    ValueDataType::String,
+                    Type::String,
                 ),
             );
 
@@ -880,7 +876,7 @@ mod tests {
         parameters.insert("name".into(), Term::var("name"));
         parameters.insert("job".into(), Term::var("job"));
 
-        let application = stuff.apply(parameters);
+        let application = stuff.apply(parameters)?;
         let plan = application.plan(&VariableScope::new())?;
 
         let selection = plan.query(&session)?.collect_matches().await?;

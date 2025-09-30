@@ -10,9 +10,10 @@ use crate::Cardinality;
 pub use crate::FactSelector;
 pub use crate::VariableScope;
 use crate::{try_stream, EvaluationContext, Match, Selection, Source};
-pub use crate::{Dependencies, Entity, Fact, QueryError, Term, Value};
+use crate::{Constraint, Dependencies, Dependency, Entity, QueryError, Schema, Term, Type, Value};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FactApplication {
@@ -23,6 +24,45 @@ pub struct FactApplication {
 }
 
 impl FactApplication {
+    /// Returns the static schema for fact selectors
+    /// Defines the "the", "of", "is" parameters with choice constraint
+    pub fn schema() -> &'static Schema<Constraint> {
+        static FACT_SCHEMA: OnceLock<Schema<Constraint>> = OnceLock::new();
+        FACT_SCHEMA.get_or_init(|| {
+            let constraint = Dependency::choice();
+            let mut schema = Schema::new();
+
+            schema.insert(
+                "the".to_string(),
+                Constraint {
+                    description: "Attribute of the fact".to_string(),
+                    content_type: Some(Type::Symbol),
+                    requirement: constraint.desire(ATTRIBUTE_COST),
+                },
+            );
+
+            schema.insert(
+                "of".to_string(),
+                Constraint {
+                    description: "Entity of the fact".to_string(),
+                    content_type: Some(Type::Entity),
+                    requirement: constraint.desire(ENTITY_COST),
+                },
+            );
+
+            schema.insert(
+                "is".to_string(),
+                Constraint {
+                    description: "Value of the fact".to_string(),
+                    content_type: None, // Can be any type
+                    requirement: constraint.desire(VALUE_COST),
+                },
+            );
+
+            schema
+        })
+    }
+
     pub fn many(&self) -> Self {
         Self {
             cardinality: Cardinality::Many,

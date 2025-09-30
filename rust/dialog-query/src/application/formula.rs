@@ -47,6 +47,10 @@ impl FormulaApplication {
                 Requirement::Derived(cost) => {
                     analysis.desire(self.parameters.get(name), *cost);
                 }
+                Requirement::Choice { cost, .. } => {
+                    // Formulas don't use choice groups, treat as derived
+                    analysis.desire(self.parameters.get(name), *cost);
+                }
                 // We should be checking this at the application time not
                 // during analysis
                 Requirement::Required => {
@@ -67,6 +71,10 @@ impl FormulaApplication {
         for (name, cell) in self.cells.iter() {
             match cell.requirement() {
                 Requirement::Derived(cost) => {
+                    dependencies.desire(name.to_string(), *cost);
+                }
+                Requirement::Choice { cost, .. } => {
+                    // Formulas don't use choice groups, treat as derived
                     dependencies.desire(name.to_string(), *cost);
                 }
                 Requirement::Required => {
@@ -105,14 +113,16 @@ impl FormulaApplication {
                         })
                     }?;
                 }
-                Requirement::Derived(estimate) => match term {
-                    Some(term) => {
-                        derives.add(term);
+                Requirement::Derived(estimate) | Requirement::Choice { cost: estimate, .. } => {
+                    match term {
+                        Some(term) => {
+                            derives.add(term);
+                        }
+                        None => {
+                            cost += estimate;
+                        }
                     }
-                    None => {
-                        cost += estimate;
-                    }
-                },
+                }
             }
         }
 
@@ -174,7 +184,7 @@ impl Planner for FormulaApplication {
                 plan.desire(term, 0);
             } else {
                 match cell.requirement() {
-                    Requirement::Derived(cost) => {
+                    Requirement::Derived(cost) | Requirement::Choice { cost, .. } => {
                         plan.desire(term, *cost);
                     }
                     Requirement::Required => {

@@ -48,13 +48,13 @@ pub static INC: Inc = Inc {
             name: &"of",
             description: &"Source to increment",
             requirement: Requirement::Required,
-            data_type: ValueDataType::SignedInteger,
+            data_type: Type::SignedInteger,
         },
         is: Cell {
             name: &"is",
             description: &"Output of the increment",
             requirement: Requirement::Derived(0),
-            data_type: ValueDataType::SignedInteger,
+            data_type: Type::SignedInteger,
         },
     },
 };

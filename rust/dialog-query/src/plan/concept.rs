@@ -35,15 +35,20 @@ impl EvaluationPlan for ConceptPlan {
         &self,
         context: EvaluationContext<S, M>,
     ) -> impl Selection {
-        let implicit = DeductiveRule::try_from(&self.concept).expect("Failed to compile implicit rule");
+        let implicit =
+            DeductiveRule::try_from(&self.concept).expect("Failed to compile implicit rule");
         let mut scope = VariableScope::new();
-        let application = implicit.apply(self.terms.clone()).expect("Failed to apply rule");
+        let application = implicit
+            .apply(self.terms.clone())
+            .expect("Failed to apply rule");
         for (name, term) in self.terms.iter() {
             if term.is_constant() {
                 scope.add(&Term::<Value>::var(name));
             }
         }
-        let plan = application.plan(&scope).expect("Failed to plan application");
+        let plan = application
+            .plan(&scope)
+            .expect("Failed to plan application");
         try_stream! {
             for await item in plan.evaluate(context) {
                 yield item?;

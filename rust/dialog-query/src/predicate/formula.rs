@@ -392,7 +392,7 @@ impl Cell {
     pub fn check<'a, T: Scalar>(&self, term: &'a Term<T>) -> Result<&'a Term<T>, TypeError> {
         let expected = self.content_type();
         // First we type check the input to ensure it matches cell's content type
-        if let Some(actual) = term.data_type() {
+        if let Some(actual) = term.content_type() {
             if &actual != expected {
                 // Convert the term to Term<Value> for the error
                 return Err(TypeError::TypeMismatch {

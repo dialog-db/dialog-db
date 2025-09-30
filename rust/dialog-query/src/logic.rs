@@ -3,9 +3,12 @@
 //! This module provides formulas for boolean operations including
 //! AND, OR, and NOT operations.
 
+use crate::{
+    cursor::Cursor, error::FormulaEvaluationError, predicate::formula::Cells, Compute,
+    Dependencies, Formula, Type, Value,
+};
+
 use std::sync::OnceLock;
-use dialog_artifacts::ValueDataType;
-use crate::{cursor::Cursor, error::FormulaEvaluationError, predicate::formula::Cells, Compute, Dependencies, Formula, Value};
 
 // ============================================================================
 // Boolean Logic Operations: And, Or, Not
@@ -57,15 +60,11 @@ impl Formula for And {
     fn cells() -> &'static Cells {
         AND_CELLS.get_or_init(|| {
             Cells::define(|cell| {
-                cell("left", ValueDataType::Boolean)
-                    .the("Left operand")
-                    .required();
+                cell("left", Type::Boolean).the("Left operand").required();
 
-                cell("right", ValueDataType::Boolean)
-                    .the("Right operand")
-                    .required();
+                cell("right", Type::Boolean).the("Right operand").required();
 
-                cell("is", ValueDataType::Boolean)
+                cell("is", Type::Boolean)
                     .the("Result of AND operation")
                     .derived(1);
             })
@@ -141,15 +140,11 @@ impl Formula for Or {
     fn cells() -> &'static Cells {
         OR_CELLS.get_or_init(|| {
             Cells::define(|cell| {
-                cell("left", ValueDataType::Boolean)
-                    .the("Left operand")
-                    .required();
+                cell("left", Type::Boolean).the("Left operand").required();
 
-                cell("right", ValueDataType::Boolean)
-                    .the("Right operand")
-                    .required();
+                cell("right", Type::Boolean).the("Right operand").required();
 
-                cell("is", ValueDataType::Boolean)
+                cell("is", Type::Boolean)
                     .the("Result of OR operation")
                     .derived(1);
             })
@@ -221,11 +216,11 @@ impl Formula for Not {
     fn cells() -> &'static Cells {
         NOT_CELLS.get_or_init(|| {
             Cells::define(|cell| {
-                cell("value", ValueDataType::Boolean)
+                cell("value", Type::Boolean)
                     .the("Boolean value to negate")
                     .required();
 
-                cell("is", ValueDataType::Boolean)
+                cell("is", Type::Boolean)
                     .the("Result of NOT operation")
                     .derived(1);
             })
@@ -272,7 +267,7 @@ mod tests {
             .set(Term::var("b"), true)
             .unwrap();
 
-        let app = And::apply(terms);
+        let app = And::apply(terms)?;
         let results = app.derive(input).expect("And formula failed");
 
         assert_eq!(results.len(), 1);
@@ -293,7 +288,7 @@ mod tests {
             .set(Term::var("b"), false)
             .unwrap();
 
-        let app = And::apply(terms);
+        let app = And::apply(terms)?;
         let results = app.derive(input).expect("And formula failed");
 
         assert_eq!(results.len(), 1);
@@ -314,7 +309,7 @@ mod tests {
             .set(Term::var("b"), false)
             .unwrap();
 
-        let app = And::apply(terms);
+        let app = And::apply(terms)?;
         let results = app.derive(input).expect("And formula failed");
 
         assert_eq!(results.len(), 1);
@@ -335,7 +330,7 @@ mod tests {
             .set(Term::var("b"), false)
             .unwrap();
 
-        let app = Or::apply(terms);
+        let app = Or::apply(terms)?;
         let results = app.derive(input).expect("Or formula failed");
 
         assert_eq!(results.len(), 1);
@@ -356,7 +351,7 @@ mod tests {
             .set(Term::var("b"), false)
             .unwrap();
 
-        let app = Or::apply(terms);
+        let app = Or::apply(terms)?;
         let results = app.derive(input).expect("Or formula failed");
 
         assert_eq!(results.len(), 1);
@@ -372,7 +367,7 @@ mod tests {
 
         let input = Match::new().set(Term::var("bool"), true).unwrap();
 
-        let app = Not::apply(terms);
+        let app = Not::apply(terms)?;
         let results = app.derive(input).expect("Not formula failed");
 
         assert_eq!(results.len(), 1);
@@ -388,7 +383,8 @@ mod tests {
 
         let input = Match::new().set(Term::var("bool"), false).unwrap();
 
-        let app = Not::apply(terms);
+        let app = Not::apply(terms)?;
+
         let results = app.derive(input).expect("Not formula failed");
 
         assert_eq!(results.len(), 1);
@@ -410,7 +406,7 @@ mod tests {
             .set(Term::var("b"), false)
             .unwrap();
 
-        let and_app = And::apply(and_terms);
+        let and_app = And::apply(and_terms)?;
         let and_results = and_app.derive(input).expect("And formula failed");
         let and_result = &and_results[0];
 
@@ -419,7 +415,7 @@ mod tests {
         not_terms.insert("value".to_string(), Term::var("and_result").into());
         not_terms.insert("is".to_string(), Term::var("final_result").into());
 
-        let not_app = Not::apply(not_terms);
+        let not_app = Not::apply(not_terms)?;
         let not_results = not_app
             .derive(and_result.clone())
             .expect("Not formula failed");

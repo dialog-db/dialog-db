@@ -3,7 +3,7 @@
 pub use crate::analyzer::AnalyzerError;
 pub use crate::analyzer::Required;
 pub use crate::application::Application;
-use crate::artifact::{DialogArtifactsError, Value, ValueDataType};
+use crate::artifact::{DialogArtifactsError, Type, Value};
 pub use crate::predicate::DeductiveRule;
 use crate::term::Term;
 pub use crate::FactSelector;
@@ -122,10 +122,7 @@ pub enum InconsistencyError {
     UnboundVariableError(String),
 
     #[error("Type mismatch: expected value of type {expected}, got {actual}")]
-    UnexpectedType {
-        expected: ValueDataType,
-        actual: ValueDataType,
-    },
+    UnexpectedType { expected: Type, actual: Type },
 
     #[error("Invalid fact selector")]
     UnconstrainedSelector,
@@ -231,10 +228,7 @@ pub enum FormulaEvaluationError {
     /// // Fails with TypeMismatch { expected: "u32", actual: "String" }
     /// ```
     #[error("Type mismatch: expected {expected}, got {actual}")]
-    TypeMismatch {
-        expected: ValueDataType,
-        actual: ValueDataType,
-    },
+    TypeMismatch { expected: Type, actual: Type },
 }
 
 /// Errors that can occur during query planning.
@@ -341,10 +335,7 @@ impl From<AnalyzerError> for PlanError {
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum TypeError {
     #[error("Expected a term with type {expected}, instead got {actual}")]
-    TypeMismatch {
-        expected: ValueDataType,
-        actual: Term<Value>,
-    },
+    TypeMismatch { expected: Type, actual: Term<Value> },
     #[error("Required term is missing")]
     OmittedRequirement,
     #[error("Required term can not be blank")]
@@ -371,7 +362,7 @@ pub enum SchemaError {
     #[error("Expected binding \"{binding}\" with {expected} type, instead got {actual}")]
     TypeError {
         binding: String,
-        expected: ValueDataType,
+        expected: Type,
         actual: Term<Value>,
     },
     #[error("Required binding \"{binding}\" was omitted")]

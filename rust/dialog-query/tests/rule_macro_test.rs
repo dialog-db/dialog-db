@@ -1,7 +1,7 @@
 use dialog_query::attribute::Cardinality;
 use dialog_query::concept::{Attributes, Concept};
 use dialog_query::rule::{Match, Premises};
-use dialog_query::{Rule, Term, ValueDataType};
+use dialog_query::{Rule, Term, Type};
 
 #[derive(Rule, Debug, Clone)]
 pub struct Person {
@@ -38,12 +38,12 @@ fn test_derive_rule_generates_types() {
     assert_eq!(attrs[0].1.namespace, "person");
     assert_eq!(attrs[0].1.name, "name");
     assert_eq!(attrs[0].1.description, "Name of the person");
-    assert_eq!(attrs[0].1.data_type(), Some(ValueDataType::String));
+    assert_eq!(attrs[0].1.content_type(), Some(Type::String));
     assert_eq!(attrs[1].0, "birthday");
     assert_eq!(attrs[1].1.namespace, "person");
     assert_eq!(attrs[1].1.name, "birthday");
     assert_eq!(attrs[1].1.description, "Birthday of the person");
-    assert_eq!(attrs[1].1.data_type(), Some(ValueDataType::UnsignedInt));
+    assert_eq!(attrs[1].1.content_type(), Some(Type::UnsignedInt));
 
     // Test the new Attributes::of function
     let _attributes = PersonAttributes::of(entity.clone());

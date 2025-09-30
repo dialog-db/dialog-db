@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 
 // Mock types for our exploration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValueDataType {
+pub enum Type {
     String,
     UnsignedInt,
     SignedInt,
@@ -46,33 +46,33 @@ impl<T> Attribute<T> {
             marker: PhantomData,
         }
     }
-    
+
     pub fn the(&self) -> String {
         format!("{}/{}", self.namespace, self.name)
     }
 }
 
-// Trait for types that can provide ValueDataType metadata
-pub trait IntoValueDataType {
-    fn into_value_data_type() -> Option<ValueDataType>;
+// Trait for types that can provide Type metadata
+pub trait IntoType {
+    fn into_value_data_type() -> Option<Type>;
 }
 
 // Implementations for common types
-impl IntoValueDataType for String {
-    fn into_value_data_type() -> Option<ValueDataType> {
-        Some(ValueDataType::String)
+impl IntoType for String {
+    fn into_value_data_type() -> Option<Type> {
+        Some(Type::String)
     }
 }
 
-impl IntoValueDataType for u32 {
-    fn into_value_data_type() -> Option<ValueDataType> {
-        Some(ValueDataType::UnsignedInt)
+impl IntoType for u32 {
+    fn into_value_data_type() -> Option<Type> {
+        Some(Type::UnsignedInt)
     }
 }
 
-impl IntoValueDataType for bool {
-    fn into_value_data_type() -> Option<ValueDataType> {
-        Some(ValueDataType::Boolean)
+impl IntoType for bool {
+    fn into_value_data_type() -> Option<Type> {
+        Some(Type::Boolean)
     }
 }
 
@@ -84,37 +84,37 @@ impl IntoValueDataType for bool {
 pub trait AttributeTrait: Any + Send + Sync {
     /// Get the fully qualified name of this attribute
     fn the(&self) -> String;
-    
+
     /// Get the data type this attribute holds
-    fn data_type(&self) -> Option<ValueDataType>;
-    
+    fn data_type(&self) -> Option<Type>;
+
     /// Get the cardinality of this attribute
     fn cardinality(&self) -> Cardinality;
-    
+
     /// Get type metadata for downcasting
     fn type_id(&self) -> TypeId;
-    
+
     /// Cast to Any for downcasting
     fn as_any(&self) -> &dyn Any;
 }
 
-impl<T: IntoValueDataType + Send + Sync + 'static> AttributeTrait for Attribute<T> {
+impl<T: IntoType + Send + Sync + 'static> AttributeTrait for Attribute<T> {
     fn the(&self) -> String {
         format!("{}/{}", self.namespace, self.name)
     }
-    
-    fn data_type(&self) -> Option<ValueDataType> {
+
+    fn data_type(&self) -> Option<Type> {
         T::into_value_data_type()
     }
-    
+
     fn cardinality(&self) -> Cardinality {
         self.cardinality
     }
-    
+
     fn type_id(&self) -> TypeId {
         TypeId::of::<T>()
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -146,15 +146,15 @@ impl TypedAttribute {
             TypedAttribute::Boolean(attr) => attr.the(),
         }
     }
-    
-    pub fn data_type(&self) -> Option<ValueDataType> {
+
+    pub fn data_type(&self) -> Option<Type> {
         match self {
-            TypedAttribute::String(_) => Some(ValueDataType::String),
-            TypedAttribute::UnsignedInt(_) => Some(ValueDataType::UnsignedInt),
-            TypedAttribute::Boolean(_) => Some(ValueDataType::Boolean),
+            TypedAttribute::String(_) => Some(Type::String),
+            TypedAttribute::UnsignedInt(_) => Some(Type::UnsignedInt),
+            TypedAttribute::Boolean(_) => Some(Type::Boolean),
         }
     }
-    
+
     /// Safely extract the underlying Attribute<String> if this is a String variant
     pub fn as_string(&self) -> Option<&Attribute<String>> {
         match self {
@@ -162,7 +162,7 @@ impl TypedAttribute {
             _ => None,
         }
     }
-    
+
     /// Safely extract the underlying Attribute<u32> if this is a UnsignedInt variant
     pub fn as_unsigned_int(&self) -> Option<&Attribute<u32>> {
         match self {
@@ -170,7 +170,7 @@ impl TypedAttribute {
             _ => None,
         }
     }
-    
+
     /// Safely extract the underlying Attribute<bool> if this is a Boolean variant
     pub fn as_boolean(&self) -> Option<&Attribute<bool>> {
         match self {
@@ -210,7 +210,7 @@ pub struct ErasedAttribute {
     /// Type metadata for safe casting
     type_id: TypeId,
     /// Data type information
-    data_type: Option<ValueDataType>,
+    data_type: Option<Type>,
     /// Vtable for common operations
     vtable: &'static ErasedAttributeVtable,
 }
@@ -224,10 +224,10 @@ pub struct ErasedAttributeVtable {
 
 impl ErasedAttribute {
     /// Create a new erased attribute from a typed attribute
-    pub fn new<T: IntoValueDataType + 'static>(attr: Attribute<T>) -> Self {
+    pub fn new<T: IntoType + 'static>(attr: Attribute<T>) -> Self {
         let boxed = Box::new(attr);
         let ptr = Box::into_raw(boxed) as *const ();
-        
+
         Self {
             ptr,
             type_id: TypeId::of::<T>(),
@@ -247,25 +247,23 @@ impl ErasedAttribute {
             },
         }
     }
-    
+
     pub fn the(&self) -> String {
         (self.vtable.the)(self.ptr)
     }
-    
-    pub fn data_type(&self) -> Option<ValueDataType> {
+
+    pub fn data_type(&self) -> Option<Type> {
         self.data_type
     }
-    
+
     pub fn cardinality(&self) -> Cardinality {
         (self.vtable.cardinality)(self.ptr)
     }
-    
+
     /// Safely downcast to the original type
     pub fn downcast<T: 'static>(&self) -> Option<&Attribute<T>> {
         if self.type_id == TypeId::of::<T>() {
-            unsafe {
-                Some(&*(self.ptr as *const Attribute<T>))
-            }
+            unsafe { Some(&*(self.ptr as *const Attribute<T>)) }
         } else {
             None
         }
@@ -289,11 +287,11 @@ unsafe impl Sync for ErasedAttribute {}
 /// Type witness that carries type information
 pub struct TypeWitness<T> {
     pub type_id: TypeId,
-    pub data_type: Option<ValueDataType>,
+    pub data_type: Option<Type>,
     pub _phantom: PhantomData<T>,
 }
 
-impl<T: IntoValueDataType + 'static> TypeWitness<T> {
+impl<T: IntoType + 'static> TypeWitness<T> {
     pub fn new() -> Self {
         Self {
             type_id: TypeId::of::<T>(),
@@ -310,7 +308,7 @@ pub struct ExistentialAttribute {
     /// Type witness for safe casting
     type_id: TypeId,
     /// Data type information
-    data_type: Option<ValueDataType>,
+    data_type: Option<Type>,
     /// Common attribute operations
     the: String,
     cardinality: Cardinality,
@@ -318,7 +316,7 @@ pub struct ExistentialAttribute {
 
 impl ExistentialAttribute {
     /// Create a new existential attribute
-    pub fn new<T: IntoValueDataType + Send + Sync + 'static>(attr: Attribute<T>) -> Self {
+    pub fn new<T: IntoType + Send + Sync + 'static>(attr: Attribute<T>) -> Self {
         Self {
             the: attr.the(),
             cardinality: attr.cardinality,
@@ -327,19 +325,19 @@ impl ExistentialAttribute {
             attr: Box::new(attr),
         }
     }
-    
+
     pub fn the(&self) -> &str {
         &self.the
     }
-    
-    pub fn data_type(&self) -> Option<ValueDataType> {
+
+    pub fn data_type(&self) -> Option<Type> {
         self.data_type
     }
-    
+
     pub fn cardinality(&self) -> Cardinality {
         self.cardinality
     }
-    
+
     /// Safely downcast to the original type
     pub fn downcast<T: 'static>(&self) -> Option<&Attribute<T>> {
         if self.type_id == TypeId::of::<T>() {
@@ -361,7 +359,7 @@ pub struct TypeRegistry {
 
 #[derive(Clone)]
 pub struct TypeInfo {
-    pub data_type: Option<ValueDataType>,
+    pub data_type: Option<Type>,
     pub name: &'static str,
 }
 
@@ -371,14 +369,17 @@ impl TypeRegistry {
             types: HashMap::new(),
         }
     }
-    
-    pub fn register<T: IntoValueDataType + 'static>(&mut self, name: &'static str) {
-        self.types.insert(TypeId::of::<T>(), TypeInfo {
-            data_type: T::into_value_data_type(),
-            name,
-        });
+
+    pub fn register<T: IntoType + 'static>(&mut self, name: &'static str) {
+        self.types.insert(
+            TypeId::of::<T>(),
+            TypeInfo {
+                data_type: T::into_value_data_type(),
+                name,
+            },
+        );
     }
-    
+
     pub fn get_type_info(&self, type_id: TypeId) -> Option<&TypeInfo> {
         self.types.get(&type_id)
     }
@@ -401,23 +402,23 @@ impl RegistryAttribute {
             attr: Box::new(attr),
         }
     }
-    
+
     pub fn the(&self) -> &str {
         &self.the
     }
-    
+
     pub fn cardinality(&self) -> Cardinality {
         self.cardinality
     }
-    
+
     pub fn type_id(&self) -> TypeId {
         self.type_id
     }
-    
-    pub fn data_type(&self, registry: &TypeRegistry) -> Option<ValueDataType> {
+
+    pub fn data_type(&self, registry: &TypeRegistry) -> Option<Type> {
         registry.get_type_info(self.type_id)?.data_type
     }
-    
+
     pub fn downcast<T: 'static>(&self) -> Option<&Attribute<T>> {
         if self.type_id == TypeId::of::<T>() {
             self.attr.downcast_ref::<Attribute<T>>()
@@ -434,129 +435,122 @@ impl RegistryAttribute {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     fn create_person_attributes() -> (Attribute<String>, Attribute<u32>, Attribute<bool>) {
         let name = Attribute::<String>::new("person", "name", "Person's full name");
         let age = Attribute::<u32>::new("person", "age", "Person's age in years");
         let active = Attribute::<bool>::new("person", "active", "Whether person is active");
         (name, age, active)
     }
-    
+
     #[test]
     fn test_trait_object_approach() {
         let (name, age, active) = create_person_attributes();
-        
+
         // Store as trait objects
-        let attrs: Vec<Box<dyn AttributeTrait>> = vec![
-            Box::new(name),
-            Box::new(age),
-            Box::new(active),
-        ];
-        
+        let attrs: Vec<Box<dyn AttributeTrait>> =
+            vec![Box::new(name), Box::new(age), Box::new(active)];
+
         for attr in &attrs {
             println!("Attribute: {}, Type: {:?}", attr.the(), attr.data_type());
-            
+
             // Test downcasting
             if let Some(string_attr) = downcast_attribute::<String>(attr.as_ref()) {
                 println!("  -> Successfully downcast to Attribute<String>");
                 assert_eq!(string_attr.the(), "person/name");
             }
-            
+
             if let Some(u32_attr) = downcast_attribute::<u32>(attr.as_ref()) {
                 println!("  -> Successfully downcast to Attribute<u32>");
                 assert_eq!(u32_attr.the(), "person/age");
             }
-            
+
             if let Some(bool_attr) = downcast_attribute::<bool>(attr.as_ref()) {
                 println!("  -> Successfully downcast to Attribute<bool>");
                 assert_eq!(bool_attr.the(), "person/active");
             }
         }
     }
-    
+
     #[test]
     fn test_enum_approach() {
         let (name, age, active) = create_person_attributes();
-        
+
         // Store as enum variants
-        let attrs: Vec<TypedAttribute> = vec![
-            name.into(),
-            age.into(),
-            active.into(),
-        ];
-        
+        let attrs: Vec<TypedAttribute> = vec![name.into(), age.into(), active.into()];
+
         for attr in &attrs {
             println!("Attribute: {}, Type: {:?}", attr.the(), attr.data_type());
-            
+
             // Test pattern matching and extraction
             match attr {
                 TypedAttribute::String(string_attr) => {
                     println!("  -> String attribute: {}", string_attr.the());
                     assert_eq!(string_attr.the(), "person/name");
-                },
+                }
                 TypedAttribute::UnsignedInt(u32_attr) => {
                     println!("  -> U32 attribute: {}", u32_attr.the());
                     assert_eq!(u32_attr.the(), "person/age");
-                },
+                }
                 TypedAttribute::Boolean(bool_attr) => {
                     println!("  -> Bool attribute: {}", bool_attr.the());
                     assert_eq!(bool_attr.the(), "person/active");
-                },
+                }
             }
-            
+
             // Test safe extraction methods
             if let Some(string_attr) = attr.as_string() {
                 println!("  -> Extracted String attribute: {}", string_attr.the());
             }
         }
     }
-    
+
     #[test]
     fn test_erased_attribute_approach() {
         let (name, age, active) = create_person_attributes();
-        
+
         // Store as erased attributes
         let attrs = vec![
             ErasedAttribute::new(name),
             ErasedAttribute::new(age),
             ErasedAttribute::new(active),
         ];
-        
+
         for attr in &attrs {
             println!("Attribute: {}, Type: {:?}", attr.the(), attr.data_type());
-            
+
             // Test downcasting
             if let Some(string_attr) = attr.downcast::<String>() {
                 println!("  -> Successfully downcast to Attribute<String>");
                 assert_eq!(string_attr.the(), "person/name");
             }
-            
+
             if let Some(u32_attr) = attr.downcast::<u32>() {
                 println!("  -> Successfully downcast to Attribute<u32>");
                 assert_eq!(u32_attr.the(), "person/age");
             }
-            
+
             if let Some(bool_attr) = attr.downcast::<bool>() {
                 println!("  -> Successfully downcast to Attribute<bool>");
                 assert_eq!(bool_attr.the(), "person/active");
             }
         }
     }
-    
+
     #[test]
     fn test_existential_approach() {
         let (name, age, active) = create_person_attributes();
-        
+
         // Store as existential attributes
         let attrs = vec![
             ExistentialAttribute::new(name),
             ExistentialAttribute::new(age),
             ExistentialAttribute::new(active),
         ];
-        
+
         for attr in &attrs {
             println!("Attribute: {}, Type: {:?}", attr.the(), attr.data_type());
-            
+
             // Test downcasting
             if let Some(string_attr) = attr.downcast::<String>() {
                 println!("  -> Successfully downcast to Attribute<String>");
@@ -564,25 +558,29 @@ mod tests {
             }
         }
     }
-    
+
     #[test]
     fn test_registry_approach() {
         let mut registry = TypeRegistry::new();
         registry.register::<String>("String");
         registry.register::<u32>("u32");
         registry.register::<bool>("bool");
-        
+
         let (name, age, active) = create_person_attributes();
-        
+
         let attrs = vec![
             RegistryAttribute::new(name),
             RegistryAttribute::new(age),
             RegistryAttribute::new(active),
         ];
-        
+
         for attr in &attrs {
-            println!("Attribute: {}, Type: {:?}", attr.the(), attr.data_type(&registry));
-            
+            println!(
+                "Attribute: {}, Type: {:?}",
+                attr.the(),
+                attr.data_type(&registry)
+            );
+
             if let Some(string_attr) = attr.downcast::<String>() {
                 println!("  -> Successfully downcast to Attribute<String>");
                 assert_eq!(string_attr.the(), "person/name");
@@ -602,12 +600,24 @@ impl Person {
     /// Returns a uniform collection of attributes that preserves type information
     pub fn attributes_trait_objects() -> Vec<Box<dyn AttributeTrait>> {
         vec![
-            Box::new(Attribute::<String>::new("person", "name", "Person's full name")),
-            Box::new(Attribute::<u32>::new("person", "age", "Person's age in years")),
-            Box::new(Attribute::<bool>::new("person", "active", "Whether person is active")),
+            Box::new(Attribute::<String>::new(
+                "person",
+                "name",
+                "Person's full name",
+            )),
+            Box::new(Attribute::<u32>::new(
+                "person",
+                "age",
+                "Person's age in years",
+            )),
+            Box::new(Attribute::<bool>::new(
+                "person",
+                "active",
+                "Whether person is active",
+            )),
         ]
     }
-    
+
     pub fn attributes_enum() -> Vec<TypedAttribute> {
         vec![
             Attribute::<String>::new("person", "name", "Person's full name").into(),
@@ -615,12 +625,24 @@ impl Person {
             Attribute::<bool>::new("person", "active", "Whether person is active").into(),
         ]
     }
-    
+
     pub fn attributes_erased() -> Vec<ErasedAttribute> {
         vec![
-            ErasedAttribute::new(Attribute::<String>::new("person", "name", "Person's full name")),
-            ErasedAttribute::new(Attribute::<u32>::new("person", "age", "Person's age in years")),
-            ErasedAttribute::new(Attribute::<bool>::new("person", "active", "Whether person is active")),
+            ErasedAttribute::new(Attribute::<String>::new(
+                "person",
+                "name",
+                "Person's full name",
+            )),
+            ErasedAttribute::new(Attribute::<u32>::new(
+                "person",
+                "age",
+                "Person's age in years",
+            )),
+            ErasedAttribute::new(Attribute::<bool>::new(
+                "person",
+                "active",
+                "Whether person is active",
+            )),
         ]
     }
 }
@@ -631,44 +653,44 @@ pub fn demonstrate_goal_pattern() {
     let attrs = Person::attributes_trait_objects();
     for attr in attrs {
         match attr.data_type() {
-            Some(ValueDataType::String) => {
+            Some(Type::String) => {
                 if let Some(string_attr) = downcast_attribute::<String>(attr.as_ref()) {
                     println!("Found String attribute: {}", string_attr.the());
                 }
-            },
-            Some(ValueDataType::UnsignedInt) => {
+            }
+            Some(Type::UnsignedInt) => {
                 if let Some(u32_attr) = downcast_attribute::<u32>(attr.as_ref()) {
                     println!("Found UnsignedInt attribute: {}", u32_attr.the());
                 }
-            },
-            Some(ValueDataType::Boolean) => {
+            }
+            Some(Type::Boolean) => {
                 if let Some(bool_attr) = downcast_attribute::<bool>(attr.as_ref()) {
                     println!("Found Boolean attribute: {}", bool_attr.the());
                 }
-            },
+            }
             _ => {}
         }
     }
-    
+
     println!("\n=== Enum Approach ===");
     let attrs = Person::attributes_enum();
     for attr in attrs {
         match attr.data_type() {
-            Some(ValueDataType::String) => {
+            Some(Type::String) => {
                 if let Some(string_attr) = attr.as_string() {
                     println!("Found String attribute: {}", string_attr.the());
                 }
-            },
-            Some(ValueDataType::UnsignedInt) => {
+            }
+            Some(Type::UnsignedInt) => {
                 if let Some(u32_attr) = attr.as_unsigned_int() {
                     println!("Found UnsignedInt attribute: {}", u32_attr.the());
                 }
-            },
-            Some(ValueDataType::Boolean) => {
+            }
+            Some(Type::Boolean) => {
                 if let Some(bool_attr) = attr.as_boolean() {
                     println!("Found Boolean attribute: {}", bool_attr.the());
                 }
-            },
+            }
             _ => {}
         }
     }

@@ -1,5 +1,4 @@
 use crate::application::FactApplication;
-use crate::artifact::ValueDataType;
 pub use crate::artifact::{Attribute as ArtifactsAttribute, Entity, Value};
 use crate::error::{SchemaError, TypeError};
 pub use crate::fact_selector::FactSelector;
@@ -30,7 +29,7 @@ pub struct Attribute<T: Scalar> {
     pub name: &'static str,
     pub description: &'static str,
     pub cardinality: Cardinality,
-    pub data_type: ValueDataType,
+    pub content_type: Type,
     pub marker: PhantomData<T>,
 }
 
@@ -39,14 +38,14 @@ impl<T: Scalar> Attribute<T> {
         namespace: &'static str,
         name: &'static str,
         description: &'static str,
-        data_type: ValueDataType,
+        content_type: Type,
     ) -> Self {
         Self {
             namespace,
             name,
             description,
             cardinality: Cardinality::One,
-            data_type,
+            content_type,
             marker: PhantomData,
         }
     }
@@ -64,15 +63,15 @@ impl<T: Scalar> Attribute<T> {
     /// Get the data type for this attribute
     ///
     /// Returns the stored ValueDataType for this attribute.
-    pub fn data_type(&self) -> Option<ValueDataType> {
-        Some(self.data_type)
+    pub fn content_type(&self) -> Option<Type> {
+        Some(self.content_type)
     }
 
     /// Type checks that provided term matches cells content type. If term
     pub fn check<'a, U: Scalar>(&self, term: &'a Term<U>) -> Result<&'a Term<U>, TypeError> {
-        let expected = self.data_type();
+        let expected = self.content_type();
         // First we type check the input to ensure it matches cell's content type
-        if let Some(actual) = term.data_type() {
+        if let Some(actual) = term.content_type() {
             if let Some(expected_type) = expected {
                 if actual != expected_type {
                     // Convert the term to Term<Value> for the error
@@ -100,13 +99,13 @@ impl<T: Scalar> Attribute<T> {
     }
 
     pub fn resolve(&self, value: Value) -> Result<Relation, TypeError> {
-        if value.data_type() == self.data_type {
+        if value.data_type() == self.content_type {
             let the_str = self.the();
             let the_attr =
                 the_str
                     .parse::<ArtifactsAttribute>()
                     .map_err(|_| TypeError::TypeMismatch {
-                        expected: ValueDataType::Symbol,
+                        expected: Type::Symbol,
                         actual: Term::Constant(Value::String(the_str.clone())),
                     })?;
 
@@ -117,7 +116,7 @@ impl<T: Scalar> Attribute<T> {
             })
         } else {
             Err(TypeError::TypeMismatch {
-                expected: self.data_type,
+                expected: self.content_type,
                 actual: Term::Constant(value),
             })
         }
@@ -130,11 +129,11 @@ impl<T: Scalar> Attribute<T> {
 
         // Check that if `this` parameter is provided, it has entity type.
         if let Some(this) = parameters.get("this") {
-            if let Some(actual) = this.data_type() {
-                if actual != ValueDataType::Entity {
+            if let Some(actual) = this.content_type() {
+                if actual != Type::Entity {
                     return Err(SchemaError::TypeError {
                         binding: "this".to_string(),
-                        expected: ValueDataType::Entity,
+                        expected: Type::Entity,
                         actual: this.clone(),
                     });
                 }
@@ -159,7 +158,7 @@ impl<T: Scalar> Attribute<T> {
             .map(|t| match t {
                 Term::Variable { name, .. } => Term::<Entity>::Variable {
                     name: name.clone(),
-                    _type: Default::default(),
+                    content_type: Default::default(),
                 },
                 Term::Constant(v) => match v {
                     Value::Entity(e) => Term::Constant(e.clone()),
@@ -185,7 +184,7 @@ impl<T: Scalar> Serialize for Attribute<T> {
         state.serialize_field("namespace", self.namespace)?;
         state.serialize_field("name", self.name)?;
         state.serialize_field("description", self.description)?;
-        state.serialize_field("data_type", &self.data_type)?;
+        state.serialize_field("type", &self.content_type)?;
         state.end()
     }
 }
@@ -271,7 +270,7 @@ impl<'de, T: Scalar> Deserialize<'de> for Attribute<T> {
                     name,
                     description,
                     cardinality: Cardinality::One,
-                    data_type,
+                    content_type: data_type,
                     marker: PhantomData,
                 })
             }
@@ -296,11 +295,11 @@ impl<T: Scalar> Match<T> {
         namespace: &'static str,
         name: &'static str,
         description: &'static str,
-        data_type: ValueDataType,
+        content_type: Type,
         of: Term<Entity>,
     ) -> Self {
         Self {
-            attribute: Attribute::new(namespace, name, description, data_type),
+            attribute: Attribute::new(namespace, name, description, content_type),
             of,
         }
     }

@@ -9,11 +9,11 @@ pub struct Person {
 
 mod person {
     pub use super::Person;
-    use dialog_query::artifact::{Entity, Value, ValueDataType};
+    use dialog_query::artifact::{Entity, Value};
     use dialog_query::attribute::{Attribute, Cardinality};
 
-    use dialog_query::concept;
     use dialog_query::term::Term;
+    use dialog_query::{concept, Type};
     use std::marker::PhantomData;
 
     pub const NAMESPACE: &'static str = "person";
@@ -24,7 +24,7 @@ mod person {
                 namespace: NAMESPACE,
                 name: "name",
                 description: "person name",
-                data_type: ValueDataType::String,
+                content_type: Type::String,
                 cardinality: Cardinality::One,
                 marker: PhantomData::<Value>,
             },
@@ -35,7 +35,7 @@ mod person {
                 namespace: NAMESPACE,
                 name: "age",
                 description: "person age",
-                data_type: ValueDataType::SignedInt,
+                content_type: Type::SignedInt,
                 cardinality: Cardinality::One,
                 marker: PhantomData::<Value>,
             },

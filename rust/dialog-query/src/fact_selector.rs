@@ -388,8 +388,8 @@ impl<T: Scalar> TryFrom<&FactSelectorPlan<T>> for ArtifactSelector<Constrained> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::Type;
     use crate::artifact::Value;
-    use crate::artifact::ValueDataType;
 
     #[test]
     fn test_fact_selector_by_attribute() {
@@ -451,7 +451,7 @@ mod tests {
         // Check entity variable (should be typed as Entity)
         if let Some(term) = &fact_selector.of {
             assert_eq!(term.name().unwrap(), "user");
-            assert_eq!(term.data_type(), Some(ValueDataType::Entity));
+            assert_eq!(term.content_type(), Some(Type::Entity));
         } else {
             panic!("Expected variable for entity");
         }
@@ -460,7 +460,7 @@ mod tests {
         if let Some(term) = &fact_selector.is {
             assert_eq!(term.name().unwrap(), "name");
             // Value type returns None since it can hold any type
-            assert!(term.data_type().is_none());
+            assert!(term.content_type().is_none());
         } else {
             panic!("Expected variable for value");
         }

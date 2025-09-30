@@ -1,6 +1,6 @@
-use dialog_query::artifact::{Value, ValueDataType};
+use dialog_query::artifact::{Type, Value};
 
-pub enum Term<T: Into<ValueDataType>> {
+pub enum Term<T: Into<Type>> {
     Variable { name: String, value_type: T },
 
     // With phantom types I had Constant(T)
@@ -8,7 +8,7 @@ pub enum Term<T: Into<ValueDataType>> {
     Constant(Value),
 }
 
-impl<T: Into<ValueDataType>> Term<T> {
+impl<T: Into<Type>> Term<T> {
     pub fn var<Name: Into<String>>(name: Name) -> Self {
         #[allow(unreachable_code)]
         Term::Variable {
@@ -18,11 +18,11 @@ impl<T: Into<ValueDataType>> Term<T> {
     }
 }
 
-pub fn select<T: Into<ValueDataType>>(_term: Term<T>) -> Vec<T> {
+pub fn select<T: Into<Type>>(_term: Term<T>) -> Vec<T> {
     vec![]
 }
 
-// fn to_label(term: Term<ValueDataType::String>) -> String {
+// fn to_label(term: Term<Type::String>) -> String {
 //     "String".to_string()
 // }
 

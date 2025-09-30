@@ -5,9 +5,9 @@
 use std::marker::PhantomData;
 
 // Import types from the actual codebase
-use dialog_query::artifact::{Entity, Value, ValueDataType};
+use dialog_query::artifact::{Entity, Value};
 use dialog_query::types::Scalar;
-use dialog_query::Cardinality;
+use dialog_query::{Cardinality, Type};
 
 // Re-define Attribute to match existing structure
 #[derive(Clone, Debug)]
@@ -35,7 +35,7 @@ impl<T: Scalar> Attribute<T> {
     }
 
     /// Get the data type for this attribute's type parameter T
-    pub fn data_type(&self) -> Option<ValueDataType> {
+    pub fn data_type(&self) -> Option<Type> {
         T::into_value_data_type()
     }
 }
@@ -46,7 +46,7 @@ impl<T: Scalar> Attribute<T> {
 
 /// Enum that holds different Attribute<T> variants while preserving type info
 ///
-/// This enum covers all the major types supported by the dialog-artifacts ValueDataType.
+/// This enum covers all the major types supported by the dialog-artifacts Type.
 /// Each variant preserves the exact type information and allows safe downcasting.
 #[derive(Debug, Clone)]
 pub enum TypedAttribute {
@@ -89,16 +89,16 @@ impl TypedAttribute {
     }
 
     /// Get the data type for this attribute
-    pub fn data_type(&self) -> Option<ValueDataType> {
+    pub fn data_type(&self) -> Option<Type> {
         match self {
-            TypedAttribute::String(_) => Some(ValueDataType::String),
-            TypedAttribute::Boolean(_) => Some(ValueDataType::Boolean),
-            TypedAttribute::UnsignedInt(_) => Some(ValueDataType::UnsignedInt),
-            TypedAttribute::SignedInt(_) => Some(ValueDataType::SignedInt),
-            TypedAttribute::Float(_) => Some(ValueDataType::Float),
-            TypedAttribute::Bytes(_) => Some(ValueDataType::Bytes),
-            TypedAttribute::Entity(_) => Some(ValueDataType::Entity),
-            TypedAttribute::Symbol(_) => Some(ValueDataType::Symbol),
+            TypedAttribute::String(_) => Some(Type::String),
+            TypedAttribute::Boolean(_) => Some(Type::Boolean),
+            TypedAttribute::UnsignedInt(_) => Some(Type::UnsignedInt),
+            TypedAttribute::SignedInt(_) => Some(Type::SignedInt),
+            TypedAttribute::Float(_) => Some(Type::Float),
+            TypedAttribute::Bytes(_) => Some(Type::Bytes),
+            TypedAttribute::Entity(_) => Some(Type::Entity),
+            TypedAttribute::Symbol(_) => Some(Type::Symbol),
             TypedAttribute::Value(_) => None, // Value can hold any type
         }
     }
@@ -294,7 +294,7 @@ impl Person {
 // For the trait object approach, we need this trait
 pub trait AttributeTrait: std::any::Any + Send + Sync {
     fn the(&self) -> String;
-    fn data_type(&self) -> Option<ValueDataType>;
+    fn data_type(&self) -> Option<Type>;
     fn cardinality(&self) -> Cardinality;
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -304,7 +304,7 @@ impl<T: Scalar + Send + Sync + 'static> AttributeTrait for Attribute<T> {
         format!("{}/{}", self.namespace, self.name)
     }
 
-    fn data_type(&self) -> Option<ValueDataType> {
+    fn data_type(&self) -> Option<Type> {
         T::into_value_data_type()
     }
 
@@ -337,7 +337,7 @@ fn demonstrate_goal_pattern() {
     println!("🎯 GOAL ACHIEVED: Runtime inspection and type refinement:");
     for attr in attrs {
         match attr.data_type() {
-            Some(ValueDataType::String) => {
+            Some(Type::String) => {
                 // We can safely get back to Attribute<String>!
                 if let Some(string_attr) = attr.as_string() {
                     println!(
@@ -350,7 +350,7 @@ fn demonstrate_goal_pattern() {
                     println!("     - Description: {}", string_attr.description);
                 }
             }
-            Some(ValueDataType::UnsignedInt) => {
+            Some(Type::UnsignedInt) => {
                 // We can safely get back to Attribute<u32>!
                 if let Some(u32_attr) = attr.as_unsigned_int() {
                     println!(
@@ -361,7 +361,7 @@ fn demonstrate_goal_pattern() {
                     println!("     - Can use for type-safe operations");
                 }
             }
-            Some(ValueDataType::Boolean) => {
+            Some(Type::Boolean) => {
                 // We can safely get back to Attribute<bool>!
                 if let Some(bool_attr) = attr.as_boolean() {
                     println!(
@@ -371,7 +371,7 @@ fn demonstrate_goal_pattern() {
                     println!("     - Type is preserved: bool");
                 }
             }
-            Some(ValueDataType::Float) => {
+            Some(Type::Float) => {
                 if let Some(float_attr) = attr.as_float() {
                     println!(
                         "  ✅ Float attribute '{}' recovered as Attribute<f64>",
@@ -417,17 +417,17 @@ fn demonstrate_performance() {
     for _ in 0..iterations {
         for attr in &attrs {
             match attr.data_type() {
-                Some(ValueDataType::String) => {
+                Some(Type::String) => {
                     if attr.as_string().is_some() {
                         count += 1;
                     }
                 }
-                Some(ValueDataType::UnsignedInt) => {
+                Some(Type::UnsignedInt) => {
                     if attr.as_unsigned_int().is_some() {
                         count += 1;
                     }
                 }
-                Some(ValueDataType::Boolean) => {
+                Some(Type::Boolean) => {
                     if attr.as_boolean().is_some() {
                         count += 1;
                     }
@@ -478,7 +478,7 @@ mod tests {
 
         for attr in attrs {
             match attr.data_type() {
-                Some(ValueDataType::String) => {
+                Some(Type::String) => {
                     if let Some(string_attr) = attr.as_string() {
                         assert!(
                             string_attr.the().contains("name")
@@ -487,19 +487,19 @@ mod tests {
                         found_string = true;
                     }
                 }
-                Some(ValueDataType::UnsignedInt) => {
+                Some(Type::UnsignedInt) => {
                     if let Some(uint_attr) = attr.as_unsigned_int() {
                         assert_eq!(uint_attr.the(), "person/age");
                         found_uint = true;
                     }
                 }
-                Some(ValueDataType::Boolean) => {
+                Some(Type::Boolean) => {
                     if let Some(bool_attr) = attr.as_boolean() {
                         assert_eq!(bool_attr.the(), "person/active");
                         found_bool = true;
                     }
                 }
-                Some(ValueDataType::Float) => {
+                Some(Type::Float) => {
                     if let Some(float_attr) = attr.as_float() {
                         assert_eq!(float_attr.the(), "person/height");
                         found_float = true;

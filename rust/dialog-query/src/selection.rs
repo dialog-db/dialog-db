@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use crate::artifact::{Value, ValueDataType};
+use crate::artifact::{Type, Value};
 use dialog_common::ConditionalSend;
 
 pub use futures_util::stream::Stream;
@@ -138,7 +138,7 @@ impl Match {
                             // Create a proper TypeError for type conversion errors
                             InconsistencyError::TypeConversion(
                                 crate::artifact::TypeError::TypeMismatch(
-                                    T::into_value_data_type().unwrap_or(ValueDataType::Bytes),
+                                    T::into_value_data_type().unwrap_or(Type::Bytes),
                                     value.data_type(),
                                 ),
                             )

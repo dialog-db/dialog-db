@@ -14,12 +14,14 @@ impl Dependencies {
 
     /// Calculates the total cost of all derived dependencies.
     /// Required dependencies don't contribute to cost as they must be provided.
+    /// Choice dependencies contribute their cost (will be refined during planning).
     pub fn cost(&self) -> usize {
         self.0
             .values()
             .filter_map(|d| match d {
                 Requirement::Derived(cost) => Some(*cost),
-                _ => None,
+                Requirement::Choice { cost, .. } => Some(*cost),
+                Requirement::Required => None,
             })
             .sum()
     }
@@ -82,10 +84,12 @@ impl Dependencies {
     }
 
     /// Returns an iterator over only the required dependencies.
+    /// Note: Choice dependencies are not considered "required" until planning determines
+    /// that none in their group are satisfied.
     pub fn required(&self) -> impl Iterator<Item = (&str, &Requirement)> {
         self.0.iter().filter_map(|(k, v)| match v {
             Requirement::Required => Some((k.as_str(), v)),
-            Requirement::Derived(_) => None,
+            Requirement::Derived(_) | Requirement::Choice { .. } => None,
         })
     }
 
@@ -110,12 +114,66 @@ pub enum Requirement {
     /// Dependency that could be provided. If not provided it will be derived.
     /// Number represents cost of the derivation.
     Derived(usize),
+    /// Dependency is part of a choice group - if ANY parameter in the group
+    /// is bound, the requirement is satisfied. The cost applies if this
+    /// specific parameter is NOT the one that's bound.
+    Choice { group: ChoiceId, cost: usize },
 }
 
 impl Requirement {
     /// Checks if this is a required (non-derivable) dependency.
     pub fn is_required(&self) -> bool {
         matches!(self, Requirement::Required)
+    }
+}
+
+/// Identifier for a choice group
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ChoiceId(usize);
+
+impl ChoiceId {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        ChoiceId(id)
+    }
+}
+
+/// Builder for creating choice groups
+pub struct ChoiceBuilder {
+    group: ChoiceId,
+}
+
+impl ChoiceBuilder {
+    /// Mark this parameter as part of the choice with given cost
+    pub fn desire(&self, cost: usize) -> Requirement {
+        Requirement::Choice {
+            group: self.group,
+            cost,
+        }
+    }
+}
+
+/// Static API for creating requirements
+pub struct Dependency;
+
+impl Dependency {
+    /// Create a new choice group builder
+    pub fn choice() -> ChoiceBuilder {
+        ChoiceBuilder {
+            group: ChoiceId::new(),
+        }
+    }
+
+    /// Mark parameter as required
+    pub fn require() -> Requirement {
+        Requirement::Required
+    }
+
+    /// Mark parameter as derived with given cost
+    pub fn derive(cost: usize) -> Requirement {
+        Requirement::Derived(cost)
     }
 }
 

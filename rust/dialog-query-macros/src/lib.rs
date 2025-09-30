@@ -441,27 +441,27 @@ fn type_to_value_data_type(ty: &Type) -> proc_macro2::TokenStream {
     let type_str = quote!(#ty).to_string().replace(" ", "");
 
     match type_str.as_str() {
-        "String" => quote! { dialog_query::artifact::ValueDataType::String },
-        "&str" | "str" => quote! { dialog_query::artifact::ValueDataType::String },
-        "bool" => quote! { dialog_query::artifact::ValueDataType::Boolean },
+        "String" => quote! { dialog_query::artifact::Type::String },
+        "&str" | "str" => quote! { dialog_query::artifact::Type::String },
+        "bool" => quote! { dialog_query::artifact::Type::Boolean },
         "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => {
-            quote! { dialog_query::artifact::ValueDataType::UnsignedInt }
+            quote! { dialog_query::artifact::Type::UnsignedInt }
         }
         "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => {
-            quote! { dialog_query::artifact::ValueDataType::SignedInt }
+            quote! { dialog_query::artifact::Type::SignedInt }
         }
-        "f32" | "f64" => quote! { dialog_query::artifact::ValueDataType::Float },
-        "Vec<u8>" => quote! { dialog_query::artifact::ValueDataType::Bytes },
+        "f32" | "f64" => quote! { dialog_query::artifact::Type::Float },
+        "Vec<u8>" => quote! { dialog_query::artifact::Type::Bytes },
         "dialog_artifacts::Entity" | "Entity" => {
-            quote! { dialog_query::artifact::ValueDataType::Entity }
+            quote! { dialog_query::artifact::Type::Entity }
         }
         "dialog_artifacts::Attribute" | "Attribute" => {
-            quote! { dialog_query::artifact::ValueDataType::Symbol }
+            quote! { dialog_query::artifact::Type::Symbol }
         }
         _ => {
             // For unknown types, default to String to avoid compile-time errors
             // This matches the behavior of the original unwrap_or(ValueDataType::String)
-            quote! { dialog_query::artifact::ValueDataType::String }
+            quote! { dialog_query::artifact::Type::String }
         }
     }
 }

@@ -1,4 +1,4 @@
-use dialog_query::artifact::{Entity, Value, ValueDataType};
+use dialog_query::artifact::{Entity, Type, Value};
 use dialog_query::attribute::{Attribute, Cardinality, Match};
 use dialog_query::concept::{Attributes, Concept, Instance, Instructions, Match as ConceptMatch};
 use dialog_query::fact_selector::FactSelector;
@@ -65,7 +65,7 @@ pub mod person {
         name: "name",
         description: "Name of the person",
         cardinality: Cardinality::One,
-        data_type: ValueDataType::String,
+        content_type: Type::String,
         marker: PhantomData,
     };
 
@@ -74,7 +74,7 @@ pub mod person {
         name: "age",
         description: "Age of the person",
         cardinality: Cardinality::One,
-        data_type: ValueDataType::UnsignedInt,
+        content_type: Type::UnsignedInt,
         marker: PhantomData,
     };
 
@@ -85,7 +85,7 @@ pub mod person {
             name: "name",
             description: "Name of the person",
             cardinality: Cardinality::One,
-            data_type: ValueDataType::String,
+            content_type: Type::String,
             marker: PhantomData,
         },
         Attribute {
@@ -93,7 +93,7 @@ pub mod person {
             name: "age",
             description: "Age of the person",
             cardinality: Cardinality::One,
-            data_type: ValueDataType::UnsignedInt,
+            content_type: Type::UnsignedInt,
             marker: PhantomData,
         },
     ];
@@ -107,7 +107,7 @@ pub mod person {
                 name: "name",
                 description: "Name of the person",
                 cardinality: Cardinality::One,
-                data_type: ValueDataType::String,
+                content_type: Type::String,
                 marker: PhantomData,
             },
         ),
@@ -118,7 +118,7 @@ pub mod person {
                 name: "age",
                 description: "Age of the person",
                 cardinality: Cardinality::One,
-                data_type: ValueDataType::UnsignedInt,
+                content_type: Type::UnsignedInt,
                 marker: PhantomData,
             },
         ),
@@ -188,7 +188,7 @@ impl Rule for Person {
         let name_value_term = match &terms.name {
             Term::Variable { name, .. } => Term::Variable {
                 name: name.clone(),
-                _type: Default::default(),
+                content_type: Default::default(),
             },
             Term::Constant(value) => Term::Constant(value.as_value()),
         };
@@ -196,7 +196,7 @@ impl Rule for Person {
         let age_value_term = match &terms.age {
             Term::Variable { name, .. } => Term::Variable {
                 name: name.clone(),
-                _type: Default::default(),
+                content_type: Default::default(),
             },
             Term::Constant(value) => Term::Constant(value.as_value()),
         };
@@ -266,8 +266,8 @@ mod tests {
 
         // Test that Attribute<Value> has data_type() method
         // Now returns the stored data_type field
-        assert_eq!(attrs[0].1.data_type(), Some(ValueDataType::String));
-        assert_eq!(attrs[1].1.data_type(), Some(ValueDataType::UnsignedInt));
+        assert_eq!(attrs[0].1.content_type(), Some(Type::String));
+        assert_eq!(attrs[1].1.content_type(), Some(Type::UnsignedInt));
     }
 
     #[test]
@@ -390,7 +390,7 @@ mod tests {
 
         for attr in attrs {
             // Attributes now have data_type() return the stored type
-            assert!(attr.1.data_type().is_some());
+            assert!(attr.1.content_type().is_some());
 
             // We can still access all the basic attribute properties
             assert_eq!(attr.1.namespace, "person");

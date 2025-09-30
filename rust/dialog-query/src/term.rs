@@ -12,7 +12,7 @@
 use std::fmt;
 use std::marker::PhantomData;
 
-use crate::artifact::{Attribute, Entity, Value, ValueDataType};
+use crate::artifact::{Attribute, Entity, Type, Value};
 use crate::fact::Scalar;
 use crate::types::IntoValueDataType;
 use serde::{Deserialize, Serialize};
@@ -48,10 +48,10 @@ where
         name: Option<String>,
         #[serde(
             rename = "type",
-            skip_serializing_if = "Type::<T>::is_any",
-            default = "Type::<T>::default"
+            skip_serializing_if = "ContentType::<T>::is_any",
+            default = "ContentType::<T>::default"
         )]
-        _type: Type<T>,
+        content_type: ContentType<T>,
     },
 
     /// A concrete value of type T
@@ -62,24 +62,24 @@ where
 }
 
 /// Wrapper around PhantomData<T> with additional functionality so it can
-/// be converted to and from Option<ValueDataType>.
+/// be converted to and from Option<Type>.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
-#[serde(into = "Option<ValueDataType>", from = "Option<ValueDataType>")]
-pub struct Type<T: IntoValueDataType + Clone + 'static>(PhantomData<T>);
+#[serde(into = "Option<Type>", from = "Option<Type>")]
+pub struct ContentType<T: IntoValueDataType + Clone + 'static>(PhantomData<T>);
 
-impl<T: IntoValueDataType + Clone + 'static> Default for Type<T> {
+impl<T: IntoValueDataType + Clone + 'static> Default for ContentType<T> {
     fn default() -> Self {
-        Type(PhantomData)
+        ContentType(PhantomData)
     }
 }
 
-// impl<T: IntoValueDataType + Clone + 'static> From<PhantomData<T>> for ValueDataType {
+// impl<T: IntoValueDataType + Clone + 'static> From<PhantomData<T>> for Type {
 //     fn from(_value: PhantomData<T>) -> Self {
 //         T::into_value_data_type()
 //     }
 // }
 
-impl<T: IntoValueDataType + Clone + 'static> Type<T> {
+impl<T: IntoValueDataType + Clone + 'static> ContentType<T> {
     /// Returns true if `T` is `Value` as it can represent all supported data
     /// types.
     fn is_any(&self) -> bool {
@@ -87,20 +87,20 @@ impl<T: IntoValueDataType + Clone + 'static> Type<T> {
     }
 }
 
-impl<T> From<Type<T>> for Option<ValueDataType>
+impl<T> From<ContentType<T>> for Option<Type>
 where
     T: IntoValueDataType + Clone + 'static,
 {
-    fn from(_value: Type<T>) -> Self {
+    fn from(_value: ContentType<T>) -> Self {
         T::into_value_data_type()
     }
 }
-impl<T> From<Option<ValueDataType>> for Type<T>
+impl<T> From<Option<Type>> for ContentType<T>
 where
     T: IntoValueDataType + Clone + 'static,
 {
-    fn from(_value: Option<ValueDataType>) -> Self {
-        Type(PhantomData)
+    fn from(_value: Option<Type>) -> Self {
+        ContentType(PhantomData)
     }
 }
 
@@ -118,7 +118,7 @@ where
     pub fn var<N: Into<String>>(name: N) -> Self {
         Term::Variable {
             name: Some(name.into()),
-            _type: Type(PhantomData),
+            content_type: ContentType(PhantomData),
         }
     }
 
@@ -165,9 +165,9 @@ where
 
     /// Get the data type for this term's type parameter T
     ///
-    /// Returns Some(ValueDataType) for typed variables, None for Value type
+    /// Returns Some(Type) for typed variables, None for Value type
     /// (since Value can hold any type). Always returns None for constants.
-    pub fn data_type(&self) -> Option<ValueDataType> {
+    pub fn content_type(&self) -> Option<Type> {
         match self {
             Term::Variable { .. } => T::into_value_data_type(),
             _ => None,
@@ -184,7 +184,7 @@ where
             Term::Variable { .. } => {
                 // For typed variables, check if the value matches the expected type
                 if let Some(var_type) = T::into_value_data_type() {
-                    let value_type = ValueDataType::from(value);
+                    let value_type = Type::from(value);
                     value_type == var_type
                 } else {
                     // Untyped variables (like Term<Value>) can unify with anything
@@ -231,9 +231,12 @@ where
     pub fn as_unknown(&self) -> Term<Value> {
         match self {
             Term::Constant(value) => Term::Constant(value.as_value()),
-            Term::Variable { name, _type } => Term::Variable {
+            Term::Variable {
+                name,
+                content_type: _type,
+            } => Term::Variable {
                 name: name.clone(),
-                _type: Type::default(),
+                content_type: ContentType::default(),
             },
         }
     }
@@ -246,7 +249,7 @@ where
     fn default() -> Self {
         Term::Variable {
             name: None,
-            _type: Type::default(),
+            content_type: ContentType::default(),
         }
     }
 }
@@ -557,10 +560,10 @@ mod tests {
 
         // Terms now preserve type information using direct methods
         assert_eq!(string_term.name(), Some("name"));
-        assert_eq!(string_term.data_type(), Some(ValueDataType::String));
+        assert_eq!(string_term.content_type(), Some(Type::String));
 
         assert_eq!(untyped_term.name(), Some("anything"));
-        assert_eq!(untyped_term.data_type(), None);
+        assert_eq!(untyped_term.content_type(), None);
     }
 
     #[test]
@@ -586,9 +589,9 @@ mod tests {
         assert_eq!(any_term.name(), Some("wildcard"));
 
         // Terms now preserve type information
-        assert_eq!(name_term.data_type(), Some(ValueDataType::String));
-        assert_eq!(age_term.data_type(), Some(ValueDataType::UnsignedInt));
-        assert_eq!(any_term.data_type(), None);
+        assert_eq!(name_term.content_type(), Some(Type::String));
+        assert_eq!(age_term.content_type(), Some(Type::UnsignedInt));
+        assert_eq!(any_term.content_type(), None);
     }
 
     #[test]
@@ -648,10 +651,10 @@ mod tests {
 
         // Check that variable names are preserved
         assert_eq!(entity_term.name(), Some("entity"));
-        assert_eq!(entity_term.data_type(), Some(ValueDataType::Entity));
+        assert_eq!(entity_term.content_type(), Some(Type::Entity));
 
         assert_eq!(string_term.name(), Some("name"));
-        assert_eq!(string_term.data_type(), Some(ValueDataType::String));
+        assert_eq!(string_term.content_type(), Some(Type::String));
     }
 
     #[test]
@@ -664,12 +667,12 @@ mod tests {
 
         do_thing(&thing);
 
-        let data_type = thing.data_type();
+        let data_type = thing.content_type();
 
-        assert_eq!(data_type, Some(ValueDataType::String));
+        assert_eq!(data_type, Some(Type::String));
 
         let unknown = Term::<Value>::var("unknown");
 
-        assert_eq!(unknown.data_type(), None);
+        assert_eq!(unknown.content_type(), None);
     }
 }
