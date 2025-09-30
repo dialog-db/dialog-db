@@ -201,7 +201,7 @@ impl<'a, Form: Syntax> Stats<'a, Form> {
     pub fn provides(&self) -> VariableScope {
         let mut provides = VariableScope::new();
         for variable in self.desired.iter() {
-            provides.add(variable.clone());
+            provides.add(&variable);
         }
         provides
     }
@@ -325,12 +325,12 @@ pub enum EstimateError<'a> {
     RequiredParameters { required: &'a Required },
 }
 
-impl<'a> From<EstimateError<'a>> for CompileError<'a> {
+impl<'a> From<EstimateError<'a>> for CompileError {
     fn from(error: EstimateError<'a>) -> Self {
         match error {
-            EstimateError::RequiredParameters { required } => {
-                CompileError::RequiredBindings { required }
-            }
+            EstimateError::RequiredParameters { required } => CompileError::RequiredBindings {
+                required: required.clone(),
+            },
         }
     }
 }
@@ -470,6 +470,13 @@ impl SyntaxAnalysis {
                 self.require(term);
             }
         }
+    }
+
+    /// Bindings availabile in this context
+    pub fn bindings(&self) -> impl Iterator<Item = &Term<Value>> {
+        self.desired()
+            .entries()
+            .filter_map(|(term, cost)| if *cost == 0 { Some(term) } else { None })
     }
 }
 

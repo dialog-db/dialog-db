@@ -6,13 +6,13 @@ use crate::fact::Scalar;
 use crate::fact_selector::ATTRIBUTE_COST;
 use crate::math::ProductInput;
 use crate::plan::ConceptPlan;
+use crate::planner::Join;
 use crate::predicate::Concept;
 use crate::{
-    dependencies, parameters, Dependencies, Parameters, Requirement, Term, Value, VariableScope,
+    dependencies, parameters, DeductiveRule, Dependencies, EvaluationContext, Parameters,
+    Requirement, Selection, Source, Term, Value, VariableScope,
 };
 use std::fmt::Display;
-use std::os::macos::raw::stat;
-use std::ptr::{with_exposed_provenance, NonNull};
 
 /// Represents an application of a concept with specific term bindings.
 /// This is used when querying for entities that match a concept pattern.
@@ -204,6 +204,24 @@ impl ConceptApplication {
     //         conjuncts,
     //     })
     // }
+    //
+
+    fn evaluate<S: Source, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
+        let mut scope = VariableScope::new();
+        // If we some parameters are bound to constants we can optimize
+        // evaluation order
+        for (name, term) in self.terms.iter() {
+            if matches!(term, Term::Constant(_)) {
+                scope.add(&Term::var(name));
+            }
+        }
+
+        let implicit = DeductiveRule::from(&self.concept);
+        let join = Join::new(&implicit.premises).plan(&scope);
+    }
 }
 
 impl Planner for ConceptApplication {

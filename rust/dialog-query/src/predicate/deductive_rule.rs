@@ -6,7 +6,6 @@ pub use crate::predicate::Concept;
 pub use crate::premise::Premise;
 pub use crate::{Application, Attribute, Dependencies, Parameters, Requirement, Value};
 use crate::{Term, Type, VariableScope};
-use std::collections::HashSet;
 use std::fmt::Display;
 
 /// Represents a deductive rule that can be applied creating a premise.
@@ -24,7 +23,7 @@ impl DeductiveRule {
         &self.conclusion.operator()
     }
     pub fn operands(&self) -> impl Iterator<Item = &str> {
-        &self.conclusion.operands()
+        self.conclusion.operands()
     }
     /// Returns the names of the parameters for this rule.
     pub fn parameters(&self) -> impl Iterator<Item = &str> {

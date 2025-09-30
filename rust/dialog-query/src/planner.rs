@@ -18,6 +18,13 @@ pub enum Join<'a> {
     },
 }
 
+pub struct Candidate<'a> {
+    /// Things we have inferred during planning of the premise.
+    analysis: SyntaxAnalysis,
+    /// Premise that we have analyzed.
+    premise: &'a Premise,
+}
+
 impl<'a> Join<'a> {
     /// Creates a new planner for the given premises.
     pub fn new(premises: &'a Vec<Premise>) -> Self {
@@ -28,14 +35,16 @@ impl<'a> Join<'a> {
     /// Returns the first error found, or UnexpectedError if none.
     fn fail(
         candidates: &[(&'_ Premise, SyntaxAnalysis)],
-    ) -> Result<(&'_ Premise, VariableScope), CompileError> {
+    ) -> Result<(&'a Premise, VariableScope), CompileError> {
         for (premise, plan) in candidates {
             match plan {
                 SyntaxAnalysis::Incomplete {
                     cost,
                     required,
                     desired,
-                } => Err(CompileError::RequiredBindings { required }),
+                } => Err(CompileError::RequiredBindings {
+                    required: required.clone(),
+                }),
                 SyntaxAnalysis::Complete {
                     cost,
                     required,

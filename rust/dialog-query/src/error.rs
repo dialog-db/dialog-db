@@ -1,6 +1,7 @@
 //! Error types for the query engine
 
 pub use crate::analyzer::AnalyzerError;
+pub use crate::analyzer::Required;
 pub use crate::application::Application;
 use crate::artifact::{DialogArtifactsError, Value, ValueDataType};
 pub use crate::predicate::DeductiveRule;
@@ -384,9 +385,9 @@ pub enum SchemaError {
 }
 
 #[derive(Error, Debug, Clone, PartialEq)]
-pub enum CompileError<'a> {
+pub enum CompileError {
     #[error("Required bindings {required} are not bound in the rule environment")]
-    RequiredBindings { required: &'a Required },
+    RequiredBindings { required: Required },
     #[error("Rule {rule} does not bind a variable \"{variable}\"")]
     UnboundVariable {
         rule: DeductiveRule,
