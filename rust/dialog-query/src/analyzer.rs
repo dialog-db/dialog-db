@@ -551,6 +551,42 @@ impl SyntaxAnalysis {
         }
     }
 
+    /// Mark a variable as bound (already available in the environment)
+    /// This removes it from desired/required and adds it to depends
+    /// Variables should be in exactly one category: required, desired, or depends
+    pub fn depend<T: Scalar>(&mut self, term: &Term<T>) {
+        match term {
+            Term::Constant(_) => {}
+            Term::Variable { name: Some(_), .. } => {
+                match self {
+                    SyntaxAnalysis::Incomplete { depends, required, desired, cost } => {
+                        // Remove from required and desired
+                        required.remove(term);
+                        desired.remove(term);
+                        // Add to depends
+                        depends.add(term);
+
+                        // If no required left, transition to Candidate
+                        if required.count() == 0 {
+                            *self = SyntaxAnalysis::Candidate {
+                                cost: *cost,
+                                desired: desired.to_owned(),
+                                depends: depends.to_owned(),
+                            };
+                        }
+                    }
+                    SyntaxAnalysis::Candidate { depends, desired, .. } => {
+                        // Remove from desired
+                        desired.remove(term);
+                        // Add to depends
+                        depends.add(term);
+                    }
+                }
+            }
+            Term::Variable { name: None, .. } => {}
+        }
+    }
+
     /// Bindings availabile in this context
     pub fn bindings(&self) -> impl Iterator<Item = &Term<Value>> {
         self.desired()
@@ -591,4 +627,145 @@ pub trait Planner: Sized {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use crate::{Term, Value};
+
+    #[test]
+    fn test_syntax_analysis_new() {
+        let analysis = SyntaxAnalysis::new(100);
+
+        match analysis {
+            SyntaxAnalysis::Candidate { cost, desired, depends } => {
+                assert_eq!(cost, 100);
+                assert_eq!(desired.count(), 0);
+                assert_eq!(depends.size(), 0);
+            }
+            _ => panic!("Expected Candidate variant"),
+        }
+    }
+
+    #[test]
+    fn test_plan_context_from_candidate() {
+        let mut analysis = SyntaxAnalysis::new(100);
+        let term = Term::<Value>::var("y");
+        analysis.desire(&term, 10);
+
+        let context: PlanContext = analysis.try_into().expect("Should convert to PlanContext");
+
+        assert_eq!(context.cost, 100);
+        assert_eq!(context.desired.count(), 1);
+        assert_eq!(context.depends.size(), 0);
+    }
+
+    #[test]
+    fn test_plan_context_from_incomplete_fails() {
+        let mut analysis = SyntaxAnalysis::new(100);
+        let term = Term::<Value>::var("z");
+
+        analysis.require(&term);
+
+        let result: Result<PlanContext, _> = analysis.try_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_depend_marks_variable_as_bound() {
+        let mut analysis = SyntaxAnalysis::new(100);
+        let term = Term::<Value>::var("bound_var");
+
+        analysis.depend(&term);
+
+        // Should be in depends ONLY
+        assert_eq!(analysis.depends().size(), 1);
+        assert!(analysis.depends().contains(&term));
+
+        // Should NOT be in desired (mutual exclusivity)
+        assert_eq!(analysis.desired().count(), 0);
+        assert!(!analysis.desired().contains(&term));
+    }
+
+    #[test]
+    fn test_depend_removes_from_desired() {
+        let mut analysis = SyntaxAnalysis::new(50);
+        let term = Term::<Value>::var("var");
+
+        // First, desire it
+        analysis.desire(&term, 15);
+        assert_eq!(analysis.desired().count(), 1);
+        assert_eq!(analysis.depends().size(), 0);
+
+        // Then mark as dependent
+        analysis.depend(&term);
+
+        // Should move from desired to depends
+        assert_eq!(analysis.depends().size(), 1);
+        assert!(analysis.depends().contains(&term));
+        assert_eq!(analysis.desired().count(), 0);
+        assert!(!analysis.desired().contains(&term));
+    }
+
+    #[test]
+    fn test_depend_removes_from_required_and_transitions() {
+        let mut analysis = SyntaxAnalysis::new(90);
+        let term = Term::<Value>::var("will_be_bound");
+
+        // First, require it
+        analysis.require(&term);
+
+        match &analysis {
+            SyntaxAnalysis::Incomplete { required, .. } => {
+                assert_eq!(required.count(), 1);
+            }
+            _ => panic!("Should be Incomplete after require"),
+        }
+
+        // Then mark as dependent
+        analysis.depend(&term);
+
+        // Should transition to Candidate (no required left)
+        match analysis {
+            SyntaxAnalysis::Candidate { depends, desired, .. } => {
+                assert_eq!(depends.size(), 1);
+                assert!(depends.contains(&term));
+                assert_eq!(desired.count(), 0);
+            }
+            _ => panic!("Should transition to Candidate after satisfying requirement"),
+        }
+    }
+
+    #[test]
+    fn test_mutual_exclusivity_of_categories() {
+        let mut analysis = SyntaxAnalysis::new(100);
+        let term1 = Term::<Value>::var("a");
+        let term2 = Term::<Value>::var("b");
+        let term3 = Term::<Value>::var("c");
+
+        // term1: desired
+        analysis.desire(&term1, 10);
+        // term2: required
+        analysis.require(&term2);
+        // term3: depends
+        analysis.depend(&term3);
+
+        match analysis {
+            SyntaxAnalysis::Incomplete { depends, desired, required, .. } => {
+                // Each term should be in exactly one category
+                assert_eq!(desired.count(), 1);
+                assert!(desired.contains(&term1));
+
+                assert_eq!(required.count(), 1);
+
+                assert_eq!(depends.size(), 1);
+                assert!(depends.contains(&term3));
+
+                // Verify mutual exclusivity
+                assert!(!desired.contains(&term2));
+                assert!(!desired.contains(&term3));
+                assert!(!depends.contains(&term1));
+                assert!(!depends.contains(&term2));
+            }
+            _ => panic!("Expected Incomplete state"),
+        }
+    }
+}
