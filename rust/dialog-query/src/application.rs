@@ -8,7 +8,6 @@ use crate::analyzer::Planner;
 pub use crate::analyzer::{Analysis, AnalyzerError, Stats, Syntax};
 pub use crate::error::PlanError;
 pub use crate::plan::ApplicationPlan;
-use crate::plan::Plan;
 pub use crate::premise::{Negation, Premise};
 pub use crate::Dependencies;
 pub use crate::VariableScope;
@@ -47,18 +46,6 @@ impl Application {
         }
     }
     /// Analyzes this application to determine its dependencies and base cost.
-    pub fn compile(self) -> Result<ApplicationAnalysis, AnalyzerError> {
-        match self {
-            Application::Fact(application) => application.compile().map(ApplicationAnalysis::Fact),
-            Application::Concept(application) => {
-                application.compile().map(ApplicationAnalysis::Concept)
-            }
-            Application::Formula(application) => {
-                application.compile().map(ApplicationAnalysis::Formula)
-            }
-        }
-    }
-    /// Analyzes this application to determine its dependencies and base cost.
     pub fn analyze(&self) -> Analysis {
         match self {
             Application::Fact(selector) => selector.analyze(),
@@ -70,11 +57,10 @@ impl Application {
     /// Creates an execution plan for this application within the given variable scope.
     pub fn plan(&self, scope: &VariableScope) -> Result<ApplicationPlan, PlanError> {
         match self {
-            Application::Fact(select) => select.plan(&scope).map(ApplicationPlan::Fact),
-            Application::Concept(concept) => concept.plan(&scope).map(ApplicationPlan::Concept),
-
+            Application::Fact(select) => Ok(ApplicationPlan::Fact(select.plan(&scope)?)),
+            Application::Concept(concept) => Ok(ApplicationPlan::Concept(concept.plan(&scope)?)),
             Application::Formula(application) => {
-                application.plan(scope).map(ApplicationPlan::Formula)
+                Ok(ApplicationPlan::Formula(application.plan(scope)?))
             }
         }
     }
@@ -91,30 +77,6 @@ impl Display for Application {
             Application::Fact(application) => Display::fmt(application, f),
             Application::Concept(application) => Display::fmt(application, f),
             Application::Formula(application) => Display::fmt(application, f),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ApplicationAnalysis {
-    Fact(fact::FactApplicationAnalysis),
-    Concept(concept::ConceptApplicationAnalysis),
-    Formula(formula::FormulaApplicationAnalysis),
-}
-impl ApplicationAnalysis {
-    pub fn cost(&self) -> usize {
-        match self {
-            ApplicationAnalysis::Fact(application) => application.cost(),
-            ApplicationAnalysis::Concept(application) => application.cost(),
-            ApplicationAnalysis::Formula(application) => application.cost(),
-        }
-    }
-
-    pub fn dependencies(&self) -> &'_ Dependencies {
-        match self {
-            ApplicationAnalysis::Fact(application) => application.dependencies(),
-            ApplicationAnalysis::Concept(application) => application.dependencies(),
-            ApplicationAnalysis::Formula(application) => application.dependencies(),
         }
     }
 }
@@ -174,16 +136,16 @@ impl ApplicationAnalysis {
 impl Planner for Application {
     fn init(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
         match self {
-            Fact(application) => Planner::init(application, plan, env),
-            Concept(application) => Planner::init(application, plan, env),
-            Formula(application) => Planner::init(application, plan, env),
+            Application::Fact(application) => Planner::init(application, plan, env),
+            Application::Concept(application) => Planner::init(application, plan, env),
+            Application::Formula(application) => Planner::init(application, plan, env),
         }
     }
     fn update(&self, plan: &mut crate::analyzer::SyntaxAnalysis, env: &VariableScope) {
         match self {
-            Fact(application) => Planner::update(application, plan, env),
-            Concept(application) => Planner::update(application, plan, env),
-            Formula(application) => Planner::update(application, plan, env),
+            Application::Fact(application) => Planner::update(application, plan, env),
+            Application::Concept(application) => Planner::update(application, plan, env),
+            Application::Formula(application) => Planner::update(application, plan, env),
         }
     }
 }

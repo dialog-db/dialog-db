@@ -10,7 +10,7 @@ pub mod analyzer;
 pub mod application;
 pub mod artifact;
 pub mod attribute;
-pub mod cell;
+
 pub mod claim;
 pub mod concept;
 pub mod conversions;

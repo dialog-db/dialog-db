@@ -3,7 +3,9 @@
 //! This module provides formulas for common string operations including
 //! concatenation, length calculation, case conversion, and basic string processing.
 
-use crate::{cursor::Cursor, error::FormulaEvaluationError, Compute, Dependencies, Formula, Value};
+use std::sync::OnceLock;
+use dialog_artifacts::ValueDataType;
+use crate::{cursor::Cursor, error::FormulaEvaluationError, predicate::formula::Cells, Compute, Dependencies, Formula, Value};
 
 // ============================================================================
 // String Operations: Concatenate, Length, Uppercase, Lowercase
@@ -42,12 +44,36 @@ impl Compute for Concatenate {
     }
 }
 
+static CONCATENATE_CELLS: OnceLock<Cells> = OnceLock::new();
+
 impl Formula for Concatenate {
     type Input = ConcatenateInput;
     type Match = ();
 
     fn operator() -> &'static str {
         "concatenate"
+    }
+
+    fn cells() -> &'static Cells {
+        CONCATENATE_CELLS.get_or_init(|| {
+            Cells::define(|cell| {
+                cell("first", ValueDataType::String)
+                    .the("First string")
+                    .required();
+
+                cell("second", ValueDataType::String)
+                    .the("Second string")
+                    .required();
+
+                cell("is", ValueDataType::String)
+                    .the("Concatenated string")
+                    .derived(2);
+            })
+        })
+    }
+
+    fn cost() -> usize {
+        2
     }
 
     fn dependencies() -> Dependencies {
@@ -98,12 +124,32 @@ impl Compute for Length {
     }
 }
 
+static LENGTH_CELLS: OnceLock<Cells> = OnceLock::new();
+
 impl Formula for Length {
     type Input = LengthInput;
     type Match = ();
 
     fn operator() -> &'static str {
         "length"
+    }
+
+    fn cells() -> &'static Cells {
+        LENGTH_CELLS.get_or_init(|| {
+            Cells::define(|cell| {
+                cell("of", ValueDataType::String)
+                    .the("String to measure")
+                    .required();
+
+                cell("is", ValueDataType::UnsignedInt)
+                    .the("Length of string")
+                    .derived(1);
+            })
+        })
+    }
+
+    fn cost() -> usize {
+        1
     }
 
     fn dependencies() -> Dependencies {
@@ -153,12 +199,32 @@ impl Compute for Uppercase {
     }
 }
 
+static UPPERCASE_CELLS: OnceLock<Cells> = OnceLock::new();
+
 impl Formula for Uppercase {
     type Input = UppercaseInput;
     type Match = ();
 
     fn operator() -> &'static str {
         "uppercase"
+    }
+
+    fn cells() -> &'static Cells {
+        UPPERCASE_CELLS.get_or_init(|| {
+            Cells::define(|cell| {
+                cell("of", ValueDataType::String)
+                    .the("String to convert")
+                    .required();
+
+                cell("is", ValueDataType::String)
+                    .the("Uppercase string")
+                    .derived(1);
+            })
+        })
+    }
+
+    fn cost() -> usize {
+        1
     }
 
     fn dependencies() -> Dependencies {
@@ -208,12 +274,32 @@ impl Compute for Lowercase {
     }
 }
 
+static LOWERCASE_CELLS: OnceLock<Cells> = OnceLock::new();
+
 impl Formula for Lowercase {
     type Input = LowercaseInput;
     type Match = ();
 
     fn operator() -> &'static str {
         "lowercase"
+    }
+
+    fn cells() -> &'static Cells {
+        LOWERCASE_CELLS.get_or_init(|| {
+            Cells::define(|cell| {
+                cell("of", ValueDataType::String)
+                    .the("String to convert")
+                    .required();
+
+                cell("is", ValueDataType::String)
+                    .the("Lowercase string")
+                    .derived(1);
+            })
+        })
+    }
+
+    fn cost() -> usize {
+        1
     }
 
     fn dependencies() -> Dependencies {

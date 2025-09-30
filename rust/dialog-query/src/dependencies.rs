@@ -1,5 +1,3 @@
-use crate::fact::Scalar;
-use crate::Term;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

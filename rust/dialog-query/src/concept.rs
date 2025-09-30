@@ -1,7 +1,5 @@
-use std::collections::HashMap;
-
 use crate::analyzer::Analysis;
-use crate::application::{ConceptApplication, Join};
+use crate::application::ConceptApplication;
 use crate::attribute::Attribute;
 use crate::error::{AnalyzerError, PlanError, QueryError};
 use crate::fact_selector::{BASE_COST, ENTITY_COST, VALUE_COST};
@@ -10,11 +8,10 @@ use crate::plan::EvaluationPlan;
 use crate::predicate;
 use crate::query::{Query, QueryResult, Source};
 use crate::term::Term;
-use crate::FactSelector;
 use crate::Selection;
 use crate::VariableScope;
 use crate::{Application, Premise};
-use crate::{Dependencies, Entity, Parameters, Requirement, Value};
+use crate::{Dependencies, Entity, Parameters, Value};
 use dialog_artifacts::Instruction;
 
 /// Concept is a set of attributes associated with entity representing an
@@ -94,64 +91,67 @@ pub trait Match {
     }
 
     fn plan(&self, scope: &VariableScope) -> Result<ConceptPlan, PlanError> {
-        let mut provides = VariableScope::new();
-        let analysis = self.analyze().map_err(PlanError::from)?;
+        // let mut provides = VariableScope::new();
+        // let analysis = self.analyze().map_err(PlanError::from)?;
 
-        // analyze dependencies and make sure that all required dependencies
-        // are provided
-        for (name, requirement) in analysis.dependencies.iter() {
-            let parameter = self.term_for(name);
-            match requirement {
-                Requirement::Required => {}
-                Requirement::Derived(_) => {
-                    // If requirement can be derived and was not provided
-                    // we add it to the provided set
-                    if let Some(term) = parameter {
-                        if !scope.contains(&term) {
-                            provides.add(&term);
-                        }
-                    }
-                }
-            }
-        }
+        // // analyze dependencies and make sure that all required dependencies
+        // // are provided
+        // for (name, requirement) in analysis.dependencies.iter() {
+        //     let parameter = self.term_for(name);
+        //     match requirement {
+        //         Requirement::Required => {}
+        //         Requirement::Derived(_) => {
+        //             // If requirement can be derived and was not provided
+        //             // we add it to the provided set
+        //             if let Some(term) = parameter {
+        //                 if !scope.contains(&term) {
+        //                     provides.add(&term);
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
 
-        let mut premises = vec![];
-        let entity = self.this();
-        for (name, attribute) in Self::Attributes::attributes() {
-            if let Some(term) = self.term_for(name) {
-                let select = FactSelector::new()
-                    .the(attribute.the())
-                    .of(entity.clone())
-                    .is(term.clone());
+        // let mut premises = vec![];
+        // let entity = self.this();
+        // for (name, attribute) in Self::Attributes::attributes() {
+        //     if let Some(term) = self.term_for(name) {
+        //         let select = FactSelector::new()
+        //             .the(attribute.the())
+        //             .of(entity.clone())
+        //             .is(term.clone());
 
-                premises.push(select.into())
-            }
-        }
+        //         premises.push(select.into())
+        //     }
+        // }
 
-        let mut join = Join::new(&premises);
-        let (cost, conjuncts) = join.plan(scope)?;
+        // let mut join = Join::new(&premises);
+        // let (cost, conjuncts) = join.plan(scope)?;
 
-        Ok(ConceptPlan {
-            cost,
-            provides,
-            conjuncts,
-        })
+        // Ok(ConceptPlan {
+        //     cost,
+        //     provides,
+        //     conjuncts,
+        // })
+        // TODO: Legacy concept planning code - needs refactoring
+        panic!("Legacy concept planning not yet implemented")
     }
 
     fn conpect(&self) -> predicate::Concept {
-        let mut attributes = HashMap::new();
-        let mut operator = None;
-        for (name, attribute) in Self::Attributes::attributes() {
-            if operator.is_none() {
-                operator = Some(attribute.namespace.to_string())
-            }
-            attributes.insert(name.to_string(), attribute.clone());
-        }
+        //     let mut attributes = HashMap::new();
+        //     let mut operator = None;
+        //     for (name, attribute) in Self::Attributes::attributes() {
+        //         if operator.is_none() {
+        //             operator = Some(attribute.namespace.to_string())
+        //         }
+        //         attributes.insert(name.to_string(), attribute.clone());
+        //     }
 
-        predicate::Concept {
-            operator: operator.unwrap_or("".to_string()),
-            attributes,
-        }
+        //     predicate::Concept {
+        //         operator: operator.unwrap_or("".to_string()),
+        //         attributes,
+        //     }
+        panic!("Legacy concept conversion not yet implemented")
     }
 }
 

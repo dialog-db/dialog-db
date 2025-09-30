@@ -36,20 +36,14 @@ impl<'a> Join<'a> {
     fn fail(
         candidates: &[(&'_ Premise, SyntaxAnalysis)],
     ) -> Result<(&'a Premise, VariableScope), CompileError> {
-        for (premise, plan) in candidates {
+        for (_, plan) in candidates {
             match plan {
-                SyntaxAnalysis::Incomplete {
-                    cost,
-                    required,
-                    desired,
-                } => Err(CompileError::RequiredBindings {
-                    required: required.clone(),
-                }),
-                SyntaxAnalysis::Complete {
-                    cost,
-                    required,
-                    desired,
-                } => Ok(()),
+                SyntaxAnalysis::Incomplete { required, .. } => {
+                    Err(CompileError::RequiredBindings {
+                        required: required.clone(),
+                    })
+                }
+                SyntaxAnalysis::Candidate { .. } => Ok(()),
             }?;
         }
 
@@ -71,13 +65,13 @@ impl<'a> Join<'a> {
         scope: &VariableScope,
     ) -> Result<(Vec<Premise>, VariableScope), CompileError> {
         let mut bound = scope.clone();
-        let mut delta = scope;
+        let mut delta = scope.clone();
         let mut conjuncts = vec![];
 
         while !self.done() {
-            let (premise, provides) = self.top(delta)?;
+            let (premise, provides) = self.top(&delta)?;
 
-            delta = &bound.extend(provides);
+            delta = bound.extend(provides);
 
             conjuncts.push(premise.to_owned());
         }
@@ -98,14 +92,26 @@ impl<'a> Join<'a> {
                 for (index, premise) in premises.iter().enumerate() {
                     let plan = Planner::plan(premise, &env);
 
-                    match plan {
-                        SyntaxAnalysis::Candidate { cost, desired } => {
+                    match &plan {
+                        SyntaxAnalysis::Candidate { cost, desired, .. } => {
                             if let Some((top, _, _, _, _)) = &best {
-                                if cost < *top {
-                                    best = Some((cost, premise, plan, desired.into(), index));
+                                if cost < top {
+                                    best = Some((
+                                        *cost,
+                                        premise,
+                                        plan.clone(),
+                                        desired.clone().into(),
+                                        index,
+                                    ));
                                 }
                             } else {
-                                best = Some((cost, premise, plan, desired.into(), index));
+                                best = Some((
+                                    *cost,
+                                    premise,
+                                    plan.clone(),
+                                    desired.clone().into(),
+                                    index,
+                                ));
                             }
                         }
                         SyntaxAnalysis::Incomplete { .. } => {}
@@ -125,17 +131,20 @@ impl<'a> Join<'a> {
             }
             Join::Active { candidates } => {
                 for (index, (premise, plan)) in candidates.iter_mut().enumerate() {
-                    Planner::update(&self, plan, &differential);
+                    Planner::update(*premise, plan, &differential);
 
-                    match plan {
-                        SyntaxAnalysis::Candidate { cost, desired } => {
+                    // Clone the plan before matching to avoid borrow issues
+                    let plan_copy = plan.clone();
+
+                    match &plan_copy {
+                        SyntaxAnalysis::Candidate { cost, desired, .. } => {
+                            let provides = desired.clone().into();
                             if let Some((top, _, _, _, _)) = best {
                                 if *cost < top {
-                                    best =
-                                        Some((*cost, premise, plan.into(), desired.into(), index));
+                                    best = Some((*cost, premise, plan_copy, provides, index));
                                 }
                             } else {
-                                best = Some((*cost, premise, plan.into(), desired.into(), index));
+                                best = Some((*cost, premise, plan_copy, provides, index));
                             }
                         }
                         SyntaxAnalysis::Incomplete { .. } => {}

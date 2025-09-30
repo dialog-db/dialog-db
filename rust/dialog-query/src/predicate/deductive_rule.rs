@@ -1,6 +1,6 @@
 pub use crate::analyzer::{Analysis, AnalyzerError};
 pub use crate::application::{FactApplication, RuleApplication};
-use crate::error::{CompileError, PlanError, SchemaError};
+use crate::error::{CompileError, SchemaError};
 pub use crate::planner::Join;
 pub use crate::predicate::Concept;
 pub use crate::premise::Premise;
@@ -43,7 +43,7 @@ impl DeductiveRule {
         // rule premises, otherwise we produce an error since rule evaluation
         // would not be able to bind such parameter.
         for name in self.operands() {
-            if !derived.contains(&Term::var(name)) {
+            if !derived.contains(&Term::<Value>::var(name)) {
                 Err(CompileError::UnboundVariable {
                     rule: self.clone(),
                     variable: name.to_string(),
@@ -162,18 +162,21 @@ impl Display for DeductiveRule {
 
 impl From<&Concept> for DeductiveRule {
     fn from(concept: &Concept) -> Self {
+        use crate::artifact::Entity;
+
         let mut premises = Vec::new();
 
-        let this = Term::var("this");
+        let this = Term::<Entity>::var("this");
         for (name, attribute) in concept.attributes.iter() {
+            let attr_str = attribute.the();
+            let the = Term::Constant(
+                attr_str
+                    .parse::<crate::artifact::Attribute>()
+                    .expect("Failed to parse attribute name"),
+            );
             premises.push(
-                FactApplication::new(
-                    attribute.the().parse().expect("Expected a valid attribute"),
-                    this.clone(),
-                    Term::var(name),
-                    attribute.cardinality,
-                )
-                .into(),
+                FactApplication::new(the, this.clone(), Term::var(name), attribute.cardinality)
+                    .into(),
             );
         }
 

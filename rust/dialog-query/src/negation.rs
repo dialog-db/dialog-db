@@ -1,15 +1,12 @@
+use crate::analyzer;
 use crate::analyzer::Planner;
-use crate::application::ApplicationAnalysis;
-use crate::plan::Plan;
-use crate::{analyzer, dependencies};
 
-use super::analyzer::{Analysis, Stats, Syntax};
+use super::analyzer::Analysis;
 use super::application::Application;
-use super::error::{AnalyzerError, PlanError};
+use super::error::PlanError;
 use super::plan::NegationPlan;
 use super::{Dependencies, VariableScope};
 use std::fmt::Display;
-use std::os::macos::raw::stat;
 
 // FactSelectorPlan's EvaluationPlan implementation is in fact_selector.rs
 
@@ -54,23 +51,6 @@ impl Negation {
 
         Ok(plan.not())
     }
-
-    pub fn compile(self) -> Result<NegationAnalysis, AnalyzerError> {
-        let Negation(source) = self;
-        let mut dependencies = Dependencies::new();
-        let application = source.compile()?;
-        for (name, _) in application.dependencies().iter() {
-            dependencies.require(name.into());
-        }
-
-        Ok(NegationAnalysis {
-            analysis: Analysis {
-                cost: application.cost(),
-                dependencies,
-            },
-            application,
-        })
-    }
 }
 
 impl Planner for Negation {
@@ -99,22 +79,6 @@ impl Planner for Negation {
 //         }
 //     }
 // }
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct NegationAnalysis {
-    pub application: ApplicationAnalysis,
-    pub analysis: Analysis,
-}
-
-impl NegationAnalysis {
-    pub fn cost(&self) -> usize {
-        self.analysis.cost
-    }
-
-    pub fn dependencies(&self) -> &'_ Dependencies {
-        &self.analysis.dependencies
-    }
-}
 
 impl Display for Negation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

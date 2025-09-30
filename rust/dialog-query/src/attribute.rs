@@ -4,7 +4,7 @@ pub use crate::artifact::{Attribute as ArtifactsAttribute, Entity, Value};
 use crate::error::{SchemaError, TypeError};
 pub use crate::fact_selector::FactSelector;
 pub use crate::term::Term;
-pub use crate::types::{IntoValueDataType, Scalar};
+pub use crate::types::{IntoValueDataType, Scalar, Type};
 use crate::Parameters;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use std::marker::PhantomData;
@@ -69,25 +69,28 @@ impl<T: Scalar> Attribute<T> {
     }
 
     /// Type checks that provided term matches cells content type. If term
-    pub fn check<T: Scalar>(&self, term: &Term<T>) -> Result<&Term<T>, TypeError> {
+    pub fn check<'a, U: Scalar>(&self, term: &'a Term<U>) -> Result<&'a Term<U>, TypeError> {
         let expected = self.data_type();
         // First we type check the input to ensure it matches cell's content type
         if let Some(actual) = term.data_type() {
-            if (&actual != expected) {
-                Err(TypeError::TypeMismatch {
-                    expected: expected.into(),
-                    actual: term.into(),
-                })?;
-            };
+            if let Some(expected_type) = expected {
+                if actual != expected_type {
+                    // Convert the term to Term<Value> for the error
+                    return Err(TypeError::TypeMismatch {
+                        expected: expected_type,
+                        actual: term.as_unknown(),
+                    });
+                }
+            }
         };
 
         Ok(term)
     }
 
-    pub fn conform<T: Scalar>(
+    pub fn conform<'a, U: Scalar>(
         &self,
-        term: Option<&Term<T>>,
-    ) -> Result<Option<&Term<T>>, TypeError> {
+        term: Option<&'a Term<U>>,
+    ) -> Result<Option<&'a Term<U>>, TypeError> {
         // We check that cell type matches term type.
         if let Some(term) = term {
             self.check(term)?;
@@ -98,8 +101,17 @@ impl<T: Scalar> Attribute<T> {
 
     pub fn resolve(&self, value: Value) -> Result<Relation, TypeError> {
         if value.data_type() == self.data_type {
+            let the_str = self.the();
+            let the_attr =
+                the_str
+                    .parse::<ArtifactsAttribute>()
+                    .map_err(|_| TypeError::TypeMismatch {
+                        expected: ValueDataType::Symbol,
+                        actual: Term::Constant(Value::String(the_str.clone())),
+                    })?;
+
             Ok(Relation {
-                the: self.the().parse().unwrap(),
+                the: the_attr,
                 is: value.clone(),
                 cardinality: self.cardinality,
             })
@@ -113,28 +125,53 @@ impl<T: Scalar> Attribute<T> {
 
     pub fn apply(&self, parameters: Parameters) -> Result<FactApplication, SchemaError> {
         // Check that type of the `is` parameter matches the attribute's data type
-        self.conform(parameters.get("is"))?;
+        self.conform(parameters.get("is"))
+            .map_err(|e| e.at("is".to_string()))?;
 
         // Check that if `this` parameter is provided, it has entity type.
         if let Some(this) = parameters.get("this") {
             if let Some(actual) = this.data_type() {
-                if (&actual != Type::Entity) {
-                    Err(TypeError::TypeMismatch {
-                        expected: Type::Entity,
-                        actual: this.into(),
-                    })?;
-                };
-            };
-        }?;
+                if actual != ValueDataType::Entity {
+                    return Err(SchemaError::TypeError {
+                        binding: "this".to_string(),
+                        expected: ValueDataType::Entity,
+                        actual: this.clone(),
+                    });
+                }
+            }
+        }
 
         let blank = Term::blank();
+        let blank_entity = Term::<Entity>::blank();
 
-        Ok(FactApplication::new(
-            self.the().parse().expect("Expected a valid attribute"),
-            parameters.get("this").unwrap_or(&blank).into(),
-            parameters.get("is").unwrap_or(&blank).into(),
-            self.cardinality,
-        ))
+        // Get the attribute term - parse the string name to an Attribute
+        let attr_str = self.the();
+        let the = Term::Constant(
+            attr_str
+                .parse::<ArtifactsAttribute>()
+                .expect("Failed to parse attribute name"),
+        );
+
+        // TODO: Verify that this is Term<Entity> instead.
+        // Get the entity term (this), converting from Term<Value> if needed
+        let of = parameters
+            .get("this")
+            .map(|t| match t {
+                Term::Variable { name, .. } => Term::<Entity>::Variable {
+                    name: name.clone(),
+                    _type: Default::default(),
+                },
+                Term::Constant(v) => match v {
+                    Value::Entity(e) => Term::Constant(e.clone()),
+                    _ => blank_entity.clone(),
+                },
+            })
+            .unwrap_or_else(|| blank_entity.clone());
+
+        // Get the value term (is)
+        let is = parameters.get("is").unwrap_or(&blank).clone();
+
+        Ok(FactApplication::new(the, of, is, self.cardinality))
     }
 }
 

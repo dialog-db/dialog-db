@@ -1,12 +1,10 @@
-use std::{collections::HashMap, usize};
+use std::{sync::OnceLock, usize};
 
 use dialog_artifacts::ValueDataType;
 
 use crate::{
-    cursor::Cursor,
-    error::FormulaEvaluationError,
-    predicate::formula::{Cell, Cells},
-    Compute, Dependencies, Formula, Term, Value,
+    cursor::Cursor, error::FormulaEvaluationError, predicate::formula::Cells, Compute,
+    Dependencies, Formula, Term, Value,
 };
 
 // ============================================================================
@@ -54,19 +52,7 @@ impl Compute for Sum {
     }
 }
 
-const SUM_CELLS: Cells = Cells::define(|cell| {
-    cell("of", ValueDataType::UnsignedInt)
-        .the("Number to add to")
-        .required();
-
-    cell("with", ValueDataType::UnsignedInt)
-        .the("Number to add")
-        .required();
-
-    cell("is", ValueDataType::UnsignedInt)
-        .the("Sum of numbers")
-        .derived(5);
-});
+static SUM_CELLS: OnceLock<Cells> = OnceLock::new();
 
 impl Formula for Sum {
     type Input = SumInput;
@@ -77,7 +63,25 @@ impl Formula for Sum {
     }
 
     fn cells() -> &'static Cells {
-        &SUM_CELLS
+        SUM_CELLS.get_or_init(|| {
+            Cells::define(|cell| {
+                cell("of", ValueDataType::UnsignedInt)
+                    .the("Number to add to")
+                    .required();
+
+                cell("with", ValueDataType::UnsignedInt)
+                    .the("Number to add")
+                    .required();
+
+                cell("is", ValueDataType::UnsignedInt)
+                    .the("Sum of numbers")
+                    .derived(5);
+            })
+        })
+    }
+
+    fn cost() -> usize {
+        5
     }
 
     fn dependencies() -> Dependencies {
@@ -137,6 +141,8 @@ impl Compute for Difference {
     }
 }
 
+static DIFFERENCE_CELLS: OnceLock<Cells> = OnceLock::new();
+
 impl Formula for Difference {
     type Input = DifferenceInput;
     type Match = ();
@@ -145,23 +151,28 @@ impl Formula for Difference {
         "difference"
     }
 
-    fn cells(cells: Cells) {
-        cells
-            .cell("of", ValueDataType::UnsignedInt)
-            .the("Number to subtract from")
-            .required();
+    fn cells() -> &'static Cells {
+        DIFFERENCE_CELLS.get_or_init(|| {
+            Cells::define(|cell| {
+                cell("of", ValueDataType::UnsignedInt)
+                    .the("Number to subtract from")
+                    .required();
 
-        cells
-            .cell("subtract", ValueDataType::UnsignedInt)
-            .the("Number to subtract")
-            .required();
+                cell("subtract", ValueDataType::UnsignedInt)
+                    .the("Number to subtract")
+                    .required();
 
-        cells
-            .cell("is", ValueDataType::UnsignedInt)
-            .the("Difference")
-            .typed(ValueDataType::UnsignedInt)
-            .derived(2);
+                cell("is", ValueDataType::UnsignedInt)
+                    .the("Difference")
+                    .derived(2);
+            })
+        })
     }
+
+    fn cost() -> usize {
+        2
+    }
+
     fn dependencies() -> Dependencies {
         let mut dependencies = Dependencies::new();
         dependencies.require("of".into());
@@ -214,6 +225,8 @@ impl Compute for Product {
     }
 }
 
+static PRODUCT_CELLS: OnceLock<Cells> = OnceLock::new();
+
 impl Formula for Product {
     type Input = ProductInput;
     type Match = ();
@@ -222,24 +235,26 @@ impl Formula for Product {
         "product"
     }
 
-    fn cells(cells: Cells) {
-        cells
-            .cell("of", ValueDataType::UnsignedInt)
-            .the("Number to multiply")
-            .typed(ValueDataType::UnsignedInt)
-            .required();
+    fn cells() -> &'static Cells {
+        PRODUCT_CELLS.get_or_init(|| {
+            Cells::define(|cell| {
+                cell("of", ValueDataType::UnsignedInt)
+                    .the("Number to multiply")
+                    .required();
 
-        cells
-            .cell("times", ValueDataType::UnsignedInt)
-            .the("Times to multiply")
-            .typed(ValueDataType::UnsignedInt)
-            .required();
+                cell("times", ValueDataType::UnsignedInt)
+                    .the("Times to multiply")
+                    .required();
 
-        cells
-            .cell("is", ValueDataType::UnsignedInt)
-            .the("Result of multiplication")
-            .typed(ValueDataType::UnsignedInt)
-            .derived(5);
+                cell("is", ValueDataType::UnsignedInt)
+                    .the("Result of multiplication")
+                    .derived(5);
+            })
+        })
+    }
+
+    fn cost() -> usize {
+        5
     }
 
     fn dependencies() -> Dependencies {
@@ -299,6 +314,8 @@ impl Compute for Quotient {
     }
 }
 
+static QUOTIENT_CELLS: OnceLock<Cells> = OnceLock::new();
+
 impl Formula for Quotient {
     type Input = QuotientInput;
     type Match = ();
@@ -307,29 +324,34 @@ impl Formula for Quotient {
         "quotient"
     }
 
+    fn cells() -> &'static Cells {
+        QUOTIENT_CELLS.get_or_init(|| {
+            Cells::define(|cell| {
+                cell("of", ValueDataType::UnsignedInt)
+                    .the("Number to divide")
+                    .required();
+
+                cell("by", ValueDataType::UnsignedInt)
+                    .the("Number to divide by")
+                    .required();
+
+                cell("is", ValueDataType::UnsignedInt)
+                    .the("Result of division")
+                    .derived(5);
+            })
+        })
+    }
+
+    fn cost() -> usize {
+        5
+    }
+
     fn dependencies() -> Dependencies {
         let mut dependencies = Dependencies::new();
         dependencies.require("of".into());
         dependencies.require("by".into());
         dependencies.provide("is".into());
         dependencies
-    }
-
-    fn cells(cells: Cells) {
-        cells
-            .cell("of", ValueDataType::UnsignedInt)
-            .the("Number to divide")
-            .derived(5);
-
-        cells
-            .cell("by", ValueDataType::UnsignedInt)
-            .the("Number to divide by")
-            .derived(5);
-
-        cells
-            .cell("is", ValueDataType::UnsignedInt)
-            .the("Result of division")
-            .derived(5);
     }
 
     fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
@@ -381,6 +403,8 @@ impl Compute for Modulo {
     }
 }
 
+static MODULO_CELLS: OnceLock<Cells> = OnceLock::new();
+
 impl Formula for Modulo {
     type Input = ModuloInput;
     type Match = ();
@@ -389,27 +413,34 @@ impl Formula for Modulo {
         "modulo"
     }
 
+    fn cells() -> &'static Cells {
+        MODULO_CELLS.get_or_init(|| {
+            Cells::define(|cell| {
+                cell("of", ValueDataType::UnsignedInt)
+                    .the("Number to compute modulo of")
+                    .required();
+
+                cell("by", ValueDataType::UnsignedInt)
+                    .the("Number to compute modulo by")
+                    .required();
+
+                cell("is", ValueDataType::UnsignedInt)
+                    .the("Result of modulo operation")
+                    .derived(10);
+            })
+        })
+    }
+
+    fn cost() -> usize {
+        10
+    }
+
     fn dependencies() -> Dependencies {
         let mut dependencies = Dependencies::new();
         dependencies.require("of".into());
         dependencies.require("by".into());
         dependencies.provide("is".into());
         dependencies
-    }
-
-    fn cells(cells: Cells) {
-        cells
-            .cell("of", ValueDataType::UnsignedInt)
-            .the("Number to compute module of")
-            .required();
-        cells
-            .cell("by", ValueDataType::UnsignedInt)
-            .the("Number to compute module by")
-            .required();
-        cells
-            .cell("is", ValueDataType::UnsignedInt)
-            .the("Result of modulo operation")
-            .derived(10);
     }
 
     fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {

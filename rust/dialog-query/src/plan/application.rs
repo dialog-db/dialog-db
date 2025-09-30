@@ -1,8 +1,9 @@
 pub use super::{
-    application, try_stream, ConceptPlan, EvaluationContext, EvaluationPlan, FactApplicationPlan,
+    application, try_stream, ConceptPlan, EvaluationContext, EvaluationPlan,
     FormulaApplicationPlan, NegationPlan, Ordering, RuleApplicationPlan, Selection, Source,
     VariableScope,
 };
+pub use crate::application::fact::FactApplicationPlan;
 
 /// Execution plan for different types of applications.
 /// Contains the optimized execution strategy for each application type.

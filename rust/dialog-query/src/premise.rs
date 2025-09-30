@@ -5,9 +5,9 @@
 //!
 //! Note: Premises are only used in rule conditions (the "when" part), not in conclusions.
 
-pub use super::application::{Application, ApplicationAnalysis};
-use super::application::{FactApplication, FormulaApplication, RuleApplication};
-pub use super::negation::{Negation, NegationAnalysis};
+pub use super::application::Application;
+use super::application::{FactApplication, FormulaApplication};
+pub use super::negation::Negation;
 pub use super::plan::{EvaluationPlan, Plan};
 use crate::analyzer::Planner;
 pub use crate::analyzer::{Analysis, Stats, Syntax};
@@ -37,12 +37,6 @@ impl Premise {
         match self {
             Premise::Apply(application) => application.cost(),
             Premise::Exclude(negation) => negation.cost(),
-        }
-    }
-    pub fn compile(self) -> Result<PremiseAnalysis, AnalyzerError> {
-        match self {
-            Premise::Apply(application) => application.compile().map(PremiseAnalysis::Apply),
-            Premise::Exclude(negation) => negation.compile().map(PremiseAnalysis::Exclude),
         }
     }
     /// Creates an execution plan for this premise within the given variable scope.
@@ -120,39 +114,6 @@ impl Planner for Premise {
             Self::Apply(application) => Planner::update(application, plan, env),
             Self::Exclude(negation) => Planner::update(negation, plan, env),
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum PremiseAnalysis {
-    Apply(ApplicationAnalysis),
-    Exclude(NegationAnalysis),
-}
-impl PremiseAnalysis {
-    pub fn cost(&self) -> usize {
-        match self {
-            PremiseAnalysis::Apply(application) => application.cost(),
-            PremiseAnalysis::Exclude(application) => application.cost(),
-        }
-    }
-
-    pub fn dependencies(&self) -> &'_ Dependencies {
-        match self {
-            PremiseAnalysis::Apply(application) => application.dependencies(),
-            PremiseAnalysis::Exclude(application) => application.dependencies(),
-        }
-    }
-}
-
-impl From<ApplicationAnalysis> for PremiseAnalysis {
-    fn from(application: ApplicationAnalysis) -> Self {
-        PremiseAnalysis::Apply(application)
-    }
-}
-
-impl From<NegationAnalysis> for PremiseAnalysis {
-    fn from(negation: NegationAnalysis) -> Self {
-        PremiseAnalysis::Exclude(negation)
     }
 }
 

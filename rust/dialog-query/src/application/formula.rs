@@ -1,10 +1,10 @@
 pub use super::Application;
 pub use crate::analyzer::Analysis;
-use crate::analyzer::{AnalysisStatus, Environment, Plan as SyntaxPlan, Planner, Stats, Syntax};
+use crate::analyzer::Planner;
 pub use crate::cursor::Cursor;
 pub use crate::error::{AnalyzerError, FormulaEvaluationError, PlanError};
 pub use crate::plan::FormulaApplicationPlan;
-use crate::predicate::formula::{Cell, Cells};
+use crate::predicate::formula::Cells;
 use crate::Term;
 pub use crate::{Dependencies, Match, Parameters, Requirement, VariableScope};
 use std::fmt::Display;
@@ -42,8 +42,8 @@ impl FormulaApplication {
 
     pub fn analyze(&self) -> Analysis {
         let mut analysis = Analysis::new(self.cost);
-        for (name, requirement) in self.dependencies.iter() {
-            match requirement {
+        for (name, cell) in self.cells.iter() {
+            match cell.requirement() {
                 Requirement::Derived(cost) => {
                     analysis.desire(self.parameters.get(name), *cost);
                 }
@@ -63,7 +63,18 @@ impl FormulaApplication {
     }
 
     pub fn dependencies(&self) -> Dependencies {
-        self.dependencies.clone()
+        let mut dependencies = Dependencies::new();
+        for (name, cell) in self.cells.iter() {
+            match cell.requirement() {
+                Requirement::Derived(cost) => {
+                    dependencies.desire(name.to_string(), *cost);
+                }
+                Requirement::Required => {
+                    dependencies.require(name.to_string());
+                }
+            }
+        }
+        dependencies
     }
 
     pub fn plan(&self, scope: &VariableScope) -> Result<FormulaApplicationPlan, PlanError> {
@@ -72,7 +83,8 @@ impl FormulaApplication {
         // We ensure that all terms for all required formula parametrs are
         // applied, otherwise we fail. We also identify all the dependencies
         // that formula will derive.
-        for (name, requirement) in self.dependencies.iter() {
+        for (name, cell) in self.cells.iter() {
+            let requirement = cell.requirement();
             let term = self.parameters.get(name);
             match requirement {
                 Requirement::Required => {
@@ -115,7 +127,7 @@ impl FormulaApplication {
         Ok(FormulaApplicationAnalysis {
             analysis: Analysis {
                 cost: self.cost,
-                dependencies: self.dependencies.clone(),
+                dependencies: self.dependencies(),
             },
             application: self,
         })

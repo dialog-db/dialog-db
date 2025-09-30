@@ -5,7 +5,6 @@ use crate::{Dependencies, Term, Value, VariableScope};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
-use std::marker::PhantomData;
 use thiserror::Error;
 
 /// Errors that can occur during rule or formula analysis.
@@ -298,14 +297,14 @@ impl Desired {
         self.0.values().sum()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = Term<Value>> {
+    pub fn iter(&self) -> impl Iterator<Item = Term<Value>> + '_ {
         self.0.keys().map(|name| Term::var(name.clone()))
     }
 
-    pub fn entries(&self) -> impl Iterator<Item = (&Term<Value>, &usize)> {
+    pub fn entries(&self) -> impl Iterator<Item = (Term<Value>, usize)> + '_ {
         self.0
             .iter()
-            .map(|(name, cost)| (&Term::var(name.clone()), cost))
+            .map(|(name, cost)| (Term::var(name.clone()), *cost))
     }
 }
 
@@ -313,7 +312,7 @@ impl From<Desired> for VariableScope {
     fn from(desired: Desired) -> Self {
         let mut scope = VariableScope::new();
         for (name, _) in desired.0.into_iter() {
-            scope.add(&Term::var(name));
+            scope.add(&Term::<Value>::var(name));
         }
         scope
     }
@@ -408,6 +407,7 @@ impl From<PlanContext> for SyntaxAnalysis {
     }
 }
 
+#[derive(Clone)]
 pub enum SyntaxAnalysis {
     /// Plan that can not be evaluated because it has unsatisfied requirements.
     Incomplete {
@@ -454,8 +454,8 @@ impl SyntaxAnalysis {
 
     pub fn provides(&self) -> &VariableScope {
         match self {
-            SyntaxAnalysis::Incomplete { desired, .. } => desired,
-            SyntaxAnalysis::Candidate { desired, .. } => desired,
+            SyntaxAnalysis::Incomplete { depends, .. } => depends,
+            SyntaxAnalysis::Candidate { depends, .. } => depends,
         }
     }
 
@@ -496,7 +496,7 @@ impl SyntaxAnalysis {
                     depends,
                 } => {
                     *self = SyntaxAnalysis::Incomplete {
-                        cost: total + *cost,
+                        cost: *total + cost,
                         desired: desired.to_owned(),
                         required: required.to_owned(),
                         depends: depends.to_owned(),
@@ -508,7 +508,7 @@ impl SyntaxAnalysis {
                     depends,
                 } => {
                     *self = SyntaxAnalysis::Candidate {
-                        cost: total + *cost,
+                        cost: *total + cost,
                         desired: desired.to_owned(),
                         depends: depends.to_owned(),
                     };
@@ -527,7 +527,7 @@ impl SyntaxAnalysis {
 
                     // if none of the requirements are left we transition it to
                     // candidate state.
-                    if (required.count() == 0) {
+                    if required.count() == 0 {
                         *self = SyntaxAnalysis::Candidate {
                             cost: *total,
                             desired: desired.to_owned(),
@@ -544,10 +544,14 @@ impl SyntaxAnalysis {
     }
 
     pub fn require_all(&mut self) {
-        for (term, cost) in self.desired().entries() {
-            if cost > &0 {
-                self.require(term);
-            }
+        let terms: Vec<_> = self
+            .desired()
+            .entries()
+            .filter(|(_, cost)| *cost > 0)
+            .map(|(term, _)| term)
+            .collect();
+        for term in terms {
+            self.require(&term);
         }
     }
 
@@ -559,7 +563,12 @@ impl SyntaxAnalysis {
             Term::Constant(_) => {}
             Term::Variable { name: Some(_), .. } => {
                 match self {
-                    SyntaxAnalysis::Incomplete { depends, required, desired, cost } => {
+                    SyntaxAnalysis::Incomplete {
+                        depends,
+                        required,
+                        desired,
+                        cost,
+                    } => {
                         // Remove from required and desired
                         required.remove(term);
                         desired.remove(term);
@@ -575,7 +584,9 @@ impl SyntaxAnalysis {
                             };
                         }
                     }
-                    SyntaxAnalysis::Candidate { depends, desired, .. } => {
+                    SyntaxAnalysis::Candidate {
+                        depends, desired, ..
+                    } => {
                         // Remove from desired
                         desired.remove(term);
                         // Add to depends
@@ -588,10 +599,10 @@ impl SyntaxAnalysis {
     }
 
     /// Bindings availabile in this context
-    pub fn bindings(&self) -> impl Iterator<Item = &Term<Value>> {
+    pub fn bindings(&self) -> impl Iterator<Item = Term<Value>> + '_ {
         self.desired()
             .entries()
-            .filter_map(|(term, cost)| if *cost == 0 { Some(term) } else { None })
+            .filter_map(|(term, cost)| if cost == 0 { Some(term) } else { None })
     }
 }
 
@@ -611,13 +622,13 @@ pub trait Planner: Sized {
             required,
             desired,
             depends,
-        } = plan
+        } = &plan
         {
             if required.count() == 0 {
-                *plan = SyntaxAnalysis::Candidate {
-                    cost,
-                    desired,
-                    depends,
+                plan = SyntaxAnalysis::Candidate {
+                    cost: *cost,
+                    desired: desired.clone(),
+                    depends: depends.clone(),
                 };
             }
         }
@@ -636,7 +647,11 @@ mod tests {
         let analysis = SyntaxAnalysis::new(100);
 
         match analysis {
-            SyntaxAnalysis::Candidate { cost, desired, depends } => {
+            SyntaxAnalysis::Candidate {
+                cost,
+                desired,
+                depends,
+            } => {
                 assert_eq!(cost, 100);
                 assert_eq!(desired.count(), 0);
                 assert_eq!(depends.size(), 0);
@@ -725,7 +740,9 @@ mod tests {
 
         // Should transition to Candidate (no required left)
         match analysis {
-            SyntaxAnalysis::Candidate { depends, desired, .. } => {
+            SyntaxAnalysis::Candidate {
+                depends, desired, ..
+            } => {
                 assert_eq!(depends.size(), 1);
                 assert!(depends.contains(&term));
                 assert_eq!(desired.count(), 0);
@@ -749,7 +766,12 @@ mod tests {
         analysis.depend(&term3);
 
         match analysis {
-            SyntaxAnalysis::Incomplete { depends, desired, required, .. } => {
+            SyntaxAnalysis::Incomplete {
+                depends,
+                desired,
+                required,
+                ..
+            } => {
                 // Each term should be in exactly one category
                 assert_eq!(desired.count(), 1);
                 assert!(desired.contains(&term1));

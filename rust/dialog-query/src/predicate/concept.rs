@@ -50,10 +50,10 @@ impl Attributes {
         Ok(parameters)
     }
 
-    pub fn from<T: Iterator<Item = (&str, Attribute<Value>)>>(attributes: T) -> Self {
+    pub fn from<T: IntoIterator<Item = (String, Attribute<Value>)>>(iter: T) -> Self {
         let mut attributes = Attributes::new();
-        for (name, attribute) in attributes {
-            attributes.0.insert(name.to_string(), attribute);
+        for (name, attribute) in iter {
+            attributes.0.insert(name, attribute);
         }
         attributes
     }
@@ -149,7 +149,7 @@ impl Concept {
     }
 
     pub fn operands(&self) -> impl Iterator<Item = &str> {
-        std::iter::once("this").chain(self.attributes.keys().map(|key| key.as_str()))
+        std::iter::once("this").chain(self.attributes.keys().map(|key| key.as_ref()))
     }
 
     pub fn with(mut self, name: &str, attribute: Attribute<Value>) -> Self {
@@ -172,7 +172,7 @@ impl Concept {
             self.attributes
                 .keys()
                 .find(|name| !dependencies.contains(name))
-                .map(|name| name.as_str())
+                .map(|name| name.as_ref())
         }
     }
 
@@ -203,13 +203,15 @@ impl Concept {
     /// * `SchemaError::TypeError` - If an attribute value has the wrong type
     pub fn conform(&self, model: Model) -> Result<Instance, SchemaError> {
         let mut relations = vec![];
-        for (name, attribute) in &self.attributes {
+        for (name, attribute) in self.attributes.iter() {
             if let Some(value) = model.attributes.get(name) {
-                let relation = attribute.resolve(value.clone())?;
+                let relation = attribute
+                    .resolve(value.clone())
+                    .map_err(|e| e.at(name.to_string()))?;
                 relations.push(relation);
             } else {
-                return Err(SchemaError::MissingProperty {
-                    property: name.into(),
+                return Err(SchemaError::OmittedRequirement {
+                    binding: name.into(),
                 });
             }
         }

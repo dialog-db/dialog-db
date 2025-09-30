@@ -3,7 +3,9 @@
 //! This module provides formulas for boolean operations including
 //! AND, OR, and NOT operations.
 
-use crate::{cursor::Cursor, error::FormulaEvaluationError, Compute, Dependencies, Formula, Value};
+use std::sync::OnceLock;
+use dialog_artifacts::ValueDataType;
+use crate::{cursor::Cursor, error::FormulaEvaluationError, predicate::formula::Cells, Compute, Dependencies, Formula, Value};
 
 // ============================================================================
 // Boolean Logic Operations: And, Or, Not
@@ -42,12 +44,36 @@ impl Compute for And {
     }
 }
 
+static AND_CELLS: OnceLock<Cells> = OnceLock::new();
+
 impl Formula for And {
     type Input = AndInput;
     type Match = ();
 
     fn operator() -> &'static str {
         "and"
+    }
+
+    fn cells() -> &'static Cells {
+        AND_CELLS.get_or_init(|| {
+            Cells::define(|cell| {
+                cell("left", ValueDataType::Boolean)
+                    .the("Left operand")
+                    .required();
+
+                cell("right", ValueDataType::Boolean)
+                    .the("Right operand")
+                    .required();
+
+                cell("is", ValueDataType::Boolean)
+                    .the("Result of AND operation")
+                    .derived(1);
+            })
+        })
+    }
+
+    fn cost() -> usize {
+        1
     }
 
     fn dependencies() -> Dependencies {
@@ -102,12 +128,36 @@ impl Compute for Or {
     }
 }
 
+static OR_CELLS: OnceLock<Cells> = OnceLock::new();
+
 impl Formula for Or {
     type Input = OrInput;
     type Match = ();
 
     fn operator() -> &'static str {
         "or"
+    }
+
+    fn cells() -> &'static Cells {
+        OR_CELLS.get_or_init(|| {
+            Cells::define(|cell| {
+                cell("left", ValueDataType::Boolean)
+                    .the("Left operand")
+                    .required();
+
+                cell("right", ValueDataType::Boolean)
+                    .the("Right operand")
+                    .required();
+
+                cell("is", ValueDataType::Boolean)
+                    .the("Result of OR operation")
+                    .derived(1);
+            })
+        })
+    }
+
+    fn cost() -> usize {
+        1
     }
 
     fn dependencies() -> Dependencies {
@@ -158,12 +208,32 @@ impl Compute for Not {
     }
 }
 
+static NOT_CELLS: OnceLock<Cells> = OnceLock::new();
+
 impl Formula for Not {
     type Input = NotInput;
     type Match = ();
 
     fn operator() -> &'static str {
         "not"
+    }
+
+    fn cells() -> &'static Cells {
+        NOT_CELLS.get_or_init(|| {
+            Cells::define(|cell| {
+                cell("value", ValueDataType::Boolean)
+                    .the("Boolean value to negate")
+                    .required();
+
+                cell("is", ValueDataType::Boolean)
+                    .the("Result of NOT operation")
+                    .derived(1);
+            })
+        })
+    }
+
+    fn cost() -> usize {
+        1
     }
 
     fn dependencies() -> Dependencies {

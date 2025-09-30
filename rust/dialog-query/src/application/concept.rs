@@ -1,16 +1,12 @@
 use super::fact::{BASE_COST, ENTITY_COST, VALUE_COST};
-use crate::analyzer::{Analysis, AnalyzerError, Stats};
-use crate::analyzer::{AnalysisStatus, Environment, Planner, Syntax};
+use crate::analyzer::Planner;
+use crate::analyzer::{Analysis, AnalyzerError};
 use crate::error::PlanError;
-use crate::fact::Scalar;
-use crate::fact_selector::ATTRIBUTE_COST;
-use crate::math::ProductInput;
 use crate::plan::ConceptPlan;
-use crate::planner::Join;
 use crate::predicate::Concept;
 use crate::{
-    dependencies, parameters, DeductiveRule, Dependencies, EvaluationContext, Parameters,
-    Requirement, Selection, Source, Term, Value, VariableScope,
+    Dependencies, EvaluationContext, Parameters, Requirement, Selection, Source, Term, Value,
+    VariableScope,
 };
 use std::fmt::Display;
 
@@ -97,7 +93,7 @@ impl ConceptApplication {
     }
 
     pub fn plan(&self, scope: &VariableScope) -> Result<ConceptPlan, PlanError> {
-        let analysis = self.analyze()?;
+        let analysis = self.analyze();
         let mut cost = analysis.cost;
         let mut provides = VariableScope::new();
         for (name, requirement) in analysis.dependencies.iter() {
@@ -210,17 +206,21 @@ impl ConceptApplication {
         &self,
         context: EvaluationContext<S, M>,
     ) -> impl Selection {
-        let mut scope = VariableScope::new();
-        // If we some parameters are bound to constants we can optimize
-        // evaluation order
-        for (name, term) in self.terms.iter() {
-            if matches!(term, Term::Constant(_)) {
-                scope.add(&Term::var(name));
-            }
-        }
+        // let mut scope = VariableScope::new();
+        // // If we some parameters are bound to constants we can optimize
+        // // evaluation order
+        // for (name, term) in self.terms.iter() {
+        //     if matches!(term, Term::Constant(_)) {
+        //         scope.add(&Term::var(name));
+        //     }
+        // }
+        // TODO: Phase 7 - Implement concept evaluation using context.scope
+        // This needs to resolve the concept's rule, plan execution order based on bound variables,
+        // and evaluate the premises
 
-        let implicit = DeductiveRule::from(&self.concept);
-        let join = Join::new(&implicit.premises).plan(&scope);
+        // let implicit = DeductiveRule::from(&self.concept);
+        // let join = Join::new(&implicit.premises).plan(&scope);
+        context.selection
     }
 }
 

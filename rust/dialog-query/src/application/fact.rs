@@ -1,11 +1,7 @@
 pub use super::{Analysis, Application};
-use crate::analyzer::{
-    AnalysisStatus, Desired, Environment, Plan as SyntaxPlan, Planner, Required, Stats, Syntax,
-    SyntaxAnalysis,
-};
+use crate::analyzer::{Planner, SyntaxAnalysis};
 pub use crate::artifact::Attribute;
 pub use crate::artifact::{ArtifactSelector, Constrained};
-use crate::dependencies;
 pub use crate::error::AnalyzerError;
 use crate::error::PlanError;
 pub use crate::fact_selector::{ATTRIBUTE_COST, BASE_COST, ENTITY_COST, UNBOUND_COST, VALUE_COST};
@@ -16,10 +12,7 @@ pub use crate::VariableScope;
 use crate::{try_stream, EvaluationContext, Match, Selection, Source};
 pub use crate::{Dependencies, Entity, Fact, QueryError, Term, Value};
 use serde::{Deserialize, Serialize};
-use serde_json::de;
 use std::fmt::Display;
-use std::os::macos::raw::stat;
-use std::path::MAIN_SEPARATOR_STR;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FactApplication {
@@ -50,6 +43,18 @@ impl FactApplication {
             of,
             is,
         }
+    }
+
+    pub fn cost(&self) -> usize {
+        BASE_COST
+    }
+
+    pub fn dependencies(&self) -> Dependencies {
+        let mut dependencies = Dependencies::new();
+        dependencies.desire("the".into(), ATTRIBUTE_COST);
+        dependencies.desire("of".into(), ENTITY_COST);
+        dependencies.desire("is".into(), VALUE_COST);
+        dependencies
     }
 
     pub fn analyze(&self) -> Analysis {
@@ -104,182 +109,6 @@ impl FactApplication {
     }
 }
 
-impl Syntax for FactApplication {
-    fn analyze<'a>(&'a self, env: &Environment) -> Stats<'a, Self> {
-        let mut stats = Stats::new(self, BASE_COST);
-        let (the, of, is) = (
-            env.locals.contains(&self.the),
-            env.locals.contains(&self.of),
-            env.locals.contains(&self.is),
-        );
-
-        // if no parameter is provided mark all as required
-        if !(the && of && is) {
-            stats.require(&self.the);
-            stats.require(&self.of);
-            stats.require(&self.is);
-        }
-        // otherwise we mark fields that are not in the local scope
-        // as desired
-        else {
-            if !the {
-                stats.desire(&self.the, ATTRIBUTE_COST);
-            }
-            if !of {
-                stats.desire(&self.of, ENTITY_COST);
-            }
-            if !is {
-                stats.desire(&self.is, VALUE_COST);
-            }
-        }
-
-        stats
-    }
-
-    fn update<'a>(&'a self, stats: &mut Stats<'a, Self>, extension: VariableScope) {
-        // If analyzer is not blocked update may reduce it's cost estimate
-        if stats.required.count() == 0 {
-            if extension.contains(&stats.syntax.the) {
-                stats.desired.remove(&stats.syntax.the);
-            }
-            if extension.contains(&stats.syntax.of) {
-                stats.desired.remove(&stats.syntax.of);
-            }
-            if extension.contains(&stats.syntax.is) {
-                stats.desired.remove(&stats.syntax.is);
-            }
-        }
-        // If analysis are blocked update may unblock it.
-        else {
-            let (the, of, is) = (
-                extension.contains(&stats.syntax.the),
-                extension.contains(&stats.syntax.of),
-                extension.contains(&stats.syntax.is),
-            );
-
-            // if we have one of the parameters
-            if the || of || is {
-                stats.required.remove(&stats.syntax.the);
-                stats.required.remove(&stats.syntax.of);
-                stats.required.remove(&stats.syntax.is);
-
-                if !the {
-                    stats.desire(&stats.syntax.the, ATTRIBUTE_COST);
-                    stats.desire(&stats.syntax.of, ENTITY_COST);
-                    stats.desire(&stats.syntax.is, VALUE_COST);
-                }
-            }
-        }
-    }
-}
-
-impl Planner for FactApplication {
-    fn init(&'a self, plan: &mut SyntaxAnalysis, env: &VariableScope) {
-        // add base cost of execution
-        plan.desire(&Term::blank(), BASE_COST);
-
-        let (the, of, is) = (
-            env.contains(&self.the),
-            env.contains(&self.of),
-            env.contains(&self.is),
-        );
-
-        // if no parameter is provided mark all as required
-        if !(the && of && is) {
-            plan.require(&self.the);
-            plan.require(&self.of);
-            plan.require(&self.is);
-        }
-        // otherwise we mark fields that are not in the local scope
-        // as desired
-        else {
-            let desired = plan.desired();
-            if !the {
-                desired.insert(&self.the, ATTRIBUTE_COST);
-            }
-            if !of {
-                desired.insert(&self.of, ENTITY_COST);
-            }
-            if !is {
-                desired.insert(&self.is, VALUE_COST);
-            }
-
-            *plan = SyntaxAnalysis::Candidate {
-                cost: BASE_COST,
-                desired: desired.to_owned(),
-            }
-        }
-    }
-
-    fn update(&self, plan: &mut SyntaxAnalysis, env: &VariableScope) {
-        match plan {
-            SyntaxAnalysis::Incomplete { cost, desired, .. } => {
-                let (the, of, is) = (
-                    env.contains(&self.the),
-                    env.contains(&self.of),
-                    env.contains(&self.is),
-                );
-
-                if the || of || is {
-                    if !the {
-                        desired.insert(&self.the, ATTRIBUTE_COST);
-                    }
-
-                    if !of {
-                        desired.insert(&self.of, ENTITY_COST);
-                    }
-
-                    if !is {
-                        desired.insert(&self.is, VALUE_COST);
-                    }
-
-                    *plan = SyntaxAnalysis::Candidate {
-                        desired: desired.to_owned(),
-                        cost: *cost,
-                    };
-                }
-            }
-            SyntaxAnalysis::Candidate { desired, .. } => {
-                if env.contains(&self.the) {
-                    desired.remove(&self.the);
-                }
-                if env.contains(&self.of) {
-                    desired.remove(&self.of);
-                }
-                if env.contains(&self.is) {
-                    desired.remove(&self.is);
-                }
-            }
-        }
-    }
-}
-
-struct FactApplicationAnalysis {
-    pub form: FactApplication,
-    pub cost: usize,
-    pub required: Required,
-    pub desired: Desired,
-}
-
-impl FactApplicationAnalysis {
-    pub fn update(&mut self, scope: &VariableScope) {
-        if scope.contains(&self.form.the) {
-            self.required.remove(&self.form.the);
-            self.desired.remove(&self.form.the);
-        }
-
-        if scope.contains(&self.form.of) {
-            self.required.remove(&self.form.of);
-            self.desired.remove(&self.form.of);
-        }
-
-        if scope.contains(&self.form.is) {
-            self.required.remove(&self.form.is);
-            self.desired.remove(&self.form.is);
-        }
-    }
-}
-
 impl Planner for FactApplication {
     fn init(&self, analysis: &mut SyntaxAnalysis, env: &VariableScope) {
         let (the, of, is) = (
@@ -300,7 +129,7 @@ impl Planner for FactApplication {
             },
         );
 
-        analysis.desire(&Term::blank(), BASE_COST);
+        analysis.desire(&Term::<Value>::blank(), BASE_COST);
 
         // if any variable is bound in the given environment we can mark
         // all as desired since we only need one to derive the others.
@@ -333,15 +162,14 @@ impl Planner for FactApplication {
         // if we desired count is above 0 we mark all the other
         // variables as desired also because we only need one to
         // derive the rest.
-        let desired = analysis.desired();
-        if desired.count() > 0 {
-            if !desired.contains(&self.the) {
+        if analysis.desired().count() > 0 {
+            if !analysis.desired().contains(&self.the) {
                 analysis.desire(&self.the, ATTRIBUTE_COST);
             }
-            if !desired.contains(&self.of) {
+            if !analysis.desired().contains(&self.of) {
                 analysis.desire(&self.of, ATTRIBUTE_COST);
             }
-            if !desired.contains(&self.is) {
+            if !analysis.desired().contains(&self.is) {
                 analysis.desire(&self.is, ATTRIBUTE_COST);
             }
         }
@@ -454,10 +282,30 @@ impl Display for FactApplication {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct FactApplicationPlan {
     pub selector: FactApplication,
     pub provides: VariableScope,
     pub cost: usize,
+}
+
+impl FactApplicationPlan {
+    pub fn cost(&self) -> usize {
+        self.cost
+    }
+
+    pub fn provides(&self) -> &VariableScope {
+        &self.provides
+    }
+
+    // TODO: Phase 3 - Implement proper evaluate() method
+    pub fn evaluate<S: crate::Source, M: crate::Selection>(
+        &self,
+        context: crate::EvaluationContext<S, M>,
+    ) -> impl crate::Selection {
+        // Return the input selection unchanged as a placeholder
+        context.selection
+    }
 }
 
 impl From<FactApplication> for Application {

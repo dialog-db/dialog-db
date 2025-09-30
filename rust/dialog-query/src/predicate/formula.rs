@@ -176,21 +176,16 @@
 //! ```
 
 use std::collections::HashMap;
-use std::marker::PhantomData;
-use std::path::Display;
+use std::fmt::Display;
 
-use crate::types::IntoValueDataType;
-use crate::{term, Term, Type};
-use indexmap::indexmap_with_default;
+use crate::{Term, Type};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
-use crate::analyzer::Required;
 use crate::application::FormulaApplication;
 use crate::cursor::Cursor;
 use crate::error::{FormulaEvaluationError, SchemaError, TypeError};
 use crate::fact::Scalar;
-use crate::{parameters, Match, Parameters, Requirement};
+use crate::{Dependencies, Match, Parameters, Requirement};
 
 /// Core trait for implementing formulas in the query system
 ///
@@ -220,7 +215,7 @@ use crate::{parameters, Match, Parameters, Requirement};
 /// # Example
 ///
 /// See the module-level documentation for a complete example.
-pub trait Formula: Sized + Clone + Into<FormulaDescriptor> {
+pub trait Formula: Sized + Clone {
     /// The input type for this formula
     ///
     /// This type must be constructible from a Cursor and should contain
@@ -337,9 +332,9 @@ pub trait Compute: Formula + Sized {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
     /// Name of this cell
-    name: &'static str,
+    name: String,
     /// Description of this cell
-    description: &'static str,
+    description: String,
     /// Data type of this cell
     #[serde(rename = "type")]
     content_type: Type,
@@ -350,8 +345,8 @@ pub struct Cell {
 impl Cell {
     pub fn new(name: &'static str, content_type: Type) -> Self {
         Cell {
-            name,
-            description: "",
+            name: name.to_string(),
+            description: String::new(),
             content_type,
             requirement: Requirement::Derived(5),
         }
@@ -363,7 +358,7 @@ impl Cell {
     }
 
     pub fn the(mut self, description: &'static str) -> Self {
-        self.description = description;
+        self.description = description.to_string();
         self
     }
 
@@ -378,11 +373,11 @@ impl Cell {
     }
 
     pub fn name(&self) -> &str {
-        self.name
+        &self.name
     }
 
     pub fn description(&self) -> &str {
-        self.description
+        &self.description
     }
 
     pub fn content_type(&self) -> &Type {
@@ -394,25 +389,26 @@ impl Cell {
     }
 
     /// Type checks that provided term matches cells content type. If term
-    pub fn check<T: Scalar>(&self, term: &Term<T>) -> Result<&Term<T>, TypeError> {
+    pub fn check<'a, T: Scalar>(&self, term: &'a Term<T>) -> Result<&'a Term<T>, TypeError> {
         let expected = self.content_type();
         // First we type check the input to ensure it matches cell's content type
         if let Some(actual) = term.data_type() {
-            if (&actual != expected) {
-                Err(TypeError::TypeMismatch {
-                    expected: expected.into(),
-                    actual: term.into(),
-                })?;
+            if &actual != expected {
+                // Convert the term to Term<Value> for the error
+                return Err(TypeError::TypeMismatch {
+                    expected: expected.clone(),
+                    actual: term.as_unknown(),
+                });
             };
         };
 
         Ok(term)
     }
 
-    pub fn conform<T: Scalar>(
+    pub fn conform<'a, T: Scalar>(
         &self,
-        term: Option<&Term<T>>,
-    ) -> Result<Option<&Term<T>>, TypeError> {
+        term: Option<&'a Term<T>>,
+    ) -> Result<Option<&'a Term<T>>, TypeError> {
         // We check that cell type matches term type.
         if let Some(term) = term {
             self.check(term)?;
@@ -443,16 +439,21 @@ impl Display for Cell {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Cells(HashMap<String, Cell>);
 impl Cells {
-    pub fn define(define: fn(cell: fn(name: &'static str, content_type: Type) -> Cell)) -> Self {
+    pub fn define<F>(define: F) -> Self
+    where
+        F: FnOnce(&mut dyn FnMut(&'static str, Type) -> Cell),
+    {
         let mut cells = Self(HashMap::new());
-        let cell = |name, content_type| {
+        let mut cell = |name: &'static str, content_type: Type| {
             let cell = Cell::new(name, content_type);
-            cells.0.insert(cell.name.into(), cell);
-            cell
+            let cloned = cell.clone();
+            cells.0.insert(cell.name.clone(), cell);
+            cloned
         };
-        define(cell);
+        define(&mut cell);
         cells
     }
 
@@ -467,7 +468,7 @@ impl Cells {
     pub fn from<T: Iterator<Item = Cell>>(source: T) -> Cells {
         let mut cells = Self::default();
         for cell in source {
-            cells.0.insert(cell.name.into(), cell);
+            cells.0.insert(cell.name.clone(), cell);
         }
         cells
     }

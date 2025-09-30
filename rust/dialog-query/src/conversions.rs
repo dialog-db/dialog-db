@@ -3,7 +3,9 @@
 //! This module provides formulas for converting between different types,
 //! including string conversion and number parsing operations.
 
-use crate::{cursor::Cursor, error::FormulaEvaluationError, Compute, Dependencies, Formula, Value};
+use std::sync::OnceLock;
+use dialog_artifacts::ValueDataType;
+use crate::{cursor::Cursor, error::FormulaEvaluationError, predicate::formula::Cells, Compute, Dependencies, Formula, Value};
 
 // ============================================================================
 // Type Conversion Operations: ToString, ParseNumber
@@ -65,12 +67,32 @@ impl Compute for ToString {
     }
 }
 
+static TO_STRING_CELLS: OnceLock<Cells> = OnceLock::new();
+
 impl Formula for ToString {
     type Input = ToStringInput;
     type Match = ();
 
     fn operator() -> &'static str {
         "to_string"
+    }
+
+    fn cells() -> &'static Cells {
+        TO_STRING_CELLS.get_or_init(|| {
+            Cells::define(|cell| {
+                cell("value", ValueDataType::String)  // Note: accepts any type
+                    .the("Value to convert")
+                    .required();
+
+                cell("is", ValueDataType::String)
+                    .the("String representation")
+                    .derived(1);
+            })
+        })
+    }
+
+    fn cost() -> usize {
+        1
     }
 
     fn dependencies() -> Dependencies {
@@ -127,12 +149,32 @@ impl Compute for ParseNumber {
     }
 }
 
+static PARSE_NUMBER_CELLS: OnceLock<Cells> = OnceLock::new();
+
 impl Formula for ParseNumber {
     type Input = ParseNumberInput;
     type Match = ();
 
     fn operator() -> &'static str {
         "parse_number"
+    }
+
+    fn cells() -> &'static Cells {
+        PARSE_NUMBER_CELLS.get_or_init(|| {
+            Cells::define(|cell| {
+                cell("text", ValueDataType::String)
+                    .the("String to parse")
+                    .required();
+
+                cell("is", ValueDataType::UnsignedInt)
+                    .the("Parsed number")
+                    .derived(2);
+            })
+        })
+    }
+
+    fn cost() -> usize {
+        2
     }
 
     fn dependencies() -> Dependencies {

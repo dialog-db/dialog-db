@@ -13,7 +13,7 @@
 
 use dialog_common::ConditionalSend;
 
-pub use crate::artifact::{Attribute, Entity, Value, ValueDataType as Type};
+pub use crate::artifact::{Attribute, Entity, Value, ValueDataType, ValueDataType as Type};
 
 /// Trait for types that can provide ValueDataType metadata
 ///
