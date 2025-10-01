@@ -95,7 +95,10 @@ impl FactApplication {
     }
 
     pub fn cost(&self) -> usize {
-        BASE_COST
+        match self.cardinality {
+            Cardinality::One => BASE_COST,
+            Cardinality::Many => usize::pow(BASE_COST, 2),
+        }
     }
 
     /// Returns the parameters for this fact application
@@ -167,7 +170,6 @@ impl FactApplication {
         }
     }
 }
-
 
 impl FactApplication {
     /// Resolves variables from the given selection match.
