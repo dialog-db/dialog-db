@@ -1,6 +1,6 @@
 use crate::error::CompileError;
 use crate::{fact::Scalar, predicate::DeductiveRule};
-use crate::{Dependencies, Term, Value, VariableScope};
+use crate::{Dependencies, Premise, Term, Value, VariableScope};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -244,6 +244,52 @@ pub enum Analysis {
 }
 
 impl Analysis {
+    pub fn from(premise: Premise) -> Self {
+        let schema = premise.schema();
+        let params = premise.parameters();
+        let env = VariableScope::new();
+
+        let mut cost = premise.cost();
+        let mut binds = VariableScope::new();
+        let mut requires = Required::new();
+
+        // Categorize all parameters based on their requirement types
+        for (name, constraint) in schema.iter() {
+            if let Some(term) = params.get(name) {
+                match &constraint.requirement {
+                    crate::Requirement::Required(_) => {
+                        requires.add(term);
+                    }
+                    crate::Requirement::Derived(c) => {
+                        cost += c;
+                        binds.add(term);
+                    }
+                }
+            }
+        }
+
+        // If no requirements, create Viable analysis
+        if requires.count() == 0 {
+            Analysis::Viable {
+                premise,
+                cost,
+                binds,
+                env,
+                schema,
+                params,
+            }
+        } else {
+            Analysis::Blocked {
+                premise,
+                cost,
+                binds,
+                env,
+                requires,
+                schema,
+                params,
+            }
+        }
+    }
     /// Update this analysis with new bindings from the environment.
     /// May transition from Blocked to Viable if requirements are satisfied.
     /// Only processes relevant bindings and updates incrementally.
@@ -288,7 +334,7 @@ impl Analysis {
                 // Track which choice groups now have at least one bound parameter
                 let mut satisfied_groups = std::collections::HashSet::new();
 
-                // Process only relevant bindings
+                // Process only relevant bindings (parameters that got bound)
                 for (name, constraint) in schema.iter() {
                     if let Some(term) = params.get(name) {
                         if new_bindings.contains(term) {
@@ -376,6 +422,12 @@ impl Analysis {
     }
 }
 
+impl From<Premise> for Analysis {
+    fn from(premise: Premise) -> Self {
+        Analysis::from(premise)
+    }
+}
+
 impl TryFrom<Analysis> for Plan {
     type Error = CompileError;
 
@@ -403,157 +455,147 @@ impl TryFrom<Analysis> for Plan {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{Term, Value};
+#[test]
+fn test_analysis_from_premise_all_derived() {
+    use crate::predicate::formula::Formula;
+    use crate::strings::Length;
+    use crate::{Parameters, Term, Value};
 
-    #[test]
-    fn test_syntax_analysis_new() {
-        let analysis = Analysis::new(100);
+    // Length formula has: of (required), is (derived)
+    // We'll test with both as variables to see derived-only behavior
+    let mut params = Parameters::new();
+    params.insert("of".to_string(), Term::<Value>::var("text".to_string()));
+    params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
 
-        match analysis {
-            Analysis::Candidate {
-                cost,
-                desired,
-                depends,
-            } => {
-                assert_eq!(cost, 100);
-                assert_eq!(desired.count(), 0);
-                assert_eq!(depends.size(), 0);
-            }
-            _ => panic!("Expected Candidate variant"),
-        }
-    }
+    let application = Length::apply(params).unwrap();
+    let premise = Premise::from(application);
 
-    #[test]
-    fn test_plan_context_from_candidate() {
-        let mut analysis = Analysis::new(100);
-        let term = Term::<Value>::var("y");
-        analysis.desire(&term, 10);
+    // Analysis should be Blocked because "of" is required
+    let analysis = Analysis::from(premise);
+    assert!(!analysis.is_viable());
+}
 
-        let context: PlanContext = analysis.try_into().expect("Should convert to PlanContext");
+#[test]
+fn test_analysis_from_premise_with_constant() {
+    use crate::predicate::formula::Formula;
+    use crate::strings::Length;
+    use crate::{Parameters, Term, Value};
 
-        assert_eq!(context.cost, 100);
-        assert_eq!(context.desired.count(), 1);
-        assert_eq!(context.depends.size(), 0);
-    }
+    // Provide "of" as a constant, "is" as a variable
+    let mut params = Parameters::new();
+    params.insert(
+        "of".to_string(),
+        Term::<Value>::Constant(Value::String("hello".to_string())),
+    );
+    params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
 
-    #[test]
-    fn test_plan_context_from_incomplete_fails() {
-        let mut analysis = Analysis::new(100);
-        let term = Term::<Value>::var("z");
+    let application = Length::apply(params).unwrap();
+    let premise = Premise::from(application);
 
-        analysis.require(&term);
+    // Analysis should be Viable because "of" is provided as constant
+    let analysis = Analysis::from(premise);
+    assert!(analysis.is_viable());
+}
 
-        let result: Result<PlanContext, _> = analysis.try_into();
-        assert!(result.is_err());
-    }
+#[test]
+fn test_analysis_update_transitions_to_viable() {
+    use crate::predicate::formula::Formula;
+    use crate::strings::Length;
+    use crate::{Parameters, Term, Value, VariableScope};
 
-    #[test]
-    fn test_depend_marks_variable_as_bound() {
-        let mut analysis = Analysis::new(100);
-        let term = Term::<Value>::var("bound_var");
+    // Length formula requires "of" parameter
+    let mut params = Parameters::new();
+    params.insert("of".to_string(), Term::<Value>::var("text"));
+    params.insert("is".to_string(), Term::<Value>::var("len"));
 
-        analysis.depend(&term);
+    let application = Length::apply(params).unwrap();
+    let premise = Premise::from(application);
 
-        // Should be in depends ONLY
-        assert_eq!(analysis.depends().size(), 1);
-        assert!(analysis.depends().contains(&term));
+    let mut analysis = Analysis::from(premise);
+    assert!(!analysis.is_viable());
 
-        // Should NOT be in desired (mutual exclusivity)
-        assert_eq!(analysis.desired().count(), 0);
-        assert!(!analysis.desired().contains(&term));
-    }
+    // Update with "text" bound
+    let mut env = VariableScope::new();
+    env.add(&Term::<Value>::var("text"));
+    analysis.update(&env);
 
-    #[test]
-    fn test_depend_removes_from_desired() {
-        let mut analysis = Analysis::new(50);
-        let term = Term::<Value>::var("var");
+    // Should now be viable
+    assert!(analysis.is_viable());
+}
 
-        // First, desire it
-        analysis.desire(&term, 15);
-        assert_eq!(analysis.desired().count(), 1);
-        assert_eq!(analysis.depends().size(), 0);
+#[test]
+fn test_analysis_update_reduces_cost_when_derived_bound() {
+    use crate::predicate::formula::Formula;
+    use crate::strings::Length;
+    use crate::{Parameters, Term, Value, VariableScope};
 
-        // Then mark as dependent
-        analysis.depend(&term);
+    // Provide "of" as constant so it's viable, "is" is derived
+    let mut params = Parameters::new();
+    params.insert(
+        "of".to_string(),
+        Term::<Value>::Constant(Value::String("hello".to_string())),
+    );
+    params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
 
-        // Should move from desired to depends
-        assert_eq!(analysis.depends().size(), 1);
-        assert!(analysis.depends().contains(&term));
-        assert_eq!(analysis.desired().count(), 0);
-        assert!(!analysis.desired().contains(&term));
-    }
+    let application = Length::apply(params).unwrap();
+    let premise = Premise::from(application);
 
-    #[test]
-    fn test_depend_removes_from_required_and_transitions() {
-        let mut analysis = Analysis::new(90);
-        let term = Term::<Value>::var("will_be_bound");
+    let mut analysis = Analysis::from(premise);
+    let initial_cost = analysis.cost();
+    assert!(analysis.is_viable());
 
-        // First, require it
-        analysis.require(&term);
+    // Update with "len" already bound (should reduce cost)
+    let mut env = VariableScope::new();
+    env.add(&Term::<Value>::var("len".to_string()));
+    analysis.update(&env);
 
-        match &analysis {
-            Analysis::Incomplete { required, .. } => {
-                assert_eq!(required.count(), 1);
-            }
-            _ => panic!("Should be Incomplete after require"),
-        }
+    // Cost should be reduced since "is" was desired and is now bound
+    assert!(analysis.cost() < initial_cost);
+}
 
-        // Then mark as dependent
-        analysis.depend(&term);
+#[test]
+fn test_analysis_try_into_plan_when_viable() {
+    use crate::predicate::formula::Formula;
+    use crate::strings::Length;
+    use crate::{Parameters, Term, Value};
 
-        // Should transition to Candidate (no required left)
-        match analysis {
-            Analysis::Candidate {
-                depends, desired, ..
-            } => {
-                assert_eq!(depends.size(), 1);
-                assert!(depends.contains(&term));
-                assert_eq!(desired.count(), 0);
-            }
-            _ => panic!("Should transition to Candidate after satisfying requirement"),
-        }
-    }
+    // Provide "of" as constant so premise is viable
+    let mut params = Parameters::new();
+    params.insert(
+        "of".to_string(),
+        Term::<Value>::Constant(Value::String("hello".to_string())),
+    );
+    params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
 
-    #[test]
-    fn test_mutual_exclusivity_of_categories() {
-        let mut analysis = Analysis::new(100);
-        let term1 = Term::<Value>::var("a");
-        let term2 = Term::<Value>::var("b");
-        let term3 = Term::<Value>::var("c");
+    let application = Length::apply(params).unwrap();
+    let premise = Premise::from(application);
 
-        // term1: desired
-        analysis.desire(&term1, 10);
-        // term2: required
-        analysis.require(&term2);
-        // term3: depends
-        analysis.depend(&term3);
+    let analysis = Analysis::from(premise);
+    assert!(analysis.is_viable());
 
-        match analysis {
-            Analysis::Incomplete {
-                depends,
-                desired,
-                required,
-                ..
-            } => {
-                // Each term should be in exactly one category
-                assert_eq!(desired.count(), 1);
-                assert!(desired.contains(&term1));
+    // Should successfully convert to Plan
+    let plan = Plan::try_from(analysis);
+    assert!(plan.is_ok());
+}
 
-                assert_eq!(required.count(), 1);
+#[test]
+fn test_analysis_try_into_plan_when_blocked() {
+    use crate::predicate::formula::Formula;
+    use crate::strings::Length;
+    use crate::{Parameters, Term, Value};
 
-                assert_eq!(depends.size(), 1);
-                assert!(depends.contains(&term3));
+    // Leave "of" as unbound variable - premise will be blocked
+    let mut params = Parameters::new();
+    params.insert("of".to_string(), Term::<Value>::var("text".to_string()));
+    params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
 
-                // Verify mutual exclusivity
-                assert!(!desired.contains(&term2));
-                assert!(!desired.contains(&term3));
-                assert!(!depends.contains(&term1));
-                assert!(!depends.contains(&term2));
-            }
-            _ => panic!("Expected Incomplete state"),
-        }
-    }
+    let application = Length::apply(params).unwrap();
+    let premise = Premise::from(application);
+
+    let analysis = Analysis::from(premise);
+    assert!(!analysis.is_viable());
+
+    // Should fail to convert to Plan
+    let plan = Plan::try_from(analysis);
+    assert!(plan.is_err());
 }

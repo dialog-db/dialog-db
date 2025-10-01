@@ -57,59 +57,9 @@ impl Premise {
     /// Analyze this premise in the given environment.
     /// Returns either a viable plan (ready to execute) or a blocked plan (missing requirements).
     pub fn analyze(&self, env: &crate::VariableScope) -> crate::analyzer::Analysis {
-        use crate::analyzer::{Analysis, Required};
-
-        let schema = self.schema();
-        let params = self.parameters();
-        let base_cost = self.cost();
-
-        let mut cost = base_cost;
-        let mut binds = crate::VariableScope::new();
-        let mut requires = Required::new();
-        let mut premise_env = env.clone();
-
-        // Iterate over schema constraints
-        for (name, constraint) in schema.iter() {
-            if let Some(term) = params.get(name) {
-                if env.contains(term) {
-                    // Already bound in environment
-                    premise_env.add(term);
-                } else {
-                    // Not yet bound
-                    match &constraint.requirement {
-                        crate::Requirement::Required(_) => {
-                            requires.add(term);
-                        }
-                        crate::Requirement::Derived(c) => {
-                            cost += c;
-                            binds.add(term);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Return either Viable or Blocked (with cached schema/params)
-        if requires.count() == 0 {
-            Analysis::Viable {
-                premise: self.clone(),
-                cost,
-                binds,
-                env: premise_env,
-                schema,
-                params,
-            }
-        } else {
-            Analysis::Blocked {
-                premise: self.clone(),
-                cost,
-                binds,
-                env: premise_env,
-                requires,
-                schema,
-                params,
-            }
-        }
+        let mut analysis = crate::analyzer::Analysis::from(self.clone());
+        analysis.update(env);
+        analysis
     }
 
     /// Creates an execution plan for this premise within the given variable scope.

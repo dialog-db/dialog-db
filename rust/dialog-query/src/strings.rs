@@ -326,7 +326,7 @@ mod tests {
             .set(Term::var("y"), " World".to_string())
             .unwrap();
 
-        let app = Concatenate::apply(terms);
+        let app = Concatenate::apply(terms).expect("apply should work");
         let results = app.derive(input).expect("Concatenate failed");
 
         assert_eq!(results.len(), 1);
@@ -347,7 +347,7 @@ mod tests {
             .set(Term::var("text"), "Hello".to_string())
             .unwrap();
 
-        let app = Length::apply(terms);
+        let app = Length::apply(terms).expect("apply should work");
         let results = app.derive(input).expect("Length failed");
 
         assert_eq!(results.len(), 1);
@@ -365,7 +365,7 @@ mod tests {
             .set(Term::var("text"), "hello world".to_string())
             .unwrap();
 
-        let app = Uppercase::apply(terms);
+        let app = Uppercase::apply(terms).expect("apply should work");
         let results = app.derive(input).expect("Uppercase failed");
 
         assert_eq!(results.len(), 1);
@@ -386,7 +386,7 @@ mod tests {
             .set(Term::var("text"), "HELLO WORLD".to_string())
             .unwrap();
 
-        let app = Lowercase::apply(terms);
+        let app = Lowercase::apply(terms).expect("apply should work");
         let results = app.derive(input).expect("Lowercase failed");
 
         assert_eq!(results.len(), 1);
@@ -405,7 +405,7 @@ mod tests {
 
         let input = Match::new().set(Term::var("text"), "".to_string()).unwrap();
 
-        let app = Length::apply(terms);
+        let app = Length::apply(terms).expect("apply should work");
         let results = app.derive(input).expect("Length of empty string failed");
 
         assert_eq!(results.len(), 1);
@@ -426,7 +426,7 @@ mod tests {
             .set(Term::var("y"), "World".to_string())
             .unwrap();
 
-        let app = Concatenate::apply(terms);
+        let app = Concatenate::apply(terms).expect("apply should work");
         let results = app
             .derive(input)
             .expect("Concatenate with empty string failed");
