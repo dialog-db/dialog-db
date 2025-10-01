@@ -62,17 +62,17 @@ impl UncompiledDeductiveRule {
         // order in such scenario or to discover that some premise in the rule
         // is not satisfiable e.g. if formula uses rule parameter in the required
         // cell which is not derived from any other premise.
-        let (premises, derived) = Join::new(self.premises.clone()).plan(&VariableScope::new())?;
+        let plan = Join::new(self.premises.clone()).plan(&VariableScope::new())?;
 
         // We also verify that every rule parameter was derived by one of the
         // rule premises, otherwise we produce an error since rule evaluation
         // would not be able to bind such parameter.
         for name in self.conclusion.operands() {
-            if !derived.contains(&Term::<Value>::var(name)) {
+            if !plan.binds.contains(&Term::<Value>::var(name)) {
                 // Create a temporary rule for the error message
                 let temp_rule = DeductiveRule {
                     conclusion: self.conclusion.clone(),
-                    premises: premises.clone(),
+                    premises: plan.steps.clone(),
                 };
                 Err(CompileError::UnboundVariable {
                     rule: temp_rule,
@@ -83,7 +83,7 @@ impl UncompiledDeductiveRule {
 
         Ok(DeductiveRule {
             conclusion: self.conclusion,
-            premises,
+            premises: plan.steps,
         })
     }
 
@@ -209,5 +209,202 @@ impl TryFrom<&Concept> for DeductiveRule {
         }
 
         DeductiveRule::new(concept.clone(), premises)
+    }
+}
+
+#[test]
+fn test_rule_compiles_with_valid_premises() {
+    use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
+    // Rule: person(name, age) :- fact(user/name, ?user, name), fact(user/age, ?user, age)
+    let conclusion = Concept {
+        operator: "person".to_string(),
+        attributes: vec![
+            (
+                "name",
+                crate::attribute::Attribute::new("person", "name", "", Type::String),
+            ),
+            (
+                "age",
+                crate::attribute::Attribute::new("person", "age", "", Type::UnsignedInt),
+            ),
+        ]
+        .into(),
+    };
+    let this = Term::<Entity>::var("this");
+    let premises = vec![
+        FactApplication::new(
+            Term::Constant("user/name".parse::<ArtifactAttribute>().unwrap()),
+            this.clone(),
+            Term::var("name"),
+            crate::attribute::Cardinality::One,
+        )
+        .into(),
+        FactApplication::new(
+            Term::Constant("user/age".parse::<ArtifactAttribute>().unwrap()),
+            this,
+            Term::var("age"),
+            crate::attribute::Cardinality::One,
+        )
+        .into(),
+    ];
+    let result = DeductiveRule::new(conclusion, premises);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_rule_fails_with_unconstrained_fact() {
+    use crate::artifact::{Entity, Type};
+    // Rule: person(key, value) :- fact(key, ?user, value) - all params unconstrained
+    let conclusion = Concept {
+        operator: "person".to_string(),
+        attributes: vec![
+            (
+                "key",
+                crate::attribute::Attribute::new("person", "key", "", Type::String),
+            ),
+            (
+                "value",
+                crate::attribute::Attribute::new("person", "value", "", Type::String),
+            ),
+        ]
+        .into(),
+    };
+    let premises = vec![FactApplication::new(
+        Term::var("key"),
+        Term::<Entity>::var("user"),
+        Term::var("value"),
+        crate::attribute::Cardinality::One,
+    )
+    .into()];
+    assert!(DeductiveRule::new(conclusion, premises).is_err());
+}
+
+#[test]
+fn test_rule_fails_with_unused_parameter() {
+    use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
+    // Rule: person(name, age) :- fact(user/name, ?this, name) - 'age' unused
+    let conclusion = Concept {
+        operator: "person".to_string(),
+        attributes: vec![
+            (
+                "name",
+                crate::attribute::Attribute::new("person", "name", "", Type::String),
+            ),
+            (
+                "age",
+                crate::attribute::Attribute::new("person", "age", "", Type::UnsignedInt),
+            ),
+        ]
+        .into(),
+    };
+    let premises = vec![FactApplication::new(
+        Term::Constant("user/name".parse::<ArtifactAttribute>().unwrap()),
+        Term::<Entity>::var("this"),
+        Term::var("name"),
+        crate::attribute::Cardinality::One,
+    )
+    .into()];
+    let result = DeductiveRule::new(conclusion, premises);
+    assert!(result.is_err());
+    if let Err(CompileError::UnboundVariable { variable, .. }) = result {
+        assert_eq!(variable, "age", "Should report 'age' as unbound");
+    }
+}
+
+#[test]
+fn test_rule_fails_with_no_premises() {
+    use crate::artifact::Type;
+    // Rule: person(name, age) :- (empty)
+    let conclusion = Concept {
+        operator: "person".to_string(),
+        attributes: vec![
+            (
+                "name",
+                crate::attribute::Attribute::new("person", "name", "", Type::String),
+            ),
+            (
+                "age",
+                crate::attribute::Attribute::new("person", "age", "", Type::UnsignedInt),
+            ),
+        ]
+        .into(),
+    };
+    assert!(DeductiveRule::new(conclusion, vec![]).is_err());
+}
+
+#[test]
+fn test_rule_compiles_with_chained_dependencies() {
+    use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
+    // Rule: result(key, value) :- fact(user/name, ?user, "jack"), fact(key, ?user, value)
+    // First fact constrains ?user, allowing second fact to be planned
+    let conclusion = Concept {
+        operator: "result".to_string(),
+        attributes: vec![
+            (
+                "key",
+                crate::attribute::Attribute::new("result", "key", "", Type::String),
+            ),
+            (
+                "value",
+                crate::attribute::Attribute::new("result", "value", "", Type::String),
+            ),
+        ]
+        .into(),
+    };
+    let this = Term::<Entity>::var("this");
+    let premises = vec![
+        FactApplication::new(
+            Term::Constant("user/name".parse::<ArtifactAttribute>().unwrap()),
+            this.clone(),
+            Term::Constant(Value::String("jack".to_string())),
+            crate::attribute::Cardinality::One,
+        )
+        .into(),
+        FactApplication::new(
+            Term::var("key"),
+            this,
+            Term::var("value"),
+            crate::attribute::Cardinality::One,
+        )
+        .into(),
+    ];
+    let result = DeductiveRule::new(conclusion, premises);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().premises.len(), 2);
+}
+
+#[test]
+fn test_rule_parameter_name_vs_variable_name() {
+    use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
+    // This test ensures we correctly track variable names, not parameter names
+    // Rule: result(key, value) :- fact(user/name, ?entity, key_var)
+    // Parameter "is" maps to variable "key_var", not "key"
+    let conclusion = Concept {
+        operator: "result".to_string(),
+        attributes: vec![(
+            "key",
+            crate::attribute::Attribute::new("result", "key", "", Type::String),
+        )]
+        .into(),
+    };
+
+    // The premise binds variable "key_var" via parameter "is"
+    // But conclusion expects parameter "key" to be bound
+    let premises = vec![FactApplication::new(
+        Term::Constant("user/name".parse::<ArtifactAttribute>().unwrap()),
+        Term::<Entity>::var("this"),
+        Term::var("key_var"), // Variable name is "key_var", not "key"
+        crate::attribute::Cardinality::One,
+    )
+    .into()];
+
+    let result = DeductiveRule::new(conclusion, premises);
+    // Should fail because conclusion needs "key" but premise binds "key_var"
+    assert!(
+        result.is_err(),
+        "Should fail when variable name doesn't match parameter name"
+    );
+    if let Err(CompileError::UnboundVariable { variable, .. }) = result {
+        assert_eq!(variable, "key", "Should report 'key' as unbound");
     }
 }

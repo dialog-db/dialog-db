@@ -1,8 +1,10 @@
-use crate::analyzer::{Analysis, Plan};
+use crate::analyzer::{Analysis, JoinPlan, Plan};
+use crate::artifact::Value;
 use crate::error::CompileError;
 pub use crate::error::{AnalyzerError, PlanError};
 pub use crate::plan::EvaluationPlan;
 pub use crate::premise::Premise;
+pub use crate::term::Term;
 pub use crate::VariableScope;
 
 /// Query planner that optimizes the order of premise execution based on cost
@@ -23,6 +25,13 @@ impl Join {
 
     /// Helper to create a planning error from failed candidates.
     fn fail(analyses: &[Analysis]) -> Result<Plan, CompileError> {
+        // If there are no candidates at all, return empty Required
+        if analyses.is_empty() {
+            return Err(CompileError::RequiredBindings {
+                required: crate::analyzer::Required::new(),
+            });
+        }
+
         // Return the first required bindings error we find
         for analysis in analyses {
             if let Analysis::Blocked { requires, .. } = analysis {
@@ -46,24 +55,41 @@ impl Join {
     }
 
     /// Creates an optimized execution plan for all premises.
-    /// Returns ordered list of ready plans and the final variable scope.
+    /// Returns a JoinPlan with the ordered steps, cost, and variable scopes.
     pub fn plan(
         &mut self,
         scope: &VariableScope,
-    ) -> Result<(Vec<Plan>, VariableScope), CompileError> {
+    ) -> Result<JoinPlan, CompileError> {
+        let env = scope.clone();
         let mut bound = scope.clone();
-        let mut plans = vec![];
+        let mut steps = vec![];
+        let mut cost = 0;
 
         while !self.done() {
             let plan = self.top(&bound)?;
 
+            cost += plan.cost;
             // Extend the scope with what this premise binds
-            bound = bound.extend(&plan.binds);
+            bound.extend(&plan.binds);
 
-            plans.push(plan);
+            steps.push(plan);
         }
 
-        Ok((plans, bound))
+        // binds is the difference between final scope and initial env
+        let mut binds = VariableScope::new();
+        for var_name in &bound.variables {
+            let var: Term<Value> = Term::var(var_name);
+            if !env.contains(&var) {
+                binds.add(&var);
+            }
+        }
+
+        Ok(JoinPlan {
+            steps,
+            cost,
+            binds,
+            env,
+        })
     }
     /// Selects and returns the best premise to execute next based on cost.
     /// Updates the planner state by removing the selected premise from candidates.

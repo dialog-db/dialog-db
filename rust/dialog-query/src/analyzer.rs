@@ -210,9 +210,23 @@ impl<'a> From<EstimateError<'a>> for CompileError {
 /// A plan for executing a premise - ready to execute (lightweight, no cached schema/params)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
-    pub premise: crate::premise::Premise,
+    pub premise: Premise,
     pub cost: usize,
     pub binds: VariableScope,
+    pub env: VariableScope,
+}
+
+/// Represents a join plan - the result of planning multiple premises together.
+/// Contains the ordered sequence of steps, total cost, and variable scopes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JoinPlan {
+    /// The ordered steps to execute
+    pub steps: Vec<Plan>,
+    /// Total execution cost
+    pub cost: usize,
+    /// Variables provided/bound by this join
+    pub binds: VariableScope,
+    /// Variables required in the environment to execute this join
     pub env: VariableScope,
 }
 
@@ -253,11 +267,40 @@ impl Analysis {
         let mut binds = VariableScope::new();
         let mut requires = Required::new();
 
-        // Categorize all parameters based on their requirement types
+        // Track which choice groups are satisfied by constants
+        let mut satisfied_groups = std::collections::HashSet::new();
+
+        // First pass: identify groups satisfied by constants
         for (name, constraint) in schema.iter() {
             if let Some(term) = params.get(name) {
+                if let crate::Requirement::Required(Some((_, group))) = &constraint.requirement {
+                    // If this parameter is a constant, its group is satisfied
+                    if matches!(term, Term::Constant(_)) {
+                        satisfied_groups.insert(*group);
+                    }
+                }
+            }
+        }
+
+        // Second pass: categorize all parameters based on their requirement types
+        for (name, constraint) in schema.iter() {
+            if let Some(term) = params.get(name) {
+                // Constants and variables already in env don't add cost - they're already satisfied
+                if matches!(term, Term::Constant(_)) || env.contains(term) {
+                    continue;
+                }
+
                 match &constraint.requirement {
-                    crate::Requirement::Required(_) => {
+                    crate::Requirement::Required(Some((c, group))) => {
+                        // If this group is satisfied, treat as desired (variable will be bound)
+                        if satisfied_groups.contains(group) {
+                            cost += c;
+                            binds.add(term);
+                        } else {
+                            requires.add(term);
+                        }
+                    }
+                    crate::Requirement::Required(None) => {
                         requires.add(term);
                     }
                     crate::Requirement::Derived(c) => {
@@ -315,8 +358,15 @@ impl Analysis {
                             binds.remove(term);
 
                             // Decrease cost (incremental update)
-                            if let crate::Requirement::Derived(c) = constraint.requirement {
-                                *cost = cost.saturating_sub(c);
+                            match &constraint.requirement {
+                                crate::Requirement::Derived(c) => {
+                                    *cost = cost.saturating_sub(*c);
+                                }
+                                crate::Requirement::Required(Some((c, _group))) => {
+                                    // Grouped requirement that's been satisfied
+                                    *cost = cost.saturating_sub(*c);
+                                }
+                                _ => {}
                             }
                         }
                     }
