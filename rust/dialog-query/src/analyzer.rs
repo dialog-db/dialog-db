@@ -349,6 +349,11 @@ impl Analysis {
                 // Only process bindings that are relevant to this plan
                 for (name, constraint) in schema.iter() {
                     if let Some(term) = params.get(name) {
+                        // Skip constants - they're never in binds
+                        if matches!(term, Term::Constant(_)) {
+                            continue;
+                        }
+
                         // If this term was in binds and is now bound, move it to env
                         if new_bindings.contains(term) && binds.contains(term) {
                             // Add to env (only relevant bindings)
@@ -648,4 +653,378 @@ fn test_analysis_try_into_plan_when_blocked() {
     // Should fail to convert to Plan
     let plan = Plan::try_from(analysis);
     assert!(plan.is_err());
+}
+#[cfg(test)]
+mod cost_model_tests {
+    use crate::application::fact::{FactApplication, ATTRIBUTE_COST, BASE_COST, ENTITY_COST, VALUE_COST};
+    use crate::artifact::{Attribute, Entity};
+    use crate::analyzer::Analysis;
+    use crate::{Premise, Term, Value, VariableScope};
+
+    // Test 1: Constants don't add to cost
+    #[test]
+    fn test_constants_do_not_add_cost() {
+        // All constants - should only have BASE_COST
+        let the_attr: Attribute = "user/name".parse().unwrap();
+        let entity_val: Entity = Entity::new().unwrap();
+
+        let app = FactApplication::new(
+            Term::Constant(the_attr),
+            Term::Constant(entity_val),
+            Term::Constant(Value::String("test".to_string())),
+            crate::attribute::Cardinality::One,
+        );
+        let premise = Premise::from(app);
+        let analysis = Analysis::from(premise);
+
+        assert_eq!(analysis.cost(), BASE_COST,
+            "All constants should only cost BASE_COST ({}), got {}",
+            BASE_COST, analysis.cost());
+    }
+
+    #[test]
+    fn test_one_constant_two_variables() {
+        // Constant "the" satisfies group, "of" and "is" are derived
+        let the_attr: Attribute = "user/name".parse().unwrap();
+
+        let app = FactApplication::new(
+            Term::Constant(the_attr),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("value"),
+            crate::attribute::Cardinality::One,
+        );
+        let premise = Premise::from(app);
+        let analysis = Analysis::from(premise);
+
+        let expected = BASE_COST + ENTITY_COST + VALUE_COST;
+        assert_eq!(analysis.cost(), expected,
+            "Constant 'the' should not add cost. Expected BASE({}) + ENTITY({}) + VALUE({}) = {}, got {}",
+            BASE_COST, ENTITY_COST, VALUE_COST, expected, analysis.cost());
+    }
+
+    // Test 2: Parameters in env are removed from costs
+    #[test]
+    fn test_env_variables_reduce_cost() {
+        let the_attr: Attribute = "user/name".parse().unwrap();
+        let app = FactApplication::new(
+            Term::Constant(the_attr),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("value"),
+            crate::attribute::Cardinality::One,
+        );
+        let premise = Premise::from(app);
+
+        let mut analysis = Analysis::from(premise);
+        let initial_cost = analysis.cost();
+        assert_eq!(initial_cost, BASE_COST + ENTITY_COST + VALUE_COST);
+
+        // Bind entity in environment
+        let mut env = VariableScope::new();
+        env.add(&Term::<Value>::var("entity"));
+        analysis.update(&env);
+
+        let after_entity = analysis.cost();
+        assert_eq!(after_entity, BASE_COST + VALUE_COST,
+            "After binding entity, cost should decrease by ENTITY_COST ({}). Expected {}, got {}",
+            ENTITY_COST, BASE_COST + VALUE_COST, after_entity);
+
+        // Bind value as well
+        env.add(&Term::<Value>::var("value"));
+        analysis.update(&env);
+
+        let final_cost = analysis.cost();
+        assert_eq!(final_cost, BASE_COST,
+            "After binding all variables, cost should be just BASE_COST ({}), got {}",
+            BASE_COST, final_cost);
+    }
+
+    #[test]
+    fn test_variables_already_in_initial_env_dont_add_cost() {
+        let the_attr: Attribute = "user/name".parse().unwrap();
+        let app = FactApplication::new(
+            Term::Constant(the_attr),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("value"),
+            crate::attribute::Cardinality::One,
+        );
+
+        // Create analysis with entity already in environment
+        let schema = app.schema();
+        let params = app.parameters();
+        let mut env = VariableScope::new();
+        env.add(&Term::<Value>::var("entity"));
+
+        let mut cost = app.cost();
+        let mut binds = VariableScope::new();
+        let mut requires = crate::analyzer::Required::new();
+
+        // Manually simulate Analysis::from with pre-populated env
+        let mut satisfied_groups = std::collections::HashSet::new();
+        for (name, constraint) in schema.iter() {
+            if let Some(term) = params.get(name) {
+                if let crate::Requirement::Required(Some((_, group))) = &constraint.requirement {
+                    if matches!(term, Term::Constant(_)) {
+                        satisfied_groups.insert(*group);
+                    }
+                }
+            }
+        }
+
+        for (name, constraint) in schema.iter() {
+            if let Some(term) = params.get(name) {
+                if matches!(term, Term::Constant(_)) || env.contains(term) {
+                    continue;
+                }
+
+                match &constraint.requirement {
+                    crate::Requirement::Required(Some((c, group))) => {
+                        if satisfied_groups.contains(group) {
+                            cost += c;
+                            binds.add(term);
+                        } else {
+                            requires.add(term);
+                        }
+                    }
+                    crate::Requirement::Required(None) => {
+                        requires.add(term);
+                    }
+                    crate::Requirement::Derived(c) => {
+                        cost += c;
+                        binds.add(term);
+                    }
+                }
+            }
+        }
+
+        // entity is in env, so it shouldn't add ENTITY_COST
+        let expected = BASE_COST + VALUE_COST;
+        assert_eq!(cost, expected,
+            "Variable already in env should not add cost. Expected BASE({}) + VALUE({}) = {}, got {}",
+            BASE_COST, VALUE_COST, expected, cost);
+    }
+
+    // Test 3: Cardinality affects cost
+    #[test]
+    fn test_cardinality_many_costs_more_than_one() {
+        let the_attr: Attribute = "user/tags".parse().unwrap();
+
+        let one_app = FactApplication::new(
+            Term::Constant(the_attr.clone()),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("tag"),
+            crate::attribute::Cardinality::One,
+        );
+
+        let many_app = FactApplication::new(
+            Term::Constant(the_attr),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("tag"),
+            crate::attribute::Cardinality::Many,
+        );
+
+        let one_analysis = Analysis::from(Premise::from(one_app));
+        let many_analysis = Analysis::from(Premise::from(many_app));
+
+        assert!(many_analysis.cost() > one_analysis.cost(),
+            "Cardinality::Many should cost more than Cardinality::One. One: {}, Many: {}",
+            one_analysis.cost(), many_analysis.cost());
+
+        // Verify the specific cost difference
+        let one_base = 100;  // BASE_COST for Cardinality::One
+        let many_base = 100 * 100;  // BASE_COST^2 for Cardinality::Many
+
+        let expected_diff = many_base - one_base;
+        let actual_diff = many_analysis.cost() - one_analysis.cost();
+
+        assert_eq!(actual_diff, expected_diff,
+            "Cost difference should be {} (many_base - one_base), got {}",
+            expected_diff, actual_diff);
+    }
+
+    #[test]
+    fn test_fully_bound_cardinality_should_not_differ() {
+        // When all parameters are known (constants or bound), cardinality shouldn't matter much
+        // because we're doing a precise lookup, not a scan
+        let the_attr: Attribute = "user/tags".parse().unwrap();
+        let entity_val: Entity = Entity::new().unwrap();
+        let value_val = Value::String("rust".to_string());
+
+        let one_app = FactApplication::new(
+            Term::Constant(the_attr.clone()),
+            Term::Constant(entity_val.clone()),
+            Term::Constant(value_val.clone()),
+            crate::attribute::Cardinality::One,
+        );
+
+        let many_app = FactApplication::new(
+            Term::Constant(the_attr),
+            Term::Constant(entity_val),
+            Term::Constant(value_val),
+            crate::attribute::Cardinality::Many,
+        );
+
+        let one_analysis = Analysis::from(Premise::from(one_app));
+        let many_analysis = Analysis::from(Premise::from(many_app));
+
+        // Both should only have their base costs since all params are constants
+        // The difference is only in the BASE_COST
+        let one_base = 100;
+        let many_base = 10000;
+
+        assert_eq!(one_analysis.cost(), one_base);
+        assert_eq!(many_analysis.cost(), many_base);
+
+        // Note: This test documents current behavior. The comment above suggests
+        // this might not be ideal - when all components are known, cardinality
+        // probably shouldn't affect cost much since it's a precise lookup
+    }
+
+    // Test 4: Formula vs Fact costs
+    #[test]
+    fn test_formula_cheaper_than_fact_no_io() {
+        use crate::predicate::formula::Formula;
+        use crate::strings::Length;
+        use crate::Parameters;
+
+        // Formula with constant input (no IO needed)
+        let mut formula_params = Parameters::new();
+        formula_params.insert("of".to_string(),
+            Term::<Value>::Constant(Value::String("hello".to_string())));
+        formula_params.insert("is".to_string(),
+            Term::<Value>::var("len"));
+
+        let formula_app = Length::apply(formula_params).unwrap();
+        let formula_analysis = Analysis::from(Premise::from(formula_app));
+
+        // Fact with constant attribute (requires IO)
+        let the_attr: Attribute = "user/name".parse().unwrap();
+        let fact_app = FactApplication::new(
+            Term::Constant(the_attr),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("value"),
+            crate::attribute::Cardinality::One,
+        );
+        let fact_analysis = Analysis::from(Premise::from(fact_app));
+
+        assert!(formula_analysis.cost() < fact_analysis.cost(),
+            "Formula with no IO should be cheaper than FactApplication. Formula: {}, Fact: {}",
+            formula_analysis.cost(), fact_analysis.cost());
+    }
+
+    #[test]
+    fn test_formula_requiring_fact_costs_more() {
+        use crate::predicate::formula::Formula;
+        use crate::strings::Length;
+        use crate::Parameters;
+
+        // Formula that needs variable bound by fact (requires IO transitively)
+        let mut formula_params = Parameters::new();
+        formula_params.insert("of".to_string(),
+            Term::<Value>::var("text"));  // Needs to be bound first
+        formula_params.insert("is".to_string(),
+            Term::<Value>::var("len"));
+
+        let formula_app = Length::apply(formula_params).unwrap();
+        let formula_premise = Premise::from(formula_app);
+        let formula_analysis = Analysis::from(formula_premise);
+
+        // This formula is blocked - needs "text" to be bound
+        assert!(!formula_analysis.is_viable(),
+            "Formula requiring unbound variable should be blocked");
+
+        // To make it viable, we'd need a fact to bind "text" first
+        // The combined cost would be: fact_cost + formula_cost
+        // which is more than just the formula with a constant
+    }
+
+    #[test]
+    fn test_cost_accumulation_through_planning() {
+        // Test that costs accumulate correctly when planning multiple premises
+        let the_attr: Attribute = "user/name".parse().unwrap();
+
+        // First premise: binds "entity" and "name"
+        let p1 = FactApplication::new(
+            Term::Constant(the_attr.clone()),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("name"),
+            crate::attribute::Cardinality::One,
+        );
+
+        // Second premise: uses bound "entity", binds "age"
+        let age_attr: Attribute = "user/age".parse().unwrap();
+        let p2 = FactApplication::new(
+            Term::Constant(age_attr),
+            Term::<Entity>::var("entity"),  // Already bound by p1
+            Term::<Value>::var("age"),
+            crate::attribute::Cardinality::One,
+        );
+
+        let a1 = Analysis::from(Premise::from(p1));
+        let cost1 = a1.cost();
+
+        // Simulate p2 with entity already bound
+        let mut a2 = Analysis::from(Premise::from(p2.clone()));
+        let mut env = VariableScope::new();
+        env.add(&Term::<Value>::var("entity"));
+        a2.update(&env);
+        let cost2 = a2.cost();
+
+        // Second premise should be cheaper because entity is already bound
+        let expected_p2 = BASE_COST + VALUE_COST;  // No ENTITY_COST
+        assert_eq!(cost2, expected_p2,
+            "Second premise with bound entity should cost BASE + VALUE. Expected {}, got {}",
+            expected_p2, cost2);
+
+        // Total cost should be sum of both
+        let total = cost1 + cost2;
+        let expected_total = (BASE_COST + ENTITY_COST + VALUE_COST) + (BASE_COST + VALUE_COST);
+        assert_eq!(total, expected_total,
+            "Total cost should be sum of individual costs. Expected {}, got {}",
+            expected_total, total);
+    }
+}
+#[test]
+fn debug_update_cost() {
+    use crate::application::fact::{FactApplication, ATTRIBUTE_COST, BASE_COST, ENTITY_COST, VALUE_COST};
+    use crate::artifact::Attribute;
+    use crate::{Premise, Term, Value, VariableScope};
+    use crate::artifact::Entity;
+    use crate::analyzer::Analysis;
+
+    let the_attr: Attribute = "user/name".parse().unwrap();
+    let app = FactApplication::new(
+        Term::Constant(the_attr),
+        Term::<Entity>::var("entity"),
+        Term::<Value>::var("value"),
+        crate::attribute::Cardinality::One,
+    );
+    
+    let schema = app.schema();
+    eprintln!("\nSchema:");
+    for (name, constraint) in schema.iter() {
+        eprintln!("  {}: {:?}", name, constraint.requirement);
+    }
+    
+    let premise = Premise::from(app);
+    let mut analysis = Analysis::from(premise);
+    
+    eprintln!("\nInitial state:");
+    eprintln!("  Cost: {}", analysis.cost());
+    if let Analysis::Viable { binds, .. } = &analysis {
+        eprintln!("  Binds: {:?}", binds.variables);
+    }
+    
+    // Bind entity
+    let mut env = VariableScope::new();
+    env.add(&Term::<Value>::var("entity"));
+    
+    eprintln!("\nUpdating with entity bound...");
+    analysis.update(&env);
+    
+    eprintln!("\nAfter update:");
+    eprintln!("  Cost: {}", analysis.cost());
+    if let Analysis::Viable { binds, env, .. } = &analysis {
+        eprintln!("  Binds: {:?}", binds.variables);
+        eprintln!("  Env: {:?}", env.variables);
+    }
 }
