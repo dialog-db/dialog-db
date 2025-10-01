@@ -1,5 +1,4 @@
 pub use super::{Application, LegacyAnalysis};
-use crate::analyzer::{Analysis, Planner};
 pub use crate::artifact::Attribute;
 pub use crate::artifact::{ArtifactSelector, Constrained};
 pub use crate::error::AnalyzerError;
@@ -10,7 +9,9 @@ use crate::Cardinality;
 pub use crate::FactSelector;
 pub use crate::VariableScope;
 use crate::{try_stream, EvaluationContext, Match, Selection, Source};
-use crate::{Constraint, Dependencies, Dependency, Entity, QueryError, Schema, Term, Type, Value};
+use crate::{
+    Constraint, Dependencies, Dependency, Entity, Parameters, QueryError, Schema, Term, Type, Value,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::sync::OnceLock;
@@ -24,12 +25,17 @@ pub struct FactApplication {
 }
 
 impl FactApplication {
-    /// Returns the static schema for fact selectors
+    /// Returns the schema for fact selectors
     /// Defines the "the", "of", "is" parameters with choice constraint
-    pub fn schema() -> &'static Schema<Constraint> {
-        static FACT_SCHEMA: OnceLock<Schema<Constraint>> = OnceLock::new();
+    pub fn schema(&self) -> Schema {
+        Self::static_schema().clone()
+    }
+
+    /// Returns the static schema for fact selectors
+    fn static_schema() -> &'static Schema {
+        static FACT_SCHEMA: OnceLock<Schema> = OnceLock::new();
         FACT_SCHEMA.get_or_init(|| {
-            let constraint = Dependency::choice();
+            let constraint = Dependency::some();
             let mut schema = Schema::new();
 
             schema.insert(
@@ -37,7 +43,8 @@ impl FactApplication {
                 Constraint {
                     description: "Attribute of the fact".to_string(),
                     content_type: Some(Type::Symbol),
-                    requirement: constraint.desire(ATTRIBUTE_COST),
+                    requirement: constraint.derive(ATTRIBUTE_COST),
+                    cardinality: Cardinality::One,
                 },
             );
 
@@ -46,7 +53,8 @@ impl FactApplication {
                 Constraint {
                     description: "Entity of the fact".to_string(),
                     content_type: Some(Type::Entity),
-                    requirement: constraint.desire(ENTITY_COST),
+                    requirement: constraint.derive(ENTITY_COST),
+                    cardinality: Cardinality::One,
                 },
             );
 
@@ -55,7 +63,8 @@ impl FactApplication {
                 Constraint {
                     description: "Value of the fact".to_string(),
                     content_type: None, // Can be any type
-                    requirement: constraint.desire(VALUE_COST),
+                    requirement: constraint.derive(VALUE_COST),
+                    cardinality: Cardinality::One,
                 },
             );
 
@@ -87,6 +96,16 @@ impl FactApplication {
 
     pub fn cost(&self) -> usize {
         BASE_COST
+    }
+
+    /// Returns the parameters for this fact application
+    /// Note: This allocates since fact parameters are stored as separate fields
+    pub fn parameters(&self) -> Parameters {
+        let mut params = Parameters::new();
+        params.insert("the".to_string(), self.the.as_unknown());
+        params.insert("of".to_string(), self.of.as_unknown());
+        params.insert("is".to_string(), self.is.clone());
+        params
     }
 
     pub fn dependencies(&self) -> Dependencies {
@@ -149,72 +168,6 @@ impl FactApplication {
     }
 }
 
-impl Planner for FactApplication {
-    fn init(&self, analysis: &mut Analysis, env: &VariableScope) {
-        let (the, of, is) = (
-            if env.contains(&self.the) {
-                0
-            } else {
-                ATTRIBUTE_COST
-            },
-            if env.contains(&self.of) {
-                0
-            } else {
-                ENTITY_COST
-            },
-            if env.contains(&self.is) {
-                0
-            } else {
-                VALUE_COST
-            },
-        );
-
-        analysis.desire(&Term::<Value>::blank(), BASE_COST);
-
-        // if any variable is bound in the given environment we can mark
-        // all as desired since we only need one to derive the others.
-        if the + of + is < ATTRIBUTE_COST + ENTITY_COST + VALUE_COST {
-            analysis.desire(&self.the, the);
-            analysis.desire(&self.of, of);
-            analysis.desire(&self.is, is);
-        }
-        // if none of the variables are bound we can mark them all as required
-        else {
-            analysis.require(&self.the);
-            analysis.require(&self.of);
-            analysis.require(&self.is);
-        }
-    }
-    fn update(&self, analysis: &mut Analysis, env: &VariableScope) {
-        // update all the bound variable costs to 0
-        if env.contains(&self.the) {
-            analysis.desire(&self.the, 0);
-        }
-
-        if env.contains(&self.of) {
-            analysis.desire(&self.of, 0);
-        }
-
-        if env.contains(&self.is) {
-            analysis.desire(&self.is, 0);
-        }
-
-        // if we desired count is above 0 we mark all the other
-        // variables as desired also because we only need one to
-        // derive the rest.
-        if analysis.desired().count() > 0 {
-            if !analysis.desired().contains(&self.the) {
-                analysis.desire(&self.the, ATTRIBUTE_COST);
-            }
-            if !analysis.desired().contains(&self.of) {
-                analysis.desire(&self.of, ATTRIBUTE_COST);
-            }
-            if !analysis.desired().contains(&self.is) {
-                analysis.desire(&self.is, ATTRIBUTE_COST);
-            }
-        }
-    }
-}
 
 impl FactApplication {
     /// Resolves variables from the given selection match.

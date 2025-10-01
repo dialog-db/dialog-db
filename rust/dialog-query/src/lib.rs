@@ -44,7 +44,7 @@ pub use artifact::{Entity, Type, Value};
 pub use attribute::{Attribute, Cardinality};
 pub use claim::fact::Relation;
 pub use concept::Concept;
-pub use dependencies::{ChoiceId, Dependencies, Dependency, Requirement};
+pub use dependencies::{Dependencies, Dependency, Group, Requirement};
 pub use dialog_query_macros::Rule;
 pub use error::{InconsistencyError, QueryError};
 pub use fact::{assert, retract, Assertion, Claim, Fact, Retraction};
@@ -56,7 +56,7 @@ pub use predicate::{Compute, DeductiveRule, Formula};
 pub use premise::Premise;
 pub use query::{Query, Source, Store};
 pub use rule::{Premises, Rule, When};
-pub use schema::{Constraint, Descriptor, Schema};
+pub use schema::{Constraint, Schema};
 pub use session::transaction::{Edit, Transaction, TransactionError};
 pub use session::{QuerySession, Session};
 

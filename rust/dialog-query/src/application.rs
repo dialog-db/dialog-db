@@ -4,7 +4,6 @@ pub mod formula;
 pub mod join;
 pub mod rule;
 
-use crate::analyzer::Planner;
 pub use crate::analyzer::{AnalyzerError, LegacyAnalysis};
 pub use crate::error::PlanError;
 pub use crate::plan::ApplicationPlan;
@@ -38,6 +37,23 @@ impl Application {
             Application::Formula(application) => application.cost(),
         }
     }
+
+    pub fn parameters(&self) -> crate::Parameters {
+        match self {
+            Application::Fact(application) => application.parameters(),
+            Application::Concept(application) => application.parameters(),
+            Application::Formula(application) => application.parameters(),
+        }
+    }
+
+    pub fn schema(&self) -> crate::Schema {
+        match self {
+            Application::Fact(application) => application.schema(),
+            Application::Concept(application) => application.schema(),
+            Application::Formula(application) => application.schema(),
+        }
+    }
+
     pub fn dependencies(&self) -> Dependencies {
         match self {
             Application::Fact(application) => application.dependencies(),
@@ -132,20 +148,3 @@ impl Display for Application {
 //         }
 //     }
 // }
-
-impl Planner for Application {
-    fn init(&self, plan: &mut crate::analyzer::Analysis, env: &VariableScope) {
-        match self {
-            Application::Fact(application) => Planner::init(application, plan, env),
-            Application::Concept(application) => Planner::init(application, plan, env),
-            Application::Formula(application) => Planner::init(application, plan, env),
-        }
-    }
-    fn update(&self, plan: &mut crate::analyzer::Analysis, env: &VariableScope) {
-        match self {
-            Application::Fact(application) => Planner::update(application, plan, env),
-            Application::Concept(application) => Planner::update(application, plan, env),
-            Application::Formula(application) => Planner::update(application, plan, env),
-        }
-    }
-}

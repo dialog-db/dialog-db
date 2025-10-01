@@ -13,15 +13,14 @@ impl Dependencies {
     }
 
     /// Calculates the total cost of all derived dependencies.
-    /// Required dependencies don't contribute to cost as they must be provided.
-    /// Choice dependencies contribute their cost (will be refined during planning).
+    /// Required dependencies contribute cost only if part of choice group.
     pub fn cost(&self) -> usize {
         self.0
             .values()
             .filter_map(|d| match d {
                 Requirement::Derived(cost) => Some(*cost),
-                Requirement::Choice { cost, .. } => Some(*cost),
-                Requirement::Required => None,
+                Requirement::Required(Some((cost, _))) => Some(*cost),
+                Requirement::Required(None) => None,
             })
             .sum()
     }
@@ -51,7 +50,7 @@ impl Dependencies {
 
     /// Marks a dependency as required - must be provided externally.
     pub fn require(&mut self, dependency: String) {
-        self.0.insert(dependency, Requirement::Required);
+        self.0.insert(dependency, Requirement::Required(None));
     }
 
     /// Alters the dependency level to the lowest between current and provided
@@ -84,12 +83,11 @@ impl Dependencies {
     }
 
     /// Returns an iterator over only the required dependencies.
-    /// Note: Choice dependencies are not considered "required" until planning determines
-    /// that none in their group are satisfied.
+    /// Includes both non-choice required and choice-group required dependencies.
     pub fn required(&self) -> impl Iterator<Item = (&str, &Requirement)> {
         self.0.iter().filter_map(|(k, v)| match v {
-            Requirement::Required => Some((k.as_str(), v)),
-            Requirement::Derived(_) | Requirement::Choice { .. } => None,
+            Requirement::Required(_) => Some((k.as_str(), v)),
+            Requirement::Derived(_) => None,
         })
     }
 
@@ -109,49 +107,63 @@ impl Dependencies {
 /// Represents the requirement level for a dependency in a rule or formula.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Requirement {
-    /// Dependency that must be provided externally - cannot be derived.
-    Required,
-    /// Dependency that could be provided. If not provided it will be derived.
+    /// Dependency that must be provided externally or via choice group.
+    /// If Some(cost, group), this is part of a choice group with derivation cost.
+    /// If None, must be provided externally (no derivation possible).
+    Required(Option<(usize, Group)>),
+    /// Dependency that can be derived if not provided.
     /// Number represents cost of the derivation.
     Derived(usize),
-    /// Dependency is part of a choice group - if ANY parameter in the group
-    /// is bound, the requirement is satisfied. The cost applies if this
-    /// specific parameter is NOT the one that's bound.
-    Choice { group: ChoiceId, cost: usize },
 }
 
 impl Requirement {
     /// Checks if this is a required (non-derivable) dependency.
     pub fn is_required(&self) -> bool {
-        matches!(self, Requirement::Required)
+        matches!(self, Requirement::Required(_))
+    }
+
+    /// Get the cost associated with this requirement.
+    /// Required without choice group returns 0 (must be provided).
+    pub fn cost(&self) -> usize {
+        match self {
+            Requirement::Required(Some((cost, _))) => *cost,
+            Requirement::Required(None) => 0,
+            Requirement::Derived(cost) => *cost,
+        }
+    }
+
+    /// Check if this requirement is part of a choice group
+    pub fn group(&self) -> Option<Group> {
+        match self {
+            Requirement::Required(Some((_, group))) => Some(*group),
+            Requirement::Required(None) => None,
+            Requirement::Derived(_) => None,
+        }
+    }
+
+    pub fn required() -> Self {
+        Requirement::Required(None)
+    }
+    pub fn derived(cost: usize) -> Self {
+        Requirement::Derived(cost)
     }
 }
 
 /// Identifier for a choice group
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ChoiceId(usize);
+pub struct Group(usize);
 
-impl ChoiceId {
+impl Group {
     fn new() -> Self {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        ChoiceId(id)
+        Group(id)
     }
-}
 
-/// Builder for creating choice groups
-pub struct ChoiceBuilder {
-    group: ChoiceId,
-}
-
-impl ChoiceBuilder {
-    /// Mark this parameter as part of the choice with given cost
-    pub fn desire(&self, cost: usize) -> Requirement {
-        Requirement::Choice {
-            group: self.group,
-            cost,
-        }
+    /// Mark this parameter as part of the choice with this group
+    pub fn derive(&self, cost: usize) -> Requirement {
+        Requirement::Required(Some((cost, *self)))
     }
 }
 
@@ -159,16 +171,15 @@ impl ChoiceBuilder {
 pub struct Dependency;
 
 impl Dependency {
-    /// Create a new choice group builder
-    pub fn choice() -> ChoiceBuilder {
-        ChoiceBuilder {
-            group: ChoiceId::new(),
-        }
+    /// Create a requirement group where one of the members is required
+    /// in order to derive the rest.
+    pub fn some() -> Group {
+        Group::new()
     }
 
-    /// Mark parameter as required
+    /// Mark parameter as required (must be provided externally)
     pub fn require() -> Requirement {
-        Requirement::Required
+        Requirement::Required(None)
     }
 
     /// Mark parameter as derived with given cost
@@ -196,7 +207,7 @@ mod tests {
 
         // Test require
         deps.require("required".into());
-        assert_eq!(deps.resolve("required"), Requirement::Required);
+        assert_eq!(deps.resolve("required"), Requirement::Required(None));
 
         // Test provide
         deps.provide("provided".into());
@@ -232,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_requirement_properties() {
-        let required = Requirement::Required;
+        let required = Requirement::Required(None);
         let derived = Requirement::Derived(100);
 
         assert!(required.is_required());

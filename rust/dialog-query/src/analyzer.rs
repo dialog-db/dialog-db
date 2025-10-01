@@ -207,455 +207,199 @@ impl<'a> From<EstimateError<'a>> for CompileError {
     }
 }
 
-/// Context for a successfully planned premise
-/// Unlike SyntaxAnalysis, this can never be in Incomplete state
+/// A plan for executing a premise - ready to execute (lightweight, no cached schema/params)
 #[derive(Debug, Clone, PartialEq)]
-pub struct PlanContext {
+pub struct Plan {
+    pub premise: crate::premise::Premise,
     pub cost: usize,
-    pub desired: Desired,
-    pub depends: VariableScope,
+    pub binds: VariableScope,
+    pub env: VariableScope,
 }
 
-impl PlanContext {
-    pub fn provides(&self) -> VariableScope {
-        self.desired.clone().into()
+/// Analysis result for a premise - either viable or blocked
+/// Both variants cache schema/params for efficient updates
+#[derive(Debug, Clone, PartialEq)]
+pub enum Analysis {
+    /// Plan is ready to execute
+    Viable {
+        premise: crate::premise::Premise,
+        cost: usize,
+        binds: VariableScope,
+        env: VariableScope,
+        // Cached for efficient updates
+        schema: crate::Schema,
+        params: crate::Parameters,
+    },
+    /// Plan is blocked on missing requirements
+    Blocked {
+        premise: crate::premise::Premise,
+        cost: usize,
+        binds: VariableScope,
+        env: VariableScope,
+        requires: Required,
+        // Cached for efficient updates
+        schema: crate::Schema,
+        params: crate::Parameters,
+    },
+}
+
+impl Analysis {
+    /// Update this analysis with new bindings from the environment.
+    /// May transition from Blocked to Viable if requirements are satisfied.
+    /// Only processes relevant bindings and updates incrementally.
+    pub fn update(&mut self, new_bindings: &VariableScope) {
+        match self {
+            Analysis::Viable {
+                cost,
+                binds,
+                env,
+                schema,
+                params,
+                ..
+            } => {
+                // Only process bindings that are relevant to this plan
+                for (name, constraint) in schema.iter() {
+                    if let Some(term) = params.get(name) {
+                        // If this term was in binds and is now bound, move it to env
+                        if new_bindings.contains(term) && binds.contains(term) {
+                            // Add to env (only relevant bindings)
+                            env.add(term);
+
+                            // Remove from binds (incremental update)
+                            binds.remove(term);
+
+                            // Decrease cost (incremental update)
+                            if let crate::Requirement::Derived(c) = constraint.requirement {
+                                *cost = cost.saturating_sub(c);
+                            }
+                        }
+                    }
+                }
+            }
+            Analysis::Blocked {
+                premise,
+                cost,
+                binds,
+                env,
+                requires,
+                schema,
+                params,
+            } => {
+                // Track which choice groups now have at least one bound parameter
+                let mut satisfied_groups = std::collections::HashSet::new();
+
+                // Process only relevant bindings
+                for (name, constraint) in schema.iter() {
+                    if let Some(term) = params.get(name) {
+                        if new_bindings.contains(term) {
+                            // Check if this term is relevant to this plan
+                            let was_required = requires.remove(term);
+                            let was_bound = binds.remove(term);
+
+                            if was_required || was_bound {
+                                // This parameter is now bound (add to env)
+                                env.add(term);
+
+                                // Update cost incrementally if it was a desired binding
+                                if was_bound {
+                                    if let crate::Requirement::Derived(c) = constraint.requirement {
+                                        *cost = cost.saturating_sub(c);
+                                    }
+                                }
+
+                                // If this is part of a choice group, mark that group as satisfied
+                                if let crate::Requirement::Required(Some((_, group))) =
+                                    &constraint.requirement
+                                {
+                                    satisfied_groups.insert(*group);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Second pass: for satisfied choice groups, convert required params to desired
+                if !satisfied_groups.is_empty() {
+                    for (name, constraint) in schema.iter() {
+                        if let crate::Requirement::Required(Some((c, group))) =
+                            &constraint.requirement
+                        {
+                            if satisfied_groups.contains(group) {
+                                if let Some(term) = params.get(name) {
+                                    // If this term was required, it's no longer required
+                                    // Move it to binds if it's not already bound
+                                    if requires.remove(term) && !env.contains(term) {
+                                        binds.add(term);
+                                        // Add its cost since it's now desired instead of required
+                                        *cost += c;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // If no requirements remain, transition to Viable
+                if requires.count() == 0 {
+                    *self = Analysis::Viable {
+                        premise: premise.clone(),
+                        cost: *cost,
+                        binds: binds.clone(),
+                        env: env.clone(),
+                        schema: schema.clone(),
+                        params: params.clone(),
+                    };
+                }
+            }
+        }
     }
 
-    pub fn depends(&self) -> &VariableScope {
-        &self.depends
+    /// Get the cost of this analysis (whether viable or blocked)
+    pub fn cost(&self) -> usize {
+        match self {
+            Analysis::Viable { cost, .. } => *cost,
+            Analysis::Blocked { cost, .. } => *cost,
+        }
+    }
+
+    /// Check if this analysis is viable
+    pub fn is_viable(&self) -> bool {
+        matches!(self, Analysis::Viable { .. })
+    }
+
+    /// Get the premise this analysis is for
+    pub fn premise(&self) -> &crate::premise::Premise {
+        match self {
+            Analysis::Viable { premise, .. } => premise,
+            Analysis::Blocked { premise, .. } => premise,
+        }
     }
 }
 
-impl TryFrom<Analysis> for PlanContext {
-    type Error = &'static str;
+impl TryFrom<Analysis> for Plan {
+    type Error = CompileError;
 
     fn try_from(analysis: Analysis) -> Result<Self, Self::Error> {
         match analysis {
-            Analysis::Candidate {
-                cost,
-                desired,
-                depends,
-            } => Ok(PlanContext {
-                cost,
-                desired,
-                depends,
-            }),
-            Analysis::Incomplete { .. } => {
-                Err("Cannot convert Incomplete SyntaxAnalysis to PlanContext")
-            }
-        }
-    }
-}
-
-impl From<PlanContext> for Analysis {
-    fn from(context: PlanContext) -> Self {
-        Analysis::Candidate {
-            cost: context.cost,
-            desired: context.desired,
-            depends: context.depends,
-        }
-    }
-}
-
-/// Status trait marks valid planning states for premises
-pub trait Status: std::fmt::Debug + Clone + PartialEq {}
-
-/// Blocked state - premise has unmet requirements
-#[derive(Debug, Clone, PartialEq)]
-pub struct Incomplete {
-    pub requires: Required,
-}
-impl Status for Incomplete {}
-
-/// Ready state - premise is ready for execution
-#[derive(Debug, Clone, PartialEq)]
-pub struct Viable;
-impl Status for Viable {}
-
-/// A premise with planning state attached
-/// Uses phantom types to enforce that only ready plans can be executed
-#[derive(Debug, Clone, PartialEq)]
-pub struct PremisePlan<State: Status> {
-    premise: crate::premise::Premise,
-    cost: usize,
-    desires: Desired,
-    depends: VariableScope,
-    state: State,
-}
-
-impl PremisePlan<Incomplete> {
-    /// Create a new blocked plan from a premise
-    pub fn new(premise: crate::premise::Premise) -> Self {
-        PremisePlan {
-            premise,
-            cost: 0,
-            desires: Desired::new(),
-            depends: VariableScope::new(),
-            state: Incomplete {
-                requires: Required::new(),
-            },
-        }
-    }
-
-    /// Attempt to transition to Ready state if all requirements are satisfied
-    pub fn try_ready(self) -> Result<PremisePlan<Viable>, Self> {
-        if self.state.requires.count() == 0 {
-            Ok(PremisePlan {
-                premise: self.premise,
-                cost: self.cost,
-                desires: self.desires,
-                depends: self.depends,
-                state: Viable,
-            })
-        } else {
-            Err(self)
-        }
-    }
-
-    /// Access to the required dependencies
-    pub fn required(&self) -> &Required {
-        &self.state.requires
-    }
-}
-
-impl PremisePlan<Viable> {
-    /// Get the variables this plan provides
-    pub fn provides(&self) -> VariableScope {
-        self.desires.clone().into()
-    }
-
-    /// Get the variables this plan depends on
-    pub fn depends(&self) -> &VariableScope {
-        &self.depends
-    }
-
-    /// Extract the premise from this ready plan
-    pub fn into_premise(self) -> crate::premise::Premise {
-        self.premise
-    }
-
-    /// Get a reference to the premise
-    pub fn premise(&self) -> &crate::premise::Premise {
-        &self.premise
-    }
-}
-
-// Common methods available in both states
-impl<State: Status> PremisePlan<State> {
-    pub fn desired(&self) -> &Desired {
-        &self.desires
-    }
-
-    pub fn depends_on(&self) -> &VariableScope {
-        &self.depends
-    }
-
-    pub fn cost(&self) -> usize {
-        self.cost
-    }
-}
-
-// Mutable methods for planning (work on any state)
-impl PremisePlan<Incomplete> {
-    /// Mark a term as required
-    pub fn require<T: Scalar>(&mut self, term: &Term<T>) {
-        self.desires.remove(term);
-        self.state.requires.add(term);
-    }
-
-    /// Mark a term as desired with a cost
-    pub fn desire<T: Scalar>(&mut self, term: &Term<T>, cost: usize) {
-        match term {
-            Term::Variable { name: None, .. } => {
-                self.cost += cost;
-            }
-            Term::Variable { name: Some(_), .. } => {
-                self.state.requires.remove(term);
-                self.desires.insert(term, cost);
-            }
-            _ => {}
-        }
-    }
-
-    /// Mark a variable as bound (already available in the environment)
-    pub fn depend<T: Scalar>(&mut self, term: &Term<T>) {
-        match term {
-            Term::Constant(_) => {}
-            Term::Variable { name: Some(_), .. } => {
-                self.state.requires.remove(term);
-                self.desires.remove(term);
-                self.depends.add(term);
-            }
-            Term::Variable { name: None, .. } => {}
-        }
-    }
-
-    /// Mark all desired variables as required
-    pub fn require_all(&mut self) {
-        let terms: Vec<_> = self
-            .desires
-            .entries()
-            .filter(|(_, cost)| *cost > 0)
-            .map(|(term, _)| term)
-            .collect();
-        for term in terms {
-            self.require(&term);
-        }
-    }
-}
-
-/// Convert Analysis + Premise into PremisePlan
-impl Analysis {
-    pub fn into_plan(self, premise: crate::premise::Premise) -> PremisePlan<Incomplete> {
-        match self {
-            Analysis::Incomplete {
-                cost,
-                required,
-                desired,
-                depends,
-            } => PremisePlan {
+            Analysis::Viable {
                 premise,
                 cost,
-                desires: desired,
-                depends,
-                state: Incomplete { requires: required },
-            },
-            Analysis::Candidate {
-                cost,
-                desired,
-                depends,
-            } => PremisePlan {
-                premise,
-                cost,
-                desires: desired,
-                depends,
-                state: Incomplete {
-                    requires: Required::new(),
-                },
-            },
-        }
-    }
-
-    pub fn into_ready_plan(
-        self,
-        premise: crate::premise::Premise,
-    ) -> Result<PremisePlan<Viable>, PremisePlan<Incomplete>> {
-        self.into_plan(premise).try_ready()
-    }
-}
-
-#[derive(Clone)]
-pub enum Analysis {
-    /// Plan that can not be evaluated because it has unsatisfied requirements.
-    Incomplete {
-        cost: usize,
-        required: Required,
-        desired: Desired,
-        depends: VariableScope,
-    },
-    Candidate {
-        cost: usize,
-        desired: Desired,
-        depends: VariableScope,
-    },
-}
-impl Analysis {
-    pub fn new(cost: usize) -> Self {
-        Analysis::Candidate {
-            cost,
-            desired: Desired::new(),
-            depends: VariableScope::new(),
-        }
-    }
-
-    pub fn desired(&self) -> &Desired {
-        match self {
-            Analysis::Incomplete { desired, .. } => desired,
-            Analysis::Candidate { desired, .. } => desired,
-        }
-    }
-
-    pub fn cost(&self) -> &usize {
-        match self {
-            Analysis::Incomplete { cost, .. } => cost,
-            Analysis::Candidate { cost, .. } => cost,
-        }
-    }
-
-    pub fn depends(&self) -> &VariableScope {
-        match self {
-            Analysis::Incomplete { depends, .. } => depends,
-            Analysis::Candidate { depends, .. } => depends,
-        }
-    }
-
-    pub fn provides(&self) -> &VariableScope {
-        match self {
-            Analysis::Incomplete { depends, .. } => depends,
-            Analysis::Candidate { depends, .. } => depends,
-        }
-    }
-
-    pub fn require<T: Scalar>(&mut self, term: &Term<T>) {
-        match self {
-            Analysis::Incomplete {
-                required, desired, ..
+                binds,
+                env,
+                ..
             } => {
-                desired.remove(term);
-                required.add(term);
+                // Drop schema/params - don't need them in the final plan
+                Ok(Plan {
+                    premise,
+                    cost,
+                    binds,
+                    env,
+                })
             }
-            Analysis::Candidate {
-                cost,
-                desired,
-                depends,
-            } => {
-                desired.remove(term);
-                let mut required = Required::new();
-                required.add(term);
-                *self = Analysis::Incomplete {
-                    cost: *cost,
-                    desired: desired.to_owned(),
-                    required,
-                    depends: depends.to_owned(),
-                };
+            Analysis::Blocked { requires, .. } => {
+                Err(CompileError::RequiredBindings { required: requires })
             }
         }
-    }
-
-    pub fn desire<T: Scalar>(&mut self, term: &Term<T>, cost: usize) {
-        match term {
-            // if terms is not a named variable we add inflate base cost
-            Term::Variable { name: None, .. } => match self {
-                Analysis::Incomplete {
-                    cost: total,
-                    required,
-                    desired,
-                    depends,
-                } => {
-                    *self = Analysis::Incomplete {
-                        cost: *total + cost,
-                        desired: desired.to_owned(),
-                        required: required.to_owned(),
-                        depends: depends.to_owned(),
-                    };
-                }
-                Analysis::Candidate {
-                    cost: total,
-                    desired,
-                    depends,
-                } => {
-                    *self = Analysis::Candidate {
-                        cost: *total + cost,
-                        desired: desired.to_owned(),
-                        depends: depends.to_owned(),
-                    };
-                }
-            },
-            // if term is named variable we update required and desired
-            Term::Variable { name: Some(_), .. } => match self {
-                Analysis::Incomplete {
-                    cost: total,
-                    required,
-                    desired,
-                    depends,
-                } => {
-                    required.remove(term);
-                    desired.insert(term, cost);
-
-                    // if none of the requirements are left we transition it to
-                    // candidate state.
-                    if required.count() == 0 {
-                        *self = Analysis::Candidate {
-                            cost: *total,
-                            desired: desired.to_owned(),
-                            depends: depends.to_owned(),
-                        };
-                    }
-                }
-                Analysis::Candidate { desired, .. } => {
-                    desired.insert(term, cost);
-                }
-            },
-            _ => {}
-        }
-    }
-
-    pub fn require_all(&mut self) {
-        let terms: Vec<_> = self
-            .desired()
-            .entries()
-            .filter(|(_, cost)| *cost > 0)
-            .map(|(term, _)| term)
-            .collect();
-        for term in terms {
-            self.require(&term);
-        }
-    }
-
-    /// Mark a variable as bound (already available in the environment)
-    /// This removes it from desired/required and adds it to depends
-    /// Variables should be in exactly one category: required, desired, or depends
-    pub fn depend<T: Scalar>(&mut self, term: &Term<T>) {
-        match term {
-            Term::Constant(_) => {}
-            Term::Variable { name: Some(_), .. } => {
-                match self {
-                    Analysis::Incomplete {
-                        depends,
-                        required,
-                        desired,
-                        cost,
-                    } => {
-                        // Remove from required and desired
-                        required.remove(term);
-                        desired.remove(term);
-                        // Add to depends
-                        depends.add(term);
-
-                        // If no required left, transition to Candidate
-                        if required.count() == 0 {
-                            *self = Analysis::Candidate {
-                                cost: *cost,
-                                desired: desired.to_owned(),
-                                depends: depends.to_owned(),
-                            };
-                        }
-                    }
-                    Analysis::Candidate {
-                        depends, desired, ..
-                    } => {
-                        // Remove from desired
-                        desired.remove(term);
-                        // Add to depends
-                        depends.add(term);
-                    }
-                }
-            }
-            Term::Variable { name: None, .. } => {}
-        }
-    }
-
-    /// Bindings availabile in this context
-    pub fn bindings(&self) -> impl Iterator<Item = Term<Value>> + '_ {
-        self.desired()
-            .entries()
-            .filter_map(|(term, cost)| if cost == 0 { Some(term) } else { None })
-    }
-}
-
-/// Syntax forms for our datalog notation.
-pub trait Planner: Sized {
-    /// Performs initial analysis of this syntax form in the provided environment.
-    fn init(&self, plan: &mut Analysis, env: &VariableScope);
-
-    /// Updates analysis when new bindings become available in the environment.
-    fn update(&self, plan: &mut Analysis, env: &VariableScope);
-
-    /// Create a plan for this syntax form
-    fn plan(&self, env: &VariableScope) -> Analysis {
-        let mut plan = Analysis::new(0);
-        self.init(&mut plan, env);
-        plan
     }
 }
 

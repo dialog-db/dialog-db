@@ -1,5 +1,3 @@
-use crate::analyzer;
-use crate::analyzer::Planner;
 
 use super::analyzer::LegacyAnalysis;
 use super::application::Application;
@@ -19,10 +17,31 @@ impl Negation {
     pub fn not(application: Application) -> Self {
         Negation(application)
     }
+
     pub fn cost(&self) -> usize {
         let Negation(application) = self;
         application.cost()
     }
+
+    pub fn parameters(&self) -> crate::Parameters {
+        let Negation(application) = self;
+        application.parameters()
+    }
+
+    /// Returns schema for negation - all parameters become required
+    /// because negation can't run until all terms are bound
+    pub fn schema(&self) -> crate::Schema {
+        let Negation(application) = self;
+        let mut schema = application.schema();
+
+        // Convert all desired parameters to required
+        for (_, constraint) in schema.iter_mut() {
+            constraint.requirement = crate::Requirement::Required(None);
+        }
+
+        schema
+    }
+
     pub fn dependencies(&self) -> Dependencies {
         let Negation(application) = self;
         let mut dependencies = Dependencies::new();
@@ -50,19 +69,6 @@ impl Negation {
         let plan = application.plan(&scope)?;
 
         Ok(plan.not())
-    }
-}
-
-impl Planner for Negation {
-    fn init(&self, plan: &mut analyzer::Analysis, env: &VariableScope) {
-        let Negation(application) = self;
-        Planner::init(application, plan, env);
-        plan.require_all();
-    }
-    fn update(&self, plan: &mut analyzer::Analysis, env: &VariableScope) {
-        let Negation(application) = self;
-        Planner::update(application, plan, env);
-        plan.require_all();
     }
 }
 

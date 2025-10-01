@@ -178,7 +178,7 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 
-use crate::{Descriptor, Term, Type};
+use crate::{Term, Type};
 use serde::{Deserialize, Serialize};
 
 use crate::application::FormulaApplication;
@@ -235,7 +235,7 @@ pub trait Formula: Sized + Clone {
     fn cells() -> &'static Cells;
     fn operator() -> &'static str;
 
-    fn schema() -> Schema<Cell> {
+    fn schema() -> Schema {
         Self::cells().into()
     }
 
@@ -368,7 +368,7 @@ impl Cell {
     }
 
     pub fn required(mut self) -> Self {
-        self.requirement = Requirement::Required;
+        self.requirement = Requirement::Required(None);
         self
     }
 
@@ -443,17 +443,6 @@ impl Display for Cell {
     }
 }
 
-impl Descriptor for Cell {
-    fn content_type(&self) -> Option<Type> {
-        Some(self.content_type)
-    }
-    fn requirement(&self) -> &Requirement {
-        self.requirement()
-    }
-    fn description(&self) -> &str {
-        self.description()
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -530,11 +519,20 @@ impl<T: Iterator<Item = Cell>> From<T> for Cells {
     }
 }
 
-impl From<&Cells> for Schema<Cell> {
+impl From<&Cells> for Schema {
     fn from(cells: &Cells) -> Self {
-        let mut schema = Schema::<Cell>::new();
+        use crate::{Cardinality, Constraint};
+        let mut schema = Schema::new();
         for (name, cell) in cells.iter() {
-            schema.insert(name.into(), cell.clone());
+            schema.insert(
+                name.into(),
+                Constraint {
+                    description: cell.description.clone(),
+                    content_type: Some(cell.content_type),
+                    requirement: cell.requirement.clone(),
+                    cardinality: Cardinality::One,
+                },
+            );
         }
         schema
     }
@@ -552,7 +550,7 @@ fn test_cells() {
     assert_eq!(cells.get("name")?.name(), "name");
     assert_eq!(cells.get("name")?.content_type(), Type::String);
     assert_eq!(cells.get("name")?.description(), "name field");
-    assert_eq!(cells.get("name")?.requirement(), &Requirement::Required);
+    assert_eq!(cells.get("name")?.requirement(), &Requirement::Required(None));
 
     assert_eq!(cells.get("age")?.name(), "age");
     assert_eq!(cells.get("age")?.content_type(), Type::UnsignedInt);

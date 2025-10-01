@@ -35,6 +35,19 @@ impl VariableScope {
         self
     }
 
+    /// Removes a variable from the scope. Returns true if the variable was present.
+    /// If term is a constant or blank variable, returns false.
+    pub fn remove<T: Scalar>(&mut self, variable: &Term<T>) -> bool {
+        if let Term::Variable {
+            name: Some(name), ..
+        } = variable
+        {
+            self.variables.remove(name)
+        } else {
+            false
+        }
+    }
+
     pub fn extend(&mut self, other: impl IntoIterator<Item = Term<Value>>) -> VariableScope {
         let mut delta = HashSet::new();
 

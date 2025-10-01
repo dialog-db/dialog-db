@@ -2,10 +2,9 @@ use crate::application::FactApplication;
 pub use crate::artifact::{Attribute as ArtifactsAttribute, Entity, Value};
 use crate::error::{SchemaError, TypeError};
 pub use crate::fact_selector::FactSelector;
-use crate::fact_selector::ATTRIBUTE_COST;
 pub use crate::term::Term;
 pub use crate::types::{IntoValueDataType, Scalar, Type};
-use crate::{Descriptor, Parameters, Requirement};
+use crate::Parameters;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use std::marker::PhantomData;
 
@@ -285,25 +284,6 @@ impl<'de, T: Scalar> Deserialize<'de> for Attribute<T> {
     }
 }
 
-const REQUIREMENT: Requirement = Requirement::Derived(ATTRIBUTE_COST);
-
-impl<T: Scalar> Descriptor for Attribute<T> {
-    fn description(&self) -> &'static str {
-        self.description
-    }
-
-    fn content_type(&self) -> Option<Type> {
-        Some(self.content_type)
-    }
-
-    fn requirement(&self) -> &Requirement {
-        &REQUIREMENT
-    }
-
-    fn cardinality(&self) -> Cardinality {
-        self.cardinality
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct Match<T: Scalar> {

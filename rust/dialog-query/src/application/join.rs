@@ -74,7 +74,7 @@ impl<'a> Join<'a> {
                 let mut best: Option<(Plan, usize)> = None;
                 let mut candidates = vec![];
                 for (index, premise) in premises.iter().enumerate() {
-                    let analysis = premise.analyze();
+                    let analysis = premise.analyze_legacy();
                     let result = premise.plan(differential);
 
                     // Check if this is the best plan so far

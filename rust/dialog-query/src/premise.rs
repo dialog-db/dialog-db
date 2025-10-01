@@ -9,7 +9,7 @@ pub use super::application::Application;
 use super::application::{FactApplication, FormulaApplication};
 pub use super::negation::Negation;
 pub use super::plan::{EvaluationPlan, Plan};
-pub use crate::analyzer::{Analysis, LegacyAnalysis, Planner};
+pub use crate::analyzer::LegacyAnalysis;
 pub use crate::error::{AnalyzerError, PlanError};
 pub use crate::syntax::VariableScope;
 pub use crate::Dependencies;
@@ -32,12 +32,86 @@ impl Premise {
             Premise::Exclude(negation) => negation.dependencies(),
         }
     }
+
     pub fn cost(&self) -> usize {
         match self {
             Premise::Apply(application) => application.cost(),
             Premise::Exclude(negation) => negation.cost(),
         }
     }
+
+    pub fn parameters(&self) -> crate::Parameters {
+        match self {
+            Premise::Apply(application) => application.parameters(),
+            Premise::Exclude(negation) => negation.parameters(),
+        }
+    }
+
+    pub fn schema(&self) -> crate::Schema {
+        match self {
+            Premise::Apply(application) => application.schema(),
+            Premise::Exclude(negation) => negation.schema(),
+        }
+    }
+
+    /// Analyze this premise in the given environment.
+    /// Returns either a viable plan (ready to execute) or a blocked plan (missing requirements).
+    pub fn analyze(&self, env: &crate::VariableScope) -> crate::analyzer::Analysis {
+        use crate::analyzer::{Analysis, Required};
+
+        let schema = self.schema();
+        let params = self.parameters();
+        let base_cost = self.cost();
+
+        let mut cost = base_cost;
+        let mut binds = crate::VariableScope::new();
+        let mut requires = Required::new();
+        let mut premise_env = env.clone();
+
+        // Iterate over schema constraints
+        for (name, constraint) in schema.iter() {
+            if let Some(term) = params.get(name) {
+                if env.contains(term) {
+                    // Already bound in environment
+                    premise_env.add(term);
+                } else {
+                    // Not yet bound
+                    match &constraint.requirement {
+                        crate::Requirement::Required(_) => {
+                            requires.add(term);
+                        }
+                        crate::Requirement::Derived(c) => {
+                            cost += c;
+                            binds.add(term);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Return either Viable or Blocked (with cached schema/params)
+        if requires.count() == 0 {
+            Analysis::Viable {
+                premise: self.clone(),
+                cost,
+                binds,
+                env: premise_env,
+                schema,
+                params,
+            }
+        } else {
+            Analysis::Blocked {
+                premise: self.clone(),
+                cost,
+                binds,
+                env: premise_env,
+                requires,
+                schema,
+                params,
+            }
+        }
+    }
+
     /// Creates an execution plan for this premise within the given variable scope.
     pub fn plan(&self, scope: &VariableScope) -> Result<Plan, PlanError> {
         match self {
@@ -46,8 +120,8 @@ impl Premise {
         }
     }
 
-    /// Analyzes this premise to determine its dependencies and cost.
-    pub fn analyze(&self) -> LegacyAnalysis {
+    /// Analyzes this premise to determine its dependencies and cost (legacy method).
+    pub fn analyze_legacy(&self) -> LegacyAnalysis {
         match self {
             Premise::Apply(application) => application.analyze(),
             // Negation requires that all of the underlying dependencies to be
@@ -100,21 +174,6 @@ impl Display for Premise {
 //         }
 //     }
 // }
-
-impl Planner for Premise {
-    fn init(&self, analysis: &mut Analysis, env: &VariableScope) {
-        match self {
-            Self::Apply(application) => Planner::init(application, analysis, env),
-            Self::Exclude(negation) => Planner::init(negation, analysis, env),
-        }
-    }
-    fn update(&self, analysis: &mut Analysis, env: &VariableScope) {
-        match self {
-            Self::Apply(application) => Planner::update(application, analysis, env),
-            Self::Exclude(negation) => Planner::update(negation, analysis, env),
-        }
-    }
-}
 
 impl From<FormulaApplication> for Premise {
     fn from(application: FormulaApplication) -> Self {

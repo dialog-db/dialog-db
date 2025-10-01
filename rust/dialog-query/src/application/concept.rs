@@ -1,5 +1,4 @@
 use super::fact::{BASE_COST, ENTITY_COST, VALUE_COST};
-use crate::analyzer::Planner;
 use crate::analyzer::{AnalyzerError, LegacyAnalysis};
 use crate::error::PlanError;
 use crate::plan::ConceptPlan;
@@ -24,6 +23,17 @@ pub struct ConceptApplication {
 impl ConceptApplication {
     pub fn cost(&self) -> usize {
         BASE_COST
+    }
+
+    /// Returns the parameters for this concept application
+    pub fn parameters(&self) -> Parameters {
+        self.terms.clone()
+    }
+
+    /// Concepts don't have a schema yet - returns empty schema
+    /// TODO: Figure out how to represent `this` in schema
+    pub fn schema(&self) -> crate::Schema {
+        crate::Schema::new()
     }
 
     pub fn dependencies(&self) -> Dependencies {
@@ -224,29 +234,6 @@ impl ConceptApplication {
     }
 }
 
-impl Planner for ConceptApplication {
-    fn init(&self, plan: &mut crate::analyzer::Analysis, env: &VariableScope) {
-        let blank = Term::blank();
-        for operand in self.concept.operands() {
-            let term = self.terms.get(operand).unwrap_or(&blank);
-            if env.contains(term) {
-                plan.desire(term, 0);
-            } else {
-                plan.desire(term, VALUE_COST);
-            }
-        }
-    }
-
-    fn update(&self, plan: &mut crate::analyzer::Analysis, env: &VariableScope) {
-        let blank = Term::blank();
-        for operand in self.concept.operands() {
-            let term = self.terms.get(operand).unwrap_or(&blank);
-            if env.contains(term) {
-                plan.desire(term, 0);
-            }
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConceptApplicationAnalysis {

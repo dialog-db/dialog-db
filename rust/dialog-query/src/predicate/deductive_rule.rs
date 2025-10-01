@@ -1,4 +1,4 @@
-pub use crate::analyzer::{AnalyzerError, LegacyAnalysis, PremisePlan, Viable};
+pub use crate::analyzer::{AnalyzerError, LegacyAnalysis, Plan};
 pub use crate::application::{FactApplication, RuleApplication};
 use crate::error::{CompileError, SchemaError};
 pub use crate::planner::Join;
@@ -15,9 +15,9 @@ pub struct DeductiveRule {
     /// typically what datalog calls rule head.
     pub conclusion: Concept,
     /// Premises that must hold for rule to reach it's conclusion. Typically
-    /// datalog calls these rule body. These are guaranteed to be ready plans
+    /// datalog calls these rule body. These are guaranteed to be viable plans
     /// after compilation.
-    pub premises: Vec<PremisePlan<Viable>>,
+    pub premises: Vec<Plan>,
 }
 impl DeductiveRule {
     /// Create a new uncompiled rule from a conclusion and premises
@@ -62,7 +62,7 @@ impl UncompiledDeductiveRule {
         // order in such scenario or to discover that some premise in the rule
         // is not satisfiable e.g. if formula uses rule parameter in the required
         // cell which is not derived from any other premise.
-        let (premises, derived) = Join::new(&self.premises).plan(&VariableScope::new())?;
+        let (premises, derived) = Join::new(self.premises.clone()).plan(&VariableScope::new())?;
 
         // We also verify that every rule parameter was derived by one of the
         // rule premises, otherwise we produce an error since rule evaluation

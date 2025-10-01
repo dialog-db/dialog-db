@@ -1,88 +1,88 @@
 //! Schema system for describing parameter signatures
 //!
-//! This module provides a generic schema system that describes the structure,
-//! types, and requirements of parameters across different premise types.
+//! This module provides a schema system that describes the structure,
+//! types, and requirements of parameters for different premise types.
 
 use crate::{Cardinality, Requirement, Type};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Generic schema that maps parameter names to their descriptors
+/// Schema that maps parameter names to their constraints
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Schema<T: Descriptor> {
-    descriptors: HashMap<String, T>,
+pub struct Schema {
+    constraints: HashMap<String, Constraint>,
 }
 
-impl<T: Descriptor> Schema<T> {
+impl Schema {
     pub fn new() -> Self {
         Self {
-            descriptors: HashMap::new(),
+            constraints: HashMap::new(),
         }
     }
 
-    pub fn insert(&mut self, name: String, descriptor: T) {
-        self.descriptors.insert(name, descriptor);
+    pub fn insert(&mut self, name: String, constraint: Constraint) {
+        self.constraints.insert(name, constraint);
     }
 
-    pub fn get(&self, name: &str) -> Option<&T> {
-        self.descriptors.get(name)
+    pub fn get(&self, name: &str) -> Option<&Constraint> {
+        self.constraints.get(name)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &T)> {
-        self.descriptors.iter()
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Constraint)> {
+        self.constraints.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut Constraint)> {
+        self.constraints.iter_mut()
     }
 
     pub fn len(&self) -> usize {
-        self.descriptors.len()
+        self.constraints.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.descriptors.is_empty()
+        self.constraints.is_empty()
     }
 }
 
-impl<T: Descriptor> Default for Schema<T> {
+impl Default for Schema {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Trait for parameter descriptors - describes a parameter's type, requirement, etc.
-pub trait Descriptor: Clone {
-    /// Human-readable description of this parameter
-    fn description(&self) -> &str;
-
-    /// The data type of this parameter (None means any type)
-    fn content_type(&self) -> Option<Type>;
-
-    /// How this parameter is required/derived
-    fn requirement(&self) -> &Requirement;
-
-    /// Cardinality constraint (1, ?, +, *)
-    fn cardinality(&self) -> Cardinality {
-        Cardinality::One // Default
-    }
-}
-
-/// Constraint descriptor - for fact selectors
-/// Describes a parameter's type and requirement without additional metadata
+/// Constraint descriptor - describes a parameter's type and requirement
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Constraint {
     pub description: String,
     pub content_type: Option<Type>,
     pub requirement: Requirement,
+    pub cardinality: Cardinality,
 }
 
-impl Descriptor for Constraint {
-    fn description(&self) -> &str {
+impl Constraint {
+    pub fn new(description: String, content_type: Option<Type>, requirement: Requirement) -> Self {
+        Self {
+            description,
+            content_type,
+            requirement,
+            cardinality: Cardinality::One,
+        }
+    }
+
+    pub fn description(&self) -> &str {
         &self.description
     }
 
-    fn content_type(&self) -> Option<Type> {
+    pub fn content_type(&self) -> Option<Type> {
         self.content_type
     }
 
-    fn requirement(&self) -> &Requirement {
+    pub fn requirement(&self) -> &Requirement {
         &self.requirement
+    }
+
+    pub fn cardinality(&self) -> Cardinality {
+        self.cardinality
     }
 }

@@ -1,11 +1,10 @@
 pub use super::Application;
 pub use crate::analyzer::LegacyAnalysis;
-use crate::analyzer::Planner;
 pub use crate::cursor::Cursor;
 pub use crate::error::{AnalyzerError, FormulaEvaluationError, PlanError};
 pub use crate::plan::FormulaApplicationPlan;
 use crate::predicate::formula::Cells;
-use crate::Term;
+
 pub use crate::{Dependencies, Match, Parameters, Requirement, VariableScope};
 use std::fmt::Display;
 
@@ -47,13 +46,13 @@ impl FormulaApplication {
                 Requirement::Derived(cost) => {
                     analysis.desire(self.parameters.get(name), *cost);
                 }
-                Requirement::Choice { cost, .. } => {
+                Requirement::Required(Some((cost, _))) => {
                     // Formulas don't use choice groups, treat as derived
                     analysis.desire(self.parameters.get(name), *cost);
                 }
                 // We should be checking this at the application time not
                 // during analysis
-                Requirement::Required => {
+                Requirement::Required(None) => {
                     // analysis.require(self.parameters.get(name));
                 }
             }
@@ -66,6 +65,16 @@ impl FormulaApplication {
         self.cost
     }
 
+    /// Returns the schema for this formula
+    pub fn schema(&self) -> crate::Schema {
+        self.cells.into()
+    }
+
+    /// Returns the parameters for this formula application
+    pub fn parameters(&self) -> Parameters {
+        self.parameters.clone()
+    }
+
     pub fn dependencies(&self) -> Dependencies {
         let mut dependencies = Dependencies::new();
         for (name, cell) in self.cells.iter() {
@@ -73,11 +82,11 @@ impl FormulaApplication {
                 Requirement::Derived(cost) => {
                     dependencies.desire(name.to_string(), *cost);
                 }
-                Requirement::Choice { cost, .. } => {
+                Requirement::Required(Some((cost, _))) => {
                     // Formulas don't use choice groups, treat as derived
                     dependencies.desire(name.to_string(), *cost);
                 }
-                Requirement::Required => {
+                Requirement::Required(None) => {
                     dependencies.require(name.to_string());
                 }
             }
@@ -95,7 +104,7 @@ impl FormulaApplication {
             let requirement = cell.requirement();
             let term = self.parameters.get(name);
             match requirement {
-                Requirement::Required => {
+                Requirement::Required(_) => {
                     if let Some(parameter) = term {
                         if scope.contains(&parameter) {
                             Ok(())
@@ -113,7 +122,7 @@ impl FormulaApplication {
                         })
                     }?;
                 }
-                Requirement::Derived(estimate) | Requirement::Choice { cost: estimate, .. } => {
+                Requirement::Derived(estimate) => {
                     match term {
                         Some(term) => {
                             derives.add(term);
@@ -175,32 +184,3 @@ impl From<FormulaApplication> for Application {
     }
 }
 
-impl Planner for FormulaApplication {
-    fn init(&self, plan: &mut crate::analyzer::Analysis, env: &VariableScope) {
-        let blank = Term::blank();
-        for (name, cell) in self.cells.iter() {
-            let term = self.parameters.get(name).unwrap_or(&blank);
-            if env.contains(term) {
-                plan.desire(term, 0);
-            } else {
-                match cell.requirement() {
-                    Requirement::Derived(cost) | Requirement::Choice { cost, .. } => {
-                        plan.desire(term, *cost);
-                    }
-                    Requirement::Required => {
-                        plan.require(term);
-                    }
-                }
-            }
-        }
-    }
-    fn update(&self, plan: &mut crate::analyzer::Analysis, env: &VariableScope) {
-        for (name, _) in self.cells.iter() {
-            if let Some(parameter) = self.parameters.get(name) {
-                if env.contains(parameter) {
-                    plan.desire(parameter, 0);
-                }
-            }
-        }
-    }
-}
