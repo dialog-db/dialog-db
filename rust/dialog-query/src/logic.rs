@@ -59,12 +59,12 @@ impl Formula for And {
 
     fn cells() -> &'static Cells {
         AND_CELLS.get_or_init(|| {
-            Cells::define(|cell| {
-                cell("left", Type::Boolean).the("Left operand").required();
+            Cells::define(|builder| {
+                builder.cell("left", Type::Boolean).the("Left operand").required();
 
-                cell("right", Type::Boolean).the("Right operand").required();
+                builder.cell("right", Type::Boolean).the("Right operand").required();
 
-                cell("is", Type::Boolean)
+                builder.cell("is", Type::Boolean)
                     .the("Result of AND operation")
                     .derived(1);
             })
@@ -139,12 +139,12 @@ impl Formula for Or {
 
     fn cells() -> &'static Cells {
         OR_CELLS.get_or_init(|| {
-            Cells::define(|cell| {
-                cell("left", Type::Boolean).the("Left operand").required();
+            Cells::define(|builder| {
+                builder.cell("left", Type::Boolean).the("Left operand").required();
 
-                cell("right", Type::Boolean).the("Right operand").required();
+                builder.cell("right", Type::Boolean).the("Right operand").required();
 
-                cell("is", Type::Boolean)
+                builder.cell("is", Type::Boolean)
                     .the("Result of OR operation")
                     .derived(1);
             })
@@ -215,12 +215,12 @@ impl Formula for Not {
 
     fn cells() -> &'static Cells {
         NOT_CELLS.get_or_init(|| {
-            Cells::define(|cell| {
-                cell("value", Type::Boolean)
+            Cells::define(|builder| {
+                builder.cell("value", Type::Boolean)
                     .the("Boolean value to negate")
                     .required();
 
-                cell("is", Type::Boolean)
+                builder.cell("is", Type::Boolean)
                     .the("Result of NOT operation")
                     .derived(1);
             })

@@ -58,12 +58,12 @@ impl Formula for Concatenate {
 
     fn cells() -> &'static Cells {
         CONCATENATE_CELLS.get_or_init(|| {
-            Cells::define(|cell| {
-                cell("first", Type::String).the("First string").required();
+            Cells::define(|builder| {
+                builder.cell("first", Type::String).the("First string").required();
 
-                cell("second", Type::String).the("Second string").required();
+                builder.cell("second", Type::String).the("Second string").required();
 
-                cell("is", Type::String)
+                builder.cell("is", Type::String)
                     .the("Concatenated string")
                     .derived(2);
             })
@@ -213,10 +213,10 @@ impl Formula for Uppercase {
 
     fn cells() -> &'static Cells {
         UPPERCASE_CELLS.get_or_init(|| {
-            Cells::define(|cell| {
-                cell("of", Type::String).the("String to convert").required();
+            Cells::define(|builder| {
+                builder.cell("of", Type::String).the("String to convert").required();
 
-                cell("is", Type::String).the("Uppercase string").derived(1);
+                builder.cell("is", Type::String).the("Uppercase string").derived(1);
             })
         })
     }
@@ -284,10 +284,10 @@ impl Formula for Lowercase {
 
     fn cells() -> &'static Cells {
         LOWERCASE_CELLS.get_or_init(|| {
-            Cells::define(|cell| {
-                cell("of", Type::String).the("String to convert").required();
+            Cells::define(|builder| {
+                builder.cell("of", Type::String).the("String to convert").required();
 
-                cell("is", Type::String).the("Lowercase string").derived(1);
+                builder.cell("is", Type::String).the("Lowercase string").derived(1);
             })
         })
     }

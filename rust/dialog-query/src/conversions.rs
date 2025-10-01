@@ -82,12 +82,12 @@ impl Formula for ToString {
 
     fn cells() -> &'static Cells {
         TO_STRING_CELLS.get_or_init(|| {
-            Cells::define(|cell| {
-                cell("value", Type::String) // Note: accepts any type
+            Cells::define(|builder| {
+                builder.cell("value", Type::String) // Note: accepts any type
                     .the("Value to convert")
                     .required();
 
-                cell("is", Type::String)
+                builder.cell("is", Type::String)
                     .the("String representation")
                     .derived(1);
             })
@@ -164,10 +164,10 @@ impl Formula for ParseNumber {
 
     fn cells() -> &'static Cells {
         PARSE_NUMBER_CELLS.get_or_init(|| {
-            Cells::define(|cell| {
-                cell("text", Type::String).the("String to parse").required();
+            Cells::define(|builder| {
+                builder.cell("text", Type::String).the("String to parse").required();
 
-                cell("is", Type::UnsignedInt)
+                builder.cell("is", Type::UnsignedInt)
                     .the("Parsed number")
                     .derived(2);
             })

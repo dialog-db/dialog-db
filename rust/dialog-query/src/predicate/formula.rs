@@ -377,6 +377,10 @@ impl Cell {
         self
     }
 
+    pub fn done(self) -> Self {
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -444,23 +448,31 @@ impl Display for Cell {
 }
 
 
+pub struct CellsBuilder {
+    cells: HashMap<String, Cell>,
+}
+
+impl CellsBuilder {
+    pub fn cell(&mut self, name: &'static str, content_type: Type) -> &mut Cell {
+        let cell = Cell::new(name, content_type);
+        self.cells.insert(name.to_string(), cell);
+        self.cells.get_mut(name).unwrap()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Cells(HashMap<String, Cell>);
 impl Cells {
     pub fn define<F>(define: F) -> Self
     where
-        F: FnOnce(&mut dyn FnMut(&'static str, Type) -> Cell),
+        F: FnOnce(&mut CellsBuilder),
     {
-        let mut cells = Self(HashMap::new());
-        let mut cell = |name: &'static str, content_type: Type| {
-            let cell = Cell::new(name, content_type);
-            let cloned = cell.clone();
-            cells.0.insert(cell.name.clone(), cell);
-            cloned
+        let mut builder = CellsBuilder {
+            cells: HashMap::new(),
         };
-        define(&mut cell);
-        cells
+        define(&mut builder);
+        Self(builder.cells)
     }
 
     pub fn default() -> Self {
@@ -544,10 +556,10 @@ impl From<&Cells> for Schema {
 
 #[test]
 fn test_cells() -> anyhow::Result<()> {
-    let cells = Cells::define(|cell| {
-        cell("name", Type::String).the("name field").required();
+    let cells = Cells::define(|builder| {
+        builder.cell("name", Type::String).the("name field").required();
 
-        cell("age", Type::UnsignedInt).the("age field").derived(15);
+        builder.cell("age", Type::UnsignedInt).the("age field").derived(15);
     });
 
     assert_eq!(cells.count(), 2);

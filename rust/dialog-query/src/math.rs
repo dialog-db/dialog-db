@@ -62,16 +62,16 @@ impl Formula for Sum {
 
     fn cells() -> &'static Cells {
         SUM_CELLS.get_or_init(|| {
-            Cells::define(|cell| {
-                cell("of", Type::UnsignedInt)
+            Cells::define(|builder| {
+                builder.cell("of", Type::UnsignedInt)
                     .the("Number to add to")
                     .required();
 
-                cell("with", Type::UnsignedInt)
+                builder.cell("with", Type::UnsignedInt)
                     .the("Number to add")
                     .required();
 
-                cell("is", Type::UnsignedInt)
+                builder.cell("is", Type::UnsignedInt)
                     .the("Sum of numbers")
                     .derived(5);
             })
@@ -151,16 +151,16 @@ impl Formula for Difference {
 
     fn cells() -> &'static Cells {
         DIFFERENCE_CELLS.get_or_init(|| {
-            Cells::define(|cell| {
-                cell("of", Type::UnsignedInt)
+            Cells::define(|builder| {
+                builder.cell("of", Type::UnsignedInt)
                     .the("Number to subtract from")
                     .required();
 
-                cell("subtract", Type::UnsignedInt)
+                builder.cell("subtract", Type::UnsignedInt)
                     .the("Number to subtract")
                     .required();
 
-                cell("is", Type::UnsignedInt).the("Difference").derived(2);
+                builder.cell("is", Type::UnsignedInt).the("Difference").derived(2);
             })
         })
     }
@@ -233,16 +233,16 @@ impl Formula for Product {
 
     fn cells() -> &'static Cells {
         PRODUCT_CELLS.get_or_init(|| {
-            Cells::define(|cell| {
-                cell("of", Type::UnsignedInt)
+            Cells::define(|builder| {
+                builder.cell("of", Type::UnsignedInt)
                     .the("Number to multiply")
                     .required();
 
-                cell("times", Type::UnsignedInt)
+                builder.cell("times", Type::UnsignedInt)
                     .the("Times to multiply")
                     .required();
 
-                cell("is", Type::UnsignedInt)
+                builder.cell("is", Type::UnsignedInt)
                     .the("Result of multiplication")
                     .derived(5);
             })
@@ -322,16 +322,16 @@ impl Formula for Quotient {
 
     fn cells() -> &'static Cells {
         QUOTIENT_CELLS.get_or_init(|| {
-            Cells::define(|cell| {
-                cell("of", Type::UnsignedInt)
+            Cells::define(|builder| {
+                builder.cell("of", Type::UnsignedInt)
                     .the("Number to divide")
                     .required();
 
-                cell("by", Type::UnsignedInt)
+                builder.cell("by", Type::UnsignedInt)
                     .the("Number to divide by")
                     .required();
 
-                cell("is", Type::UnsignedInt)
+                builder.cell("is", Type::UnsignedInt)
                     .the("Result of division")
                     .derived(5);
             })
@@ -411,16 +411,16 @@ impl Formula for Modulo {
 
     fn cells() -> &'static Cells {
         MODULO_CELLS.get_or_init(|| {
-            Cells::define(|cell| {
-                cell("of", Type::UnsignedInt)
+            Cells::define(|builder| {
+                builder.cell("of", Type::UnsignedInt)
                     .the("Number to compute modulo of")
                     .required();
 
-                cell("by", Type::UnsignedInt)
+                builder.cell("by", Type::UnsignedInt)
                     .the("Number to compute modulo by")
                     .required();
 
-                cell("is", Type::UnsignedInt)
+                builder.cell("is", Type::UnsignedInt)
                     .the("Result of modulo operation")
                     .derived(10);
             })
