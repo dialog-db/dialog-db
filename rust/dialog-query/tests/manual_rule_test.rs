@@ -1,7 +1,7 @@
 use dialog_query::artifact::{Entity, Type, Value};
 use dialog_query::attribute::{Attribute, Cardinality, Match};
 use dialog_query::concept::{Attributes, Concept, Instance, Instructions, Match as ConceptMatch};
-use dialog_query::fact_selector::FactSelector;
+use dialog_query::predicate::fact::Fact;
 use dialog_query::rule::{Premises, Rule, When};
 use dialog_query::term::Term;
 use dialog_query::types::Scalar;
@@ -201,28 +201,18 @@ impl Rule for Person {
             Term::Constant(value) => Term::Constant(value.as_value()),
         };
 
-        let name_selector = FactSelector::<Value> {
-            the: Some(Term::from(
-                "person/name"
-                    .parse::<dialog_artifacts::Attribute>()
-                    .unwrap(),
-            )),
-            of: Some(terms.this.clone()),
-            is: Some(name_value_term),
-            fact: None,
-        };
+        let name_fact = Fact::select()
+            .the("person/name")
+            .of(terms.this.clone())
+            .is(name_value_term);
 
-        let age_selector = FactSelector::<Value> {
-            the: Some(Term::from(
-                "person/age".parse::<dialog_artifacts::Attribute>().unwrap(),
-            )),
-            of: Some(terms.this.clone()),
-            is: Some(age_value_term),
-            fact: None,
-        };
+        let age_fact = Fact::select()
+            .the("person/age")
+            .of(terms.this.clone())
+            .is(age_value_term);
 
-        // Return When collection with both selectors
-        [name_selector, age_selector].into()
+        // Return When collection with both facts
+        [name_fact, age_fact].into()
     }
 }
 
@@ -325,13 +315,9 @@ mod tests {
         for statement in &when_statements {
             match statement {
                 Premise::Apply(Application::Fact(selector)) => {
-                    assert!(selector.the.is_some());
-                    assert!(selector.of.is_some());
-                    assert!(selector.is.is_some());
-                    assert!(selector.fact.is_none());
-                }
-                Premise::Apply(Application::Rule(_)) => {
-                    panic!("Unexpected ApplyRule premise in test");
+                    assert!(selector.parameters().get("the").is_some());
+                    assert!(selector.parameters().get("of").is_some());
+                    assert!(selector.parameters().get("is").is_some());
                 }
                 Premise::Apply(Application::Formula(_)) => {
                     panic!("Unexpected ApplyFormula premise in test");
@@ -363,12 +349,9 @@ mod tests {
         for statement in statements {
             match statement {
                 Premise::Apply(Application::Fact(selector)) => {
-                    assert!(selector.the.is_some());
-                    assert!(selector.of.is_some());
-                    assert!(selector.is.is_some());
-                }
-                Premise::Apply(Application::Rule(_)) => {
-                    panic!("Unexpected ApplyRule premise in test");
+                    assert!(selector.parameters().get("the").is_some());
+                    assert!(selector.parameters().get("of").is_some());
+                    assert!(selector.parameters().get("is").is_some());
                 }
                 Premise::Apply(Application::Formula(_)) => {
                     panic!("Unexpected ApplyFormula premise in test");

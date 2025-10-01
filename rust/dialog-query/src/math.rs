@@ -457,7 +457,7 @@ mod tests {
     use crate::*;
 
     #[test]
-    fn test_sum_formula_basic() {
+    fn test_sum_formula_basic() -> anyhow::Result<()> {
         // Create Terms mapping
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x").into());
@@ -487,10 +487,11 @@ mod tests {
 
         // Check that result is computed correctly
         assert_eq!(output.get::<u32>(&Term::var("result")).ok(), Some(8));
+        Ok(())
     }
 
     #[test]
-    fn test_cursor_read_write() {
+    fn test_cursor_read_write() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("test").into());
 
@@ -515,10 +516,11 @@ mod tests {
             .read::<u32>("value")
             .expect("Failed to read written value");
         assert_eq!(written_value, 100);
+        Ok(())
     }
 
     #[test]
-    fn test_sum_formula_missing_input() {
+    fn test_sum_formula_missing_input() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x").into());
         terms.insert("with".to_string(), Term::var("missing").into());
@@ -536,10 +538,11 @@ mod tests {
             result.unwrap_err(),
             FormulaEvaluationError::UnboundVariable { .. }
         ));
+        Ok(())
     }
 
     #[test]
-    fn test_sum_formula_multiple_expand() {
+    fn test_sum_formula_multiple_expand() -> anyhow::Result<()> {
         // Test multiple expansions without the stream complexity
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("a").into());
@@ -575,10 +578,11 @@ mod tests {
         assert_eq!(result2.get::<u32>(&Term::var("a")).ok(), Some(10));
         assert_eq!(result2.get::<u32>(&Term::var("b")).ok(), Some(15));
         assert_eq!(result2.get::<u32>(&Term::var("sum")).ok(), Some(25));
+        Ok(())
     }
 
     #[test]
-    fn test_multiple_try_from_types() {
+    fn test_multiple_try_from_types() -> anyhow::Result<()> {
         // Test various data types with standard TryFrom<Value>
         let bool_val = Value::Boolean(true);
         assert_eq!(bool::try_from(bool_val).unwrap(), true);
@@ -594,10 +598,11 @@ mod tests {
 
         let i32_val = Value::SignedInt(-10);
         assert_eq!(i32::try_from(i32_val).unwrap(), -10);
+        Ok(())
     }
 
     #[test]
-    fn test_difference_formula() {
+    fn test_difference_formula() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x").into());
         terms.insert("subtract".to_string(), Term::var("y").into());
@@ -615,10 +620,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(result.get::<u32>(&Term::var("result")).ok(), Some(7));
+        Ok(())
     }
 
     #[test]
-    fn test_difference_formula_underflow() {
+    fn test_difference_formula_underflow() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x").into());
         terms.insert("subtract".to_string(), Term::var("y").into());
@@ -639,10 +645,11 @@ mod tests {
         let result = &results[0];
         // Should saturate at 0
         assert_eq!(result.get::<u32>(&Term::var("result")).ok(), Some(0));
+        Ok(())
     }
 
     #[test]
-    fn test_product_formula() {
+    fn test_product_formula() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x").into());
         terms.insert("times".to_string(), Term::var("y").into());
@@ -660,10 +667,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(result.get::<u32>(&Term::var("result")).ok(), Some(42));
+        Ok(())
     }
 
     #[test]
-    fn test_quotient_formula() {
+    fn test_quotient_formula() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x").into());
         terms.insert("by".to_string(), Term::var("y").into());
@@ -681,10 +689,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(result.get::<u32>(&Term::var("result")).ok(), Some(5));
+        Ok(())
     }
 
     #[test]
-    fn test_quotient_formula_division_by_zero() {
+    fn test_quotient_formula_division_by_zero() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x").into());
         terms.insert("by".to_string(), Term::var("y").into());
@@ -703,10 +712,11 @@ mod tests {
 
         // Should return empty Vec for division by zero
         assert_eq!(results.len(), 0);
+        Ok(())
     }
 
     #[test]
-    fn test_modulo_formula() {
+    fn test_modulo_formula() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x").into());
         terms.insert("by".to_string(), Term::var("y").into());
@@ -724,10 +734,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(result.get::<u32>(&Term::var("result")).ok(), Some(2));
+        Ok(())
     }
 
     #[test]
-    fn test_modulo_formula_by_zero() {
+    fn test_modulo_formula_by_zero() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x").into());
         terms.insert("by".to_string(), Term::var("y").into());
@@ -744,5 +755,6 @@ mod tests {
 
         // Should return empty Vec for modulo by zero
         assert_eq!(results.len(), 0);
+        Ok(())
     }
 }

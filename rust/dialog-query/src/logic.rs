@@ -255,7 +255,7 @@ mod tests {
     use crate::{Match, Parameters, Term};
 
     #[test]
-    fn test_and_formula_true_true() {
+    fn test_and_formula_true_true() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("left".to_string(), Term::var("a").into());
         terms.insert("right".to_string(), Term::var("b").into());
@@ -273,10 +273,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(result.get::<bool>(&Term::var("result")).ok(), Some(true));
+        Ok(())
     }
 
     #[test]
-    fn test_and_formula_true_false() {
+    fn test_and_formula_true_false() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("left".to_string(), Term::var("a").into());
         terms.insert("right".to_string(), Term::var("b").into());
@@ -294,10 +295,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(result.get::<bool>(&Term::var("result")).ok(), Some(false));
+        Ok(())
     }
 
     #[test]
-    fn test_and_formula_false_false() {
+    fn test_and_formula_false_false() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("left".to_string(), Term::var("a").into());
         terms.insert("right".to_string(), Term::var("b").into());
@@ -315,10 +317,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(result.get::<bool>(&Term::var("result")).ok(), Some(false));
+        Ok(())
     }
 
     #[test]
-    fn test_or_formula_true_false() {
+    fn test_or_formula_true_false() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("left".to_string(), Term::var("a").into());
         terms.insert("right".to_string(), Term::var("b").into());
@@ -336,10 +339,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(result.get::<bool>(&Term::var("result")).ok(), Some(true));
+        Ok(())
     }
 
     #[test]
-    fn test_or_formula_false_false() {
+    fn test_or_formula_false_false() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("left".to_string(), Term::var("a").into());
         terms.insert("right".to_string(), Term::var("b").into());
@@ -357,10 +361,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(result.get::<bool>(&Term::var("result")).ok(), Some(false));
+        Ok(())
     }
 
     #[test]
-    fn test_not_formula_true() {
+    fn test_not_formula_true() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("bool").into());
         terms.insert("is".to_string(), Term::var("result").into());
@@ -373,10 +378,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(result.get::<bool>(&Term::var("result")).ok(), Some(false));
+        Ok(())
     }
 
     #[test]
-    fn test_not_formula_false() {
+    fn test_not_formula_false() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("bool").into());
         terms.insert("is".to_string(), Term::var("result").into());
@@ -390,10 +396,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(result.get::<bool>(&Term::var("result")).ok(), Some(true));
+        Ok(())
     }
 
     #[test]
-    fn test_chained_logic_operations() {
+    fn test_chained_logic_operations() -> anyhow::Result<()> {
         // Test AND then NOT: !(true && false) = !false = true
         let mut and_terms = Parameters::new();
         and_terms.insert("left".to_string(), Term::var("a").into());
@@ -426,5 +433,6 @@ mod tests {
             final_result.get::<bool>(&Term::var("final_result")).ok(),
             Some(true)
         );
+        Ok(())
     }
 }

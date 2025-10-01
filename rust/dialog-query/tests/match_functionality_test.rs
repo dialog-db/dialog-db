@@ -1,12 +1,13 @@
 #[cfg(test)]
 mod match_functionality_test {
-    use dialog_query::artifact::Entity;
+    use dialog_query::artifact::{Entity, Value};
+    use dialog_query::predicate::fact::Fact;
     use dialog_query::syntax::VariableScope;
-    use dialog_query::*;
+    use dialog_query::term::Term;
     use dialog_query::{Application, Premise};
 
     // This test demonstrates the Match struct functionality that was requested.
-    // It shows how Match structs work with the generic FactSelector<T> system
+    // It shows how Match structs work with the new Fact API
     // that was implemented as part of the original request for:
     // `Employee::Name::Match { of: entity, is: name }`
 
@@ -17,20 +18,26 @@ mod match_functionality_test {
     }
 
     impl TestNameMatch {
-        pub fn to_fact_selector(&self) -> FactSelector<String> {
-            FactSelector::new()
+        pub fn to_fact(&self) -> Fact {
+            // Convert Term<String> to Term<Value>
+            let value_term = match &self.is {
+                Term::Variable { name, .. } => Term::<Value>::Variable {
+                    name: name.clone(),
+                    content_type: Default::default(),
+                },
+                Term::Constant(s) => Term::Constant(Value::String(s.clone())),
+            };
+
+            Fact::select()
                 .the("test/name")
                 .of(self.of.clone())
-                .is(self.is.clone())
+                .is(value_term)
         }
     }
 
     impl From<TestNameMatch> for Premise {
         fn from(test_match: TestNameMatch) -> Self {
-            // Convert String-typed FactSelector to Value-typed and then to Premise
-            let selector = test_match.to_fact_selector();
-            let generic_selector = FactSelector::from(&selector);
-            Premise::Apply(Application::Fact(generic_selector))
+            Premise::from(test_match.to_fact())
         }
     }
 
@@ -60,15 +67,15 @@ mod match_functionality_test {
 
         assert!(match_with_var.is.is_variable());
 
-        // Test conversion to FactSelector
-        let fact_selector = match_pattern.to_fact_selector();
-        assert!(fact_selector.the.is_some());
-        assert!(fact_selector.of.is_some());
-        assert!(fact_selector.is.is_some());
+        // Test conversion to Fact
+        let fact = match_pattern.to_fact();
+        assert!(fact.the.is_constant());
+        assert!(fact.of.is_constant());
+        assert!(fact.is.is_constant());
     }
 
     #[test]
-    fn test_fact_selector_integration() {
+    fn test_fact_integration() {
         let entity = Entity::new().unwrap();
 
         let match_pattern = TestNameMatch {
@@ -76,20 +83,14 @@ mod match_functionality_test {
             is: "Bob".to_string().into(),
         };
 
-        let fact_selector = match_pattern.to_fact_selector();
+        let fact = match_pattern.to_fact();
 
-        // Check the fact selector has the right fields
+        // Check the fact has the right fields
         assert_eq!(
-            fact_selector
-                .the
-                .as_ref()
-                .unwrap()
-                .as_constant()
-                .unwrap()
-                .to_string(),
+            fact.the.as_constant().unwrap().to_string(),
             "test/name"
         );
-        assert!(fact_selector.of.is_some());
-        assert!(fact_selector.is.is_some());
+        assert!(fact.of.is_constant());
+        assert!(fact.is.is_constant());
     }
 }

@@ -152,7 +152,7 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
                 name: #field_name_lit,
                 description: #doc_comment_lit,
                 cardinality: dialog_query::attribute::Cardinality::One,
-                data_type: #data_type_value,
+                content_type: #data_type_value,
                 marker: std::marker::PhantomData,
             };
         });
@@ -164,7 +164,7 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
                 name: #field_name_lit,
                 description: #doc_comment_lit,
                 cardinality: dialog_query::attribute::Cardinality::One,
-                data_type: #data_type_value,
+                content_type: #data_type_value,
                 marker: std::marker::PhantomData,
             }
         });
@@ -176,17 +176,15 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
                 let value_term = match &terms.#field_name {
                     dialog_query::term::Term::Variable { name, .. } => dialog_query::term::Term::Variable {
                         name: name.clone(),
-                        _type: Default::default(),
+                        content_type: Default::default(),
                     },
                     dialog_query::term::Term::Constant(value) => dialog_query::term::Term::Constant(dialog_query::types::Scalar::as_value(value)),
                 };
 
-                dialog_query::fact_selector::FactSelector::<dialog_query::artifact::Value> {
-                    the: Some(dialog_query::term::Term::from(#attr_string.parse::<dialog_artifacts::Attribute>().unwrap())),
-                    of: Some(terms.this.clone()),
-                    is: Some(value_term),
-                    fact: None,
-                }
+                dialog_query::predicate::fact::Fact::select()
+                    .the(#attr_string)
+                    .of(terms.this.clone())
+                    .is(value_term)
             }
         });
 
@@ -205,7 +203,7 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
                 name: #field_name_lit,
                 description: #doc_comment_lit,
                 cardinality: dialog_query::attribute::Cardinality::One,
-                data_type: #data_type_value,
+                content_type: #data_type_value,
                 marker: std::marker::PhantomData,
             })
         });
@@ -371,7 +369,7 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
                 // Start with an empty match frame
                 let initial_match = Match::new();
                 let initial_selection = stream::iter(vec![Ok(initial_match)]);
-                let context = EvaluationContext::single(store.clone(), initial_selection);
+                let context = EvaluationContext::single(store.clone(), initial_selection, VariableScope::new());
 
                 // For now, we'll just execute the first plan to demonstrate the pattern
                 // In a complete implementation, we'd need to handle plan joining properly

@@ -133,14 +133,20 @@ impl Formula for Length {
     }
 
     fn cells() -> &'static Cells {
-        LENGTH_CELLS.get_or_init(|| {
-            Cells::define(|cell| {
-                cell("of", Type::String).the("String to measure").required();
+        use crate::predicate::formula::Cell;
 
-                cell("is", Type::UnsignedInt)
-                    .the("Length of string")
-                    .derived(1);
-            })
+        LENGTH_CELLS.get_or_init(|| {
+            let mut cells = Cells::default();
+
+            let mut of_cell = Cell::new("of", Type::String);
+            of_cell.the("String to measure").required();
+            cells.insert(of_cell);
+
+            let mut is_cell = Cell::new("is", Type::UnsignedInt);
+            is_cell.the("Length of string").derived(1);
+            cells.insert(is_cell);
+
+            cells
         })
     }
 

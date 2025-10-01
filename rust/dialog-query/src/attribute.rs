@@ -203,6 +203,7 @@ impl<'de, T: Scalar> Deserialize<'de> for Attribute<T> {
             Namespace,
             Name,
             Description,
+            #[serde(rename = "type")]
             DataType,
         }
 

@@ -202,7 +202,7 @@ mod tests {
     use crate::{Entity, Match, Parameters, Term};
 
     #[test]
-    fn test_to_string_number() {
+    fn test_to_string_number() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("num").into());
         terms.insert("is".to_string(), Term::var("str").into());
@@ -218,10 +218,11 @@ mod tests {
             result.get::<String>(&Term::var("str")).ok(),
             Some("42".to_string())
         );
+        Ok(())
     }
 
     #[test]
-    fn test_to_string_boolean() {
+    fn test_to_string_boolean() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("bool").into());
         terms.insert("is".to_string(), Term::var("str").into());
@@ -237,10 +238,11 @@ mod tests {
             result.get::<String>(&Term::var("str")).ok(),
             Some("true".to_string())
         );
+        Ok(())
     }
 
     #[test]
-    fn test_to_string_string() {
+    fn test_to_string_string() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("text").into());
         terms.insert("is".to_string(), Term::var("str").into());
@@ -258,10 +260,11 @@ mod tests {
             result.get::<String>(&Term::var("str")).ok(),
             Some("hello".to_string())
         );
+        Ok(())
     }
 
     #[test]
-    fn test_to_string_entity() {
+    fn test_to_string_entity() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("entity").into());
         terms.insert("is".to_string(), Term::var("str").into());
@@ -280,10 +283,11 @@ mod tests {
             result.get::<String>(&Term::var("str")).ok(),
             Some(entity.to_string())
         );
+        Ok(())
     }
 
     #[test]
-    fn test_parse_number_valid() {
+    fn test_parse_number_valid() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("text".to_string(), Term::var("str").into());
         terms.insert("is".to_string(), Term::var("num").into());
@@ -298,10 +302,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(result.get::<u32>(&Term::var("num")).ok(), Some(123));
+        Ok(())
     }
 
     #[test]
-    fn test_parse_number_with_whitespace() {
+    fn test_parse_number_with_whitespace() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("text".to_string(), Term::var("str").into());
         terms.insert("is".to_string(), Term::var("num").into());
@@ -316,10 +321,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(result.get::<u32>(&Term::var("num")).ok(), Some(456));
+        Ok(())
     }
 
     #[test]
-    fn test_parse_number_invalid() {
+    fn test_parse_number_invalid() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("text".to_string(), Term::var("str").into());
         terms.insert("is".to_string(), Term::var("num").into());
@@ -335,10 +341,11 @@ mod tests {
 
         // Should return empty Vec for invalid input
         assert_eq!(results.len(), 0);
+        Ok(())
     }
 
     #[test]
-    fn test_parse_number_empty_string() {
+    fn test_parse_number_empty_string() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("text".to_string(), Term::var("str").into());
         terms.insert("is".to_string(), Term::var("num").into());
@@ -352,10 +359,11 @@ mod tests {
 
         // Should return empty Vec for empty string
         assert_eq!(results.len(), 0);
+        Ok(())
     }
 
     #[test]
-    fn test_parse_number_negative() {
+    fn test_parse_number_negative() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("text".to_string(), Term::var("str").into());
         terms.insert("is".to_string(), Term::var("num").into());
@@ -371,5 +379,6 @@ mod tests {
 
         // Should return empty Vec for negative numbers since we parse as u32
         assert_eq!(results.len(), 0);
+        Ok(())
     }
 }

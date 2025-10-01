@@ -122,16 +122,14 @@ impl FormulaApplication {
                         })
                     }?;
                 }
-                Requirement::Derived(estimate) => {
-                    match term {
-                        Some(term) => {
-                            derives.add(term);
-                        }
-                        None => {
-                            cost += estimate;
-                        }
+                Requirement::Derived(estimate) => match term {
+                    Some(term) => {
+                        derives.add(term);
                     }
-                }
+                    None => {
+                        cost += estimate;
+                    }
+                },
             }
         }
 
@@ -183,4 +181,3 @@ impl From<FormulaApplication> for Application {
         Application::Formula(application)
     }
 }
-

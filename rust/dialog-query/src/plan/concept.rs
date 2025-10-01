@@ -50,7 +50,8 @@ impl EvaluationPlan for ConceptPlan {
             .plan(&scope)
             .expect("Failed to plan application");
         try_stream! {
-            for await item in plan.evaluate(context) {
+            let boxed_stream = Box::pin(plan.evaluate(context));
+            for await item in boxed_stream {
                 yield item?;
             }
         }

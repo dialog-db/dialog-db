@@ -50,15 +50,53 @@ impl Attributes {
         Ok(parameters)
     }
 
-    pub fn from<T: IntoIterator<Item = (String, Attribute<Value>)>>(iter: T) -> Self {
+}
+
+impl<const N: usize> From<[(&str, Attribute<Value>); N]> for Attributes {
+    fn from(arr: [(&str, Attribute<Value>); N]) -> Self {
         let mut attributes = Attributes::new();
-        for (name, attribute) in iter {
+        for (name, attribute) in arr {
+            attributes.0.insert(name.to_string(), attribute);
+        }
+        attributes
+    }
+}
+
+impl<const N: usize> From<[(String, Attribute<Value>); N]> for Attributes {
+    fn from(arr: [(String, Attribute<Value>); N]) -> Self {
+        let mut attributes = Attributes::new();
+        for (name, attribute) in arr {
             attributes.0.insert(name, attribute);
         }
         attributes
     }
 }
 
+impl From<Vec<(&str, Attribute<Value>)>> for Attributes {
+    fn from(vec: Vec<(&str, Attribute<Value>)>) -> Self {
+        let mut attributes = Attributes::new();
+        for (name, attribute) in vec {
+            attributes.0.insert(name.to_string(), attribute);
+        }
+        attributes
+    }
+}
+
+impl From<Vec<(String, Attribute<Value>)>> for Attributes {
+    fn from(vec: Vec<(String, Attribute<Value>)>) -> Self {
+        let mut attributes = Attributes::new();
+        for (name, attribute) in vec {
+            attributes.0.insert(name, attribute);
+        }
+        attributes
+    }
+}
+
+impl From<HashMap<String, Attribute<Value>>> for Attributes {
+    fn from(map: HashMap<String, Attribute<Value>>) -> Self {
+        Attributes(map)
+    }
+}
 
 /// Represents a concept which is a set of attributes that define an entity type.
 /// Concepts are similar to tables in relational databases but are more flexible
@@ -152,7 +190,6 @@ impl Concept {
     pub fn operands(&self) -> impl Iterator<Item = &str> {
         std::iter::once("this").chain(self.attributes.keys().map(|key| key.as_ref()))
     }
-
 
     pub fn with(mut self, name: &str, attribute: Attribute<Value>) -> Self {
         self.attributes.0.insert(name.into(), attribute);
@@ -366,14 +403,14 @@ mod tests {
 
     #[test]
     fn test_concept_serialization_to_specific_json() {
-        let attributes = Attributes::from([
+        let attributes = <Attributes as From<_>>::from([
             (
                 "name",
-                Attribute::new("user", "name", "User's name", Type::String),
+                Attribute::<Value>::new("user", "name", "User's name", Type::String),
             ),
             (
                 "age",
-                Attribute::new("user", "age", "User's age", Type::UnsignedInt),
+                Attribute::<Value>::new("user", "age", "User's age", Type::UnsignedInt),
             ),
         ]);
 
@@ -405,7 +442,7 @@ mod tests {
         assert_eq!(name_attr["namespace"], "user");
         assert_eq!(name_attr["name"], "name");
         assert_eq!(name_attr["description"], "User's name");
-        assert_eq!(name_attr["data_type"], "String");
+        assert_eq!(name_attr["type"], "String");
 
         // Check age attribute
         let age_attr = attributes_obj["age"]
@@ -414,7 +451,7 @@ mod tests {
         assert_eq!(age_attr["namespace"], "user");
         assert_eq!(age_attr["name"], "age");
         assert_eq!(age_attr["description"], "User's age");
-        assert_eq!(age_attr["data_type"], "UnsignedInt");
+        assert_eq!(age_attr["type"], "UnsignedInt");
     }
 
     #[test]
@@ -426,13 +463,13 @@ mod tests {
                     "namespace": "person",
                     "name": "email",
                     "description": "Person's email address",
-                    "data_type": "String"
+                    "type": "String"
                 },
                 "active": {
                     "namespace": "person",
                     "name": "active",
                     "description": "Whether person is active",
-                    "data_type": "Boolean"
+                    "type": "Boolean"
                 }
             }
         }"#;
@@ -463,9 +500,9 @@ mod tests {
 
     #[test]
     fn test_concept_round_trip_serialization() {
-        let mut attributes = Attributes::from([(
+        let mut attributes = <Attributes as From<_>>::from([(
             "score",
-            Attribute::new("game", "score", "Game score", Type::UnsignedInt),
+            Attribute::<Value>::new("game", "score", "Game score", Type::UnsignedInt),
         )]);
 
         let original = Concept {

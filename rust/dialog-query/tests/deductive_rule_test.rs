@@ -4,27 +4,28 @@ use dialog_query::application::{ConceptApplication, PlanCandidate};
 use dialog_query::artifact::Type;
 use dialog_query::attribute::Attribute;
 use dialog_query::error::{AnalyzerError, PlanError, QueryError};
-use dialog_query::predicate::{Concept, DeductiveRule, FactSelector};
+use dialog_query::predicate::fact::Fact;
+use dialog_query::predicate::concept::Attributes;
+use dialog_query::predicate::{Concept, DeductiveRule};
 use dialog_query::term::Term;
 use dialog_query::Negation;
 use dialog_query::{Application, Dependencies, Parameters, Premise, Value, VariableScope};
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 #[test]
 fn test_concept_as_conclusion_operations() {
-    let mut attributes = HashMap::new();
-    attributes.insert(
-        "name".to_string(),
-        Attribute::new("person", "name", "Person name", Type::String),
-    );
-    attributes.insert(
-        "age".to_string(),
-        Attribute::new("person", "age", "Person age", Type::UnsignedInt),
-    );
-
     let concept = Concept {
         operator: "person".to_string(),
-        attributes,
+        attributes: Attributes::from(vec![
+            (
+                "name",
+                Attribute::<Value>::new("person", "name", "Person name", Type::String),
+            ),
+            (
+                "age",
+                Attribute::<Value>::new("person", "age", "Person age", Type::UnsignedInt),
+            ),
+        ]),
     };
 
     // Test contains method - should include "this" parameter
@@ -51,37 +52,33 @@ fn test_concept_as_conclusion_operations() {
 
 #[test]
 fn test_concept_creation() {
-    let mut attributes = HashMap::new();
-    attributes.insert(
-        "name".to_string(),
-        Attribute::new("person", "name", "Person name", Type::String),
-    );
-
     let concept = Concept {
         operator: "person".to_string(),
-        attributes,
+        attributes: Attributes::from(vec![(
+            "name".to_string(),
+            Attribute::<Value>::new("person", "name", "Person name", Type::String),
+        )]),
     };
 
     assert_eq!(concept.operator, "person");
-    assert_eq!(concept.attributes.len(), 1);
-    assert!(concept.attributes.contains_key("name"));
+    assert_eq!(concept.attributes.count(), 1);
+    assert!(concept.attributes.contains("name"));
 }
 
 #[test]
 fn test_concept_application_analysis() {
-    let mut attributes = HashMap::new();
-    attributes.insert(
-        "name".to_string(),
-        Attribute::new("person", "name", "Person name", Type::String),
-    );
-    attributes.insert(
-        "age".to_string(),
-        Attribute::new("person", "age", "Person age", Type::UnsignedInt),
-    );
-
     let concept = Concept {
         operator: "person".to_string(),
-        attributes,
+        attributes: Attributes::from(vec![
+            (
+                "name".to_string(),
+                Attribute::<Value>::new("person", "name", "Person name", Type::String),
+            ),
+            (
+                "age".to_string(),
+                Attribute::<Value>::new("person", "age", "Person age", Type::UnsignedInt),
+            ),
+        ]),
     };
 
     let mut terms = Parameters::new();
@@ -90,7 +87,7 @@ fn test_concept_application_analysis() {
 
     let concept_app = ConceptApplication { terms, concept };
 
-    let analysis = concept_app.analyze().expect("Analysis should succeed");
+    let analysis = concept_app.analyze();
 
     assert_eq!(analysis.cost, BASE_COST);
     assert!(analysis.dependencies.contains("this"));
@@ -116,7 +113,7 @@ fn test_deductive_rule_parameters() {
         premises: vec![],
     };
 
-    let params = rule.parameters();
+    let params: HashSet<&str> = rule.parameters().collect();
     assert!(params.contains("this"));
     assert!(params.contains("name"));
     assert!(params.contains("age"));
@@ -125,12 +122,12 @@ fn test_deductive_rule_parameters() {
 
 #[test]
 fn test_premise_construction() {
-    let fact_selector = FactSelector::new()
+    let fact = Fact::select()
         .the("person/name")
         .of(Term::var("person"))
         .is(Value::String("Alice".to_string()));
 
-    let premise = Premise::from(fact_selector);
+    let premise = Premise::from(fact);
 
     match premise {
         Premise::Apply(Application::Fact(_)) => {
@@ -156,8 +153,8 @@ fn test_analysis_structure() {
 
 #[test]
 fn test_plan_candidate_structure() {
-    let fact_selector = FactSelector::new().the("test/attr");
-    let premise = Premise::from(fact_selector);
+    let fact = Fact::select().the("test/attr");
+    let premise = Premise::from(fact);
 
     let candidate = PlanCandidate {
         premise: &premise,
@@ -175,7 +172,7 @@ fn test_error_types() {
     let rule = DeductiveRule {
         conclusion: Concept {
             operator: "test".to_string(),
-            attributes: HashMap::new(),
+            attributes: Attributes::new(),
         },
         premises: vec![],
     };
@@ -208,8 +205,8 @@ fn test_error_types() {
 #[test]
 fn test_application_variants() {
     // Test Select application
-    let selector = FactSelector::new().the("test/attr");
-    let app = Application::Fact(selector);
+    let fact = Fact::select().the("test/attr");
+    let app = Application::Fact(fact.into());
 
     match app {
         Application::Fact(_) => {
@@ -223,7 +220,7 @@ fn test_application_variants() {
     terms.insert("test".to_string(), Term::var("test_var"));
     let concept = Concept {
         operator: "test".to_string(),
-        attributes: HashMap::new(),
+        attributes: Attributes::new(),
     };
     let concept_app = Application::Concept(ConceptApplication { terms, concept });
 
@@ -237,8 +234,8 @@ fn test_application_variants() {
 
 #[test]
 fn test_negation_construction() {
-    let selector = FactSelector::new().the("test/attr");
-    let app = Application::Fact(selector);
+    let fact = Fact::select().the("test/attr");
+    let app = Application::Fact(fact.into());
     let negation = Negation(app);
 
     // Test that negation wraps the application

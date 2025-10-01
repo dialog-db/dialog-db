@@ -1,23 +1,22 @@
 use dialog_query::artifact::Type;
 use dialog_query::attribute::Attribute;
+use dialog_query::predicate::concept::Attributes;
 use dialog_query::predicate::Concept;
-use std::collections::HashMap;
 
 #[test]
 fn test_concept_serialization_to_specific_json() {
-    let mut attributes = HashMap::new();
-    attributes.insert(
-        "name".to_string(),
-        Attribute::new("user", "name", "User's name", Type::String),
-    );
-    attributes.insert(
-        "age".to_string(),
-        Attribute::new("user", "age", "User's age", Type::UnsignedInt),
-    );
-
     let concept = Concept {
         operator: "user".to_string(),
-        attributes,
+        attributes: Attributes::from(vec![
+            (
+                "name".to_string(),
+                Attribute::new("user", "name", "User's name", Type::String),
+            ),
+            (
+                "age".to_string(),
+                Attribute::new("user", "age", "User's age", Type::UnsignedInt),
+            ),
+        ]),
     };
 
     // Test serialization to JSON
@@ -78,7 +77,7 @@ fn test_concept_deserialization_from_specific_json() {
     let concept: Concept = serde_json::from_str(json).expect("Should deserialize");
 
     assert_eq!(concept.operator, "person");
-    assert_eq!(concept.attributes.len(), 2);
+    assert_eq!(concept.attributes.count(), 2);
 
     let email_attr = concept
         .attributes
@@ -101,15 +100,12 @@ fn test_concept_deserialization_from_specific_json() {
 
 #[test]
 fn test_concept_round_trip_serialization() {
-    let mut attributes = HashMap::new();
-    attributes.insert(
-        "score".to_string(),
-        Attribute::new("game", "score", "Game score", Type::UnsignedInt),
-    );
-
     let original = Concept {
         operator: "game".to_string(),
-        attributes,
+        attributes: Attributes::from(vec![(
+            "score".to_string(),
+            Attribute::new("game", "score", "Game score", Type::UnsignedInt),
+        )]),
     };
 
     // Serialize then deserialize
@@ -118,7 +114,7 @@ fn test_concept_round_trip_serialization() {
 
     // Should be identical
     assert_eq!(original.operator, deserialized.operator);
-    assert_eq!(original.attributes.len(), deserialized.attributes.len());
+    assert_eq!(original.attributes.count(), deserialized.attributes.count());
 
     let orig_score = original.attributes.get("score").unwrap();
     let deser_score = deserialized.attributes.get("score").unwrap();
@@ -131,15 +127,12 @@ fn test_concept_round_trip_serialization() {
 #[test]
 fn test_expected_json_structure() {
     // Test that we get exactly the JSON structure we expect
-    let mut attributes = HashMap::new();
-    attributes.insert(
-        "id".to_string(),
-        Attribute::new("product", "id", "Product ID", Type::UnsignedInt),
-    );
-
     let concept = Concept {
         operator: "product".to_string(),
-        attributes,
+        attributes: Attributes::from(vec![(
+            "id".to_string(),
+            Attribute::new("product", "id", "Product ID", Type::UnsignedInt),
+        )]),
     };
 
     let json = serde_json::to_string_pretty(&concept).expect("Should serialize");

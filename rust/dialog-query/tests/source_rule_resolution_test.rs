@@ -1,7 +1,7 @@
 use anyhow::Result;
 use dialog_query::{
     artifact::{Artifacts, Type},
-    predicate::{Concept, DeductiveRule},
+    predicate::{concept::Attributes, Concept, DeductiveRule},
     query::Source,
     session::{QuerySession, Session},
     Attribute,
@@ -20,19 +20,19 @@ async fn test_session_source_rule_resolution() -> Result<()> {
     assert_eq!(session.resolve_rules("nonexistent"), Vec::new());
 
     // Test 2: Install a rule and verify it can be resolved
-    let mut attributes = HashMap::new();
-    attributes.insert(
-        "name".into(),
-        Attribute::new("adult", "name", "Adult name", Type::String),
-    );
-    attributes.insert(
-        "age".into(),
-        Attribute::new("adult", "age", "Adult age", Type::UnsignedInt),
-    );
 
     let adult_conclusion = Concept {
         operator: "adult".into(),
-        attributes: attributes.clone(),
+        attributes: Attributes::from(vec![
+            (
+                "name",
+                Attribute::new("adult", "name", "Adult name", Type::String),
+            ),
+            (
+                "age",
+                Attribute::new("adult", "age", "Adult age", Type::UnsignedInt),
+            ),
+        ]),
     };
 
     // Create a simple rule: adult(X, Age) :- person(X, Age), Age >= 18

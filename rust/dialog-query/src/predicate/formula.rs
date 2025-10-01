@@ -357,22 +357,22 @@ impl Cell {
         }
     }
 
-    pub fn typed(mut self, content_type: Type) -> Self {
+    pub fn typed(&mut self, content_type: Type) -> &mut Self {
         self.content_type = content_type;
         self
     }
 
-    pub fn the(mut self, description: &'static str) -> Self {
+    pub fn the(&mut self, description: &'static str) -> &mut Self {
         self.description = description.to_string();
         self
     }
 
-    pub fn required(mut self) -> Self {
+    pub fn required(&mut self) -> &mut Self {
         self.requirement = Requirement::Required(None);
         self
     }
 
-    pub fn derived(mut self, derivation: usize) -> Self {
+    pub fn derived(&mut self, derivation: usize) -> &mut Self {
         self.requirement = Requirement::Derived(derivation);
         self
     }
@@ -467,6 +467,10 @@ impl Cells {
         Cells(HashMap::new())
     }
 
+    pub fn insert(&mut self, cell: Cell) {
+        self.0.insert(cell.name.clone(), cell);
+    }
+
     pub fn new() -> Self {
         Cells(HashMap::new())
     }
@@ -539,7 +543,7 @@ impl From<&Cells> for Schema {
 }
 
 #[test]
-fn test_cells() {
+fn test_cells() -> anyhow::Result<()> {
     let cells = Cells::define(|cell| {
         cell("name", Type::String).the("name field").required();
 
@@ -547,13 +551,17 @@ fn test_cells() {
     });
 
     assert_eq!(cells.count(), 2);
-    assert_eq!(cells.get("name")?.name(), "name");
-    assert_eq!(cells.get("name")?.content_type(), Type::String);
-    assert_eq!(cells.get("name")?.description(), "name field");
-    assert_eq!(cells.get("name")?.requirement(), &Requirement::Required(None));
+    assert_eq!(cells.get("name").unwrap().name(), "name");
+    assert_eq!(*cells.get("name").unwrap().content_type(), Type::String);
+    assert_eq!(cells.get("name").unwrap().description(), "name field");
+    assert_eq!(
+        cells.get("name").unwrap().requirement(),
+        &Requirement::Required(None)
+    );
 
-    assert_eq!(cells.get("age")?.name(), "age");
-    assert_eq!(cells.get("age")?.content_type(), Type::UnsignedInt);
-    assert_eq!(cells.get("age")?.description(), "age field");
-    assert_eq!(cells.get("age")?.requirement(), &Requirement::Derived(15));
+    assert_eq!(cells.get("age").unwrap().name(), "age");
+    assert_eq!(*cells.get("age").unwrap().content_type(), Type::UnsignedInt);
+    assert_eq!(cells.get("age").unwrap().description(), "age field");
+    assert_eq!(cells.get("age").unwrap().requirement(), &Requirement::Derived(15));
+    Ok(())
 }

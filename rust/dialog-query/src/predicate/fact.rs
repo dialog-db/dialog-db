@@ -10,8 +10,70 @@ pub struct Selector {
     pub is: Term<Value>,
 }
 
-pub struct Fact;
+pub struct Fact {
+    pub the: Term<Attribute>,
+    pub of: Term<Entity>,
+    pub is: Term<Value>,
+}
+
 impl Fact {
+    /// Create a new empty Fact selector with all blank terms
+    pub fn new() -> Self {
+        Fact {
+            the: Term::blank(),
+            of: Term::blank(),
+            is: Term::blank(),
+        }
+    }
+
+    /// Set the attribute (the) constraint
+    pub fn the<T: crate::term::IntoAttributeTerm>(mut self, the: T) -> Self {
+        self.the = the.into_attribute_term();
+        self
+    }
+
+    /// Set the entity (of) constraint
+    pub fn of<Of: Into<Term<Entity>>>(mut self, entity: Of) -> Self {
+        self.of = entity.into();
+        self
+    }
+
+    /// Set the value (is) constraint
+    pub fn is<V: Into<Term<Value>>>(mut self, value: V) -> Self {
+        self.is = value.into();
+        self
+    }
+
+    /// Convert the builder into a FactApplication
+    pub fn build(self) -> Result<FactApplication, SchemaError> {
+        let mut params = Parameters::new();
+        // Convert typed terms to Term<Value> for Parameters
+        let the_value = match self.the {
+            Term::Variable { name, .. } => Term::Variable {
+                name,
+                content_type: Default::default(),
+            },
+            Term::Constant(attr) => Term::Constant(Value::Symbol(attr)),
+        };
+        let of_value = match self.of {
+            Term::Variable { name, .. } => Term::Variable {
+                name,
+                content_type: Default::default(),
+            },
+            Term::Constant(entity) => Term::Constant(Value::Entity(entity)),
+        };
+
+        params.insert("the".to_string(), the_value);
+        params.insert("of".to_string(), of_value);
+        params.insert("is".to_string(), self.is);
+
+        Self::apply(params)
+    }
+
+    pub fn select() -> Self {
+        Self::new()
+    }
+
     pub fn conform(terms: Parameters) -> Result<Selector, SchemaError> {
         let the = match terms.get("the") {
             None => Err(SchemaError::OmittedRequirement {
@@ -91,5 +153,17 @@ impl Fact {
         let Selector { the, of, is } = Self::conform(terms)?;
 
         Ok(FactApplication::new(the, of, is, Cardinality::One))
+    }
+}
+
+impl From<Fact> for FactApplication {
+    fn from(fact: Fact) -> Self {
+        FactApplication::new(fact.the, fact.of, fact.is, Cardinality::One)
+    }
+}
+
+impl From<Fact> for crate::Premise {
+    fn from(fact: Fact) -> Self {
+        crate::Premise::Apply(crate::Application::Fact(fact.into()))
     }
 }

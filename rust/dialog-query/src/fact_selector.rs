@@ -624,7 +624,7 @@ mod tests {
         let initial_match = Match::new();
         let initial_selection = stream::iter(vec![Ok(initial_match)]);
         let session = Session::open(artifacts.clone());
-        let context = EvaluationContext::single(session, initial_selection);
+        let context = EvaluationContext::single(session, initial_selection, VariableScope::new());
 
         // Step 5: Execute the plan using familiar-query pattern
         let result_stream = plan.evaluate(context);
