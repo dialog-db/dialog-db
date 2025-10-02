@@ -8,6 +8,7 @@ pub use crate::premise::Premise;
 pub use crate::term::Term;
 use crate::EvaluationContext;
 pub use crate::{try_stream, Selection, Source, VariableScope};
+use core::pin::Pin;
 
 /// Query planner that optimizes the order of premise execution based on cost
 /// and dependency analysis. Uses a state machine approach to iteratively
@@ -267,31 +268,9 @@ impl Join {
     pub fn evaluate<S: Source, M: Selection>(
         &self,
         context: EvaluationContext<S, M>,
-    ) -> core::pin::Pin<Box<dyn Selection>> {
-        let steps = self.steps.clone();
-        Box::pin(try_stream! {
-            match steps.as_slice() {
-                [] => {
-                    // No steps - just pass through the selection
-                    for await each in context.selection {
-                            yield each?;
-                    }
-                }
-                [plan, plans @ ..] => {
-                    // Single step - evaluate directly without wrapping
-                    let source = context.source.clone();
-                    let scope = context.scope.clone();
-                    let mut selection = plan.evaluate(context);
-                    for plan in plans {
-                        selection = plan.evaluate(EvaluationContext { selection, source: source.clone(), scope: scope.clone() });
-                    }
-
-                    for await each in selection {
-                        yield each?;
-                    }
-                }
-            }
-        })
+    ) -> impl Selection {
+        let chain = Chain::from(self.steps.clone());
+        chain.evaluate(context)
     }
 
     pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
@@ -299,6 +278,64 @@ impl Join {
         let context = fresh(store);
         let selection = self.evaluate(context);
         Ok(selection)
+    }
+}
+
+/// Recursive chain structure for joining 2+ plan steps.
+/// This explicit recursion at the value level avoids type-level recursion
+/// that would cause compiler stack overflow.
+pub enum Chain {
+    /// Base case - passes through the selection unchanged.
+    Empty,
+    /// Recursive case - joins a plan with the rest of the join chain.
+    Join(Box<Chain>, Plan),
+}
+
+impl Chain {
+    /// Creates a new empty join (identity).
+    pub fn new() -> Self {
+        Chain::Empty
+    }
+
+    /// Adds a plan to this join chain.
+    pub fn and(self, plan: Plan) -> Self {
+        Chain::Join(Box::new(self), plan)
+    }
+
+    /// Creates a join from a vector of plans by chaining them together.
+    pub fn from(plans: Vec<Plan>) -> Self {
+        plans
+            .into_iter()
+            .fold(Self::Empty, |join, plan| join.and(plan))
+    }
+
+    /// Evaluate this chain by executing plans in sequence
+    fn evaluate<S: Source, M: Selection>(
+        self,
+        context: EvaluationContext<S, M>,
+    ) -> Pin<Box<dyn Selection>> {
+        Box::pin(try_stream! {
+            match self {
+                Chain::Empty => {
+                    for await each in context.selection {
+                        yield each?;
+                    }
+                },
+                Chain::Join(left, right) => {
+                    let source = context.source.clone();
+                    let scope = context.scope.clone();
+                    let selection = left.evaluate(context);
+                    let output = right.evaluate(EvaluationContext {
+                        selection,
+                        source,
+                        scope,
+                    });
+                    for await each in output {
+                        yield each?;
+                    }
+                },
+            }
+        })
     }
 }
 

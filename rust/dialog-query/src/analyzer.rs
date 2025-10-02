@@ -237,20 +237,14 @@ impl Plan {
     pub fn evaluate<S: Source, M: Selection>(
         &self,
         context: EvaluationContext<S, M>,
-    ) -> core::pin::Pin<Box<dyn Selection>> {
+    ) -> impl Selection {
         // Delegate to premise evaluation passing env inferred by an analyzer
-        // as scope.
-        use crate::try_stream;
-        let premise = self.premise.clone();
+        // as scope. Premise already returns boxed, so just pass through.
         let scope = self.env.clone();
-        Box::pin(try_stream! {
-            for await each in premise.evaluate(EvaluationContext {
-                source: context.source,
-                selection: context.selection,
-                scope,
-            }) {
-                yield each?;
-            }
+        self.premise.evaluate(EvaluationContext {
+            source: context.source,
+            selection: context.selection,
+            scope,
         })
     }
 }
