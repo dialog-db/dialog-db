@@ -1,10 +1,11 @@
 use super::fact::{BASE_COST, ENTITY_COST, VALUE_COST};
 use crate::analyzer::{AnalyzerError, LegacyAnalysis};
 use crate::error::PlanError;
+use crate::fact_selector::ATTRIBUTE_COST;
 use crate::plan::ConceptPlan;
 use crate::predicate::Concept;
 use crate::{
-    Dependencies, EvaluationContext, Parameters, Requirement, Selection, Source, Term, Value,
+    Cardinality, Dependencies, EvaluationContext, Parameters, Selection, Source, Term, Value,
     VariableScope,
 };
 use std::fmt::Display;
@@ -23,6 +24,111 @@ pub struct ConceptApplication {
 impl ConceptApplication {
     pub fn cost(&self) -> usize {
         BASE_COST
+    }
+
+    /// Estimate the cost of this concept application given the current environment.
+    /// A concept is essentially a join over N fact lookups (one per attribute).
+    /// Each fact lookup has the form: (this, attribute_i, value_i).
+    ///
+    /// Cost model:
+    /// - If "this" is bound: Sum of costs for each attribute lookup
+    ///   - For both 2/3 and 3/3 constraint:
+    ///     - Cardinality::One: SEGMENT_READ_COST (same lookup cost)
+    ///     - Cardinality::Many: RANGE_SCAN_COST (still need to scan)
+    ///
+    /// - If "this" is unbound but any attribute value is bound:
+    ///   - Prefer Cardinality::One attribute (nearly free - just returns `this`)
+    ///   - Otherwise use Cardinality::Many (expensive - scan + lookups for each result)
+    ///
+    /// - If nothing is bound: Returns None (should be blocked)
+    pub fn estimate(&self, env: &VariableScope) -> Option<usize> {
+        // Check if "this" parameter is bound
+        let this_bound = if let Some(this_term) = self.terms.get("this") {
+            env.contains(this_term)
+        } else {
+            false
+        };
+
+        if this_bound {
+            // Entity is known - each attribute is a lookup (the + of known)
+            let mut total = 0;
+            for (name, attribute) in self.concept.attributes.iter() {
+                // Check if this attribute's value is also bound
+                total += attribute.estimate(
+                    true,
+                    if let Some(term) = self.terms.get(name) {
+                        env.contains(term)
+                    } else {
+                        false
+                    },
+                );
+            }
+            Some(total)
+        } else {
+            // Entity is not bound - categorize attributes to find best execution strategy
+            let mut bound_one: Option<&crate::Attribute<crate::Value>> = None;
+            let mut bound_many: Option<&crate::Attribute<crate::Value>> = None;
+            let mut unbound_one: Option<&crate::Attribute<crate::Value>> = None;
+
+            for (name, attribute) in self.concept.attributes.iter() {
+                if let Some(term) = self.terms.get(name) {
+                    if env.contains(term) {
+                        match attribute.cardinality {
+                            crate::Cardinality::One => {
+                                bound_one = Some(attribute);
+                                break; // Best case found, stop searching
+                            }
+                            crate::Cardinality::Many if bound_many.is_none() => {
+                                bound_many = Some(attribute);
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if unbound_one.is_none() && attribute.cardinality == crate::Cardinality::One
+                {
+                    unbound_one = Some(attribute);
+                }
+            }
+
+            // Determine initial scan strategy based on what we found
+            let (lead, bound) = if let Some(attribute) = bound_one {
+                // Best case: bound Cardinality::One - lookup returns `this` directly
+                (Some(attribute), true)
+            } else if let Some(attribute) = bound_many {
+                // Bound Cardinality::Many - scan with value constraint
+                (Some(attribute), true)
+            } else if let Some(attribute) = unbound_one {
+                // No bound attributes but have Cardinality::One - cheaper scan
+                (Some(attribute), false)
+            } else {
+                // Worst case: no bound attrs and no Cardinality::One
+                (None, false)
+            };
+
+            // Add costs for all other attributes (of=true, is=false)
+            let mut total = if let Some(attribute) = lead {
+                attribute.estimate(true, bound)
+            } else {
+                Cardinality::Many
+                    .estimate(true, false, false)
+                    .expect("Should have it because we know attribute")
+            };
+
+            for (name, attribute) in self.concept.attributes.iter() {
+                if lead != Some(attribute) {
+                    total += attribute.estimate(
+                        true,
+                        if let Some(term) = self.terms.get(name) {
+                            env.contains(term)
+                        } else {
+                            false
+                        },
+                    );
+                }
+            }
+
+            Some(total)
+        }
     }
 
     /// Returns the parameters for this concept application
@@ -111,9 +217,7 @@ impl ConceptApplication {
             if !scope.contains(&term) {
                 provides.add(&term);
                 // No variable can be required on the concept application
-                if let Requirement::Derived(overhead) = requirement {
-                    cost += overhead;
-                }
+                // Cost is already calculated via estimate()
             }
         }
 
@@ -233,7 +337,6 @@ impl ConceptApplication {
         context.selection
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConceptApplicationAnalysis {

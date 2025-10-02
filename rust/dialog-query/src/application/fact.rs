@@ -3,11 +3,12 @@ pub use crate::artifact::Attribute;
 pub use crate::artifact::{ArtifactSelector, Constrained};
 pub use crate::error::AnalyzerError;
 use crate::error::PlanError;
-pub use crate::fact_selector::{ATTRIBUTE_COST, BASE_COST, ENTITY_COST, UNBOUND_COST, VALUE_COST};
+pub use crate::fact_selector::{ATTRIBUTE_COST, BASE_COST, ENTITY_COST, VALUE_COST};
 pub use crate::plan::Plan;
 use crate::Cardinality;
 pub use crate::FactSelector;
 pub use crate::VariableScope;
+
 use crate::{try_stream, EvaluationContext, Match, Selection, Source};
 use crate::{
     Constraint, Dependencies, Dependency, Entity, Parameters, QueryError, Schema, Term, Type, Value,
@@ -15,6 +16,29 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::sync::OnceLock;
+
+/// Cost of a segment read for Cardinality::One with 3/3 or 2/3 constraints.
+/// This is a direct lookup that reads from a single segment.
+pub const SEGMENT_READ_COST: usize = 100;
+
+/// Cost of a range read for Cardinality::Many with 3/3 constraints.
+/// This read could potentially span multiple segments but is bounded.
+pub const RANGE_READ_COST: usize = 200;
+
+/// Cost of a range scan for Cardinality::Many with 2/3 constraints,
+/// or Cardinality::One with 1/3 constraints.
+/// This scan is likely to span multiple segments.
+pub const RANGE_SCAN_COST: usize = 1_000;
+
+/// Cost of a multi-segment scan (currently unused, reserved for future use).
+pub const MULTISEGMENT_SCAN_COST: usize = 2_000;
+
+/// Cost of a table scan with unique filter (currently unused).
+pub const TABLE_SCAN_COST: usize = 1_000;
+
+/// Cost of an index scan for Cardinality::Many with 1/3 constraints.
+/// This is the most expensive query pattern - scanning with minimal constraints.
+pub const INDEX_SCAN: usize = 5_000;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FactApplication {
@@ -43,7 +67,7 @@ impl FactApplication {
                 Constraint {
                     description: "Attribute of the fact".to_string(),
                     content_type: Some(Type::Symbol),
-                    requirement: constraint.derive(ATTRIBUTE_COST),
+                    requirement: constraint.member(),
                     cardinality: Cardinality::One,
                 },
             );
@@ -53,7 +77,7 @@ impl FactApplication {
                 Constraint {
                     description: "Entity of the fact".to_string(),
                     content_type: Some(Type::Entity),
-                    requirement: constraint.derive(ENTITY_COST),
+                    requirement: constraint.member(),
                     cardinality: Cardinality::One,
                 },
             );
@@ -63,7 +87,7 @@ impl FactApplication {
                 Constraint {
                     description: "Value of the fact".to_string(),
                     content_type: None, // Can be any type
-                    requirement: constraint.derive(VALUE_COST),
+                    requirement: constraint.member(),
                     cardinality: Cardinality::One,
                 },
             );
@@ -101,6 +125,17 @@ impl FactApplication {
         }
     }
 
+    /// Estimate cost based on how many parameters are constrained and cardinality.
+    /// More constrained = lower cost. Cardinality matters for partially constrained queries.
+    pub fn estimate(&self, env: &VariableScope) -> Option<usize> {
+        // Check which parameters are bound (constants or in env)
+        let the = env.contains(&self.the);
+        let of = env.contains(&self.of);
+        let is = env.contains(&self.is);
+
+        self.cardinality.estimate(the, of, is)
+    }
+
     /// Returns the parameters for this fact application
     /// Note: This allocates since fact parameters are stored as separate fields
     pub fn parameters(&self) -> Parameters {
@@ -128,46 +163,41 @@ impl FactApplication {
     }
 
     pub fn plan(&self, scope: &VariableScope) -> Result<FactApplicationPlan, PlanError> {
-        // We start with a cost estimate that assumes nothing is known.
-        let mut cost = UNBOUND_COST;
+        // Use estimate() to get the cost based on what's bound in scope
+        let cost = match self.estimate(scope) {
+            Some(cost) => cost,
+            None => {
+                // No constraints - return error
+                let selector = FactSelector {
+                    the: Some(self.the.clone()),
+                    of: Some(self.of.clone()),
+                    is: Some(self.is.clone()),
+                    fact: None,
+                };
+                return Err(PlanError::UnconstrainedSelector { selector });
+            }
+        };
+
         let mut provides = VariableScope::new();
 
-        // If self.of is in scope we subtract ENTITY_COST from estimate
-
-        if scope.contains(&self.of) {
-            cost -= ENTITY_COST;
+        // Track which variables we provide
+        if !scope.contains(&self.of) {
             provides.add(&self.of);
         }
 
-        // If self.the is in scope we subtract ATTRIBUTE_COST from the cost
-        if scope.contains(&self.the) {
-            cost -= ATTRIBUTE_COST;
+        if !scope.contains(&self.the) {
             provides.add(&self.the);
         }
 
-        if scope.contains(&self.is) {
-            cost -= VALUE_COST;
+        if !scope.contains(&self.is) {
             provides.add(&self.is);
         }
 
-        // if cost is below UNBOUND_COST we have some term in the selector &
-        // during evaluation we will be able to produce constrained selector
-        // in this case we can return a plan, otherwise we return an error
-        if cost < UNBOUND_COST {
-            Ok(FactApplicationPlan {
-                selector: self.clone(),
-                provides,
-                cost,
-            })
-        } else {
-            let selector = FactSelector {
-                the: Some(self.the.clone()),
-                of: Some(self.of.clone()),
-                is: Some(self.is.clone()),
-                fact: None,
-            };
-            Err(PlanError::UnconstrainedSelector { selector })
-        }
+        Ok(FactApplicationPlan {
+            selector: self.clone(),
+            provides,
+            cost,
+        })
     }
 }
 

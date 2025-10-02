@@ -15,6 +15,44 @@ pub enum Cardinality {
     Many,
 }
 
+impl Cardinality {
+    /// Estimates the cost of a fact query given what's known about the triple (the, of, is).
+    ///
+    /// # Parameters
+    /// - `the`: Is the attribute known?
+    /// - `of`: Is the entity known?
+    /// - `is`: Is the value known?
+    ///
+    /// # Cost Model
+    /// The cost depends on how many components are known and the cardinality:
+    /// - 3 known (lookup): Precise lookup, low cost
+    /// - 2 known (select): Index-based selection
+    /// - 1 known (scan): Table/index scan
+    /// - 0 known: Unbound (should be rejected)
+    pub fn estimate(&self, the: bool, of: bool, is: bool) -> Option<usize> {
+        use crate::application::fact::*;
+
+        let count = (the as usize) + (of as usize) + (is as usize);
+
+        match (count, self) {
+            // Three constraints - fully bound lookup
+            (3, Cardinality::One) => Some(SEGMENT_READ_COST),
+            (3, Cardinality::Many) => Some(RANGE_READ_COST),
+
+            // Two constraints - index-based select
+            (2, Cardinality::One) => Some(SEGMENT_READ_COST),
+            (2, Cardinality::Many) => Some(RANGE_SCAN_COST),
+
+            // One constraint - table/index scan
+            (1, Cardinality::One) => Some(RANGE_SCAN_COST),
+            (1, Cardinality::Many) => Some(INDEX_SCAN),
+
+            // No constraints - unbound query
+            _ => None,
+        }
+    }
+}
+
 /// A relation specific to the attribute module containing cardinality information
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Relation {
@@ -120,6 +158,18 @@ impl<T: Scalar> Attribute<T> {
                 actual: Term::Constant(value),
             })
         }
+    }
+
+    /// Estimates the cost of a fact query on this attribute given what's known.
+    ///
+    /// # Parameters
+    /// - `the`: Is the attribute known? (usually true for Attribute)
+    /// - `of`: Is the entity known?
+    /// - `is`: Is the value known?
+    pub fn estimate(&self, of: bool, is: bool) -> usize {
+        self.cardinality
+            .estimate(true, of, is)
+            .expect("Should succeed if we know attribute")
     }
 
     pub fn apply(&self, parameters: Parameters) -> Result<FactApplication, SchemaError> {
@@ -284,7 +334,6 @@ impl<'de, T: Scalar> Deserialize<'de> for Attribute<T> {
         )
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct Match<T: Scalar> {

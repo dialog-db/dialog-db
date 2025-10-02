@@ -353,7 +353,7 @@ impl Cell {
             name: name.to_string(),
             description: String::new(),
             content_type,
-            requirement: Requirement::Derived(5),
+            requirement: Requirement::Optional,
         }
     }
 
@@ -372,8 +372,8 @@ impl Cell {
         self
     }
 
-    pub fn derived(&mut self, derivation: usize) -> &mut Self {
-        self.requirement = Requirement::Derived(derivation);
+    pub fn derived(&mut self, _derivation: usize) -> &mut Self {
+        self.requirement = Requirement::Optional;
         self
     }
 
@@ -446,7 +446,6 @@ impl Display for Cell {
         }
     }
 }
-
 
 pub struct CellsBuilder {
     cells: HashMap<String, Cell>,
@@ -557,9 +556,15 @@ impl From<&Cells> for Schema {
 #[test]
 fn test_cells() -> anyhow::Result<()> {
     let cells = Cells::define(|builder| {
-        builder.cell("name", Type::String).the("name field").required();
+        builder
+            .cell("name", Type::String)
+            .the("name field")
+            .required();
 
-        builder.cell("age", Type::UnsignedInt).the("age field").derived(15);
+        builder
+            .cell("age", Type::UnsignedInt)
+            .the("age field")
+            .derived(15);
     });
 
     assert_eq!(cells.count(), 2);
@@ -574,6 +579,9 @@ fn test_cells() -> anyhow::Result<()> {
     assert_eq!(cells.get("age").unwrap().name(), "age");
     assert_eq!(*cells.get("age").unwrap().content_type(), Type::UnsignedInt);
     assert_eq!(cells.get("age").unwrap().description(), "age field");
-    assert_eq!(cells.get("age").unwrap().requirement(), &Requirement::Derived(15));
+    assert_eq!(
+        cells.get("age").unwrap().requirement(),
+        &Requirement::Optional
+    );
     Ok(())
 }

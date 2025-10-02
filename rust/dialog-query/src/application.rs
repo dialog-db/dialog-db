@@ -38,6 +38,17 @@ impl Application {
         }
     }
 
+    /// Estimate the cost of this application given the current environment.
+    /// Each application type knows how to calculate its cost based on what's bound.
+    /// Returns None if the application cannot be executed without more constraints.
+    pub fn estimate(&self, env: &crate::VariableScope) -> Option<usize> {
+        match self {
+            Application::Fact(application) => application.estimate(env),
+            Application::Concept(application) => application.estimate(env),
+            Application::Formula(application) => application.estimate(env),
+        }
+    }
+
     pub fn parameters(&self) -> crate::Parameters {
         match self {
             Application::Fact(application) => application.parameters(),

@@ -8,6 +8,9 @@ use std::fmt::Display;
 
 // FactSelectorPlan's EvaluationPlan implementation is in fact_selector.rs
 
+/// Cost overhead added for negation operations (checking non-existence)
+pub const NEGATION_OVERHEAD: usize = 100;
+
 /// Represents a negated application that excludes matching results.
 /// Used in rules to specify conditions that must NOT hold.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,6 +24,14 @@ impl Negation {
     pub fn cost(&self) -> usize {
         let Negation(application) = self;
         application.cost()
+    }
+
+    /// Estimate the cost of this negation given the current environment.
+    /// Negation adds overhead to the underlying application's cost.
+    /// Returns None if the underlying application cannot be executed.
+    pub fn estimate(&self, env: &VariableScope) -> Option<usize> {
+        let Negation(application) = self;
+        application.estimate(env).map(|cost| cost + NEGATION_OVERHEAD)
     }
 
     pub fn parameters(&self) -> crate::Parameters {

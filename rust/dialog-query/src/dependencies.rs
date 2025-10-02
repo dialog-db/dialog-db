@@ -14,15 +14,10 @@ impl Dependencies {
 
     /// Calculates the total cost of all derived dependencies.
     /// Required dependencies contribute cost only if part of choice group.
+    /// Note: With the new cost model, this always returns 0 since costs are
+    /// calculated by estimate() methods on Application/Premise types.
     pub fn cost(&self) -> usize {
-        self.0
-            .values()
-            .filter_map(|d| match d {
-                Requirement::Derived(cost) => Some(*cost),
-                Requirement::Required(Some((cost, _))) => Some(*cost),
-                Requirement::Required(None) => None,
-            })
-            .sum()
+        0
     }
 
     /// Returns an iterator over all dependencies as (name, requirement) pairs.
@@ -30,16 +25,12 @@ impl Dependencies {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    /// Adds or updates a derived dependency with the given cost.
-    /// If dependency already exists as derived, keeps the maximum cost.
-    pub fn desire(&mut self, dependency: String, cost: usize) {
+    /// Adds or updates a derived dependency.
+    /// Note: Cost parameter is deprecated but kept for API compatibility.
+    pub fn desire(&mut self, dependency: String, _cost: usize) {
         let Dependencies(content) = self;
-        if let Some(existing) = content.get(&dependency) {
-            if let Requirement::Derived(prior) = existing {
-                content.insert(dependency, Requirement::Derived(cost.max(*prior)));
-            }
-        } else {
-            content.insert(dependency, Requirement::Derived(cost));
+        if !content.contains_key(&dependency) {
+            content.insert(dependency, Requirement::Optional);
         }
     }
 
@@ -53,25 +44,20 @@ impl Dependencies {
         self.0.insert(dependency, Requirement::Required(None));
     }
 
-    /// Alters the dependency level to the lowest between current and provided
-    /// levels. If dependency does not exist yet it is added. General idea
-    /// behind picking lower ranking level is that if some premise is able to
-    /// fulfill the requirement with a lower budget it will likely be picked
-    /// to execute ahead of the ones that are more expensive, hence actual level
-    /// is lower (🤔 perhaps average would be more accurate).
+    /// Alters the dependency level. If dependency does not exist yet it is added.
     pub fn merge(&mut self, dependency: String, requirement: &Requirement) {
         let Dependencies(content) = self;
         if let Some(existing) = content.get(&dependency) {
-            if let Requirement::Derived(prior) = existing {
-                if let Requirement::Derived(desire) = requirement {
-                    content.insert(dependency, Requirement::Derived(*prior.min(desire)));
-                }
+            if matches!(existing, Requirement::Optional)
+                && matches!(requirement, Requirement::Optional)
+            {
+                // Both are derived, keep it as derived
+                content.insert(dependency, Requirement::Optional);
             } else {
                 content.insert(dependency, requirement.clone());
             }
-        }
-        // If dependency was previously assumed to be required it is no longer
-        else {
+        } else {
+            // If dependency was previously assumed to be required it is no longer
             content.insert(dependency, requirement.clone());
         }
     }
@@ -87,7 +73,7 @@ impl Dependencies {
     pub fn required(&self) -> impl Iterator<Item = (&str, &Requirement)> {
         self.0.iter().filter_map(|(k, v)| match v {
             Requirement::Required(_) => Some((k.as_str(), v)),
-            Requirement::Derived(_) => None,
+            Requirement::Optional => None,
         })
     }
 
@@ -95,11 +81,11 @@ impl Dependencies {
         self.0.get(dependency)
     }
 
-    /// Gets the requirement level for a dependency, defaulting to Derived(0) if not present.
+    /// Gets the requirement level for a dependency, defaulting to Derived if not present.
     pub fn resolve(&self, name: &str) -> Requirement {
         match self.0.get(name) {
             Some(requirement) => requirement.clone(),
-            None => Requirement::Derived(0),
+            None => Requirement::Optional,
         }
     }
 }
@@ -108,12 +94,11 @@ impl Dependencies {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Requirement {
     /// Dependency that must be provided externally or via choice group.
-    /// If Some(cost, group), this is part of a choice group with derivation cost.
+    /// If Some(group), this is part of a choice group.
     /// If None, must be provided externally (no derivation possible).
-    Required(Option<(usize, Group)>),
+    Required(Option<Group>),
     /// Dependency that can be derived if not provided.
-    /// Number represents cost of the derivation.
-    Derived(usize),
+    Optional,
 }
 
 impl Requirement {
@@ -122,30 +107,21 @@ impl Requirement {
         matches!(self, Requirement::Required(_))
     }
 
-    /// Get the cost associated with this requirement.
-    /// Required without choice group returns 0 (must be provided).
-    pub fn cost(&self) -> usize {
-        match self {
-            Requirement::Required(Some((cost, _))) => *cost,
-            Requirement::Required(None) => 0,
-            Requirement::Derived(cost) => *cost,
-        }
-    }
-
     /// Check if this requirement is part of a choice group
     pub fn group(&self) -> Option<Group> {
         match self {
-            Requirement::Required(Some((_, group))) => Some(*group),
+            Requirement::Required(Some(group)) => Some(*group),
             Requirement::Required(None) => None,
-            Requirement::Derived(_) => None,
+            Requirement::Optional => None,
         }
     }
 
     pub fn required() -> Self {
         Requirement::Required(None)
     }
-    pub fn derived(cost: usize) -> Self {
-        Requirement::Derived(cost)
+
+    pub fn optional() -> Self {
+        Requirement::Optional
     }
 }
 
@@ -162,8 +138,8 @@ impl Group {
     }
 
     /// Mark this parameter as part of the choice with this group
-    pub fn derive(&self, cost: usize) -> Requirement {
-        Requirement::Required(Some((cost, *self)))
+    pub fn member(&self) -> Requirement {
+        Requirement::Required(Some(*self))
     }
 }
 
@@ -182,9 +158,9 @@ impl Dependency {
         Requirement::Required(None)
     }
 
-    /// Mark parameter as derived with given cost
-    pub fn derive(cost: usize) -> Requirement {
-        Requirement::Derived(cost)
+    /// Mark parameter as derived (can be computed if not provided)
+    pub fn optional() -> Requirement {
+        Requirement::Optional
     }
 }
 
@@ -198,12 +174,12 @@ mod tests {
 
         // Test basic operations
         assert!(!deps.contains("test"));
-        assert_eq!(deps.resolve("test"), Requirement::Derived(0)); // Default value
+        assert_eq!(deps.resolve("test"), Requirement::Optional); // Default value
 
         // Test desire
         deps.desire("test".into(), 100);
         assert!(deps.contains("test"));
-        assert_eq!(deps.resolve("test"), Requirement::Derived(100));
+        assert_eq!(deps.resolve("test"), Requirement::Optional);
 
         // Test require
         deps.require("required".into());
@@ -211,7 +187,7 @@ mod tests {
 
         // Test provide
         deps.provide("provided".into());
-        assert_eq!(deps.resolve("provided"), Requirement::Derived(0));
+        assert_eq!(deps.resolve("provided"), Requirement::Optional);
 
         // Test iteration
         let items: Vec<_> = deps.iter().collect();
@@ -222,29 +198,25 @@ mod tests {
     fn test_dependencies_update_logic() {
         let mut deps = Dependencies::new();
 
-        // Test updating derived with derived - should take minimum cost
+        // Test updating derived with derived - should remain derived
         deps.desire("cost".into(), 50);
-        deps.merge("cost".into(), &Requirement::Derived(200));
-        assert_eq!(deps.resolve("cost"), Requirement::Derived(50)); // Takes minimum
-
-        // Test updating derived with lower cost - should take the new lower cost
-        deps.merge("cost".into(), &Requirement::Derived(25));
-        assert_eq!(deps.resolve("cost"), Requirement::Derived(25));
+        deps.merge("cost".into(), &Requirement::Optional);
+        assert_eq!(deps.resolve("cost"), Requirement::Optional);
 
         // Test that Required dependency gets overridden when updated with Derived
         deps.require("required_test".into());
-        deps.merge("required_test".into(), &Requirement::Derived(100));
-        assert_eq!(deps.resolve("required_test"), Requirement::Derived(100));
+        deps.merge("required_test".into(), &Requirement::Optional);
+        assert_eq!(deps.resolve("required_test"), Requirement::Optional);
 
         // Test adding new dependency via update
-        deps.merge("new_dep".into(), &Requirement::Derived(75));
-        assert_eq!(deps.resolve("new_dep"), Requirement::Derived(75));
+        deps.merge("new_dep".into(), &Requirement::Optional);
+        assert_eq!(deps.resolve("new_dep"), Requirement::Optional);
     }
 
     #[test]
     fn test_requirement_properties() {
         let required = Requirement::Required(None);
-        let derived = Requirement::Derived(100);
+        let derived = Requirement::Optional;
 
         assert!(required.is_required());
         assert!(!derived.is_required());

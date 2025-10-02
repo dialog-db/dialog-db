@@ -43,12 +43,12 @@ impl FormulaApplication {
         let mut analysis = LegacyAnalysis::new(self.cost);
         for (name, cell) in self.cells.iter() {
             match cell.requirement() {
-                Requirement::Derived(cost) => {
-                    analysis.desire(self.parameters.get(name), *cost);
+                Requirement::Optional => {
+                    analysis.desire(self.parameters.get(name), 0);
                 }
-                Requirement::Required(Some((cost, _))) => {
+                Requirement::Required(Some(_)) => {
                     // Formulas don't use choice groups, treat as derived
-                    analysis.desire(self.parameters.get(name), *cost);
+                    analysis.desire(self.parameters.get(name), 0);
                 }
                 // We should be checking this at the application time not
                 // during analysis
@@ -65,6 +65,13 @@ impl FormulaApplication {
         self.cost
     }
 
+    /// Estimate the cost of this formula given the current environment.
+    /// For formulas, cost is constant - it's the computational cost of the formula itself.
+    /// Formulas are always bound (they compute rather than query), so always returns Some.
+    pub fn estimate(&self, _env: &VariableScope) -> Option<usize> {
+        Some(self.cost)
+    }
+
     /// Returns the schema for this formula
     pub fn schema(&self) -> crate::Schema {
         self.cells.into()
@@ -79,12 +86,12 @@ impl FormulaApplication {
         let mut dependencies = Dependencies::new();
         for (name, cell) in self.cells.iter() {
             match cell.requirement() {
-                Requirement::Derived(cost) => {
-                    dependencies.desire(name.to_string(), *cost);
+                Requirement::Optional => {
+                    dependencies.desire(name.to_string(), 0);
                 }
-                Requirement::Required(Some((cost, _))) => {
+                Requirement::Required(Some(_)) => {
                     // Formulas don't use choice groups, treat as derived
-                    dependencies.desire(name.to_string(), *cost);
+                    dependencies.desire(name.to_string(), 0);
                 }
                 Requirement::Required(None) => {
                     dependencies.require(name.to_string());
@@ -122,12 +129,12 @@ impl FormulaApplication {
                         })
                     }?;
                 }
-                Requirement::Derived(estimate) => match term {
+                Requirement::Optional => match term {
                     Some(term) => {
                         derives.add(term);
                     }
                     None => {
-                        cost += estimate;
+                        // Derived parameters don't add cost - cost is calculated via estimate()
                     }
                 },
             }

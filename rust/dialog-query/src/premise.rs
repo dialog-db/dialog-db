@@ -40,6 +40,15 @@ impl Premise {
         }
     }
 
+    /// Estimate the cost of this premise given the current environment.
+    /// Returns None if the premise cannot be executed without more constraints.
+    pub fn estimate(&self, env: &crate::VariableScope) -> Option<usize> {
+        match self {
+            Premise::Apply(application) => application.estimate(env),
+            Premise::Exclude(negation) => negation.estimate(env),
+        }
+    }
+
     pub fn parameters(&self) -> crate::Parameters {
         match self {
             Premise::Apply(application) => application.parameters(),
