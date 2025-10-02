@@ -177,18 +177,35 @@ pub struct JoinPlan {
 impl JoinPlan {
     /// Evaluate this join plan by executing all steps in order.
     /// Each step flows results to the next, building up bindings.
-    /// Uses pattern from plan::join::Join - recursive enum structure.
     pub fn evaluate<S: Source, M: Selection>(
         &self,
         context: EvaluationContext<S, M>,
     ) -> impl Selection {
-        // Build a recursive Join structure from steps using fold
-        let join = self.steps.iter().fold(
-            AnalyzerJoin::Identity,
-            |join, step| join.and(step.clone()),
-        );
-
-        join.evaluate(context)
+        let steps = self.steps.clone();
+        try_stream! {
+            match steps.as_slice() {
+                [] => {
+                    // No steps - just pass through the selection
+                    for await each in context.selection {
+                            yield each?;
+                    }
+                }
+                [single] => {
+                    // Single step - evaluate directly without wrapping
+                    let plan = single.clone();
+                    for await each in plan.evaluate(context) {
+                        yield each?;
+                    }
+                }
+                _ => {
+                    // Multiple steps - create chain
+                    let chain = Chain::from_vec(steps);
+                    for await each in chain.evaluate(context) {
+                        yield each?;
+                    }
+                }
+            }
+        }
     }
 
     pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
@@ -199,15 +216,24 @@ impl JoinPlan {
     }
 }
 
-/// Recursive join structure for analyzer::Plan steps, following plan::join::Join pattern
-enum AnalyzerJoin {
-    Identity,
-    Join(Box<AnalyzerJoin>, Plan),
+/// Recursive chain structure for joining 2+ plan steps
+enum Chain {
+    /// Base case: exactly two plans
+    And(Plan, Plan),
+    /// Recursive case: chain followed by another plan
+    Then(Box<Chain>, Plan),
 }
 
-impl AnalyzerJoin {
-    fn and(self, step: Plan) -> Self {
-        AnalyzerJoin::Join(Box::new(self), step)
+impl Chain {
+    /// Convert a Vec of 2+ Plans into a recursive Chain structure
+    fn from_vec(mut steps: Vec<Plan>) -> Self {
+        let first = steps.remove(0);
+        let second = steps.remove(0);
+        steps
+            .into_iter()
+            .fold(Chain::And(first, second), |chain, plan| {
+                Chain::Then(Box::new(chain), plan)
+            })
     }
 
     fn evaluate<S: Source, M: Selection>(
@@ -216,12 +242,20 @@ impl AnalyzerJoin {
     ) -> Pin<Box<dyn Selection>> {
         Box::pin(try_stream! {
             match self {
-                AnalyzerJoin::Identity => {
-                    for await each in context.selection {
+                Chain::And(first, second) => {
+                    let source = context.source.clone();
+                    let scope = context.scope.clone();
+                    let selection = first.evaluate(context);
+                    let output = second.evaluate(EvaluationContext {
+                        selection,
+                        source,
+                        scope,
+                    });
+                    for await each in output {
                         yield each?;
                     }
                 },
-                AnalyzerJoin::Join(left, right) => {
+                Chain::Then(left, right) => {
                     let source = context.source.clone();
                     let scope = context.scope.clone();
                     let selection = left.evaluate(context);
