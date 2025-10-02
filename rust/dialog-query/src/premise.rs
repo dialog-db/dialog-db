@@ -5,6 +5,8 @@
 //!
 //! Note: Premises are only used in rule conditions (the "when" part), not in conclusions.
 
+use async_stream::try_stream;
+
 pub use super::application::Application;
 use super::application::{FactApplication, FormulaApplication};
 pub use super::negation::Negation;
@@ -13,6 +15,7 @@ pub use crate::analyzer::LegacyAnalysis;
 pub use crate::error::{AnalyzerError, PlanError};
 pub use crate::syntax::VariableScope;
 pub use crate::Dependencies;
+pub use crate::{EvaluationContext, Selection, Source};
 use std::fmt::Display;
 
 /// Represents a premise in a rule - a condition that must be satisfied.
@@ -89,6 +92,28 @@ impl Premise {
             Premise::Exclude(negation) => negation.analyze(),
         }
     }
+
+    /// Evaluate this premise with the given context
+    pub fn evaluate<S: Source, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl crate::Selection {
+        let source = self.clone();
+        try_stream! {
+            match source {
+                Premise::Apply(application) => {
+                    for await each in application.evaluate(context) {
+                        yield each?;
+                    }
+                },
+                Premise::Exclude(negation) => {
+                    for await each in negation.evaluate(context) {
+                        yield each?;
+                    }
+                },
+            }
+        }
+    }
 }
 
 impl Display for Premise {
@@ -99,40 +124,6 @@ impl Display for Premise {
         }
     }
 }
-
-// impl Syntax for Premise {
-//     fn analyze<'a>(&'a self, env: &crate::analyzer::Environment) -> Stats<'a, Self> {
-//         match self {
-//             Premise::Apply(application) => {
-//                 let Stats {
-//                     cost,
-//                     required,
-//                     desired,
-//                     ..
-//                 } = Syntax::analyze(application, env);
-//                 Stats {
-//                     cost,
-//                     required,
-//                     desired,
-//                     syntax: self,
-//                 }
-//             },
-//             Premise::Exclude(negation) => {
-//                 let Stats {
-//                     cost,
-//                     required,
-//                     desired,
-//                     ..
-//                 } = Syntax::analyze(negation, env);
-//                 Stats {
-//                     cost,
-//                     required,
-//                     desired,
-//                     syntax: self,
-//                 }
-//         }
-//     }
-// }
 
 impl From<FormulaApplication> for Premise {
     fn from(application: FormulaApplication) -> Self {

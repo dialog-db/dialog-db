@@ -1,9 +1,10 @@
-
 use super::analyzer::LegacyAnalysis;
 use super::application::Application;
 use super::error::PlanError;
 use super::plan::NegationPlan;
 use super::{Dependencies, VariableScope};
+use crate::{try_stream, EvaluationContext, Selection, Source};
+pub use futures_util::{stream, TryStreamExt};
 use std::fmt::Display;
 
 // FactSelectorPlan's EvaluationPlan implementation is in fact_selector.rs
@@ -31,7 +32,9 @@ impl Negation {
     /// Returns None if the underlying application cannot be executed.
     pub fn estimate(&self, env: &VariableScope) -> Option<usize> {
         let Negation(application) = self;
-        application.estimate(env).map(|cost| cost + NEGATION_OVERHEAD)
+        application
+            .estimate(env)
+            .map(|cost| cost + NEGATION_OVERHEAD)
     }
 
     pub fn parameters(&self) -> crate::Parameters {
@@ -80,6 +83,32 @@ impl Negation {
         let plan = application.plan(&scope)?;
 
         Ok(plan.not())
+    }
+
+    pub fn evaluate<S: Source, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
+        let application = self.0.clone();
+        try_stream! {
+            for await each in context.selection {
+                let frame = each?;
+                let not = frame.clone();
+                let output = application.evaluate(EvaluationContext {
+                    selection: stream::once(async move { Ok(not)}),
+                    source: context.source.clone(),
+                    scope: context.scope.clone(),
+                });
+
+                tokio::pin!(output);
+
+                if let Ok(Some(_)) = output.try_next().await {
+                    continue;
+                }
+
+                yield frame;
+            }
+        }
     }
 }
 

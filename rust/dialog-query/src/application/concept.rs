@@ -1,4 +1,4 @@
-use super::fact::{BASE_COST, ENTITY_COST, VALUE_COST};
+use super::fact::{BASE_COST, CONCEPT_OVERHEAD, ENTITY_COST, VALUE_COST};
 use crate::analyzer::{AnalyzerError, LegacyAnalysis};
 use crate::error::PlanError;
 use crate::fact_selector::ATTRIBUTE_COST;
@@ -51,7 +51,7 @@ impl ConceptApplication {
 
         if this_bound {
             // Entity is known - each attribute is a lookup (the + of known)
-            let mut total = 0;
+            let mut total = CONCEPT_OVERHEAD; // Add overhead for potential rule evaluation
             for (name, attribute) in self.concept.attributes.iter() {
                 // Check if this attribute's value is also bound
                 total += attribute.estimate(
@@ -128,9 +128,9 @@ impl ConceptApplication {
                 unreachable!("concept without attributes is not possible")
             };
 
-            // Start with initial cost
+            // Start with initial cost including overhead for potential rule evaluation
             // of=false (finding entity), is=bound
-            let mut total = lead.estimate(false, bound);
+            let mut total = CONCEPT_OVERHEAD + lead.estimate(false, bound);
 
             for (name, attribute) in self.concept.attributes.iter() {
                 if lead != attribute {
@@ -334,7 +334,7 @@ impl ConceptApplication {
     // }
     //
 
-    fn evaluate<S: Source, M: Selection>(
+    pub fn evaluate<S: Source, M: Selection>(
         &self,
         context: EvaluationContext<S, M>,
     ) -> impl Selection {

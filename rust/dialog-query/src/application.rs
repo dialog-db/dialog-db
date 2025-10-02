@@ -8,8 +8,8 @@ pub use crate::analyzer::{AnalyzerError, LegacyAnalysis};
 pub use crate::error::PlanError;
 pub use crate::plan::ApplicationPlan;
 pub use crate::premise::{Negation, Premise};
-pub use crate::Dependencies;
-pub use crate::VariableScope;
+pub use crate::{Dependencies, EvaluationContext, Selection, Source, VariableScope};
+use async_stream::try_stream;
 pub use concept::ConceptApplication;
 pub use fact::FactApplication;
 pub use formula::FormulaApplication;
@@ -46,6 +46,32 @@ impl Application {
             Application::Fact(application) => application.estimate(env),
             Application::Concept(application) => application.estimate(env),
             Application::Formula(application) => application.estimate(env),
+        }
+    }
+
+    pub fn evaluate<S: Source, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl crate::Selection {
+        let source = self.clone();
+        try_stream! {
+            match source {
+                Application::Fact(application) => {
+                    for await item in application.evaluate(context) {
+                        yield item?;
+                    }
+                },
+                Application::Concept(application) => {
+                    for await item in application.evaluate(context) {
+                        yield item?;
+                    }
+                },
+                Application::Formula(application) => {
+                    for await item in application.evaluate(context) {
+                        yield item?;
+                    }
+                },
+            }
         }
     }
 

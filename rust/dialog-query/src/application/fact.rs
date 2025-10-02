@@ -30,15 +30,13 @@ pub const RANGE_READ_COST: usize = 200;
 /// This scan is likely to span multiple segments.
 pub const RANGE_SCAN_COST: usize = 1_000;
 
-/// Cost of a multi-segment scan (currently unused, reserved for future use).
-pub const MULTISEGMENT_SCAN_COST: usize = 2_000;
-
-/// Cost of a table scan with unique filter (currently unused).
-pub const TABLE_SCAN_COST: usize = 1_000;
-
 /// Cost of an index scan for Cardinality::Many with 1/3 constraints.
 /// This is the most expensive query pattern - scanning with minimal constraints.
 pub const INDEX_SCAN: usize = 5_000;
+
+/// Overhead cost for concept queries due to potential rule evaluation.
+/// Concepts may have associated deductive rules that need to be checked and evaluated.
+pub const CONCEPT_OVERHEAD: usize = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FactApplication {

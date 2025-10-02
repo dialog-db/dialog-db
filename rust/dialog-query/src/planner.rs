@@ -1,4 +1,4 @@
-use crate::analyzer::{Analysis, JoinPlan, Plan};
+use crate::analyzer::{Analysis, Plan};
 use crate::artifact::Value;
 use crate::error::CompileError;
 pub use crate::error::{AnalyzerError, PlanError};
@@ -56,10 +56,7 @@ impl Join {
 
     /// Creates an optimized execution plan for all premises.
     /// Returns a JoinPlan with the ordered steps, cost, and variable scopes.
-    pub fn plan(
-        &mut self,
-        scope: &VariableScope,
-    ) -> Result<JoinPlan, CompileError> {
+    pub fn plan(&mut self, scope: &VariableScope) -> Result<JoinPlan, CompileError> {
         let env = scope.clone();
         let mut bound = scope.clone();
         let mut steps = vec![];
@@ -157,5 +154,35 @@ impl Join {
                 }
             }
         }
+    }
+}
+
+/// Represents a join plan - the result of planning multiple premises together.
+/// Contains the ordered sequence of steps, total cost, and variable scopes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JoinPlan {
+    /// The ordered steps to execute
+    pub steps: Vec<Plan>,
+    /// Total execution cost
+    pub cost: usize,
+    /// Variables provided/bound by this join
+    pub binds: VariableScope,
+    /// Variables required in the environment to execute this join
+    pub env: VariableScope,
+}
+
+impl JoinPlan {
+    /// Evaluate this join plan by executing all steps in order
+    /// Each step flows results to the next, building up bindings
+    ///
+    /// TODO: Currently returns input selection unchanged - needs proper implementation
+    /// once we have working premise evaluation
+    pub fn evaluate<S: crate::Source, M: crate::Selection>(
+        &self,
+        context: crate::EvaluationContext<S, M>,
+    ) -> impl crate::Selection {
+        // TODO: Implement proper step-by-step evaluation
+        // For now, just return the input selection
+        context.selection
     }
 }

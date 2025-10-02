@@ -1,6 +1,9 @@
 use crate::error::CompileError;
 use crate::{fact::Scalar, predicate::DeductiveRule};
-use crate::{Dependencies, Parameters, Premise, Requirement, Schema, Term, Value, VariableScope};
+use crate::{
+    Dependencies, EvaluationContext, Parameters, Premise, Requirement, Schema, Selection, Source,
+    Term, Value, VariableScope,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -216,18 +219,21 @@ pub struct Plan {
     pub env: VariableScope,
 }
 
-/// Represents a join plan - the result of planning multiple premises together.
-/// Contains the ordered sequence of steps, total cost, and variable scopes.
-#[derive(Debug, Clone, PartialEq)]
-pub struct JoinPlan {
-    /// The ordered steps to execute
-    pub steps: Vec<Plan>,
-    /// Total execution cost
-    pub cost: usize,
-    /// Variables provided/bound by this join
-    pub binds: VariableScope,
-    /// Variables required in the environment to execute this join
-    pub env: VariableScope,
+impl Plan {
+    /// Evaluate this plan with the given context
+    /// The premise will be evaluated with scope set to self.env
+    pub fn evaluate<S: Source, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
+        // Delegate to premise evaluation passing env inferred by an analyzer
+        // as scope.
+        self.premise.evaluate(EvaluationContext {
+            source: context.source,
+            selection: context.selection,
+            scope: self.env.clone(),
+        })
+    }
 }
 
 /// Analysis result for a premise - either viable or blocked
@@ -931,8 +937,8 @@ mod cost_model_tests {
     #[test]
     fn test_concept_equals_fact_cost_nothing_bound() {
         use crate::application::concept::ConceptApplication;
-        use crate::application::fact::RANGE_SCAN_COST;
-        use crate::predicate::concept::{Attributes, Concept};
+        use crate::application::fact::{CONCEPT_OVERHEAD, RANGE_SCAN_COST};
+        use crate::predicate::concept::Concept;
 
         // Create a FactApplication with constant attribute name
         let the_attr: Attribute = "user/name".parse().unwrap();
@@ -946,12 +952,11 @@ mod cost_model_tests {
         // Create a ConceptApplication with single attribute
         let concept = Concept {
             operator: "user".to_string(),
-            attributes: [("name", crate::Attribute::new(
-                "user",
+            attributes: [(
                 "name",
-                "User name",
-                crate::Type::String,
-            ))].into(),
+                crate::Attribute::new("user", "name", "User name", crate::Type::String),
+            )]
+            .into(),
         };
 
         let mut terms = crate::Parameters::new();
@@ -966,23 +971,26 @@ mod cost_model_tests {
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
 
-        assert_eq!(
-            fact_cost, concept_cost,
-            "FactApplication and ConceptApplication with single attribute should have same cost. \
-             Fact: {}, Concept: {}",
-            fact_cost, concept_cost
-        );
-
-        // Should both be RANGE_SCAN_COST (1 constraint: just attribute known)
+        // Fact cost is just the scan
         assert_eq!(fact_cost, RANGE_SCAN_COST);
-        assert_eq!(concept_cost, RANGE_SCAN_COST);
+
+        // Concept cost includes overhead for potential rule evaluation
+        assert_eq!(concept_cost, RANGE_SCAN_COST + CONCEPT_OVERHEAD);
+
+        assert!(
+            concept_cost > fact_cost,
+            "ConceptApplication should cost more than FactApplication due to rule overhead. \
+             Fact: {}, Concept: {}",
+            fact_cost,
+            concept_cost
+        );
     }
 
     #[test]
     fn test_concept_equals_fact_cost_value_bound() {
         use crate::application::concept::ConceptApplication;
-        use crate::application::fact::SEGMENT_READ_COST;
-        use crate::predicate::concept::{Attributes, Concept};
+        use crate::application::fact::{CONCEPT_OVERHEAD, SEGMENT_READ_COST};
+        use crate::predicate::concept::Concept;
 
         // Create a FactApplication with constant attribute name
         let the_attr: Attribute = "user/name".parse().unwrap();
@@ -996,12 +1004,11 @@ mod cost_model_tests {
         // Create a ConceptApplication with single attribute
         let concept = Concept {
             operator: "user".to_string(),
-            attributes: [("name", crate::Attribute::new(
-                "user",
+            attributes: [(
                 "name",
-                "User name",
-                crate::Type::String,
-            ))].into(),
+                crate::Attribute::new("user", "name", "User name", crate::Type::String),
+            )]
+            .into(),
         };
 
         let mut terms = crate::Parameters::new();
@@ -1017,23 +1024,18 @@ mod cost_model_tests {
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
 
-        assert_eq!(
-            fact_cost, concept_cost,
-            "FactApplication and ConceptApplication should have same cost when value bound. \
-             Fact: {}, Concept: {}",
-            fact_cost, concept_cost
-        );
-
-        // Should both be SEGMENT_READ_COST (2 constraints: attribute + value known, Cardinality::One)
+        // Fact cost
         assert_eq!(fact_cost, SEGMENT_READ_COST);
-        assert_eq!(concept_cost, SEGMENT_READ_COST);
+
+        // Concept cost includes overhead
+        assert_eq!(concept_cost, SEGMENT_READ_COST + CONCEPT_OVERHEAD);
     }
 
     #[test]
     fn test_concept_equals_fact_cost_entity_bound() {
         use crate::application::concept::ConceptApplication;
-        use crate::application::fact::SEGMENT_READ_COST;
-        use crate::predicate::concept::{Attributes, Concept};
+        use crate::application::fact::{CONCEPT_OVERHEAD, SEGMENT_READ_COST};
+        use crate::predicate::concept::Concept;
 
         // Create a FactApplication with constant attribute name
         let the_attr: Attribute = "user/name".parse().unwrap();
@@ -1047,12 +1049,11 @@ mod cost_model_tests {
         // Create a ConceptApplication with single attribute
         let concept = Concept {
             operator: "user".to_string(),
-            attributes: [("name", crate::Attribute::new(
-                "user",
+            attributes: [(
                 "name",
-                "User name",
-                crate::Type::String,
-            ))].into(),
+                crate::Attribute::new("user", "name", "User name", crate::Type::String),
+            )]
+            .into(),
         };
 
         let mut terms = crate::Parameters::new();
@@ -1068,23 +1069,18 @@ mod cost_model_tests {
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
 
-        assert_eq!(
-            fact_cost, concept_cost,
-            "FactApplication and ConceptApplication should have same cost when entity bound. \
-             Fact: {}, Concept: {}",
-            fact_cost, concept_cost
-        );
-
-        // Should both be SEGMENT_READ_COST (2 constraints: attribute + entity known, Cardinality::One)
+        // Fact cost
         assert_eq!(fact_cost, SEGMENT_READ_COST);
-        assert_eq!(concept_cost, SEGMENT_READ_COST);
+
+        // Concept cost includes overhead
+        assert_eq!(concept_cost, SEGMENT_READ_COST + CONCEPT_OVERHEAD);
     }
 
     #[test]
     fn test_concept_equals_fact_cost_cardinality_many_nothing_bound() {
         use crate::application::concept::ConceptApplication;
-        use crate::application::fact::INDEX_SCAN;
-        use crate::predicate::concept::{Attributes, Concept};
+        use crate::application::fact::{CONCEPT_OVERHEAD, INDEX_SCAN};
+        use crate::predicate::concept::Concept;
 
         // Create a FactApplication with Cardinality::Many
         let the_attr: Attribute = "user/tags".parse().unwrap();
@@ -1096,12 +1092,8 @@ mod cost_model_tests {
         );
 
         // Create a ConceptApplication with single Cardinality::Many attribute
-        let mut concept_attr = crate::Attribute::new(
-            "user",
-            "tags",
-            "User tags",
-            crate::Type::String,
-        );
+        let mut concept_attr =
+            crate::Attribute::new("user", "tags", "User tags", crate::Type::String);
         concept_attr.cardinality = crate::Cardinality::Many;
 
         let concept = Concept {
@@ -1121,23 +1113,18 @@ mod cost_model_tests {
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
 
-        assert_eq!(
-            fact_cost, concept_cost,
-            "FactApplication and ConceptApplication should have same cost for Cardinality::Many. \
-             Fact: {}, Concept: {}",
-            fact_cost, concept_cost
-        );
-
-        // Should both be INDEX_SCAN (1 constraint with Cardinality::Many)
+        // Fact cost
         assert_eq!(fact_cost, INDEX_SCAN);
-        assert_eq!(concept_cost, INDEX_SCAN);
+
+        // Concept cost includes overhead
+        assert_eq!(concept_cost, INDEX_SCAN + CONCEPT_OVERHEAD);
     }
 
     #[test]
     fn test_concept_equals_fact_cost_cardinality_many_value_bound() {
         use crate::application::concept::ConceptApplication;
-        use crate::application::fact::RANGE_SCAN_COST;
-        use crate::predicate::concept::{Attributes, Concept};
+        use crate::application::fact::{CONCEPT_OVERHEAD, RANGE_SCAN_COST};
+        use crate::predicate::concept::Concept;
 
         // Create a FactApplication with Cardinality::Many
         let the_attr: Attribute = "user/tags".parse().unwrap();
@@ -1149,12 +1136,8 @@ mod cost_model_tests {
         );
 
         // Create a ConceptApplication with single Cardinality::Many attribute
-        let mut concept_attr = crate::Attribute::new(
-            "user",
-            "tags",
-            "User tags",
-            crate::Type::String,
-        );
+        let mut concept_attr =
+            crate::Attribute::new("user", "tags", "User tags", crate::Type::String);
         concept_attr.cardinality = crate::Cardinality::Many;
 
         let concept = Concept {
@@ -1175,16 +1158,11 @@ mod cost_model_tests {
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
 
-        assert_eq!(
-            fact_cost, concept_cost,
-            "FactApplication and ConceptApplication should have same cost for Cardinality::Many with value bound. \
-             Fact: {}, Concept: {}",
-            fact_cost, concept_cost
-        );
-
-        // Should both be RANGE_SCAN_COST (2 constraints: attribute + value, Cardinality::Many)
+        // Fact cost
         assert_eq!(fact_cost, RANGE_SCAN_COST);
-        assert_eq!(concept_cost, RANGE_SCAN_COST);
+
+        // Concept cost includes overhead
+        assert_eq!(concept_cost, RANGE_SCAN_COST + CONCEPT_OVERHEAD);
     }
 
     #[test]

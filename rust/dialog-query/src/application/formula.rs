@@ -1,9 +1,10 @@
 pub use super::Application;
 pub use crate::analyzer::LegacyAnalysis;
 pub use crate::cursor::Cursor;
-pub use crate::error::{AnalyzerError, FormulaEvaluationError, PlanError};
+pub use crate::error::{AnalyzerError, FormulaEvaluationError, PlanError, QueryError};
 pub use crate::plan::FormulaApplicationPlan;
 use crate::predicate::formula::Cells;
+pub use crate::{try_stream, EvaluationContext, Selection, Source};
 
 pub use crate::{Dependencies, Match, Parameters, Requirement, VariableScope};
 use std::fmt::Display;
@@ -155,6 +156,48 @@ impl FormulaApplication {
             },
             application: self,
         })
+    }
+
+    pub fn evaluate<S: Source, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
+        let parameters = self.parameters.clone();
+        let compute = self.compute;
+
+        try_stream! {
+
+            for await source in context.selection {
+                let frame = source?;
+                let mut cursor = Cursor::new(frame, parameters.clone());
+                let expansion = compute(&mut cursor);
+                // let expansion = self.expand(frame);
+                // Map results and omit inconsistent matches
+                let results = match expansion {
+                    Ok(output) => Ok(output),
+                    Err(e) => {
+                        match e {
+                            FormulaEvaluationError::VariableInconsistency { .. } => Ok(vec![]),
+                            FormulaEvaluationError::RequiredParameter { parameter } => {
+                                Err(QueryError::RequiredFormulaParamater { parameter })
+                            },
+                            FormulaEvaluationError::UnboundVariable { parameter, .. } => {
+                                Err(QueryError::UnboundVariable { variable_name: parameter })
+                            },
+                            FormulaEvaluationError::TypeMismatch { expected, actual } => {
+                                Err(QueryError::InvalidTerm {
+                                    message: format!("Type mismatch: expected {}, got {}", expected, actual)
+                                })
+                            },
+                        }
+                    }
+                }?;
+
+                for output in results {
+                    yield output;
+                }
+            }
+        }
     }
 }
 
