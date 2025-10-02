@@ -62,7 +62,7 @@ impl UncompiledDeductiveRule {
         // order in such scenario or to discover that some premise in the rule
         // is not satisfiable e.g. if formula uses rule parameter in the required
         // cell which is not derived from any other premise.
-        let plan = Join::new(self.premises.clone()).plan(&VariableScope::new())?;
+        let plan = Join::new(self.premises).plan(&VariableScope::new())?;
 
         // We also verify that every rule parameter was derived by one of the
         // rule premises, otherwise we produce an error since rule evaluation

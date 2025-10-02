@@ -8,7 +8,6 @@ pub use crate::premise::Premise;
 pub use crate::term::Term;
 use crate::EvaluationContext;
 pub use crate::{try_stream, Selection, Source, VariableScope};
-use core::pin::Pin;
 
 /// Query planner that optimizes the order of premise execution based on cost
 /// and dependency analysis. Uses a state machine approach to iteratively
@@ -68,9 +67,9 @@ impl Join {
         while !self.done() {
             let plan = self.top(&bound)?;
 
-            cost += plan.cost;
+            cost += plan.cost();
             // Extend the scope with what this premise binds
-            bound.extend(&plan.binds);
+            bound.extend(plan.binds());
 
             steps.push(plan);
         }
@@ -166,6 +165,7 @@ impl Join {
 pub struct JoinPlan {
     /// The ordered steps to execute
     pub steps: Vec<Plan>,
+
     /// Total execution cost
     pub cost: usize,
     /// Variables provided/bound by this join
@@ -190,17 +190,16 @@ impl JoinPlan {
                             yield each?;
                     }
                 }
-                [single] => {
+                [plan, plans @ ..] => {
                     // Single step - evaluate directly without wrapping
-                    let plan = single.clone();
-                    for await each in plan.evaluate(context) {
-                        yield each?;
+                    let source = context.source.clone();
+                    let scope = context.scope.clone();
+                    let mut selection = plan.evaluate(context);
+                    for plan in plans {
+                        selection = plan.evaluate(EvaluationContext { selection, source: source.clone(), scope: scope.clone() });
                     }
-                }
-                _ => {
-                    // Multiple steps - create chain
-                    let chain = Chain::from_vec(steps);
-                    for await each in chain.evaluate(context) {
+
+                    for await each in selection {
                         yield each?;
                     }
                 }
@@ -213,63 +212,6 @@ impl JoinPlan {
         let context = fresh(store);
         let selection = self.evaluate(context);
         Ok(selection)
-    }
-}
-
-/// Recursive chain structure for joining 2+ plan steps
-enum Chain {
-    /// Base case: exactly two plans
-    And(Plan, Plan),
-    /// Recursive case: chain followed by another plan
-    Then(Box<Chain>, Plan),
-}
-
-impl Chain {
-    /// Convert a Vec of 2+ Plans into a recursive Chain structure
-    fn from_vec(mut steps: Vec<Plan>) -> Self {
-        let first = steps.remove(0);
-        let second = steps.remove(0);
-        steps
-            .into_iter()
-            .fold(Chain::And(first, second), |chain, plan| {
-                Chain::Then(Box::new(chain), plan)
-            })
-    }
-
-    fn evaluate<S: Source, M: Selection>(
-        self,
-        context: EvaluationContext<S, M>,
-    ) -> Pin<Box<dyn Selection>> {
-        Box::pin(try_stream! {
-            match self {
-                Chain::And(first, second) => {
-                    let source = context.source.clone();
-                    let scope = context.scope.clone();
-                    let selection = first.evaluate(context);
-                    let output = second.evaluate(EvaluationContext {
-                        selection,
-                        source,
-                        scope,
-                    });
-                    for await each in output {
-                        yield each?;
-                    }
-                },
-                Chain::Then(left, right) => {
-                    let source = context.source.clone();
-                    let scope = context.scope.clone();
-                    let selection = left.evaluate(context);
-                    let output = right.evaluate(EvaluationContext {
-                        selection,
-                        source,
-                        scope,
-                    });
-                    for await each in output {
-                        yield each?;
-                    }
-                },
-            }
-        })
     }
 }
 

@@ -220,18 +220,37 @@ pub struct Plan {
 }
 
 impl Plan {
+    pub fn cost(&self) -> usize {
+        self.cost
+    }
+
+    pub fn binds(&self) -> &VariableScope {
+        &self.binds
+    }
+
+    pub fn env(&self) -> &VariableScope {
+        &self.env
+    }
+
     /// Evaluate this plan with the given context
     /// The premise will be evaluated with scope set to self.env
     pub fn evaluate<S: Source, M: Selection>(
         &self,
         context: EvaluationContext<S, M>,
-    ) -> impl Selection {
+    ) -> core::pin::Pin<Box<dyn Selection>> {
         // Delegate to premise evaluation passing env inferred by an analyzer
         // as scope.
-        self.premise.evaluate(EvaluationContext {
-            source: context.source,
-            selection: context.selection,
-            scope: self.env.clone(),
+        use crate::try_stream;
+        let premise = self.premise.clone();
+        let scope = self.env.clone();
+        Box::pin(try_stream! {
+            for await each in premise.evaluate(EvaluationContext {
+                source: context.source,
+                selection: context.selection,
+                scope,
+            }) {
+                yield each?;
+            }
         })
     }
 }
