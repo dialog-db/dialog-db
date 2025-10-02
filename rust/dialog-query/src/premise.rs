@@ -10,9 +10,9 @@ use async_stream::try_stream;
 pub use super::application::Application;
 use super::application::{FactApplication, FormulaApplication};
 pub use super::negation::Negation;
-pub use super::plan::{EvaluationPlan, Plan};
+pub use super::plan::{fresh, EvaluationPlan, Plan};
 pub use crate::analyzer::LegacyAnalysis;
-pub use crate::error::{AnalyzerError, PlanError};
+pub use crate::error::{AnalyzerError, PlanError, QueryResult};
 pub use crate::syntax::VariableScope;
 pub use crate::Dependencies;
 pub use crate::{EvaluationContext, Selection, Source};
@@ -113,6 +113,13 @@ impl Premise {
                 },
             }
         }
+    }
+
+    pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
+        let store = store.clone();
+        let context = fresh(store);
+        let selection = self.evaluate(context);
+        Ok(selection)
     }
 }
 

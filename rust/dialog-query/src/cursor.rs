@@ -179,6 +179,68 @@ impl Cursor {
     pub fn terms(&self) -> &Parameters {
         &self.terms
     }
+
+    /// Merge values from a frame into the source match using the parameter mapping.
+    ///
+    /// For each parameter in the cursor's terms:
+    /// - If it's a variable in the terms, look up the corresponding value in the frame
+    /// - Unify that value with the variable in the source match
+    ///
+    /// This is the reverse operation of creating an initial match - it takes results
+    /// from evaluation and merges them back into the original context.
+    ///
+    /// # Arguments
+    /// * `frame` - The match containing evaluation results to merge
+    ///
+    /// # Returns
+    /// * `Ok(Match)` - New match with source data plus merged frame values
+    /// * `Err(InconsistencyError)` - If unification fails
+    pub fn merge(&self, frame: &Match) -> Result<Match, crate::InconsistencyError> {
+        let mut output = self.source.clone();
+
+        for (param_name, term) in self.terms.iter() {
+            // If this parameter is a variable with a name, map it from frame to output
+            if let crate::Term::Variable {
+                name: Some(var_name),
+                ..
+            } = term
+            {
+                // Look up the value in the frame using the parameter name
+                if let Some(value) = frame.variables.get(param_name.as_str()) {
+                    // Bind the value to our variable name in the output
+                    output = output.unify(crate::Term::<Value>::var(var_name), value.clone())?;
+                }
+            }
+        }
+
+        Ok(output)
+    }
+}
+
+/// Convert a Cursor into a Match by extracting all resolved constants.
+///
+/// This creates an initial match for evaluation by:
+/// 1. Resolving all terms in the cursor using the source match
+/// 2. Unifying any resolved constants into a new match
+///
+/// This is useful for creating the starting point for query evaluation.
+impl TryFrom<&Cursor> for Match {
+    type Error = crate::InconsistencyError;
+
+    fn try_from(cursor: &Cursor) -> Result<Self, Self::Error> {
+        let mut result = Match::new();
+
+        for (name, term) in cursor.terms.iter() {
+            let resolved = cursor.source.resolve(term);
+
+            // If resolved to a constant, bind it in the result match
+            if let crate::Term::Constant(value) = resolved {
+                result = result.unify(crate::Term::<Value>::var(name), value)?;
+            }
+        }
+
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
@@ -240,5 +302,97 @@ mod tests {
             result,
             Err(FormulaEvaluationError::UnboundVariable { .. })
         ));
+    }
+
+    #[test]
+    fn test_cursor_try_from_extracts_constants() {
+        use crate::artifact::Entity;
+
+        // Create parameters with mixed terms
+        let mut params = Parameters::new();
+        params.insert("this".to_string(), Term::var("entity"));
+        params.insert(
+            "name".to_string(),
+            Term::Constant(Value::String("Alice".to_string())),
+        );
+        params.insert("age".to_string(), Term::var("person_age"));
+
+        // Create a match with some variable bindings
+        let entity = Entity::new().expect("entity creation should succeed");
+        let mut input = Match::new();
+        input = input
+            .set(Term::var("entity"), entity.clone())
+            .expect("set should succeed");
+        input = input
+            .set(Term::var("person_age"), 25u32)
+            .expect("set should succeed");
+
+        // Create cursor and convert to Match
+        let cursor = Cursor::new(input, params);
+        let result_match = Match::try_from(&cursor).expect("conversion should succeed");
+
+        // Check that the result match has all resolved constants bound
+        assert_eq!(
+            result_match.get(&Term::<Value>::var("this")).ok(),
+            Some(Value::Entity(entity)),
+            "Variable 'entity' should be bound to entity constant"
+        );
+        assert_eq!(
+            result_match.get(&Term::<Value>::var("name")).ok(),
+            Some(Value::String("Alice".to_string())),
+            "Constant 'Alice' should be bound to name"
+        );
+        assert_eq!(
+            result_match.get(&Term::<Value>::var("age")).ok(),
+            Some(Value::UnsignedInt(25)),
+            "Variable 'person_age' should be bound to 25"
+        );
+    }
+
+    #[test]
+    fn test_cursor_merge_applies_frame() {
+        use crate::artifact::Entity;
+
+        // Setup: cursor with parameters mapping implicit names to user variables
+        let mut params = Parameters::new();
+        params.insert("this".to_string(), Term::var("my_entity"));
+        params.insert("name".to_string(), Term::var("my_name"));
+
+        let entity = Entity::new().expect("entity creation should succeed");
+        let source = Match::new()
+            .set(Term::var("original"), "original_value".to_string())
+            .expect("set should succeed");
+
+        let cursor = Cursor::new(source, params);
+
+        // Frame has values for the implicit variable names
+        let frame = Match::new()
+            .set(Term::var("this"), entity.clone())
+            .expect("set should succeed")
+            .set(Term::var("name"), "Alice".to_string())
+            .expect("set should succeed");
+
+        // Merge should map frame values to user variable names
+        let output = cursor.merge(&frame).expect("merge should succeed");
+
+        // Check that:
+        // 1. Original source data is preserved
+        assert_eq!(
+            output.get(&Term::<String>::var("original")).ok(),
+            Some("original_value".to_string()),
+            "Original source value should be preserved"
+        );
+
+        // 2. Frame values are mapped to user variable names
+        assert_eq!(
+            output.get(&Term::<Value>::var("my_entity")).ok(),
+            Some(Value::Entity(entity)),
+            "Frame 'this' should be mapped to 'my_entity'"
+        );
+        assert_eq!(
+            output.get(&Term::<String>::var("my_name")).ok(),
+            Some("Alice".to_string()),
+            "Frame 'name' should be mapped to 'my_name'"
+        );
     }
 }

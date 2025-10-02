@@ -135,3 +135,74 @@ impl IntoIterator for &VariableScope {
             .into_iter()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scope_add_ignores_constants() {
+        let mut scope = VariableScope::new();
+
+        // Adding a constant should do nothing
+        scope.add(&Term::Constant(Value::String("test".to_string())));
+
+        assert_eq!(
+            scope.size(),
+            0,
+            "VariableScope.add() should ignore constants"
+        );
+        assert!(
+            !scope.variables.contains("test"),
+            "Constant values should not be added to scope"
+        );
+    }
+
+    #[test]
+    fn test_scope_add_ignores_blank_variables() {
+        let mut scope = VariableScope::new();
+
+        // Adding a blank variable (None name) should do nothing
+        scope.add(&Term::<Value>::blank());
+
+        assert_eq!(
+            scope.size(),
+            0,
+            "VariableScope.add() should ignore blank variables"
+        );
+    }
+
+    #[test]
+    fn test_scope_add_only_adds_named_variables() {
+        let mut scope = VariableScope::new();
+
+        // Only named variables should be added
+        scope.add(&Term::<Value>::var("x"));
+        scope.add(&Term::<Value>::var("y"));
+
+        assert_eq!(scope.size(), 2, "Should have 2 variables");
+        assert!(scope.variables.contains("x"), "Should contain 'x'");
+        assert!(scope.variables.contains("y"), "Should contain 'y'");
+
+        // Adding the same variable again should not increase size
+        scope.add(&Term::<Value>::var("x"));
+        assert_eq!(scope.size(), 2, "Should still have 2 variables");
+    }
+
+    #[test]
+    fn test_scope_tracks_variable_names_not_values() {
+        let mut scope = VariableScope::new();
+
+        // Add a variable to the scope
+        scope.add(&Term::<Value>::var("name"));
+
+        assert!(
+            scope.variables.contains("name"),
+            "Scope should track that 'name' is bound"
+        );
+
+        // The scope doesn't care what value the variable has
+        // It only tracks the variable NAME for query planning
+        // The actual value is stored in Match, not VariableScope
+    }
+}

@@ -1,10 +1,10 @@
 pub use super::{Application, LegacyAnalysis};
 pub use crate::artifact::Attribute;
 pub use crate::artifact::{ArtifactSelector, Constrained};
-pub use crate::error::AnalyzerError;
 use crate::error::PlanError;
+pub use crate::error::{AnalyzerError, QueryResult};
 pub use crate::fact_selector::{ATTRIBUTE_COST, BASE_COST, ENTITY_COST, VALUE_COST};
-pub use crate::plan::Plan;
+pub use crate::plan::{fresh, Plan};
 use crate::Cardinality;
 pub use crate::FactSelector;
 pub use crate::VariableScope;
@@ -243,6 +243,13 @@ impl FactApplication {
                 }
             }
         }
+    }
+
+    pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
+        let store = store.clone();
+        let context = fresh(store);
+        let selection = self.evaluate(context);
+        Ok(selection)
     }
 }
 

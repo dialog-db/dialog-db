@@ -5,8 +5,8 @@ pub mod join;
 pub mod rule;
 
 pub use crate::analyzer::{AnalyzerError, LegacyAnalysis};
-pub use crate::error::PlanError;
-pub use crate::plan::ApplicationPlan;
+pub use crate::error::{PlanError, QueryResult};
+pub use crate::plan::{fresh, ApplicationPlan};
 pub use crate::premise::{Negation, Premise};
 pub use crate::{Dependencies, EvaluationContext, Selection, Source, VariableScope};
 use async_stream::try_stream;
@@ -121,6 +121,13 @@ impl Application {
     /// Creates a negated premise from this application.
     pub fn not(&self) -> Premise {
         Premise::Exclude(Negation::not(self.clone()))
+    }
+
+    pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
+        let store = store.clone();
+        let context = fresh(store);
+        let selection = self.evaluate(context);
+        Ok(selection)
     }
 }
 

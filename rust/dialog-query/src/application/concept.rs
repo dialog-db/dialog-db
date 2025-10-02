@@ -6,6 +6,7 @@ use crate::plan::{fresh, ConceptPlan};
 use crate::planner::Join;
 use crate::predicate::Concept;
 use crate::DeductiveRule;
+use crate::cursor::Cursor;
 use crate::{
     try_stream, Cardinality, Dependencies, EvaluationContext, Parameters, Selection, Source, Term,
     Value, VariableScope,
@@ -343,72 +344,38 @@ impl ConceptApplication {
         let app = self.clone();
         let concept = self.concept.clone();
 
+        // OPTIMIZATION: Plan once outside the loop instead of replanning on every frame
+        // This reduces per-frame cost from ~100s of operations to ~5
+        let implicit = DeductiveRule::from(&concept);
+        let join: Join = (&implicit.premises).into();
+        let planned_join = std::sync::Arc::new(join.plan(&context.scope).unwrap_or(join));
+
         try_stream! {
             for await each in context.selection {
                 let input = each?;
 
-                // Resolve terms from the input match
-                let mut resolved_terms = Parameters::new();
-                for (name, term) in app.terms.iter() {
-                    resolved_terms.insert(name.clone(), input.resolve(term));
-                }
+                // Create cursor for bidirectional parameter mapping
+                let cursor = Cursor::new(input, app.terms.clone());
 
-                // Create the implicit rule and join from the concept
-                let implicit = DeductiveRule::from(&concept);
-                let mut join: Join = (&implicit.premises).into();
-
-                // Build scope with resolved constant terms
-                let mut scope = context.scope.clone();
-                for (name, term) in resolved_terms.iter() {
-                    if let Term::Constant(_) = term {
-                        scope.add(term);
-                    }
-                }
-
-                // Try to replan with the updated scope for better execution order
-                join = join.plan(&scope).unwrap_or(join);
-
-                // Create initial match with resolved constants bound
-                let mut initial_match = crate::Match::new();
-                for (name, term) in resolved_terms.iter() {
-                    if let Term::Constant(value) = term {
-                        initial_match = initial_match.unify(Term::<Value>::var(name), value.clone())
-                            .map_err(|e| crate::QueryError::FactStore(e.to_string()))?;
-                    }
-                }
+                // Extract initial match with resolved constants for evaluation
+                let initial_match = crate::Match::try_from(&cursor)
+                    .map_err(|e| crate::QueryError::FactStore(e.to_string()))?;
 
                 // Evaluate join with single-match selection
+                // NOTE: context.scope already contains all bound variable names from upstream.
+                // VariableScope only tracks variable names (for planning), not values.
+                // The actual constant values are bound in initial_match, not the scope.
                 let single_selection = futures_util::stream::once(async move { Ok(initial_match) });
                 let eval_context = EvaluationContext {
                     selection: single_selection,
                     source: context.source.clone(),
-                    scope: scope.clone(),
+                    scope: context.scope.clone(),
                 };
 
-                // Merge results back with the input, mapping variable names
-                for await result in join.evaluate(eval_context) {
-                    let frame = result?;
-                    let mut output = input.clone();
-
-                    // Map variables from implicit rule names to our term names
-                    // The implicit rule uses standard names: "this", attribute names like "name", "age"
-                    // We need to map them to the variable names in app.terms
-                    for (term_name, term) in app.terms.iter() {
-                        if let Term::Variable { name: Some(var_name), .. } = term {
-                            // Look up the value from the frame using the implicit rule's variable name
-                            // For "this" term, look for "this" in frame
-                            // For attribute terms, look for the attribute name in frame
-                            let implicit_var_name = term_name.as_str();
-                            if let Some(value) = frame.variables.get(implicit_var_name) {
-                                // Bind to our variable name
-                                let var = Term::<Value>::var(var_name);
-                                output = output.unify(var, value.clone())
-                                    .map_err(|e| crate::QueryError::FactStore(e.to_string()))?;
-                            }
-                        }
-                    }
-
-                    yield output;
+                // Merge results back using cursor's bidirectional mapping
+                for await result in planned_join.evaluate(eval_context) {
+                    yield cursor.merge(&result?)
+                        .map_err(|e| crate::QueryError::FactStore(e.to_string()))?;
                 }
             }
         }
