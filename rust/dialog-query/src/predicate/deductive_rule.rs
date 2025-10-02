@@ -5,7 +5,7 @@ pub use crate::planner::Join;
 pub use crate::predicate::Concept;
 pub use crate::premise::Premise;
 pub use crate::{Application, Attribute, Dependencies, Parameters, Requirement, Value};
-use crate::{Term, Type, VariableScope};
+use crate::{Term, Type};
 use std::fmt::Display;
 
 /// Represents a deductive rule that can be applied creating a premise.
@@ -62,7 +62,7 @@ impl UncompiledDeductiveRule {
         // order in such scenario or to discover that some premise in the rule
         // is not satisfiable e.g. if formula uses rule parameter in the required
         // cell which is not derived from any other premise.
-        let plan = Join::new(self.premises).plan(&VariableScope::new())?;
+        let plan = Join::try_from(self.premises)?;
 
         // We also verify that every rule parameter was derived by one of the
         // rule premises, otherwise we produce an error since rule evaluation
@@ -186,10 +186,8 @@ impl Display for DeductiveRule {
     }
 }
 
-impl TryFrom<&Concept> for DeductiveRule {
-    type Error = CompileError;
-
-    fn try_from(concept: &Concept) -> Result<Self, Self::Error> {
+impl From<&Concept> for DeductiveRule {
+    fn from(concept: &Concept) -> Self {
         use crate::artifact::Entity;
 
         let mut premises = Vec::new();
@@ -208,7 +206,7 @@ impl TryFrom<&Concept> for DeductiveRule {
             );
         }
 
-        DeductiveRule::new(concept.clone(), premises)
+        DeductiveRule::new(concept.clone(), premises).expect("Conceupt should compile")
     }
 }
 

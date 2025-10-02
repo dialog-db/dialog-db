@@ -12,19 +12,14 @@ pub use crate::{try_stream, Selection, Source, VariableScope};
 /// Query planner that optimizes the order of premise execution based on cost
 /// and dependency analysis. Uses a state machine approach to iteratively
 /// select the best premise to execute next.
-pub enum Join {
+pub enum Planner {
     /// Initial state with unprocessed premises.
     Idle { premises: Vec<Premise> },
     /// Processing state with cached candidates and current scope.
     Active { candidates: Vec<Analysis> },
 }
 
-impl Join {
-    /// Creates a new planner for the given premises.
-    pub fn new(premises: Vec<Premise>) -> Self {
-        Self::Idle { premises }
-    }
-
+impl Planner {
     /// Helper to create a planning error from failed candidates.
     fn fail(analyses: &[Analysis]) -> Result<Plan, CompileError> {
         // If there are no candidates at all, return empty Required
@@ -56,45 +51,11 @@ impl Join {
         }
     }
 
-    /// Creates an optimized execution plan for all premises.
-    /// Returns a JoinPlan with the ordered steps, cost, and variable scopes.
-    pub fn plan(&mut self, scope: &VariableScope) -> Result<JoinPlan, CompileError> {
-        let env = scope.clone();
-        let mut bound = scope.clone();
-        let mut steps = vec![];
-        let mut cost = 0;
-
-        while !self.done() {
-            let plan = self.top(&bound)?;
-
-            cost += plan.cost();
-            // Extend the scope with what this premise binds
-            bound.extend(plan.binds());
-
-            steps.push(plan);
-        }
-
-        // binds is the difference between final scope and initial env
-        let mut binds = VariableScope::new();
-        for var_name in &bound.variables {
-            let var: Term<Value> = Term::var(var_name);
-            if !env.contains(&var) {
-                binds.add(&var);
-            }
-        }
-
-        Ok(JoinPlan {
-            steps,
-            cost,
-            binds,
-            env,
-        })
-    }
     /// Selects and returns the best premise to execute next based on cost.
     /// Updates the planner state by removing the selected premise from candidates.
-    pub fn top(&mut self, env: &VariableScope) -> Result<Plan, CompileError> {
+    fn top(&mut self, env: &VariableScope) -> Result<Plan, CompileError> {
         match self {
-            Join::Idle { premises } => {
+            Planner::Idle { premises } => {
                 let mut candidates = vec![];
                 let mut best: Option<(usize, usize)> = None; // (cost, index)
 
@@ -120,13 +81,13 @@ impl Join {
 
                 if let Some((_, best_index)) = best {
                     let analysis = candidates.remove(best_index);
-                    *self = Join::Active { candidates };
+                    *self = Planner::Active { candidates };
                     Plan::try_from(analysis)
                 } else {
                     Self::fail(&candidates)
                 }
             }
-            Join::Active { candidates } => {
+            Planner::Active { candidates } => {
                 let mut best: Option<(usize, usize)> = None; // (cost, index)
 
                 // Update all candidates with new bindings
@@ -159,13 +120,20 @@ impl Join {
     }
 }
 
+impl From<&Vec<Plan>> for Planner {
+    fn from(plans: &Vec<Plan>) -> Self {
+        Self::Active {
+            candidates: plans.iter().map(|plan| plan.into()).collect(),
+        }
+    }
+}
+
 /// Represents a join plan - the result of planning multiple premises together.
 /// Contains the ordered sequence of steps, total cost, and variable scopes.
 #[derive(Debug, Clone, PartialEq)]
-pub struct JoinPlan {
+pub struct Join {
     /// The ordered steps to execute
     pub steps: Vec<Plan>,
-
     /// Total execution cost
     pub cost: usize,
     /// Variables provided/bound by this join
@@ -174,15 +142,134 @@ pub struct JoinPlan {
     pub env: VariableScope,
 }
 
-impl JoinPlan {
+impl Join {
+    /// Replan this join with a different scope by converting existing steps to candidates
+    pub fn plan(&self, scope: &VariableScope) -> Result<Self, CompileError> {
+        let env = scope.clone();
+        let mut bound = scope.clone();
+        let mut steps = vec![];
+        let mut cost = 0;
+
+        // Convert existing plans back to analyses for replanning
+        // let candidates: Vec<Analysis> = self.steps.iter().map(|plan| plan.into()).collect();
+
+        let mut planner: Planner = (&self.steps).into();
+
+        while !planner.done() {
+            let plan = planner.top(&bound)?;
+
+            cost += plan.cost();
+            // Extend the scope with what this premise binds
+            bound.extend(plan.binds());
+
+            steps.push(plan);
+        }
+
+        // binds is the difference between final scope and initial env
+        let mut binds = VariableScope::new();
+        for var_name in &bound.variables {
+            let var: Term<Value> = Term::var(var_name);
+            if !env.contains(&var) {
+                binds.add(&var);
+            }
+        }
+
+        Ok(Join {
+            steps,
+            cost,
+            binds,
+            env,
+        })
+    }
+}
+
+impl TryFrom<Vec<Premise>> for Join {
+    type Error = CompileError;
+
+    fn try_from(premises: Vec<Premise>) -> Result<Self, Self::Error> {
+        let env = VariableScope::new();
+        let mut bound = VariableScope::new();
+        let mut steps = vec![];
+        let mut cost = 0;
+
+        let mut planner = Planner::Idle { premises };
+
+        while !planner.done() {
+            let plan = planner.top(&bound)?;
+
+            cost += plan.cost();
+            // Extend the scope with what this premise binds
+            bound.extend(plan.binds());
+
+            steps.push(plan);
+        }
+
+        // binds is the difference between final scope and initial env
+        let mut binds = VariableScope::new();
+        for var_name in &bound.variables {
+            let var: Term<Value> = Term::var(var_name);
+            if !env.contains(&var) {
+                binds.add(&var);
+            }
+        }
+
+        Ok(Self {
+            steps,
+            cost,
+            binds,
+            env,
+        })
+    }
+}
+
+impl From<&Vec<Plan>> for Join {
+    fn from(plans: &Vec<Plan>) -> Self {
+        let env = VariableScope::new();
+        let mut bound = VariableScope::new();
+        let mut steps = vec![];
+        let mut cost = 0;
+
+        let mut planner: Planner = plans.into();
+
+        while !planner.done() {
+            let plan = planner
+                .top(&bound)
+                .expect("Plan from empty scope can be planned in non-empty scope");
+
+            cost += plan.cost();
+            // Extend the scope with what this premise binds
+            bound.extend(plan.binds());
+
+            steps.push(plan);
+        }
+
+        // binds is the difference between final scope and initial env
+        let mut binds = VariableScope::new();
+        for var_name in &bound.variables {
+            let var: Term<Value> = Term::var(var_name);
+            if !env.contains(&var) {
+                binds.add(&var);
+            }
+        }
+
+        Self {
+            steps,
+            cost,
+            binds,
+            env,
+        }
+    }
+}
+
+impl Join {
     /// Evaluate this join plan by executing all steps in order.
     /// Each step flows results to the next, building up bindings.
     pub fn evaluate<S: Source, M: Selection>(
         &self,
         context: EvaluationContext<S, M>,
-    ) -> impl Selection {
+    ) -> core::pin::Pin<Box<dyn Selection>> {
         let steps = self.steps.clone();
-        try_stream! {
+        Box::pin(try_stream! {
             match steps.as_slice() {
                 [] => {
                     // No steps - just pass through the selection
@@ -204,7 +291,7 @@ impl JoinPlan {
                     }
                 }
             }
-        }
+        })
     }
 
     pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
@@ -242,9 +329,7 @@ fn test_join_plan_with_two_fact_applications() {
     let premises = vec![Premise::from(fact1), Premise::from(fact2)];
 
     // Create a join planner and plan with empty scope
-    let mut join = Join::new(premises);
-    let scope = VariableScope::new();
-    let plan = join.plan(&scope).expect("Planning should succeed");
+    let plan = Join::try_from(premises).expect("Planning should succeed");
 
     // Verify the plan was created
     assert_eq!(plan.steps.len(), 2, "Should have two steps");
@@ -289,9 +374,7 @@ fn test_join_plan_execution_order() {
 
     let premises = vec![Premise::from(fact1), Premise::from(fact2)];
 
-    let mut join = Join::new(premises);
-    let scope = VariableScope::new();
-    let plan = join.plan(&scope).expect("Planning should succeed");
+    let plan = Join::try_from(premises).expect("Planning should succeed");
 
     // The planner should execute fact1 first (lower cost - entity is bound)
     // Then fact2 (which now has ?name bound from fact1)
@@ -358,9 +441,7 @@ async fn test_join_plan_query_execution() -> anyhow::Result<()> {
     );
 
     let premises = vec![Premise::from(fact1), Premise::from(fact2)];
-    let mut join = Join::new(premises);
-    let scope = VariableScope::new();
-    let plan = join.plan(&scope)?;
+    let plan = Join::try_from(premises)?;
 
     // Execute the query
     let selection = plan.query(&session)?.collect_matches().await?;

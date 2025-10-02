@@ -490,6 +490,32 @@ impl From<Premise> for Analysis {
     }
 }
 
+impl From<Plan> for Analysis {
+    fn from(plan: Plan) -> Self {
+        Self::Viable {
+            schema: plan.premise.schema(),
+            params: plan.premise.parameters(),
+            premise: plan.premise,
+            cost: plan.cost,
+            binds: plan.binds,
+            env: plan.env,
+        }
+    }
+}
+
+impl From<&Plan> for Analysis {
+    fn from(plan: &Plan) -> Self {
+        Self::Viable {
+            schema: plan.premise.schema(),
+            params: plan.premise.parameters(),
+            premise: plan.premise.clone(),
+            cost: plan.cost,
+            binds: plan.binds.clone(),
+            env: plan.env.clone(),
+        }
+    }
+}
+
 impl TryFrom<Analysis> for Plan {
     type Error = CompileError;
 
