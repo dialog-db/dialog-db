@@ -1,11 +1,14 @@
 use crate::analyzer::{Analysis, Plan};
 use crate::artifact::Value;
-use crate::error::CompileError;
 pub use crate::error::{AnalyzerError, PlanError};
+use crate::error::{CompileError, QueryResult};
+use crate::plan::fresh;
 pub use crate::plan::EvaluationPlan;
 pub use crate::premise::Premise;
 pub use crate::term::Term;
-pub use crate::VariableScope;
+use crate::EvaluationContext;
+pub use crate::{try_stream, Selection, Source, VariableScope};
+use core::pin::Pin;
 
 /// Query planner that optimizes the order of premise execution based on cost
 /// and dependency analysis. Uses a state machine approach to iteratively
@@ -172,17 +175,248 @@ pub struct JoinPlan {
 }
 
 impl JoinPlan {
-    /// Evaluate this join plan by executing all steps in order
-    /// Each step flows results to the next, building up bindings
-    ///
-    /// TODO: Currently returns input selection unchanged - needs proper implementation
-    /// once we have working premise evaluation
-    pub fn evaluate<S: crate::Source, M: crate::Selection>(
+    /// Evaluate this join plan by executing all steps in order.
+    /// Each step flows results to the next, building up bindings.
+    /// Uses pattern from plan::join::Join - recursive enum structure.
+    pub fn evaluate<S: Source, M: Selection>(
         &self,
-        context: crate::EvaluationContext<S, M>,
-    ) -> impl crate::Selection {
-        // TODO: Implement proper step-by-step evaluation
-        // For now, just return the input selection
-        context.selection
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
+        // Build a recursive Join structure from steps using fold
+        let join = self.steps.iter().fold(
+            AnalyzerJoin::Identity,
+            |join, step| join.and(step.clone()),
+        );
+
+        join.evaluate(context)
     }
+
+    pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
+        let store = store.clone();
+        let context = fresh(store);
+        let selection = self.evaluate(context);
+        Ok(selection)
+    }
+}
+
+/// Recursive join structure for analyzer::Plan steps, following plan::join::Join pattern
+enum AnalyzerJoin {
+    Identity,
+    Join(Box<AnalyzerJoin>, Plan),
+}
+
+impl AnalyzerJoin {
+    fn and(self, step: Plan) -> Self {
+        AnalyzerJoin::Join(Box::new(self), step)
+    }
+
+    fn evaluate<S: Source, M: Selection>(
+        self,
+        context: EvaluationContext<S, M>,
+    ) -> Pin<Box<dyn Selection>> {
+        Box::pin(try_stream! {
+            match self {
+                AnalyzerJoin::Identity => {
+                    for await each in context.selection {
+                        yield each?;
+                    }
+                },
+                AnalyzerJoin::Join(left, right) => {
+                    let source = context.source.clone();
+                    let scope = context.scope.clone();
+                    let selection = left.evaluate(context);
+                    let output = right.evaluate(EvaluationContext {
+                        selection,
+                        source,
+                        scope,
+                    });
+                    for await each in output {
+                        yield each?;
+                    }
+                },
+            }
+        })
+    }
+}
+
+#[test]
+fn test_join_plan_with_two_fact_applications() {
+    use crate::application::FactApplication;
+    use crate::{Cardinality, Term, Value};
+    use dialog_artifacts::Attribute;
+
+    // Create two fact applications that will be joined
+    // First: (person/name, of: ?person, is: ?name) - find person's name
+    let fact1 = FactApplication::new(
+        Term::Constant(Attribute::try_from("person/name".to_string()).unwrap()),
+        Term::var("person"),
+        Term::var("name"),
+        Cardinality::One,
+    );
+
+    // Second: (person/age, of: ?person, is: ?age) - find person's age
+    let fact2 = FactApplication::new(
+        Term::Constant(Attribute::try_from("person/age".to_string()).unwrap()),
+        Term::var("person"),
+        Term::var("age"),
+        Cardinality::One,
+    );
+
+    // Create premises from the applications
+    let premises = vec![Premise::from(fact1), Premise::from(fact2)];
+
+    // Create a join planner and plan with empty scope
+    let mut join = Join::new(premises);
+    let scope = VariableScope::new();
+    let plan = join.plan(&scope).expect("Planning should succeed");
+
+    // Verify the plan was created
+    assert_eq!(plan.steps.len(), 2, "Should have two steps");
+    assert!(plan.cost > 0, "Should have non-zero cost");
+
+    // Verify that the plan binds the expected variables
+    let person_var: Term<Value> = Term::var("person");
+    let name_var: Term<Value> = Term::var("name");
+    let age_var: Term<Value> = Term::var("age");
+
+    assert!(
+        plan.binds.contains(&person_var),
+        "Should bind person variable"
+    );
+    assert!(plan.binds.contains(&name_var), "Should bind name variable");
+    assert!(plan.binds.contains(&age_var), "Should bind age variable");
+}
+
+#[test]
+fn test_join_plan_execution_order() {
+    use crate::application::FactApplication;
+    use crate::{Cardinality, Term};
+    use dialog_artifacts::{Attribute, Entity};
+
+    // Create two fact applications where one depends on the other
+    // First: (person/name, of: urn:alice, is: ?name) - alice's name is bound
+    let fact1 = FactApplication::new(
+        Term::Constant(Attribute::try_from("person/name".to_string()).unwrap()),
+        Term::Constant(Entity::try_from("urn:alice".to_string()).unwrap()),
+        Term::var("name"),
+        Cardinality::One,
+    );
+
+    // Second: (greeting/text, of: ?name, is: ?greeting) - uses ?name from first
+    // Note: ?name here refers to the Entity value, not Attribute
+    let fact2 = FactApplication::new(
+        Term::Constant(Attribute::try_from("greeting/text".to_string()).unwrap()),
+        Term::var("name"),
+        Term::var("greeting"),
+        Cardinality::One,
+    );
+
+    let premises = vec![Premise::from(fact1), Premise::from(fact2)];
+
+    let mut join = Join::new(premises);
+    let scope = VariableScope::new();
+    let plan = join.plan(&scope).expect("Planning should succeed");
+
+    // The planner should execute fact1 first (lower cost - entity is bound)
+    // Then fact2 (which now has ?name bound from fact1)
+    assert_eq!(plan.steps.len(), 2);
+
+    // After both steps, 2 variables should be bound (name and greeting)
+    assert_eq!(plan.binds.variables.len(), 2, "Should bind 2 variables");
+}
+
+#[tokio::test]
+async fn test_join_plan_query_execution() -> anyhow::Result<()> {
+    use crate::application::FactApplication;
+    use crate::session::Session;
+    use crate::{Cardinality, Fact, SelectionExt, Term, Value};
+    use dialog_artifacts::{Artifacts, Attribute, Entity};
+    use dialog_storage::MemoryStorageBackend;
+
+    // Create a store and session
+    let backend = MemoryStorageBackend::default();
+    let store = Artifacts::anonymous(backend).await?;
+    let mut session = Session::open(store);
+
+    let alice = Entity::new()?;
+    let bob = Entity::new()?;
+
+    session
+        .transact(vec![
+            Fact::assert(
+                "person/name".parse::<Attribute>()?,
+                alice.clone(),
+                Value::String("Alice".to_string()),
+            ),
+            Fact::assert(
+                "person/age".parse::<Attribute>()?,
+                alice.clone(),
+                Value::UnsignedInt(25),
+            ),
+            Fact::assert(
+                "person/name".parse::<Attribute>()?,
+                bob.clone(),
+                Value::String("Bob".to_string()),
+            ),
+            Fact::assert(
+                "person/age".parse::<Attribute>()?,
+                bob.clone(),
+                Value::UnsignedInt(30),
+            ),
+        ])
+        .await?;
+
+    // Create a join query: find person's name and age
+    let fact1 = FactApplication::new(
+        Term::Constant(Attribute::try_from("person/name".to_string()).unwrap()),
+        Term::var("person"),
+        Term::var("name"),
+        Cardinality::One,
+    );
+
+    let fact2 = FactApplication::new(
+        Term::Constant(Attribute::try_from("person/age".to_string()).unwrap()),
+        Term::var("person"),
+        Term::var("age"),
+        Cardinality::One,
+    );
+
+    let premises = vec![Premise::from(fact1), Premise::from(fact2)];
+    let mut join = Join::new(premises);
+    let scope = VariableScope::new();
+    let plan = join.plan(&scope)?;
+
+    // Execute the query
+    let selection = plan.query(&session)?.collect_matches().await?;
+
+    // Should find both Alice and Bob with their name and age
+    assert_eq!(selection.len(), 2, "Should find 2 people");
+
+    let name_var: Term<Value> = Term::var("name");
+    let age_var: Term<Value> = Term::var("age");
+
+    let mut found_alice = false;
+    let mut found_bob = false;
+
+    for match_result in selection.iter() {
+        let name = match_result.get(&name_var)?;
+        let age = match_result.get(&age_var)?;
+
+        match name {
+            Value::String(n) if n == "Alice" => {
+                assert_eq!(age, Value::UnsignedInt(25), "Alice should be 25");
+                found_alice = true;
+            }
+            Value::String(n) if n == "Bob" => {
+                assert_eq!(age, Value::UnsignedInt(30), "Bob should be 30");
+                found_bob = true;
+            }
+            _ => panic!("Unexpected person: {:?}", name),
+        }
+    }
+
+    assert!(found_alice, "Should find Alice");
+    assert!(found_bob, "Should find Bob");
+
+    Ok(())
 }
