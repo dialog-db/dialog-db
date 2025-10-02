@@ -69,6 +69,7 @@ impl ConceptApplication {
             let mut bound_one: Option<&crate::Attribute<crate::Value>> = None;
             let mut bound_many: Option<&crate::Attribute<crate::Value>> = None;
             let mut unbound_one: Option<&crate::Attribute<crate::Value>> = None;
+            let mut unbound_many: Option<&crate::Attribute<crate::Value>> = None;
 
             for (name, attribute) in self.concept.attributes.iter() {
                 if let Some(term) = self.terms.get(name) {
@@ -83,39 +84,56 @@ impl ConceptApplication {
                             }
                             _ => {}
                         }
+                    } else {
+                        // Term exists but not bound
+                        match attribute.cardinality {
+                            crate::Cardinality::One if unbound_one.is_none() => {
+                                unbound_one = Some(attribute);
+                            }
+                            crate::Cardinality::Many if unbound_many.is_none() => {
+                                unbound_many = Some(attribute);
+                            }
+                            _ => {}
+                        }
                     }
-                } else if unbound_one.is_none() && attribute.cardinality == crate::Cardinality::One
-                {
-                    unbound_one = Some(attribute);
+                } else {
+                    // No term at all
+                    match attribute.cardinality {
+                        crate::Cardinality::One if unbound_one.is_none() => {
+                            unbound_one = Some(attribute);
+                        }
+                        crate::Cardinality::Many if unbound_many.is_none() => {
+                            unbound_many = Some(attribute);
+                        }
+                        _ => {}
+                    }
                 }
             }
 
             // Determine initial scan strategy based on what we found
+            // For lead attribute: of=false (finding entity), is=bound (value bound or not)
             let (lead, bound) = if let Some(attribute) = bound_one {
                 // Best case: bound Cardinality::One - lookup returns `this` directly
-                (Some(attribute), true)
+                (attribute, true)
             } else if let Some(attribute) = bound_many {
                 // Bound Cardinality::Many - scan with value constraint
-                (Some(attribute), true)
+                (attribute, true)
             } else if let Some(attribute) = unbound_one {
                 // No bound attributes but have Cardinality::One - cheaper scan
-                (Some(attribute), false)
+                (attribute, false)
+            } else if let Some(attribute) = unbound_many {
+                // Worst case: use unbound Cardinality::Many
+                (attribute, false)
             } else {
-                // Worst case: no bound attrs and no Cardinality::One
-                (None, false)
+                unreachable!("concept without attributes is not possible")
             };
 
-            // Add costs for all other attributes (of=true, is=false)
-            let mut total = if let Some(attribute) = lead {
-                attribute.estimate(true, bound)
-            } else {
-                Cardinality::Many
-                    .estimate(true, false, false)
-                    .expect("Should have it because we know attribute")
-            };
+            // Start with initial cost
+            // of=false (finding entity), is=bound
+            let mut total = lead.estimate(false, bound);
 
             for (name, attribute) in self.concept.attributes.iter() {
-                if lead != Some(attribute) {
+                if lead != attribute {
                     total += attribute.estimate(
                         true,
                         if let Some(term) = self.terms.get(name) {

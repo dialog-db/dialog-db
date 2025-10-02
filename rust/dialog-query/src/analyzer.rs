@@ -929,6 +929,265 @@ mod cost_model_tests {
     }
 
     #[test]
+    fn test_concept_equals_fact_cost_nothing_bound() {
+        use crate::application::concept::ConceptApplication;
+        use crate::application::fact::RANGE_SCAN_COST;
+        use crate::predicate::concept::{Attributes, Concept};
+
+        // Create a FactApplication with constant attribute name
+        let the_attr: Attribute = "user/name".parse().unwrap();
+        let fact_app = FactApplication::new(
+            Term::Constant(the_attr.clone()),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("value"),
+            crate::attribute::Cardinality::One,
+        );
+
+        // Create a ConceptApplication with single attribute
+        let concept = Concept {
+            operator: "user".to_string(),
+            attributes: [("name", crate::Attribute::new(
+                "user",
+                "name",
+                "User name",
+                crate::Type::String,
+            ))].into(),
+        };
+
+        let mut terms = crate::Parameters::new();
+        terms.insert("this".to_string(), Term::<Value>::var("entity"));
+        terms.insert("name".to_string(), Term::<Value>::var("value"));
+
+        let concept_app = ConceptApplication { terms, concept };
+
+        // Both should have same cost when nothing is bound
+        let env = VariableScope::new();
+
+        let fact_cost = fact_app.estimate(&env).expect("Should have cost");
+        let concept_cost = concept_app.estimate(&env).expect("Should have cost");
+
+        assert_eq!(
+            fact_cost, concept_cost,
+            "FactApplication and ConceptApplication with single attribute should have same cost. \
+             Fact: {}, Concept: {}",
+            fact_cost, concept_cost
+        );
+
+        // Should both be RANGE_SCAN_COST (1 constraint: just attribute known)
+        assert_eq!(fact_cost, RANGE_SCAN_COST);
+        assert_eq!(concept_cost, RANGE_SCAN_COST);
+    }
+
+    #[test]
+    fn test_concept_equals_fact_cost_value_bound() {
+        use crate::application::concept::ConceptApplication;
+        use crate::application::fact::SEGMENT_READ_COST;
+        use crate::predicate::concept::{Attributes, Concept};
+
+        // Create a FactApplication with constant attribute name
+        let the_attr: Attribute = "user/name".parse().unwrap();
+        let fact_app = FactApplication::new(
+            Term::Constant(the_attr.clone()),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("value"),
+            crate::attribute::Cardinality::One,
+        );
+
+        // Create a ConceptApplication with single attribute
+        let concept = Concept {
+            operator: "user".to_string(),
+            attributes: [("name", crate::Attribute::new(
+                "user",
+                "name",
+                "User name",
+                crate::Type::String,
+            ))].into(),
+        };
+
+        let mut terms = crate::Parameters::new();
+        terms.insert("this".to_string(), Term::<Value>::var("entity"));
+        terms.insert("name".to_string(), Term::<Value>::var("value"));
+
+        let concept_app = ConceptApplication { terms, concept };
+
+        // Bind the value
+        let mut env = VariableScope::new();
+        env.add(&Term::<Value>::var("value"));
+
+        let fact_cost = fact_app.estimate(&env).expect("Should have cost");
+        let concept_cost = concept_app.estimate(&env).expect("Should have cost");
+
+        assert_eq!(
+            fact_cost, concept_cost,
+            "FactApplication and ConceptApplication should have same cost when value bound. \
+             Fact: {}, Concept: {}",
+            fact_cost, concept_cost
+        );
+
+        // Should both be SEGMENT_READ_COST (2 constraints: attribute + value known, Cardinality::One)
+        assert_eq!(fact_cost, SEGMENT_READ_COST);
+        assert_eq!(concept_cost, SEGMENT_READ_COST);
+    }
+
+    #[test]
+    fn test_concept_equals_fact_cost_entity_bound() {
+        use crate::application::concept::ConceptApplication;
+        use crate::application::fact::SEGMENT_READ_COST;
+        use crate::predicate::concept::{Attributes, Concept};
+
+        // Create a FactApplication with constant attribute name
+        let the_attr: Attribute = "user/name".parse().unwrap();
+        let fact_app = FactApplication::new(
+            Term::Constant(the_attr.clone()),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("value"),
+            crate::attribute::Cardinality::One,
+        );
+
+        // Create a ConceptApplication with single attribute
+        let concept = Concept {
+            operator: "user".to_string(),
+            attributes: [("name", crate::Attribute::new(
+                "user",
+                "name",
+                "User name",
+                crate::Type::String,
+            ))].into(),
+        };
+
+        let mut terms = crate::Parameters::new();
+        terms.insert("this".to_string(), Term::<Value>::var("entity"));
+        terms.insert("name".to_string(), Term::<Value>::var("value"));
+
+        let concept_app = ConceptApplication { terms, concept };
+
+        // Bind the entity
+        let mut env = VariableScope::new();
+        env.add(&Term::<Value>::var("entity"));
+
+        let fact_cost = fact_app.estimate(&env).expect("Should have cost");
+        let concept_cost = concept_app.estimate(&env).expect("Should have cost");
+
+        assert_eq!(
+            fact_cost, concept_cost,
+            "FactApplication and ConceptApplication should have same cost when entity bound. \
+             Fact: {}, Concept: {}",
+            fact_cost, concept_cost
+        );
+
+        // Should both be SEGMENT_READ_COST (2 constraints: attribute + entity known, Cardinality::One)
+        assert_eq!(fact_cost, SEGMENT_READ_COST);
+        assert_eq!(concept_cost, SEGMENT_READ_COST);
+    }
+
+    #[test]
+    fn test_concept_equals_fact_cost_cardinality_many_nothing_bound() {
+        use crate::application::concept::ConceptApplication;
+        use crate::application::fact::INDEX_SCAN;
+        use crate::predicate::concept::{Attributes, Concept};
+
+        // Create a FactApplication with Cardinality::Many
+        let the_attr: Attribute = "user/tags".parse().unwrap();
+        let fact_app = FactApplication::new(
+            Term::Constant(the_attr.clone()),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("tag"),
+            crate::attribute::Cardinality::Many,
+        );
+
+        // Create a ConceptApplication with single Cardinality::Many attribute
+        let mut concept_attr = crate::Attribute::new(
+            "user",
+            "tags",
+            "User tags",
+            crate::Type::String,
+        );
+        concept_attr.cardinality = crate::Cardinality::Many;
+
+        let concept = Concept {
+            operator: "user".to_string(),
+            attributes: [("tags", concept_attr)].into(),
+        };
+
+        let mut terms = crate::Parameters::new();
+        terms.insert("this".to_string(), Term::<Value>::var("entity"));
+        terms.insert("tags".to_string(), Term::<Value>::var("tag"));
+
+        let concept_app = ConceptApplication { terms, concept };
+
+        // Nothing bound
+        let env = VariableScope::new();
+
+        let fact_cost = fact_app.estimate(&env).expect("Should have cost");
+        let concept_cost = concept_app.estimate(&env).expect("Should have cost");
+
+        assert_eq!(
+            fact_cost, concept_cost,
+            "FactApplication and ConceptApplication should have same cost for Cardinality::Many. \
+             Fact: {}, Concept: {}",
+            fact_cost, concept_cost
+        );
+
+        // Should both be INDEX_SCAN (1 constraint with Cardinality::Many)
+        assert_eq!(fact_cost, INDEX_SCAN);
+        assert_eq!(concept_cost, INDEX_SCAN);
+    }
+
+    #[test]
+    fn test_concept_equals_fact_cost_cardinality_many_value_bound() {
+        use crate::application::concept::ConceptApplication;
+        use crate::application::fact::RANGE_SCAN_COST;
+        use crate::predicate::concept::{Attributes, Concept};
+
+        // Create a FactApplication with Cardinality::Many
+        let the_attr: Attribute = "user/tags".parse().unwrap();
+        let fact_app = FactApplication::new(
+            Term::Constant(the_attr.clone()),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("tag"),
+            crate::attribute::Cardinality::Many,
+        );
+
+        // Create a ConceptApplication with single Cardinality::Many attribute
+        let mut concept_attr = crate::Attribute::new(
+            "user",
+            "tags",
+            "User tags",
+            crate::Type::String,
+        );
+        concept_attr.cardinality = crate::Cardinality::Many;
+
+        let concept = Concept {
+            operator: "user".to_string(),
+            attributes: [("tags", concept_attr)].into(),
+        };
+
+        let mut terms = crate::Parameters::new();
+        terms.insert("this".to_string(), Term::<Value>::var("entity"));
+        terms.insert("tags".to_string(), Term::<Value>::var("tag"));
+
+        let concept_app = ConceptApplication { terms, concept };
+
+        // Bind the value
+        let mut env = VariableScope::new();
+        env.add(&Term::<Value>::var("tag"));
+
+        let fact_cost = fact_app.estimate(&env).expect("Should have cost");
+        let concept_cost = concept_app.estimate(&env).expect("Should have cost");
+
+        assert_eq!(
+            fact_cost, concept_cost,
+            "FactApplication and ConceptApplication should have same cost for Cardinality::Many with value bound. \
+             Fact: {}, Concept: {}",
+            fact_cost, concept_cost
+        );
+
+        // Should both be RANGE_SCAN_COST (2 constraints: attribute + value, Cardinality::Many)
+        assert_eq!(fact_cost, RANGE_SCAN_COST);
+        assert_eq!(concept_cost, RANGE_SCAN_COST);
+    }
+
+    #[test]
     fn test_cost_accumulation_through_planning() {
         use crate::application::fact::{RANGE_SCAN_COST, SEGMENT_READ_COST};
 
