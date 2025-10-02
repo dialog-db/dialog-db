@@ -4,6 +4,8 @@ pub use crate::cursor::Cursor;
 pub use crate::error::{AnalyzerError, FormulaEvaluationError, PlanError, QueryError};
 pub use crate::plan::FormulaApplicationPlan;
 use crate::predicate::formula::Cells;
+use crate::selection::TryExpand;
+use crate::SelectionExt;
 pub use crate::{try_stream, EvaluationContext, Selection, Source};
 
 pub use crate::{Dependencies, Match, Parameters, Requirement, VariableScope};
@@ -158,46 +160,107 @@ impl FormulaApplication {
         })
     }
 
+    pub fn expand(&self, frame: Match) -> Result<Vec<Match>, QueryError> {
+        let compute = self.compute;
+        let mut cursor = Cursor::new(frame, self.parameters.clone());
+        let expansion = compute(&mut cursor);
+        // Map results and omit inconsistent matches
+        match expansion {
+            Ok(output) => Ok(output),
+            Err(e) => match e {
+                FormulaEvaluationError::VariableInconsistency { .. } => Ok(vec![]),
+                FormulaEvaluationError::RequiredParameter { parameter } => {
+                    Err(QueryError::RequiredFormulaParamater { parameter })
+                }
+                FormulaEvaluationError::UnboundVariable { parameter, .. } => {
+                    Err(QueryError::UnboundVariable {
+                        variable_name: parameter,
+                    })
+                }
+                FormulaEvaluationError::TypeMismatch { expected, actual } => {
+                    Err(QueryError::InvalidTerm {
+                        message: format!("Type mismatch: expected {}, got {}", expected, actual),
+                    })
+                }
+            },
+        }
+    }
+
     pub fn evaluate<S: Source, M: Selection>(
         &self,
         context: EvaluationContext<S, M>,
     ) -> impl Selection {
-        let parameters = self.parameters.clone();
-        let compute = self.compute;
+        context.selection.try_expand(self.clone())
+        // let parameters = self.parameters.clone();
+        // let compute = self.compute;
+        // context.selection.try_expand_with_fn(|frame| {
+        //     let mut cursor = Cursor::new(frame, parameters.clone());
+        //     let expansion = compute(&mut cursor);
+        //     // let expansion = self.expand(frame);
+        //     // Map results and omit inconsistent matches
+        //     match expansion {
+        //         Ok(output) => Ok(output),
+        //         Err(e) => match e {
+        //             FormulaEvaluationError::VariableInconsistency { .. } => Ok(vec![]),
+        //             FormulaEvaluationError::RequiredParameter { parameter } => {
+        //                 Err(QueryError::RequiredFormulaParamater { parameter })
+        //             }
+        //             FormulaEvaluationError::UnboundVariable { parameter, .. } => {
+        //                 Err(QueryError::UnboundVariable {
+        //                     variable_name: parameter,
+        //                 })
+        //             }
+        //             FormulaEvaluationError::TypeMismatch { expected, actual } => {
+        //                 Err(QueryError::InvalidTerm {
+        //                     message: format!(
+        //                         "Type mismatch: expected {}, got {}",
+        //                         expected, actual
+        //                     ),
+        //                 })
+        //             }
+        //         },
+        //     }
+        // })
 
-        try_stream! {
+        //     try_stream! {
 
-            for await source in context.selection {
-                let frame = source?;
-                let mut cursor = Cursor::new(frame, parameters.clone());
-                let expansion = compute(&mut cursor);
-                // let expansion = self.expand(frame);
-                // Map results and omit inconsistent matches
-                let results = match expansion {
-                    Ok(output) => Ok(output),
-                    Err(e) => {
-                        match e {
-                            FormulaEvaluationError::VariableInconsistency { .. } => Ok(vec![]),
-                            FormulaEvaluationError::RequiredParameter { parameter } => {
-                                Err(QueryError::RequiredFormulaParamater { parameter })
-                            },
-                            FormulaEvaluationError::UnboundVariable { parameter, .. } => {
-                                Err(QueryError::UnboundVariable { variable_name: parameter })
-                            },
-                            FormulaEvaluationError::TypeMismatch { expected, actual } => {
-                                Err(QueryError::InvalidTerm {
-                                    message: format!("Type mismatch: expected {}, got {}", expected, actual)
-                                })
-                            },
-                        }
-                    }
-                }?;
+        //         for await source in context.selection {
+        //             let frame = source?;
+        //             let mut cursor = Cursor::new(frame, parameters.clone());
+        //             let expansion = compute(&mut cursor);
+        //             // let expansion = self.expand(frame);
+        //             // Map results and omit inconsistent matches
+        //             let results = match expansion {
+        //                 Ok(output) => Ok(output),
+        //                 Err(e) => {
+        //                     match e {
+        //                         FormulaEvaluationError::VariableInconsistency { .. } => Ok(vec![]),
+        //                         FormulaEvaluationError::RequiredParameter { parameter } => {
+        //                             Err(QueryError::RequiredFormulaParamater { parameter })
+        //                         },
+        //                         FormulaEvaluationError::UnboundVariable { parameter, .. } => {
+        //                             Err(QueryError::UnboundVariable { variable_name: parameter })
+        //                         },
+        //                         FormulaEvaluationError::TypeMismatch { expected, actual } => {
+        //                             Err(QueryError::InvalidTerm {
+        //                                 message: format!("Type mismatch: expected {}, got {}", expected, actual)
+        //                             })
+        //                         },
+        //                     }
+        //                 }
+        //             }?;
 
-                for output in results {
-                    yield output;
-                }
-            }
-        }
+        //             for output in results {
+        //                 yield output;
+        //             }
+        //         }
+        //     }
+    }
+}
+
+impl TryExpand for FormulaApplication {
+    fn try_expand(&self, frame: Match) -> Result<Vec<Match>, QueryError> {
+        self.expand(frame)
     }
 }
 
