@@ -5,7 +5,10 @@ use crate::attribute::Relation;
 use crate::claim::concept::ConceptClaim;
 use crate::error::SchemaError;
 use crate::fact::Scalar;
-use crate::{Application, Attribute, Claim, Dependencies, Entity, Parameters, Value};
+use crate::{
+    Application, Attribute, Cardinality, Claim, Constraint, Dependencies, Entity, Parameters,
+    Requirement, Schema, Type, Value,
+};
 use dialog_artifacts::DialogArtifactsError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -49,7 +52,6 @@ impl Attributes {
 
         Ok(parameters)
     }
-
 }
 
 impl<const N: usize> From<[(&str, Attribute<Value>); N]> for Attributes {
@@ -95,6 +97,38 @@ impl From<Vec<(String, Attribute<Value>)>> for Attributes {
 impl From<HashMap<String, Attribute<Value>>> for Attributes {
     fn from(map: HashMap<String, Attribute<Value>>) -> Self {
         Attributes(map)
+    }
+}
+
+impl From<&Attributes> for Schema {
+    fn from(attributes: &Attributes) -> Self {
+        let mut schema = Schema::new();
+        for (name, attribute) in attributes.iter() {
+            schema.insert(
+                name.into(),
+                Constraint {
+                    description: attribute.description.into(),
+                    content_type: Some(attribute.content_type),
+                    requirement: Requirement::Optional,
+                    cardinality: attribute.cardinality,
+                },
+            );
+        }
+
+        // This is implied in the schema.
+        if !attributes.contains("this") {
+            schema.insert(
+                "this".into(),
+                Constraint {
+                    description: "The entity that this model represents".into(),
+                    content_type: Some(Type::Entity),
+                    requirement: Requirement::Optional,
+                    cardinality: Cardinality::One,
+                },
+            );
+        }
+
+        schema
     }
 }
 
@@ -183,12 +217,20 @@ impl Concept {
         }
     }
 
+    pub fn attributes(&self) -> &Attributes {
+        &self.attributes
+    }
+
     pub fn operator(&self) -> &str {
         &self.operator
     }
 
     pub fn operands(&self) -> impl Iterator<Item = &str> {
         std::iter::once("this").chain(self.attributes.keys().map(|key| key.as_ref()))
+    }
+
+    pub fn schema(&self) -> Schema {
+        (&self.attributes).into()
     }
 
     pub fn with(mut self, name: &str, attribute: Attribute<Value>) -> Self {

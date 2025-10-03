@@ -1,15 +1,15 @@
 use super::fact::{BASE_COST, CONCEPT_OVERHEAD, ENTITY_COST, VALUE_COST};
 use crate::analyzer::{AnalyzerError, LegacyAnalysis};
+use crate::cursor::Cursor;
 use crate::error::PlanError;
 use crate::error::QueryResult;
 use crate::plan::{fresh, ConceptPlan};
 use crate::planner::Join;
 use crate::predicate::Concept;
 use crate::DeductiveRule;
-use crate::cursor::Cursor;
 use crate::{
-    try_stream, Cardinality, Dependencies, EvaluationContext, Parameters, Selection, Source, Term,
-    Value, VariableScope,
+    try_stream, Attribute, Dependencies, EvaluationContext, Parameters, Schema, Selection, Source,
+    Term, Value, VariableScope,
 };
 use std::fmt::Display;
 
@@ -69,10 +69,10 @@ impl ConceptApplication {
             Some(total)
         } else {
             // Entity is not bound - categorize attributes to find best execution strategy
-            let mut bound_one: Option<&crate::Attribute<crate::Value>> = None;
-            let mut bound_many: Option<&crate::Attribute<crate::Value>> = None;
-            let mut unbound_one: Option<&crate::Attribute<crate::Value>> = None;
-            let mut unbound_many: Option<&crate::Attribute<crate::Value>> = None;
+            let mut bound_one: Option<&Attribute<Value>> = None;
+            let mut bound_many: Option<&Attribute<Value>> = None;
+            let mut unbound_one: Option<&Attribute<Value>> = None;
+            let mut unbound_many: Option<&Attribute<Value>> = None;
 
             for (name, attribute) in self.concept.attributes.iter() {
                 if let Some(term) = self.terms.get(name) {
@@ -157,10 +157,8 @@ impl ConceptApplication {
         self.terms.clone()
     }
 
-    /// Concepts don't have a schema yet - returns empty schema
-    /// TODO: Figure out how to represent `this` in schema
-    pub fn schema(&self) -> crate::Schema {
-        crate::Schema::new()
+    pub fn schema(&self) -> Schema {
+        self.concept.schema()
     }
 
     pub fn dependencies(&self) -> Dependencies {
@@ -754,13 +752,20 @@ async fn test_concept_application_respects_constant_entity_parameter() -> anyhow
 
     // Query with constant entity - should only return Alice
     let mut terms = Parameters::new();
-    terms.insert("this".to_string(), Term::Constant(Value::Entity(alice.clone())));
+    terms.insert(
+        "this".to_string(),
+        Term::Constant(Value::Entity(alice.clone())),
+    );
     terms.insert("name".to_string(), Term::var("name"));
 
     let app = ConceptApplication { terms, concept };
     let selection = app.query(&session)?.collect_matches().await?;
 
-    assert_eq!(selection.len(), 1, "Should find only Alice, not both people");
+    assert_eq!(
+        selection.len(),
+        1,
+        "Should find only Alice, not both people"
+    );
     assert_eq!(
         selection[0].get(&Term::<Value>::var("name"))?,
         Value::String("Alice".to_string())
@@ -815,11 +820,21 @@ async fn test_concept_application_respects_constant_attribute_parameter() -> any
         attributes: vec![
             (
                 "name",
-                crate::attribute::Attribute::new("person", "name", "Person name", crate::Type::String),
+                crate::attribute::Attribute::new(
+                    "person",
+                    "name",
+                    "Person name",
+                    crate::Type::String,
+                ),
             ),
             (
                 "age",
-                crate::attribute::Attribute::new("person", "age", "Person age", crate::Type::UnsignedInt),
+                crate::attribute::Attribute::new(
+                    "person",
+                    "age",
+                    "Person age",
+                    crate::Type::UnsignedInt,
+                ),
             ),
         ]
         .into(),
@@ -828,7 +843,10 @@ async fn test_concept_application_respects_constant_attribute_parameter() -> any
     // Query with constant name value - should only return Bob
     let mut terms = Parameters::new();
     terms.insert("this".to_string(), Term::var("entity"));
-    terms.insert("name".to_string(), Term::Constant(Value::String("Bob".to_string())));
+    terms.insert(
+        "name".to_string(),
+        Term::Constant(Value::String("Bob".to_string())),
+    );
     terms.insert("age".to_string(), Term::var("age"));
 
     let app = ConceptApplication { terms, concept };
@@ -893,11 +911,21 @@ async fn test_concept_application_respects_multiple_constant_parameters() -> any
         attributes: vec![
             (
                 "name",
-                crate::attribute::Attribute::new("person", "name", "Person name", crate::Type::String),
+                crate::attribute::Attribute::new(
+                    "person",
+                    "name",
+                    "Person name",
+                    crate::Type::String,
+                ),
             ),
             (
                 "age",
-                crate::attribute::Attribute::new("person", "age", "Person age", crate::Type::UnsignedInt),
+                crate::attribute::Attribute::new(
+                    "person",
+                    "age",
+                    "Person age",
+                    crate::Type::UnsignedInt,
+                ),
             ),
         ]
         .into(),
@@ -906,13 +934,20 @@ async fn test_concept_application_respects_multiple_constant_parameters() -> any
     // Query with both name and age constants - should only match Alice
     let mut terms = Parameters::new();
     terms.insert("this".to_string(), Term::var("entity"));
-    terms.insert("name".to_string(), Term::Constant(Value::String("Alice".to_string())));
+    terms.insert(
+        "name".to_string(),
+        Term::Constant(Value::String("Alice".to_string())),
+    );
     terms.insert("age".to_string(), Term::Constant(Value::UnsignedInt(25)));
 
     let app = ConceptApplication { terms, concept };
     let selection = app.query(&session)?.collect_matches().await?;
 
-    assert_eq!(selection.len(), 1, "Should find only Alice with exact name and age match");
+    assert_eq!(
+        selection.len(),
+        1,
+        "Should find only Alice with exact name and age match"
+    );
     assert_eq!(
         selection[0].get(&Term::<Value>::var("entity"))?,
         Value::Entity(alice.clone())

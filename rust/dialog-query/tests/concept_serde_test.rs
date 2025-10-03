@@ -42,7 +42,7 @@ fn test_concept_serialization_to_specific_json() {
     assert_eq!(name_attr["namespace"], "user");
     assert_eq!(name_attr["name"], "name");
     assert_eq!(name_attr["description"], "User's name");
-    assert_eq!(name_attr["data_type"], "String");
+    assert_eq!(name_attr["type"], "String");
 
     // Check age attribute
     let age_attr = attributes_obj["age"]
@@ -51,7 +51,7 @@ fn test_concept_serialization_to_specific_json() {
     assert_eq!(age_attr["namespace"], "user");
     assert_eq!(age_attr["name"], "age");
     assert_eq!(age_attr["description"], "User's age");
-    assert_eq!(age_attr["data_type"], "UnsignedInt");
+    assert_eq!(age_attr["type"], "UnsignedInt");
 }
 
 #[test]
@@ -63,13 +63,13 @@ fn test_concept_deserialization_from_specific_json() {
                 "namespace": "person",
                 "name": "email",
                 "description": "Person's email address",
-                "data_type": "String"
+                "type": "String"
             },
             "active": {
                 "namespace": "person",
                 "name": "active",
                 "description": "Whether person is active",
-                "data_type": "Boolean"
+                "type": "Boolean"
             }
         }
     }"#;
@@ -145,7 +145,7 @@ fn test_expected_json_structure() {
       "namespace": "product",
       "name": "id",
       "description": "Product ID",
-      "data_type": "UnsignedInt"
+      "type": "UnsignedInt"
     }
   }
 }"#;

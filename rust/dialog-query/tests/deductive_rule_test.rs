@@ -4,8 +4,8 @@ use dialog_query::application::{ConceptApplication, PlanCandidate};
 use dialog_query::artifact::Type;
 use dialog_query::attribute::Attribute;
 use dialog_query::error::{AnalyzerError, PlanError, QueryError};
-use dialog_query::predicate::fact::Fact;
 use dialog_query::predicate::concept::Attributes;
+use dialog_query::predicate::fact::Fact;
 use dialog_query::predicate::{Concept, DeductiveRule};
 use dialog_query::term::Term;
 use dialog_query::Negation;
@@ -87,15 +87,16 @@ fn test_concept_application_analysis() {
 
     let concept_app = ConceptApplication { terms, concept };
 
-    let analysis = concept_app.analyze();
+    let cost = concept_app.estimate(&VariableScope::new());
+    assert_eq!(cost, Some(2100));
 
-    assert_eq!(analysis.cost, BASE_COST);
-    assert!(analysis.dependencies.contains("this"));
-    assert!(analysis.dependencies.contains("name"));
-    assert!(analysis.dependencies.contains("age"));
-    // Check that we have the expected dependencies
-    let deps_count = analysis.dependencies.iter().count();
-    assert_eq!(deps_count, 3);
+    let schema = concept_app.schema();
+    println!("schema {:?}", concept_app.schema());
+
+    assert_eq!(schema.iter().count(), 3);
+    assert!(schema.get("this").is_some());
+    assert!(schema.get("name").is_some());
+    assert!(schema.get("age").is_some());
 }
 
 #[test]

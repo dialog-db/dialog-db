@@ -30,7 +30,7 @@ pub trait Concept: Clone + std::fmt::Debug {
     /// Type representing a query of this concept. It is a set of terms
     /// corresponding to the set of attributes defined by this concept.
     /// It is used as premise of the rule.
-    type Match: Match<Instance = Self::Instance, Attributes = Self::Attributes>;
+    type Match: Match<Concept = Self, Instance = Self::Instance, Attributes = Self::Attributes>;
     /// Type representing an assertion of this concept. It is used in the
     /// inductive rules that describe how state of the concept changes
     /// (or persists) over time.
@@ -66,6 +66,7 @@ pub trait Instructions {
 /// concept. Each match should be translatable into a set of statements making
 /// it possible to spread it into a query.
 pub trait Match {
+    type Concept: Concept;
     /// Instance of the concept that this match can produce.
     type Instance: Instance;
     /// Attributes describing the mapping between concept and it's instance.
@@ -138,20 +139,15 @@ pub trait Match {
     }
 
     fn conpect(&self) -> predicate::Concept {
-        //     let mut attributes = HashMap::new();
-        //     let mut operator = None;
-        //     for (name, attribute) in Self::Attributes::attributes() {
-        //         if operator.is_none() {
-        //             operator = Some(attribute.namespace.to_string())
-        //         }
-        //         attributes.insert(name.to_string(), attribute.clone());
-        //     }
+        let mut attributes = vec![];
+        for (name, attribute) in Self::Concept::attributes() {
+            attributes.push((name.to_string(), attribute.clone()));
+        }
 
-        //     predicate::Concept {
-        //         operator: operator.unwrap_or("".to_string()),
-        //         attributes,
-        //     }
-        panic!("Legacy concept conversion not yet implemented")
+        predicate::Concept {
+            operator: Self::Concept::name().into(),
+            attributes: attributes.into(),
+        }
     }
 }
 
@@ -195,6 +191,21 @@ impl<T: Match> From<T> for Premise {
         let concept = source.conpect();
         let terms = source.into();
         Premise::Apply(Application::Concept(ConceptApplication { terms, concept }))
+    }
+}
+
+impl<T: Match> From<T> for Application {
+    fn from(source: T) -> Self {
+        let concept = source.conpect();
+        let terms = source.into();
+        Application::Concept(ConceptApplication { terms, concept })
+    }
+}
+impl<T: Match> From<T> for ConceptApplication {
+    fn from(source: T) -> Self {
+        let concept = source.conpect();
+        let terms = source.into();
+        ConceptApplication { terms, concept }
     }
 }
 
@@ -482,6 +493,7 @@ mod tests {
 
     // Implement Match for PersonMatch
     impl Match for PersonMatch {
+        type Concept = Person;
         type Instance = Person;
         type Attributes = PersonAttributes;
 
