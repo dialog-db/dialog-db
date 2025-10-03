@@ -13,32 +13,69 @@ use dialog_artifacts::DialogArtifactsError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Attributes(HashMap<String, Attribute<Value>>);
+#[derive(Debug, Clone, PartialEq)]
+pub enum Attributes {
+    /// Static attributes from compile-time generated code (const-compatible)
+    Static(&'static [(&'static str, Attribute<Value>)]),
+    /// Dynamic attributes from runtime construction
+    Dynamic(Vec<(String, Attribute<Value>)>),
+}
+
+/// Iterator over attribute (name, value) pairs
+pub enum AttributesIter<'a> {
+    Static(std::slice::Iter<'a, (&'static str, Attribute<Value>)>),
+    Dynamic(std::slice::Iter<'a, (String, Attribute<Value>)>),
+}
+
+impl<'a> Iterator for AttributesIter<'a> {
+    type Item = (&'a str, &'a Attribute<Value>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            AttributesIter::Static(iter) => iter.next().map(|(k, v)| (*k, v)),
+            AttributesIter::Dynamic(iter) => iter.next().map(|(k, v)| (k.as_str(), v)),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            AttributesIter::Static(iter) => iter.size_hint(),
+            AttributesIter::Dynamic(iter) => iter.size_hint(),
+        }
+    }
+}
+
+impl<'a> ExactSizeIterator for AttributesIter<'a> {
+    fn len(&self) -> usize {
+        match self {
+            AttributesIter::Static(iter) => iter.len(),
+            AttributesIter::Dynamic(iter) => iter.len(),
+        }
+    }
+}
+
 impl Attributes {
     /// Returns an iterator over all dependencies as (name, requirement) pairs.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &Attribute<Value>)> {
-        self.0.iter().map(|(k, v)| (k.as_str(), v))
+    pub fn iter(&self) -> AttributesIter<'_> {
+        match self {
+            Attributes::Static(slice) => AttributesIter::Static(slice.iter()),
+            Attributes::Dynamic(vec) => AttributesIter::Dynamic(vec.iter()),
+        }
     }
 
     pub fn count(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn get(&self, name: &str) -> Option<&Attribute<Value>> {
-        self.0.get(name)
+        match self {
+            Attributes::Static(slice) => slice.len(),
+            Attributes::Dynamic(vec) => vec.len(),
+        }
     }
 
     pub fn new() -> Self {
-        Attributes(HashMap::new())
+        Attributes::Dynamic(Vec::new())
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = &str> {
-        self.0.keys().map(|k| k.as_str())
-    }
-
-    pub fn contains(&self, name: &str) -> bool {
-        self.0.contains_key(name)
+    pub fn keys(&self) -> impl Iterator<Item = &str> + '_ {
+        self.iter().map(|(k, _)| k)
     }
 
     /// Conforms the provided parameters conform to the schema of the cells.
@@ -56,47 +93,68 @@ impl Attributes {
 
 impl<const N: usize> From<[(&str, Attribute<Value>); N]> for Attributes {
     fn from(arr: [(&str, Attribute<Value>); N]) -> Self {
-        let mut attributes = Attributes::new();
-        for (name, attribute) in arr {
-            attributes.0.insert(name.to_string(), attribute);
-        }
-        attributes
+        Attributes::Dynamic(
+            arr.into_iter()
+                .map(|(name, attr)| (name.to_string(), attr))
+                .collect(),
+        )
     }
 }
 
 impl<const N: usize> From<[(String, Attribute<Value>); N]> for Attributes {
     fn from(arr: [(String, Attribute<Value>); N]) -> Self {
-        let mut attributes = Attributes::new();
-        for (name, attribute) in arr {
-            attributes.0.insert(name, attribute);
-        }
-        attributes
+        Attributes::Dynamic(arr.into_iter().collect())
     }
 }
 
 impl From<Vec<(&str, Attribute<Value>)>> for Attributes {
     fn from(vec: Vec<(&str, Attribute<Value>)>) -> Self {
-        let mut attributes = Attributes::new();
-        for (name, attribute) in vec {
-            attributes.0.insert(name.to_string(), attribute);
-        }
-        attributes
+        Attributes::Dynamic(
+            vec.into_iter()
+                .map(|(name, attr)| (name.to_string(), attr))
+                .collect(),
+        )
     }
 }
 
 impl From<Vec<(String, Attribute<Value>)>> for Attributes {
     fn from(vec: Vec<(String, Attribute<Value>)>) -> Self {
-        let mut attributes = Attributes::new();
-        for (name, attribute) in vec {
-            attributes.0.insert(name, attribute);
-        }
-        attributes
+        Attributes::Dynamic(vec)
     }
 }
 
 impl From<HashMap<String, Attribute<Value>>> for Attributes {
     fn from(map: HashMap<String, Attribute<Value>>) -> Self {
-        Attributes(map)
+        Attributes::Dynamic(map.into_iter().collect())
+    }
+}
+
+// From static slice - creates const-compatible Static variant
+impl From<&'static [(&'static str, Attribute<Value>)]> for Attributes {
+    fn from(slice: &'static [(&'static str, Attribute<Value>)]) -> Self {
+        Attributes::Static(slice)
+    }
+}
+
+// Custom Serialize implementation that converts to HashMap
+impl Serialize for Attributes {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let map: HashMap<&str, &Attribute<Value>> = self.iter().collect();
+        map.serialize(serializer)
+    }
+}
+
+// Custom Deserialize implementation that creates Dynamic variant
+impl<'de> Deserialize<'de> for Attributes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let map = HashMap::<String, Attribute<Value>>::deserialize(deserializer)?;
+        Ok(Attributes::from(map))
     }
 }
 
@@ -116,7 +174,7 @@ impl From<&Attributes> for Schema {
         }
 
         // This is implied in the schema.
-        if !attributes.contains("this") {
+        if !schema.contains("this") {
             schema.insert(
                 "this".into(),
                 Constraint {
@@ -231,18 +289,6 @@ impl Concept {
 
     pub fn schema(&self) -> Schema {
         (&self.attributes).into()
-    }
-
-    pub fn with(mut self, name: &str, attribute: Attribute<Value>) -> Self {
-        self.attributes.0.insert(name.into(), attribute);
-        self
-    }
-
-    /// Checks if the concept includes the given parameter name.
-    /// The special "this" parameter is always considered present as it represents
-    /// the entity that the concept applies to.
-    pub fn contains(&self, name: &str) -> bool {
-        name == "this" || self.attributes.contains(name)
     }
 
     /// Finds a parameter that is absent from the provided dependencies.
@@ -523,7 +569,9 @@ mod tests {
 
         let email_attr = concept
             .attributes
-            .get("email")
+            .iter()
+            .find(|(k, _)| *k == "email")
+            .map(|(_, v)| v)
             .expect("Should have email attribute");
         assert_eq!(email_attr.namespace, "person");
         assert_eq!(email_attr.name, "email");
@@ -532,7 +580,9 @@ mod tests {
 
         let active_attr = concept
             .attributes
-            .get("active")
+            .iter()
+            .find(|(k, _)| *k == "active")
+            .map(|(_, v)| v)
             .expect("Should have active attribute");
         assert_eq!(active_attr.namespace, "person");
         assert_eq!(active_attr.name, "active");
@@ -560,8 +610,8 @@ mod tests {
         assert_eq!(original.operator, deserialized.operator);
         assert_eq!(original.attributes.count(), deserialized.attributes.count());
 
-        let orig_score = original.attributes.get("score").unwrap();
-        let deser_score = deserialized.attributes.get("score").unwrap();
+        let orig_score = original.attributes.iter().find(|(k, _)| *k == "score").map(|(_, v)| v).unwrap();
+        let deser_score = deserialized.attributes.iter().find(|(k, _)| *k == "score").map(|(_, v)| v).unwrap();
         assert_eq!(orig_score.namespace, deser_score.namespace);
         assert_eq!(orig_score.name, deser_score.name);
         assert_eq!(orig_score.description, deser_score.description);

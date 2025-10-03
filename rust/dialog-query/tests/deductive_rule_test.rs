@@ -28,11 +28,12 @@ fn test_concept_as_conclusion_operations() {
         ]),
     };
 
-    // Test contains method - should include "this" parameter
-    assert!(concept.contains("this"));
-    assert!(concept.contains("name"));
-    assert!(concept.contains("age"));
-    assert!(!concept.contains("height"));
+    // Test that attributes are present
+    let param_names: Vec<&str> = concept.attributes.keys().collect();
+    assert!(param_names.contains(&"name"));
+    assert!(param_names.contains(&"age"));
+    assert!(!param_names.contains(&"height"));
+    // "this" parameter is implied but not in attributes
 
     // Test absent method
     let mut dependencies = Dependencies::new();
@@ -62,7 +63,7 @@ fn test_concept_creation() {
 
     assert_eq!(concept.operator, "person");
     assert_eq!(concept.attributes.count(), 1);
-    assert!(concept.attributes.contains("name"));
+    assert!(concept.attributes.keys().any(|k| k == "name"));
 }
 
 #[test]
@@ -102,15 +103,20 @@ fn test_concept_application_analysis() {
 #[test]
 fn test_deductive_rule_parameters() {
     let rule = DeductiveRule {
-        conclusion: Concept::new("adult".into())
-            .with(
-                "name",
-                Attribute::new("person", "name", "Person name", Type::String),
-            )
-            .with(
-                "age",
-                Attribute::new("person", "age", "Person age", Type::UnsignedInt),
-            ),
+        conclusion: Concept {
+            operator: "adult".into(),
+            attributes: [
+                (
+                    "name".to_string(),
+                    Attribute::new("person", "name", "Person name", Type::String),
+                ),
+                (
+                    "age".to_string(),
+                    Attribute::new("person", "age", "Person age", Type::UnsignedInt),
+                ),
+            ]
+            .into(),
+        },
         premises: vec![],
     };
 

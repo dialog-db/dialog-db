@@ -101,15 +101,23 @@ async fn test_multiple_rules_same_operator() -> Result<()> {
     let query_session: QuerySession<_> = artifacts.into();
 
     // Create two different rules for the same concept
-    let concept1 = Concept::new("person".into()).with(
-        "name",
-        Attribute::new("person", "name", "Person name", Type::String),
-    );
+    let concept1 = Concept {
+        operator: "person".into(),
+        attributes: [(
+            "name".to_string(),
+            Attribute::new("person", "name", "Person name", Type::String),
+        )]
+        .into(),
+    };
 
-    let concept2 = Concept::new("person".into()).with(
-        "age",
-        Attribute::new("person", "age", "Person age", Type::UnsignedInt),
-    );
+    let concept2 = Concept {
+        operator: "person".into(),
+        attributes: [(
+            "age".to_string(),
+            Attribute::new("person", "age", "Person age", Type::UnsignedInt),
+        )]
+        .into(),
+    };
 
     let rule1 = DeductiveRule {
         conclusion: concept1,
@@ -149,10 +157,14 @@ async fn test_explicit_conversion_pattern() -> Result<()> {
     assert_eq!(query_session.rules().len(), 0);
 
     // Test 2: Conversion with rule installation
-    let adult_concept = Concept::new("adult".into()).with(
-        "name",
-        Attribute::new("person", "name", "Adult name", Type::String),
-    );
+    let adult_concept = Concept {
+        operator: "adult".into(),
+        attributes: [(
+            "name".to_string(),
+            Attribute::new("person", "name", "Adult name", Type::String),
+        )]
+        .into(),
+    };
 
     let adult_rule = DeductiveRule {
         conclusion: adult_concept,

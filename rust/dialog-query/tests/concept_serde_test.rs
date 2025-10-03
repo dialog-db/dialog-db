@@ -81,7 +81,9 @@ fn test_concept_deserialization_from_specific_json() {
 
     let email_attr = concept
         .attributes
-        .get("email")
+        .iter()
+        .find(|(k, _)| *k == "email")
+        .map(|(_, v)| v)
         .expect("Should have email attribute");
     assert_eq!(email_attr.namespace, "person");
     assert_eq!(email_attr.name, "email");
@@ -90,7 +92,9 @@ fn test_concept_deserialization_from_specific_json() {
 
     let active_attr = concept
         .attributes
-        .get("active")
+        .iter()
+        .find(|(k, _)| *k == "active")
+        .map(|(_, v)| v)
         .expect("Should have active attribute");
     assert_eq!(active_attr.namespace, "person");
     assert_eq!(active_attr.name, "active");
@@ -116,8 +120,8 @@ fn test_concept_round_trip_serialization() {
     assert_eq!(original.operator, deserialized.operator);
     assert_eq!(original.attributes.count(), deserialized.attributes.count());
 
-    let orig_score = original.attributes.get("score").unwrap();
-    let deser_score = deserialized.attributes.get("score").unwrap();
+    let orig_score = original.attributes.iter().find(|(k, _)| *k == "score").map(|(_, v)| v).unwrap();
+    let deser_score = deserialized.attributes.iter().find(|(k, _)| *k == "score").map(|(_, v)| v).unwrap();
     assert_eq!(orig_score.namespace, deser_score.namespace);
     assert_eq!(orig_score.name, deser_score.name);
     assert_eq!(orig_score.description, deser_score.description);

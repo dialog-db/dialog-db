@@ -24,6 +24,10 @@ impl Schema {
         self.constraints.insert(name, constraint);
     }
 
+    pub fn contains(&self, name: &str) -> bool {
+        self.constraints.contains_key(name)
+    }
+
     pub fn get(&self, name: &str) -> Option<&Constraint> {
         self.constraints.get(name)
     }
