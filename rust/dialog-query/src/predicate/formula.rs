@@ -47,24 +47,26 @@
 //!
 //! Here's a complete example of implementing a Sum formula:
 //!
-//! ```ignore
-//! use dialog_query::{Formula, Compute, Parameters, Term, Match, Value, Dependencies};
-//! use dialog_query::application::{FormulaApplication};
-//! use dialog_query::error::FormulaEvaluationError;
-//! use dialog_query::cursor::Cursor;
+//! ```rust
+//! use std::sync::OnceLock;
+//! use dialog_query::{
+//!     Formula, Compute, Parameters, Term, Match, Value, Dependencies, Type,
+//!     error::FormulaEvaluationError, cursor::Cursor,
+//!     predicate::formula::Cells,
+//! };
 //!
 //! // 1. Define the formula struct with input and output fields
 //! #[derive(Debug, Clone)]
 //! struct Sum {
-//!     of: u32,      // Input field
-//!     with: u32,    // Input field
-//!     is: u32,      // Output field (computed)
+//!     pub of: u32,      // Input field
+//!     pub with: u32,    // Input field
+//!     pub is: u32,      // Output field (computed)
 //! }
 //!
 //! // 2. Define the input type
 //! struct SumInput {
-//!     of: u32,
-//!     with: u32,
+//!     pub of: u32,
+//!     pub with: u32,
 //! }
 //!
 //! // 3. Implement conversion from Cursor to Input
@@ -90,20 +92,43 @@
 //!     }
 //! }
 //!
-//! // 5. Implement the Formula trait
+//! // 5. Define cells schema (static)
+//! static SUM_CELLS: OnceLock<Cells> = OnceLock::new();
+//!
+//! // 6. Implement the Formula trait
 //! impl Formula for Sum {
 //!     type Input = SumInput;
-//!     type Match = SumMatch;
+//!     type Match = (); // Placeholder for future macro generation
 //!
-//!     fn name() -> &'static str {
+//!     fn operator() -> &'static str {
 //!         "sum"
+//!     }
+//!
+//!     fn cells() -> &'static Cells {
+//!         SUM_CELLS.get_or_init(|| {
+//!             Cells::define(|builder| {
+//!                 builder.cell("of", Type::UnsignedInt)
+//!                     .the("Number to add to")
+//!                     .required();
+//!                 builder.cell("with", Type::UnsignedInt)
+//!                     .the("Number to add")
+//!                     .required();
+//!                 builder.cell("is", Type::UnsignedInt)
+//!                     .the("Sum of numbers")
+//!                     .derived(5);
+//!             })
+//!         })
+//!     }
+//!
+//!     fn cost() -> usize {
+//!         5
 //!     }
 //!
 //!     fn dependencies() -> Dependencies {
 //!         let mut deps = Dependencies::new();
-//!         deps.require("of".to_string());
-//!         deps.require("with".to_string());
-//!         deps.provide("is".to_string());
+//!         deps.require("of".into());
+//!         deps.require("with".into());
+//!         deps.provide("is".into());
 //!         deps
 //!     }
 //!
@@ -117,20 +142,20 @@
 //!     }
 //! }
 //!
-//! // 6. Use the formula in a query
+//! // 7. Use the formula in a query
 //! let mut parameters = Parameters::new();
-//! parameters.insert("of".to_string(), Term::var("x"));
-//! parameters.insert("with".to_string(), Term::var("y"));
-//! parameters.insert("is".to_string(), Term::var("result"));
+//! parameters.insert("of".to_string(), Term::var("x").into());
+//! parameters.insert("with".to_string(), Term::var("y").into());
+//! parameters.insert("is".to_string(), Term::var("result").into());
 //!
-//! let sum = Sum::apply(parameters).unwrap();
+//! let app = Sum::apply(parameters).unwrap();
 //!
 //! // Apply to a match with x=5, y=3
-//! let source = Match::new()
+//! let input = Match::new()
 //!     .set(Term::var("x"), 5u32).unwrap()
 //!     .set(Term::var("y"), 3u32).unwrap();
 //!
-//! let results = sum.derive(source).unwrap();
+//! let results = app.derive(input).unwrap();
 //! assert_eq!(results[0].get::<u32>(&Term::var("result")).unwrap(), 8);
 //! ```
 //!
