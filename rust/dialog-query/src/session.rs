@@ -295,7 +295,7 @@ mod tests {
 
     use crate::{
         predicate::{self, concept::Attributes},
-        Attribute, Parameters, SelectionExt, Type, VariableScope,
+        Attribute, Parameters, SelectionExt, Type,
     };
 
     use super::*;
@@ -517,14 +517,6 @@ mod tests {
         mixed_params.insert("age".into(), Term::blank()); // This matches but is blank
 
         let application = person.apply(mixed_params)?;
-        let result = application.plan(&VariableScope::new());
-
-        // Should succeed because we have at least one non-blank parameter
-        assert!(
-            result.is_ok(),
-            "Mixed parameters with at least one non-blank should succeed, got: {:?}",
-            result
-        );
 
         Ok(())
     }

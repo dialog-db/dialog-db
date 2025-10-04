@@ -1,10 +1,9 @@
 use crate::error::CompileError;
 use crate::{fact::Scalar, predicate::DeductiveRule};
 use crate::{
-    Dependencies, EvaluationContext, Parameters, Premise, Requirement, Schema, Selection, Source,
-    Term, Value, VariableScope,
+    EvaluationContext, Parameters, Premise, Requirement, Schema, Selection, Source, Term, Value,
+    VariableScope,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use thiserror::Error;
@@ -42,44 +41,6 @@ pub enum AnalyzerError {
         rule: DeductiveRule,
         variable: String,
     },
-}
-
-/// Query planner analyzes each premise to identify it's dependencies and budget
-/// required to perform them. This struct represents result of succesful analysis.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LegacyAnalysis {
-    /// Base execution cost which does not include added costs captured in the
-    /// dependencies.
-    pub cost: usize,
-    pub dependencies: Dependencies,
-}
-
-impl LegacyAnalysis {
-    pub fn new(cost: usize) -> Self {
-        LegacyAnalysis {
-            cost,
-            dependencies: Dependencies::new(),
-        }
-    }
-
-    pub fn desire<T: Scalar>(&mut self, dependency: Option<&Term<T>>, cost: usize) -> &mut Self {
-        match dependency {
-            Some(Term::Variable {
-                name: Some(name), ..
-            }) => {
-                self.dependencies.desire(name.into(), cost);
-            }
-            Some(Term::Variable { name: None, .. }) => {
-                self.cost += cost;
-            }
-            Some(Term::Constant(_)) => {}
-            None => {
-                self.cost += cost;
-            }
-        }
-
-        self
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

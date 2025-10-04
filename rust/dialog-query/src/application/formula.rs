@@ -1,14 +1,12 @@
 pub use super::Application;
-pub use crate::analyzer::LegacyAnalysis;
 pub use crate::cursor::Cursor;
 pub use crate::error::{AnalyzerError, FormulaEvaluationError, PlanError, QueryError};
-pub use crate::plan::FormulaApplicationPlan;
 use crate::predicate::formula::Cells;
 use crate::selection::TryExpand;
 use crate::SelectionExt;
 pub use crate::{try_stream, EvaluationContext, Selection, Source};
 
-pub use crate::{Dependencies, Match, Parameters, Requirement, VariableScope};
+pub use crate::{Match, Parameters, Requirement, VariableScope};
 use std::fmt::Display;
 
 pub const PARAM_COST: usize = 10;
@@ -42,32 +40,6 @@ impl FormulaApplication {
         (self.compute)(&mut cursor)
     }
 
-    pub fn analyze(&self) -> LegacyAnalysis {
-        let mut analysis = LegacyAnalysis::new(self.cost);
-        for (name, cell) in self.cells.iter() {
-            match cell.requirement() {
-                Requirement::Optional => {
-                    analysis.desire(self.parameters.get(name), 0);
-                }
-                Requirement::Required(Some(_)) => {
-                    // Formulas don't use choice groups, treat as derived
-                    analysis.desire(self.parameters.get(name), 0);
-                }
-                // We should be checking this at the application time not
-                // during analysis
-                Requirement::Required(None) => {
-                    // analysis.require(self.parameters.get(name));
-                }
-            }
-        }
-
-        analysis
-    }
-
-    pub fn cost(&self) -> usize {
-        self.cost
-    }
-
     /// Estimate the cost of this formula given the current environment.
     /// For formulas, cost is constant - it's the computational cost of the formula itself.
     /// Formulas are always bound (they compute rather than query), so always returns Some.
@@ -83,81 +55,6 @@ impl FormulaApplication {
     /// Returns the parameters for this formula application
     pub fn parameters(&self) -> Parameters {
         self.parameters.clone()
-    }
-
-    pub fn dependencies(&self) -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        for (name, cell) in self.cells.iter() {
-            match cell.requirement() {
-                Requirement::Optional => {
-                    dependencies.desire(name.to_string(), 0);
-                }
-                Requirement::Required(Some(_)) => {
-                    // Formulas don't use choice groups, treat as derived
-                    dependencies.desire(name.to_string(), 0);
-                }
-                Requirement::Required(None) => {
-                    dependencies.require(name.to_string());
-                }
-            }
-        }
-        dependencies
-    }
-
-    pub fn plan(&self, scope: &VariableScope) -> Result<FormulaApplicationPlan, PlanError> {
-        let mut cost = self.cost;
-        let mut derives = VariableScope::new();
-        // We ensure that all terms for all required formula parametrs are
-        // applied, otherwise we fail. We also identify all the dependencies
-        // that formula will derive.
-        for (name, cell) in self.cells.iter() {
-            let requirement = cell.requirement();
-            let term = self.parameters.get(name);
-            match requirement {
-                Requirement::Required(_) => {
-                    if let Some(parameter) = term {
-                        if scope.contains(&parameter) {
-                            Ok(())
-                        } else {
-                            Err(PlanError::UnboundFormulaParameter {
-                                formula: self.name,
-                                cell: name.into(),
-                                parameter: parameter.clone(),
-                            })
-                        }
-                    } else {
-                        Err(PlanError::OmitsRequiredCell {
-                            formula: self.name,
-                            cell: name.into(),
-                        })
-                    }?;
-                }
-                Requirement::Optional => match term {
-                    Some(term) => {
-                        derives.add(term);
-                    }
-                    None => {
-                        // Derived parameters don't add cost - cost is calculated via estimate()
-                    }
-                },
-            }
-        }
-
-        Ok(FormulaApplicationPlan {
-            cost: self.cost,
-            derives,
-            application: self.clone(),
-        })
-    }
-
-    pub fn compile(self) -> Result<FormulaApplicationAnalysis, AnalyzerError> {
-        Ok(FormulaApplicationAnalysis {
-            analysis: LegacyAnalysis {
-                cost: self.cost,
-                dependencies: self.dependencies(),
-            },
-            application: self,
-        })
     }
 
     pub fn expand(&self, frame: Match) -> Result<Vec<Match>, QueryError> {
@@ -261,21 +158,6 @@ impl FormulaApplication {
 impl TryExpand for FormulaApplication {
     fn try_expand(&self, frame: Match) -> Result<Vec<Match>, QueryError> {
         self.expand(frame)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FormulaApplicationAnalysis {
-    pub application: FormulaApplication,
-    pub analysis: LegacyAnalysis,
-}
-
-impl FormulaApplicationAnalysis {
-    pub fn dependencies(&self) -> &Dependencies {
-        &self.analysis.dependencies
-    }
-    pub fn cost(&self) -> usize {
-        self.analysis.cost
     }
 }
 

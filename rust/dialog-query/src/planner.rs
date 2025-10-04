@@ -1,9 +1,8 @@
 use crate::analyzer::{Analysis, Plan};
 use crate::artifact::Value;
+use crate::context::new_context;
 pub use crate::error::{AnalyzerError, PlanError};
 use crate::error::{CompileError, QueryResult};
-use crate::plan::fresh;
-pub use crate::plan::EvaluationPlan;
 pub use crate::premise::Premise;
 pub use crate::term::Term;
 use crate::EvaluationContext;
@@ -275,7 +274,7 @@ impl Join {
 
     pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
         let store = store.clone();
-        let context = fresh(store);
+        let context = new_context(store);
         let selection = self.evaluate(context);
         Ok(selection)
     }

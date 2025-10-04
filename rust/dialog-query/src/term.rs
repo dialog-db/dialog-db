@@ -13,8 +13,7 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use crate::artifact::{Attribute, Entity, Type, Value};
-use crate::fact::Scalar;
-use crate::types::IntoType;
+use crate::types::{IntoType, Scalar};
 use serde::{Deserialize, Serialize};
 
 /// Term represents either a constant value or variable constraint of the
@@ -661,7 +660,7 @@ mod tests {
     fn test_inference() {
         let thing = Term::var("hello");
 
-        fn do_thing(term: &Term<String>) {
+        fn do_thing(_term: &Term<String>) {
             println!("")
         }
 

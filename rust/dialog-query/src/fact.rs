@@ -1,6 +1,7 @@
 //! Fact, Assertion, Retraction, and Claim types for the dialog-query system
 
 pub use super::claim::{fact, Claim};
+pub use super::predicate::fact::Fact as PredicateFact;
 pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Instruction, Value};
 use crate::claim::fact::Relation;
 pub use crate::types::Scalar;
@@ -59,11 +60,6 @@ impl<T> Fact<T>
 where
     T: Scalar,
 {
-    /// Start building a fact selector for queries
-    pub fn select() -> crate::FactSelector<T> {
-        crate::FactSelector::new()
-    }
-
     /// Create an assertion claim from individual components
     pub fn assert<The: Into<Attribute>, Of: Into<Entity>>(the: The, of: Of, is: T) -> Claim {
         let relation = Relation::new(the.into(), of.into(), is.as_value());
@@ -74,6 +70,10 @@ where
     pub fn retract<The: Into<Attribute>, Of: Into<Entity>>(the: The, of: Of, is: T) -> Claim {
         let relation = Relation::new(the.into(), of.into(), is.as_value());
         Claim::Fact(fact::Claim::Retract(relation))
+    }
+
+    pub fn select() -> PredicateFact {
+        PredicateFact::new()
     }
 }
 
@@ -268,14 +268,6 @@ mod tests {
             }
             _ => panic!("Expected Claim::Fact(Assertion)"),
         }
-
-        // Test that both types work with FactSelector and Query trait
-        let value_selector: crate::FactSelector<Value> = crate::FactSelector::new();
-        let string_selector: crate::FactSelector<String> = crate::FactSelector::new();
-
-        // Both should compile and work
-        assert!(value_selector.the.is_none());
-        assert!(string_selector.the.is_none());
     }
 }
 
@@ -286,7 +278,7 @@ mod integration_tests {
 
     use super::*;
     use crate::artifact::{Artifacts, Attribute, Entity, Value};
-    use crate::{Query, Session, Term};
+    use crate::{Session, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -330,7 +322,8 @@ mod integration_tests {
         let query_with_named_vars = Fact::<Value>::select()
             .the("user/name")
             .of(Term::var("user")) // Named variable - should be bound
-            .is(Term::var("name")); // Named variable - should be bound
+            .is(Term::var("name")) // Named variable - should be bound
+            .build()?;
 
         let matches = query_with_named_vars
             .query(&Session::open(artifacts.clone()))?
@@ -355,7 +348,8 @@ mod integration_tests {
         let query_with_wildcards = Fact::<Value>::select()
             .the("user/email")
             .of(Term::blank()) // Unnamed variable (wildcard) - should not be bound
-            .is(Term::blank()); // Unnamed variable (wildcard) - should not be bound
+            .is(Term::blank()) // Unnamed variable (wildcard) - should not be bound
+            .build()?;
 
         let wildcard_matches = query_with_wildcards
             .query(&Session::open(artifacts.clone()))?
@@ -376,7 +370,8 @@ mod integration_tests {
         let mixed_query = Fact::<Value>::select()
             .the("user/name")
             .of(Term::var("person")) // Named - should be bound
-            .is(Term::blank()); // Unnamed - should not be bound
+            .is(Term::blank()) // Unnamed - should not be bound
+            .build()?;
 
         let mixed_matches = mixed_query
             .query(&Session::open(artifacts.clone()))?
@@ -426,7 +421,8 @@ mod integration_tests {
         let query_constant = Fact::<Value>::select()
             .the("user/name")
             .of(alice.clone()) // Constant entity
-            .is(Term::var("name")); // Variable value - should be bound
+            .is(Term::var("name"))
+            .build()?; // Variable value - should be bound
 
         let results = query_constant
             .query(&Session::open(artifacts.clone()))?
@@ -453,7 +449,8 @@ mod integration_tests {
         let query2 = Fact::<Value>::select()
             .the("user/name")
             .of(alice.clone()) // Same constant entity
-            .is(Term::var("name"));
+            .is(Term::var("name"))
+            .build()?;
 
         let results2 = query2
             .query(&Session::open(artifacts.clone()))?
@@ -502,7 +499,8 @@ mod integration_tests {
         let all_constants_query = Fact::<Value>::select()
             .the("user/name") // Constant attribute
             .of(alice.clone()) // Constant entity
-            .is(Value::String("Alice".to_string())); // Constant value
+            .is(Value::String("Alice".to_string()))
+            .build()?; // Constant value
 
         let constant_results = all_constants_query
             .query(&Session::open(artifacts.clone()))?
@@ -522,7 +520,8 @@ mod integration_tests {
         let mixed_query = Fact::<Value>::select()
             .the("user/name") // Constant attribute
             .of(Term::var("person")) // Variable entity - should bind
-            .is(Value::String("Alice".to_string())); // Constant value
+            .is(Value::String("Alice".to_string()))
+            .build()?;
 
         let mixed_results = mixed_query
             .query(&Session::open(artifacts.clone()))?
@@ -549,7 +548,8 @@ mod integration_tests {
         let find_all_names = Fact::<Value>::select()
             .the("user/name") // Constant attribute
             .of(Term::var("person")) // Variable entity
-            .is(Term::var("name")); // Variable value
+            .is(Term::var("name"))
+            .build()?; // Variable value
 
         let all_name_results = find_all_names
             .query(&Session::open(artifacts.clone()))?
@@ -616,10 +616,11 @@ mod integration_tests {
         session.transact(facts).await?;
 
         // Query 1: Find all admins by role - using constants with variable entity
-        let admin_query = Fact::select()
+        let admin_query = Fact::<Value>::select()
             .the("user/role") // Constant attribute
             .of(Term::var("admin_user")) // Variable entity - should bind
-            .is("admin"); // Constant value
+            .is(Value::String("admin".to_string()))
+            .build()?; // Constant value
 
         let admin_results = admin_query
             .query(&Session::open(artifacts.clone()))?
@@ -653,7 +654,8 @@ mod integration_tests {
         let role_query = Fact::<Value>::select()
             .the("user/role") // Constant attribute
             .of(Term::var("user")) // Variable entity
-            .is(Term::var("role")); // Variable value
+            .is(Term::var("role"))
+            .build()?; // Variable value
 
         let role_results = role_query
             .query(&Session::open(artifacts.clone()))?
@@ -673,7 +675,8 @@ mod integration_tests {
         let bob_query = Fact::<Value>::select()
             .the("user/name") // Constant attribute
             .of(bob.clone()) // Constant entity
-            .is(Value::String("Bob".to_string())); // Constant value
+            .is(Value::String("Bob".to_string()))
+            .build()?; // Constant value
 
         let bob_results = bob_query
             .query(&Session::open(artifacts.clone()))?
@@ -726,7 +729,8 @@ mod integration_tests {
         let query_with_variables = Fact::<Value>::select()
             .the("user/name") // Constant - used for matching
             .of(Term::var("user")) // Variable - gets bound to entities
-            .is(Term::var("name")); // Variable - gets bound to names
+            .is(Term::var("name"))
+            .build()?; // Variable - gets bound to names
 
         // Query should succeed and return matches with variable bindings
         let results = query_with_variables
@@ -775,10 +779,11 @@ mod integration_tests {
         session.transact(facts).await?;
 
         // Pattern 1: String-typed FactSelector (most common, backward compatible)
-        let value_selector = Fact::select()
+        let value_selector = Fact::<Value>::select()
             .the("user/name")
             .of(Term::var("user"))
-            .is(Term::<String>::var("name"));
+            .is(Term::var("name"))
+            .build()?;
 
         let value_results = value_selector
             .query(&Session::open(artifacts.clone()))?
@@ -792,7 +797,8 @@ mod integration_tests {
         let entity_selector = Fact::<Value>::select()
             .the("user/friend")
             .of(alice.clone()) // Constant entity
-            .is(Term::<Value>::var("friend")); // Variable - should bind to Bob
+            .is(Term::<Value>::var("friend"))
+            .build()?; // Variable - should bind to Bob
 
         let entity_results = entity_selector
             .query(&Session::open(artifacts.clone()))?
@@ -814,7 +820,8 @@ mod integration_tests {
         let constant_selector = Fact::<Value>::select()
             .the("user/name") // Constant
             .of(alice.clone()) // Constant
-            .is(Value::String("Alice".to_string())); // Constant
+            .is(Value::String("Alice".to_string()))
+            .build()?;
 
         let constant_results = constant_selector
             .query(&Session::open(artifacts.clone()))?
@@ -871,7 +878,8 @@ mod integration_tests {
         let bob_query = Fact::<Value>::select()
             .the("user/name")
             .of(Term::var("user")) // Variable - should bind
-            .is(Value::String("Bob".to_string())); // String constant
+            .is(Value::String("Bob".to_string()))
+            .build()?; // String constant
 
         let bob_results = bob_query
             .query(&Session::open(artifacts.clone()))?
@@ -884,7 +892,8 @@ mod integration_tests {
         let admin_query = Fact::<Value>::select()
             .the("user/role")
             .of(Term::var("admin_user")) // Variable - should bind to Alice
-            .is(Value::String("admin".to_string())); // String constant
+            .is(Value::String("admin".to_string()))
+            .build()?; // String constant
 
         let admin_results = admin_query
             .query(&Session::open(artifacts.clone()))?
@@ -897,7 +906,8 @@ mod integration_tests {
         let names_query = Fact::<Value>::select()
             .the("user/name") // Constant attribute
             .of(Term::var("user")) // Variable entity
-            .is(Term::var("name")); // Variable value
+            .is(Term::var("name"))
+            .build()?; // Variable value
 
         let name_results = names_query
             .query(&Session::open(artifacts.clone()))?
@@ -935,7 +945,8 @@ mod integration_tests {
         let mixed_query = Fact::<Value>::select()
             .the("user/name") // Constant - used for matching
             .of(alice.clone()) // Constant - used for matching
-            .is(Term::<Value>::var("name")); // Variable - should bind to "Alice"
+            .is(Term::<Value>::var("name"))
+            .build()?;
 
         let results = mixed_query
             .query(&Session::open(artifacts.clone()))?
@@ -970,7 +981,8 @@ mod integration_tests {
         let query_only_vars = Fact::<Value>::select()
             .the(Term::<Attribute>::var("attr")) // Variable
             .of(Term::<Entity>::var("entity")) // Variable
-            .is(Term::<Value>::var("value")); // Variable
+            .is(Term::<Value>::var("value"))
+            .build()?;
 
         // Setup store
         let storage_backend = MemoryStorageBackend::default();
@@ -1034,10 +1046,13 @@ mod integration_tests {
         session.transact(facts).await?;
 
         // Test 1: Find admin users using fluent query building
-        let admin_results = Fact::<Value>::select()
+        let admin_search = Fact::<Value>::select()
             .the("user/role")
             .of(Term::var("admin_user")) // Variable - binds to admin users
-            .is(Value::String("admin".to_string())) // Constant role
+            .is(Value::String("admin".to_string()))
+            .build()?;
+
+        let admin_results = admin_search
             .query(&Session::open(artifacts.clone()))?
             .collect_set()
             .await?;
@@ -1046,10 +1061,13 @@ mod integration_tests {
         assert!(admin_results.contains_binding("admin_user", &Value::Entity(alice.clone())));
 
         // Test 2: Find all user names with set-based collection
-        let name_results = Fact::<Value>::select()
+        let name_search = Fact::<Value>::select()
             .the("user/name") // Constant attribute
             .of(Term::var("user")) // Variable entity
             .is(Term::var("name")) // Variable name
+            .build()?;
+
+        let name_results = name_search
             .query(&Session::open(artifacts.clone()))?
             .collect_set()
             .await?;

@@ -8,7 +8,6 @@ pub mod concept;
 pub mod deductive_rule;
 pub mod fact;
 pub mod formula;
-pub mod premise;
 
 pub use concept::Concept;
 pub use deductive_rule::DeductiveRule;

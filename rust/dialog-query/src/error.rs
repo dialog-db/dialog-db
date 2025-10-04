@@ -6,7 +6,6 @@ pub use crate::application::Application;
 use crate::artifact::{DialogArtifactsError, Type, Value};
 pub use crate::predicate::DeductiveRule;
 use crate::term::Term;
-pub use crate::FactSelector;
 pub use thiserror::Error;
 
 /// Errors that can occur during query planning and execution
@@ -297,9 +296,6 @@ pub enum PlanError {
         cell: String,
         parameter: Term<Value>,
     },
-
-    #[error("Fact application {selector} requires at least one bound parameter")]
-    UnconstrainedSelector { selector: FactSelector },
 
     #[error("Application requires at least one non-blank parameter")]
     UnparameterizedApplication,

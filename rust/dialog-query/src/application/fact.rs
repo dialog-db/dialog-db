@@ -1,21 +1,18 @@
-pub use super::{Application, LegacyAnalysis};
+pub use super::Application;
 pub use crate::artifact::Attribute;
 pub use crate::artifact::{ArtifactSelector, Constrained};
-use crate::error::PlanError;
+pub use crate::context::new_context;
 pub use crate::error::{AnalyzerError, QueryResult};
-pub use crate::fact_selector::{ATTRIBUTE_COST, BASE_COST, ENTITY_COST, VALUE_COST};
-pub use crate::plan::{fresh, Plan};
 use crate::Cardinality;
-pub use crate::FactSelector;
 pub use crate::VariableScope;
 
 use crate::{try_stream, EvaluationContext, Match, Selection, Source};
-use crate::{
-    Constraint, Dependencies, Dependency, Entity, Parameters, QueryError, Schema, Term, Type, Value,
-};
+use crate::{Constraint, Dependency, Entity, Parameters, QueryError, Schema, Term, Type, Value};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::sync::OnceLock;
+
+pub const BASE_COST: usize = 100;
 
 /// Cost of a segment read for Cardinality::One with 3/3 or 2/3 constraints.
 /// This is a direct lookup that reads from a single segment.
@@ -116,13 +113,6 @@ impl FactApplication {
         }
     }
 
-    pub fn cost(&self) -> usize {
-        match self.cardinality {
-            Cardinality::One => BASE_COST,
-            Cardinality::Many => usize::pow(BASE_COST, 2),
-        }
-    }
-
     /// Estimate cost based on how many parameters are constrained and cardinality.
     /// More constrained = lower cost. Cardinality matters for partially constrained queries.
     pub fn estimate(&self, env: &VariableScope) -> Option<usize> {
@@ -142,60 +132,6 @@ impl FactApplication {
         params.insert("of".to_string(), self.of.as_unknown());
         params.insert("is".to_string(), self.is.clone());
         params
-    }
-
-    pub fn dependencies(&self) -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        dependencies.desire("the".into(), ATTRIBUTE_COST);
-        dependencies.desire("of".into(), ENTITY_COST);
-        dependencies.desire("is".into(), VALUE_COST);
-        dependencies
-    }
-
-    pub fn analyze(&self) -> LegacyAnalysis {
-        LegacyAnalysis::new(0)
-            .desire(Some(&self.the), ATTRIBUTE_COST)
-            .desire(Some(&self.of), ENTITY_COST)
-            .desire(Some(&self.is), VALUE_COST)
-            .to_owned()
-    }
-
-    pub fn plan(&self, scope: &VariableScope) -> Result<FactApplicationPlan, PlanError> {
-        // Use estimate() to get the cost based on what's bound in scope
-        let cost = match self.estimate(scope) {
-            Some(cost) => cost,
-            None => {
-                // No constraints - return error
-                let selector = FactSelector {
-                    the: Some(self.the.clone()),
-                    of: Some(self.of.clone()),
-                    is: Some(self.is.clone()),
-                    fact: None,
-                };
-                return Err(PlanError::UnconstrainedSelector { selector });
-            }
-        };
-
-        let mut provides = VariableScope::new();
-
-        // Track which variables we provide
-        if !scope.contains(&self.of) {
-            provides.add(&self.of);
-        }
-
-        if !scope.contains(&self.the) {
-            provides.add(&self.the);
-        }
-
-        if !scope.contains(&self.is) {
-            provides.add(&self.is);
-        }
-
-        Ok(FactApplicationPlan {
-            selector: self.clone(),
-            provides,
-            cost,
-        })
     }
 }
 
@@ -246,8 +182,22 @@ impl FactApplication {
     }
 
     pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
+        // Validate that at least one parameter is constrained (not a variable)
+        // This prevents completely unconstrained queries
+        let has_constant = matches!(&self.the, Term::Constant(_))
+            || matches!(&self.of, Term::Constant(_))
+            || matches!(&self.is, Term::Constant(_));
+
+        if !has_constant {
+            return Err(QueryError::EmptySelector {
+                message:
+                    "At least one bound parameter required (the, of, or is must be a constant)"
+                        .to_string(),
+            });
+        }
+
         let store = store.clone();
-        let context = fresh(store);
+        let context = new_context(store);
         let selection = self.evaluate(context);
         Ok(selection)
     }

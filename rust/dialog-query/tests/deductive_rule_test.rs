@@ -1,5 +1,4 @@
-use dialog_query::analyzer::LegacyAnalysis;
-use dialog_query::application::{ConceptApplication, PlanCandidate};
+use dialog_query::application::ConceptApplication;
 use dialog_query::artifact::Type;
 use dialog_query::attribute::Attribute;
 use dialog_query::error::{AnalyzerError, PlanError, QueryError};
@@ -143,34 +142,6 @@ fn test_premise_construction() {
     }
 }
 
-#[test]
-fn test_analysis_structure() {
-    let mut deps = Dependencies::new();
-    deps.desire("test".into(), 50);
-
-    let analysis = LegacyAnalysis {
-        cost: 100,
-        dependencies: deps,
-    };
-
-    assert_eq!(analysis.cost, 100);
-    assert!(analysis.dependencies.contains("test"));
-}
-
-#[test]
-fn test_plan_candidate_structure() {
-    let fact = Fact::select().the("test/attr");
-    let premise = Premise::from(fact);
-
-    let candidate = PlanCandidate {
-        premise: &premise,
-        dependencies: VariableScope::new(),
-        result: Err(PlanError::UnexpectedError),
-    };
-
-    // Test that the structure exists and can be created
-    assert!(matches!(candidate.result, Err(PlanError::UnexpectedError)));
-}
 
 #[test]
 fn test_error_types() {

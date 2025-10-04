@@ -209,7 +209,7 @@ use serde::{Deserialize, Serialize};
 use crate::application::FormulaApplication;
 use crate::cursor::Cursor;
 use crate::error::{FormulaEvaluationError, SchemaError, TypeError};
-use crate::fact::Scalar;
+use crate::types::Scalar;
 use crate::Schema;
 use crate::{Dependencies, Match, Parameters, Requirement};
 

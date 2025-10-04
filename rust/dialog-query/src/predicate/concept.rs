@@ -1,10 +1,9 @@
-pub use crate::analyzer::{AnalyzerError, LegacyAnalysis};
 use crate::application::ConceptApplication;
 use crate::artifact::Artifact;
 use crate::attribute::Relation;
 use crate::claim::concept::ConceptClaim;
 use crate::error::SchemaError;
-use crate::fact::Scalar;
+use crate::types::Scalar;
 use crate::{
     Application, Attribute, Cardinality, Claim, Constraint, Dependencies, Entity, Parameters,
     Requirement, Schema, Type, Value,
@@ -617,14 +616,13 @@ mod tests {
 
     #[test]
     fn test_concept_round_trip_serialization() {
-        let mut attributes = <Attributes as From<_>>::from([(
-            "score",
-            Attribute::<Value>::new("game", "score", "Game score", Type::UnsignedInt),
-        )]);
-
         let original = Concept {
             operator: "game".to_string(),
-            attributes,
+            attributes: [(
+                "score",
+                Attribute::<Value>::new("game", "score", "Game score", Type::UnsignedInt),
+            )]
+            .into(),
         };
 
         // Serialize then deserialize

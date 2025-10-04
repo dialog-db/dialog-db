@@ -1,8 +1,8 @@
 //! Syntax trait for query forms
 
 use crate::artifact::Value;
-use crate::fact::Scalar;
 use crate::term::Term;
+use crate::types::Scalar;
 use std::collections::HashSet;
 
 /// Tracks variable bindings during query planning

@@ -100,48 +100,6 @@ impl<T: Match + Clone> From<&T> for ConceptApplication {
     }
 }
 
-// impl<T: Match + Clone + std::fmt::Debug> Premise for T {
-//     type Plan = JoinPlan;
-
-//     fn plan(&self, scope: &VariableScope) -> PlanResult<Self::Plan> {
-//         // Step 1: Create statement premises for each attribute
-//         let mut statements = Vec::new();
-//         let entity = self.this();
-
-//         for (name, attribute) in T::Attributes::attributes() {
-//             let term = self.term_for(name).unwrap();
-//             let select = FactSelector::new()
-//                 .the(attribute.the())
-//                 .of(entity.clone())
-//                 .is(term.clone());
-
-//             statements.push(Statement::select(select));
-//         }
-
-//         // Step 2: Create a Join premise and plan it
-//         let join_premise = Join::new(statements);
-//         join_premise.plan(scope)
-//     }
-
-//     fn cells(&self) -> VariableScope {
-//         // Collect cells from all attributes
-//         let mut cells = VariableScope::new();
-//         let entity = self.this();
-
-//         // Add the entity variable
-//         cells.add(&entity);
-
-//         // Add variables from each attribute term
-//         for (name, _attribute) in T::Attributes::attributes() {
-//             if let Some(term) = self.term_for(name) {
-//                 cells.add(term);
-//             }
-//         }
-
-//         cells
-//     }
-// }
-
 /// Describes an instance of a concept. It is expected that each concept is
 /// can be materialized from the selection::Match.
 pub trait Instance: ConditionalSend {
@@ -150,171 +108,16 @@ pub trait Instance: ConditionalSend {
     fn this(&self) -> Entity;
 }
 
-// /// Join premise that combines multiple premises and orders them optimally
-// #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-// pub struct Join {
-//     premises: Vec<Statement>,
-// }
-
-// impl Join {
-//     /// Create a new Join from a collection of premises
-//     pub fn new(premises: Vec<Statement>) -> Self {
-//         Self { premises }
-//     }
-// }
-
-// /// Plan for executing a Join premise
-// #[derive(Debug, Clone)]
-// pub struct JoinPlan {
-//     cost: usize,
-//     ordered_premises: Vec<StatementPlan>,
-// }
-
-// /// Cached premise with all computed data
-// #[derive(Debug, Clone)]
-// struct CachedPlan<'a> {
-//     premise: &'a Statement,
-//     cells: VariableScope,
-//     result: PlanResult<StatementPlan>,
-// }
-
-// impl<'a> CachedPlan<'a> {
-//     fn recompute(&mut self, scope: &VariableScope) -> &Self {
-//         self.result = self.premise.plan(scope);
-//         self
-//     }
-// }
-
-// /// Create a planning error from cached premises that failed to plan
-// fn create_planning_error(cached_premises: &[CachedPlan]) -> crate::plan::PlanError {
-//     crate::plan::PlanError {
-//         description: format!(
-//             "Cannot plan remaining {} premises - missing required variables",
-//             cached_premises.len()
-//         ),
-//     }
-// }
-
-// impl Premise for Join {
-//     type Plan = JoinPlan;
-
-//     fn cells(&self) -> VariableScope {
-//         let mut cells = VariableScope::new();
-//         for premise in &self.premises {
-//             cells.extend(premise.cells());
-//         }
-//         cells
-//     }
-
-//     fn plan(&self, scope: &VariableScope) -> PlanResult<Self::Plan> {
-//         let mut local = scope.clone();
-//         let mut conjuncts = Vec::new();
-//         let mut cost = 0usize;
-
-//         // First iteration: compute everything and populate cache
-//         let mut cache: Vec<CachedPlan> = Vec::new();
-//         let mut best: Option<(crate::statement::StatementPlan, usize)> = None;
-
-//         for (index, premise) in self.premises.iter().enumerate() {
-//             let cells = premise.cells();
-//             let result = premise.plan(&local);
-
-//             // Check if this is the best plan so far
-//             if let Ok(plan) = &result {
-//                 if let Some((ref top, _)) = best {
-//                     if plan.cmp(top) == std::cmp::Ordering::Less {
-//                         best = Some((plan.clone(), index));
-//                     }
-//                 } else {
-//                     best = Some((plan.clone(), index));
-//                 }
-//             }
-
-//             cache.push(CachedPlan {
-//                 premise,
-//                 cells,
-//                 result,
-//             });
-//         }
-
-//         // If we found a plannable premise in first iteration, process it
-//         let mut delta = if let Some((plan, index)) = best {
-//             cost += plan.cost();
-//             let delta = local.extend(plan.provides());
-//             conjuncts.push(plan);
-//             cache.remove(index);
-//             delta
-//         } else {
-//             return Err(create_planning_error(&cache));
-//         };
-
-//         // Subsequent iterations: use cached data with delta optimization
-//         while !cache.is_empty() {
-//             let mut best: Option<(crate::statement::StatementPlan, usize)> = None;
-
-//             for (index, cached) in cache.iter_mut().enumerate() {
-//                 // Check if we need to recompute based on delta
-//                 if cached.cells.intersects(&delta) {
-//                     cached.recompute(&local);
-//                 }
-
-//                 if let Ok(plan) = &cached.result {
-//                     if let Some((top, _)) = &best {
-//                         if plan.cmp(top) == std::cmp::Ordering::Less {
-//                             best = Some((plan.clone(), index));
-//                         }
-//                     } else {
-//                         best = Some((plan.clone(), index));
-//                     }
-//                 }
-//             }
-
-//             if let Some((plan, index)) = best {
-//                 cost += plan.cost();
-//                 delta = local.extend(plan.provides());
-//                 conjuncts.push(plan);
-//                 cache.remove(index);
-//             } else {
-//                 return Err(create_planning_error(&cache));
-//             }
-//         }
-
-//         Ok(JoinPlan {
-//             cost,
-//             ordered_premises: conjuncts,
-//         })
-//     }
-// }
-
-// impl EvaluationPlan for JoinPlan {
-//     fn cost(&self) -> usize {
-//         self.cost
-//     }
-
-//     fn provides(&self) -> VariableScope {
-//         let mut scope = VariableScope::new();
-//         for premise in &self.ordered_premises {
-//             scope.extend(premise.provides());
-//         }
-//         scope
-//     }
-
-//     fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
-//         // Convert statement plans to evaluation plans
-//         let eval_plans: Vec<crate::statement::StatementPlan> = self.ordered_premises.clone();
-//         crate::and::join(eval_plans, context)
-//     }
-// }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::artifact::Value;
     use crate::artifact::{Artifacts, Attribute as ArtifactAttribute};
     use crate::concept::Concept;
+    use crate::Fact;
     use crate::selection::SelectionExt;
     use crate::term::Term;
-    use crate::{Fact, Query, Session};
+    use crate::Session;
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -885,7 +688,8 @@ mod tests {
         let missing_query = Fact::<Value>::select()
             .the("person/name")
             .of(Term::var("person"))
-            .is(Value::String("NonExistent".to_string()));
+            .is(Value::String("NonExistent".to_string()))
+            .build()?;
 
         let session = Session::open(artifacts);
         let no_results = missing_query.query(&session)?.collect_set().await?;

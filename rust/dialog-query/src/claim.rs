@@ -51,7 +51,6 @@
 
 pub mod concept;
 pub mod fact;
-pub mod rule;
 
 pub use self::fact::Relation;
 pub use crate::artifact::{Artifact, Attribute, Instruction};

@@ -1,10 +1,10 @@
-use crate::application::FactApplication;
+use crate::application::{Application, FactApplication};
 pub use crate::artifact::{Attribute as ArtifactsAttribute, Entity, Value};
 use crate::error::{SchemaError, TypeError};
-pub use crate::fact_selector::FactSelector;
-pub use crate::term::Term;
+pub use crate::predicate::Fact;
 pub use crate::types::{IntoType, Scalar, Type};
 use crate::Parameters;
+pub use crate::{Premise, Term};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use std::marker::PhantomData;
 
@@ -369,16 +369,14 @@ impl<T: Scalar> Match<T> {
         self.attribute.the()
     }
 
-    pub fn is<Is: Into<Term<T>>>(self, term: Is) -> FactSelector<T> {
-        FactSelector::new()
+    pub fn is<Is: Into<Term<T>>>(self, term: Is) -> FactApplication {
+        Fact::new()
             .the(self.the())
             .of(self.of())
-            .is(term.into())
+            .is(term.into().as_unknown())
+            .into()
     }
-    pub fn not<Is: Into<Term<T>>>(self, term: Is) -> FactSelector<T> {
-        FactSelector::new()
-            .the(self.the())
-            .of(self.of())
-            .is(term.into())
+    pub fn not<Is: Into<Term<T>>>(self, term: Is) -> Premise {
+        Application::Fact(self.is(term)).not()
     }
 }

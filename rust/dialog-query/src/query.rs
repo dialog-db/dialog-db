@@ -3,8 +3,9 @@
 pub use dialog_common::ConditionalSend;
 
 use crate::artifact::{ArtifactStore, ArtifactStoreMut};
+use crate::context::{new_context, EvaluationPlan};
 pub use crate::error::{QueryError, QueryResult};
-use crate::plan::{fresh, EvaluationPlan};
+pub use crate::fact::Fact;
 use crate::Selection;
 pub use futures_util::stream::{Stream, TryStream};
 
@@ -83,7 +84,7 @@ pub trait PlannedQuery {
 impl<Plan: EvaluationPlan> PlannedQuery for Plan {
     fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
         let store = store.clone();
-        let context = fresh(store);
+        let context = new_context(store);
         let selection = self.evaluate(context);
         Ok(selection)
     }
@@ -93,7 +94,7 @@ impl<Plan: EvaluationPlan> PlannedQuery for Plan {
 mod tests {
     use super::*;
     use crate::artifact::{Artifacts, Attribute, Entity, Value};
-    use crate::{Fact, Session, Term};
+    use crate::{Session, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -134,7 +135,8 @@ mod tests {
         let alice_query = Fact::<Value>::select()
             .the("user/name")
             .of(alice.clone())
-            .is(Value::String("Alice".to_string()));
+            .is(Value::String("Alice".to_string()))
+            .build()?;
 
         // Use the Query trait method - should succeed since all fields are constants
         let session = Session::open(artifacts.clone());
@@ -142,14 +144,17 @@ mod tests {
         assert!(result.is_ok()); // Should succeed with constants, returns empty stream
 
         // Query 2: Find all user/name facts using Query trait
-        let all_names_query = Fact::<Value>::select().the("user/name");
+        let all_names_query = Fact::<Value>::select().the("user/name").build()?;
 
         let session = Session::open(artifacts.clone());
         let result = all_names_query.query(&session);
         assert!(result.is_ok()); // Should succeed with constants
 
         // Query 3: Find Alice's email using Query trait
-        let email_query = Fact::<Value>::select().the("user/email").of(alice.clone());
+        let email_query = Fact::<Value>::select()
+            .the("user/email")
+            .of(alice.clone())
+            .build()?;
 
         let session = Session::open(artifacts);
         let result = email_query.query(&session);
@@ -168,7 +173,8 @@ mod tests {
         let variable_query = Fact::<Value>::select()
             .the("user/name") // Constant - used
             .of(Term::<Entity>::var("user")) // Variable - skipped
-            .is(Term::<Value>::var("name")); // Variable - skipped
+            .is(Term::<Value>::var("name")) // Variable - skippeda
+            .build()?;
 
         // Should succeed since planning validation only rejects all-unbound queries, and this has a constant
         let session = Session::open(artifacts);
@@ -181,16 +187,6 @@ mod tests {
     #[tokio::test]
     async fn test_polymorphic_querying() -> Result<()> {
         // This test demonstrates polymorphic querying - same function can work with any Query impl
-
-        async fn execute_query<Q: Query>(
-            query: Q,
-            store: &(impl Source + 'static),
-        ) -> Result<Vec<crate::artifact::Artifact>> {
-            let result = query.query(store);
-            // Should succeed with constants, returns empty stream for now
-            assert!(result.is_ok());
-            Ok(vec![])
-        }
 
         // Setup
         let storage_backend = MemoryStorageBackend::default();
@@ -207,11 +203,14 @@ mod tests {
         session.transact(facts).await?;
 
         // Test with FactSelector
-        let fact_selector = Fact::<Value>::select().the("user/name").of(alice.clone());
+        let fact_selector = Fact::<Value>::select()
+            .the("user/name")
+            .of(alice.clone())
+            .build()?;
 
         let session = Session::open(artifacts);
-        let results = execute_query(fact_selector, &session).await?;
-        assert_eq!(results.len(), 0); // Empty since evaluation returns empty stream
+        let results = fact_selector.query(&session)?.try_collect().await?;
+        assert_eq!(results.len(), 1); // Should find the Alice fact
 
         // Could also test with FactSelectorPlan if we had a way to create one easily
         // This demonstrates the polymorphic nature of the Query trait
@@ -261,12 +260,16 @@ mod tests {
         let admin_result = Fact::<Value>::select()
             .the("user/role")
             .is(Value::String("admin".to_string()))
+            .build()?
             .query(&session);
         assert!(admin_result.is_ok());
 
         // Test another fluent query - should also succeed
         let session = Session::open(artifacts);
-        let names_result = Fact::<Value>::select().the("user/name").query(&session);
+        let names_result = Fact::<Value>::select()
+            .the("user/name")
+            .build()?
+            .query(&session);
         assert!(names_result.is_ok());
 
         Ok(())
