@@ -73,7 +73,7 @@ pub mod person {
         name: "name",
         description: "Name of the person",
         cardinality: Cardinality::One,
-        content_type: Type::String,
+        content_type: Some(Type::String),
         marker: PhantomData,
     };
 
@@ -82,7 +82,7 @@ pub mod person {
         name: "age",
         description: "Age of the person",
         cardinality: Cardinality::One,
-        content_type: Type::UnsignedInt,
+        content_type: Some(Type::UnsignedInt),
         marker: PhantomData,
     };
 
@@ -93,7 +93,7 @@ pub mod person {
             name: "name",
             description: "Name of the person",
             cardinality: Cardinality::One,
-            content_type: Type::String,
+            content_type: Some(Type::String),
             marker: PhantomData,
         },
         Attribute {
@@ -101,7 +101,7 @@ pub mod person {
             name: "age",
             description: "Age of the person",
             cardinality: Cardinality::One,
-            content_type: Type::UnsignedInt,
+            content_type: Some(Type::UnsignedInt),
             marker: PhantomData,
         },
     ];
@@ -115,7 +115,7 @@ pub mod person {
                 name: "name",
                 description: "Name of the person",
                 cardinality: Cardinality::One,
-                content_type: Type::String,
+                content_type: Some(Type::String),
                 marker: PhantomData,
             },
         ),
@@ -126,7 +126,7 @@ pub mod person {
                 name: "age",
                 description: "Age of the person",
                 cardinality: Cardinality::One,
-                content_type: Type::UnsignedInt,
+                content_type: Some(Type::UnsignedInt),
                 marker: PhantomData,
             },
         ),

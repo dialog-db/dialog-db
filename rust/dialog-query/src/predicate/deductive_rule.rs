@@ -180,7 +180,10 @@ impl Display for DeductiveRule {
         write!(f, "{} {{", self.operator())?;
         write!(f, "this: {},", Type::Entity)?;
         for (name, attribute) in self.conclusion.attributes.iter() {
-            write!(f, "{}: {},", name, attribute.content_type)?;
+            match attribute.content_type {
+                Some(ty) => write!(f, "{}: {},", name, ty)?,
+                None => write!(f, "{}: Any,", name)?,
+            }
         }
         write!(f, "}}")
     }

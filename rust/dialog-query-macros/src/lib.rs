@@ -489,17 +489,12 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
 /// the type at compile time. This works because IntoType::TYPE is a const,
 /// allowing proper type detection without string matching.
 ///
-/// The generated code uses a const block with match to handle the Option<Type>,
-/// defaulting to Type::Bytes for Value types (which have TYPE = None).
+/// Returns Option<Type> directly from the trait's TYPE constant:
+/// - Some(Type::String) for String types
+/// - None for Value types (accepts any type)
 fn type_to_value_data_type(ty: &Type) -> proc_macro2::TokenStream {
     quote! {
-        {
-            const TYPE_RESULT: dialog_query::artifact::Type = match <#ty as dialog_query::types::IntoType>::TYPE {
-                Some(ty) => ty,
-                None => dialog_query::artifact::Type::Bytes,
-            };
-            TYPE_RESULT
-        }
+        <#ty as dialog_query::types::IntoType>::TYPE
     }
 }
 

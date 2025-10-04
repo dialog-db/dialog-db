@@ -67,7 +67,7 @@ pub struct Attribute<T: Scalar> {
     pub name: &'static str,
     pub description: &'static str,
     pub cardinality: Cardinality,
-    pub content_type: Type,
+    pub content_type: Option<Type>,
     pub marker: PhantomData<T>,
 }
 
@@ -83,7 +83,7 @@ impl<T: Scalar> Attribute<T> {
             name,
             description,
             cardinality: Cardinality::One,
-            content_type,
+            content_type: Some(content_type),
             marker: PhantomData,
         }
     }
@@ -101,8 +101,9 @@ impl<T: Scalar> Attribute<T> {
     /// Get the data type for this attribute
     ///
     /// Returns the stored ValueDataType for this attribute.
+    /// Returns None if this attribute accepts any type.
     pub fn content_type(&self) -> Option<Type> {
-        Some(self.content_type)
+        self.content_type
     }
 
     /// Type checks that provided term matches cells content type. If term
@@ -137,7 +138,13 @@ impl<T: Scalar> Attribute<T> {
     }
 
     pub fn resolve(&self, value: Value) -> Result<Relation, TypeError> {
-        if value.data_type() == self.content_type {
+        // Check type if content_type is specified
+        let type_matches = match self.content_type {
+            Some(expected) => value.data_type() == expected,
+            None => true, // Any type is acceptable
+        };
+
+        if type_matches {
             let the_str = self.the();
             let the_attr =
                 the_str
@@ -154,7 +161,7 @@ impl<T: Scalar> Attribute<T> {
             })
         } else {
             Err(TypeError::TypeMismatch {
-                expected: self.content_type,
+                expected: self.content_type.unwrap(), // Safe because we checked Some above
                 actual: Term::Constant(value),
             })
         }

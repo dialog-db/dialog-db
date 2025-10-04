@@ -88,7 +88,7 @@ fn test_concept_deserialization_from_specific_json() {
     assert_eq!(email_attr.namespace, "person");
     assert_eq!(email_attr.name, "email");
     assert_eq!(email_attr.description, "Person's email address");
-    assert_eq!(email_attr.content_type, Type::String);
+    assert_eq!(email_attr.content_type, Some(Type::String));
 
     let active_attr = concept
         .attributes
@@ -99,7 +99,7 @@ fn test_concept_deserialization_from_specific_json() {
     assert_eq!(active_attr.namespace, "person");
     assert_eq!(active_attr.name, "active");
     assert_eq!(active_attr.description, "Whether person is active");
-    assert_eq!(active_attr.content_type, Type::Boolean);
+    assert_eq!(active_attr.content_type, Some(Type::Boolean));
 }
 
 #[test]
