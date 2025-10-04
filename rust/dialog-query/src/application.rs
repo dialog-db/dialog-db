@@ -6,7 +6,7 @@ pub use crate::analyzer::AnalyzerError;
 pub use crate::context::new_context;
 pub use crate::error::{PlanError, QueryResult};
 pub use crate::premise::{Negation, Premise};
-pub use crate::{EvaluationContext, Selection, Source, VariableScope};
+pub use crate::{Environment, EvaluationContext, Selection, Source};
 use async_stream::try_stream;
 pub use concept::ConceptApplication;
 pub use fact::FactApplication;
@@ -29,7 +29,7 @@ impl Application {
     /// Estimate the cost of this application given the current environment.
     /// Each application type knows how to calculate its cost based on what's bound.
     /// Returns None if the application cannot be executed without more constraints.
-    pub fn estimate(&self, env: &crate::VariableScope) -> Option<usize> {
+    pub fn estimate(&self, env: &crate::Environment) -> Option<usize> {
         match self {
             Application::Fact(application) => application.estimate(env),
             Application::Concept(application) => application.estimate(env),

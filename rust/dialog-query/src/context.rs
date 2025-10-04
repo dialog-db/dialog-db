@@ -8,15 +8,15 @@ use std::collections::BTreeMap;
 
 pub use futures_util::{stream, TryStreamExt};
 
+pub use super::environment::Environment;
 pub use super::parameters::Parameters;
-pub use super::syntax::VariableScope;
 
 pub fn new_context<S: Source>(store: S) -> EvaluationContext<S, impl Selection> {
     let selection = once(async move { Ok(Match::new()) });
     EvaluationContext {
         source: store,
         selection,
-        scope: VariableScope::new(),
+        scope: Environment::new(),
     }
 }
 
@@ -36,7 +36,7 @@ where
     /// Artifact store for querying facts (equivalent to source/Querier in TypeScript)
     pub source: S,
     /// Variables that are bound at this evaluation point
-    pub scope: VariableScope,
+    pub scope: Environment,
 }
 
 impl<S, M> EvaluationContext<S, M>
@@ -45,7 +45,7 @@ where
     M: Selection,
 {
     /// Create a new evaluation context with given scope
-    pub fn single(store: S, selection: M, scope: VariableScope) -> Self {
+    pub fn single(store: S, selection: M, scope: Environment) -> Self {
         Self {
             source: store,
             selection,
@@ -59,12 +59,12 @@ where
         EvaluationContext {
             source: store,
             selection,
-            scope: VariableScope::new(),
+            scope: Environment::new(),
         }
     }
 
     /// Create a new context with updated scope
-    pub fn with_scope(&self, scope: VariableScope) -> EvaluationContext<S, M>
+    pub fn with_scope(&self, scope: Environment) -> EvaluationContext<S, M>
     where
         M: Clone,
     {
@@ -82,7 +82,7 @@ pub trait EvaluationPlan: Clone + std::fmt::Debug + ConditionalSend {
     /// Get the estimated cost of executing this plan
     fn cost(&self) -> usize;
     /// Set of variables that this plan will bind
-    fn provides(&self) -> &VariableScope;
+    fn provides(&self) -> &Environment;
     /// Execute this plan with the given context and return result frames
     /// This follows the familiar-query pattern where frames flow through the evaluation
     fn evaluate<S: Source, M: Selection>(&self, context: EvaluationContext<S, M>)
@@ -115,7 +115,7 @@ mod tests {
         let session = Session::open(artifacts);
 
         let selection = once(async move { Ok(Match::new()) });
-        let mut scope = VariableScope::new();
+        let mut scope = Environment::new();
         scope.add(&Term::<Value>::var("z"));
 
         let context = EvaluationContext::single(session, selection, scope.clone());

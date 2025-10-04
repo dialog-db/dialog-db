@@ -6,7 +6,7 @@ use crate::selection::TryExpand;
 use crate::SelectionExt;
 pub use crate::{try_stream, EvaluationContext, Selection, Source};
 
-pub use crate::{Match, Parameters, Requirement, VariableScope};
+pub use crate::{Environment, Match, Parameters, Requirement};
 use std::fmt::Display;
 
 pub const PARAM_COST: usize = 10;
@@ -43,7 +43,7 @@ impl FormulaApplication {
     /// Estimate the cost of this formula given the current environment.
     /// For formulas, cost is constant - it's the computational cost of the formula itself.
     /// Formulas are always bound (they compute rather than query), so always returns Some.
-    pub fn estimate(&self, _env: &VariableScope) -> Option<usize> {
+    pub fn estimate(&self, _env: &Environment) -> Option<usize> {
         Some(self.cost)
     }
 

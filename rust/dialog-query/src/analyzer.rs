@@ -1,8 +1,8 @@
 use crate::error::CompileError;
 use crate::{fact::Scalar, predicate::DeductiveRule};
 use crate::{
-    EvaluationContext, Parameters, Premise, Requirement, Schema, Selection, Source, Term, Value,
-    VariableScope,
+    Environment, EvaluationContext, Parameters, Premise, Requirement, Schema, Selection, Source,
+    Term, Value,
 };
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -145,9 +145,9 @@ impl Desired {
     }
 }
 
-impl From<Desired> for VariableScope {
+impl From<Desired> for Environment {
     fn from(desired: Desired) -> Self {
-        let mut scope = VariableScope::new();
+        let mut scope = Environment::new();
         for (name, _) in desired.0.into_iter() {
             scope.add(&Term::<Value>::var(name));
         }
@@ -176,8 +176,8 @@ impl<'a> From<EstimateError<'a>> for CompileError {
 pub struct Plan {
     pub premise: Premise,
     pub cost: usize,
-    pub binds: VariableScope,
-    pub env: VariableScope,
+    pub binds: Environment,
+    pub env: Environment,
 }
 
 impl Plan {
@@ -185,11 +185,11 @@ impl Plan {
         self.cost
     }
 
-    pub fn binds(&self) -> &VariableScope {
+    pub fn binds(&self) -> &Environment {
         &self.binds
     }
 
-    pub fn env(&self) -> &VariableScope {
+    pub fn env(&self) -> &Environment {
         &self.env
     }
 
@@ -218,8 +218,8 @@ pub enum Analysis {
     Viable {
         premise: Premise,
         cost: usize,
-        binds: VariableScope,
-        env: VariableScope,
+        binds: Environment,
+        env: Environment,
         // Cached for efficient updates
         schema: Schema,
         params: Parameters,
@@ -228,8 +228,8 @@ pub enum Analysis {
     Blocked {
         premise: Premise,
         cost: usize,
-        binds: VariableScope,
-        env: VariableScope,
+        binds: Environment,
+        env: Environment,
         requires: Required,
         // Cached for efficient updates
         schema: Schema,
@@ -241,12 +241,12 @@ impl Analysis {
     pub fn from(premise: Premise) -> Self {
         let schema = premise.schema();
         let params = premise.parameters();
-        let env = VariableScope::new();
+        let env = Environment::new();
 
         // Use the premise's estimate() method to calculate cost
         // If None, the premise is unbound and should use a high cost
         let cost = premise.estimate(&env).unwrap_or(usize::MAX);
-        let mut binds = VariableScope::new();
+        let mut binds = Environment::new();
         let mut requires = Required::new();
 
         // Track which choice groups are satisfied by constants
@@ -316,7 +316,7 @@ impl Analysis {
     /// Update this analysis with new bindings from the environment.
     /// May transition from Blocked to Viable if requirements are satisfied.
     /// Only processes relevant bindings and updates incrementally.
-    pub fn update(&mut self, new_bindings: &VariableScope) {
+    pub fn update(&mut self, new_bindings: &Environment) {
         match self {
             Analysis::Viable {
                 premise,
@@ -544,7 +544,7 @@ fn test_analysis_from_premise_with_constant() {
 fn test_analysis_update_transitions_to_viable() {
     use crate::predicate::formula::Formula;
     use crate::strings::Length;
-    use crate::{Parameters, Term, Value, VariableScope};
+    use crate::{Environment, Parameters, Term, Value};
 
     // Length formula requires "of" parameter
     let mut params = Parameters::new();
@@ -558,7 +558,7 @@ fn test_analysis_update_transitions_to_viable() {
     assert!(!analysis.is_viable());
 
     // Update with "text" bound
-    let mut env = VariableScope::new();
+    let mut env = Environment::new();
     env.add(&Term::<Value>::var("text"));
     analysis.update(&env);
 
@@ -570,7 +570,7 @@ fn test_analysis_update_transitions_to_viable() {
 fn test_analysis_update_reduces_cost_when_derived_bound() {
     use crate::predicate::formula::Formula;
     use crate::strings::Length;
-    use crate::{Parameters, Term, Value, VariableScope};
+    use crate::{Environment, Parameters, Term, Value};
 
     // Provide "of" as constant so it's viable, "is" is derived
     let mut params = Parameters::new();
@@ -588,7 +588,7 @@ fn test_analysis_update_reduces_cost_when_derived_bound() {
     assert!(analysis.is_viable());
 
     // Update with "len" already bound
-    let mut env = VariableScope::new();
+    let mut env = Environment::new();
     env.add(&Term::<Value>::var("len".to_string()));
     analysis.update(&env);
 
@@ -652,7 +652,7 @@ mod cost_model_tests {
     use crate::analyzer::Analysis;
     use crate::application::fact::{FactApplication, BASE_COST};
     use crate::artifact::{Attribute, Entity};
-    use crate::{Premise, Term, Value, VariableScope};
+    use crate::{Environment, Premise, Term, Value};
 
     // Test 1: Constants don't add to cost
     #[test]
@@ -727,7 +727,7 @@ mod cost_model_tests {
         assert_eq!(initial_cost, RANGE_SCAN_COST);
 
         // Bind entity in environment
-        let mut env = VariableScope::new();
+        let mut env = Environment::new();
         env.add(&Term::<Value>::var("entity"));
         analysis.update(&env);
 
@@ -767,7 +767,7 @@ mod cost_model_tests {
         );
 
         // Create analysis with entity already in environment
-        let mut env = VariableScope::new();
+        let mut env = Environment::new();
         env.add(&Term::<Value>::var("entity"));
 
         // Use estimate() with the pre-populated env
@@ -964,7 +964,7 @@ mod cost_model_tests {
         let concept_app = ConceptApplication { terms, concept };
 
         // Both should have same cost when nothing is bound
-        let env = VariableScope::new();
+        let env = Environment::new();
 
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
@@ -1016,7 +1016,7 @@ mod cost_model_tests {
         let concept_app = ConceptApplication { terms, concept };
 
         // Bind the value
-        let mut env = VariableScope::new();
+        let mut env = Environment::new();
         env.add(&Term::<Value>::var("value"));
 
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
@@ -1061,7 +1061,7 @@ mod cost_model_tests {
         let concept_app = ConceptApplication { terms, concept };
 
         // Bind the entity
-        let mut env = VariableScope::new();
+        let mut env = Environment::new();
         env.add(&Term::<Value>::var("entity"));
 
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
@@ -1106,7 +1106,7 @@ mod cost_model_tests {
         let concept_app = ConceptApplication { terms, concept };
 
         // Nothing bound
-        let env = VariableScope::new();
+        let env = Environment::new();
 
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
         let concept_cost = concept_app.estimate(&env).expect("Should have cost");
@@ -1150,7 +1150,7 @@ mod cost_model_tests {
         let concept_app = ConceptApplication { terms, concept };
 
         // Bind the value
-        let mut env = VariableScope::new();
+        let mut env = Environment::new();
         env.add(&Term::<Value>::var("tag"));
 
         let fact_cost = fact_app.estimate(&env).expect("Should have cost");
@@ -1196,7 +1196,7 @@ mod cost_model_tests {
 
         // Simulate p2 with entity already bound
         let mut a2 = Analysis::from(Premise::from(p2.clone()));
-        let mut env = VariableScope::new();
+        let mut env = Environment::new();
         env.add(&Term::<Value>::var("entity"));
         a2.update(&env);
         let cost2 = a2.cost();
@@ -1225,7 +1225,7 @@ fn debug_update_cost() {
     use crate::application::fact::FactApplication;
     use crate::artifact::Attribute;
     use crate::artifact::Entity;
-    use crate::{Premise, Term, Value, VariableScope};
+    use crate::{Environment, Premise, Term, Value};
 
     let the_attr: Attribute = "user/name".parse().unwrap();
     let app = FactApplication::new(
@@ -1251,7 +1251,7 @@ fn debug_update_cost() {
     }
 
     // Bind entity
-    let mut env = VariableScope::new();
+    let mut env = Environment::new();
     env.add(&Term::<Value>::var("entity"));
 
     eprintln!("\nUpdating with entity bound...");

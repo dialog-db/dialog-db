@@ -5,8 +5,8 @@ use crate::planner::Join;
 use crate::predicate::Concept;
 use crate::DeductiveRule;
 use crate::{
-    try_stream, Attribute, EvaluationContext, Parameters, Schema, Selection, Source, Value,
-    VariableScope,
+    try_stream, Attribute, Environment, EvaluationContext, Parameters, Schema, Selection, Source,
+    Value,
 };
 use std::fmt::Display;
 
@@ -37,7 +37,7 @@ impl ConceptApplication {
     ///   - Otherwise use Cardinality::Many (expensive - scan + lookups for each result)
     ///
     /// - If nothing is bound: Returns None (should be blocked)
-    pub fn estimate(&self, env: &VariableScope) -> Option<usize> {
+    pub fn estimate(&self, env: &Environment) -> Option<usize> {
         // Check if "this" parameter is bound
         let this_bound = if let Some(this_term) = self.terms.get("this") {
             env.contains(this_term)
@@ -375,7 +375,7 @@ mod tests {
         let application = ConceptApplication { terms, concept };
 
         // Create a scope with the entity already bound
-        let mut scope = VariableScope::new();
+        let mut scope = Environment::new();
         let person_var: Term<Value> = Term::var("person");
         scope.add(&person_var);
 

@@ -4,7 +4,7 @@ pub use crate::artifact::{ArtifactSelector, Constrained};
 pub use crate::context::new_context;
 pub use crate::error::{AnalyzerError, QueryResult};
 use crate::Cardinality;
-pub use crate::VariableScope;
+pub use crate::Environment;
 
 use crate::{try_stream, EvaluationContext, Match, Selection, Source};
 use crate::{Constraint, Dependency, Entity, Parameters, QueryError, Schema, Term, Type, Value};
@@ -115,7 +115,7 @@ impl FactApplication {
 
     /// Estimate cost based on how many parameters are constrained and cardinality.
     /// More constrained = lower cost. Cardinality matters for partially constrained queries.
-    pub fn estimate(&self, env: &VariableScope) -> Option<usize> {
+    pub fn estimate(&self, env: &Environment) -> Option<usize> {
         // Check which parameters are bound (constants or in env)
         let the = env.contains(&self.the);
         let of = env.contains(&self.of);
@@ -265,7 +265,7 @@ impl Display for FactApplication {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FactApplicationPlan {
     pub selector: FactApplication,
-    pub provides: VariableScope,
+    pub provides: Environment,
     pub cost: usize,
 }
 
@@ -274,7 +274,7 @@ impl FactApplicationPlan {
         self.cost
     }
 
-    pub fn provides(&self) -> &VariableScope {
+    pub fn provides(&self) -> &Environment {
         &self.provides
     }
 

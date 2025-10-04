@@ -17,6 +17,7 @@ pub mod context;
 pub mod conversions;
 pub mod cursor;
 pub mod dependencies;
+pub mod environment;
 pub mod error;
 pub mod fact;
 pub mod label;
@@ -35,7 +36,6 @@ pub mod selector;
 pub mod session;
 pub mod stream;
 pub mod strings;
-pub mod syntax;
 pub mod term;
 pub mod types;
 
@@ -61,10 +61,10 @@ pub use session::transaction::{Edit, Transaction, TransactionError};
 pub use session::{QuerySession, Session};
 
 pub use async_stream::try_stream;
+pub use environment::Environment;
 pub use selection::{Match, MatchSet, Selection, SelectionExt};
 pub use selector::Selector;
 pub use stream::*;
-pub use syntax::VariableScope;
 pub use term::*;
 pub use types::IntoType;
 
@@ -95,12 +95,12 @@ pub mod formulas {
 pub mod prelude {
     pub use crate::artifact::{Type, Value};
     pub use crate::context::EvaluationPlan;
+    pub use crate::environment::Environment;
     pub use crate::error::QueryError;
     pub use crate::premise::Premise;
     pub use crate::query::Query;
     pub use crate::rule::{Premises, Rule, When};
     pub use crate::selector::Selector;
-    pub use crate::syntax::VariableScope;
     pub use crate::term::Term;
     pub use crate::types::IntoType;
     // Macros are automatically available due to #[macro_export]

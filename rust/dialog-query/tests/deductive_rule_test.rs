@@ -7,7 +7,7 @@ use dialog_query::predicate::fact::Fact;
 use dialog_query::predicate::{Concept, DeductiveRule};
 use dialog_query::term::Term;
 use dialog_query::Negation;
-use dialog_query::{Application, Dependencies, Parameters, Premise, Value, VariableScope};
+use dialog_query::{Application, Dependencies, Environment, Parameters, Premise, Value};
 use std::collections::HashSet;
 
 #[test]
@@ -86,7 +86,7 @@ fn test_concept_application_analysis() {
 
     let concept_app = ConceptApplication { terms, concept };
 
-    let cost = concept_app.estimate(&VariableScope::new());
+    let cost = concept_app.estimate(&Environment::new());
     assert_eq!(cost, Some(2100));
 
     let schema = concept_app.schema();
@@ -141,7 +141,6 @@ fn test_premise_construction() {
         _ => panic!("Expected Select application"),
     }
 }
-
 
 #[test]
 fn test_error_types() {

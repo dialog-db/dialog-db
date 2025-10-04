@@ -6,7 +6,7 @@ use crate::error::{CompileError, QueryResult};
 pub use crate::premise::Premise;
 pub use crate::term::Term;
 use crate::EvaluationContext;
-pub use crate::{try_stream, Selection, Source, VariableScope};
+pub use crate::{try_stream, Environment, Selection, Source};
 use core::pin::Pin;
 
 /// Query planner that optimizes the order of premise execution based on cost
@@ -53,7 +53,7 @@ impl Planner {
 
     /// Selects and returns the best premise to execute next based on cost.
     /// Updates the planner state by removing the selected premise from candidates.
-    fn top(&mut self, env: &VariableScope) -> Result<Plan, CompileError> {
+    fn top(&mut self, env: &Environment) -> Result<Plan, CompileError> {
         match self {
             Planner::Idle { premises } => {
                 let mut candidates = vec![];
@@ -137,14 +137,14 @@ pub struct Join {
     /// Total execution cost
     pub cost: usize,
     /// Variables provided/bound by this join
-    pub binds: VariableScope,
+    pub binds: Environment,
     /// Variables required in the environment to execute this join
-    pub env: VariableScope,
+    pub env: Environment,
 }
 
 impl Join {
     /// Replan this join with a different scope by converting existing steps to candidates
-    pub fn plan(&self, scope: &VariableScope) -> Result<Self, CompileError> {
+    pub fn plan(&self, scope: &Environment) -> Result<Self, CompileError> {
         let env = scope.clone();
         let mut bound = scope.clone();
         let mut steps = vec![];
@@ -166,7 +166,7 @@ impl Join {
         }
 
         // binds is the difference between final scope and initial env
-        let mut binds = VariableScope::new();
+        let mut binds = Environment::new();
         for var_name in &bound.variables {
             let var: Term<Value> = Term::var(var_name);
             if !env.contains(&var) {
@@ -187,8 +187,8 @@ impl TryFrom<Vec<Premise>> for Join {
     type Error = CompileError;
 
     fn try_from(premises: Vec<Premise>) -> Result<Self, Self::Error> {
-        let env = VariableScope::new();
-        let mut bound = VariableScope::new();
+        let env = Environment::new();
+        let mut bound = Environment::new();
         let mut steps = vec![];
         let mut cost = 0;
 
@@ -205,7 +205,7 @@ impl TryFrom<Vec<Premise>> for Join {
         }
 
         // binds is the difference between final scope and initial env
-        let mut binds = VariableScope::new();
+        let mut binds = Environment::new();
         for var_name in &bound.variables {
             let var: Term<Value> = Term::var(var_name);
             if !env.contains(&var) {
@@ -224,8 +224,8 @@ impl TryFrom<Vec<Premise>> for Join {
 
 impl From<&Vec<Plan>> for Join {
     fn from(plans: &Vec<Plan>) -> Self {
-        let env = VariableScope::new();
-        let mut bound = VariableScope::new();
+        let env = Environment::new();
+        let mut bound = Environment::new();
         let mut steps = vec![];
         let mut cost = 0;
 
@@ -244,7 +244,7 @@ impl From<&Vec<Plan>> for Join {
         }
 
         // binds is the difference between final scope and initial env
-        let mut binds = VariableScope::new();
+        let mut binds = Environment::new();
         for var_name in &bound.variables {
             let var: Term<Value> = Term::var(var_name);
             if !env.contains(&var) {

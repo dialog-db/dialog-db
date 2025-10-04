@@ -1,5 +1,5 @@
 use super::application::Application;
-use super::VariableScope;
+use super::Environment;
 use crate::{try_stream, EvaluationContext, Parameters, Schema, Selection, Source};
 pub use futures_util::{stream, TryStreamExt};
 use std::fmt::Display;
@@ -22,7 +22,7 @@ impl Negation {
     /// Estimate the cost of this negation given the current environment.
     /// Negation adds overhead to the underlying application's cost.
     /// Returns None if the underlying application cannot be executed.
-    pub fn estimate(&self, env: &VariableScope) -> Option<usize> {
+    pub fn estimate(&self, env: &Environment) -> Option<usize> {
         let Negation(application) = self;
         application
             .estimate(env)

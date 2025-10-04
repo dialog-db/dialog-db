@@ -11,8 +11,8 @@ pub use super::application::Application;
 use super::application::{FactApplication, FormulaApplication};
 pub use super::context::{new_context, EvaluationPlan};
 pub use super::negation::Negation;
+pub use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, PlanError, QueryResult};
-pub use crate::syntax::VariableScope;
 pub use crate::Dependencies;
 pub use crate::{EvaluationContext, Selection, Source};
 use std::fmt::Display;
@@ -30,7 +30,7 @@ pub enum Premise {
 impl Premise {
     /// Estimate the cost of this premise given the current environment.
     /// Returns None if the premise cannot be executed without more constraints.
-    pub fn estimate(&self, env: &crate::VariableScope) -> Option<usize> {
+    pub fn estimate(&self, env: &crate::Environment) -> Option<usize> {
         match self {
             Premise::Apply(application) => application.estimate(env),
             Premise::Exclude(negation) => negation.estimate(env),
@@ -53,7 +53,7 @@ impl Premise {
 
     /// Analyze this premise in the given environment.
     /// Returns either a viable plan (ready to execute) or a blocked plan (missing requirements).
-    pub fn analyze(&self, env: &crate::VariableScope) -> crate::analyzer::Analysis {
+    pub fn analyze(&self, env: &crate::Environment) -> crate::analyzer::Analysis {
         let mut analysis = crate::analyzer::Analysis::from(self.clone());
         analysis.update(env);
         analysis

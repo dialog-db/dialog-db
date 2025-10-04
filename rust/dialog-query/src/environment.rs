@@ -7,12 +7,12 @@ use std::collections::HashSet;
 
 /// Tracks variable bindings during query planning
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VariableScope {
+pub struct Environment {
     /// Set of variables that have already been bound.
     pub variables: HashSet<String>,
 }
 
-impl VariableScope {
+impl Environment {
     pub fn new() -> Self {
         Self {
             variables: HashSet::new(),
@@ -48,7 +48,7 @@ impl VariableScope {
         }
     }
 
-    pub fn extend(&mut self, other: impl IntoIterator<Item = Term<Value>>) -> VariableScope {
+    pub fn extend(&mut self, other: impl IntoIterator<Item = Term<Value>>) -> Environment {
         let mut delta = HashSet::new();
 
         for variable in other {
@@ -63,14 +63,14 @@ impl VariableScope {
             }
         }
 
-        VariableScope { variables: delta }
+        Environment { variables: delta }
     }
 
-    pub fn union(self, other: impl IntoIterator<Item = Term<Value>>) -> VariableScope {
+    pub fn union(self, other: impl IntoIterator<Item = Term<Value>>) -> Environment {
         self.clone().extend(other)
     }
 
-    pub fn intersection(self, other: impl IntoIterator<Item = Term<Value>>) -> VariableScope {
+    pub fn intersection(self, other: impl IntoIterator<Item = Term<Value>>) -> Environment {
         let mut intersection = Self::new();
         for variable in other {
             if let Term::Variable {
@@ -86,7 +86,7 @@ impl VariableScope {
         intersection
     }
 
-    pub fn intersects(&self, other: &VariableScope) -> bool {
+    pub fn intersects(&self, other: &Environment) -> bool {
         !self.variables.is_disjoint(&other.variables)
     }
 
@@ -109,7 +109,7 @@ impl VariableScope {
     }
 }
 
-impl IntoIterator for VariableScope {
+impl IntoIterator for Environment {
     type Item = Term<crate::artifact::Value>;
     type IntoIter = std::vec::IntoIter<Term<crate::artifact::Value>>;
 
@@ -122,7 +122,7 @@ impl IntoIterator for VariableScope {
     }
 }
 
-impl IntoIterator for &VariableScope {
+impl IntoIterator for &Environment {
     type Item = Term<crate::artifact::Value>;
     type IntoIter = std::vec::IntoIter<Term<crate::artifact::Value>>;
 
@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn test_scope_add_ignores_constants() {
-        let mut scope = VariableScope::new();
+        let mut scope = Environment::new();
 
         // Adding a constant should do nothing
         scope.add(&Term::Constant(Value::String("test".to_string())));
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_scope_add_ignores_blank_variables() {
-        let mut scope = VariableScope::new();
+        let mut scope = Environment::new();
 
         // Adding a blank variable (None name) should do nothing
         scope.add(&Term::<Value>::blank());
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn test_scope_add_only_adds_named_variables() {
-        let mut scope = VariableScope::new();
+        let mut scope = Environment::new();
 
         // Only named variables should be added
         scope.add(&Term::<Value>::var("x"));
@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_scope_tracks_variable_names_not_values() {
-        let mut scope = VariableScope::new();
+        let mut scope = Environment::new();
 
         // Add a variable to the scope
         scope.add(&Term::<Value>::var("name"));
