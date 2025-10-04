@@ -67,7 +67,7 @@ pub use selector::Selector;
 pub use stream::*;
 pub use syntax::VariableScope;
 pub use term::*;
-pub use types::IntoValueDataType;
+pub use types::IntoType;
 
 /// Formula library exports
 pub mod formulas {
@@ -105,6 +105,6 @@ pub mod prelude {
     pub use crate::selector::Selector;
     pub use crate::syntax::VariableScope;
     pub use crate::term::Term;
-    pub use crate::types::IntoValueDataType;
+    pub use crate::types::IntoType;
     // Macros are automatically available due to #[macro_export]
 }

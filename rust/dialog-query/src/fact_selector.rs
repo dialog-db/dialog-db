@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 /// - `Some(Term::Any)`: Matches any value without binding
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(
-    bound = "T: crate::types::IntoValueDataType + Clone + std::fmt::Debug + Serialize + for<'a> Deserialize<'a> + 'static"
+    bound = "T: crate::types::IntoType + Clone + std::fmt::Debug + Serialize + for<'a> Deserialize<'a> + 'static"
 )]
 pub struct FactSelector<T: Scalar = Value> {
     /// The attribute term (predicate) - what property this fact describes

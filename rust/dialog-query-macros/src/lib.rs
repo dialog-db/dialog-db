@@ -487,14 +487,14 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
 ///
 /// NOTE: This uses string-based type matching because the generated attributes
 /// are in `static` declarations, which require const initialization. Since
-/// `IntoValueDataType::into_value_data_type()` is not a const fn, we cannot
+/// `IntoType::into_type()` is not a const fn, we cannot
 /// call it in static context.
 ///
 /// This is a known limitation. Type aliases will not work correctly.
 /// For example: `type MyString = String;` will default to `Type::Bytes`.
 ///
 /// Future improvement: Use `LazyLock` for runtime trait-based initialization,
-/// or make `IntoValueDataType::into_value_data_type()` a const fn (requires nightly).
+/// or make `IntoType::into_type()` a const fn (requires nightly).
 fn type_to_value_data_type(ty: &Type) -> proc_macro2::TokenStream {
     let type_str = quote!(#ty).to_string().replace(" ", "");
 

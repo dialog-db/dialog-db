@@ -36,7 +36,7 @@ impl<T: Scalar> Attribute<T> {
 
     /// Get the data type for this attribute's type parameter T
     pub fn data_type(&self) -> Option<Type> {
-        T::into_value_data_type()
+        T::TYPE
     }
 }
 
@@ -305,7 +305,7 @@ impl<T: Scalar + Send + Sync + 'static> AttributeTrait for Attribute<T> {
     }
 
     fn data_type(&self) -> Option<Type> {
-        T::into_value_data_type()
+        T::TYPE
     }
 
     fn cardinality(&self) -> Cardinality {

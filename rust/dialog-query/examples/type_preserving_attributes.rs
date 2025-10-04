@@ -54,24 +54,24 @@ impl<T> Attribute<T> {
 
 // Trait for types that can provide Type metadata
 pub trait IntoType {
-    fn into_value_data_type() -> Option<Type>;
+    fn into_type() -> Option<Type>;
 }
 
 // Implementations for common types
 impl IntoType for String {
-    fn into_value_data_type() -> Option<Type> {
+    fn into_type() -> Option<Type> {
         Some(Type::String)
     }
 }
 
 impl IntoType for u32 {
-    fn into_value_data_type() -> Option<Type> {
+    fn into_type() -> Option<Type> {
         Some(Type::UnsignedInt)
     }
 }
 
 impl IntoType for bool {
-    fn into_value_data_type() -> Option<Type> {
+    fn into_type() -> Option<Type> {
         Some(Type::Boolean)
     }
 }
@@ -104,7 +104,7 @@ impl<T: IntoType + Send + Sync + 'static> AttributeTrait for Attribute<T> {
     }
 
     fn data_type(&self) -> Option<Type> {
-        T::into_value_data_type()
+        T::into_type()
     }
 
     fn cardinality(&self) -> Cardinality {
@@ -231,7 +231,7 @@ impl ErasedAttribute {
         Self {
             ptr,
             type_id: TypeId::of::<T>(),
-            data_type: T::into_value_data_type(),
+            data_type: T::into_type(),
             vtable: &ErasedAttributeVtable {
                 the: |ptr| unsafe {
                     let attr = &*(ptr as *const Attribute<T>);
@@ -295,7 +295,7 @@ impl<T: IntoType + 'static> TypeWitness<T> {
     pub fn new() -> Self {
         Self {
             type_id: TypeId::of::<T>(),
-            data_type: T::into_value_data_type(),
+            data_type: T::into_type(),
             _phantom: PhantomData,
         }
     }
@@ -321,7 +321,7 @@ impl ExistentialAttribute {
             the: attr.the(),
             cardinality: attr.cardinality,
             type_id: TypeId::of::<T>(),
-            data_type: T::into_value_data_type(),
+            data_type: T::into_type(),
             attr: Box::new(attr),
         }
     }
@@ -374,7 +374,7 @@ impl TypeRegistry {
         self.types.insert(
             TypeId::of::<T>(),
             TypeInfo {
-                data_type: T::into_value_data_type(),
+                data_type: T::into_type(),
                 name,
             },
         );

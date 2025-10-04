@@ -2,14 +2,13 @@
 ///
 /// This file provides detailed analysis of the trade-offs between different approaches
 /// for preserving type information while allowing uniform collections.
-
 use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 use std::mem;
 
 // Mock types for our exploration (duplicate from the other example for independence)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValueDataType {
+pub enum Type {
     String,
     UnsignedInt,
     SignedInt,
@@ -46,33 +45,33 @@ impl<T> Attribute<T> {
             marker: PhantomData,
         }
     }
-    
+
     pub fn the(&self) -> String {
         format!("{}/{}", self.namespace, self.name)
     }
 }
 
 // Trait for types that can provide ValueDataType metadata
-pub trait IntoValueDataType {
-    fn into_value_data_type() -> Option<ValueDataType>;
+pub trait IntoType {
+    fn into_type() -> Option<Type>;
 }
 
 // Implementations for common types
-impl IntoValueDataType for String {
-    fn into_value_data_type() -> Option<ValueDataType> {
-        Some(ValueDataType::String)
+impl IntoType for String {
+    fn into_type() -> Option<Type> {
+        Some(Type::String)
     }
 }
 
-impl IntoValueDataType for u32 {
-    fn into_value_data_type() -> Option<ValueDataType> {
-        Some(ValueDataType::UnsignedInt)
+impl IntoType for u32 {
+    fn into_type() -> Option<Type> {
+        Some(Type::UnsignedInt)
     }
 }
 
-impl IntoValueDataType for bool {
-    fn into_value_data_type() -> Option<ValueDataType> {
-        Some(ValueDataType::Boolean)
+impl IntoType for bool {
+    fn into_type() -> Option<Type> {
+        Some(Type::Boolean)
     }
 }
 
@@ -84,37 +83,37 @@ impl IntoValueDataType for bool {
 pub trait AttributeTrait: Any + Send + Sync {
     /// Get the fully qualified name of this attribute
     fn the(&self) -> String;
-    
+
     /// Get the data type this attribute holds
-    fn data_type(&self) -> Option<ValueDataType>;
-    
+    fn data_type(&self) -> Option<Type>;
+
     /// Get the cardinality of this attribute
     fn cardinality(&self) -> Cardinality;
-    
+
     /// Get type metadata for downcasting
     fn type_id(&self) -> TypeId;
-    
+
     /// Cast to Any for downcasting
     fn as_any(&self) -> &dyn Any;
 }
 
-impl<T: IntoValueDataType + Send + Sync + 'static> AttributeTrait for Attribute<T> {
+impl<T: IntoType + Send + Sync + 'static> AttributeTrait for Attribute<T> {
     fn the(&self) -> String {
         format!("{}/{}", self.namespace, self.name)
     }
-    
-    fn data_type(&self) -> Option<ValueDataType> {
-        T::into_value_data_type()
+
+    fn data_type(&self) -> Option<Type> {
+        T::into_type()
     }
-    
+
     fn cardinality(&self) -> Cardinality {
         self.cardinality
     }
-    
+
     fn type_id(&self) -> TypeId {
         TypeId::of::<T>()
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -146,15 +145,15 @@ impl TypedAttribute {
             TypedAttribute::Boolean(attr) => attr.the(),
         }
     }
-    
-    pub fn data_type(&self) -> Option<ValueDataType> {
+
+    pub fn data_type(&self) -> Option<Type> {
         match self {
-            TypedAttribute::String(_) => Some(ValueDataType::String),
-            TypedAttribute::UnsignedInt(_) => Some(ValueDataType::UnsignedInt),
-            TypedAttribute::Boolean(_) => Some(ValueDataType::Boolean),
+            TypedAttribute::String(_) => Some(Type::String),
+            TypedAttribute::UnsignedInt(_) => Some(Type::UnsignedInt),
+            TypedAttribute::Boolean(_) => Some(Type::Boolean),
         }
     }
-    
+
     /// Safely extract the underlying Attribute<String> if this is a String variant
     pub fn as_string(&self) -> Option<&Attribute<String>> {
         match self {
@@ -162,7 +161,7 @@ impl TypedAttribute {
             _ => None,
         }
     }
-    
+
     /// Safely extract the underlying Attribute<u32> if this is a UnsignedInt variant
     pub fn as_unsigned_int(&self) -> Option<&Attribute<u32>> {
         match self {
@@ -170,7 +169,7 @@ impl TypedAttribute {
             _ => None,
         }
     }
-    
+
     /// Safely extract the underlying Attribute<bool> if this is a Boolean variant
     pub fn as_boolean(&self) -> Option<&Attribute<bool>> {
         match self {
@@ -210,7 +209,7 @@ pub struct ErasedAttribute {
     /// Type metadata for safe casting
     type_id: TypeId,
     /// Data type information
-    data_type: Option<ValueDataType>,
+    data_type: Option<Type>,
     /// Vtable for common operations
     vtable: &'static ErasedAttributeVtable,
 }
@@ -224,14 +223,14 @@ pub struct ErasedAttributeVtable {
 
 impl ErasedAttribute {
     /// Create a new erased attribute from a typed attribute
-    pub fn new<T: IntoValueDataType + 'static>(attr: Attribute<T>) -> Self {
+    pub fn new<T: IntoType + 'static>(attr: Attribute<T>) -> Self {
         let boxed = Box::new(attr);
         let ptr = Box::into_raw(boxed) as *const ();
-        
+
         Self {
             ptr,
             type_id: TypeId::of::<T>(),
-            data_type: T::into_value_data_type(),
+            data_type: T::into_type(),
             vtable: &ErasedAttributeVtable {
                 the: |ptr| unsafe {
                     let attr = &*(ptr as *const Attribute<T>);
@@ -247,25 +246,23 @@ impl ErasedAttribute {
             },
         }
     }
-    
+
     pub fn the(&self) -> String {
         (self.vtable.the)(self.ptr)
     }
-    
-    pub fn data_type(&self) -> Option<ValueDataType> {
+
+    pub fn data_type(&self) -> Option<Type> {
         self.data_type
     }
-    
+
     pub fn cardinality(&self) -> Cardinality {
         (self.vtable.cardinality)(self.ptr)
     }
-    
+
     /// Safely downcast to the original type
     pub fn downcast<T: 'static>(&self) -> Option<&Attribute<T>> {
         if self.type_id == TypeId::of::<T>() {
-            unsafe {
-                Some(&*(self.ptr as *const Attribute<T>))
-            }
+            unsafe { Some(&*(self.ptr as *const Attribute<T>)) }
         } else {
             None
         }
@@ -293,7 +290,7 @@ pub struct ExistentialAttribute {
     /// Type witness for safe casting
     type_id: TypeId,
     /// Data type information
-    data_type: Option<ValueDataType>,
+    data_type: Option<Type>,
     /// Common attribute operations
     the: String,
     cardinality: Cardinality,
@@ -301,28 +298,28 @@ pub struct ExistentialAttribute {
 
 impl ExistentialAttribute {
     /// Create a new existential attribute
-    pub fn new<T: IntoValueDataType + Send + Sync + 'static>(attr: Attribute<T>) -> Self {
+    pub fn new<T: IntoType + Send + Sync + 'static>(attr: Attribute<T>) -> Self {
         Self {
             the: attr.the(),
             cardinality: attr.cardinality,
             type_id: TypeId::of::<T>(),
-            data_type: T::into_value_data_type(),
+            data_type: T::into_type(),
             attr: Box::new(attr),
         }
     }
-    
+
     pub fn the(&self) -> &str {
         &self.the
     }
-    
-    pub fn data_type(&self) -> Option<ValueDataType> {
+
+    pub fn data_type(&self) -> Option<Type> {
         self.data_type
     }
-    
+
     pub fn cardinality(&self) -> Cardinality {
         self.cardinality
     }
-    
+
     /// Safely downcast to the original type
     pub fn downcast<T: 'static>(&self) -> Option<&Attribute<T>> {
         if self.type_id == TypeId::of::<T>() {
@@ -356,7 +353,7 @@ pub fn analyze_approaches() {
     analyze_enum_approach();
     analyze_erased_approach();
     analyze_existential_approach();
-    
+
     println!("=== RECOMMENDATIONS ===\n");
     print_recommendations();
 }
@@ -364,31 +361,30 @@ pub fn analyze_approaches() {
 fn analyze_trait_object_approach() {
     println!("1. TRAIT OBJECT APPROACH");
     println!("========================");
-    
+
     let (name, age, active) = create_person_attributes();
-    let attrs: Vec<Box<dyn AttributeTrait>> = vec![
-        Box::new(name),
-        Box::new(age),
-        Box::new(active),
-    ];
-    
+    let attrs: Vec<Box<dyn AttributeTrait>> = vec![Box::new(name), Box::new(age), Box::new(active)];
+
     println!("Memory usage:");
-    println!("  - Box<dyn AttributeTrait>: {} bytes per attribute", mem::size_of::<Box<dyn AttributeTrait>>());
+    println!(
+        "  - Box<dyn AttributeTrait>: {} bytes per attribute",
+        mem::size_of::<Box<dyn AttributeTrait>>()
+    );
     println!("  - Includes vtable pointer (8 bytes) + data pointer (8 bytes)");
-    
+
     println!("Pros:");
     println!("  + Clean, idiomatic Rust approach");
     println!("  + Type-safe downcasting with Any trait");
     println!("  + No need to modify existing Attribute<T> structure");
     println!("  + Extensible - can add new types without modifying core enum");
     println!("  + Zero-cost abstractions when not downcasting");
-    
+
     println!("Cons:");
     println!("  - Heap allocation for each attribute (Box)");
     println!("  - Double indirection (vtable + data pointer)");
     println!("  - Runtime cost of downcasting");
     println!("  - Requires All: Any + Send + Sync bounds");
-    
+
     // Test downcasting performance
     let start = std::time::Instant::now();
     for _ in 0..1000 {
@@ -405,81 +401,89 @@ fn analyze_trait_object_approach() {
         }
     }
     let duration = start.elapsed();
-    println!("Performance: 1000 iterations of 3 downcasts: {:?}", duration);
+    println!(
+        "Performance: 1000 iterations of 3 downcasts: {:?}",
+        duration
+    );
     println!();
 }
 
 fn analyze_enum_approach() {
     println!("2. ENUM APPROACH");
     println!("================");
-    
+
     let (name, age, active) = create_person_attributes();
-    let attrs: Vec<TypedAttribute> = vec![
-        name.into(),
-        age.into(),
-        active.into(),
-    ];
-    
+    let attrs: Vec<TypedAttribute> = vec![name.into(), age.into(), active.into()];
+
     println!("Memory usage:");
-    println!("  - TypedAttribute: {} bytes per attribute", mem::size_of::<TypedAttribute>());
+    println!(
+        "  - TypedAttribute: {} bytes per attribute",
+        mem::size_of::<TypedAttribute>()
+    );
     println!("  - Stack allocated, size determined by largest variant");
-    
+
     println!("Pros:");
     println!("  + Stack allocated - no heap overhead");
     println!("  + Compile-time exhaustiveness checking");
     println!("  + Pattern matching is very fast");
     println!("  + Zero-cost type refinement after match");
     println!("  + Clear, explicit type handling");
-    
+
     println!("Cons:");
     println!("  - Must modify code for each new type (not extensible)");
     println!("  - Larger memory footprint (size of largest variant)");
     println!("  - Coupling between attribute types and enum definition");
     println!("  - Manual conversion implementations needed");
-    
+
     // Test pattern matching performance
     let start = std::time::Instant::now();
     for _ in 0..1000 {
         for attr in &attrs {
             match attr {
-                TypedAttribute::String(_) => {},
-                TypedAttribute::UnsignedInt(_) => {},
-                TypedAttribute::Boolean(_) => {},
+                TypedAttribute::String(_) => {}
+                TypedAttribute::UnsignedInt(_) => {}
+                TypedAttribute::Boolean(_) => {}
             }
         }
     }
     let duration = start.elapsed();
-    println!("Performance: 1000 iterations of pattern matching: {:?}", duration);
+    println!(
+        "Performance: 1000 iterations of pattern matching: {:?}",
+        duration
+    );
     println!();
 }
 
 fn analyze_erased_approach() {
     println!("3. TYPE-ERASED WRAPPER APPROACH");
     println!("===============================");
-    
+
     let (name, age, active) = create_person_attributes();
     let attrs = vec![
         ErasedAttribute::new(name),
         ErasedAttribute::new(age),
         ErasedAttribute::new(active),
     ];
-    
+
     println!("Memory usage:");
-    println!("  - ErasedAttribute: {} bytes per attribute", mem::size_of::<ErasedAttribute>());
+    println!(
+        "  - ErasedAttribute: {} bytes per attribute",
+        mem::size_of::<ErasedAttribute>()
+    );
     println!("  - Contains pointer + metadata + vtable pointer");
-    
+
     println!("Pros:");
     println!("  + Type-safe with proper lifetime management");
     println!("  + Extensible - works with any type");
     println!("  + Custom vtable allows optimized operations");
     println!("  + Memory efficient for large attributes");
-    
+
     println!("Cons:");
     println!("  - Complex unsafe implementation");
     println!("  - Manual memory management via vtable");
     println!("  - Higher complexity and potential for bugs");
     println!("  - Requires careful lifetime management");
-    
+
     // Test downcasting performance
     let start = std::time::Instant::now();
     for _ in 0..1000 {
@@ -490,36 +494,42 @@ fn analyze_erased_approach() {
         }
     }
     let duration = start.elapsed();
-    println!("Performance: 1000 iterations of 3 downcasts: {:?}", duration);
+    println!(
+        "Performance: 1000 iterations of 3 downcasts: {:?}",
+        duration
+    );
     println!();
 }
 
 fn analyze_existential_approach() {
     println!("4. EXISTENTIAL TYPES APPROACH");
     println!("=============================");
-    
+
     let (name, age, active) = create_person_attributes();
     let attrs = vec![
         ExistentialAttribute::new(name),
         ExistentialAttribute::new(age),
         ExistentialAttribute::new(active),
     ];
-    
+
     println!("Memory usage:");
-    println!("  - ExistentialAttribute: {} bytes per attribute", mem::size_of::<ExistentialAttribute>());
+    println!(
+        "  - ExistentialAttribute: {} bytes per attribute",
+        mem::size_of::<ExistentialAttribute>()
+    );
     println!("  - Contains Box + metadata + cached values");
-    
+
     println!("Pros:");
     println!("  + Safe - uses Box<dyn Any> internally");
     println!("  + Caches common values for fast access");
     println!("  + Type-safe downcasting");
     println!("  + Extensible to new types");
-    
+
     println!("Cons:");
     println!("  - Heap allocation for each attribute");
     println!("  - Memory overhead from cached values");
     println!("  - Less efficient than direct approaches");
-    
+
     // Test performance
     let start = std::time::Instant::now();
     for _ in 0..1000 {
@@ -529,35 +539,36 @@ fn analyze_existential_approach() {
         }
     }
     let duration = start.elapsed();
-    println!("Performance: 1000 iterations access + downcast: {:?}", duration);
+    println!(
+        "Performance: 1000 iterations access + downcast: {:?}",
+        duration
+    );
     println!();
 }
-
 
 fn print_recommendations() {
     println!("RECOMMENDED APPROACH BY USE CASE:");
     println!("=================================");
-    
+
     println!("🏆 BEST OVERALL: Enum Approach");
     println!("   Use when you have a known, finite set of attribute types and");
     println!("   performance is critical. Provides best performance and safety.");
     println!();
-    
+
     println!("🚀 MOST FLEXIBLE: Trait Object Approach");
     println!("   Use when you need maximum extensibility and don't mind the");
     println!("   heap allocation cost. Great for plugin architectures.");
     println!();
-    
+
     println!("⚡ PERFORMANCE CRITICAL: Enum Approach");
     println!("   Stack allocation + pattern matching gives the best performance.");
     println!();
-    
+
     println!("🔧 COMPLEX SCENARIOS: Type-Erased Wrapper");
     println!("   Use when you need fine-grained control over memory layout and");
     println!("   have expertise with unsafe Rust.");
     println!();
-    
-    
+
     println!("INTEGRATION RECOMMENDATION:");
     println!("===========================");
     println!("Start with the **Enum Approach** for your current use case:");
@@ -589,4 +600,3 @@ fn print_recommendations() {
 fn main() {
     analyze_approaches();
 }
-

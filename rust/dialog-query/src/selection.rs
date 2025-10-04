@@ -199,7 +199,7 @@ impl Match {
                             // Create a proper TypeError for type conversion errors
                             InconsistencyError::TypeConversion(
                                 crate::artifact::TypeError::TypeMismatch(
-                                    T::into_value_data_type().unwrap_or(Type::Bytes),
+                                    T::TYPE.unwrap_or(Type::Bytes),
                                     value.data_type(),
                                 ),
                             )
@@ -217,7 +217,7 @@ impl Match {
 
     pub fn set<T>(&self, term: Term<T>, value: T) -> Result<Self, InconsistencyError>
     where
-        T: crate::types::IntoValueDataType
+        T: crate::types::IntoType
             + Clone
             + Into<Value>
             + PartialEq
@@ -279,7 +279,7 @@ impl Match {
 
     pub fn has<T>(&self, term: &Term<T>) -> bool
     where
-        T: crate::types::IntoValueDataType + Clone,
+        T: crate::types::IntoType + Clone,
     {
         match term {
             Term::Variable { name, .. } => {
@@ -296,7 +296,7 @@ impl Match {
 
     pub fn unify<T>(&self, term: Term<T>, value: Value) -> Result<Self, InconsistencyError>
     where
-        T: crate::types::IntoValueDataType + Clone + Into<Value> + PartialEq<Value>,
+        T: crate::types::IntoType + Clone + Into<Value> + PartialEq<Value>,
     {
         match term {
             Term::Variable { name, .. } => {

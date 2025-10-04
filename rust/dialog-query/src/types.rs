@@ -28,76 +28,69 @@ pub use crate::artifact::{Attribute, Entity, Type, Value};
 ///
 /// # Usage
 /// ```rust
-/// use dialog_query::types::IntoValueDataType;
+/// use dialog_query::types::IntoType;
 /// use dialog_query::artifact::{Value, Type};
 ///
 /// // For concrete types
-/// assert_eq!(String::into_value_data_type(), Some(Type::String));
-/// assert_eq!(u32::into_value_data_type(), Some(Type::UnsignedInt));
+/// assert_eq!(String::TYPE, Some(Type::String));
+/// assert_eq!(u32::TYPE, Some(Type::UnsignedInt));
 ///
 /// // For the dynamic Value type
-/// assert_eq!(Value::into_value_data_type(), None); // Can hold any type
+/// assert_eq!(Value::TYPE, None); // Can hold any type
 /// ```
-pub trait IntoValueDataType {
-    /// Get the Type that corresponds to this Rust type
-    ///
-    /// Returns:
-    /// - `Some(Type::X)` for concrete types like String, u32, etc.
-    /// - `None` for Value type (indicates it can hold any type)
-    fn into_value_data_type() -> Option<Type>;
+pub trait IntoType {
+    const TYPE: Option<Type>;
 }
 
-/// Macro to implement IntoValueDataType for primitive types
+/// Macro to implement IntoType for primitive types
 ///
 /// This macro reduces boilerplate for implementing the trait on standard Rust types.
 /// Each implementation returns Some(Type) for the appropriate variant.
-macro_rules! impl_into_value_data_type {
+macro_rules! impl_into_type {
     ($rust_type:ty, $value_data_type:expr) => {
-        impl IntoValueDataType for $rust_type {
-            fn into_value_data_type() -> Option<Type> {
-                Some($value_data_type)
-            }
+        impl IntoType for $rust_type {
+            const TYPE: Option<Type> = Some($value_data_type);
         }
     };
 }
 
-// Implement IntoValueDataType for all supported primitive and dialog-artifacts types
+// Implement IntoType for all supported primitive and dialog-artifacts types
 //
 // These implementations provide the mapping between Rust types and Type variants.
 // Note that all unsigned integer types map to UnsignedInt, and all signed integers map
 // to SignedInt, regardless of their specific bit width.
 
 // String type
-impl_into_value_data_type!(String, Type::String);
+impl_into_type!(String, Type::String);
 
 // Boolean type
-impl_into_value_data_type!(bool, Type::Boolean);
+impl_into_type!(bool, Type::Boolean);
 
 // Unsigned integer types (all map to UnsignedInt)
-impl_into_value_data_type!(usize, Type::UnsignedInt);
-impl_into_value_data_type!(u128, Type::UnsignedInt);
-impl_into_value_data_type!(u64, Type::UnsignedInt);
-impl_into_value_data_type!(u32, Type::UnsignedInt);
-impl_into_value_data_type!(u16, Type::UnsignedInt);
-impl_into_value_data_type!(u8, Type::UnsignedInt);
+impl_into_type!(usize, Type::UnsignedInt);
+impl_into_type!(u128, Type::UnsignedInt);
+impl_into_type!(u64, Type::UnsignedInt);
+impl_into_type!(u32, Type::UnsignedInt);
+impl_into_type!(u16, Type::UnsignedInt);
+impl_into_type!(u8, Type::UnsignedInt);
 
 // Signed integer types (all map to SignedInt)
-impl_into_value_data_type!(i128, Type::SignedInt);
-impl_into_value_data_type!(i64, Type::SignedInt);
-impl_into_value_data_type!(i32, Type::SignedInt);
-impl_into_value_data_type!(i16, Type::SignedInt);
-impl_into_value_data_type!(i8, Type::SignedInt);
+impl_into_type!(i128, Type::SignedInt);
+impl_into_type!(i64, Type::SignedInt);
+impl_into_type!(i32, Type::SignedInt);
+impl_into_type!(i16, Type::SignedInt);
+impl_into_type!(i8, Type::SignedInt);
 
 // Floating point types (all map to Float)
-impl_into_value_data_type!(f64, Type::Float);
-impl_into_value_data_type!(f32, Type::Float);
+impl_into_type!(f64, Type::Float);
+impl_into_type!(f32, Type::Float);
 
 // Binary data
-impl_into_value_data_type!(Vec<u8>, Type::Bytes);
+impl_into_type!(Vec<u8>, Type::Bytes);
 
 // Dialog-artifacts specific types
-impl_into_value_data_type!(Entity, Type::Entity);
-impl_into_value_data_type!(Attribute, Type::Symbol);
+impl_into_type!(Entity, Type::Entity);
+impl_into_type!(Attribute, Type::Symbol);
 
 /// Special implementation for Value type
 ///
@@ -106,16 +99,12 @@ impl_into_value_data_type!(Attribute, Type::Symbol);
 /// we return None to indicate "this can be any type".
 ///
 /// This is used by Term<Value> to indicate untyped variables in JSON serialization.
-impl IntoValueDataType for Value {
-    fn into_value_data_type() -> Option<Type> {
-        // Value is a dynamic type, so we return None to indicate it can hold any type
-        // This makes Term<Value> variables serialize without type information
-        None
-    }
+impl IntoType for Value {
+    const TYPE: Option<Type> = None;
 }
 
 pub trait Scalar:
-    IntoValueDataType + Clone + std::fmt::Debug + 'static + ConditionalSend + TryFrom<Value>
+    IntoType + Clone + std::fmt::Debug + 'static + ConditionalSend + TryFrom<Value>
 {
     /// Can be used to convert scalars into boxed value. It is intentionally
     /// different from `From<Scalar> impl Value` to avoid unintentional

@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 
 use crate::artifact::{Attribute, Entity, Type, Value};
 use crate::fact::Scalar;
-use crate::types::IntoValueDataType;
+use crate::types::IntoType;
 use serde::{Deserialize, Serialize};
 
 /// Term represents either a constant value or variable constraint of the
@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum Term<T>
 where
-    T: IntoValueDataType + Clone + 'static,
+    T: IntoType + Clone + 'static,
 {
     /// A variable term can be used as matching term across conjuncts in the
     /// predicate. If variable has name it acts as an implicit join across
@@ -65,39 +65,39 @@ where
 /// be converted to and from Option<Type>.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(into = "Option<Type>", from = "Option<Type>")]
-pub struct ContentType<T: IntoValueDataType + Clone + 'static>(PhantomData<T>);
+pub struct ContentType<T: IntoType + Clone + 'static>(PhantomData<T>);
 
-impl<T: IntoValueDataType + Clone + 'static> Default for ContentType<T> {
+impl<T: IntoType + Clone + 'static> Default for ContentType<T> {
     fn default() -> Self {
         ContentType(PhantomData)
     }
 }
 
-// impl<T: IntoValueDataType + Clone + 'static> From<PhantomData<T>> for Type {
+// impl<T: IntoType + Clone + 'static> From<PhantomData<T>> for Type {
 //     fn from(_value: PhantomData<T>) -> Self {
-//         T::into_value_data_type()
+//         T::into_type()
 //     }
 // }
 
-impl<T: IntoValueDataType + Clone + 'static> ContentType<T> {
+impl<T: IntoType + Clone + 'static> ContentType<T> {
     /// Returns true if `T` is `Value` as it can represent all supported data
     /// types.
     fn is_any(&self) -> bool {
-        T::into_value_data_type().is_none()
+        T::TYPE.is_none()
     }
 }
 
 impl<T> From<ContentType<T>> for Option<Type>
 where
-    T: IntoValueDataType + Clone + 'static,
+    T: IntoType + Clone + 'static,
 {
     fn from(_value: ContentType<T>) -> Self {
-        T::into_value_data_type()
+        T::TYPE
     }
 }
 impl<T> From<Option<Type>> for ContentType<T>
 where
-    T: IntoValueDataType + Clone + 'static,
+    T: IntoType + Clone + 'static,
 {
     fn from(_value: Option<Type>) -> Self {
         ContentType(PhantomData)
@@ -169,7 +169,7 @@ where
     /// (since Value can hold any type). Always returns None for constants.
     pub fn content_type(&self) -> Option<Type> {
         match self {
-            Term::Variable { .. } => T::into_value_data_type(),
+            Term::Variable { .. } => T::TYPE,
             _ => None,
         }
     }
@@ -183,7 +183,7 @@ where
         match self {
             Term::Variable { .. } => {
                 // For typed variables, check if the value matches the expected type
-                if let Some(var_type) = T::into_value_data_type() {
+                if let Some(var_type) = T::TYPE {
                     let value_type = Type::from(value);
                     value_type == var_type
                 } else {
@@ -244,7 +244,7 @@ where
 
 impl<T> Default for Term<T>
 where
-    T: IntoValueDataType + Clone,
+    T: IntoType + Clone,
 {
     fn default() -> Self {
         Term::Variable {
@@ -263,7 +263,7 @@ where
 ///
 impl<T> fmt::Display for Term<T>
 where
-    T: IntoValueDataType + Clone + fmt::Debug,
+    T: IntoType + Clone + fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -273,7 +273,7 @@ where
                 name: Some(name), ..
             } => {
                 // Named variables show type information, untyped don't
-                if let Some(data_type) = T::into_value_data_type() {
+                if let Some(data_type) = T::TYPE {
                     write!(f, "?{}<{:?}>", name, data_type)
                 } else {
                     write!(f, "?{}", name)
@@ -415,7 +415,7 @@ impl From<Vec<u8>> for Term<Vec<u8>> {
 /// Allows cloning Terms when you have a reference but need an owned value.
 impl<T> From<&Term<T>> for Term<T>
 where
-    T: IntoValueDataType + Clone,
+    T: IntoType + Clone,
 {
     fn from(term: &Term<T>) -> Self {
         term.clone()

@@ -3,7 +3,7 @@ pub use crate::artifact::{Attribute as ArtifactsAttribute, Entity, Value};
 use crate::error::{SchemaError, TypeError};
 pub use crate::fact_selector::FactSelector;
 pub use crate::term::Term;
-pub use crate::types::{IntoValueDataType, Scalar, Type};
+pub use crate::types::{IntoType, Scalar, Type};
 use crate::Parameters;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use std::marker::PhantomData;

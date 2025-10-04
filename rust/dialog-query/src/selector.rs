@@ -2,15 +2,15 @@
 
 use crate::artifact::{Attribute, Entity};
 use crate::term::Term;
-use crate::types::IntoValueDataType;
+use crate::types::IntoType;
 use serde::{Deserialize, Serialize};
 
 /// Selector pattern for matching against the database (with variables/constants)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(bound = "T: IntoValueDataType + Clone + Serialize + for<'a> Deserialize<'a> + 'static")]
+#[serde(bound = "T: IntoType + Clone + Serialize + for<'a> Deserialize<'a> + 'static")]
 pub struct Selector<T>
 where
-    T: IntoValueDataType + Clone + 'static,
+    T: IntoType + Clone + 'static,
 {
     /// The entity (subject)
     pub entity: Term<Entity>,
@@ -22,7 +22,7 @@ where
 
 impl<T> Selector<T>
 where
-    T: IntoValueDataType + Clone,
+    T: IntoType + Clone,
 {
     /// Create a new selector with the given terms
     pub fn new(entity: Term<Entity>, attribute: Term<Attribute>, value: Term<T>) -> Self {
