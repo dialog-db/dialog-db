@@ -485,48 +485,20 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
 
 /// Generate the Type value for a field type in static attribute declarations.
 ///
-/// NOTE: This uses string-based type matching because the generated attributes
-/// are in `static` declarations, which require const initialization. Since
-/// `IntoType::into_type()` is not a const fn, we cannot
-/// call it in static context.
+/// This uses the IntoType trait's const TYPE associated constant to determine
+/// the type at compile time. This works because IntoType::TYPE is a const,
+/// allowing proper type detection without string matching.
 ///
-/// This is a known limitation. Type aliases will not work correctly.
-/// For example: `type MyString = String;` will default to `Type::Bytes`.
-///
-/// Future improvement: Use `LazyLock` for runtime trait-based initialization,
-/// or make `IntoType::into_type()` a const fn (requires nightly).
+/// The generated code uses a const block with match to handle the Option<Type>,
+/// defaulting to Type::Bytes for Value types (which have TYPE = None).
 fn type_to_value_data_type(ty: &Type) -> proc_macro2::TokenStream {
-    let type_str = quote!(#ty).to_string().replace(" ", "");
-
-    match type_str.as_str() {
-        "String" => quote! { dialog_query::artifact::Type::String },
-        "&str" | "str" => quote! { dialog_query::artifact::Type::String },
-        "bool" => quote! { dialog_query::artifact::Type::Boolean },
-        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => {
-            quote! { dialog_query::artifact::Type::UnsignedInt }
-        }
-        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => {
-            quote! { dialog_query::artifact::Type::SignedInt }
-        }
-        "f32" | "f64" => quote! { dialog_query::artifact::Type::Float },
-        "Vec<u8>" | "Vec<u8>" => quote! { dialog_query::artifact::Type::Bytes },
-        "dialog_artifacts::Entity" | "Entity" => {
-            quote! { dialog_query::artifact::Type::Entity }
-        }
-        "dialog_query::Entity" | "crate::Entity" => {
-            quote! { dialog_query::artifact::Type::Entity }
-        }
-        "dialog_artifacts::Attribute" | "Attribute" => {
-            quote! { dialog_query::artifact::Type::Symbol }
-        }
-        "Concept" | "dialog_query::Concept" | "crate::Concept" => {
-            // Concept is just an Entity wrapper
-            quote! { dialog_query::artifact::Type::Entity }
-        }
-        _ => {
-            // For unknown types, default to Bytes
-            // TODO: Emit a compile warning for unknown types
-            quote! { dialog_query::artifact::Type::Bytes }
+    quote! {
+        {
+            const TYPE_RESULT: dialog_query::artifact::Type = match <#ty as dialog_query::types::IntoType>::TYPE {
+                Some(ty) => ty,
+                None => dialog_query::artifact::Type::Bytes,
+            };
+            TYPE_RESULT
         }
     }
 }
