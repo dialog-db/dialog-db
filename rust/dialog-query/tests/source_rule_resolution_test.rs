@@ -7,7 +7,6 @@ use dialog_query::{
     Attribute,
 };
 use dialog_storage::MemoryStorageBackend;
-use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_session_source_rule_resolution() -> Result<()> {

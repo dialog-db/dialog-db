@@ -2,7 +2,6 @@ use super::fact::{BASE_COST, CONCEPT_OVERHEAD, ENTITY_COST, VALUE_COST};
 use crate::analyzer::{AnalyzerError, LegacyAnalysis};
 use crate::cursor::Cursor;
 use crate::error::PlanError;
-use crate::error::QueryResult;
 use crate::plan::{fresh, ConceptPlan};
 use crate::planner::Join;
 use crate::predicate::Concept;
@@ -231,7 +230,7 @@ impl ConceptApplication {
         let analysis = self.analyze();
         let mut cost = analysis.cost;
         let mut provides = VariableScope::new();
-        for (name, requirement) in analysis.dependencies.iter() {
+        for (name, _) in analysis.dependencies.iter() {
             let term: Term<Value> = Term::var(name);
             if !scope.contains(&term) {
                 provides.add(&term);
@@ -379,11 +378,11 @@ impl ConceptApplication {
         }
     }
 
-    pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
+    pub fn query<S: Source>(&self, store: S) -> impl Selection {
         let store = store.clone();
         let context = fresh(store);
         let selection = self.evaluate(context);
-        Ok(selection)
+        selection
     }
 }
 
@@ -443,7 +442,7 @@ impl Display for ConceptApplication {
 mod tests {
     use super::*;
     use crate::predicate::Concept;
-    use crate::{Attribute, Cardinality, Parameters, Term, Type, Value};
+    use crate::{Attribute, Parameters, Term, Type, Value};
 
     #[test]
     fn test_concept_application_plan() {
@@ -596,7 +595,7 @@ mod tests {
         let application = ConceptApplication { terms, concept };
 
         // Execute the query
-        let selection = application.query(&session)?.collect_matches().await?;
+        let selection = application.query(session).collect_matches().await?;
 
         // Should find both Alice and Bob with their name and age
         assert_eq!(selection.len(), 2, "Should find 2 people");
@@ -759,7 +758,7 @@ async fn test_concept_application_respects_constant_entity_parameter() -> anyhow
     terms.insert("name".to_string(), Term::var("name"));
 
     let app = ConceptApplication { terms, concept };
-    let selection = app.query(&session)?.collect_matches().await?;
+    let selection = app.query(session).collect_matches().await?;
 
     assert_eq!(
         selection.len(),
@@ -850,7 +849,7 @@ async fn test_concept_application_respects_constant_attribute_parameter() -> any
     terms.insert("age".to_string(), Term::var("age"));
 
     let app = ConceptApplication { terms, concept };
-    let selection = app.query(&session)?.collect_matches().await?;
+    let selection = app.query(session).collect_matches().await?;
 
     assert_eq!(selection.len(), 1, "Should find only Bob");
     assert_eq!(
@@ -941,7 +940,7 @@ async fn test_concept_application_respects_multiple_constant_parameters() -> any
     terms.insert("age".to_string(), Term::Constant(Value::UnsignedInt(25)));
 
     let app = ConceptApplication { terms, concept };
-    let selection = app.query(&session)?.collect_matches().await?;
+    let selection = app.query(session).collect_matches().await?;
 
     assert_eq!(
         selection.len(),

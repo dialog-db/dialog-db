@@ -1,6 +1,6 @@
 use dialog_query::artifact::{Entity, Type, Value};
-use dialog_query::attribute::{Attribute, Cardinality, Match};
-use dialog_query::concept::{Attributes, Concept, Instance, Instructions, Match as ConceptMatch};
+use dialog_query::attribute::{Attribute, Cardinality};
+use dialog_query::concept::{Concept, Instance, Instructions, Match as ConceptMatch};
 use dialog_query::predicate::fact::Fact;
 use dialog_query::rule::{Premises, Rule, When};
 use dialog_query::term::Term;
@@ -13,6 +13,7 @@ use std::marker::PhantomData;
 /// This serves as a template for what the derive macro should generate
 #[derive(Debug, Clone)]
 pub struct Person {
+    pub this: Entity,
     /// Name of the person
     pub name: String,
     /// Age of the person
@@ -46,10 +47,17 @@ pub struct PersonRetract {
 
 /// Attributes pattern for Person - enables fluent query building
 #[derive(Debug, Clone)]
-pub struct PersonAttributes {
-    pub this: Term<Entity>,
-    pub name: Match<String>,
-    pub age: Match<u32>,
+pub struct PersonTerms;
+impl PersonTerms {
+    pub fn this() -> Term<Entity> {
+        Term::var("this")
+    }
+    pub fn name() -> Term<String> {
+        Term::var("name")
+    }
+    pub fn age() -> Term<u32> {
+        Term::var("age")
+    }
 }
 
 // Module to hold Person-related constants and attributes
@@ -125,46 +133,70 @@ pub mod person {
     ];
 }
 
+impl dialog_query::predicate::concept::ConceptType for Person {
+    fn operator() -> &'static str {
+        "person"
+    }
+
+    fn attributes() -> &'static dialog_query::predicate::concept::Attributes {
+        static ATTRS: dialog_query::predicate::concept::Attributes =
+            dialog_query::predicate::concept::Attributes::Static(&[]);
+        &ATTRS
+    }
+}
+
 impl Concept for Person {
     type Instance = Person;
     type Match = PersonMatch;
     type Assert = PersonAssert;
     type Retract = PersonRetract;
-    type Attributes = PersonAttributes;
+    type Term = PersonTerms;
+}
 
-    fn name() -> &'static str {
-        "person"
+impl TryFrom<dialog_query::selection::Match> for Person {
+    type Error = dialog_query::error::InconsistencyError;
+
+    fn try_from(source: dialog_query::selection::Match) -> Result<Self, Self::Error> {
+        Ok(Person {
+            this: source.get(&PersonTerms::this())?,
+            name: source.get(&PersonTerms::name())?,
+            age: source.get(&PersonTerms::age())?,
+        })
+    }
+}
+
+impl From<PersonMatch> for dialog_query::Parameters {
+    fn from(source: PersonMatch) -> Self {
+        let mut terms = Self::new();
+
+        terms.insert("this".into(), source.this.as_unknown());
+        terms.insert("name".into(), source.name.as_unknown());
+        terms.insert("age".into(), source.age.as_unknown());
+
+        terms
     }
 }
 
 impl ConceptMatch for PersonMatch {
+    type Concept = Person;
     type Instance = Person;
-    type Attributes = PersonAttributes;
-
-    fn term_for(&self, _name: &str) -> Option<&Term<Value>> {
-        // For now return None - proper implementation would need term conversion
-        None
-    }
-
-    fn this(&self) -> Term<Entity> {
-        self.this.clone()
-    }
 }
 
-impl Attributes for PersonAttributes {
-    fn attributes() -> &'static [(&'static str, Attribute<Value>)] {
-        person::ATTRIBUTE_TUPLES
-    }
-
-    fn of<T: Into<Term<Entity>>>(entity: T) -> Self {
-        let entity = entity.into();
-        PersonAttributes {
-            this: entity.clone(),
-            name: person::NAME_ATTR.of(entity.clone()),
-            age: person::AGE_ATTR.of(entity),
-        }
-    }
-}
+// TODO: Attributes trait no longer exists - replaced by ConceptType
+// impl Attributes for PersonAttributes {
+//     fn attributes() -> &'static [(&'static str, Attribute<Value>)] {
+//         person::ATTRIBUTE_TUPLES
+//     }
+//
+//     fn of<T: Into<Term<Entity>>>(entity: T) -> Self {
+//         let entity = entity.into();
+//         PersonAttributes {
+//             this: entity.clone(),
+//             name: person::NAME_ATTR.of(entity.clone()),
+//             age: person::AGE_ATTR.of(entity),
+//         }
+//     }
+// }
 
 impl Instance for Person {
     fn this(&self) -> Entity {
@@ -243,61 +275,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_manual_person_implementation() {
-        // Test that Person implements Concept
-        assert_eq!(Person::name(), "person");
-
-        // Test attributes metadata using PersonAttributes
-        let attrs = PersonAttributes::attributes();
-        assert_eq!(attrs.len(), 2);
-        assert_eq!(attrs[0].0, "name");
-        assert_eq!(attrs[1].0, "age");
-        assert_eq!(attrs[1].1.cardinality, Cardinality::One);
-
-        // Test that Attribute<Value> has data_type() method
-        // Now returns the stored data_type field
-        assert_eq!(attrs[0].1.content_type(), Some(Type::String));
-        assert_eq!(attrs[1].1.content_type(), Some(Type::UnsignedInt));
-    }
-
-    #[test]
-    fn test_person_match_creation() {
-        let entity = Term::var("person_entity");
-        let attributes = PersonAttributes::of(entity.clone());
-
-        // Verify the attributes object is created correctly
-        assert_eq!(attributes.name.the(), "person/name");
-        assert_eq!(attributes.age.the(), "person/age");
-
-        // Test fluent API with is()
-        let name_query = attributes.name.is("Alice");
-        assert_eq!(
-            name_query
-                .the
-                .as_ref()
-                .map(|t| t.as_constant().cloned())
-                .flatten(),
-            Some(
-                "person/name"
-                    .parse::<dialog_artifacts::Attribute>()
-                    .unwrap()
-            )
-        );
-        assert!(name_query.is.is_some());
-
-        let age_query = attributes.age.is(30u32);
-        assert_eq!(
-            age_query
-                .the
-                .as_ref()
-                .map(|t| t.as_constant().cloned())
-                .flatten(),
-            Some("person/age".parse::<dialog_artifacts::Attribute>().unwrap())
-        );
-        assert!(age_query.is.is_some());
-    }
-
-    #[test]
     fn test_person_rule_when() {
         let entity = Term::var("person_entity");
         let person_match = PersonMatch {
@@ -367,32 +344,6 @@ mod tests {
     }
 
     #[test]
-    fn test_attribute_value_pattern() {
-        // This test demonstrates the Attribute<Value> pattern after reversion
-        let attrs = PersonAttributes::attributes(); // Returns &[(&str, Attribute<Value>)]
-
-        for attr in attrs {
-            // Attributes now have data_type() return the stored type
-            assert!(attr.1.content_type().is_some());
-
-            // We can still access all the basic attribute properties
-            assert_eq!(attr.1.namespace, "person");
-            assert!(attr.0 == "name" || attr.0 == "age");
-            assert!(attr.1.description.contains("person"));
-            println!("Found attribute: {}/{}", attr.1.namespace, attr.1.name);
-        }
-
-        // Verify we can find attributes by name
-        let name_attr = attrs.iter().find(|attr| attr.0 == "name").unwrap();
-        assert_eq!(name_attr.1.name, "name");
-        assert_eq!(name_attr.1.description, "Name of the person");
-
-        let age_attr = attrs.iter().find(|attr| attr.0 == "age").unwrap();
-        assert_eq!(age_attr.1.name, "age");
-        assert_eq!(age_attr.1.description, "Age of the person");
-    }
-
-    #[test]
     fn test_usage_pattern() {
         // This test demonstrates the expected usage pattern
 
@@ -407,14 +358,5 @@ mod tests {
         // 2. Generate When conditions
         let conditions = Person::when(match_pattern);
         assert_eq!(conditions.len(), 2);
-
-        // 3. Alternative: Use the fluent API
-        let query = PersonAttributes::of(Term::var("person"));
-        let name_selector = query.name.is("Alice");
-        let age_selector = query.age.is(30u32);
-
-        // Both selectors should be properly formed
-        assert!(name_selector.the.is_some());
-        assert!(age_selector.the.is_some());
     }
 }

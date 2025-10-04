@@ -689,9 +689,7 @@ fn test_analysis_try_into_plan_when_blocked() {
 #[cfg(test)]
 mod cost_model_tests {
     use crate::analyzer::Analysis;
-    use crate::application::fact::{
-        FactApplication, ATTRIBUTE_COST, BASE_COST, ENTITY_COST, VALUE_COST,
-    };
+    use crate::application::fact::{FactApplication, BASE_COST};
     use crate::artifact::{Attribute, Entity};
     use crate::{Premise, Term, Value, VariableScope};
 
@@ -1263,9 +1261,7 @@ mod cost_model_tests {
 #[test]
 fn debug_update_cost() {
     use crate::analyzer::Analysis;
-    use crate::application::fact::{
-        FactApplication, ATTRIBUTE_COST, BASE_COST, ENTITY_COST, VALUE_COST,
-    };
+    use crate::application::fact::FactApplication;
     use crate::artifact::Attribute;
     use crate::artifact::Entity;
     use crate::{Premise, Term, Value, VariableScope};

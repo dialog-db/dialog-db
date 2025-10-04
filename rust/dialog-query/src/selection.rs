@@ -1,11 +1,10 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::artifact::{Type, Value};
-use crate::{Source, VariableScope};
 use async_stream::try_stream;
 use dialog_common::ConditionalSend;
 
-pub use futures_util::stream::Stream;
+pub use futures_util::stream::{Stream, TryStream};
 use std::pin::Pin;
 use std::task;
 

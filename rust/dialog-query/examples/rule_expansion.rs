@@ -1,8 +1,9 @@
 use dialog_query::rule::Premises;
-use dialog_query::Term;
+use dialog_query::{Entity, Term};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Person {
+    pub this: Entity,
     pub name: String,
     pub age: u32,
 }
@@ -12,12 +13,14 @@ mod person {
     use dialog_query::artifact::{Entity, Value};
     use dialog_query::attribute::{Attribute, Cardinality};
 
+    use dialog_query::predicate::concept::Attributes;
     use dialog_query::term::Term;
-    use dialog_query::{concept, Type};
+    use dialog_query::{concept, Parameters, Type};
     use std::marker::PhantomData;
 
     pub const NAMESPACE: &'static str = "person";
-    const ATTRIBUTES: &'static [(&'static str, Attribute<Value>)] = &[
+
+    const PERSON_ATTRIBUTES: Attributes = Attributes::Static(&[
         (
             "name",
             Attribute {
@@ -40,71 +43,78 @@ mod person {
                 marker: PhantomData::<Value>,
             },
         ),
-    ];
+    ]);
 
     impl concept::Instance for Person {
         fn this(&self) -> Entity {
-            // TODO: This in not gonig to fly we need to find a better way to
-            // manage this relation.
-            Entity::new().unwrap()
+            self.this.clone()
         }
     }
 
-    pub struct Attributes;
-    impl concept::Attributes for Attributes {
-        fn attributes() -> &'static [(&'static str, Attribute<Value>)] {
-            ATTRIBUTES
-        }
+    impl TryFrom<dialog_query::selection::Match> for Person {
+        type Error = dialog_query::error::InconsistencyError;
 
-        fn of<T: Into<Term<Entity>>>(_entity: T) -> Self {
-            Attributes
+        fn try_from(source: dialog_query::selection::Match) -> Result<Self, Self::Error> {
+            Ok(Person {
+                this: source.get(&PersonTerms::this())?,
+                name: source.get(&PersonTerms::name())?,
+                age: source.get(&PersonTerms::age())?,
+            })
         }
     }
 
     pub struct Assert;
     pub struct Retract;
 
+    #[derive(Debug, Clone, PartialEq)]
     pub struct Match {
         pub this: Term<Value>,
-        pub name: Term<Value>,
-        pub age: Term<Value>,
+        pub name: Term<String>,
+        pub age: Term<u32>,
     }
     impl concept::Match for Match {
+        type Concept = Person;
         type Instance = Person;
-        type Attributes = Attributes;
+    }
 
-        fn term_for(&self, name: &str) -> Option<&Term<Value>> {
-            match name {
-                "this" => Some(&self.this),
-                "name" => Some(&self.name),
-                "age" => Some(&self.age),
-                _ => None,
-            }
+    pub struct PersonTerms;
+    impl PersonTerms {
+        pub fn this() -> Term<Entity> {
+            Term::var("this")
         }
+        pub fn name() -> Term<String> {
+            Term::var("name")
+        }
+        pub fn age() -> Term<u32> {
+            Term::var("age")
+        }
+    }
 
-        fn this(&self) -> Term<Entity> {
-            match &self.this {
-                Term::Constant(v) => Term::Constant(v.clone().try_into().unwrap()),
-                Term::Variable { name, .. } => {
-                    if let Some(name) = name {
-                        Term::var(name)
-                    } else {
-                        Term::blank()
-                    }
-                }
-            }
+    impl From<Match> for Parameters {
+        fn from(person: Match) -> Self {
+            let mut params = Parameters::new();
+            params.insert("this".into(), person.this);
+            params.insert("name".into(), person.name.as_unknown());
+            params.insert("age".into(), person.age.as_unknown());
+            params
         }
     }
 
     impl concept::Concept for Person {
         type Instance = Person;
-        type Attributes = Attributes;
         type Match = Match;
+        type Term = PersonTerms;
         type Assert = Assert;
         type Retract = Retract;
+    }
 
-        fn name() -> &'static str {
-            NAMESPACE
+    impl concept::ConceptType for Person {
+        fn operator() -> &'static str {
+            &NAMESPACE
+        }
+
+        fn attributes() -> &'static Attributes {
+            &PERSON_ATTRIBUTES
         }
     }
 

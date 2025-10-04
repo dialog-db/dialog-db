@@ -294,8 +294,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::{
-        predicate::{self, concept::Attributes, Concept},
-        query::PlannedQuery,
+        predicate::{self, concept::Attributes},
         Attribute, Parameters, SelectionExt, Type, VariableScope,
     };
 

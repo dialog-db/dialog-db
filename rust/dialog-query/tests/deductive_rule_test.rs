@@ -1,5 +1,4 @@
 use dialog_query::analyzer::LegacyAnalysis;
-use dialog_query::application::fact::BASE_COST;
 use dialog_query::application::{ConceptApplication, PlanCandidate};
 use dialog_query::artifact::Type;
 use dialog_query::attribute::Attribute;

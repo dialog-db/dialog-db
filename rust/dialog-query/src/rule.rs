@@ -15,8 +15,6 @@ pub type Match<T: Concept> = T::Match;
 #[allow(type_alias_bounds)]
 pub type Claim<T: Concept> = T::Assert;
 #[allow(type_alias_bounds)]
-pub type Attributes<T: Concept> = T::Attributes;
-#[allow(type_alias_bounds)]
 pub type Instance<T: Concept> = T::Instance;
 
 /// Collection of premises that must be satisfied for a rule to apply.

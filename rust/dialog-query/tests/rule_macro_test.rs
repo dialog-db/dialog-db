@@ -1,12 +1,15 @@
-use dialog_query::attribute::Cardinality;
-use dialog_query::concept::{Attributes, Concept};
+use dialog_query::concept::ConceptType;
 use dialog_query::rule::{Match, Premises};
-use dialog_query::{Rule, Term, Type};
+use dialog_query::{Entity, Rule, Term, Type};
 
 #[derive(Rule, Debug, Clone)]
 pub struct Person {
+    /// Person entity
+    pub this: Entity,
+
     /// Name of the person
     pub name: String,
+
     /// Birthday of the person
     pub birthday: u32,
 }
@@ -28,10 +31,10 @@ fn test_derive_rule_generates_types() {
     assert_eq!(statements.len(), 2); // Should have 2 statements for name and birthday
 
     // Test that Person implements Concept
-    assert_eq!(Person::name(), "person");
+    assert_eq!(Person::operator(), "person");
 
     // Test the attributes() method through PersonAttributes
-    let attrs = Person::attributes();
+    let attrs = Person::attributes().iter().collect::<Vec<_>>();
 
     assert_eq!(attrs.len(), 2);
     assert_eq!(attrs[0].0, "name");
@@ -44,22 +47,6 @@ fn test_derive_rule_generates_types() {
     assert_eq!(attrs[1].1.name, "birthday");
     assert_eq!(attrs[1].1.description, "Birthday of the person");
     assert_eq!(attrs[1].1.content_type(), Some(Type::UnsignedInt));
-
-    // Test the new Attributes::of function
-    let _attributes = PersonAttributes::of(entity.clone());
-    // The attributes should be created successfully
-    assert_eq!(_attributes.name.the(), "person/name");
-    assert_eq!(_attributes.birthday.the(), "person/birthday");
-    assert_eq!(_attributes.name.attribute.cardinality, Cardinality::One);
-    assert_eq!(_attributes.name.attribute.description, "Name of the person");
-    assert_eq!(_attributes.birthday.attribute.cardinality, Cardinality::One);
-    assert_eq!(
-        _attributes.birthday.attribute.description,
-        "Birthday of the person"
-    );
-
-    // Test fluent API
-    _attributes.name.is("John Doe");
 
     // Test that Person implements Rule
     let test_match = Match::<Person> {
@@ -80,17 +67,4 @@ fn test_static_attributes_generation() {
     assert_eq!(PERSON_NAME.name, "name");
     assert_eq!(PERSON_BIRTHDAY.namespace, "person");
     assert_eq!(PERSON_BIRTHDAY.name, "birthday");
-}
-
-#[test]
-fn test_concept_generation() {
-    // Test the new Attributes::of approach
-    let person_query = PersonAttributes::of(Term::var("entity"));
-    person_query.name.is("John");
-    person_query.birthday.is(1990);
-
-    // Test calling the trait method directly
-    let person_query2 = PersonAttributes::of(Term::var("entity2"));
-    person_query2.name.is("Jane");
-    person_query2.birthday.is(1985);
 }

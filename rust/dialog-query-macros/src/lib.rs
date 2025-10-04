@@ -57,7 +57,7 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
 
     let struct_name = &input.ident;
 
-    // Extract fields from the struct
+    // Extract fields from the ostruct
     let fields = match &input.data {
         Data::Struct(data_struct) => match &data_struct.fields {
             Fields::Named(fields_named) => &fields_named.named,
@@ -77,6 +77,33 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
         }
     };
 
+    // Check for required `this: Entity` field
+    let has_this_field = fields.iter().any(|field| {
+        if let Some(field_name) = &field.ident {
+            if field_name == "this" {
+                // Check if the type is Entity
+                if let Type::Path(type_path) = &field.ty {
+                    if let Some(last_segment) = type_path.path.segments.last() {
+                        return last_segment.ident == "Entity";
+                    }
+                }
+            }
+        }
+        false
+    });
+
+    if !has_this_field {
+        return syn::Error::new_spanned(
+            &input,
+            "Concept structs must have a `this: Entity` field.\n\
+             Add the following field to your struct:\n\
+             pub this: Entity\n\n\
+             This field is required because every concept instance must be associated with an entity."
+        )
+        .to_compile_error()
+        .into();
+    }
+
     // Extract field information
     let mut match_fields = Vec::new();
     let mut attributes_fields = Vec::new();
@@ -87,21 +114,33 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
     let mut typed_attributes = Vec::new();
     let mut value_attributes = Vec::new();
     let mut field_names = Vec::new();
+    let mut field_name_lits = Vec::new();
+    let mut field_types = Vec::new();
     let mut match_term_conversions = Vec::new();
     let mut attributes_tuples = Vec::new();
+    let mut terms_methods = Vec::new();
 
     // Generate namespace from struct name (e.g., Person -> "person")
     let namespace = to_snake_case(&struct_name.to_string());
     let namespace_lit = syn::LitStr::new(&namespace, proc_macro2::Span::call_site());
+    let terms_name = syn::Ident::new(&format!("{}Terms", struct_name), struct_name.span());
 
     for field in fields {
         let field_name = field.ident.as_ref().unwrap();
-        let field_type = &field.ty;
         let field_name_str = field_name.to_string();
+
+        // Skip the 'this' field - it's handled specially
+        if field_name_str == "this" {
+            continue;
+        }
+
+        let field_type = &field.ty;
         let field_name_lit = syn::LitStr::new(&field_name_str, proc_macro2::Span::call_site());
 
-        // Store field name for later use in reconstruction
+        // Store field name and type for later use in reconstruction
         field_names.push(field_name);
+        field_types.push(field_type);
+        field_name_lits.push(field_name_lit.clone());
 
         // Extract doc comment for the field
         let doc_comment = extract_doc_comments(&field.attrs);
@@ -109,13 +148,21 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
 
         // Generate Match field (Term<T>)
         match_fields.push(quote! {
-            /// #doc_comment
+            #[doc = #doc_comment_lit]
             pub #field_name: dialog_query::term::Term<#field_type>
+        });
+
+        terms_methods.push(quote! {
+            impl #terms_name {
+                pub fn #field_name() -> dialog_query::Term<#field_type> {
+                    dialog_query::Term::<#field_type>::var("test")
+                }
+            }
         });
 
         // Generate Attributes field (Match<T>)
         attributes_fields.push(quote! {
-            /// #doc_comment
+            #[doc = #doc_comment_lit]
             pub #field_name: dialog_query::attribute::Match<#field_type>
         });
 
@@ -218,7 +265,10 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
 
     // Generate static array names
     let attributes_array_name = syn::Ident::new(
-        &format!("{}_ATTRIBUTES", struct_name.to_string().to_uppercase()),
+        &format!(
+            "{}_ATTRIBUTES_ARRAY",
+            struct_name.to_string().to_uppercase()
+        ),
         struct_name.span(),
     );
     let attribute_tuples_name = syn::Ident::new(
@@ -228,30 +278,47 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
         ),
         struct_name.span(),
     );
+    let attributes_const_name = syn::Ident::new(
+        &format!("{}_ATTRIBUTES", struct_name.to_string().to_uppercase()),
+        struct_name.span(),
+    );
+    let operator_const_name = syn::Ident::new(
+        &format!("{}_OPERATOR", struct_name.to_string().to_uppercase()),
+        struct_name.span(),
+    );
 
     let expanded = quote! {
         /// Match pattern for #struct_name - has Term-wrapped fields for querying
-        #[derive(Debug, Clone)]
+        #[derive(Debug, Clone, PartialEq)]
         pub struct #match_name {
             /// The entity being matched
             pub this: dialog_query::term::Term<dialog_query::artifact::Entity>,
             #(#match_fields),*
         }
 
+        #[derive(Debug, Clone, PartialEq)]
+        pub struct #terms_name {}
+        impl #terms_name {
+            pub fn this() -> dialog_query::Term<dialog_query::Entity> {
+                dialog_query::Term::<dialog_query::Entity>::var("this")
+            }
+        }
+        #(#terms_methods)*
+
         /// Assert pattern for #struct_name - used in rule conclusions
-        #[derive(Debug, Clone)]
+        #[derive(Debug, Clone, PartialEq)]
         pub struct #assert_name {
             #(#assert_fields),*
         }
 
         /// Retract pattern for #struct_name - used for removing facts
-        #[derive(Debug, Clone)]
+        #[derive(Debug, Clone, PartialEq)]
         pub struct #retract_name {
             #(#retract_fields),*
         }
 
         /// Attributes pattern for #struct_name - enables fluent query building
-        #[derive(Debug, Clone)]
+        #[derive(Debug, Clone, PartialEq)]
         pub struct #attributes_name {
             pub this: dialog_query::term::Term<dialog_query::artifact::Entity>,
             #(#attributes_fields),*
@@ -271,44 +338,90 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
             #(#attributes_tuples),*
         ];
 
-        // Implement Match trait for the Match struct
-        impl dialog_query::concept::Match for #match_name {
-            type Instance = #struct_name;
-            type Attributes = #attributes_name;
+        /// Const Attributes for this concept (Static variant)
+        pub const #attributes_const_name: dialog_query::predicate::concept::Attributes =
+            dialog_query::predicate::concept::Attributes::Static(#attribute_tuples_name);
 
-            fn term_for(&self, name: &str) -> Option<&dialog_query::term::Term<dialog_query::artifact::Value>> {
-                match name {
-                    #(#match_term_conversions),*
-                    _ => None
-                }
+        /// Const operator name for this concept
+        pub const #operator_const_name: &str = #namespace_lit;
+
+        // Implement ConceptType trait for the Match struct
+        impl dialog_query::predicate::concept::ConceptType for #match_name {
+            fn operator() -> &'static str {
+                #namespace_lit
             }
 
-            fn this(&self) -> dialog_query::term::Term<dialog_query::artifact::Entity> {
-                self.this.clone()
+            fn attributes() -> &'static dialog_query::predicate::concept::Attributes {
+                &#attributes_const_name
             }
         }
 
-        // Implement Attributes trait
-        impl dialog_query::concept::Attributes for #attributes_name {
-            fn attributes() -> &'static [(&'static str, dialog_query::attribute::Attribute<dialog_query::artifact::Value>)] {
-                #attribute_tuples_name
-            }
+        // Implement Match trait for the Match struct
+        impl dialog_query::concept::Match for #match_name {
+            type Concept = #struct_name;
+            type Instance = #struct_name;
+        }
 
-            fn of<T: Into<dialog_query::term::Term<dialog_query::artifact::Entity>>>(entity: T) -> Self {
-                let entity = entity.into();
-                #attributes_name {
-                    this: entity.clone(),
-                    #(#attribute_init_fields),*
-                }
+        // Add inherent query method so users don't need to import Match trait
+        impl #match_name {
+            /// Query for instances matching this pattern
+            ///
+            /// This is a convenience method that delegates to the Match trait's query method
+            /// and collects the results. It allows calling query without importing the Match trait.
+            pub async fn query<S: dialog_query::query::Source>(
+                &self,
+                source: S,
+            ) -> Result<Vec<#struct_name>, dialog_query::QueryError> {
+                use dialog_query::query::Output;
+                Output::try_collect(<Self as dialog_query::concept::Match>::query(self, source)).await
+            }
+        }
+
+        // Implement From<Match> for Parameters to satisfy Into<Parameters> bound
+        impl From<#match_name> for dialog_query::Parameters {
+            fn from(source: #match_name) -> Self {
+                let mut terms = Self::new();
+
+                terms.insert("this".into(), source.this.as_unknown());
+
+                // Insert each attribute field with term conversion
+                #(terms.insert(#field_name_lits.into(), source.#field_names.as_unknown());)*
+
+                terms
+            }
+        }
+
+        // Implement TryFrom<selection::Match> for the concept struct
+        // Extracts values from the match by field name
+        impl std::convert::TryFrom<dialog_query::selection::Match> for #struct_name {
+            type Error = dialog_query::error::InconsistencyError;
+
+            fn try_from(input: dialog_query::selection::Match) -> Result<Self, Self::Error> {
+                use dialog_query::artifact::{Type, Value};
+                use dialog_query::term::Term;
+
+                Ok(Self {
+                    this: input.get(&<Self as dialog_query::concept::Concept>::Term::this())?,
+                    #(#field_names: input.get(&<Self as dialog_query::concept::Concept>::Term::#field_names())?),*
+                })
             }
         }
 
         // Implement Instance trait for the concept struct
         impl dialog_query::concept::Instance for #struct_name {
             fn this(&self) -> dialog_query::artifact::Entity {
-                // For now, we'll panic as we don't have an entity field on the struct
-                // In a real implementation, you might want to add an entity field to the struct
-                panic!("Instance trait implementation requires an entity field on the struct")
+                self.this.clone()
+            }
+        }
+
+        // Implement ConceptType trait for the struct
+        impl dialog_query::predicate::concept::ConceptType for #struct_name {
+            fn operator() -> &'static str {
+                #namespace_lit
+            }
+
+            fn attributes() -> &'static dialog_query::predicate::concept::Attributes {
+                &#attributes_const_name
             }
         }
 
@@ -316,13 +429,9 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
         impl dialog_query::concept::Concept for #struct_name {
             type Instance = #struct_name;
             type Match = #match_name;
+            type Term = #terms_name;
             type Assert = #assert_name;
             type Retract = #retract_name;
-            type Attributes = #attributes_name;
-
-            fn name() -> &'static str {
-                #namespace_lit
-            }
         }
 
         // Implement Rule trait
@@ -338,67 +447,7 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
             }
         }
 
-        // Implement query helper method for Match structs
-        impl #match_name {
-            /// Query the store for concept instances matching this pattern
-            ///
-            /// This is a convenience method that executes the query plan and converts
-            /// MatchFrames back to concept instances.
-            pub async fn query<S: dialog_query::query::Source>(
-                &self,
-                store: S,
-            ) -> dialog_query::error::QueryResult<Vec<#struct_name>> {
-                use dialog_query::syntax::VariableScope;
-                use dialog_query::plan::{EvaluationContext, EvaluationPlan};
-                use dialog_query::selection::Match;
-                use dialog_query::premise::Premise;
-                use futures_util::{stream, StreamExt, TryStreamExt};
-                use dialog_query::term::Term;
 
-                // Create execution plan
-                let scope = VariableScope::new();
-                let rule_when = #struct_name::when(self.clone());
-                let plans: Vec<_> = rule_when.into_iter().map(|stmt| stmt.plan(&scope)).collect::<Result<Vec<_>, _>>()?;
-
-                // For simplicity, we'll execute each plan sequentially and combine results
-                // In a real implementation, this could be optimized with proper join logic
-                if plans.is_empty() {
-                    return Ok(vec![]);
-                }
-
-                // Start with an empty match frame
-                let initial_match = Match::new();
-                let initial_selection = stream::iter(vec![Ok(initial_match)]);
-                let context = EvaluationContext::single(store.clone(), initial_selection, VariableScope::new());
-
-                // For now, we'll just execute the first plan to demonstrate the pattern
-                // In a complete implementation, we'd need to handle plan joining properly
-                let selection = if let Some(first_plan) = plans.into_iter().next() {
-                    first_plan.evaluate(context)
-                } else {
-                    return Ok(vec![]);
-                };
-
-                // Collect all match frames
-                let match_frames: Vec<Match> = selection.try_collect().await?;
-
-                // Convert match frames back to concept instances
-                let mut results = Vec::new();
-                for frame in match_frames {
-                    // Extract the entity (this field)
-                    let entity = frame.get(&self.this)?;
-
-                    // Extract each field from the frame and construct the concept instance
-                    let instance = #struct_name {
-                        #(#field_names: frame.get(&self.#field_names)?),*
-                    };
-
-                    results.push(instance);
-                }
-
-                Ok(results)
-            }
-        }
 
         // Implement Premises for Match to enable it to be used as a premise
         impl dialog_query::rule::Premises for #match_name {
@@ -435,6 +484,18 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+/// Generate the Type value for a field type in static attribute declarations.
+///
+/// NOTE: This uses string-based type matching because the generated attributes
+/// are in `static` declarations, which require const initialization. Since
+/// `IntoValueDataType::into_value_data_type()` is not a const fn, we cannot
+/// call it in static context.
+///
+/// This is a known limitation. Type aliases will not work correctly.
+/// For example: `type MyString = String;` will default to `Type::Bytes`.
+///
+/// Future improvement: Use `LazyLock` for runtime trait-based initialization,
+/// or make `IntoValueDataType::into_value_data_type()` a const fn (requires nightly).
 fn type_to_value_data_type(ty: &Type) -> proc_macro2::TokenStream {
     let type_str = quote!(#ty).to_string().replace(" ", "");
 
@@ -449,17 +510,24 @@ fn type_to_value_data_type(ty: &Type) -> proc_macro2::TokenStream {
             quote! { dialog_query::artifact::Type::SignedInt }
         }
         "f32" | "f64" => quote! { dialog_query::artifact::Type::Float },
-        "Vec<u8>" => quote! { dialog_query::artifact::Type::Bytes },
+        "Vec<u8>" | "Vec<u8>" => quote! { dialog_query::artifact::Type::Bytes },
         "dialog_artifacts::Entity" | "Entity" => {
+            quote! { dialog_query::artifact::Type::Entity }
+        }
+        "dialog_query::Entity" | "crate::Entity" => {
             quote! { dialog_query::artifact::Type::Entity }
         }
         "dialog_artifacts::Attribute" | "Attribute" => {
             quote! { dialog_query::artifact::Type::Symbol }
         }
+        "Concept" | "dialog_query::Concept" | "crate::Concept" => {
+            // Concept is just an Entity wrapper
+            quote! { dialog_query::artifact::Type::Entity }
+        }
         _ => {
-            // For unknown types, default to String to avoid compile-time errors
-            // This matches the behavior of the original unwrap_or(ValueDataType::String)
-            quote! { dialog_query::artifact::Type::String }
+            // For unknown types, default to Bytes
+            // TODO: Emit a compile warning for unknown types
+            quote! { dialog_query::artifact::Type::Bytes }
         }
     }
 }

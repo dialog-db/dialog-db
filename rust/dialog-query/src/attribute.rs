@@ -335,7 +335,7 @@ impl<'de, T: Scalar> Deserialize<'de> for Attribute<T> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Match<T: Scalar> {
     pub attribute: Attribute<T>,
     pub of: Term<Entity>,

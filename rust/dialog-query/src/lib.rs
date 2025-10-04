@@ -19,6 +19,7 @@ pub mod dependencies;
 pub mod error;
 pub mod fact;
 pub mod fact_selector;
+pub mod label;
 pub mod logic;
 pub mod math;
 pub mod negation;

@@ -13,6 +13,8 @@ use dialog_storage::MemoryStorageBackend;
 
 #[derive(Rule, Debug, Clone)]
 pub struct Person {
+    /// The entity this person represents
+    pub this: Entity,
     /// Name of the person
     pub name: String,
 }
@@ -51,16 +53,10 @@ async fn test_person_concept_basic() -> Result<()> {
 
     // Test the new convenient query method
     let session = Session::open(artifacts);
-    match alice_match.query(session).await {
-        Ok(people) => {
-            assert_eq!(people.len(), 1);
-            assert_eq!(people[0].name, "Alice");
-        }
-        Err(e) => {
-            eprintln!("Query failed: {}", e);
-            return Err(e.into());
-        }
-    }
+    let people = alice_match.query(session).await?;
+
+    assert_eq!(people.len(), 1);
+    assert_eq!(people[0].name, "Alice");
 
     Ok(())
 }

@@ -2,9 +2,8 @@
 mod match_functionality_test {
     use dialog_query::artifact::{Entity, Value};
     use dialog_query::predicate::fact::Fact;
-    use dialog_query::syntax::VariableScope;
     use dialog_query::term::Term;
-    use dialog_query::{Application, Premise};
+    use dialog_query::Premise;
 
     // This test demonstrates the Match struct functionality that was requested.
     // It shows how Match structs work with the new Fact API

@@ -3,11 +3,30 @@
 pub use dialog_common::ConditionalSend;
 
 use crate::artifact::{ArtifactStore, ArtifactStoreMut};
-pub use crate::error::QueryResult;
+pub use crate::error::{QueryError, QueryResult};
 use crate::plan::{fresh, EvaluationPlan};
 use crate::Selection;
+pub use futures_util::stream::{Stream, TryStream};
 
 use crate::predicate::DeductiveRule;
+
+pub trait Output<T: ConditionalSend>:
+    Stream<Item = Result<T, QueryError>> + 'static + ConditionalSend
+{
+    #[allow(async_fn_in_trait)]
+    async fn try_collect(self) -> Result<Vec<T>, QueryError>
+    where
+        Self: Sized,
+    {
+        let results: Vec<T> = futures_util::TryStreamExt::try_collect(self).await?;
+        Ok(results)
+    }
+}
+
+impl<S, T: ConditionalSend> Output<T> for S where
+    S: Stream<Item = Result<T, QueryError>> + 'static + ConditionalSend
+{
+}
 
 /// Source trait for stores that support both artifact storage and rule resolution
 ///

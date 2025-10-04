@@ -3,20 +3,21 @@
 use anyhow::Result;
 use dialog_query::{
     artifact::{Artifacts, Attribute, Entity, Value},
-    rule::{Match, Rule as RuleTrait},
+    rule::Match,
     term::Term,
-    Fact, Session,
+    Fact, Rule, Session,
 };
-use dialog_query_macros::Rule;
 use dialog_storage::MemoryStorageBackend;
 
 #[derive(Rule, Debug, Clone)]
 pub struct Person {
+    pub this: Entity,
     pub name: String,
 }
 
 #[derive(Rule, Debug, Clone, PartialEq)]
 pub struct Employee {
+    pub this: Entity,
     pub name: String,
     pub department: String,
 }
@@ -117,13 +118,8 @@ async fn test_multi_attribute_constant_query_works() -> Result<()> {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name, "Alice");
     assert_eq!(results[0].department, "Engineering");
-    assert_eq!(
-        results[0],
-        Employee {
-            name: "Alice".into(),
-            department: "Engineering".into(),
-        }
-    );
+    // Note: We don't compare the full struct because we don't know the entity ID in advance
+    assert_eq!(results[0].this, alice); // Verify it's Alice's entity
     println!("✅ Multi-attribute constant query: WORKS");
 
     Ok(())

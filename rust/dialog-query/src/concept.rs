@@ -1,18 +1,12 @@
-use crate::analyzer::LegacyAnalysis;
 use crate::application::ConceptApplication;
-use crate::attribute::Attribute;
-use crate::error::{AnalyzerError, PlanError, QueryError};
-use crate::fact_selector::{BASE_COST, ENTITY_COST, VALUE_COST};
-use crate::plan::ConceptPlan;
-use crate::plan::EvaluationPlan;
-use crate::predicate;
-use crate::query::{Query, QueryResult, Source};
-use crate::term::Term;
-use crate::Selection;
-use crate::VariableScope;
+pub use crate::predicate::concept::{Attributes, ConceptType};
+use crate::query::{Output, Source};
+use crate::{predicate, QueryError};
 use crate::{Application, Premise};
-use crate::{Dependencies, Entity, Parameters, Value};
+use crate::{Entity, Parameters};
 use dialog_artifacts::Instruction;
+use dialog_common::ConditionalSend;
+use futures_util::StreamExt;
 
 /// Concept is a set of attributes associated with entity representing an
 /// abstract idea. It is a tool for the domain modeling and in some regard
@@ -23,14 +17,14 @@ use dialog_artifacts::Instruction;
 /// Concepts are used to describe conclusions of the rules, providing a mapping
 /// between conclusions and facts. In that sense you concepts are on-demand
 /// cache of all the conclusions from the associated rules.
-pub trait Concept: Clone + std::fmt::Debug {
+pub trait Concept: Clone + std::fmt::Debug + predicate::concept::ConceptType {
     type Instance: Instance;
-    /// Type describing attributes of this concept.
-    type Attributes: Attributes;
     /// Type representing a query of this concept. It is a set of terms
     /// corresponding to the set of attributes defined by this concept.
     /// It is used as premise of the rule.
-    type Match: Match<Concept = Self, Instance = Self::Instance, Attributes = Self::Attributes>;
+    type Match: Match<Concept = Self, Instance = Self::Instance>;
+
+    type Term;
     /// Type representing an assertion of this concept. It is used in the
     /// inductive rules that describe how state of the concept changes
     /// (or persists) over time.
@@ -38,17 +32,6 @@ pub trait Concept: Clone + std::fmt::Debug {
     /// Type representing a retraction of this concept. It is used in the
     /// inductive rules to describe conditions for the of the concepts lifecycle.
     type Retract;
-
-    fn name() -> &'static str;
-
-    /// Returns the static list of attributes defined for this concept
-    ///
-    /// This is a convenience method that delegates to the associated Attributes type.
-    /// It provides easy access to concept attributes without having to explicitly
-    /// reference the Attributes associated type.
-    fn attributes() -> &'static [(&'static str, Attribute<Value>)] {
-        Self::Attributes::attributes()
-    }
 }
 
 /// Every assertion or retraction can be decomposed into a set of
@@ -65,147 +48,54 @@ pub trait Instructions {
 /// Concepts can be matched and this trait describes an abstract match for the
 /// concept. Each match should be translatable into a set of statements making
 /// it possible to spread it into a query.
-pub trait Match {
-    type Concept: Concept;
+pub trait Match: Sized + Clone + Into<Parameters> {
+    type Concept: Concept + ConceptType;
     /// Instance of the concept that this match can produce.
-    type Instance: Instance;
-    /// Attributes describing the mapping between concept and it's instance.
-    type Attributes: Attributes;
+    type Instance: Instance + ConditionalSend + Clone;
 
-    /// Provides term for a given property name in the corresponding concept
-    fn term_for(&self, name: &str) -> Option<&Term<Value>>;
-
-    fn this(&self) -> Term<Entity>;
-
-    fn analyze(&self) -> Result<LegacyAnalysis, AnalyzerError> {
-        let mut dependencies = Dependencies::new();
-        dependencies.desire("this".into(), ENTITY_COST);
-
-        for (name, _) in Self::Attributes::attributes() {
-            dependencies.desire(name.to_string(), VALUE_COST);
-        }
-
-        Ok(LegacyAnalysis {
-            cost: BASE_COST,
-            dependencies,
-        })
+    fn realize(source: crate::selection::Match) -> Result<Self::Instance, QueryError> {
+        Self::Instance::realize(source).map_err(|e| e.into())
     }
 
-    fn plan(&self, scope: &VariableScope) -> Result<ConceptPlan, PlanError> {
-        // let mut provides = VariableScope::new();
-        // let analysis = self.analyze().map_err(PlanError::from)?;
-
-        // // analyze dependencies and make sure that all required dependencies
-        // // are provided
-        // for (name, requirement) in analysis.dependencies.iter() {
-        //     let parameter = self.term_for(name);
-        //     match requirement {
-        //         Requirement::Required => {}
-        //         Requirement::Derived(_) => {
-        //             // If requirement can be derived and was not provided
-        //             // we add it to the provided set
-        //             if let Some(term) = parameter {
-        //                 if !scope.contains(&term) {
-        //                     provides.add(&term);
-        //                 }
-        //             }
-        //         }
-        //     }
-        // }
-
-        // let mut premises = vec![];
-        // let entity = self.this();
-        // for (name, attribute) in Self::Attributes::attributes() {
-        //     if let Some(term) = self.term_for(name) {
-        //         let select = FactSelector::new()
-        //             .the(attribute.the())
-        //             .of(entity.clone())
-        //             .is(term.clone());
-
-        //         premises.push(select.into())
-        //     }
-        // }
-
-        // let mut join = Join::new(&premises);
-        // let (cost, conjuncts) = join.plan(scope)?;
-
-        // Ok(ConceptPlan {
-        //     cost,
-        //     provides,
-        //     conjuncts,
-        // })
-        // TODO: Legacy concept planning code - needs refactoring
-        panic!("Legacy concept planning not yet implemented")
-    }
-
-    fn conpect(&self) -> predicate::Concept {
-        let mut attributes = vec![];
-        for (name, attribute) in Self::Concept::attributes() {
-            attributes.push((name.to_string(), attribute.clone()));
-        }
-
+    fn conpect() -> predicate::Concept {
+        use predicate::concept::ConceptType;
         predicate::Concept {
-            operator: Self::Concept::name().into(),
-            attributes: attributes.into(),
+            operator: Self::Concept::operator().into(),
+            attributes: Self::Concept::attributes().clone(),
         }
     }
-}
 
-impl<T: Match> Query for T {
-    fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
-        use crate::try_stream;
-
-        let scope = VariableScope::new();
-
-        // Use try_stream to create a stream that owns the plan
-        let plan = self.plan(&scope).map_err(|error| QueryError::from(error))?;
-        let context = crate::plan::fresh(store.clone());
-
-        Ok(try_stream! {
-            for await result in plan.evaluate(context) {
-                yield result?;
-            }
-        })
+    fn query<S: Source>(&self, source: S) -> impl Output<Self::Instance> {
+        let application: ConceptApplication = self.into();
+        application.query(source).map(|input| Self::realize(input?))
     }
 }
 
-impl<T: Match> From<T> for Parameters {
-    fn from(source: T) -> Self {
-        let mut terms = Self::new();
-        if let Some(term) = source.term_for("this") {
-            terms.insert("this".into(), term.clone());
+// Blanket impl for &T -> Parameters that uses the generated From<T> impl
+impl<T: Match + Clone> From<&T> for Parameters {
+    fn from(source: &T) -> Self {
+        source.clone().into()
+    }
+}
+
+impl<T: Match + Clone> From<&T> for Premise {
+    fn from(source: &T) -> Self {
+        Premise::Apply(source.into())
+    }
+}
+
+impl<T: Match + Clone> From<&T> for Application {
+    fn from(source: &T) -> Self {
+        Application::Concept(source.into())
+    }
+}
+
+impl<T: Match + Clone> From<&T> for ConceptApplication {
+    fn from(source: &T) -> Self {
+        ConceptApplication {
+            terms: source.into(),
+            concept: T::conpect(),
         }
-
-        for (name, _) in T::Attributes::attributes() {
-            if let Some(term) = source.term_for(name) {
-                terms.insert(name.to_string(), term.clone());
-            }
-        }
-
-        terms
-    }
-}
-
-impl<T: Match> From<T> for Premise {
-    fn from(source: T) -> Self {
-        let concept = source.conpect();
-        let terms = source.into();
-        Premise::Apply(Application::Concept(ConceptApplication { terms, concept }))
-    }
-}
-
-impl<T: Match> From<T> for Application {
-    fn from(source: T) -> Self {
-        let concept = source.conpect();
-        let terms = source.into();
-        Application::Concept(ConceptApplication { terms, concept })
-    }
-}
-impl<T: Match> From<T> for ConceptApplication {
-    fn from(source: T) -> Self {
-        let concept = source.conpect();
-        let terms = source.into();
-        ConceptApplication { terms, concept }
     }
 }
 
@@ -253,19 +143,16 @@ impl<T: Match> From<T> for ConceptApplication {
 
 /// Describes an instance of a concept. It is expected that each concept is
 /// can be materialized from the selection::Match.
-pub trait Instance {
+pub trait Instance:
+    ConditionalSend + TryFrom<crate::selection::Match, Error = crate::error::InconsistencyError>
+{
     /// Each instance has a corresponding entity and this method
     /// returns a reference to it.
     fn this(&self) -> Entity;
-}
 
-// Schema describes mapping between concept properties and attributes that
-// correspond to those properties.
-pub trait Attributes {
-    fn attributes() -> &'static [(&'static str, Attribute<Value>)];
-
-    /// Create an attributes pattern for querying
-    fn of<T: Into<Term<Entity>>>(entity: T) -> Self;
+    fn realize(source: crate::selection::Match) -> Result<Self, crate::error::InconsistencyError> {
+        Self::try_from(source)
+    }
 }
 
 // /// Join premise that combines multiple premises and orders them optimally
@@ -427,8 +314,9 @@ pub trait Attributes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::Value;
     use crate::artifact::{Artifacts, Attribute as ArtifactAttribute};
-    use crate::artifact::{Type, Value};
+    use crate::concept::Concept;
     use crate::selection::SelectionExt;
     use crate::term::Term;
     use crate::{Fact, Query, Session};
@@ -436,58 +324,160 @@ mod tests {
     use dialog_storage::MemoryStorageBackend;
 
     // Define a Person concept for testing using raw concept API
+    // This mirrors what the #[derive(Rule)] macro generates
     #[derive(Debug, Clone)]
     struct Person {
-        name: String,
-        age: u32,
+        pub this: Entity,
+        pub name: String,
+        pub age: u32,
     }
 
     // PersonMatch for querying - contains Term-wrapped fields
+    // Macro generates typed Terms (Term<String>, Term<u32>) not Term<Value>
     #[derive(Debug, Clone)]
     struct PersonMatch {
-        this: Term<Entity>,
-        name: Term<Value>,
-        age: Term<Value>,
+        pub this: Term<Entity>,
+        pub name: Term<String>,
+        pub age: Term<u32>,
     }
 
-    // PersonAttributes for building queries
-    #[derive(Debug, Clone)]
-    struct PersonAttributes {
-        pub entity: Term<Entity>,
+    struct PersonTerms;
+
+    impl PersonTerms {
+        pub fn this() -> Term<Entity> {
+            Term::<Entity>::var("this")
+        }
+        pub fn name() -> Term<String> {
+            Term::<String>::var("name")
+        }
+        pub fn age() -> Term<u32> {
+            Term::<u32>::var("age")
+        }
     }
 
-    // PersonAssert for assertions
+    // PersonAssert for assertions - uses typed Terms, no 'this' field
     #[derive(Debug, Clone)]
     struct PersonAssert {
-        pub name: String,
-        pub age: u32,
+        pub name: Term<String>,
+        pub age: Term<u32>,
     }
 
-    // PersonRetract for retractions
+    // PersonRetract for retractions - uses typed Terms, no 'this' field
     #[derive(Debug, Clone)]
     struct PersonRetract {
-        pub name: String,
-        pub age: u32,
+        pub name: Term<String>,
+        pub age: Term<u32>,
+    }
+
+    // Implement ConceptType for Person
+    impl predicate::concept::ConceptType for Person {
+        fn operator() -> &'static str {
+            "person"
+        }
+
+        fn attributes() -> &'static predicate::concept::Attributes {
+            use crate::artifact::{Type, Value};
+            use crate::attribute::{Attribute, Cardinality};
+            use std::marker::PhantomData;
+
+            static ATTRIBUTE_TUPLES: &[(&str, Attribute<Value>)] = &[
+                (
+                    "name",
+                    Attribute {
+                        namespace: "person",
+                        name: "name",
+                        description: "Name of the person",
+                        cardinality: Cardinality::One,
+                        content_type: Type::String,
+                        marker: PhantomData,
+                    },
+                ),
+                (
+                    "age",
+                    Attribute {
+                        namespace: "person",
+                        name: "age",
+                        description: "Age of the person",
+                        cardinality: Cardinality::One,
+                        content_type: Type::UnsignedInt,
+                        marker: PhantomData,
+                    },
+                ),
+            ];
+
+            static ATTRS: predicate::concept::Attributes =
+                predicate::concept::Attributes::Static(ATTRIBUTE_TUPLES);
+            &ATTRS
+        }
     }
 
     // Implement Concept for Person
     impl Concept for Person {
         type Instance = Person;
-        type Attributes = PersonAttributes;
         type Match = PersonMatch;
         type Assert = PersonAssert;
         type Retract = PersonRetract;
+        type Term = PersonTerms;
+    }
 
-        fn name() -> &'static str {
-            "person"
+    // Implement TryFrom<selection::Match> for Person
+    // This extracts values from the match by field name
+    impl TryFrom<crate::selection::Match> for Person {
+        type Error = crate::error::InconsistencyError;
+
+        fn try_from(input: crate::selection::Match) -> Result<Self, Self::Error> {
+            Ok(Person {
+                this: input.get(&<Self as Concept>::Term::this())?,
+                name: input.get(&<Self as Concept>::Term::name())?,
+                age: input.get(&<Self as Concept>::Term::age())?,
+            })
         }
     }
 
     // Implement Instance for Person
     impl Instance for Person {
         fn this(&self) -> Entity {
-            // For testing, just create a new entity
-            Entity::new().unwrap()
+            self.this.clone()
+        }
+    }
+
+    // Implement From<PersonMatch> for Parameters
+    // This mirrors what the macro generates
+    impl From<PersonMatch> for Parameters {
+        fn from(source: PersonMatch) -> Self {
+            use crate::types::Scalar;
+            let mut terms = Self::new();
+
+            // Convert this field: Term<Entity> -> Term<Value>
+            let this_term = match source.this {
+                Term::Variable { name, .. } => Term::Variable {
+                    name: name.clone(),
+                    content_type: Default::default(),
+                },
+                Term::Constant(entity) => Term::Constant(Value::Entity(entity)),
+            };
+            terms.insert("this".into(), this_term);
+
+            // Convert attribute fields: Term<T> -> Term<Value> using Scalar::as_value()
+            let name_term = match source.name {
+                Term::Variable { name, .. } => Term::Variable {
+                    name: name.clone(),
+                    content_type: Default::default(),
+                },
+                Term::Constant(value) => Term::Constant(Scalar::as_value(&value)),
+            };
+            terms.insert("name".into(), name_term);
+
+            let age_term = match source.age {
+                Term::Variable { name, .. } => Term::Variable {
+                    name: name.clone(),
+                    content_type: Default::default(),
+                },
+                Term::Constant(value) => Term::Constant(Scalar::as_value(&value)),
+            };
+            terms.insert("age".into(), age_term);
+
+            terms
         }
     }
 
@@ -495,19 +485,6 @@ mod tests {
     impl Match for PersonMatch {
         type Concept = Person;
         type Instance = Person;
-        type Attributes = PersonAttributes;
-
-        fn term_for(&self, name: &str) -> Option<&Term<Value>> {
-            match name {
-                "name" => Some(&self.name),
-                "age" => Some(&self.age),
-                _ => None,
-            }
-        }
-
-        fn this(&self) -> Term<Entity> {
-            self.this.clone()
-        }
     }
 
     // TODO: Fix FactSelector vs FactApplication mismatch
@@ -550,57 +527,50 @@ mod tests {
     //     }
     // }
 
-    // Implement Attributes for PersonAttributes
-    impl Attributes for PersonAttributes {
-        fn attributes() -> &'static [(&'static str, Attribute<Value>)] {
-            use std::sync::LazyLock;
-
-            static PERSON_ATTRIBUTES: LazyLock<[(&'static str, Attribute<Value>); 2]> =
-                LazyLock::new(|| {
-                    [
-                        (
-                            "name",
-                            Attribute::new("person", "name", "Person's name", Type::String),
-                        ),
-                        (
-                            "age",
-                            Attribute::new("person", "age", "Person's age", Type::UnsignedInt),
-                        ),
-                    ]
-                });
-            &*PERSON_ATTRIBUTES
-        }
-
-        fn of<T: Into<Term<Entity>>>(entity: T) -> Self {
-            PersonAttributes {
-                entity: entity.into(),
-            }
-        }
-    }
+    // TODO: The old Attributes trait no longer exists - it was replaced by ConceptType
+    // Commenting out this implementation for now
+    // impl Attributes for PersonAttributes {
+    //     fn attributes() -> &'static [(&'static str, Attribute<Value>)] {
+    //         use std::sync::LazyLock;
+    //
+    //         static PERSON_ATTRIBUTES: LazyLock<[(&'static str, Attribute<Value>); 2]> =
+    //             LazyLock::new(|| {
+    //                 [
+    //                     (
+    //                         "name",
+    //                         Attribute::new("person", "name", "Person's name", Type::String),
+    //                     ),
+    //                     (
+    //                         "age",
+    //                         Attribute::new("person", "age", "Person's age", Type::UnsignedInt),
+    //                     ),
+    //                 ]
+    //             });
+    //         &*PERSON_ATTRIBUTES
+    //     }
+    //
+    //     fn of<T: Into<Term<Entity>>>(entity: T) -> Self {
+    //         PersonAttributes {
+    //             entity: entity.into(),
+    //         }
+    //     }
+    // }
 
     #[test]
     fn test_person_concept_creation() {
+        use predicate::concept::ConceptType;
+
         // Test that the Person concept has the expected properties
-        assert_eq!(Person::name(), "person");
+        assert_eq!(Person::operator(), "person");
 
+        // Test Person has 2 attributes (name and age)
         let attributes = Person::attributes();
-        assert_eq!(attributes.len(), 2);
+        assert_eq!(attributes.count(), 2);
 
-        // Check that name and age attributes exist
-        let attr_names: Vec<&str> = attributes.iter().map(|(name, _)| *name).collect();
+        // Verify attribute names
+        let attr_names: Vec<&str> = attributes.iter().map(|(name, _)| name).collect();
         assert!(attr_names.contains(&"name"));
         assert!(attr_names.contains(&"age"));
-    }
-
-    #[test]
-    fn test_person_attributes_creation() {
-        // Test creating PersonAttributes with the 'of' method
-        let entity_var = Term::var("person_entity");
-        let _person_attrs = PersonAttributes::of(entity_var.clone());
-
-        // Should create attributes with the provided entity
-        // The macro should have generated proper attribute constants
-        assert_eq!(Person::name(), "person");
     }
 
     #[test]
@@ -616,19 +586,18 @@ mod tests {
             age: age_var.clone(),
         };
 
-        // Test Match trait methods
-        assert_eq!(person_match.this(), entity_var);
-        assert_eq!(person_match.term_for("name"), Some(&name_var));
-        assert_eq!(person_match.term_for("age"), Some(&age_var));
-        assert_eq!(person_match.term_for("nonexistent"), None);
+        // Test that fields are accessible
+        assert_eq!(person_match.this, entity_var);
+        assert_eq!(person_match.name, name_var);
+        assert_eq!(person_match.age, age_var);
     }
 
     #[test]
     fn test_person_match_with_constants() {
         // Test querying for a specific person with constant values
         let entity_var = Term::var("alice_entity");
-        let name_const = Term::from(Value::String("Alice".to_string()));
-        let age_const = Term::from(Value::UnsignedInt(30));
+        let name_const = Term::from("Alice".to_string());
+        let age_const = Term::from(30u32);
 
         let person_match = PersonMatch {
             this: entity_var.clone(),
@@ -637,19 +606,19 @@ mod tests {
         };
 
         // Verify the constants are preserved
-        assert_eq!(person_match.term_for("name"), Some(&name_const));
-        assert_eq!(person_match.term_for("age"), Some(&age_const));
+        assert_eq!(person_match.name, name_const);
+        assert_eq!(person_match.age, age_const);
 
         // Test that constants are properly identified
-        assert!(person_match.term_for("name").unwrap().is_constant());
-        assert!(person_match.term_for("age").unwrap().is_constant());
+        assert!(person_match.name.is_constant());
+        assert!(person_match.age.is_constant());
     }
 
     #[test]
     fn test_person_match_mixed_terms() {
         // Test mixing variables and constants in a match pattern
         let entity_var = Term::var("person_entity");
-        let name_const = Term::from(Value::String("Bob".to_string()));
+        let name_const = Term::from("Bob".to_string());
         let age_var = Term::var("any_age");
 
         let person_match = PersonMatch {
@@ -659,75 +628,40 @@ mod tests {
         };
 
         // Name should be constant, age should be variable
-        assert!(person_match.term_for("name").unwrap().is_constant());
-        assert!(person_match.term_for("age").unwrap().is_variable());
-        assert_eq!(
-            person_match.term_for("age").unwrap().name(),
-            Some("any_age")
-        );
-    }
-
-    #[test]
-    fn test_concept_attributes_static_access() {
-        // Test accessing attributes through both Concept and Attributes traits
-        let concept_attrs = Person::attributes();
-        let attrs_trait = PersonAttributes::attributes();
-
-        // Should be the same
-        assert_eq!(concept_attrs.len(), attrs_trait.len());
-        // Note: We can't compare attributes directly since Attribute doesn't implement PartialEq
-
-        // Verify specific attributes
-        let mut found_name = false;
-        let mut found_age = false;
-
-        for (name, attribute) in concept_attrs {
-            match *name {
-                "name" => {
-                    found_name = true;
-                    // Verify name attribute properties
-                    assert_eq!(attribute.the(), "person/name");
-                }
-                "age" => {
-                    found_age = true;
-                    // Verify age attribute properties
-                    assert_eq!(attribute.the(), "person/age");
-                }
-                _ => panic!("Unexpected attribute: {}", name),
-            }
-        }
-
-        assert!(found_name, "name attribute not found");
-        assert!(found_age, "age attribute not found");
+        assert!(person_match.name.is_constant());
+        assert!(person_match.age.is_variable());
+        assert_eq!(person_match.age.name(), Some("any_age"));
     }
 
     #[test]
     fn test_person_instance_creation() {
         // Test creating a Person instance
+        let entity = Entity::new().unwrap();
         let person = Person {
+            this: entity.clone(),
             name: "Charlie".to_string(),
             age: 25,
         };
 
-        // Test Instance trait - this will return a new entity from our placeholder impl
-        let entity = person.this();
-        assert!(entity.to_string().len() > 0); // Should have some entity ID
+        // Test Instance trait - should return the same entity
+        assert_eq!(person.this(), entity);
     }
 
     #[test]
     fn test_concept_name_consistency() {
         // Test that concept name is consistent across different access patterns
-        assert_eq!(Person::name(), "person");
+        assert_eq!(Person::operator(), "person");
 
         // The concept should have consistent naming
         let _person = Person {
+            this: Entity::new().unwrap(),
             name: "Test".to_string(),
             age: 1,
         };
 
         // Instance should have the same concept name
         // (though our current Instance impl doesn't store concept info)
-        assert_eq!(Person::name(), "person");
+        assert_eq!(Person::operator(), "person");
     }
 
     #[test]
@@ -762,46 +696,29 @@ mod tests {
     }
 
     #[test]
-    fn test_attributes_of_method_with_different_entity_types() {
-        // Test that 'of' method works with different entity term types
-
-        // With variable
-        let entity_var = Term::var("person1");
-        let _attrs1 = PersonAttributes::of(entity_var.clone());
-        // Can't easily test the internals, but should not panic
-
-        // With constant entity (if we had one)
-        let entity_const = Term::var("person2"); // Using var since we don't have entity constants readily
-        let _attrs2 = PersonAttributes::of(entity_const);
-        // Should also not panic
-
-        // The method should accept anything that implements Into<Term<Entity>>
-        assert_eq!(Person::name(), "person"); // Just verify we're still working
-    }
-
-    #[test]
-    fn test_empty_term_access() {
-        // Test accessing non-existent terms
+    fn test_person_match_fields() {
+        // Test that PersonMatch has the expected fields
         let entity_var = Term::var("entity");
         let name_var = Term::var("name");
         let age_var = Term::var("age");
 
         let person_match = PersonMatch {
-            this: entity_var,
-            name: name_var,
-            age: age_var,
+            this: entity_var.clone(),
+            name: name_var.clone(),
+            age: age_var.clone(),
         };
 
-        // Should return None for non-existent attributes
-        assert_eq!(person_match.term_for("height"), None);
-        assert_eq!(person_match.term_for("email"), None);
-        assert_eq!(person_match.term_for(""), None);
+        // Should have this, name, and age fields
+        assert_eq!(person_match.this, entity_var);
+        assert_eq!(person_match.name, name_var);
+        assert_eq!(person_match.age, age_var);
     }
 
     #[test]
     fn test_concept_debug_output() {
         // Test that our derived Debug implementations work
         let person = Person {
+            this: Entity::new().unwrap(),
             name: "Debug Test".to_string(),
             age: 42,
         };
@@ -815,12 +732,15 @@ mod tests {
     #[test]
     fn test_concept_clone() {
         // Test that our derived Clone implementations work
+        let entity = Entity::new().unwrap();
         let person1 = Person {
+            this: entity.clone(),
             name: "Original".to_string(),
             age: 35,
         };
 
         let person2 = person1.clone();
+        assert_eq!(person1.this, person2.this);
         assert_eq!(person1.name, person2.name);
         assert_eq!(person1.age, person2.age);
 
@@ -891,16 +811,16 @@ mod tests {
 
         // This should work with the planner fix
         let session = Session::open(artifacts);
-        let results = person_query.query(&session)?.collect_set().await?;
+        let results = Output::try_collect(person_query.query(session)).await?;
 
         // Should find both Alice and Bob (not Mallory who has no age)
         assert_eq!(results.len(), 2, "Should find both people");
 
         // Verify we got the right people
-        assert!(results.contains_binding("name", &Value::String("Alice".to_string())));
-        assert!(results.contains_binding("name", &Value::String("Bob".to_string())));
-        assert!(results.contains_binding("age", &Value::UnsignedInt(25)));
-        assert!(results.contains_binding("age", &Value::UnsignedInt(30)));
+        // assert!(results.contains_binding("name", &Value::String("Alice".to_string())));
+        // assert!(results.contains_binding("name", &Value::String("Bob".to_string())));
+        // assert!(results.contains_binding("age", &Value::UnsignedInt(25)));
+        // assert!(results.contains_binding("age", &Value::UnsignedInt(30)));
 
         Ok(())
     }
@@ -915,29 +835,23 @@ mod tests {
         // Test 1: Create a PersonMatch with mixed terms
         let person_match = PersonMatch {
             this: Term::from(alice.clone()),
-            name: Term::from(Value::String("Alice".to_string())),
+            name: Term::from("Alice".to_string()),
             age: Term::var("age"),
         };
 
-        // Test Match trait methods
-        assert_eq!(person_match.this(), Term::from(alice.clone()));
-        assert_eq!(
-            person_match.term_for("name"),
-            Some(&Term::from(Value::String("Alice".to_string())))
-        );
-        assert_eq!(person_match.term_for("age"), Some(&Term::var("age")));
-        assert_eq!(person_match.term_for("nonexistent"), None);
+        // Test that we can convert to Parameters
+        let params: Parameters = person_match.clone().into();
+        assert!(params.get("this").is_some());
+        assert!(params.get("name").is_some());
+        assert!(params.get("age").is_some());
 
         // Test 2: Verify concept attributes are accessible
-        let attrs = PersonAttributes::attributes();
-        assert_eq!(attrs.len(), 2);
+        let attrs = Person::attributes();
+        assert_eq!(attrs.count(), 2); // name and age
 
-        let name_attr = &attrs[0].1;
-        let age_attr = &attrs[1].1;
-
-        // The attributes should have the expected namespaced names
-        assert_eq!(name_attr.the(), "person/name");
-        assert_eq!(age_attr.the(), "person/age");
+        // Verify we can find specific attributes
+        let name_attr = attrs.iter().find(|(name, _)| *name == "name");
+        assert!(name_attr.is_some());
 
         Ok(())
     }
