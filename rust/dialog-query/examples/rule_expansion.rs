@@ -68,13 +68,24 @@ mod person {
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct Match {
-        pub this: Term<Value>,
+        pub this: Term<Entity>,
         pub name: Term<String>,
         pub age: Term<u32>,
     }
     impl concept::Match for Match {
         type Concept = Person;
         type Instance = Person;
+
+        fn realize(
+            &self,
+            source: dialog_query::selection::Match,
+        ) -> Result<Self::Instance, dialog_query::QueryError> {
+            Ok(Self::Instance {
+                this: source.get(&self.this)?,
+                name: source.get(&self.name)?,
+                age: source.get(&self.age)?,
+            })
+        }
     }
 
     pub struct PersonTerms;
@@ -93,7 +104,7 @@ mod person {
     impl From<Match> for Parameters {
         fn from(person: Match) -> Self {
             let mut params = Parameters::new();
-            params.insert("this".into(), person.this);
+            params.insert("this".into(), person.this.as_unknown());
             params.insert("name".into(), person.name.as_unknown());
             params.insert("age".into(), person.age.as_unknown());
             params

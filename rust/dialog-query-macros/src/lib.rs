@@ -155,7 +155,7 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
         terms_methods.push(quote! {
             impl #terms_name {
                 pub fn #field_name() -> dialog_query::Term<#field_type> {
-                    dialog_query::Term::<#field_type>::var("test")
+                    dialog_query::Term::<#field_type>::var(#field_name_lit)
                 }
             }
         });
@@ -360,6 +360,13 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
         impl dialog_query::concept::Match for #match_name {
             type Concept = #struct_name;
             type Instance = #struct_name;
+
+            fn realize(&self, source: dialog_query::selection::Match) -> std::result::Result<Self::Instance, dialog_query::QueryError> {
+                Ok(#struct_name {
+                    this: source.get(&self.this)?,
+                    #(#field_names: source.get(&self.#field_names)?),*
+                })
+            }
         }
 
         // Add inherent query method so users don't need to import Match trait
@@ -373,7 +380,14 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
                 source: S,
             ) -> Result<Vec<#struct_name>, dialog_query::QueryError> {
                 use dialog_query::query::Output;
-                Output::try_collect(<Self as dialog_query::concept::Match>::query(self, source)).await
+                Output::try_collect(<Self as dialog_query::concept::Match>::query(&self.clone(), source)).await
+            }
+
+            pub fn realize(&self, input: dialog_query::selection::Match) -> Result<#struct_name, dialog_query::QueryError> {
+                Ok(#struct_name {
+                    this: input.get(&self.this)?,
+                    #(#field_names: input.get(&self.#field_names)?),*
+                })
             }
         }
 
@@ -391,21 +405,6 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
             }
         }
 
-        // Implement TryFrom<selection::Match> for the concept struct
-        // Extracts values from the match by field name
-        impl std::convert::TryFrom<dialog_query::selection::Match> for #struct_name {
-            type Error = dialog_query::error::InconsistencyError;
-
-            fn try_from(input: dialog_query::selection::Match) -> Result<Self, Self::Error> {
-                use dialog_query::artifact::{Type, Value};
-                use dialog_query::term::Term;
-
-                Ok(Self {
-                    this: input.get(&<Self as dialog_query::concept::Concept>::Term::this())?,
-                    #(#field_names: input.get(&<Self as dialog_query::concept::Concept>::Term::#field_names())?),*
-                })
-            }
-        }
 
         // Implement Instance trait for the concept struct
         impl dialog_query::concept::Instance for #struct_name {

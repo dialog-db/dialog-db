@@ -33,23 +33,23 @@ pub type Instance<T: Concept> = T::Instance;
 /// # Usage Patterns
 ///
 /// ```rust
-/// use dialog_query::{When, FactSelector, Term, Value, when};
+/// use dialog_query::{When, Term, predicate, when};
 ///
 /// // Example of creating When collections with different syntax options
 /// fn demonstrate_when_creation() -> When {
-///     let selector1 = FactSelector::<Value> {
-///         the: Some(Term::from("example/field1".parse::<dialog_artifacts::Attribute>().unwrap())),
-///         of: Some(Term::var("entity")),
-///         is: Some(Term::var("value1")),
-///         fact: None,
-///     };
+///     let selector1 = predicate::Fact::new()
+///         .the("example/field1".parse::<dialog_query::artifact::Attribute>().unwrap())
+///         .of(Term::var("entity"))
+///         .is(Term::var("value1"))
+///         .build()
+///         .unwrap();
 ///
-///     let selector2 = FactSelector::<Value> {
-///         the: Some(Term::from("example/field2".parse::<dialog_artifacts::Attribute>().unwrap())),
-///         of: Some(Term::var("entity")),
-///         is: Some(Term::var("value2")),
-///         fact: None,
-///     };
+///     let selector2 = predicate::Fact::new()
+///         .the("example/field2".parse::<dialog_query::artifact::Attribute>().unwrap())
+///         .of(Term::var("entity"))
+///         .is(Term::var("value2"))
+///         .build()
+///         .unwrap();
 ///
 ///     // Multiple syntax options for creating When:
 ///
@@ -174,27 +174,27 @@ impl<T: Into<Premise>, const N: usize> From<[T; N]> for When {
 /// This macro provides the most concise way to create rule conditions:
 ///
 /// ```rust
-/// use dialog_query::{when, When, FactSelector, Term, Value};
+/// use dialog_query::{when, When, Term, predicate, artifact::Value};
 ///
 /// fn example() -> When {
-///     let selector1 = FactSelector {
-///         the: Some(Term::from("attr1".parse::<dialog_query::artifact::Attribute>().unwrap())),
-///         of: Some(Term::var("entity")),
-///         is: Some(Term::from(Value::String("value1".to_string()))),
-///         fact: None,
-///     };
-///     let selector2 = FactSelector {
-///         the: Some(Term::from("attr2".parse::<dialog_query::artifact::Attribute>().unwrap())),
-///         of: Some(Term::var("entity")),
-///         is: Some(Term::var("value2")),
-///         fact: None,
-///     };
-///     let selector3 = FactSelector {
-///         the: Some(Term::from("attr3".parse::<dialog_query::artifact::Attribute>().unwrap())),
-///         of: Some(Term::var("entity")),
-///         is: Some(Term::var("value3")),
-///         fact: None,
-///     };
+///     let selector1 = predicate::Fact::new()
+///         .the("attr1".parse::<dialog_query::artifact::Attribute>().unwrap())
+///         .of(Term::var("entity"))
+///         .is(Term::from(Value::String("value1".to_string())))
+///         .build()
+///         .unwrap();
+///     let selector2 = predicate::Fact::new()
+///         .the("attr2".parse::<dialog_query::artifact::Attribute>().unwrap())
+///         .of(Term::var("entity"))
+///         .is(Term::var("value2"))
+///         .build()
+///         .unwrap();
+///     let selector3 = predicate::Fact::new()
+///         .the("attr3".parse::<dialog_query::artifact::Attribute>().unwrap())
+///         .of(Term::var("entity"))
+///         .is(Term::var("value3"))
+///         .build()
+///         .unwrap();
 ///     when![selector1, selector2, selector3]
 /// }
 /// ```

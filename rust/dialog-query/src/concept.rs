@@ -48,14 +48,12 @@ pub trait Instructions {
 /// Concepts can be matched and this trait describes an abstract match for the
 /// concept. Each match should be translatable into a set of statements making
 /// it possible to spread it into a query.
-pub trait Match: Sized + Clone + Into<Parameters> {
+pub trait Match: Sized + Clone + ConditionalSend + Into<Parameters> + 'static {
     type Concept: Concept + ConceptType;
     /// Instance of the concept that this match can produce.
     type Instance: Instance + ConditionalSend + Clone;
 
-    fn realize(source: crate::selection::Match) -> Result<Self::Instance, QueryError> {
-        Self::Instance::realize(source).map_err(|e| e.into())
-    }
+    fn realize(&self, source: crate::selection::Match) -> Result<Self::Instance, QueryError>;
 
     fn conpect() -> predicate::Concept {
         use predicate::concept::ConceptType;
@@ -67,7 +65,10 @@ pub trait Match: Sized + Clone + Into<Parameters> {
 
     fn query<S: Source>(&self, source: S) -> impl Output<Self::Instance> {
         let application: ConceptApplication = self.into();
-        application.query(source).map(|input| Self::realize(input?))
+        let cloned = self.clone();
+        application
+            .query(source)
+            .map(move |input| cloned.realize(input?))
     }
 }
 
@@ -143,16 +144,10 @@ impl<T: Match + Clone> From<&T> for ConceptApplication {
 
 /// Describes an instance of a concept. It is expected that each concept is
 /// can be materialized from the selection::Match.
-pub trait Instance:
-    ConditionalSend + TryFrom<crate::selection::Match, Error = crate::error::InconsistencyError>
-{
+pub trait Instance: ConditionalSend {
     /// Each instance has a corresponding entity and this method
     /// returns a reference to it.
     fn this(&self) -> Entity;
-
-    fn realize(source: crate::selection::Match) -> Result<Self, crate::error::InconsistencyError> {
-        Self::try_from(source)
-    }
 }
 
 // /// Join premise that combines multiple premises and orders them optimally
@@ -485,6 +480,17 @@ mod tests {
     impl Match for PersonMatch {
         type Concept = Person;
         type Instance = Person;
+
+        fn realize(
+            &self,
+            source: crate::selection::Match,
+        ) -> std::result::Result<Self::Instance, QueryError> {
+            Ok(Self::Instance {
+                this: source.get(&self.this)?,
+                name: source.get(&self.name)?,
+                age: source.get(&self.age)?,
+            })
+        }
     }
 
     // TODO: Fix FactSelector vs FactApplication mismatch

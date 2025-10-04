@@ -27,8 +27,8 @@ impl TryFrom<Cursor> for SumInput {
     type Error = FormulaEvaluationError;
 
     fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
-        let of = cursor.read::<u32>("of")?;
-        let with = cursor.read::<u32>("with")?;
+        let of = cursor.read("of")?;
+        let with = cursor.read("with")?;
         Ok(SumInput { of, with })
     }
 }
@@ -63,15 +63,18 @@ impl Formula for Sum {
     fn cells() -> &'static Cells {
         SUM_CELLS.get_or_init(|| {
             Cells::define(|builder| {
-                builder.cell("of", Type::UnsignedInt)
+                builder
+                    .cell("of", Type::UnsignedInt)
                     .the("Number to add to")
                     .required();
 
-                builder.cell("with", Type::UnsignedInt)
+                builder
+                    .cell("with", Type::UnsignedInt)
                     .the("Number to add")
                     .required();
 
-                builder.cell("is", Type::UnsignedInt)
+                builder
+                    .cell("is", Type::UnsignedInt)
                     .the("Sum of numbers")
                     .derived(5);
             })
@@ -152,15 +155,20 @@ impl Formula for Difference {
     fn cells() -> &'static Cells {
         DIFFERENCE_CELLS.get_or_init(|| {
             Cells::define(|builder| {
-                builder.cell("of", Type::UnsignedInt)
+                builder
+                    .cell("of", Type::UnsignedInt)
                     .the("Number to subtract from")
                     .required();
 
-                builder.cell("subtract", Type::UnsignedInt)
+                builder
+                    .cell("subtract", Type::UnsignedInt)
                     .the("Number to subtract")
                     .required();
 
-                builder.cell("is", Type::UnsignedInt).the("Difference").derived(2);
+                builder
+                    .cell("is", Type::UnsignedInt)
+                    .the("Difference")
+                    .derived(2);
             })
         })
     }
@@ -234,15 +242,18 @@ impl Formula for Product {
     fn cells() -> &'static Cells {
         PRODUCT_CELLS.get_or_init(|| {
             Cells::define(|builder| {
-                builder.cell("of", Type::UnsignedInt)
+                builder
+                    .cell("of", Type::UnsignedInt)
                     .the("Number to multiply")
                     .required();
 
-                builder.cell("times", Type::UnsignedInt)
+                builder
+                    .cell("times", Type::UnsignedInt)
                     .the("Times to multiply")
                     .required();
 
-                builder.cell("is", Type::UnsignedInt)
+                builder
+                    .cell("is", Type::UnsignedInt)
                     .the("Result of multiplication")
                     .derived(5);
             })
@@ -323,15 +334,18 @@ impl Formula for Quotient {
     fn cells() -> &'static Cells {
         QUOTIENT_CELLS.get_or_init(|| {
             Cells::define(|builder| {
-                builder.cell("of", Type::UnsignedInt)
+                builder
+                    .cell("of", Type::UnsignedInt)
                     .the("Number to divide")
                     .required();
 
-                builder.cell("by", Type::UnsignedInt)
+                builder
+                    .cell("by", Type::UnsignedInt)
                     .the("Number to divide by")
                     .required();
 
-                builder.cell("is", Type::UnsignedInt)
+                builder
+                    .cell("is", Type::UnsignedInt)
                     .the("Result of division")
                     .derived(5);
             })
@@ -412,15 +426,18 @@ impl Formula for Modulo {
     fn cells() -> &'static Cells {
         MODULO_CELLS.get_or_init(|| {
             Cells::define(|builder| {
-                builder.cell("of", Type::UnsignedInt)
+                builder
+                    .cell("of", Type::UnsignedInt)
                     .the("Number to compute modulo of")
                     .required();
 
-                builder.cell("by", Type::UnsignedInt)
+                builder
+                    .cell("by", Type::UnsignedInt)
                     .the("Number to compute modulo by")
                     .required();
 
-                builder.cell("is", Type::UnsignedInt)
+                builder
+                    .cell("is", Type::UnsignedInt)
                     .the("Result of modulo operation")
                     .derived(10);
             })

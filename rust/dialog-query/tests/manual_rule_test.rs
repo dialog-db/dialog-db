@@ -180,6 +180,17 @@ impl From<PersonMatch> for dialog_query::Parameters {
 impl ConceptMatch for PersonMatch {
     type Concept = Person;
     type Instance = Person;
+
+    fn realize(
+        &self,
+        source: dialog_query::selection::Match,
+    ) -> Result<Self::Instance, dialog_query::QueryError> {
+        Ok(Self::Instance {
+            this: source.get(&self.this)?,
+            name: source.get(&self.name)?,
+            age: source.get(&self.age)?,
+        })
+    }
 }
 
 // TODO: Attributes trait no longer exists - replaced by ConceptType

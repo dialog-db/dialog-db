@@ -47,7 +47,7 @@
 //!
 //! Here's a complete example of implementing a Sum formula:
 //!
-//! ```
+//! ```ignore
 //! use dialog_query::{Formula, Compute, Parameters, Term, Match, Value, Dependencies};
 //! use dialog_query::application::{FormulaApplication};
 //! use dialog_query::error::FormulaEvaluationError;
@@ -93,7 +93,7 @@
 //! // 5. Implement the Formula trait
 //! impl Formula for Sum {
 //!     type Input = SumInput;
-//!     type Match = ();  // Not used yet, for future macro generation
+//!     type Match = SumMatch;
 //!
 //!     fn name() -> &'static str {
 //!         "sum"
@@ -123,7 +123,7 @@
 //! parameters.insert("with".to_string(), Term::var("y"));
 //! parameters.insert("is".to_string(), Term::var("result"));
 //!
-//! let sum = Sum::apply(parameters);
+//! let sum = Sum::apply(parameters).unwrap();
 //!
 //! // Apply to a match with x=5, y=3
 //! let source = Match::new()

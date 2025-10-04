@@ -151,7 +151,7 @@ pub enum FormulaEvaluationError {
     /// // Missing "with" parameter!
     /// parameters.insert("of".to_string(), Term::var("x"));
     ///
-    /// let sum = Sum::apply(parameters);
+    /// let sum = Sum::apply(parameters).unwrap();
     /// let input = Match::new().set(Term::var("x"), 5u32).unwrap();
     /// let result = sum.derive(input).unwrap(); // Will panic with RequiredParameter
     /// ```
@@ -171,7 +171,7 @@ pub enum FormulaEvaluationError {
     /// # parameters.insert("of".to_string(), Term::var("x"));
     /// # parameters.insert("with".to_string(), Term::var("y"));
     /// # parameters.insert("is".to_string(), Term::var("result"));
-    /// # let sum = Sum::apply(parameters);
+    /// # let sum = Sum::apply(parameters).unwrap();
     /// let input = Match::new();
     /// // Variable ?x is not bound!
     /// let result = sum.derive(input).unwrap(); // Will panic with UnboundVariable
