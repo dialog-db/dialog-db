@@ -8,6 +8,8 @@ use dialog_artifacts::Instruction;
 use dialog_common::ConditionalSend;
 use futures_util::StreamExt;
 
+pub type Apply<T: Concept> = T::Match;
+
 /// Concept is a set of attributes associated with entity representing an
 /// abstract idea. It is a tool for the domain modeling and in some regard
 /// similar to a table in relational database or a collection in the document
@@ -32,6 +34,13 @@ pub trait Concept: Clone + std::fmt::Debug + predicate::concept::ConceptType {
     /// Type representing a retraction of this concept. It is used in the
     /// inductive rules to describe conditions for the of the concepts lifecycle.
     type Retract;
+
+    fn concept() -> predicate::concept::Concept {
+        predicate::concept::Concept {
+            operator: Self::operator().into(),
+            attributes: Self::attributes().clone(),
+        }
+    }
 }
 
 /// Every assertion or retraction can be decomposed into a set of
@@ -114,9 +123,9 @@ mod tests {
     use crate::artifact::Value;
     use crate::artifact::{Artifacts, Attribute as ArtifactAttribute};
     use crate::concept::Concept;
-    use crate::Fact;
     use crate::selection::SelectionExt;
     use crate::term::Term;
+    use crate::Fact;
     use crate::Session;
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
