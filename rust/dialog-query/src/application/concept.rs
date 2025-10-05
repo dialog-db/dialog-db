@@ -1,7 +1,7 @@
 use super::fact::CONCEPT_OVERHEAD;
 use crate::context::new_context;
 use crate::cursor::Cursor;
-use crate::planner::Join;
+use crate::planner::{Fork, Join};
 use crate::predicate::Concept;
 use crate::DeductiveRule;
 use crate::{
@@ -161,11 +161,13 @@ impl ConceptApplication {
         let app = self.clone();
         let concept = self.concept.clone();
 
-        // OPTIMIZATION: Plan once outside the loop instead of replanning on every frame
-        // This reduces per-frame cost from ~100s of operations to ~5
-        let implicit = DeductiveRule::from(&concept);
-        let join: Join = (&implicit.premises).into();
-        let planned_join = std::sync::Arc::new(join.plan(&context.scope).unwrap_or(join));
+        let mut rules = vec![DeductiveRule::from(&concept)];
+        rules.extend(context.source.resolve_rules(&concept.operator()));
+        let plan = rules
+            .iter()
+            .map(|rule| Join::from(&rule.premises))
+            .map(|join| join.plan(&context.scope).unwrap_or(join))
+            .fold(Fork::new(), |fork, join| fork.or(join));
 
         try_stream! {
             for await each in context.selection {
@@ -189,8 +191,9 @@ impl ConceptApplication {
                     scope: context.scope.clone(),
                 };
 
+
                 // Merge results back using cursor's bidirectional mapping
-                for await result in planned_join.evaluate(eval_context) {
+                for await result in plan.clone().evaluate(eval_context) {
                     yield cursor.merge(&result?)
                         .map_err(|e| crate::QueryError::FactStore(e.to_string()))?;
                 }

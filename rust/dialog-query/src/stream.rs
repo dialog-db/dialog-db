@@ -1,7 +1,7 @@
-use async_stream::try_stream;
-use dialog_common::ConditionalSend;
-use futures_core::{Future, TryStream};
-use futures_util::TryStreamExt;
+pub use async_stream::try_stream;
+pub use dialog_common::ConditionalSend;
+pub use futures_core::{Future, TryStream};
+pub use futures_util::{stream_select, TryStreamExt};
 use tokio::sync::mpsc::unbounded_channel;
 
 use crate::QueryError;
@@ -32,7 +32,12 @@ where
     tokio::spawn(future);
 }
 
-pub fn fork_stream<S, T>(input: S) -> (impl SendStream<T>, impl SendStream<T>)
+pub fn fork_stream<S, T>(
+    input: S,
+) -> (
+    std::pin::Pin<Box<dyn SendStream<T>>>,
+    std::pin::Pin<Box<dyn SendStream<T>>>,
+)
 where
     S: SendStream<T> + ConditionalSend + 'static,
     T: Clone + ConditionalSend + 'static,
@@ -54,17 +59,17 @@ where
         }
     });
 
-    let left = try_stream! {
+    let left = Box::pin(try_stream! {
         while let Some(item) = left_rx.recv().await {
                 yield item;
         }
-    };
+    });
 
-    let right = try_stream! {
+    let right = Box::pin(try_stream! {
         while let Some(item) = right_rx.recv().await {
                 yield item;
         }
-    };
+    });
 
     (left, right)
 }

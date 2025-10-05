@@ -4,6 +4,7 @@ use crate::context::new_context;
 pub use crate::error::{AnalyzerError, PlanError};
 use crate::error::{CompileError, QueryResult};
 pub use crate::premise::Premise;
+use crate::stream::{fork_stream, stream_select};
 pub use crate::term::Term;
 use crate::EvaluationContext;
 pub use crate::{try_stream, Environment, Selection, Source};
@@ -283,6 +284,7 @@ impl Join {
 /// Recursive chain structure for joining 2+ plan steps.
 /// This explicit recursion at the value level avoids type-level recursion
 /// that would cause compiler stack overflow.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Chain {
     /// Base case - passes through the selection unchanged.
     Empty,
@@ -330,6 +332,80 @@ impl Chain {
                         scope,
                     });
                     for await each in output {
+                        yield each?;
+                    }
+                },
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Fork {
+    Empty,
+    Solo(Join),
+    Duet(Join, Join),
+    Or(Box<Fork>, Join),
+}
+
+impl Fork {
+    /// Creates a new empty join (identity).
+    pub fn new() -> Self {
+        Self::Empty
+    }
+
+    /// Creates a new join of two plans.
+    pub fn or(self, right: Join) -> Self {
+        match self {
+            Self::Empty => Self::Solo(right),
+            Self::Solo(left) => Self::Duet(left, right),
+            _ => Self::Or(Box::new(self), right),
+        }
+    }
+
+    pub fn evaluate<S: Source, M: Selection>(
+        self,
+        context: EvaluationContext<S, M>,
+    ) -> Pin<Box<dyn Selection>> {
+        Box::pin(try_stream! {
+            match self {
+                Self::Empty => {
+                    for await each in context.selection {
+                        each?;
+                    }
+                },
+                Self::Solo(left) => {
+                    for await each in left.evaluate(context) {
+                        yield each?;
+                    }
+                },
+                Self::Duet(left, right) => {
+                    let (left_input, right_input) = fork_stream(context.selection);
+
+                    let scope = context.scope.clone();
+                    let source = context.source.clone();
+                    let left_output = left.evaluate(EvaluationContext { selection:left_input, source: source, scope });
+                    let right_output = right.evaluate(EvaluationContext { selection:right_input, source: context.source, scope: context.scope });
+
+                    tokio::pin!(left_output);
+                    tokio::pin!(right_output);
+
+                    for await each in stream_select!(left_output, right_output) {
+                        yield each?;
+                    }
+                },
+                Self::Or(left, right) => {
+                    let (left_input, right_input) = fork_stream(context.selection);
+
+                    let scope = context.scope.clone();
+                    let source = context.source.clone();
+                    let left_output = left.evaluate(EvaluationContext { selection:left_input, source: source, scope });
+                    let right_output = right.evaluate(EvaluationContext { selection:right_input, source: context.source, scope: context.scope });
+
+                    tokio::pin!(left_output);
+                    tokio::pin!(right_output);
+
+                    for await each in stream_select!(left_output, right_output) {
                         yield each?;
                     }
                 },
