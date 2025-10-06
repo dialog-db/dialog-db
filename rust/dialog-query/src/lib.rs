@@ -32,7 +32,6 @@ pub mod query;
 pub mod rule;
 pub mod schema;
 pub mod selection;
-pub mod selector;
 pub mod session;
 pub mod stream;
 pub mod strings;
@@ -63,7 +62,6 @@ pub use session::{QuerySession, Session};
 pub use async_stream::try_stream;
 pub use environment::Environment;
 pub use selection::{Match, Selection};
-pub use selector::Selector;
 pub use stream::*;
 pub use term::*;
 pub use types::IntoType;
@@ -99,7 +97,6 @@ pub mod prelude {
     pub use crate::error::QueryError;
     pub use crate::premise::Premise;
     pub use crate::rule::{Premises, Rule, When};
-    pub use crate::selector::Selector;
     pub use crate::term::Term;
     pub use crate::types::IntoType;
     // Macros are automatically available due to #[macro_export]
