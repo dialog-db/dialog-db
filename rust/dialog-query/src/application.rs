@@ -84,11 +84,10 @@ impl Application {
         Premise::Exclude(Negation::not(self.clone()))
     }
 
-    pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
+    pub fn query<S: Source>(&self, store: &S) -> impl Selection {
         let store = store.clone();
         let context = new_context(store);
-        let selection = self.evaluate(context);
-        Ok(selection)
+        self.evaluate(context)
     }
 }
 

@@ -371,6 +371,10 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
 
         // Add inherent query method so users don't need to import Match trait
         impl #match_name {
+            fn realize(&self, source: dialog_query::selection::Match) -> std::result::Result<#struct_name, dialog_query::QueryError> {
+                dialog_query::concept::Match::realize(self, source)
+            }
+
             /// Query for instances matching this pattern
             ///
             /// This is a convenience method that delegates to the Match trait's query method.
@@ -378,10 +382,13 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
             pub fn query<S: dialog_query::query::Source>(
                 &self,
                 source: S,
-            ) -> std::pin::Pin<Box<dyn dialog_query::query::Output<#struct_name>>> {
-                use dialog_query::concept::Match as _;
-                // Box the stream to avoid lifetime issues
-                Box::pin(<#match_name as dialog_query::concept::Match>::query(self, source))
+            ) -> impl dialog_query::query::Output<#struct_name> {
+                use futures_util::StreamExt;
+                let application: dialog_query::application::concept::ConceptApplication = self.into();
+                let cloned = self.clone();
+                application
+                    .query(source)
+                    .map(move |input| cloned.realize(input?))
             }
         }
 

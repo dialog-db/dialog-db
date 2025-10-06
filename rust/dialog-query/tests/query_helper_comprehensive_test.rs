@@ -3,7 +3,6 @@
 use anyhow::Result;
 use dialog_query::{
     artifact::{Artifacts, Attribute, Entity, Value},
-    concept::Match as Query,
     query::Output,
     rule::Match,
     term::Term,

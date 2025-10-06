@@ -25,23 +25,13 @@ pub trait Expand: ConditionalSend + 'static {
 pub trait Selection: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend {
     /// Collect all matches into a Vec, propagating any errors
     #[allow(async_fn_in_trait)]
-    fn try_vec(self) -> impl std::future::Future<Output = Result<Vec<Match>, QueryError>> + ConditionalSend
+    fn try_vec(
+        self,
+    ) -> impl std::future::Future<Output = Result<Vec<Match>, QueryError>> + ConditionalSend
     where
         Self: Sized,
     {
         async move { futures_util::TryStreamExt::try_collect(self).await }
-    }
-
-    /// Collect all matches into a MatchSet with set semantics, propagating any errors
-    #[allow(async_fn_in_trait)]
-    fn try_set(self) -> impl std::future::Future<Output = Result<MatchSet, QueryError>> + ConditionalSend
-    where
-        Self: Sized,
-    {
-        async move {
-            let matches: Vec<Match> = self.try_vec().await?;
-            Ok(MatchSet::from(matches))
-        }
     }
 
     fn flat_map<M: FlatMapper>(self, mapper: M) -> impl Selection
@@ -86,80 +76,6 @@ pub trait Selection: Stream<Item = Result<Match, QueryError>> + 'static + Condit
 
 impl<S> Selection for S where S: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend
 {}
-
-/// A collection of matches with set semantics
-#[derive(Debug, Clone, PartialEq)]
-pub struct MatchSet {
-    matches: Vec<Match>,
-}
-
-impl MatchSet {
-    pub fn new() -> Self {
-        Self {
-            matches: Vec::new(),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.matches.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.matches.is_empty()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &Match> {
-        self.matches.iter()
-    }
-
-    pub fn into_iter(self) -> impl Iterator<Item = Match> {
-        self.matches.into_iter()
-    }
-
-    /// Check if the set contains a match with the given variable bindings
-    pub fn contains_binding(&self, var_name: &str, expected_value: &Value) -> bool {
-        self.matches
-            .iter()
-            .any(|m| m.variables.get(var_name) == Some(expected_value))
-    }
-
-    /// Check if the set contains a match where all given bindings are present
-    pub fn contains_bindings(&self, bindings: &BTreeMap<String, Value>) -> bool {
-        self.matches.iter().any(|m| {
-            bindings
-                .iter()
-                .all(|(var, val)| m.variables.get(var) == Some(val))
-        })
-    }
-
-    /// Get all values for a given variable across all matches
-    pub fn values_for(&self, var_name: &str) -> Vec<&Value> {
-        self.matches
-            .iter()
-            .filter_map(|m| m.variables.get(var_name))
-            .collect()
-    }
-
-    /// Check if any match contains the given value for the variable
-    pub fn contains_value_for(&self, var_name: &str, expected_value: &Value) -> bool {
-        self.values_for(var_name).contains(&expected_value)
-    }
-}
-
-impl From<Vec<Match>> for MatchSet {
-    fn from(matches: Vec<Match>) -> Self {
-        Self { matches }
-    }
-}
-
-
-impl FromIterator<Match> for MatchSet {
-    fn from_iter<T: IntoIterator<Item = Match>>(iter: T) -> Self {
-        Self {
-            matches: iter.into_iter().collect(),
-        }
-    }
-}
 
 impl<F: Fn(Match) -> Result<Vec<Match>, QueryError> + ConditionalSend + 'static> TryExpand for F {
     fn try_expand(&self, match_: Match) -> Result<Vec<Match>, QueryError> {

@@ -62,7 +62,7 @@ pub use session::{QuerySession, Session};
 
 pub use async_stream::try_stream;
 pub use environment::Environment;
-pub use selection::{Match, MatchSet, Selection};
+pub use selection::{Match, Selection};
 pub use selector::Selector;
 pub use stream::*;
 pub use term::*;

@@ -55,7 +55,7 @@ async fn test_person_concept_basic() -> Result<()> {
     let session = Session::open(artifacts);
 
     use dialog_query::query::Output;
-    let people = Output::try_vec(alice_match.query(session)).await?;
+    let people = alice_match.query(session).try_vec().await?;
 
     assert_eq!(people.len(), 1);
     assert_eq!(people[0].name, "Alice");

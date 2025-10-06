@@ -296,10 +296,8 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use ::dialog_artifacts::Entity;
-
     use crate::{
-        predicate::{self, concept::Attributes, Concept},
+        predicate::{self, concept::Attributes},
         Attribute, Parameters, Selection, Type,
     };
 
@@ -372,7 +370,7 @@ mod tests {
         // Use new query API directly on application
         let application = person.apply(params)?;
 
-        let selection = application.query(&session)?.try_vec().await?;
+        let selection = Selection::try_vec(application.query(&session)).await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
 
         // Check that we have both Alice and Bob (order may vary)
@@ -404,8 +402,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_matches_complete_conepts() -> anyhow::Result<()> {
-        use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Type, Value};
-        use crate::{Fact, Rule, Term};
+        use crate::artifact::{Artifacts, Entity};
+        use crate::Rule;
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -475,7 +473,7 @@ mod tests {
         // // Use new query API directly on application
         // let application = person.apply(params)?;
 
-        // let selection = application.query(&session)?.try_vec().await?;
+        // let selection = application.query(&session)?.collect_matches().await?;
         // assert_eq!(selection.len(), 2); // Should find just Alice and Bob
 
         // // Check that we have both Alice and Bob (order may vary)
@@ -582,7 +580,7 @@ mod tests {
         // Let's test with empty parameters first to see the exact error
         let application = person.apply(params)?;
 
-        let selection = application.query(&session)?.try_vec().await?;
+        let selection = application.query(&session).try_vec().await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
 
         // Check that we have both Alice and Bob (order may vary)
@@ -614,7 +612,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rule() -> anyhow::Result<()> {
-        use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value};
+        use crate::artifact::{Artifacts, Entity};
         use crate::query::Output;
         use crate::rule::Match;
         use crate::{Concept, Fact, Rule, Term};
@@ -674,6 +672,12 @@ mod tests {
             .with("role", "developer".to_string())
             .assert()?;
 
+        let _mallory = Stuff {
+            this: Entity::new()?,
+            name: "Mallory".into(),
+            role: "developer".into(),
+        };
+
         session.transact(vec![alice, bob]).await?;
 
         let query_stuff = Match::<Stuff> {
@@ -694,7 +698,7 @@ mod tests {
             job: Term::var("job"),
         };
 
-        let employees = query_employee.query(session.clone()).try_vec().await?;
+        let employees = Output::try_vec(query_employee.query(session)).await?;
 
         assert_eq!(employees.len(), 2);
         println!("{:?}", employees);

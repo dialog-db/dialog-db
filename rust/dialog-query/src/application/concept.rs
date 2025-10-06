@@ -201,8 +201,8 @@ impl ConceptApplication {
         }
     }
 
-    pub fn query<S: Source>(&self, store: S) -> impl Selection {
-        let store = store.clone();
+    pub fn query<S: Source>(&self, source: S) -> impl Selection {
+        let store = source.clone();
         let context = new_context(store);
         let selection = self.evaluate(context);
         selection

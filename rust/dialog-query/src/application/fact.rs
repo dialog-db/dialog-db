@@ -12,7 +12,6 @@ use crate::Fact;
 use crate::{try_stream, EvaluationContext, Match, Selection, Source};
 use crate::{Constraint, Dependency, Entity, Parameters, QueryError, Schema, Term, Type, Value};
 use dialog_artifacts::Cause;
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::sync::OnceLock;
