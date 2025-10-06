@@ -234,7 +234,6 @@ mod tests {
     async fn test_concept_application_query_execution() -> anyhow::Result<()> {
         use crate::fact::Fact;
         use crate::session::Session;
-        use crate::SelectionExt;
         use dialog_artifacts::{Artifacts, Attribute as ArtifactAttribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -292,7 +291,7 @@ mod tests {
         let application = ConceptApplication { terms, concept };
 
         // Execute the query
-        let selection = application.query(session).collect_matches().await?;
+        let selection = application.query(session).try_vec().await?;
 
         // Should find both Alice and Bob with their name and age
         assert_eq!(selection.len(), 2, "Should find 2 people");
@@ -331,7 +330,6 @@ mod tests {
         use crate::context::new_context;
         use crate::fact::Fact;
         use crate::session::Session;
-        use crate::{EvaluationContext, SelectionExt};
         use dialog_artifacts::{Artifacts, Attribute as ArtifactAttribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -391,10 +389,7 @@ mod tests {
         };
 
         // Execute with bound entity scope
-        let selection = application
-            .evaluate(context_with_scope)
-            .collect_matches()
-            .await?;
+        let selection = application.evaluate(context_with_scope).try_vec().await?;
 
         // Should still execute successfully and bind name and age
         // (even though we don't have the actual entity value in the match)
@@ -412,7 +407,7 @@ async fn test_concept_application_respects_constant_entity_parameter() -> anyhow
     use crate::application::concept::ConceptApplication;
     use crate::predicate::concept::Concept;
     use crate::session::Session;
-    use crate::{Fact, Parameters, SelectionExt, Term, Value};
+    use crate::{Fact, Term, Value};
     use dialog_artifacts::{Artifacts, Attribute, Entity};
     use dialog_storage::MemoryStorageBackend;
 
@@ -456,7 +451,7 @@ async fn test_concept_application_respects_constant_entity_parameter() -> anyhow
     terms.insert("name".to_string(), Term::var("name"));
 
     let app = ConceptApplication { terms, concept };
-    let selection = app.query(session).collect_matches().await?;
+    let selection = app.query(session).try_vec().await?;
 
     assert_eq!(
         selection.len(),
@@ -476,8 +471,7 @@ async fn test_concept_application_respects_constant_attribute_parameter() -> any
     use crate::application::concept::ConceptApplication;
     use crate::predicate::concept::Concept;
     use crate::session::Session;
-    use crate::Fact;
-    use crate::{Parameters, SelectionExt, Term, Value};
+    use crate::{Fact, Term, Value};
     use dialog_artifacts::{Artifacts, Attribute, Entity};
     use dialog_storage::MemoryStorageBackend;
 
@@ -548,7 +542,7 @@ async fn test_concept_application_respects_constant_attribute_parameter() -> any
     terms.insert("age".to_string(), Term::var("age"));
 
     let app = ConceptApplication { terms, concept };
-    let selection = app.query(session).collect_matches().await?;
+    let selection = app.query(session).try_vec().await?;
 
     assert_eq!(selection.len(), 1, "Should find only Bob");
     assert_eq!(
@@ -569,7 +563,7 @@ async fn test_concept_application_respects_multiple_constant_parameters() -> any
     use crate::fact::Fact;
     use crate::predicate::concept::Concept;
     use crate::session::Session;
-    use crate::{Parameters, SelectionExt, Term, Value};
+    use crate::{Term, Value};
     use dialog_artifacts::{Artifacts, Attribute, Entity};
     use dialog_storage::MemoryStorageBackend;
 
@@ -640,7 +634,7 @@ async fn test_concept_application_respects_multiple_constant_parameters() -> any
     terms.insert("age".to_string(), Term::Constant(Value::UnsignedInt(25)));
 
     let app = ConceptApplication { terms, concept };
-    let selection = app.query(session).collect_matches().await?;
+    let selection = app.query(session).try_vec().await?;
 
     assert_eq!(
         selection.len(),

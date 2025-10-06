@@ -22,7 +22,67 @@ pub trait Expand: ConditionalSend + 'static {
     fn expand(&self, item: Match) -> Vec<Match>;
 }
 
-pub trait Selection: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend {}
+pub trait Selection: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend {
+    /// Collect all matches into a Vec, propagating any errors
+    #[allow(async_fn_in_trait)]
+    fn try_vec(self) -> impl std::future::Future<Output = Result<Vec<Match>, QueryError>> + ConditionalSend
+    where
+        Self: Sized,
+    {
+        async move { futures_util::TryStreamExt::try_collect(self).await }
+    }
+
+    /// Collect all matches into a MatchSet with set semantics, propagating any errors
+    #[allow(async_fn_in_trait)]
+    fn try_set(self) -> impl std::future::Future<Output = Result<MatchSet, QueryError>> + ConditionalSend
+    where
+        Self: Sized,
+    {
+        async move {
+            let matches: Vec<Match> = self.try_vec().await?;
+            Ok(MatchSet::from(matches))
+        }
+    }
+
+    fn flat_map<M: FlatMapper>(self, mapper: M) -> impl Selection
+    where
+        Self: Sized,
+    {
+        try_stream! {
+            for await each in self {
+                for await mapped in mapper.map(each?) {
+                    yield mapped?;
+                }
+            }
+        }
+    }
+
+    fn expand<M: Expand>(self, expander: M) -> impl Selection
+    where
+        Self: Sized,
+    {
+        try_stream! {
+            for await each in self {
+                for expanded in expander.expand(each?) {
+                    yield expanded;
+                }
+            }
+        }
+    }
+
+    fn try_expand<M: TryExpand>(self, expander: M) -> impl Selection
+    where
+        Self: Sized,
+    {
+        try_stream! {
+            for await each in self {
+                for expanded in expander.try_expand(each?)? {
+                    yield expanded;
+                }
+            }
+        }
+    }
+}
 
 impl<S> Selection for S where S: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend
 {}
@@ -92,64 +152,11 @@ impl From<Vec<Match>> for MatchSet {
     }
 }
 
+
 impl FromIterator<Match> for MatchSet {
     fn from_iter<T: IntoIterator<Item = Match>>(iter: T) -> Self {
         Self {
             matches: iter.into_iter().collect(),
-        }
-    }
-}
-
-/// Extension trait for Selection streams to provide convenient collection methods
-pub trait SelectionExt: Selection + Sized {
-    /// Collect all matches into a Vec, propagating any errors
-    #[allow(async_fn_in_trait)]
-    async fn collect_matches(self) -> Result<Vec<Match>, QueryError>
-    where
-        Self: Sized,
-    {
-        use futures_util::TryStreamExt;
-        self.try_collect().await
-    }
-
-    /// Collect all matches into a MatchSet with set semantics, propagating any errors
-    #[allow(async_fn_in_trait)]
-    async fn collect_set(self) -> Result<MatchSet, QueryError>
-    where
-        Self: Sized,
-    {
-        use futures_util::TryStreamExt;
-        let matches: Vec<Match> = self.try_collect().await?;
-        Ok(MatchSet::from(matches))
-    }
-
-    fn flat_map<M: FlatMapper>(self, mapper: M) -> impl Selection {
-        try_stream! {
-            for await each in self {
-                for await mapped in mapper.map(each?) {
-                    yield mapped?;
-                }
-            }
-        }
-    }
-
-    fn expand<M: Expand>(self, expander: M) -> impl Selection {
-        try_stream! {
-            for await each in self {
-                for expanded in expander.expand(each?) {
-                    yield expanded;
-                }
-            }
-        }
-    }
-
-    fn try_expand<M: TryExpand>(self, expander: M) -> impl Selection {
-        try_stream! {
-            for await each in self {
-                for expanded in expander.try_expand(each?)? {
-                    yield expanded;
-                }
-            }
         }
     }
 }
@@ -171,8 +178,6 @@ impl<S: Selection, F: (Fn(Match) -> S) + ConditionalSend + 'static> FlatMapper f
         self(input)
     }
 }
-
-impl<S: Selection + Sized> SelectionExt for S {}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Match {

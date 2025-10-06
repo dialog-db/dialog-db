@@ -4,6 +4,7 @@ use anyhow::Result;
 use dialog_query::{
     artifact::{Artifacts, Attribute, Entity, Value},
     concept::Match as Query,
+    query::Output,
     rule::Match,
     term::Term,
     Fact, Rule, Session,
@@ -54,7 +55,7 @@ async fn test_single_attribute_query_works() -> Result<()> {
     };
 
     let session = Session::open(artifacts.clone());
-    let results = alice_query.query(session).await?;
+    let results = alice_query.query(session).try_vec().await?;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name, "Alice");
     println!("✅ Single-attribute constant query: WORKS");
@@ -66,7 +67,7 @@ async fn test_single_attribute_query_works() -> Result<()> {
     };
 
     let session = Session::open(artifacts);
-    let all_results = all_people_query.query(session).await?;
+    let all_results = all_people_query.query(session).try_vec().await?;
     assert_eq!(all_results.len(), 2);
     println!("✅ Single-attribute variable query: WORKS");
 
@@ -115,7 +116,8 @@ async fn test_multi_attribute_constant_query_works() -> Result<()> {
     };
 
     let session = Session::open(artifacts);
-    let results = alice_engineering_query.query(session).await?;
+
+    let results = alice_engineering_query.query(session).try_vec().await?;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name, "Alice");
     assert_eq!(results[0].department, "Engineering");
@@ -168,7 +170,7 @@ async fn test_multi_attribute_variable_query_limitation() -> Result<()> {
     };
 
     let session = Session::open(artifacts);
-    match engineering_query.query(session).await {
+    match engineering_query.query(session).try_vec().await {
         Ok(results) => {
             // Currently this might return more results than expected
             // because we only execute the first plan (probably the name plan)

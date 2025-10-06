@@ -123,10 +123,9 @@ mod tests {
     use crate::artifact::Value;
     use crate::artifact::{Artifacts, Attribute as ArtifactAttribute};
     use crate::concept::Concept;
-    use crate::selection::SelectionExt;
     use crate::term::Term;
-    use crate::Fact;
     use crate::Session;
+    use crate::{Fact, Selection};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -629,7 +628,7 @@ mod tests {
 
         // This should work with the planner fix
         let session = Session::open(artifacts);
-        let results = Output::try_collect(person_query.query(session)).await?;
+        let results = person_query.query(session).try_vec().await?;
 
         // Should find both Alice and Bob (not Mallory who has no age)
         assert_eq!(results.len(), 2, "Should find both people");
@@ -701,7 +700,7 @@ mod tests {
             .build()?;
 
         let session = Session::open(artifacts);
-        let no_results = missing_query.query(&session)?.collect_set().await?;
+        let no_results = missing_query.query(&session).try_vec().await?;
         assert_eq!(no_results.len(), 0, "Should find no non-existent people");
 
         Ok(())

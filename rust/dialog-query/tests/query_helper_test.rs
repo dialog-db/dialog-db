@@ -53,7 +53,9 @@ async fn test_person_concept_basic() -> Result<()> {
 
     // Test the new convenient query method
     let session = Session::open(artifacts);
-    let people = alice_match.query(session).await?;
+
+    use dialog_query::query::Output;
+    let people = Output::try_vec(alice_match.query(session)).await?;
 
     assert_eq!(people.len(), 1);
     assert_eq!(people[0].name, "Alice");

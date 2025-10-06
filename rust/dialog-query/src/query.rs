@@ -1,26 +1,29 @@
 //! Query trait for polymorphic querying across different store types
 
+use async_stream::try_stream;
 pub use dialog_common::ConditionalSend;
 
 use crate::artifact::{ArtifactStore, ArtifactStoreMut};
-use crate::context::{new_context, EvaluationPlan};
+pub use crate::context::new_context;
 pub use crate::error::{QueryError, QueryResult};
 pub use crate::fact::Fact;
-use crate::Selection;
-pub use futures_util::stream::{Stream, TryStream};
+use crate::{selection, EvaluationContext, Selection};
+pub use futures_util::stream::{Stream, StreamExt, TryStream};
 
 use crate::predicate::DeductiveRule;
 
 pub trait Output<T: ConditionalSend>:
     Stream<Item = Result<T, QueryError>> + 'static + ConditionalSend
 {
+    /// Collect all items into a Vec, propagating any errors
     #[allow(async_fn_in_trait)]
-    async fn try_collect(self) -> Result<Vec<T>, QueryError>
+    fn try_vec(
+        self,
+    ) -> impl std::future::Future<Output = Result<Vec<T>, QueryError>> + ConditionalSend
     where
         Self: Sized,
     {
-        let results: Vec<T> = futures_util::TryStreamExt::try_collect(self).await?;
-        Ok(results)
+        async move { futures_util::TryStreamExt::try_collect(self).await }
     }
 }
 
@@ -49,6 +52,28 @@ pub trait Source: ArtifactStore + Clone + Send + Sync + 'static {
     fn resolve_rules(&self, operator: &str) -> Vec<DeductiveRule>;
 }
 
+pub trait Circuit: ConditionalSend + 'static {
+    fn evaluate<S: Source, M: Selection>(&self, context: EvaluationContext<S, M>)
+        -> impl Selection;
+}
+
+pub trait Query<T: ConditionalSend + 'static>: Circuit + Clone + ConditionalSend {
+    fn realize(&self, input: selection::Match) -> Result<T, QueryError>;
+    fn execute<S: Source>(&self, source: &S) -> impl Output<T>
+    where
+        Self: Sized,
+    {
+        let context = new_context(source.clone());
+        let selection = self.evaluate(context);
+        let query = self.clone();
+        try_stream! {
+            for await each in selection {
+                yield query.realize(each?)?;
+            }
+        }
+    }
+}
+
 // Note: Source implementations must be provided explicitly by each artifact store type.
 // The Session type provides rule resolution by maintaining a rule registry.
 // Other artifact stores should implement Source with empty rule resolution.
@@ -62,33 +87,6 @@ pub trait Source: ArtifactStore + Clone + Send + Sync + 'static {
 pub trait Store: ArtifactStoreMut + Clone + ConditionalSend {}
 /// Blanket implementation - any type that satisfies the bounds automatically implements QueryStore
 impl<T> Store for T where T: ArtifactStoreMut + Clone + ConditionalSend {}
-
-/// A trait for types that can query an ArtifactStore
-///
-/// This provides a consistent interface for querying, abstracting over the details
-/// of query planning, variable resolution, and execution against the store.
-pub trait Query {
-    /// Execute the query against the provided store
-    ///
-    /// Returns a stream of artifacts that match the query criteria.
-    fn query<S: Source>(&self, source: &S) -> QueryResult<impl Selection>;
-}
-
-pub trait PlannedQuery {
-    /// Execute the query against the provided store
-    ///
-    /// Returns a stream of artifacts that match the query criteria.
-    fn query<S: Source>(&self, source: &S) -> QueryResult<impl Selection>;
-}
-
-impl<Plan: EvaluationPlan> PlannedQuery for Plan {
-    fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
-        let store = store.clone();
-        let context = new_context(store);
-        let selection = self.evaluate(context);
-        Ok(selection)
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -140,14 +138,14 @@ mod tests {
 
         // Use the Query trait method - should succeed since all fields are constants
         let session = Session::open(artifacts.clone());
-        let result = alice_query.query(&session);
+        let result = alice_query.query(&session).try_vec().await;
         assert!(result.is_ok()); // Should succeed with constants, returns empty stream
 
         // Query 2: Find all user/name facts using Query trait
         let all_names_query = Fact::<Value>::select().the("user/name").build()?;
 
         let session = Session::open(artifacts.clone());
-        let result = all_names_query.query(&session);
+        let result = all_names_query.query(&session).try_vec().await;
         assert!(result.is_ok()); // Should succeed with constants
 
         // Query 3: Find Alice's email using Query trait
@@ -157,7 +155,7 @@ mod tests {
             .build()?;
 
         let session = Session::open(artifacts);
-        let result = email_query.query(&session);
+        let result = email_query.query(&session).try_vec().await;
         assert!(result.is_ok()); // Should succeed with constants
 
         Ok(())
@@ -178,7 +176,7 @@ mod tests {
 
         // Should succeed since planning validation only rejects all-unbound queries, and this has a constant
         let session = Session::open(artifacts);
-        let result = variable_query.query(&session);
+        let result = variable_query.query(&session).try_vec().await;
         assert!(result.is_ok());
 
         Ok(())
@@ -209,7 +207,7 @@ mod tests {
             .build()?;
 
         let session = Session::open(artifacts);
-        let results = fact_selector.query(&session)?.try_collect().await?;
+        let results = fact_selector.query(&session).try_vec().await?;
         assert_eq!(results.len(), 1); // Should find the Alice fact
 
         // Could also test with FactSelectorPlan if we had a way to create one easily
@@ -261,7 +259,9 @@ mod tests {
             .the("user/role")
             .is(Value::String("admin".to_string()))
             .build()?
-            .query(&session);
+            .query(&session)
+            .try_vec()
+            .await;
         assert!(admin_result.is_ok());
 
         // Test another fluent query - should also succeed
@@ -269,7 +269,9 @@ mod tests {
         let names_result = Fact::<Value>::select()
             .the("user/name")
             .build()?
-            .query(&session);
+            .query(&session)
+            .try_vec()
+            .await;
         assert!(names_result.is_ok());
 
         Ok(())

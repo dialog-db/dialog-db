@@ -54,7 +54,7 @@ pub use negation::Negation;
 pub use parameters::Parameters;
 pub use predicate::{Compute, DeductiveRule, Formula};
 pub use premise::Premise;
-pub use query::{Query, Source, Store};
+pub use query::{Source, Store};
 pub use rule::{Premises, Rule, When};
 pub use schema::{Constraint, Schema};
 pub use session::transaction::{Edit, Transaction, TransactionError};
@@ -62,7 +62,7 @@ pub use session::{QuerySession, Session};
 
 pub use async_stream::try_stream;
 pub use environment::Environment;
-pub use selection::{Match, MatchSet, Selection, SelectionExt};
+pub use selection::{Match, MatchSet, Selection};
 pub use selector::Selector;
 pub use stream::*;
 pub use term::*;
@@ -98,7 +98,6 @@ pub mod prelude {
     pub use crate::environment::Environment;
     pub use crate::error::QueryError;
     pub use crate::premise::Premise;
-    pub use crate::query::Query;
     pub use crate::rule::{Premises, Rule, When};
     pub use crate::selector::Selector;
     pub use crate::term::Term;

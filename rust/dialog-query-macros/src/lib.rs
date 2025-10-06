@@ -373,21 +373,15 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
         impl #match_name {
             /// Query for instances matching this pattern
             ///
-            /// This is a convenience method that delegates to the Match trait's query method
-            /// and collects the results. It allows calling query without importing the Match trait.
-            pub async fn query<S: dialog_query::query::Source>(
+            /// This is a convenience method that delegates to the Match trait's query method.
+            /// It allows calling query without importing the Match trait.
+            pub fn query<S: dialog_query::query::Source>(
                 &self,
                 source: S,
-            ) -> Result<Vec<#struct_name>, dialog_query::QueryError> {
-                use dialog_query::query::Output;
-                Output::try_collect(<Self as dialog_query::concept::Match>::query(&self.clone(), source)).await
-            }
-
-            pub fn realize(&self, input: dialog_query::selection::Match) -> Result<#struct_name, dialog_query::QueryError> {
-                Ok(#struct_name {
-                    this: input.get(&self.this)?,
-                    #(#field_names: input.get(&self.#field_names)?),*
-                })
+            ) -> std::pin::Pin<Box<dyn dialog_query::query::Output<#struct_name>>> {
+                use dialog_query::concept::Match as _;
+                // Box the stream to avoid lifetime issues
+                Box::pin(<#match_name as dialog_query::concept::Match>::query(self, source))
             }
         }
 

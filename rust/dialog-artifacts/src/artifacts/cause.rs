@@ -12,7 +12,7 @@ use super::{Artifact, Blake3Hash};
 /// same [`Attribute`]).
 #[repr(transparent)]
 #[derive(Clone, Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
-pub struct Cause(Blake3Hash);
+pub struct Cause(pub Blake3Hash);
 
 impl From<&Artifact> for Cause {
     fn from(artifact: &Artifact) -> Self {

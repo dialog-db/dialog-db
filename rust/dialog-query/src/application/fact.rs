@@ -3,11 +3,16 @@ pub use crate::artifact::Attribute;
 pub use crate::artifact::{ArtifactSelector, Constrained};
 pub use crate::context::new_context;
 pub use crate::error::{AnalyzerError, QueryResult};
+pub use crate::query::Output;
+use crate::query::{Circuit, Query};
 use crate::Cardinality;
 pub use crate::Environment;
 
+use crate::Fact;
 use crate::{try_stream, EvaluationContext, Match, Selection, Source};
 use crate::{Constraint, Dependency, Entity, Parameters, QueryError, Schema, Term, Type, Value};
+use dialog_artifacts::Cause;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::sync::OnceLock;
@@ -164,16 +169,28 @@ impl FactApplication {
                     // Create a new frame by unifying the artifact with our pattern
                     let mut output = input.clone();
 
-                    // Unify entity if we have an entity variable using type-safe unify
-                    output = output.unify(selection.of.clone(), Value::Entity(artifact.of)).map_err(|e| QueryError::FactStore(e.to_string()))?;
+                    // For each field, if it's a blank variable, assign it an internal name so we can retrieve it later
+                    let of_term = match &selection.of {
+                        Term::Variable { name: None, .. } => Term::Variable { name: Some("__of".to_string()), content_type: Default::default() },
+                        term => term.clone(),
+                    };
+                    let the_term = match &selection.the {
+                        Term::Variable { name: None, .. } => Term::Variable { name: Some("__the".to_string()), content_type: Default::default() },
+                        term => term.clone(),
+                    };
+                    let is_term = match &selection.is {
+                        Term::Variable { name: None, .. } => Term::Variable { name: Some("__is".to_string()), content_type: Default::default() },
+                        term => term.clone(),
+                    };
 
+                    // Unify entity if we have an entity variable using type-safe unify
+                    output = output.unify(of_term, Value::Entity(artifact.of)).map_err(|e| QueryError::FactStore(e.to_string()))?;
 
                     // Unify attribute if we have an attribute variable using type-safe unify
-                    output = output.unify(selection.the.clone(), Value::Symbol(artifact.the)).map_err(|e| QueryError::FactStore(e.to_string()))?;
-
+                    output = output.unify(the_term, Value::Symbol(artifact.the)).map_err(|e| QueryError::FactStore(e.to_string()))?;
 
                     // Unify value if we have a value variable using type-safe unify
-                    output = output.unify(selection.is.clone(), artifact.is).map_err(|e| QueryError::FactStore(e.to_string()))?;
+                    output = output.unify(is_term, artifact.is).map_err(|e| QueryError::FactStore(e.to_string()))?;
 
                     yield output;
                 }
@@ -181,25 +198,122 @@ impl FactApplication {
         }
     }
 
-    pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
-        // Validate that at least one parameter is constrained (not a variable)
-        // This prevents completely unconstrained queries
-        let has_constant = matches!(&self.the, Term::Constant(_))
-            || matches!(&self.of, Term::Constant(_))
-            || matches!(&self.is, Term::Constant(_));
+    pub fn realize(&self, source: crate::selection::Match) -> Result<Fact<Value>, QueryError> {
+        // Convert blank variables to internal names for retrieval
+        let the_term = match &self.the {
+            Term::Variable { name: None, .. } => Term::Variable {
+                name: Some("__the".to_string()),
+                content_type: Default::default(),
+            },
+            term => term.clone(),
+        };
+        let of_term = match &self.of {
+            Term::Variable { name: None, .. } => Term::Variable {
+                name: Some("__of".to_string()),
+                content_type: Default::default(),
+            },
+            term => term.clone(),
+        };
+        let is_term = match &self.is {
+            Term::Variable { name: None, .. } => Term::Variable {
+                name: Some("__is".to_string()),
+                content_type: Default::default(),
+            },
+            term => term.clone(),
+        };
 
-        if !has_constant {
-            return Err(QueryError::EmptySelector {
-                message:
-                    "At least one bound parameter required (the, of, or is must be a constant)"
-                        .to_string(),
-            });
-        }
+        Ok(Fact::Assertion {
+            the: source.get(&the_term)?,
+            of: source.get(&of_term)?,
+            is: source.get(&is_term)?,
+            // TODO: We actually need to capture causes, but for now we fake it.
+            cause: Cause([0; 32]),
+        })
+    }
 
-        let store = store.clone();
-        let context = new_context(store);
+    pub fn query<S: Source>(&self, source: &S) -> impl Output<Fact>
+    where
+        Self: Sized,
+    {
+        // TODO: This logic should be added perhaps to .compile method. In
+        // practice we want concept to be used for queries which we know
+        // can be evaluated due to attributes being known.
+        //
+        // // Validate that at least one parameter is constrained (not a variable)
+        // // This prevents completely unconstrained queries
+        // let has_constant = matches!(&self.the, Term::Constant(_))
+        //     || matches!(&self.of, Term::Constant(_))
+        //     || matches!(&self.is, Term::Constant(_));
+
+        // if !has_constant {
+        //     return Err(QueryError::EmptySelector {
+        //         message:
+        //             "At least one bound parameter required (the, of, or is must be a constant)"
+        //                 .to_string(),
+        //     });
+        // }
+
+        // Inline the trait implementation to avoid lifetime issues
+        let context = new_context(source.clone());
         let selection = self.evaluate(context);
-        Ok(selection)
+        let query = self.clone();
+        try_stream! {
+            for await each in selection {
+                yield query.realize(each?)?;
+            }
+        }
+    }
+}
+
+impl Circuit for FactApplication {
+    fn evaluate<S: Source, M: Selection>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Selection {
+        let selector = self.clone();
+        try_stream! {
+            for await each in context.selection {
+                let input = each?;
+                let selection = selector.resolve(&input);
+                for await artifact in context.source.select((&selection).try_into()?) {
+                    let artifact = artifact?;
+
+                    // Create a new frame by unifying the artifact with our pattern
+                    let mut output = input.clone();
+
+                    // For each field, if it's a blank variable, assign it an internal name so we can retrieve it later
+                    let of_term = match &selection.of {
+                        Term::Variable { name: None, .. } => Term::Variable { name: Some("__of".to_string()), content_type: Default::default() },
+                        term => term.clone(),
+                    };
+                    let the_term = match &selection.the {
+                        Term::Variable { name: None, .. } => Term::Variable { name: Some("__the".to_string()), content_type: Default::default() },
+                        term => term.clone(),
+                    };
+                    let is_term = match &selection.is {
+                        Term::Variable { name: None, .. } => Term::Variable { name: Some("__is".to_string()), content_type: Default::default() },
+                        term => term.clone(),
+                    };
+
+                    // Unify entity if we have an entity variable using type-safe unify
+                    output = output.unify(of_term, Value::Entity(artifact.of)).map_err(|e| QueryError::FactStore(e.to_string()))?;
+
+                    // Unify attribute if we have an attribute variable using type-safe unify
+                    output = output.unify(the_term, Value::Symbol(artifact.the)).map_err(|e| QueryError::FactStore(e.to_string()))?;
+
+                    // Unify value if we have a value variable using type-safe unify
+                    output = output.unify(is_term, artifact.is).map_err(|e| QueryError::FactStore(e.to_string()))?;
+
+                    yield output;
+                }
+            }
+        }
+    }
+}
+
+impl Query<Fact> for FactApplication {
+    fn realize(&self, input: crate::selection::Match) -> Result<Fact, QueryError> {
+        self.realize(input)
     }
 }
 

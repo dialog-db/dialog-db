@@ -3,7 +3,6 @@ pub use crate::cursor::Cursor;
 pub use crate::error::{AnalyzerError, FormulaEvaluationError, PlanError, QueryError};
 use crate::predicate::formula::Cells;
 use crate::selection::TryExpand;
-use crate::SelectionExt;
 pub use crate::{try_stream, EvaluationContext, Selection, Source};
 
 pub use crate::{Environment, Match, Parameters, Requirement};

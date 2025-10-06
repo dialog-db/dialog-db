@@ -300,7 +300,7 @@ mod tests {
 
     use crate::{
         predicate::{self, concept::Attributes, Concept},
-        Attribute, Parameters, SelectionExt, Type,
+        Attribute, Parameters, Selection, Type,
     };
 
     use super::*;
@@ -372,7 +372,7 @@ mod tests {
         // Use new query API directly on application
         let application = person.apply(params)?;
 
-        let selection = application.query(&session)?.collect_matches().await?;
+        let selection = application.query(&session)?.try_vec().await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
 
         // Check that we have both Alice and Bob (order may vary)
@@ -475,7 +475,7 @@ mod tests {
         // // Use new query API directly on application
         // let application = person.apply(params)?;
 
-        // let selection = application.query(&session)?.collect_matches().await?;
+        // let selection = application.query(&session)?.try_vec().await?;
         // assert_eq!(selection.len(), 2); // Should find just Alice and Bob
 
         // // Check that we have both Alice and Bob (order may vary)
@@ -582,7 +582,7 @@ mod tests {
         // Let's test with empty parameters first to see the exact error
         let application = person.apply(params)?;
 
-        let selection = application.query(&session)?.collect_matches().await?;
+        let selection = application.query(&session)?.try_vec().await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
 
         // Check that we have both Alice and Bob (order may vary)
@@ -682,7 +682,7 @@ mod tests {
             role: Term::var("job"),
         };
 
-        let stuff = query_stuff.query(session.clone()).await?;
+        let stuff = query_stuff.query(session.clone()).try_vec().await?;
 
         assert_eq!(stuff.len(), 2);
 
@@ -694,7 +694,7 @@ mod tests {
             job: Term::var("job"),
         };
 
-        let employees = query_employee.query(session.clone()).await?;
+        let employees = query_employee.query(session.clone()).try_vec().await?;
 
         assert_eq!(employees.len(), 2);
         println!("{:?}", employees);

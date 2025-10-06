@@ -500,7 +500,7 @@ fn test_join_plan_execution_order() {
 async fn test_join_plan_query_execution() -> anyhow::Result<()> {
     use crate::application::FactApplication;
     use crate::session::Session;
-    use crate::{Cardinality, Fact, SelectionExt, Term, Value};
+    use crate::{Cardinality, Fact, Term, Value};
     use dialog_artifacts::{Artifacts, Attribute, Entity};
     use dialog_storage::MemoryStorageBackend;
 
@@ -556,7 +556,7 @@ async fn test_join_plan_query_execution() -> anyhow::Result<()> {
     let plan = Join::try_from(premises)?;
 
     // Execute the query
-    let selection = plan.query(&session)?.collect_matches().await?;
+    let selection = plan.query(&session)?.try_vec().await?;
 
     // Should find both Alice and Bob with their name and age
     assert_eq!(selection.len(), 2, "Should find 2 people");
