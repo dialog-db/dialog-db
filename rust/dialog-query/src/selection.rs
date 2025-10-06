@@ -322,6 +322,21 @@ impl Match {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum Factor {
+    The(Blake3Hash),
+    Of(Blake3Hash),
+    Is(Blake3Hash),
+    Cause(Blake3Hash),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Answer {
+    /// Set of facts from which the answer is derived.
+    pub facts: HashMap<Blake3Hash, Fact>,
+    pub bindings: HashMap<String, Factor>,
+}
+
 /// An empty selection that yields no matches
 ///
 /// This is useful as a placeholder for unimplemented rule evaluation
