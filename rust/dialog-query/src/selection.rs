@@ -26,6 +26,93 @@ pub trait Expand: ConditionalSend + 'static {
     fn expand(&self, item: Match) -> Vec<Match>;
 }
 
+/// Trait for streams of Answers (with fact provenance)
+pub trait Answers: Stream<Item = Result<Answer, QueryError>> + 'static + ConditionalSend {
+    /// Collect all answers into a Vec, propagating any errors
+    #[allow(async_fn_in_trait)]
+    fn try_vec(
+        self,
+    ) -> impl std::future::Future<Output = Result<Vec<Answer>, QueryError>> + ConditionalSend
+    where
+        Self: Sized,
+    {
+        async move { futures_util::TryStreamExt::try_collect(self).await }
+    }
+
+    fn flat_map<M: AnswersFlatMapper>(self, mapper: M) -> impl Answers
+    where
+        Self: Sized,
+    {
+        try_stream! {
+            for await each in self {
+                for await mapped in mapper.map(each?) {
+                    yield mapped?;
+                }
+            }
+        }
+    }
+
+    fn expand<M: AnswersExpand>(self, expander: M) -> impl Answers
+    where
+        Self: Sized,
+    {
+        try_stream! {
+            for await each in self {
+                for expanded in expander.expand(each?) {
+                    yield expanded;
+                }
+            }
+        }
+    }
+
+    fn try_expand<M: AnswersTryExpand>(self, expander: M) -> impl Answers
+    where
+        Self: Sized,
+    {
+        try_stream! {
+            for await each in self {
+                for expanded in expander.try_expand(each?)? {
+                    yield expanded;
+                }
+            }
+        }
+    }
+}
+
+impl<S> Answers for S where S: Stream<Item = Result<Answer, QueryError>> + 'static + ConditionalSend {}
+
+pub trait AnswersFlatMapper: ConditionalSend + 'static {
+    fn map(&self, item: Answer) -> impl Answers;
+}
+
+pub trait AnswersTryExpand: ConditionalSend + 'static {
+    fn try_expand(&self, item: Answer) -> Result<Vec<Answer>, QueryError>;
+}
+
+pub trait AnswersExpand: ConditionalSend + 'static {
+    fn expand(&self, item: Answer) -> Vec<Answer>;
+}
+
+impl<F: Fn(Answer) -> Result<Vec<Answer>, QueryError> + ConditionalSend + 'static> AnswersTryExpand
+    for F
+{
+    fn try_expand(&self, answer: Answer) -> Result<Vec<Answer>, QueryError> {
+        self(answer)
+    }
+}
+
+impl<F: Fn(Answer) -> Vec<Answer> + ConditionalSend + 'static> AnswersExpand for F {
+    fn expand(&self, answer: Answer) -> Vec<Answer> {
+        self(answer)
+    }
+}
+
+impl<S: Answers, F: (Fn(Answer) -> S) + ConditionalSend + 'static> AnswersFlatMapper for F {
+    fn map(&self, input: Answer) -> impl Answers {
+        self(input)
+    }
+}
+
 pub trait Selection: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend {
     /// Collect all matches into a Vec, propagating any errors
     #[allow(async_fn_in_trait)]
@@ -326,45 +413,119 @@ impl Match {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Factor<'a> {
-    The(&'a Fact),
-    Of(&'a Fact),
-    Is(&'a Fact),
-    Cause(&'a Fact),
+#[derive(Clone, Debug)]
+pub enum Factor {
+    The(Arc<Fact>),
+    Of(Arc<Fact>),
+    Is(Arc<Fact>),
+    Cause(Arc<Fact>),
+    /// Derived from a formula computation - tracks the input facts used
+    Derived {
+        value: Value,
+        sources: Vec<Arc<Fact>>,
+    },
 }
-impl<'a> Factor<'a> {
-    fn fact(&'a self) -> &'a Fact {
+
+impl Factor {
+    /// Get the underlying fact if this factor is directly from a fact (not derived)
+    pub fn fact(&self) -> Option<&Fact> {
         match self {
-            Factor::The(fact) => fact,
-            Factor::Of(fact) => fact,
-            Factor::Is(fact) => fact,
-            Factor::Cause(fact) => fact,
+            Factor::The(fact) => Some(fact.as_ref()),
+            Factor::Of(fact) => Some(fact.as_ref()),
+            Factor::Is(fact) => Some(fact.as_ref()),
+            Factor::Cause(fact) => Some(fact.as_ref()),
+            Factor::Derived { .. } => None,
         }
     }
+
     fn content(&self) -> Value {
         match self {
             Factor::The(fact) => Value::Symbol(fact.the().clone()),
             Factor::Of(fact) => Value::Entity(fact.of().clone()),
             Factor::Is(fact) => fact.is().clone(),
             Factor::Cause(fact) => Value::Bytes(fact.cause().clone().0.into()),
+            Factor::Derived { value, .. } => value.clone(),
+        }
+    }
+
+    /// Get all facts that contributed to this factor
+    fn sources(&self) -> Vec<Arc<Fact>> {
+        match self {
+            Factor::The(fact) | Factor::Of(fact) | Factor::Is(fact) | Factor::Cause(fact) => {
+                vec![Arc::clone(fact)]
+            }
+            Factor::Derived { sources, .. } => sources.clone(),
         }
     }
 }
+
+// Implement Hash and Eq based on Arc pointer identity for fact variants,
+// and value/sources for Derived variant
+impl std::hash::Hash for Factor {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Hash the discriminant first to distinguish between variants
+        std::mem::discriminant(self).hash(state);
+
+        match self {
+            Factor::The(fact) | Factor::Of(fact) | Factor::Is(fact) | Factor::Cause(fact) => {
+                // Hash based on the Arc pointer address, not the content
+                let ptr = Arc::as_ptr(fact) as *const ();
+                ptr.hash(state);
+            }
+            Factor::Derived { value, sources } => {
+                // For derived factors, hash the value and source fact pointers
+                value.hash(state);
+                for source in sources {
+                    let ptr = Arc::as_ptr(source) as *const ();
+                    ptr.hash(state);
+                }
+            }
+        }
+    }
+}
+
+impl PartialEq for Factor {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Factor::The(a), Factor::The(b)) => Arc::ptr_eq(a, b),
+            (Factor::Of(a), Factor::Of(b)) => Arc::ptr_eq(a, b),
+            (Factor::Is(a), Factor::Is(b)) => Arc::ptr_eq(a, b),
+            (Factor::Cause(a), Factor::Cause(b)) => Arc::ptr_eq(a, b),
+            (
+                Factor::Derived {
+                    value: v1,
+                    sources: s1,
+                },
+                Factor::Derived {
+                    value: v2,
+                    sources: s2,
+                },
+            ) => {
+                // Compare values and source fact pointers
+                v1 == v2
+                    && s1.len() == s2.len()
+                    && s1.iter().zip(s2.iter()).all(|(a, b)| Arc::ptr_eq(a, b))
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Factor {}
 
 /// Represents factors that support a variable binding.
 ///
 /// A `Factors` instance contains one or more factors that all have the same content.
 /// The first factor added becomes the primary source for the content value.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Factors<'a> {
-    primary: &'a Factor<'a>,
-    alternates: HashSet<&'a Factor<'a>>,
+pub struct Factors {
+    primary: Factor,
+    alternates: HashSet<Factor>,
 }
 
-impl<'a> Factors<'a> {
+impl Factors {
     /// Create a new Factors with just a primary factor
-    pub fn new(primary: &'a Factor<'a>) -> Self {
+    pub fn new(primary: Factor) -> Self {
         Self {
             primary,
             alternates: HashSet::new(),
@@ -378,7 +539,7 @@ impl<'a> Factors<'a> {
 
     /// Add a factor to this binding.
     /// Returns true if a new factor was added, false if it was already present.
-    pub fn add(&mut self, factor: &'a Factor<'a>) -> bool {
+    pub fn add(&mut self, factor: Factor) -> bool {
         if self.primary == factor {
             false
         } else {
@@ -388,46 +549,181 @@ impl<'a> Factors<'a> {
 
     /// Iterate over all factors (primary and alternates) that support this binding.
     /// This provides evidence for where this value came from.
-    pub fn evidence(&self) -> impl Iterator<Item = &'a Factor<'a>> + '_ {
-        std::iter::once(self.primary).chain(self.alternates.iter().copied())
+    pub fn evidence(&self) -> impl Iterator<Item = &Factor> + '_ {
+        std::iter::once(&self.primary).chain(self.alternates.iter())
     }
 }
 
-impl<'a> From<&Factors<'a>> for Value {
-    fn from(factors: &Factors<'a>) -> Self {
+impl From<&Factors> for Value {
+    fn from(factors: &Factors) -> Self {
         factors.content()
     }
 }
 
-/// Describes answer to the equery. It captures facts from which answer was
-/// concluded and a mapping between terms and components of the contained facts.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Answer<'a> {
-    /// Facts and number of factors referencing it.
-    facts: HashMap<&'a Fact<Value>, usize>,
-    bindings: HashMap<String, Factors<'a>>,
+impl From<&Factors> for Fact {
+    /// Extract the fact from factors.
+    /// Uses the first factor's source fact (primary or first alternate).
+    fn from(factors: &Factors) -> Self {
+        if let Some(factor) = factors.evidence().next() {
+            if let Some(fact) = factor.fact() {
+                Fact::Assertion {
+                    the: fact.the().clone(),
+                    of: fact.of().clone(),
+                    is: fact.is().clone(),
+                    cause: fact.cause().clone(),
+                }
+            } else {
+                // Derived factor - shouldn't happen for FactApplication
+                // but provide a fallback
+                panic!("Cannot convert Derived factor to Fact")
+            }
+        } else {
+            panic!("Cannot convert empty Factors to Fact")
+        }
+    }
 }
 
-impl<'a> Answer<'a> {
+/// Describes answer to the query. It captures facts from which answer was
+/// concluded and tracks which FactApplication produced which facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Answer {
+    /// Conclusions: named variable bindings where we've concluded values from facts.
+    /// Maps variable names to their values with provenance (which facts support this binding).
+    conclusions: HashMap<String, Factors>,
+    /// Applications: maps FactApplication to the fact it matched.
+    /// This allows us to realize facts even when the application had only constants/blanks.
+    /// The facts stored here represent all facts that contributed to this answer.
+    facts: HashMap<crate::application::fact::FactApplication, Arc<Fact>>,
+}
+
+impl Answer {
     /// Create new empty answer.
     pub fn new() -> Self {
         Self {
+            conclusions: HashMap::new(),
             facts: HashMap::new(),
-            bindings: HashMap::new(),
         }
     }
 
-    /// Assigns term to the a given factor and captures fact in the answer.
+    /// Get all tracked facts from the applications.
+    pub fn facts(&self) -> impl Iterator<Item = &Arc<Fact>> {
+        self.facts.values()
+    }
+
+    /// Get all conclusions (named variable bindings).
+    pub fn conclusions(&self) -> impl Iterator<Item = (&String, &Factors)> {
+        self.conclusions.iter()
+    }
+
+    /// Record that a FactApplication matched a specific fact.
+    /// Returns an error if the same application already mapped to a different fact,
+    /// which would indicate an inconsistency (shouldn't happen in practice, but we check).
+    pub fn record(
+        &mut self,
+        application: &crate::application::fact::FactApplication,
+        fact: Arc<Fact>,
+    ) -> Result<(), crate::error::InconsistencyError> {
+        use crate::error::InconsistencyError;
+
+        // Check if this application already has a different fact
+        if let Some(existing_fact) = self.facts.get(application) {
+            if !Arc::ptr_eq(existing_fact, &fact) {
+                return Err(InconsistencyError::AssignmentError(format!(
+                    "FactApplication {:?} already mapped to a different fact",
+                    application
+                )));
+            }
+            // Same fact - this is fine (idempotent)
+        } else {
+            // New mapping
+            self.facts.insert(application.clone(), fact);
+        }
+        Ok(())
+    }
+
+    /// Realize a fact from a FactApplication.
+    /// First tries to extract from named variable conclusions.
+    /// Falls back to looking up the application in the recorded applications.
+    pub fn realize(
+        &self,
+        application: &crate::application::fact::FactApplication,
+    ) -> Result<Fact, crate::error::QueryError> {
+        use crate::error::QueryError;
+        use crate::term::Term;
+
+        // Try to extract from a named variable conclusion first
+        // This gives us the full fact with all its components
+
+        // Try 'the' first
+        if let Term::Variable { name: Some(_), .. } = application.the() {
+            if let Some(factors) = self.resolve_factors(&application.the().as_unknown()) {
+                return Ok(Fact::from(factors));
+            }
+        }
+
+        // Try 'of' next
+        if let Term::Variable { name: Some(_), .. } = application.of() {
+            if let Some(factors) = self.resolve_factors(&application.of().as_unknown()) {
+                return Ok(Fact::from(factors));
+            }
+        }
+
+        // Try 'is' last
+        if let Term::Variable { name: Some(_), .. } = application.is() {
+            if let Some(factors) = self.resolve_factors(&application.is().as_unknown()) {
+                return Ok(Fact::from(factors));
+            }
+        }
+
+        // No named variables - look up by application
+        if let Some(fact) = self.facts.get(application) {
+            return Ok(Fact::Assertion {
+                the: fact.the().clone(),
+                of: fact.of().clone(),
+                is: fact.is().clone(),
+                cause: fact.cause().clone(),
+            });
+        }
+
+        Err(QueryError::FactStore(
+            "Could not realize fact from answer - application not found".to_string(),
+        ))
+    }
+
+    /// Assign a term to a factor - just calls conclude() which handles all cases.
+    /// This is provided for backward compatibility.
     pub fn assign(
         &mut self,
         term: &Term<Value>,
-        factor: &'a Factor<'a>,
+        factor: &Factor,
+    ) -> Result<(), InconsistencyError> {
+        self.conclude(term, factor)
+    }
+
+    /// Extends this answer by assigning multiple term-factor pairs.
+    pub fn extend<I>(&mut self, assignments: I) -> Result<(), InconsistencyError>
+    where
+        I: IntoIterator<Item = (Term<Value>, Factor)>,
+    {
+        for (term, factor) in assignments {
+            self.assign(&term, &factor)?;
+        }
+        Ok(())
+    }
+
+    /// Conclude a value for a named variable from a factor.
+    /// This binds the variable to the value with provenance tracking.
+    /// Ignores blank variables and constants (no-op for those).
+    pub fn conclude(
+        &mut self,
+        term: &Term<Value>,
+        factor: &Factor,
     ) -> Result<(), InconsistencyError> {
         match term {
             Term::Variable {
                 name: Some(name), ..
             } => {
-                if let Some(factors) = self.bindings.get_mut(name) {
+                if let Some(factors) = self.conclusions.get_mut(name) {
                     // Check if the new factor's content matches existing content
                     if factors.content() != factor.content() {
                         Err(InconsistencyError::AssignmentError(format!(
@@ -437,38 +733,19 @@ impl<'a> Answer<'a> {
                             factors.content()
                         )))
                     } else {
-                        // Add the factor - only increment count if it was actually added
-                        if factors.add(factor) {
-                            let fact = factor.fact();
-                            if let Some(count) = self.facts.get_mut(fact) {
-                                *count += 1;
-                            } else {
-                                self.facts.insert(fact, 1);
-                            }
-                        }
+                        // Add the factor (idempotent if already present)
+                        factors.add(factor.clone());
                         Ok(())
                     }
                 } else {
-                    self.bindings.insert(name.into(), Factors::new(factor));
-                    let fact = factor.fact();
-                    if let Some(count) = self.facts.get_mut(fact) {
-                        *count += 1;
-                    } else {
-                        self.facts.insert(fact, 1);
-                    }
+                    self.conclusions
+                        .insert(name.into(), Factors::new(factor.clone()));
                     Ok(())
                 }
             }
-            Term::Variable { name: None, .. } => Ok(()),
-            Term::Constant(value) => {
-                if *value == factor.content() {
-                    Ok(())
-                } else {
-                    Err(InconsistencyError::TypeMismatch {
-                        expected: value.clone(),
-                        actual: factor.content(),
-                    })
-                }
+            Term::Variable { name: None, .. } | Term::Constant(_) => {
+                // Blank variables and constants are ignored - no-op
+                Ok(())
             }
         }
     }
@@ -478,7 +755,7 @@ impl<'a> Answer<'a> {
         match term {
             Term::Variable { name, .. } => {
                 if let Some(key) = name {
-                    self.bindings.contains_key(key)
+                    self.conclusions.contains_key(key)
                 } else {
                     // We don't capture values for Any
                     false
@@ -489,17 +766,43 @@ impl<'a> Answer<'a> {
     }
 
     /// Resolves factors that were assigned to the given term.
-    pub fn resolve_factors<T: Scalar>(&self, term: &Term<T>) -> Option<&Factors<'a>> {
+    pub fn resolve_factors<T: Scalar>(&self, term: &Term<T>) -> Option<&Factors> {
         match term {
             Term::Variable {
                 name: Some(name), ..
-            } => self.bindings.get(name.into()),
+            } => self.conclusions.get(name.into()),
             Term::Variable { name: None, .. } => None,
             Term::Constant(_) => None,
         }
     }
 
     /// Resolves a term to its typed value.
+    /// Resolve a variable term into a constant term if this answer has a
+    /// binding for it. Otherwise, return the original term.
+    /// This is similar to Match::resolve but works with Answer bindings.
+    pub fn resolve_term<T: Scalar>(&self, term: &Term<T>) -> Term<T> {
+        match term {
+            Term::Variable { name, .. } => {
+                if let Some(key) = name {
+                    if let Some(factors) = self.conclusions.get(key) {
+                        let value = factors.content();
+                        if let Ok(converted) = T::try_from(value) {
+                            Term::Constant(converted)
+                        } else {
+                            // Conversion failed - return original term
+                            term.clone()
+                        }
+                    } else {
+                        term.clone()
+                    }
+                } else {
+                    term.clone()
+                }
+            }
+            Term::Constant(_) => term.clone(),
+        }
+    }
+
     ///
     /// For variables, looks up the binding and extracts the typed value from the factor.
     /// For constants, returns the constant value directly.
@@ -514,7 +817,7 @@ impl<'a> Answer<'a> {
         match term {
             Term::Variable { name, .. } => {
                 if let Some(key) = name {
-                    if let Some(factors) = self.bindings.get(key) {
+                    if let Some(factors) = self.conclusions.get(key) {
                         let value = factors.content();
                         T::try_from(value.clone()).map_err(|_| {
                             // Create a proper TypeError for type conversion errors
@@ -851,8 +1154,12 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
         let value = Value::String("Alice".to_string());
-        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
-        let factor = Factor::Is(&fact);
+        let fact = Arc::new(create_test_fact(
+            entity.clone(),
+            attr.clone(),
+            value.clone(),
+        ));
+        let factor = Factor::Is(Arc::clone(&fact));
 
         let mut answer = Answer::new();
         let name_term = Term::<Value>::var("name");
@@ -867,7 +1174,7 @@ mod tests {
 
     #[test]
     fn test_answer_contains_unbound_variable() {
-        let answer = Answer::new();
+        let mut answer = Answer::new();
         let name_term = Term::<Value>::var("name");
 
         // Should not contain unbound variable
@@ -876,7 +1183,7 @@ mod tests {
 
     #[test]
     fn test_answer_contains_constant() {
-        let answer = Answer::new();
+        let mut answer = Answer::new();
         let constant_term = Term::Constant(Value::String("constant_value".to_string()));
 
         // Constants are always "bound"
@@ -885,7 +1192,7 @@ mod tests {
 
     #[test]
     fn test_answer_contains_blank_variable() {
-        let answer = Answer::new();
+        let mut answer = Answer::new();
         let blank_term = Term::<Value>::blank();
 
         // Blank variables (Any) are never "bound"
@@ -897,8 +1204,12 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
         let value = Value::String("Alice".to_string());
-        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
-        let factor = Factor::Is(&fact);
+        let fact = Arc::new(create_test_fact(
+            entity.clone(),
+            attr.clone(),
+            value.clone(),
+        ));
+        let factor = Factor::Is(Arc::clone(&fact));
 
         let mut answer = Answer::new();
         let name_term = Term::<String>::var("name");
@@ -918,8 +1229,12 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/age").unwrap();
         let value = Value::UnsignedInt(25);
-        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
-        let factor = Factor::Is(&fact);
+        let fact = Arc::new(create_test_fact(
+            entity.clone(),
+            attr.clone(),
+            value.clone(),
+        ));
+        let factor = Factor::Is(Arc::clone(&fact));
 
         let mut answer = Answer::new();
         let age_term = Term::<u32>::var("age");
@@ -939,8 +1254,12 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/score").unwrap();
         let value = Value::SignedInt(-10);
-        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
-        let factor = Factor::Is(&fact);
+        let fact = Arc::new(create_test_fact(
+            entity.clone(),
+            attr.clone(),
+            value.clone(),
+        ));
+        let factor = Factor::Is(Arc::clone(&fact));
 
         let mut answer = Answer::new();
         let score_term = Term::<i32>::var("score");
@@ -960,8 +1279,12 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/active").unwrap();
         let value = Value::Boolean(true);
-        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
-        let factor = Factor::Is(&fact);
+        let fact = Arc::new(create_test_fact(
+            entity.clone(),
+            attr.clone(),
+            value.clone(),
+        ));
+        let factor = Factor::Is(Arc::clone(&fact));
 
         let mut answer = Answer::new();
         let active_term = Term::<bool>::var("active");
@@ -982,8 +1305,12 @@ mod tests {
         let attr = Attribute::from_str("user/id").unwrap();
         let entity_value = Entity::new().unwrap();
         let value = Value::Entity(entity_value.clone());
-        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
-        let factor = Factor::Is(&fact);
+        let fact = Arc::new(create_test_fact(
+            entity.clone(),
+            attr.clone(),
+            value.clone(),
+        ));
+        let factor = Factor::Is(Arc::clone(&fact));
 
         let mut answer = Answer::new();
         let entity_term = Term::<Entity>::var("entity_id");
@@ -1000,7 +1327,7 @@ mod tests {
 
     #[test]
     fn test_answer_resolve_constant() {
-        let answer = Answer::new();
+        let mut answer = Answer::new();
         let constant_term = Term::Constant("constant_value".to_string());
 
         // Resolve constant directly
@@ -1011,7 +1338,7 @@ mod tests {
 
     #[test]
     fn test_answer_resolve_unbound_variable() {
-        let answer = Answer::new();
+        let mut answer = Answer::new();
         let name_term = Term::<String>::var("name");
 
         // Try to resolve unbound variable (should fail)
@@ -1027,7 +1354,7 @@ mod tests {
 
     #[test]
     fn test_answer_resolve_blank_variable() {
-        let answer = Answer::new();
+        let mut answer = Answer::new();
         let blank_term = Term::<String>::blank();
 
         // Try to resolve blank variable (should fail)
@@ -1044,8 +1371,12 @@ mod tests {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
         let value = Value::String("Alice".to_string());
-        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
-        let factor = Factor::Is(&fact);
+        let fact = Arc::new(create_test_fact(
+            entity.clone(),
+            attr.clone(),
+            value.clone(),
+        ));
+        let factor = Factor::Is(Arc::clone(&fact));
 
         let mut answer = Answer::new();
         let name_term_value = Term::<Value>::var("name");
@@ -1071,11 +1402,19 @@ mod tests {
         let value = Value::String("Alice".to_string());
 
         // Create two different facts with the same value but different entities
-        let fact1 = create_test_fact(entity1.clone(), attr.clone(), value.clone());
-        let fact2 = create_test_fact(entity2.clone(), attr.clone(), value.clone());
+        let fact1 = Arc::new(create_test_fact(
+            entity1.clone(),
+            attr.clone(),
+            value.clone(),
+        ));
+        let fact2 = Arc::new(create_test_fact(
+            entity2.clone(),
+            attr.clone(),
+            value.clone(),
+        ));
 
-        let factor1 = Factor::Is(&fact1);
-        let factor2 = Factor::Is(&fact2);
+        let factor1 = Factor::Is(Arc::clone(&fact1));
+        let factor2 = Factor::Is(Arc::clone(&fact2));
 
         let mut answer = Answer::new();
         let name_term = Term::<Value>::var("name");
@@ -1095,52 +1434,13 @@ mod tests {
 
         // Should have both factors since they come from different facts
         // (even though they have the same value)
-        assert_eq!(evidence.len(), 2, "Should have 2 factors from different facts");
+        assert_eq!(
+            evidence.len(),
+            2,
+            "Should have 2 factors from different facts"
+        );
         assert!(evidence.contains(&&factor1));
         assert!(evidence.contains(&&factor2));
-    }
-
-    #[test]
-    fn test_answer_fact_reference_counting() {
-        let entity = Entity::new().unwrap();
-        let attr = Attribute::from_str("user/name").unwrap();
-        let value = Value::String("Alice".to_string());
-        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
-
-        let factor = Factor::Is(&fact);
-
-        let mut answer = Answer::new();
-        let name_term = Term::<Value>::var("name");
-
-        // First assignment - should add fact with count 1
-        answer.assign(&name_term, &factor).unwrap();
-        assert_eq!(answer.facts.get(&fact), Some(&1));
-
-        // Second assignment of same factor - should NOT increment count (noop)
-        answer.assign(&name_term, &factor).unwrap();
-        assert_eq!(answer.facts.get(&fact), Some(&1), "Re-assigning same factor should not increment count");
-
-        // Create another variable with the same factor
-        let email_term = Term::<Value>::var("email");
-        answer.assign(&email_term, &factor).unwrap();
-        assert_eq!(answer.facts.get(&fact), Some(&2), "Same fact used by two variables should have count 2");
-
-        // Create a second fact with different entity but same value
-        let entity2 = Entity::new().unwrap();
-        let fact2 = create_test_fact(entity2.clone(), attr.clone(), value.clone());
-        let factor2 = Factor::Is(&fact2);
-
-        // Assigning a different factor with same value to existing variable
-        answer.assign(&name_term, &factor2).unwrap();
-
-        // Each fact should be tracked independently
-        assert_eq!(answer.facts.get(&fact), Some(&2), "Original fact still referenced twice");
-        assert_eq!(answer.facts.get(&fact2), Some(&1), "New fact referenced once");
-
-        // Verify both factors are in the evidence
-        let factors = answer.resolve_factors(&name_term).unwrap();
-        let evidence: Vec<_> = factors.evidence().collect();
-        assert_eq!(evidence.len(), 2, "Should have both factors in evidence");
     }
 
     #[test]
@@ -1150,25 +1450,43 @@ mod tests {
         // Create multiple facts
         let name_attr = Attribute::from_str("user/name").unwrap();
         let name_value = Value::String("Bob".to_string());
-        let name_fact = create_test_fact(entity.clone(), name_attr.clone(), name_value.clone());
-        let name_factor = Factor::Is(&name_fact);
+        let name_fact = Arc::new(create_test_fact(
+            entity.clone(),
+            name_attr.clone(),
+            name_value.clone(),
+        ));
+        let name_factor = Factor::Is(Arc::clone(&name_fact));
 
         let age_attr = Attribute::from_str("user/age").unwrap();
         let age_value = Value::UnsignedInt(30);
-        let age_fact = create_test_fact(entity.clone(), age_attr.clone(), age_value.clone());
-        let age_factor = Factor::Is(&age_fact);
+        let age_fact = Arc::new(create_test_fact(
+            entity.clone(),
+            age_attr.clone(),
+            age_value.clone(),
+        ));
+        let age_factor = Factor::Is(Arc::clone(&age_fact));
 
         let active_attr = Attribute::from_str("user/active").unwrap();
         let active_value = Value::Boolean(true);
-        let active_fact = create_test_fact(entity.clone(), active_attr.clone(), active_value.clone());
-        let active_factor = Factor::Is(&active_fact);
+        let active_fact = Arc::new(create_test_fact(
+            entity.clone(),
+            active_attr.clone(),
+            active_value.clone(),
+        ));
+        let active_factor = Factor::Is(Arc::clone(&active_fact));
 
         let mut answer = Answer::new();
 
-        // Assign all values
-        answer.assign(&Term::<Value>::var("name"), &name_factor).unwrap();
-        answer.assign(&Term::<Value>::var("age"), &age_factor).unwrap();
-        answer.assign(&Term::<Value>::var("active"), &active_factor).unwrap();
+        // Assign all values using chaining
+        answer
+            .assign(&Term::<Value>::var("name"), &name_factor)
+            .unwrap();
+        answer
+            .assign(&Term::<Value>::var("age"), &age_factor)
+            .unwrap();
+        answer
+            .assign(&Term::<Value>::var("active"), &active_factor)
+            .unwrap();
 
         // Resolve all values with correct types
         let name_result = answer.resolve::<String>(&Term::var("name")).unwrap();
@@ -1178,5 +1496,45 @@ mod tests {
         assert_eq!(name_result, "Bob");
         assert_eq!(age_result, 30);
         assert_eq!(active_result, true);
+    }
+
+    #[test]
+    fn test_answer_extend() {
+        let entity = Entity::new().unwrap();
+
+        // Create multiple facts
+        let name_attr = Attribute::from_str("user/name").unwrap();
+        let name_value = Value::String("Charlie".to_string());
+        let name_fact = Arc::new(create_test_fact(
+            entity.clone(),
+            name_attr.clone(),
+            name_value.clone(),
+        ));
+        let name_factor = Factor::Is(Arc::clone(&name_fact));
+
+        let age_attr = Attribute::from_str("user/age").unwrap();
+        let age_value = Value::UnsignedInt(35);
+        let age_fact = Arc::new(create_test_fact(
+            entity.clone(),
+            age_attr.clone(),
+            age_value.clone(),
+        ));
+        let age_factor = Factor::Is(Arc::clone(&age_fact));
+
+        // Use extend to assign multiple values at once
+        let assignments = vec![
+            (Term::<Value>::var("name"), name_factor),
+            (Term::<Value>::var("age"), age_factor),
+        ];
+
+        let mut answer = Answer::new();
+        answer.extend(assignments).unwrap();
+
+        // Verify all values were assigned
+        let name_result = answer.resolve::<String>(&Term::var("name")).unwrap();
+        let age_result = answer.resolve::<u32>(&Term::var("age")).unwrap();
+
+        assert_eq!(name_result, "Charlie");
+        assert_eq!(age_result, 35);
     }
 }

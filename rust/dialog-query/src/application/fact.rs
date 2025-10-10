@@ -8,12 +8,14 @@ use crate::query::{Circuit, Query};
 use crate::Cardinality;
 pub use crate::Environment;
 
+use crate::selection::{Answer, Answers, Factor};
 use crate::Fact;
 use crate::{try_stream, EvaluationContext, Match, Selection, Source};
 use crate::{Constraint, Dependency, Entity, Parameters, QueryError, Schema, Term, Type, Value};
 use dialog_artifacts::Cause;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 pub const BASE_COST: usize = 100;
@@ -39,7 +41,7 @@ pub const INDEX_SCAN: usize = 5_000;
 /// Concepts may have associated deductive rules that need to be checked and evaluated.
 pub const CONCEPT_OVERHEAD: usize = 1_000;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FactApplication {
     cardinality: Cardinality,
     the: Term<Attribute>,
@@ -103,6 +105,7 @@ impl FactApplication {
             is: self.is.clone(),
         }
     }
+
     pub fn new(
         the: Term<Attribute>,
         of: Term<Entity>,
@@ -115,6 +118,21 @@ impl FactApplication {
             of,
             is,
         }
+    }
+
+    /// Get the 'the' (attribute) term
+    pub fn the(&self) -> &Term<Attribute> {
+        &self.the
+    }
+
+    /// Get the 'of' (entity) term
+    pub fn of(&self) -> &Term<Entity> {
+        &self.of
+    }
+
+    /// Get the 'is' (value) term
+    pub fn is(&self) -> &Term<Value> {
+        &self.is
     }
 
     /// Estimate cost based on how many parameters are constrained and cardinality.
@@ -145,6 +163,20 @@ impl FactApplication {
         let the = source.resolve(&self.the);
         let of = source.resolve(&self.of);
         let is = source.resolve(&self.is);
+
+        Self {
+            the,
+            of,
+            is,
+            cardinality: self.cardinality,
+        }
+    }
+
+    /// Resolves variables from the given answer.
+    pub fn resolve_from_answer(&self, source: &Answer) -> Self {
+        let the = source.resolve_term(&self.the);
+        let of = source.resolve_term(&self.of);
+        let is = source.resolve_term(&self.is);
 
         Self {
             the,
@@ -197,6 +229,52 @@ impl FactApplication {
         }
     }
 
+    /// Evaluate with fact provenance tracking - returns Answers instead of Match-based Selection
+    pub fn evaluate_with_provenance<S: Source, M: Answers>(
+        &self,
+        source: S,
+        answers: M,
+    ) -> impl Answers {
+        let selector = self.clone();
+        try_stream! {
+            for await each in answers {
+                let input = each?;
+                let selection = selector.resolve_from_answer(&input);
+
+                // NOTE: We do not capture provenance for facts used to resolve the selector.
+                // For example, if we query Fact { the: ?attr, of: alice, is: ?value }
+                // and 'alice' came from a previous fact, we don't track that previous fact here.
+                // We only track the facts that directly match this FactApplication pattern.
+                // This may need reconsideration in the future for complete provenance tracking.
+
+                for await artifact in source.select((&selection).try_into()?) {
+                    let artifact = artifact?;
+
+                    // Create fact for provenance tracking
+                    let fact = Arc::new(Fact::Assertion {
+                        the: artifact.the.clone(),
+                        of: artifact.of.clone(),
+                        is: artifact.is.clone(),
+                        cause: artifact.cause.unwrap_or(Cause([0; 32])),
+                    });
+
+                    // Create a new answer by concluding variables and recording the application
+                    let mut output = input.clone();
+
+                    // Conclude binds named variables, ignores blanks and constants
+                    output.conclude(&selection.of.as_unknown(), &Factor::Of(Arc::clone(&fact)))?;
+                    output.conclude(&selection.the.as_unknown(), &Factor::The(Arc::clone(&fact)))?;
+                    output.conclude(&selection.is.as_unknown(), &Factor::Is(Arc::clone(&fact)))?;
+
+                    // Record the application -> fact mapping so we can realize later
+                    output.record(&selector, Arc::clone(&fact))?;
+
+                    yield output;
+                }
+            }
+        }
+    }
+
     pub fn realize(&self, source: crate::selection::Match) -> Result<Fact<Value>, QueryError> {
         // Convert blank variables to internal names for retrieval
         let the_term = match &self.the {
@@ -234,31 +312,16 @@ impl FactApplication {
     where
         Self: Sized,
     {
-        // TODO: This logic should be added perhaps to .compile method. In
-        // practice we want concept to be used for queries which we know
-        // can be evaluated due to attributes being known.
-        //
-        // // Validate that at least one parameter is constrained (not a variable)
-        // // This prevents completely unconstrained queries
-        // let has_constant = matches!(&self.the, Term::Constant(_))
-        //     || matches!(&self.of, Term::Constant(_))
-        //     || matches!(&self.is, Term::Constant(_));
+        use futures_util::stream::once;
 
-        // if !has_constant {
-        //     return Err(QueryError::EmptySelector {
-        //         message:
-        //             "At least one bound parameter required (the, of, or is must be a constant)"
-        //                 .to_string(),
-        //     });
-        // }
-
-        // Inline the trait implementation to avoid lifetime issues
-        let context = new_context(source.clone());
-        let selection = self.evaluate(context);
+        // Use the Answer-based approach for proper provenance tracking
+        let initial_answer = once(async move { Ok(Answer::new()) });
+        let answers = self.evaluate_with_provenance(source.clone(), initial_answer);
         let query = self.clone();
+
         try_stream! {
-            for await each in selection {
-                yield query.realize(each?)?;
+            for await each in answers {
+                yield each?.realize(&query)?;
             }
         }
     }
