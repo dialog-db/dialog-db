@@ -1,11 +1,15 @@
 //! Fact, Assertion, Retraction, and Claim types for the dialog-query system
 
+use std::hash::Hash;
+
 pub use super::claim::{fact, Claim};
 pub use super::predicate::fact::Fact as PredicateFact;
 pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Instruction, Value};
 use crate::claim::fact::Relation;
 pub use crate::query::Output;
 pub use crate::types::Scalar;
+use dialog_artifacts::{Blake3Hash, CborEncoder, DialogArtifactsError, Encoder};
+use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
 
 /// An assertion represents a fact to be asserted in the database
@@ -31,8 +35,8 @@ pub struct Retraction {
 }
 
 /// A fact represents persisted data with a cause - can be an assertion or retraction
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Fact<T = Value> {
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Serialize, Deserialize)]
+pub enum Fact<T: Scalar + ConditionalSend = Value> {
     /// An assertion fact with cause
     Assertion {
         /// The attribute (predicate)
@@ -57,10 +61,7 @@ pub enum Fact<T = Value> {
     },
 }
 
-impl<T> Fact<T>
-where
-    T: Scalar,
-{
+impl<T: Scalar + ConditionalSend> Fact<T> {
     /// Create an assertion claim from individual components
     pub fn assert<The: Into<Attribute>, Of: Into<Entity>>(the: The, of: Of, is: T) -> Claim {
         let relation = Relation::new(the.into(), of.into(), is.as_value());
@@ -75,6 +76,43 @@ where
 
     pub fn select() -> PredicateFact {
         PredicateFact::new()
+    }
+
+    pub fn the(&self) -> &Attribute {
+        match self {
+            Fact::Assertion { the, .. } => the,
+            Fact::Retraction { the, .. } => the,
+        }
+    }
+    pub fn of(&self) -> &Entity {
+        match self {
+            Fact::Assertion { of, .. } => of,
+            Fact::Retraction { of, .. } => of,
+        }
+    }
+    pub fn is(&self) -> &T {
+        match self {
+            Fact::Assertion { is, .. } => is,
+            Fact::Retraction { is, .. } => is,
+        }
+    }
+    pub fn cause(&self) -> &Cause {
+        match self {
+            Fact::Assertion { cause, .. } => cause,
+            Fact::Retraction { cause, .. } => cause,
+        }
+    }
+}
+
+impl<T: Scalar + ConditionalSend + ConditionalSync + Serialize> Fact<T> {
+    pub async fn as_bytes(&self) -> Result<Vec<u8>, DialogArtifactsError> {
+        let (_, bytes) = CborEncoder.encode(self).await?;
+        Ok(bytes)
+    }
+
+    pub async fn hash(&self) -> Result<Blake3Hash, DialogArtifactsError> {
+        let (hash, _) = CborEncoder.encode(self).await?;
+        Ok(hash)
     }
 }
 
@@ -318,9 +356,7 @@ mod integration_tests {
         session.transact(claims).await?;
 
         // Step 4: Test 1 - Query for user names
-        let query_names = Fact::<Value>::select()
-            .the("user/name")
-            .build()?;
+        let query_names = Fact::<Value>::select().the("user/name").build()?;
 
         let facts = query_names
             .query(&Session::open(artifacts.clone()))
@@ -333,8 +369,8 @@ mod integration_tests {
         let has_alice = facts.iter().any(|f| match f {
             Fact::Assertion { the, of, is, .. } => {
                 the.to_string() == "user/name"
-                && *of == alice
-                && *is == Value::String("Alice".to_string())
+                    && *of == alice
+                    && *is == Value::String("Alice".to_string())
             }
             _ => false,
         });
@@ -343,17 +379,15 @@ mod integration_tests {
         let has_bob = facts.iter().any(|f| match f {
             Fact::Assertion { the, of, is, .. } => {
                 the.to_string() == "user/name"
-                && *of == bob
-                && *is == Value::String("Bob".to_string())
+                    && *of == bob
+                    && *is == Value::String("Bob".to_string())
             }
             _ => false,
         });
         assert!(has_bob, "Should find Bob's name fact");
 
         // Step 5: Test 2 - Query for email
-        let query_email = Fact::<Value>::select()
-            .the("user/email")
-            .build()?;
+        let query_email = Fact::<Value>::select().the("user/email").build()?;
 
         let email_facts = query_email
             .query(&Session::open(artifacts.clone()))
@@ -365,8 +399,8 @@ mod integration_tests {
         let has_email = email_facts.iter().any(|f| match f {
             Fact::Assertion { the, of, is, .. } => {
                 the.to_string() == "user/email"
-                && *of == alice
-                && *is == Value::String("alice@example.com".to_string())
+                    && *of == alice
+                    && *is == Value::String("alice@example.com".to_string())
             }
             _ => false,
         });
@@ -423,8 +457,8 @@ mod integration_tests {
         let has_alice = results.iter().any(|f| match f {
             Fact::Assertion { the, of, is, .. } => {
                 the.to_string() == "user/name"
-                && *of == alice
-                && *is == Value::String("Alice".to_string())
+                    && *of == alice
+                    && *is == Value::String("Alice".to_string())
             }
             _ => false,
         });
@@ -515,9 +549,7 @@ mod integration_tests {
         assert_eq!(mixed_results.len(), 1, "Should find Alice specifically");
 
         // Test 3: Find all names
-        let find_all_names = Fact::<Value>::select()
-            .the("user/name")
-            .build()?;
+        let find_all_names = Fact::<Value>::select().the("user/name").build()?;
 
         let all_name_results = find_all_names
             .query(&Session::open(artifacts.clone()))
@@ -534,12 +566,13 @@ mod integration_tests {
             _ => false,
         });
         let has_bob = all_name_results.iter().any(|f| match f {
-            Fact::Assertion { of, is, .. } => {
-                *of == bob && *is == Value::String("Bob".to_string())
-            }
+            Fact::Assertion { of, is, .. } => *of == bob && *is == Value::String("Bob".to_string()),
             _ => false,
         });
-        assert!(has_alice && has_bob, "Should find both Alice and Bob's facts");
+        assert!(
+            has_alice && has_bob,
+            "Should find both Alice and Bob's facts"
+        );
 
         Ok(())
     }
@@ -625,9 +658,7 @@ mod integration_tests {
         assert!(has_alice_admin && has_charlie_admin);
 
         // Query 2: Find all user roles
-        let role_query = Fact::<Value>::select()
-            .the("user/role")
-            .build()?;
+        let role_query = Fact::<Value>::select().the("user/role").build()?;
 
         let role_results = role_query
             .query(&Session::open(artifacts.clone()))
@@ -678,9 +709,7 @@ mod integration_tests {
         let mut session = Session::open(artifacts.clone());
         session.transact(facts).await?;
 
-        let query_with_variables = Fact::<Value>::select()
-            .the("user/name")
-            .build()?;
+        let query_with_variables = Fact::<Value>::select().the("user/name").build()?;
 
         let results = query_with_variables
             .query(&Session::open(artifacts.clone()))
@@ -697,9 +726,7 @@ mod integration_tests {
             _ => false,
         });
         let has_bob = results.iter().any(|f| match f {
-            Fact::Assertion { of, is, .. } => {
-                *of == bob && *is == Value::String("Bob".to_string())
-            }
+            Fact::Assertion { of, is, .. } => *of == bob && *is == Value::String("Bob".to_string()),
             _ => false,
         });
         assert!(has_alice && has_bob);
@@ -733,9 +760,7 @@ mod integration_tests {
         session.transact(facts).await?;
 
         // Pattern 1: Query for user names
-        let value_selector = Fact::<Value>::select()
-            .the("user/name")
-            .build()?;
+        let value_selector = Fact::<Value>::select().the("user/name").build()?;
 
         let value_results = value_selector
             .query(&Session::open(artifacts.clone()))
@@ -852,9 +877,7 @@ mod integration_tests {
         assert!(has_alice);
 
         // Pattern 3: Find all names
-        let names_query = Fact::<Value>::select()
-            .the("user/name")
-            .build()?;
+        let names_query = Fact::<Value>::select().the("user/name").build()?;
 
         let name_results = names_query
             .query(&Session::open(artifacts.clone()))
@@ -908,8 +931,8 @@ mod integration_tests {
         let has_alice = results.iter().any(|f| match f {
             Fact::Assertion { the, of, is, .. } => {
                 the.to_string() == "user/name"
-                && *of == alice
-                && *is == Value::String("Alice".to_string())
+                    && *of == alice
+                    && *is == Value::String("Alice".to_string())
             }
             _ => false,
         });
@@ -999,9 +1022,7 @@ mod integration_tests {
         assert!(has_alice_admin);
 
         // Test 2: Find all user names
-        let name_search = Fact::<Value>::select()
-            .the("user/name")
-            .build()?;
+        let name_search = Fact::<Value>::select().the("user/name").build()?;
 
         let name_results = name_search
             .query(&Session::open(artifacts.clone()))

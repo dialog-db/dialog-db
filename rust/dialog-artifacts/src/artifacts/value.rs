@@ -1,5 +1,6 @@
 use std::{
     fmt::{Display, Formatter},
+    hash::Hash,
     marker::PhantomData,
     mem,
     str::FromStr,
@@ -12,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 /// All value type representations that may be stored by [`Artifacts`]
-#[derive(Debug, Clone, PartialOrd, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialOrd, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Value {
     /// A byte buffer
@@ -88,6 +89,45 @@ impl Value {
         make_reference(self.to_bytes())
     }
 }
+
+// We need to implement Hash because f64 does not implement it.
+impl Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Value::Float(f) => f.to_le_bytes().hash(state),
+            Value::Bytes(b) => b.hash(state),
+            Value::Entity(e) => e.hash(state),
+            Value::Boolean(b) => b.hash(state),
+            Value::String(s) => s.hash(state),
+            Value::UnsignedInt(u) => u.hash(state),
+            Value::SignedInt(i) => i.hash(state),
+            Value::Record(r) => r.hash(state),
+            Value::Symbol(s) => s.hash(state),
+        }
+    }
+}
+
+// We need to implement PartialEq / Eq because we can't derive Eq for f64
+// because of NaN equality
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Bytes(a), Value::Bytes(b)) => a == b,
+            (Value::Entity(a), Value::Entity(b)) => a == b,
+            (Value::Boolean(a), Value::Boolean(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::UnsignedInt(a), Value::UnsignedInt(b)) => a == b,
+            (Value::SignedInt(a), Value::SignedInt(b)) => a == b,
+            // NaN bitwise equal
+            (Value::Float(a), Value::Float(b)) => a.to_le_bytes() == b.to_le_bytes(),
+            (Value::Record(a), Value::Record(b)) => a == b,
+            (Value::Symbol(a), Value::Symbol(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
 
 pub(crate) fn to_utf8<S>(value: &Value, serializer: S) -> Result<S::Ok, S::Error>
 where

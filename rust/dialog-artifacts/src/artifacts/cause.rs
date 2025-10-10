@@ -11,7 +11,7 @@ use super::{Artifact, Blake3Hash};
 /// version of the same [`Artifact`] (where same implies same [`Entity`] and
 /// same [`Attribute`]).
 #[repr(transparent)]
-#[derive(Clone, Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, PartialOrd, Serialize, Deserialize, Eq, Hash)]
 pub struct Cause(pub Blake3Hash);
 
 impl From<&Artifact> for Cause {

@@ -1,14 +1,18 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 
 use crate::artifact::{Type, Value};
 use async_stream::try_stream;
 use dialog_common::ConditionalSend;
+use std::collections::HashMap;
 
 pub use futures_util::stream::{Stream, TryStream};
 use std::pin::Pin;
 use std::task;
 
-use crate::{types::Scalar, InconsistencyError, QueryError, Term};
+use crate::{types::Scalar, Fact, InconsistencyError, QueryError, Term};
 
 pub trait FlatMapper: ConditionalSend + 'static {
     fn map(&self, item: Match) -> impl Selection;
@@ -322,19 +326,134 @@ impl Match {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum Factor {
-    The(Blake3Hash),
-    Of(Blake3Hash),
-    Is(Blake3Hash),
-    Cause(Blake3Hash),
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Factor<'a> {
+    The(&'a Fact),
+    Of(&'a Fact),
+    Is(&'a Fact),
+    Cause(&'a Fact),
+}
+impl<'a> Factor<'a> {
+    fn fact(&'a self) -> &'a Fact {
+        match self {
+            Factor::The(fact) => fact,
+            Factor::Of(fact) => fact,
+            Factor::Is(fact) => fact,
+            Factor::Cause(fact) => fact,
+        }
+    }
+    fn content(&self) -> Value {
+        match self {
+            Factor::The(fact) => Value::Symbol(fact.the().clone()),
+            Factor::Of(fact) => Value::Entity(fact.of().clone()),
+            Factor::Is(fact) => fact.is().clone(),
+            Factor::Cause(fact) => Value::Bytes(fact.cause().clone().0.into()),
+        }
+    }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Answer {
-    /// Set of facts from which the answer is derived.
-    pub facts: HashMap<Blake3Hash, Fact>,
-    pub bindings: HashMap<String, Factor>,
+/// Describes answer to the equery. It captures facts from which answer was
+/// concluded and a mapping between terms and components of the contained facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Answer<'a> {
+    /// Facts and number of factors referencing it.
+    facts: HashMap<&'a Fact<Value>, usize>,
+    bindings: HashMap<String, (&'a Factor<'a>, HashSet<&'a Factor<'a>>)>,
+}
+
+impl<'a> Answer<'a> {
+    /// Create new empty answer.
+    pub fn new() -> Self {
+        Self {
+            facts: HashMap::new(),
+            bindings: HashMap::new(),
+        }
+    }
+
+    /// Assigns term to the a given factor and captures fact in the answer.
+    pub fn assign(
+        &mut self,
+        term: &Term<Value>,
+        factor: &'a Factor<'a>,
+    ) -> Result<(), InconsistencyError> {
+        match term {
+            Term::Variable {
+                name: Some(name), ..
+            } => {
+                if let Some((binding, rest)) = self.bindings.get_mut(name) {
+                    if binding.content() != factor.content() {
+                        Err(InconsistencyError::AssignmentError(format!(
+                            "Can not set {:?} to {:?} because it is already set to {:?}.",
+                            name,
+                            factor.content(),
+                            binding.content()
+                        )))
+                    } else if *binding == factor {
+                        Ok(())
+                    } else {
+                        rest.insert(factor);
+                        let fact = factor.fact();
+                        if let Some(count) = self.facts.get_mut(fact) {
+                            *count += 1;
+                        } else {
+                            self.facts.insert(fact, 1);
+                        }
+
+                        Ok(())
+                    }
+                } else {
+                    self.bindings.insert(name.into(), (factor, HashSet::new()));
+                    let fact = factor.fact();
+                    if let Some(count) = self.facts.get_mut(fact) {
+                        *count += 1;
+                    } else {
+                        self.facts.insert(fact, 1);
+                    }
+                    Ok(())
+                }
+            }
+            Term::Variable { name: None, .. } => Ok(()),
+            Term::Constant(value) => {
+                if *value == factor.content() {
+                    Ok(())
+                } else {
+                    Err(InconsistencyError::TypeMismatch {
+                        expected: value.clone(),
+                        actual: factor.content(),
+                    })
+                }
+            }
+        }
+    }
+
+    /// Returns true if term can be read from this answer.
+    pub fn contains<T: Scalar>(&self, term: &Term<T>) -> bool {
+        match term {
+            Term::Variable { name, .. } => {
+                if let Some(key) = name {
+                    self.bindings.contains_key(key)
+                } else {
+                    // We don't capture values for Any
+                    false
+                }
+            }
+            Term::Constant(_) => true, // Constants are always "bound"
+        }
+    }
+
+    /// Resolves factors that were assigned to the given term.
+    pub fn resolve<T: Scalar>(
+        &self,
+        term: &Term<T>,
+    ) -> Option<&(&'a Factor<'a>, HashSet<&'a Factor<'a>>)> {
+        match term {
+            Term::Variable {
+                name: Some(name), ..
+            } => self.bindings.get(name.into()),
+            Term::Variable { name: None, .. } => None,
+            Term::Constant(_) => None,
+        }
+    }
 }
 
 /// An empty selection that yields no matches
