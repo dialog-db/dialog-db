@@ -352,13 +352,60 @@ impl<'a> Factor<'a> {
     }
 }
 
+/// Represents factors that support a variable binding.
+///
+/// A `Factors` instance contains one or more factors that all have the same content.
+/// The first factor added becomes the primary source for the content value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Factors<'a> {
+    primary: &'a Factor<'a>,
+    alternates: HashSet<&'a Factor<'a>>,
+}
+
+impl<'a> Factors<'a> {
+    /// Create a new Factors with just a primary factor
+    pub fn new(primary: &'a Factor<'a>) -> Self {
+        Self {
+            primary,
+            alternates: HashSet::new(),
+        }
+    }
+
+    /// Get the value from the factors
+    pub fn content(&self) -> Value {
+        self.primary.content()
+    }
+
+    /// Add a factor to this binding.
+    /// Returns true if a new factor was added, false if it was already present.
+    pub fn add(&mut self, factor: &'a Factor<'a>) -> bool {
+        if self.primary == factor {
+            false
+        } else {
+            self.alternates.insert(factor)
+        }
+    }
+
+    /// Iterate over all factors (primary and alternates) that support this binding.
+    /// This provides evidence for where this value came from.
+    pub fn evidence(&self) -> impl Iterator<Item = &'a Factor<'a>> + '_ {
+        std::iter::once(self.primary).chain(self.alternates.iter().copied())
+    }
+}
+
+impl<'a> From<&Factors<'a>> for Value {
+    fn from(factors: &Factors<'a>) -> Self {
+        factors.content()
+    }
+}
+
 /// Describes answer to the equery. It captures facts from which answer was
 /// concluded and a mapping between terms and components of the contained facts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Answer<'a> {
     /// Facts and number of factors referencing it.
     facts: HashMap<&'a Fact<Value>, usize>,
-    bindings: HashMap<String, (&'a Factor<'a>, HashSet<&'a Factor<'a>>)>,
+    bindings: HashMap<String, Factors<'a>>,
 }
 
 impl<'a> Answer<'a> {
@@ -380,29 +427,29 @@ impl<'a> Answer<'a> {
             Term::Variable {
                 name: Some(name), ..
             } => {
-                if let Some((binding, rest)) = self.bindings.get_mut(name) {
-                    if binding.content() != factor.content() {
+                if let Some(factors) = self.bindings.get_mut(name) {
+                    // Check if the new factor's content matches existing content
+                    if factors.content() != factor.content() {
                         Err(InconsistencyError::AssignmentError(format!(
                             "Can not set {:?} to {:?} because it is already set to {:?}.",
                             name,
                             factor.content(),
-                            binding.content()
+                            factors.content()
                         )))
-                    } else if *binding == factor {
-                        Ok(())
                     } else {
-                        rest.insert(factor);
-                        let fact = factor.fact();
-                        if let Some(count) = self.facts.get_mut(fact) {
-                            *count += 1;
-                        } else {
-                            self.facts.insert(fact, 1);
+                        // Add the factor - only increment count if it was actually added
+                        if factors.add(factor) {
+                            let fact = factor.fact();
+                            if let Some(count) = self.facts.get_mut(fact) {
+                                *count += 1;
+                            } else {
+                                self.facts.insert(fact, 1);
+                            }
                         }
-
                         Ok(())
                     }
                 } else {
-                    self.bindings.insert(name.into(), (factor, HashSet::new()));
+                    self.bindings.insert(name.into(), Factors::new(factor));
                     let fact = factor.fact();
                     if let Some(count) = self.facts.get_mut(fact) {
                         *count += 1;
@@ -442,16 +489,50 @@ impl<'a> Answer<'a> {
     }
 
     /// Resolves factors that were assigned to the given term.
-    pub fn resolve<T: Scalar>(
-        &self,
-        term: &Term<T>,
-    ) -> Option<&(&'a Factor<'a>, HashSet<&'a Factor<'a>>)> {
+    pub fn resolve_factors<T: Scalar>(&self, term: &Term<T>) -> Option<&Factors<'a>> {
         match term {
             Term::Variable {
                 name: Some(name), ..
             } => self.bindings.get(name.into()),
             Term::Variable { name: None, .. } => None,
             Term::Constant(_) => None,
+        }
+    }
+
+    /// Resolves a term to its typed value.
+    ///
+    /// For variables, looks up the binding and extracts the typed value from the factor.
+    /// For constants, returns the constant value directly.
+    ///
+    /// Returns an error if:
+    /// - The variable is not bound
+    /// - The value cannot be converted to type T
+    pub fn resolve<T>(&self, term: &Term<T>) -> Result<T, InconsistencyError>
+    where
+        T: Scalar + std::convert::TryFrom<Value>,
+    {
+        match term {
+            Term::Variable { name, .. } => {
+                if let Some(key) = name {
+                    if let Some(factors) = self.bindings.get(key) {
+                        let value = factors.content();
+                        T::try_from(value.clone()).map_err(|_| {
+                            // Create a proper TypeError for type conversion errors
+                            InconsistencyError::TypeConversion(
+                                crate::artifact::TypeError::TypeMismatch(
+                                    T::TYPE.unwrap_or(Type::Bytes),
+                                    value.data_type(),
+                                ),
+                            )
+                        })
+                    } else {
+                        Err(InconsistencyError::UnboundVariableError(key.clone()))
+                    }
+                } else {
+                    Err(InconsistencyError::UnboundVariableError("".to_string()))
+                }
+            }
+            Term::Constant(constant) => Ok(constant.clone()),
         }
     }
 }
@@ -743,5 +824,359 @@ mod tests {
         // Mix with type-safe methods
         let typed_value: String = match_frame.get(&name_term).unwrap();
         assert_eq!(typed_value, "Henry");
+    }
+
+    // ============================================================================
+    // Answer Tests
+    // ============================================================================
+
+    // Helper function to create a test fact for Answer tests
+    // Since Fact requires a Cause (Blake3Hash), we create a simple helper
+    fn create_test_fact(entity: Entity, attr: Attribute, value: Value) -> Fact {
+        use crate::artifact::Cause;
+
+        // Create a dummy cause for testing - Cause is a newtype around a 32-byte hash
+        let cause = Cause([0u8; 32].into());
+
+        Fact::Assertion {
+            the: attr,
+            of: entity,
+            is: value,
+            cause,
+        }
+    }
+
+    #[test]
+    fn test_answer_contains_bound_variable() {
+        let entity = Entity::new().unwrap();
+        let attr = Attribute::from_str("user/name").unwrap();
+        let value = Value::String("Alice".to_string());
+        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
+        let factor = Factor::Is(&fact);
+
+        let mut answer = Answer::new();
+        let name_term = Term::<Value>::var("name");
+
+        // Initially should not contain the variable
+        assert!(!answer.contains(&name_term));
+
+        // After assignment, should contain the variable
+        answer.assign(&name_term, &factor).unwrap();
+        assert!(answer.contains(&name_term));
+    }
+
+    #[test]
+    fn test_answer_contains_unbound_variable() {
+        let answer = Answer::new();
+        let name_term = Term::<Value>::var("name");
+
+        // Should not contain unbound variable
+        assert!(!answer.contains(&name_term));
+    }
+
+    #[test]
+    fn test_answer_contains_constant() {
+        let answer = Answer::new();
+        let constant_term = Term::Constant(Value::String("constant_value".to_string()));
+
+        // Constants are always "bound"
+        assert!(answer.contains(&constant_term));
+    }
+
+    #[test]
+    fn test_answer_contains_blank_variable() {
+        let answer = Answer::new();
+        let blank_term = Term::<Value>::blank();
+
+        // Blank variables (Any) are never "bound"
+        assert!(!answer.contains(&blank_term));
+    }
+
+    #[test]
+    fn test_answer_resolve_string() {
+        let entity = Entity::new().unwrap();
+        let attr = Attribute::from_str("user/name").unwrap();
+        let value = Value::String("Alice".to_string());
+        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
+        let factor = Factor::Is(&fact);
+
+        let mut answer = Answer::new();
+        let name_term = Term::<String>::var("name");
+        let name_term_value = Term::<Value>::var("name");
+
+        // Assign the value
+        answer.assign(&name_term_value, &factor).unwrap();
+
+        // Resolve it using the type-safe method
+        let result = answer.resolve::<String>(&name_term);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Alice");
+    }
+
+    #[test]
+    fn test_answer_resolve_u32() {
+        let entity = Entity::new().unwrap();
+        let attr = Attribute::from_str("user/age").unwrap();
+        let value = Value::UnsignedInt(25);
+        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
+        let factor = Factor::Is(&fact);
+
+        let mut answer = Answer::new();
+        let age_term = Term::<u32>::var("age");
+        let age_term_value = Term::<Value>::var("age");
+
+        // Assign the value
+        answer.assign(&age_term_value, &factor).unwrap();
+
+        // Resolve it using the type-safe method
+        let result = answer.resolve::<u32>(&age_term);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 25);
+    }
+
+    #[test]
+    fn test_answer_resolve_i32() {
+        let entity = Entity::new().unwrap();
+        let attr = Attribute::from_str("user/score").unwrap();
+        let value = Value::SignedInt(-10);
+        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
+        let factor = Factor::Is(&fact);
+
+        let mut answer = Answer::new();
+        let score_term = Term::<i32>::var("score");
+        let score_term_value = Term::<Value>::var("score");
+
+        // Assign the value
+        answer.assign(&score_term_value, &factor).unwrap();
+
+        // Resolve it using the type-safe method
+        let result = answer.resolve::<i32>(&score_term);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), -10);
+    }
+
+    #[test]
+    fn test_answer_resolve_bool() {
+        let entity = Entity::new().unwrap();
+        let attr = Attribute::from_str("user/active").unwrap();
+        let value = Value::Boolean(true);
+        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
+        let factor = Factor::Is(&fact);
+
+        let mut answer = Answer::new();
+        let active_term = Term::<bool>::var("active");
+        let active_term_value = Term::<Value>::var("active");
+
+        // Assign the value
+        answer.assign(&active_term_value, &factor).unwrap();
+
+        // Resolve it using the type-safe method
+        let result = answer.resolve::<bool>(&active_term);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), true);
+    }
+
+    #[test]
+    fn test_answer_resolve_entity() {
+        let entity = Entity::new().unwrap();
+        let attr = Attribute::from_str("user/id").unwrap();
+        let entity_value = Entity::new().unwrap();
+        let value = Value::Entity(entity_value.clone());
+        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
+        let factor = Factor::Is(&fact);
+
+        let mut answer = Answer::new();
+        let entity_term = Term::<Entity>::var("entity_id");
+        let entity_term_value = Term::<Value>::var("entity_id");
+
+        // Assign the value
+        answer.assign(&entity_term_value, &factor).unwrap();
+
+        // Resolve it using the type-safe method
+        let result = answer.resolve::<Entity>(&entity_term);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), entity_value);
+    }
+
+    #[test]
+    fn test_answer_resolve_constant() {
+        let answer = Answer::new();
+        let constant_term = Term::Constant("constant_value".to_string());
+
+        // Resolve constant directly
+        let result = answer.resolve::<String>(&constant_term);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "constant_value");
+    }
+
+    #[test]
+    fn test_answer_resolve_unbound_variable() {
+        let answer = Answer::new();
+        let name_term = Term::<String>::var("name");
+
+        // Try to resolve unbound variable (should fail)
+        let result = answer.resolve::<String>(&name_term);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            InconsistencyError::UnboundVariableError(var) => {
+                assert_eq!(var, "name");
+            }
+            _ => panic!("Expected UnboundVariableError"),
+        }
+    }
+
+    #[test]
+    fn test_answer_resolve_blank_variable() {
+        let answer = Answer::new();
+        let blank_term = Term::<String>::blank();
+
+        // Try to resolve blank variable (should fail)
+        let result = answer.resolve::<String>(&blank_term);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            InconsistencyError::UnboundVariableError(_) => {} // Expected
+            _ => panic!("Expected UnboundVariableError"),
+        }
+    }
+
+    #[test]
+    fn test_answer_resolve_type_mismatch() {
+        let entity = Entity::new().unwrap();
+        let attr = Attribute::from_str("user/name").unwrap();
+        let value = Value::String("Alice".to_string());
+        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
+        let factor = Factor::Is(&fact);
+
+        let mut answer = Answer::new();
+        let name_term_value = Term::<Value>::var("name");
+
+        // Assign a string value
+        answer.assign(&name_term_value, &factor).unwrap();
+
+        // Try to resolve it as a u32 (should fail)
+        let age_term = Term::<u32>::var("name");
+        let result = answer.resolve::<u32>(&age_term);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            InconsistencyError::TypeConversion(_) => {} // Expected
+            _ => panic!("Expected TypeConversion error"),
+        }
+    }
+
+    #[test]
+    fn test_answer_factors_evidence() {
+        let entity1 = Entity::new().unwrap();
+        let entity2 = Entity::new().unwrap();
+        let attr = Attribute::from_str("user/name").unwrap();
+        let value = Value::String("Alice".to_string());
+
+        // Create two different facts with the same value but different entities
+        let fact1 = create_test_fact(entity1.clone(), attr.clone(), value.clone());
+        let fact2 = create_test_fact(entity2.clone(), attr.clone(), value.clone());
+
+        let factor1 = Factor::Is(&fact1);
+        let factor2 = Factor::Is(&fact2);
+
+        let mut answer = Answer::new();
+        let name_term = Term::<Value>::var("name");
+
+        // Assign the same value from two different facts
+        answer.assign(&name_term, &factor1).unwrap();
+        answer.assign(&name_term, &factor2).unwrap();
+
+        // Get the factors and check evidence
+        let factors = answer.resolve_factors(&name_term).unwrap();
+
+        // The content should be the same
+        assert_eq!(factors.content(), value);
+
+        // Collect evidence
+        let evidence: Vec<_> = factors.evidence().collect();
+
+        // Should have both factors since they come from different facts
+        // (even though they have the same value)
+        assert_eq!(evidence.len(), 2, "Should have 2 factors from different facts");
+        assert!(evidence.contains(&&factor1));
+        assert!(evidence.contains(&&factor2));
+    }
+
+    #[test]
+    fn test_answer_fact_reference_counting() {
+        let entity = Entity::new().unwrap();
+        let attr = Attribute::from_str("user/name").unwrap();
+        let value = Value::String("Alice".to_string());
+        let fact = create_test_fact(entity.clone(), attr.clone(), value.clone());
+
+        let factor = Factor::Is(&fact);
+
+        let mut answer = Answer::new();
+        let name_term = Term::<Value>::var("name");
+
+        // First assignment - should add fact with count 1
+        answer.assign(&name_term, &factor).unwrap();
+        assert_eq!(answer.facts.get(&fact), Some(&1));
+
+        // Second assignment of same factor - should NOT increment count (noop)
+        answer.assign(&name_term, &factor).unwrap();
+        assert_eq!(answer.facts.get(&fact), Some(&1), "Re-assigning same factor should not increment count");
+
+        // Create another variable with the same factor
+        let email_term = Term::<Value>::var("email");
+        answer.assign(&email_term, &factor).unwrap();
+        assert_eq!(answer.facts.get(&fact), Some(&2), "Same fact used by two variables should have count 2");
+
+        // Create a second fact with different entity but same value
+        let entity2 = Entity::new().unwrap();
+        let fact2 = create_test_fact(entity2.clone(), attr.clone(), value.clone());
+        let factor2 = Factor::Is(&fact2);
+
+        // Assigning a different factor with same value to existing variable
+        answer.assign(&name_term, &factor2).unwrap();
+
+        // Each fact should be tracked independently
+        assert_eq!(answer.facts.get(&fact), Some(&2), "Original fact still referenced twice");
+        assert_eq!(answer.facts.get(&fact2), Some(&1), "New fact referenced once");
+
+        // Verify both factors are in the evidence
+        let factors = answer.resolve_factors(&name_term).unwrap();
+        let evidence: Vec<_> = factors.evidence().collect();
+        assert_eq!(evidence.len(), 2, "Should have both factors in evidence");
+    }
+
+    #[test]
+    fn test_answer_resolve_multiple_types() {
+        let entity = Entity::new().unwrap();
+
+        // Create multiple facts
+        let name_attr = Attribute::from_str("user/name").unwrap();
+        let name_value = Value::String("Bob".to_string());
+        let name_fact = create_test_fact(entity.clone(), name_attr.clone(), name_value.clone());
+        let name_factor = Factor::Is(&name_fact);
+
+        let age_attr = Attribute::from_str("user/age").unwrap();
+        let age_value = Value::UnsignedInt(30);
+        let age_fact = create_test_fact(entity.clone(), age_attr.clone(), age_value.clone());
+        let age_factor = Factor::Is(&age_fact);
+
+        let active_attr = Attribute::from_str("user/active").unwrap();
+        let active_value = Value::Boolean(true);
+        let active_fact = create_test_fact(entity.clone(), active_attr.clone(), active_value.clone());
+        let active_factor = Factor::Is(&active_fact);
+
+        let mut answer = Answer::new();
+
+        // Assign all values
+        answer.assign(&Term::<Value>::var("name"), &name_factor).unwrap();
+        answer.assign(&Term::<Value>::var("age"), &age_factor).unwrap();
+        answer.assign(&Term::<Value>::var("active"), &active_factor).unwrap();
+
+        // Resolve all values with correct types
+        let name_result = answer.resolve::<String>(&Term::var("name")).unwrap();
+        let age_result = answer.resolve::<u32>(&Term::var("age")).unwrap();
+        let active_result = answer.resolve::<bool>(&Term::var("active")).unwrap();
+
+        assert_eq!(name_result, "Bob");
+        assert_eq!(age_result, 30);
+        assert_eq!(active_result, true);
     }
 }
