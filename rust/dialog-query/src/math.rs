@@ -26,7 +26,7 @@ pub struct SumInput {
 impl TryFrom<Cursor> for SumInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read("of")?;
         let with = cursor.read("with")?;
         Ok(SumInput { of, with })
@@ -125,7 +125,7 @@ pub struct DifferenceInput {
 impl TryFrom<Cursor> for DifferenceInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read::<u32>("of")?;
         let subtract = cursor.read::<u32>("subtract")?;
         Ok(DifferenceInput { of, subtract })
@@ -212,7 +212,7 @@ pub struct ProductInput {
 impl TryFrom<Cursor> for ProductInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read::<u32>("of")?;
         let times = cursor.read::<u32>("times")?;
         Ok(ProductInput { of, times })
@@ -299,7 +299,7 @@ pub struct QuotientInput {
 impl TryFrom<Cursor> for QuotientInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read::<u32>("of")?;
         let by = cursor.read::<u32>("by")?;
         Ok(QuotientInput { of, by })
@@ -391,7 +391,7 @@ pub struct ModuloInput {
 impl TryFrom<Cursor> for ModuloInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read::<u32>("of")?;
         let by = cursor.read::<u32>("by")?;
         Ok(ModuloInput { of, by })
@@ -516,7 +516,7 @@ mod tests {
             .set(Term::var("test"), 42u32)
             .expect("Failed to create test match");
 
-        let cursor = Cursor::new(source, terms);
+        let mut cursor = Cursor::new(source, terms);
 
         // Test reading
         let value = cursor.read::<u32>("value").expect("Failed to read value");

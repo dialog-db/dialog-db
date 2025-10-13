@@ -53,21 +53,21 @@ pub trait Source: ArtifactStore + Clone + Send + Sync + 'static {
 }
 
 pub trait Circuit: ConditionalSend + 'static {
-    fn evaluate<S: Source, M: Selection>(&self, context: EvaluationContext<S, M>)
-        -> impl Selection;
+    fn evaluate<S: Source, M: selection::Answers>(&self, context: EvaluationContext<S, M>)
+        -> impl selection::Answers;
 }
 
 pub trait Query<T: ConditionalSend + 'static>: Circuit + Clone + ConditionalSend {
-    fn realize(&self, input: selection::Match) -> Result<T, QueryError>;
+    fn realize(&self, input: selection::Answer) -> Result<T, QueryError>;
     fn execute<S: Source>(&self, source: &S) -> impl Output<T>
     where
         Self: Sized,
     {
         let context = new_context(source.clone());
-        let selection = self.evaluate(context);
+        let answers = self.evaluate(context);
         let query = self.clone();
         try_stream! {
-            for await each in selection {
+            for await each in answers {
                 yield query.realize(each?)?;
             }
         }

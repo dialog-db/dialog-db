@@ -30,7 +30,7 @@ pub struct AndInput {
 impl TryFrom<Cursor> for AndInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
         let left = cursor.read::<bool>("left")?;
         let right = cursor.read::<bool>("right")?;
         Ok(AndInput { left, right })
@@ -110,7 +110,7 @@ pub struct OrInput {
 impl TryFrom<Cursor> for OrInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
         let left = cursor.read::<bool>("left")?;
         let right = cursor.read::<bool>("right")?;
         Ok(OrInput { left, right })
@@ -188,7 +188,7 @@ pub struct NotInput {
 impl TryFrom<Cursor> for NotInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
         let value = cursor.read::<bool>("value")?;
         Ok(NotInput { value })
     }

@@ -361,17 +361,17 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
             type Concept = #struct_name;
             type Instance = #struct_name;
 
-            fn realize(&self, source: dialog_query::selection::Match) -> std::result::Result<Self::Instance, dialog_query::QueryError> {
+            fn realize(&self, source: dialog_query::selection::Answer) -> std::result::Result<Self::Instance, dialog_query::QueryError> {
                 Ok(#struct_name {
-                    this: source.get(&self.this)?,
-                    #(#field_names: source.get(&self.#field_names)?),*
+                    this: source.resolve(&self.this)?,
+                    #(#field_names: source.resolve(&self.#field_names)?),*
                 })
             }
         }
 
         // Add inherent query method so users don't need to import Match trait
         impl #match_name {
-            fn realize(&self, source: dialog_query::selection::Match) -> std::result::Result<#struct_name, dialog_query::QueryError> {
+            fn realize(&self, source: dialog_query::selection::Answer) -> std::result::Result<#struct_name, dialog_query::QueryError> {
                 dialog_query::concept::Match::realize(self, source)
             }
 

@@ -3,7 +3,7 @@ pub use crate::cursor::Cursor;
 pub use crate::error::{AnalyzerError, FormulaEvaluationError, PlanError, QueryError};
 use crate::predicate::formula::Cells;
 use crate::selection::TryExpand;
-pub use crate::{try_stream, EvaluationContext, Selection, Source};
+pub use crate::{try_stream, EvaluationContext, Source};
 
 pub use crate::{Environment, Match, Parameters, Requirement};
 use std::fmt::Display;
@@ -82,11 +82,24 @@ impl FormulaApplication {
         }
     }
 
-    pub fn evaluate<S: Source, M: Selection>(
+    pub fn evaluate<S: Source, M: crate::selection::Answers>(
         &self,
         context: EvaluationContext<S, M>,
-    ) -> impl Selection {
-        context.selection.try_expand(self.clone())
+    ) -> impl crate::selection::Answers {
+        // For now, convert to Match, evaluate, convert back to Answer
+        // TODO: Make formulas work natively with Answer and track provenance
+        let formula = self.clone();
+        try_stream! {
+            for await each in context.selection {
+                let answer = each?;
+                let input_match = answer.into_match();
+
+                // Use try_expand on the match
+                for result_match in formula.expand(input_match)? {
+                    yield result_match.into_answer();
+                }
+            }
+        }
         // let parameters = self.parameters.clone();
         // let compute = self.compute;
         // context.selection.try_expand_with_fn(|frame| {

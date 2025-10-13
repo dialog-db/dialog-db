@@ -14,7 +14,7 @@ pub use super::negation::Negation;
 pub use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, PlanError, QueryResult};
 pub use crate::Dependencies;
-pub use crate::{EvaluationContext, Selection, Source};
+pub use crate::{EvaluationContext, selection::Answers, Source};
 use std::fmt::Display;
 
 /// Represents a premise in a rule - a condition that must be satisfied.
@@ -60,10 +60,10 @@ impl Premise {
     }
 
     /// Evaluate this premise with the given context
-    pub fn evaluate<S: Source, M: Selection>(
+    pub fn evaluate<S: Source, M: Answers>(
         &self,
         context: EvaluationContext<S, M>,
-    ) -> impl crate::Selection {
+    ) -> impl Answers {
         let source = self.clone();
         try_stream! {
             match source {
@@ -81,11 +81,11 @@ impl Premise {
         }
     }
 
-    pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
+    pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Answers> {
         let store = store.clone();
         let context = new_context(store);
-        let selection = self.evaluate(context);
-        Ok(selection)
+        let answers = self.evaluate(context);
+        Ok(answers)
     }
 }
 

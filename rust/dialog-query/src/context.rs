@@ -1,7 +1,7 @@
 //! Query execution plans - traits and context for evaluation
 
 pub use crate::query::Source;
-pub use crate::{try_stream, Match, Selection, Value};
+pub use crate::{try_stream, selection::Answer, selection::Answers, Value};
 pub use dialog_common::ConditionalSend;
 pub use futures_util::stream::once;
 use std::collections::BTreeMap;
@@ -11,11 +11,11 @@ pub use futures_util::{stream, TryStreamExt};
 pub use super::environment::Environment;
 pub use super::parameters::Parameters;
 
-pub fn new_context<S: Source>(store: S) -> EvaluationContext<S, impl Selection> {
-    let selection = once(async move { Ok(Match::new()) });
+pub fn new_context<S: Source>(store: S) -> EvaluationContext<S, impl Answers> {
+    let answers = once(async move { Ok(Answer::new()) });
     EvaluationContext {
         source: store,
-        selection,
+        selection: answers,
         scope: Environment::new(),
     }
 }
@@ -29,9 +29,9 @@ pub type MatchFrame = BTreeMap<String, Value>;
 pub struct EvaluationContext<S, M>
 where
     S: Source,
-    M: Selection,
+    M: Answers,
 {
-    /// Current selection of frames being processed (equivalent to frames in familiar-query)
+    /// Current selection of answers being processed (with provenance tracking)
     pub selection: M,
     /// Artifact store for querying facts (equivalent to source/Querier in TypeScript)
     pub source: S,
@@ -42,7 +42,7 @@ where
 impl<S, M> EvaluationContext<S, M>
 where
     S: Source,
-    M: Selection,
+    M: Answers,
 {
     /// Create a new evaluation context with given scope
     pub fn single(store: S, selection: M, scope: Environment) -> Self {
@@ -53,12 +53,12 @@ where
         }
     }
 
-    pub fn new(store: S) -> EvaluationContext<S, impl Selection> {
-        let selection = once(async move { Ok(Match::new()) });
+    pub fn new(store: S) -> EvaluationContext<S, impl Answers> {
+        let answers = once(async move { Ok(Answer::new()) });
 
         EvaluationContext {
             source: store,
-            selection,
+            selection: answers,
             scope: Environment::new(),
         }
     }
@@ -77,16 +77,16 @@ where
 }
 
 /// Trait implemented by execution plans
-/// Following the familiar-query pattern: process selection of frames and return new frames
+/// Following the familiar-query pattern: process selection of answers and return new answers
 pub trait EvaluationPlan: Clone + std::fmt::Debug + ConditionalSend {
     /// Get the estimated cost of executing this plan
     fn cost(&self) -> usize;
     /// Set of variables that this plan will bind
     fn provides(&self) -> &Environment;
-    /// Execute this plan with the given context and return result frames
-    /// This follows the familiar-query pattern where frames flow through the evaluation
-    fn evaluate<S: Source, M: Selection>(&self, context: EvaluationContext<S, M>)
-        -> impl Selection;
+    /// Execute this plan with the given context and return result answers with provenance
+    /// This follows the familiar-query pattern where answers flow through the evaluation
+    fn evaluate<S: Source, M: Answers>(&self, context: EvaluationContext<S, M>)
+        -> impl Answers;
 }
 
 #[cfg(test)]
@@ -114,11 +114,11 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage).await.unwrap();
         let session = Session::open(artifacts);
 
-        let selection = once(async move { Ok(Match::new()) });
+        let answers = once(async move { Ok(Answer::new()) });
         let mut scope = Environment::new();
         scope.add(&Term::<Value>::var("z"));
 
-        let context = EvaluationContext::single(session, selection, scope.clone());
+        let context = EvaluationContext::single(session, answers, scope.clone());
 
         // Context should have the provided scope
         assert_eq!(context.scope.size(), 1);

@@ -61,10 +61,14 @@ pub use session::{QuerySession, Session};
 
 pub use async_stream::try_stream;
 pub use environment::Environment;
-pub use selection::{Match, Selection};
+pub use selection::{Answer, Answers};
 pub use stream::*;
 pub use term::*;
 pub use types::IntoType;
+
+// Internal types - no longer part of public API
+#[doc(hidden)]
+pub use selection::{Match, Selection};
 
 /// Formula library exports
 pub mod formulas {

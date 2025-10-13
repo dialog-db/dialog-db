@@ -1,7 +1,7 @@
 use crate::error::CompileError;
 use crate::{fact::Scalar, predicate::DeductiveRule};
 use crate::{
-    Environment, EvaluationContext, Parameters, Premise, Requirement, Schema, Selection, Source,
+    Environment, EvaluationContext, Parameters, Premise, Requirement, Schema, Source,
     Term, Value,
 };
 use std::collections::{HashMap, HashSet};
@@ -195,10 +195,10 @@ impl Plan {
 
     /// Evaluate this plan with the given context
     /// The premise will be evaluated with scope set to self.env
-    pub fn evaluate<S: Source, M: Selection>(
+    pub fn evaluate<S: Source, M: crate::selection::Answers>(
         &self,
         context: EvaluationContext<S, M>,
-    ) -> impl Selection {
+    ) -> impl crate::selection::Answers {
         // Delegate to premise evaluation passing env inferred by an analyzer
         // as scope. Premise already returns boxed, so just pass through.
         let scope = self.env.clone();

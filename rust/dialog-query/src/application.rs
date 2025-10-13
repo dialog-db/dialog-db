@@ -6,7 +6,8 @@ pub use crate::analyzer::AnalyzerError;
 pub use crate::context::new_context;
 pub use crate::error::{PlanError, QueryResult};
 pub use crate::premise::{Negation, Premise};
-pub use crate::{Environment, EvaluationContext, Selection, Source};
+pub use crate::query::Circuit;
+pub use crate::{Environment, EvaluationContext, Source};
 use async_stream::try_stream;
 pub use concept::ConceptApplication;
 pub use fact::FactApplication;
@@ -37,10 +38,10 @@ impl Application {
         }
     }
 
-    pub fn evaluate<S: Source, M: Selection>(
+    pub fn evaluate<S: Source, M: crate::selection::Answers>(
         &self,
         context: EvaluationContext<S, M>,
-    ) -> impl crate::Selection {
+    ) -> impl crate::selection::Answers {
         let source = self.clone();
         try_stream! {
             match source {
@@ -84,7 +85,7 @@ impl Application {
         Premise::Exclude(Negation::not(self.clone()))
     }
 
-    pub fn query<S: Source>(&self, store: &S) -> impl Selection {
+    pub fn query<S: Source>(&self, store: &S) -> impl crate::selection::Answers {
         let store = store.clone();
         let context = new_context(store);
         self.evaluate(context)

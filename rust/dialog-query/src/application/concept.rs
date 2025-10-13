@@ -5,7 +5,7 @@ use crate::planner::{Fork, Join};
 use crate::predicate::Concept;
 use crate::DeductiveRule;
 use crate::{
-    try_stream, Attribute, Environment, EvaluationContext, Parameters, Schema, Selection, Source,
+    try_stream, Attribute, Environment, EvaluationContext, Parameters, Schema, Source,
     Value,
 };
 use std::fmt::Display;
@@ -154,10 +154,10 @@ impl ConceptApplication {
         self.concept.schema()
     }
 
-    pub fn evaluate<S: Source, M: Selection>(
+    pub fn evaluate<S: Source, M: crate::selection::Answers>(
         &self,
         context: EvaluationContext<S, M>,
-    ) -> impl Selection {
+    ) -> impl crate::selection::Answers {
         let app = self.clone();
         let concept = self.concept.clone();
 
@@ -173,35 +173,38 @@ impl ConceptApplication {
             for await each in context.selection {
                 let input = each?;
 
+                // For now, convert Answer to Match for concept evaluation
+                // TODO: Make concept evaluation work natively with Answers
+                let input_match = input.clone().into_match();
+
                 // Create cursor for bidirectional parameter mapping
-                let cursor = Cursor::new(input, app.terms.clone());
+                let cursor = Cursor::new(input_match.clone(), app.terms.clone());
 
                 // Extract initial match with resolved constants for evaluation
                 let initial_match = crate::Match::try_from(&cursor)
                     .map_err(|e| crate::QueryError::FactStore(e.to_string()))?;
 
-                // Evaluate join with single-match selection
-                // NOTE: context.scope already contains all bound variable names from upstream.
-                // VariableScope only tracks variable names (for planning), not values.
-                // The actual constant values are bound in initial_match, not the scope.
-                let single_selection = futures_util::stream::once(async move { Ok(initial_match) });
+                // Evaluate join with single-match selection converted to answers
+                let initial_answer = initial_match.into_answer();
+                let single_answers = futures_util::stream::once(async move { Ok(initial_answer) });
                 let eval_context = EvaluationContext {
-                    selection: single_selection,
+                    selection: single_answers,
                     source: context.source.clone(),
                     scope: context.scope.clone(),
                 };
 
-
                 // Merge results back using cursor's bidirectional mapping
                 for await result in plan.clone().evaluate(eval_context) {
-                    yield cursor.merge(&result?)
+                    let result_match = result?.into_match();
+                    let merged = cursor.merge(&result_match)
                         .map_err(|e| crate::QueryError::FactStore(e.to_string()))?;
+                    yield merged.into_answer();
                 }
             }
         }
     }
 
-    pub fn query<S: Source>(&self, source: S) -> impl Selection {
+    pub fn query<S: Source>(&self, source: S) -> impl crate::selection::Answers {
         let store = source.clone();
         let context = new_context(store);
         let selection = self.evaluate(context);
@@ -291,7 +294,7 @@ mod tests {
         let application = ConceptApplication { terms, concept };
 
         // Execute the query
-        let selection = application.query(session).try_vec().await?;
+        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(application.query(session)).await?;
 
         // Should find both Alice and Bob with their name and age
         assert_eq!(selection.len(), 2, "Should find 2 people");
@@ -303,8 +306,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let name = match_result.get(&name_var)?;
-            let age = match_result.get(&age_var)?;
+            let name = match_result.resolve(&name_var)?;
+            let age = match_result.resolve(&age_var)?;
 
             match name {
                 Value::String(n) if n == "Alice" => {
@@ -389,7 +392,7 @@ mod tests {
         };
 
         // Execute with bound entity scope
-        let selection = application.evaluate(context_with_scope).try_vec().await?;
+        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(application.evaluate(context_with_scope)).await?;
 
         // Should still execute successfully and bind name and age
         // (even though we don't have the actual entity value in the match)
@@ -451,7 +454,7 @@ async fn test_concept_application_respects_constant_entity_parameter() -> anyhow
     terms.insert("name".to_string(), Term::var("name"));
 
     let app = ConceptApplication { terms, concept };
-    let selection = app.query(session).try_vec().await?;
+    let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(app.query(session)).await?;
 
     assert_eq!(
         selection.len(),
@@ -459,7 +462,7 @@ async fn test_concept_application_respects_constant_entity_parameter() -> anyhow
         "Should find only Alice, not both people"
     );
     assert_eq!(
-        selection[0].get(&Term::<Value>::var("name"))?,
+        selection[0].resolve(&Term::<Value>::var("name"))?,
         Value::String("Alice".to_string())
     );
 
@@ -542,15 +545,15 @@ async fn test_concept_application_respects_constant_attribute_parameter() -> any
     terms.insert("age".to_string(), Term::var("age"));
 
     let app = ConceptApplication { terms, concept };
-    let selection = app.query(session).try_vec().await?;
+    let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(app.query(session)).await?;
 
     assert_eq!(selection.len(), 1, "Should find only Bob");
     assert_eq!(
-        selection[0].get(&Term::<Value>::var("entity"))?,
+        selection[0].resolve(&Term::<Value>::var("entity"))?,
         Value::Entity(bob.clone())
     );
     assert_eq!(
-        selection[0].get(&Term::<Value>::var("age"))?,
+        selection[0].resolve(&Term::<Value>::var("age"))?,
         Value::UnsignedInt(30)
     );
 
@@ -634,7 +637,7 @@ async fn test_concept_application_respects_multiple_constant_parameters() -> any
     terms.insert("age".to_string(), Term::Constant(Value::UnsignedInt(25)));
 
     let app = ConceptApplication { terms, concept };
-    let selection = app.query(session).try_vec().await?;
+    let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(app.query(session)).await?;
 
     assert_eq!(
         selection.len(),
@@ -642,7 +645,7 @@ async fn test_concept_application_respects_multiple_constant_parameters() -> any
         "Should find only Alice with exact name and age match"
     );
     assert_eq!(
-        selection[0].get(&Term::<Value>::var("entity"))?,
+        selection[0].resolve(&Term::<Value>::var("entity"))?,
         Value::Entity(alice.clone())
     );
 

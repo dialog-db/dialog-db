@@ -1,6 +1,6 @@
 use super::application::Application;
 use super::Environment;
-use crate::{try_stream, EvaluationContext, Parameters, Schema, Selection, Source};
+use crate::{try_stream, EvaluationContext, Parameters, Schema, Source};
 pub use futures_util::{stream, TryStreamExt};
 use std::fmt::Display;
 
@@ -48,15 +48,15 @@ impl Negation {
         schema
     }
 
-    pub fn evaluate<S: Source, M: Selection>(
+    pub fn evaluate<S: Source, M: crate::selection::Answers>(
         &self,
         context: EvaluationContext<S, M>,
-    ) -> impl Selection {
+    ) -> impl crate::selection::Answers {
         let application = self.0.clone();
         try_stream! {
             for await each in context.selection {
-                let frame = each?;
-                let not = frame.clone();
+                let answer = each?;
+                let not = answer.clone();
                 let output = application.evaluate(EvaluationContext {
                     selection: stream::once(async move { Ok(not)}),
                     source: context.source.clone(),
@@ -69,7 +69,7 @@ impl Negation {
                     continue;
                 }
 
-                yield frame;
+                yield answer;
             }
         }
     }

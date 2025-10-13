@@ -10,7 +10,7 @@ pub use crate::Environment;
 
 use crate::selection::{Answer, Answers, Factor};
 use crate::Fact;
-use crate::{try_stream, EvaluationContext, Match, Selection, Source};
+use crate::{try_stream, EvaluationContext, Match, Source};
 use crate::{Constraint, Dependency, Entity, Parameters, QueryError, Schema, Term, Type, Value};
 use dialog_artifacts::Cause;
 use serde::{Deserialize, Serialize};
@@ -185,50 +185,6 @@ impl FactApplication {
             cardinality: self.cardinality,
         }
     }
-    pub fn evaluate<S: Source, M: Selection>(
-        &self,
-        context: EvaluationContext<S, M>,
-    ) -> impl Selection {
-        let selector = self.clone();
-        try_stream! {
-            for await each in context.selection {
-                let input = each?;
-                let selection = selector.resolve(&input);
-                for await artifact in context.source.select((&selection).try_into()?) {
-                    let artifact = artifact?;
-
-                    // Create a new frame by unifying the artifact with our pattern
-                    let mut output = input.clone();
-
-                    // For each field, if it's a blank variable, assign it an internal name so we can retrieve it later
-                    let of_term = match &selection.of {
-                        Term::Variable { name: None, .. } => Term::Variable { name: Some("__of".to_string()), content_type: Default::default() },
-                        term => term.clone(),
-                    };
-                    let the_term = match &selection.the {
-                        Term::Variable { name: None, .. } => Term::Variable { name: Some("__the".to_string()), content_type: Default::default() },
-                        term => term.clone(),
-                    };
-                    let is_term = match &selection.is {
-                        Term::Variable { name: None, .. } => Term::Variable { name: Some("__is".to_string()), content_type: Default::default() },
-                        term => term.clone(),
-                    };
-
-                    // Unify entity if we have an entity variable using type-safe unify
-                    output = output.unify(of_term, Value::Entity(artifact.of)).map_err(|e| QueryError::FactStore(e.to_string()))?;
-
-                    // Unify attribute if we have an attribute variable using type-safe unify
-                    output = output.unify(the_term, Value::Symbol(artifact.the)).map_err(|e| QueryError::FactStore(e.to_string()))?;
-
-                    // Unify value if we have a value variable using type-safe unify
-                    output = output.unify(is_term, artifact.is).map_err(|e| QueryError::FactStore(e.to_string()))?;
-
-                    yield output;
-                }
-            }
-        }
-    }
-
     /// Evaluate with fact provenance tracking - returns Answers instead of Match-based Selection
     pub fn evaluate_with_provenance<S: Source, M: Answers>(
         &self,
@@ -328,54 +284,18 @@ impl FactApplication {
 }
 
 impl Circuit for FactApplication {
-    fn evaluate<S: Source, M: Selection>(
+    fn evaluate<S: Source, M: Answers>(
         &self,
         context: EvaluationContext<S, M>,
-    ) -> impl Selection {
-        let selector = self.clone();
-        try_stream! {
-            for await each in context.selection {
-                let input = each?;
-                let selection = selector.resolve(&input);
-                for await artifact in context.source.select((&selection).try_into()?) {
-                    let artifact = artifact?;
-
-                    // Create a new frame by unifying the artifact with our pattern
-                    let mut output = input.clone();
-
-                    // For each field, if it's a blank variable, assign it an internal name so we can retrieve it later
-                    let of_term = match &selection.of {
-                        Term::Variable { name: None, .. } => Term::Variable { name: Some("__of".to_string()), content_type: Default::default() },
-                        term => term.clone(),
-                    };
-                    let the_term = match &selection.the {
-                        Term::Variable { name: None, .. } => Term::Variable { name: Some("__the".to_string()), content_type: Default::default() },
-                        term => term.clone(),
-                    };
-                    let is_term = match &selection.is {
-                        Term::Variable { name: None, .. } => Term::Variable { name: Some("__is".to_string()), content_type: Default::default() },
-                        term => term.clone(),
-                    };
-
-                    // Unify entity if we have an entity variable using type-safe unify
-                    output = output.unify(of_term, Value::Entity(artifact.of)).map_err(|e| QueryError::FactStore(e.to_string()))?;
-
-                    // Unify attribute if we have an attribute variable using type-safe unify
-                    output = output.unify(the_term, Value::Symbol(artifact.the)).map_err(|e| QueryError::FactStore(e.to_string()))?;
-
-                    // Unify value if we have a value variable using type-safe unify
-                    output = output.unify(is_term, artifact.is).map_err(|e| QueryError::FactStore(e.to_string()))?;
-
-                    yield output;
-                }
-            }
-        }
+    ) -> impl Answers {
+        // Use the Answer-based implementation
+        self.evaluate_with_provenance(context.source, context.selection)
     }
 }
 
 impl Query<Fact> for FactApplication {
-    fn realize(&self, input: crate::selection::Match) -> Result<Fact, QueryError> {
-        self.realize(input)
+    fn realize(&self, input: crate::selection::Answer) -> Result<Fact, QueryError> {
+        input.realize(self)
     }
 }
 
@@ -454,14 +374,6 @@ impl FactApplicationPlan {
         &self.provides
     }
 
-    // TODO: Phase 3 - Implement proper evaluate() method
-    pub fn evaluate<S: crate::Source, M: crate::Selection>(
-        &self,
-        context: crate::EvaluationContext<S, M>,
-    ) -> impl crate::Selection {
-        // Return the input selection unchanged as a placeholder
-        context.selection
-    }
 }
 
 impl From<FactApplication> for Application {

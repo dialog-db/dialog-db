@@ -60,7 +60,7 @@ pub trait Match: Sized + Clone + ConditionalSend + Into<Parameters> + 'static {
     /// Instance of the concept that this match can produce.
     type Instance: Instance + ConditionalSend + Clone;
 
-    fn realize(&self, source: crate::selection::Match) -> Result<Self::Instance, QueryError>;
+    fn realize(&self, source: crate::selection::Answer) -> Result<Self::Instance, QueryError>;
 
     fn conpect() -> predicate::Concept {
         use predicate::concept::ConceptType;
@@ -292,12 +292,12 @@ mod tests {
 
         fn realize(
             &self,
-            source: crate::selection::Match,
+            source: crate::selection::Answer,
         ) -> std::result::Result<Self::Instance, QueryError> {
             Ok(Self::Instance {
-                this: source.get(&self.this)?,
-                name: source.get(&self.name)?,
-                age: source.get(&self.age)?,
+                this: source.resolve(&self.this)?,
+                name: source.resolve(&self.name)?,
+                age: source.resolve(&self.age)?,
             })
         }
     }

@@ -9,12 +9,168 @@
 //! serialization/deserialization, which allows clean separation between the API
 //! (`Term<T>`) and the JSON format (`TermSyntax<T>`).
 
+use std::collections::HashSet;
 use std::fmt;
 use std::marker::PhantomData;
 
 use crate::artifact::{Attribute, Entity, Type, Value};
 use crate::types::{IntoType, Scalar};
+use crate::InconsistencyError;
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
+
+// #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+// pub enum Constraint {
+//     /// Matches this specific value.
+//     Is(Value),
+//     /// Has this exact type.
+//     Type(Type),
+//     /// Numeric value that is greater than the given value.
+//     GreaterThan(Value),
+//     /// Numeric value that is less than the given value.
+//     LessThan(Value),
+//     /// Numeric value that is greater than or equal to the given value.
+//     GreaterOrEqual(Value),
+//     /// Numeric value that is less than or equal to the given value.
+//     LessOrEqual(Value),
+//     /// Value in this set.
+//     In(HashSet<Vec<Value>>),
+
+//     /// Value that is within the given range inclusive start of the range and
+//     /// exclusive the end. If end is None, it means the range is unbounded.
+//     Range { start: Value, end: Option<Value> },
+// }
+
+// #[derive(Debug, Clone, PartialEq, Eq)]
+// pub struct In(HashSet<Value>);
+// impl Hash for In {
+//     fn hash<H: Hasher>(&self, state: &mut H) {
+//         let mut elements: Vec<&Value> = self.0.iter().collect();
+//         elements.sort();
+//         elements.hash(state);
+//     }
+// }
+
+// // impl Constraint {
+// //     /// Attempt to merge two constraints, tightening their range of possible values.
+// //     /// Returns `Ok(Some(...))` if merged into a single constraint,
+// //     /// `Ok(None)` if they are unrelated (should coexist),
+// //     /// or `Err(InconsistencyError)` if they are contradictory.
+// //     pub fn merge(&self, other: &Constraint) -> Result<Option<Constraint>, InconsistencyError> {
+// //         use Constraint::*;
+
+// //         match (self, other) {
+// //             // Identical constraints
+// //             (a, b) if a == b => Ok(Some(a.into())),
+
+// //             // Both are equality
+// //             (Is(v1), Is(v2)) => {
+// //                 if v1 == v2 {
+// //                     Ok(Some(Is(v1.clone())))
+// //                 } else {
+// //                     Err(InconsistencyError)
+// //                 }
+// //             }
+
+// //             // Equality with inequality
+// //             (Is(v), GreaterThan(g)) | (GreaterThan(g), Is(v)) => {
+// //                 if v > g {
+// //                     Ok(Some(Is(v.clone())))
+// //                 } else {
+// //                     Err(InconsistencyError)
+// //                 }
+// //             }
+
+// //             (Is(v), LessThan(l)) | (LessThan(l), Is(v)) => {
+// //                 if v < l {
+// //                     Ok(Some(Is(v.clone())))
+// //                 } else {
+// //                     Err(InconsistencyError)
+// //                 }
+// //             }
+
+// //             (Is(v), In(set)) | (In(set), Is(v)) => {
+// //                 if set.contains(v) {
+// //                     Ok(Some(Is(v.clone())))
+// //                 } else {
+// //                     Err(InconsistencyError)
+// //                 }
+// //             }
+
+// //             (GreaterThan(g1), GreaterThan(g2)) => {
+// //                 Ok(Some(GreaterThan(std::cmp::max(g1.clone(), g2.clone()))))
+// //             }
+
+// //             (LessThan(l1), LessThan(l2)) => {
+// //                 Ok(Some(LessThan(std::cmp::min(l1.clone(), l2.clone()))))
+// //             }
+
+// //             (GreaterOrEqual(g1), GreaterOrEqual(g2)) => {
+// //                 Ok(Some(GreaterOrEqual(std::cmp::max(g1.clone(), g2.clone()))))
+// //             }
+
+// //             (LessOrEqual(l1), LessOrEqual(l2)) => {
+// //                 Ok(Some(LessOrEqual(std::cmp::min(l1.clone(), l2.clone()))))
+// //             }
+
+// //             (GreaterThan(g), LessThan(l)) | (LessThan(l), GreaterThan(g)) => {
+// //                 if g >= l {
+// //                     Err(InconsistencyError)
+// //                 } else {
+// //                     Ok(Some(Range {
+// //                         start: g.clone(),
+// //                         end: Some(l.clone()),
+// //                     }))
+// //                 }
+// //             }
+
+// //             (Range { start: s1, end: e1 }, Range { start: s2, end: e2 }) => {
+// //                 let start = std::cmp::max(s1.clone(), s2.clone());
+// //                 let end = match (e1, e2) {
+// //                     (Some(e1), Some(e2)) => Some(std::cmp::min(e1.clone(), e2.clone())),
+// //                     (Some(e1), None) => Some(e1.clone()),
+// //                     (None, Some(e2)) => Some(e2.clone()),
+// //                     (None, None) => None,
+// //                 };
+// //                 if let Some(ref e) = end {
+// //                     if start >= *e {
+// //                         return Err(InconsistencyError);
+// //                     }
+// //                 }
+// //                 Ok(Some(Range { start, end }))
+// //             }
+
+// //             (In(set1), In(set2)) => {
+// //                 let intersection: HashSet<_> = set1.intersection(set2).cloned().collect();
+// //                 if intersection.is_empty() {
+// //                     Err(InconsistencyError)
+// //                 } else {
+// //                     Ok(Some(In(intersection)))
+// //                 }
+// //             }
+
+// //             // Type constraints only merge if they match
+// //             (Type(t1), Type(t2)) => {
+// //                 if t1 == t2 {
+// //                     Ok(Some(Type(t1.clone())))
+// //                 } else {
+// //                     Err(InconsistencyError)
+// //                 }
+// //             }
+
+// //             // For simplicity — unknown or unrelated combinations just coexist
+// //             _ => Ok(None),
+// //         }
+// //     }
+// // }
+
+// pub struct Constraints(HashSet<Constraint>);
+
+// impl Constraints {
+//     pub fn merge(&mut self, other: &Constraints) -> Result<(), InconsistencyError> {
+//         panic!("Not implemented")
+//     }
+// }
 
 /// Term represents either a constant value or variable constraint of the
 /// predicate.

@@ -29,7 +29,7 @@ pub struct ConcatenateInput {
 impl TryFrom<Cursor> for ConcatenateInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
         let first = cursor.read::<String>("first")?;
         let second = cursor.read::<String>("second")?;
         Ok(ConcatenateInput { first, second })
@@ -107,7 +107,7 @@ pub struct LengthInput {
 impl TryFrom<Cursor> for LengthInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read::<String>("of")?;
         Ok(LengthInput { of })
     }
@@ -186,7 +186,7 @@ pub struct UppercaseInput {
 impl TryFrom<Cursor> for UppercaseInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read::<String>("of")?;
         Ok(UppercaseInput { of })
     }
@@ -257,7 +257,7 @@ pub struct LowercaseInput {
 impl TryFrom<Cursor> for LowercaseInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read::<String>("of")?;
         Ok(LowercaseInput { of })
     }

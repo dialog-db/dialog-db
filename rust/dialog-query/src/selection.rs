@@ -113,6 +113,8 @@ impl<S: Answers, F: (Fn(Answer) -> S) + ConditionalSend + 'static> AnswersFlatMa
     }
 }
 
+/// Deprecated: Use `Answers` trait instead which includes provenance tracking
+#[deprecated(since = "0.2.0", note = "Use `Answers` trait instead for provenance tracking")]
 pub trait Selection: Stream<Item = Result<Match, QueryError>> + 'static + ConditionalSend {
     /// Collect all matches into a Vec, propagating any errors
     #[allow(async_fn_in_trait)]
@@ -186,6 +188,8 @@ impl<S: Selection, F: (Fn(Match) -> S) + ConditionalSend + 'static> FlatMapper f
     }
 }
 
+/// Deprecated: Use `Answer` instead which includes provenance tracking
+#[deprecated(since = "0.2.0", note = "Use `Answer` instead for provenance tracking")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Match {
     pub variables: Arc<BTreeMap<String, Value>>,
@@ -411,6 +415,42 @@ impl Match {
             Term::Constant(constant) => Ok(constant.as_value()),
         }
     }
+
+    /// Convert this Match into an Answer with no provenance information
+    ///
+    /// This creates an Answer where all variable bindings are treated as
+    /// having unknown provenance. This is useful for migrating from Match-based
+    /// code to Answer-based code.
+    pub fn into_answer(self) -> Answer {
+        use std::sync::OnceLock;
+        static MATCH_CONVERSION_CELLS: OnceLock<crate::predicate::formula::Cells> = OnceLock::new();
+        let cells = MATCH_CONVERSION_CELLS.get_or_init(|| crate::predicate::formula::Cells::new());
+
+        let mut answer = Answer::new();
+
+        // For each variable binding in the match, create a conclusion with no factors
+        // This loses provenance information but maintains the bindings
+        for (name, value) in self.variables.iter() {
+            // Create a simple factor with the value but no provenance
+            // We use a placeholder derived factor since we have no source facts
+            let factor = Factor::Derived {
+                value: value.clone(),
+                from: HashMap::new(),
+                formula: Arc::new(crate::application::formula::FormulaApplication {
+                    name: "match_conversion",
+                    cells,
+                    parameters: crate::Parameters::new(),
+                    cost: 0,
+                    compute: |_| Ok(vec![]),
+                }),
+            };
+
+            // Ignore errors - if conclude fails, we skip that binding
+            let _ = answer.assign(&Term::var(name), &factor);
+        }
+
+        answer
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -419,10 +459,13 @@ pub enum Factor {
     Of(Arc<Fact>),
     Is(Arc<Fact>),
     Cause(Arc<Fact>),
-    /// Derived from a formula computation - tracks the input facts used
+    /// Derived from a formula computation - tracks the input facts and formula used
     Derived {
         value: Value,
-        sources: Vec<Arc<Fact>>,
+        /// The facts that were read to produce this derived value, keyed by parameter name
+        from: HashMap<String, Factors>,
+        /// The formula application that produced this value
+        formula: Arc<crate::application::formula::FormulaApplication>,
     },
 }
 
@@ -454,13 +497,19 @@ impl Factor {
             Factor::The(fact) | Factor::Of(fact) | Factor::Is(fact) | Factor::Cause(fact) => {
                 vec![Arc::clone(fact)]
             }
-            Factor::Derived { sources, .. } => sources.clone(),
+            Factor::Derived { from, .. } => {
+                // Collect all facts from all input parameters
+                from.values()
+                    .flat_map(|factors| factors.evidence())
+                    .filter_map(|factor| factor.fact().map(|f| Arc::new(f.clone())))
+                    .collect()
+            }
         }
     }
 }
 
 // Implement Hash and Eq based on Arc pointer identity for fact variants,
-// and value/sources for Derived variant
+// and value/from/formula for Derived variant
 impl std::hash::Hash for Factor {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         // Hash the discriminant first to distinguish between variants
@@ -472,13 +521,24 @@ impl std::hash::Hash for Factor {
                 let ptr = Arc::as_ptr(fact) as *const ();
                 ptr.hash(state);
             }
-            Factor::Derived { value, sources } => {
-                // For derived factors, hash the value and source fact pointers
+            Factor::Derived { value, from, formula } => {
+                // For derived factors, hash the value, input factors, and formula pointer
                 value.hash(state);
-                for source in sources {
-                    let ptr = Arc::as_ptr(source) as *const ();
-                    ptr.hash(state);
+
+                // Hash the from map (order-independent by using sorted keys)
+                let mut keys: Vec<_> = from.keys().collect();
+                keys.sort();
+                for key in keys {
+                    key.hash(state);
+                    if let Some(factors) = from.get(key) {
+                        // Hash the factors content
+                        factors.content().hash(state);
+                    }
                 }
+
+                // Hash the formula pointer
+                let ptr = Arc::as_ptr(formula) as *const ();
+                ptr.hash(state);
             }
         }
     }
@@ -494,17 +554,22 @@ impl PartialEq for Factor {
             (
                 Factor::Derived {
                     value: v1,
-                    sources: s1,
+                    from: f1,
+                    formula: formula1,
                 },
                 Factor::Derived {
                     value: v2,
-                    sources: s2,
+                    from: f2,
+                    formula: formula2,
                 },
             ) => {
-                // Compare values and source fact pointers
+                // Compare values, input factors, and formula pointer
                 v1 == v2
-                    && s1.len() == s2.len()
-                    && s1.iter().zip(s2.iter()).all(|(a, b)| Arc::ptr_eq(a, b))
+                    && f1.len() == f2.len()
+                    && f1.iter().all(|(k, factors1)| {
+                        f2.get(k).map_or(false, |factors2| factors1 == factors2)
+                    })
+                    && Arc::ptr_eq(formula1, formula2)
             }
             _ => false,
         }
@@ -836,6 +901,24 @@ impl Answer {
                 }
             }
             Term::Constant(constant) => Ok(constant.clone()),
+        }
+    }
+
+    /// Convert this Answer into a Match, losing all provenance information
+    ///
+    /// This extracts just the variable bindings from the Answer, discarding
+    /// all factor/provenance information. This is useful for backward compatibility
+    /// with Match-based code.
+    pub fn into_match(self) -> Match {
+        let mut variables = BTreeMap::new();
+
+        // Extract the value from each conclusion
+        for (name, factors) in self.conclusions {
+            variables.insert(name, factors.content());
+        }
+
+        Match {
+            variables: Arc::new(variables),
         }
     }
 }

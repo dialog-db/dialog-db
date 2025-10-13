@@ -7,7 +7,7 @@ pub use crate::premise::Premise;
 use crate::stream::{fork_stream, stream_select};
 pub use crate::term::Term;
 use crate::EvaluationContext;
-pub use crate::{try_stream, Environment, Selection, Source};
+pub use crate::{try_stream, Environment, Source};
 use core::pin::Pin;
 
 /// Query planner that optimizes the order of premise execution based on cost
@@ -265,19 +265,19 @@ impl From<&Vec<Plan>> for Join {
 impl Join {
     /// Evaluate this join plan by executing all steps in order.
     /// Each step flows results to the next, building up bindings.
-    pub fn evaluate<S: Source, M: Selection>(
+    pub fn evaluate<S: Source, M: crate::selection::Answers>(
         &self,
         context: EvaluationContext<S, M>,
-    ) -> impl Selection {
+    ) -> impl crate::selection::Answers {
         let chain = Chain::from(self.steps.clone());
         chain.evaluate(context)
     }
 
-    pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Selection> {
+    pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl crate::selection::Answers> {
         let store = store.clone();
         let context = new_context(store);
-        let selection = self.evaluate(context);
-        Ok(selection)
+        let answers = self.evaluate(context);
+        Ok(answers)
     }
 }
 
@@ -311,10 +311,10 @@ impl Chain {
     }
 
     /// Evaluate this chain by executing plans in sequence
-    fn evaluate<S: Source, M: Selection>(
+    fn evaluate<S: Source, M: crate::selection::Answers>(
         self,
         context: EvaluationContext<S, M>,
-    ) -> Pin<Box<dyn Selection>> {
+    ) -> Pin<Box<dyn crate::selection::Answers>> {
         Box::pin(try_stream! {
             match self {
                 Chain::Empty => {
@@ -325,9 +325,9 @@ impl Chain {
                 Chain::Join(left, right) => {
                     let source = context.source.clone();
                     let scope = context.scope.clone();
-                    let selection = left.evaluate(context);
+                    let answers = left.evaluate(context);
                     let output = right.evaluate(EvaluationContext {
-                        selection,
+                        selection: answers,
                         source,
                         scope,
                     });
@@ -363,10 +363,10 @@ impl Fork {
         }
     }
 
-    pub fn evaluate<S: Source, M: Selection>(
+    pub fn evaluate<S: Source, M: crate::selection::Answers>(
         self,
         context: EvaluationContext<S, M>,
-    ) -> Pin<Box<dyn Selection>> {
+    ) -> Pin<Box<dyn crate::selection::Answers>> {
         Box::pin(try_stream! {
             match self {
                 Self::Empty => {
@@ -556,7 +556,7 @@ async fn test_join_plan_query_execution() -> anyhow::Result<()> {
     let plan = Join::try_from(premises)?;
 
     // Execute the query
-    let selection = plan.query(&session)?.try_vec().await?;
+    let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(plan.query(&session)?).await?;
 
     // Should find both Alice and Bob with their name and age
     assert_eq!(selection.len(), 2, "Should find 2 people");
@@ -568,8 +568,8 @@ async fn test_join_plan_query_execution() -> anyhow::Result<()> {
     let mut found_bob = false;
 
     for match_result in selection.iter() {
-        let name = match_result.get(&name_var)?;
-        let age = match_result.get(&age_var)?;
+        let name = match_result.resolve(&name_var)?;
+        let age = match_result.resolve(&age_var)?;
 
         match name {
             Value::String(n) if n == "Alice" => {

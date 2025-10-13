@@ -78,12 +78,12 @@ mod person {
 
         fn realize(
             &self,
-            source: dialog_query::selection::Match,
+            source: dialog_query::selection::Answer,
         ) -> Result<Self::Instance, dialog_query::QueryError> {
             Ok(Self::Instance {
-                this: source.get(&self.this)?,
-                name: source.get(&self.name)?,
-                age: source.get(&self.age)?,
+                this: source.resolve(&self.this)?,
+                name: source.resolve(&self.name)?,
+                age: source.resolve(&self.age)?,
             })
         }
     }

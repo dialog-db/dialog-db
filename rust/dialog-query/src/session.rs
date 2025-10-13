@@ -370,7 +370,7 @@ mod tests {
         // Use new query API directly on application
         let application = person.apply(params)?;
 
-        let selection = Selection::try_vec(application.query(&session)).await?;
+        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(application.query(&session)).await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
 
         // Check that we have both Alice and Bob (order may vary)
@@ -378,8 +378,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let person_name = match_result.get(&name)?;
-            let person_age = match_result.get(&age)?;
+            let person_name = match_result.resolve(&name)?;
+            let person_age = match_result.resolve(&age)?;
 
             match person_name {
                 Value::String(name_str) if name_str == "Alice" => {
@@ -481,7 +481,7 @@ mod tests {
         // let mut found_bob = false;
 
         // for match_result in selection.iter() {
-        //     let person_name = match_result.get(&name)?;
+        //     let person_name = match_result.resolve(&name)?;
 
         //     match person_name {
         //         Value::String(name_str) if name_str == "Alice" => {
@@ -580,7 +580,7 @@ mod tests {
         // Let's test with empty parameters first to see the exact error
         let application = person.apply(params)?;
 
-        let selection = application.query(&session).try_vec().await?;
+        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(application.query(&session)).await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
 
         // Check that we have both Alice and Bob (order may vary)
@@ -588,8 +588,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let person_name = match_result.get(&name)?;
-            let person_age = match_result.get(&age)?;
+            let person_name = match_result.resolve(&name)?;
+            let person_age = match_result.resolve(&age)?;
 
             match person_name {
                 Value::String(name_str) if name_str == "Alice" => {
