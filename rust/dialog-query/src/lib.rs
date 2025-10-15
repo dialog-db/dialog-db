@@ -66,10 +66,6 @@ pub use stream::*;
 pub use term::*;
 pub use types::IntoType;
 
-// Internal types - no longer part of public API
-#[doc(hidden)]
-pub use selection::{Match, Selection};
-
 /// Formula library exports
 pub mod formulas {
     //! Built-in formulas for common data transformations
