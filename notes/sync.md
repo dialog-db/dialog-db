@@ -2,141 +2,364 @@
 
 ## Goals
 
-- Pull changes from the remote
-- Reconcile changes to a determinitstic tree
-- Push change to the remote
+- Fetch and integrate changes from a remote tree.
+- Reconcile all changes into a deterministic, convergent structure.
+- Push the resulting changes back to the remote.
+
+---
+
+## Architecture Overview
+
+A **Mutable Pointer** represents the canonical shared root of a tree, while the **Archive** stores immutable, hash-addressed blobs representing tree nodes.
+
+```mermaid
+graph TD
+    subgraph Remote
+        A[Mutable Pointer]
+        B[Archive Store S3/IPFS/R2]
+    end
+
+    subgraph Local
+        C[Local Tree Replica]
+    end
+
+    C -- Query root --> A
+    C -- Fetch blobs --> B
+    C -- Upload new blobs --> B
+    C -- Update root --> A
+```
+
+The synchronization process follows this sequence:
+
+```mermaid
+sequenceDiagram
+    participant Archive
+    participant Local
+    participant Remote Pointer
+    Local->>Remote Pointer: HEAD /did (query root)
+    Remote Pointer-->>Local: 200 ETag=abc123
+    Local->>Archive: GET blobs for root abc123 (Fetch)
+    Archive-->>Local: 200
+		
+    Local->>Local: merge(local, remote)
+    Local->>Archive: PUT new blobs (Put)
+    Local->>Remote Pointer: PATCH /did (Push)
+    Remote Pointer-->>Local: 200 OK or 412 Precondition Failed
+```
+
+---
 
 ## Mutable Pointer
 
-Mutable pointer represents shared state of the tree and is centralized by nature. Conceptually it is similar to git remote, you can figure out what the current root of the tree is and you can update it to a new root.
+A **Mutable Pointer** represents the shared state of the tree and serves as a single authoritative reference — conceptually similar to a Git remote reference. It stores only the root hash and enforces access and consistency constraints.
 
 ### Query Mutable Pointer
 
-#### Mutable Pointer Query Authorization
+#### Authorization
 
-Dialog can query mutable pointer via HTTEP HEAD request to find out latest root of the search tree. Mutable pointer implementation MUST respond respond `401 Unauthorized` unless request has `Authorization: Basic ${principal.sign(blake3(payload)}` where payload matches following structure 
+A `HEAD` request is used to query the latest known root of the tree. 
 
-```json
+Requests **MUST** include a valid `Authorization` header:
+
+```javascript
+Authorization: Basic ${principal.sign(blake3(payload))}
+```
+
+The payload has the following structure:
+
+```javascript
 {
-  "iss": "did:key:z6Mkk89bC3JrVqKie71YEcc5M1SMVxuCgNx6zLZ8SYJsxALi",
-  "sub": "did:key:z6Mkk89bC3JrVqKie71YEcc5M1SMVxuCgNx6zLZ8SYJsxALi"
+  "iss": tree.did(),
+  "aud": tree.did(),
+  "sub": tree.did(),
   "cmd": "/state/query",
-  "args": {} 
+  "args": {}
 }
 ```
 
-> Note: In the future we're likely use UCANs or something along those lines but this is a simple solution for now
+The signer **MUST** match `payload.iss`, `payload.sub`, and the `did:key` being queried. 
+If authorization is invalid, the server **MUST** return `401 Unauthorized`.
 
-Signer of the payload MUST be same as `payload.iss`, `payload.sub` and `did:key` of the mutable being updated.
+> ℹ️ In future versions, [UCAN][]s or other decentralized auth mechanisms may replace this simple signature-based scheme.
 
-#### Mutabel Pointer Query Result
+#### Response
 
-If request has a valid authorization response it MUST contain an `ETag` header where value is set to the search tree root known to the pointer.
-
+If authorized, the response **MUST** include an `ETag` header with the current tree root:
 
 ```http
 HEAD /did:key:z6Mkk89bC3JrVqKie71YEcc5M1SMVxuCgNx6zLZ8SYJsxALi HTTP/1.1
 Authorization: Basic f2178157fe0a1e0993b2e42ed315e8a955013783121e6b4ef24e6b9f9a8781d9
 ```
 
-Server MUST repsond with `ETag` header
-
-```curl
-HTTP/2 200
+```http
+HTTP/1.1 200 Ok
 last-modified: Tue, 23 Sep 2025 05:41:40 GMT
 ETag: af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
 ```
 
+> ℹ️ In the future we may add `GET` request support to read latest payload that was published. 
+
+---
+
 ### Update Mutable Pointer
 
-Update has a [Compare and Swap](https://en.wikipedia.org/wiki/Compare-and-swap) semantics and instructs remote to update root of the tree from from `A -> B` where:
+Updating a mutable pointer follows [Compare-and-Swap](https://en.wikipedia.org/wiki/Compare-and-swap) semantics:
+the remote root is updated from `A → B`, where
 
-1. `A` reperesents search tree root on top of which local changes have being made.
-2. `B` represents my local search tree root.
+- `A` is the tree root on which local changes are based, and
+- `B` is the new local tree root.
 
-#### Mutable Pointer Update Auhtorization
+#### Authorization
 
-Implementation MUST return `401 Unauthorized` if request does not have a valid `Authorization` header. Valid authorization header MUST match following template `Authorization: Basic ${tree.principal.sign(blake3({ cmd: "/root/put", sub: tree.did() }))}` payload is signed by the `did:key` of the tree.
+Requests **MUST** include a valid `Authorization` header:
 
-> Note: In the future we're likely use UCANs or something along those lines but this is a simple solution for now
+```javascript
+Authorization: Basic ${tree.principal.sign(blake3(payload)}
+```
 
-#### Mutable Pointer Invariant Check
+The `payload` has the following structure:
 
-Implementation MUST return `412 Precondition Failed` if expected root specified via `If-Match` header does not match latest root of the mutipble pointer.
+```js
+{
+  "iss": tree.did(),
+  "aud": tree.did(),
+  "sub": tree.did(),
+  "cmd": "/state/assert",
+  "args": {
+    "revision": tree.revision()
+  }
+}
+```
 
+If authorization is invalid, return `401 Unauthorized`.
 
-### Mutable Update Pointer Example
+> Future implementations may use [UCAN][]s or similar capability tokens instead of direct signatures.
+
+#### Invariant Check
+
+The implementation **MUST** return `412 Precondition Failed` if the `If-Match` header does not match the current root of the pointer (i.e. another writer has already updated it). Response **MUST** have an `ETag` header set to current  of the pointer.
 
 ```http
-PATCH /did:key:z6Mkk89bC3JrVqKie71YEcc5M1SMVxuCgNx6zLZ8SYJsxALi HTTP/1.1
+HTTP/1.1 412 Precondition Failed
+last-modified: Tue, 23 Sep 2025 05:41:40 GMT
+ETag: af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
+Content-Type: application/json
+{
+  error: {
+     expected: "b20ab0a020a48d349e0c64d109c441f87c9bc43d49fc701c4a5f6f1b16aa4e32"
+     actual: "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+  }
+}
+```
+
+#### Example
+
+```http
+PUT /did:key:z6Mkk89bC3JrVqKie71YEcc5M1SMVxuCgNx6zLZ8SYJsxALi HTTP/1.1
 If-Match: af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
 Authorization: Basic f2178157fe0a1e0993b2e42ed315e8a955013783121e6b4ef24e6b9f9a8781d9
 Content-Type: application/json
 {
   "iss": "did:key:z6Mkk89bC3JrVqKie71YEcc5M1SMVxuCgNx6zLZ8SYJsxALi",
+  "sub": "did:key:z6Mkk89bC3JrVqKie71YEcc5M1SMVxuCgNx6zLZ8SYJsxALi",
   "cmd": "/state/assert",
-  "sub": "did:key:z6Mkk89bC3JrVqKie71YEcc5M1SMVxuCgNx6zLZ8SYJsxALi"
   "args": {
-     "revision": "b20ab0a020a48d349e0c64d109c441f87c9bc43d49fc701c4a5f6f1b16aa4e32"
+    "revision": "b20ab0a020a48d349e0c64d109c441f87c9bc43d49fc701c4a5f6f1b16aa4e32"
   }
 }
 ```
 
-## Archive
-
-Synchronization protocol assumes shared data archive over some commodity store like S3/R2/IPFS. Archive stores hash addressed blobs which represent encoded tree index and segment nodes.
-
-Read and write authorization is managed out of bound and directly tied to the backend.
-
-**Note:** Mutable Poiner is completely decoupled from the data archive. In fact it SHOULD not have access to the archive and consequently have no ability or responsibility to check if new root has being archived.
-
-> More advanced mutable poiners could be introduced in the future that perform additional checks, e.g. they could require signed commitment proofs from the archive along with merkle proofs that demonstrate that new root and all of the tree is archived. It is reasonable to assume that different mutable pointers may impose different update policies to ensure desired application invariants.
-
-
-## Pulling Changes
-
-Pulling changes implies:
-
-1. Reference to last known root of the remote. If root is unknown empty tree can be assumed.
-2. Querying mutable pointer to find out latest root.
-
-At the end of the pull we shoud end up with two partially replicated trees one correponding remote from which local diverged and second representing remote local wishes to converge with. If both remotes have a same root no changes have occurred and we're up to date.
-
-If remotes are different we can start integrating remote changes into local tree. General idea here is that we can look at the branches that are local and compare which ones are different on the remote and perform following steps:
-
-1. If local and remote are the same go to next sibling branch.
-1. If local is different from the remote and we don't have local branch in cache that implies we have not changed to so we update branch with remote one.
-1. If local is different from the remote we're convering with, but remote we've diverged from is the same as the one wer'e converging with than we only have local changes so we keep local branch and go to the next sibling branch.
-1. If local is different from the remote we're converging with and it's also different from the one we've diverde from there had being conflicting changes we descend (implicitly fetching remote branch from archive) and repeat the process until we arrive to segment nodes.
-  1. If local and remote segment nodes are different they get merged as a sorted set union. Please note that merged set may overflow the segment (when we encounter boundary) causing a split of segment that propagates upwards the tree which needs to be done before considering next sibling).
-  2. If segments contain conflicting facts same `{the, of}` but different `is` or/and `cause` winner could be chosen via provided merge strategy.
-
-### Merge Strategy
-
-```rust
-trait Merge {
-  fn merge(into: Artifact, from: Artifact): Artifact
+```http
+HTTP/1.1 200 Ok
+last-modified: Tue, 23 Sep 2025 05:41:40 GMT
+ETag: af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
+Content-Type: application/json
+{
+  "iss": "did:key:z6Mkk89bC3JrVqKie71YEcc5M1SMVxuCgNx6zLZ8SYJsxALi",
+  "sub": "did:key:z6Mkk89bC3JrVqKie71YEcc5M1SMVxuCgNx6zLZ8SYJsxALi",
+  "cmd": "/state/assert",
+  "args": {
+    "revision": "b20ab0a020a48d349e0c64d109c441f87c9bc43d49fc701c4a5f6f1b16aa4e32"
+  }
 }
 ```
 
-And provide muliptle implementations like
-
-- Into wins
-- From wins
-- Lower hash wins
 
 
-> Please note: We don't necessarily need to deal with 3 way merge and could simplify things by only comparing local and remote trees, the net result should be the same we may just end up wasting some work
+---
 
-> [Okra implementation goes into more sync details](https://docs.canvas.xyz/blog/2023-05-04-merklizing-the-key-value-store.html#merging-state-based-crdt-values) which could be worth a look.
+## Archive
 
-## Pushing Changes
+The **Archive** is a shared data store over a commodity backend such as S3, R2, or IPFS. 
+It stores **hash-addressed blobs** representing encoded tree index and segment nodes.
 
-Pushing changes implies:
+Access control (read/write) is managed out of band and tied directly to the backend’s authentication.
 
-1. Uploading all the updated tree nodes into the archive.
-2. Updating mutable pointer to the latest tree.
+> **Note:** The Mutable Pointer is fully decoupled from the archive — it SHOULD NOT have access to it, nor verify that uploaded roots are archived.
 
-Given that updating pointer will not succeed if the root has changed it is RECOMMENDED to perform a pull first integrating upstream changes into the tree. After pull is complete push can compare local tree with pulled remote identifying nodes that are different and publishing them to an archive (alternatively this bookeeping could be handled completely separately by representing partial view of the archive).
+More advanced implementations may require proof-based updates (e.g., Merkle inclusion proofs or signed archive commitments) to enforce stronger consistency invariants.
 
-Once all the nodes had being archived attempt to update mutable pointer SHOULD be made. If pointer responds with `412 Precondition Failed`, push can be retried by performing another pull.
+---
+
+## Sync
+
+## Pull: Fetch + Merge
+
+Pulling changes is composed of two sequential phases: **Fetch** and **Merge**.
+
+### Fetch
+
+The **Fetch** phase discovers the latest remote state and materializes a **partial** replica of it from the discovered root.
+
+Steps:
+
+1. Determine the last known remote root (`ETag`).
+2. Query the mutable pointer for the current remote root.
+3. Load tree from the root, which will get root node from archive unless it's available in local cache.
+
+Fetch create replica of the tree that in the next phase can be merged into a local replica.
+
+Failure handling:
+
+| Code               | Meaning               | Client Action                  |
+| ------------------ | --------------------- | ------------------------------ |
+| `401 Unauthorized` | Signature invalid     | Re-sign and retry query        |
+| `404 Not Found`    | Remote uninitialized  | Treat as empty tree            |
+| `5xx`              | Network/backend error | Retry with exponential backoff |
+
+### Reconciliation
+
+In order to merge local and remote trees we need to identify what changes have occured where. For clarity let's consider scenario where local tree has some node (`P17@b`) that does not exist in the remote tree
+
+```yaml
+  local@x                     remote@z
+  ├─ P11@a                       ├─ P11@a
+  │  ├─ P08@f                    │  ├─ P08@f
+  │  │  └─ ...                   │  │  └─ ...
+  │  └─ P11@g                    │  └─ P11@g
+  │     └─ ...                   │     └─ ...
+► └─ P17@b                       └─ P88@w
+     ├─ ...                         └─ ...    
+     └─ P17@k
+        └─ ...
+```
+
+From the the two trees alone it is not clear if node (`P17@b`) was inserted into a local tree or if it was removed frome the remote tree since last sync point. This information is critical for making a decision about whether `P17@b` should remain in the merged tree or not.
+
+We can compute differential between current tree and one it **diverged from**, which is a tree we have last pushed (succesfully). This will give us local changes that we can then **integrate** into remote tree we have fetched.
+
+> ✨ Integration will naturally only replicate only subtrees from the remote where we have overlapping changes. Subtrees that have not changed locally will not be accessed so they will not be fetched and subtrees that changed locally but not remotely will be in cache (unless evicted) because we would have fetched them to change.
+
+Merge logic could be described as follows
+
+```rs
+#[derive(Debug, Clone)]
+pub struct Replica {
+  current: Tree
+  checkpoint: Tree
+  upstream: MutablePointer
+}
+
+impl Replica {
+  /// Computed changes that were made since last push
+  fn changes(&self) -> impl Differntial {
+     Differntial::from((self.current, self.checkpoint))
+  }
+  
+  /// Computes `remote` tree with local changes. Expects
+  /// remote to be diverged from remote
+  async fn merge(&mut self, remote: &Tree) -> Result<&mut Self> {
+    // if remote has not changed from last chekpoint
+    // replica represents current state
+    if remote.root() != self.checkpoint.root() {
+      // inegrate changes into remote tree to derive
+      // merged tree & produce new replica with it
+      // and old checkpoint
+      self.current = integrate(remote, self.changes())?;
+    }
+    
+    Ok(self)
+  }
+  
+  async fn pull(&mut self) -> Result<&mut Self> {
+    let root = self.upstream.query().await?;
+    if root != self.checkpoint.root() {
+       self.merge(Tree::load(root)).await;
+    } 
+    
+    
+    Ok(self)
+  }
+  
+  async fn push(&self) -> Result<&mut Self> {
+     loop {
+        let checkpoint = self.current.clone()
+        if let Ok(_) = upstream.assert(checkpoint.root()).await {
+          self.checkpoint = checkpoint
+        } else {
+          self.pull().await?;
+        }
+     }
+  }
+}
+```
+
+### Differentiation
+
+It is best to think of our search tree as a sorted set of entries. Differential between last **checkpoint** (tree that was succesfully pushed) and **current** working tree can be represented as a set of entries added or removed.
+
+
+```rust
+trait Differential: TryStream<Change> {
+  fn from(source: (Tree, Tree)) -> Self
+}
+
+pub enum Change {
+  Remove(Entry)
+  Add(Entry),
+}
+```
+
+<details>
+<summary>ℹ️ It is worth observing that we end with something similar to ZSet here from DBSP</summary>
+ZSet weight can be out of -1/+1 range but my understanding is that for collections it would stay in that range and our tree is effectively a collection and Remove/Add is -1/+1
+</details>
+
+> ✨ Computing differential should not require replicating subtrees that have not changed because those can be skipped over. It is also highly likely that subtrees that have changed will already be in cache because to change them we had to replicate first
+
+
+### Integration
+
+Integration entails applying differential to the target tree.
+
+> ℹ️ It is assumed that target tree has diverged from the **checkpoint** tree otherwise integration process will simply apply changes to some other unrelated tree.
+
+Integration process simple needs to iterate over changes and either:
+
+1. add entry to the target tree
+2. remove entry from the target tree
+
+> ✨ Integration process naturally will only replicate subtrees from the target that have changed locally. Furthermore, if locally changed subtrees have not changed in the target tree we'll already have them in cache (unless evicted) because we would not have being able make changes without replicating them first. Even if they were evicted from cache we'd still need them locally in order to be able to push, that is to say we'll end up only replicating what's strictly necessary.
+
+#### Adding an Entry
+
+Target tree may have a conflicting entry in the tree which would imply concurrent change. In such case we simply compare hashes, if existing hash is greater replace it with entry being added otherwise keep existing entry.
+
+If tree does not contain connflicting entry we simply insert an entry in the right location of the tree.
+
+#### Removing an Entry
+
+Target tree may not have have an entry under the same key and same hash, this would imply that entry being removed was either removed or replaced therefor we do nothing.
+
+Target tree may not conttain an entry for the same key in which implies it was already removed. In such case we do nothing.
+
+Target tree may contain an entry for the same key with a same hash, in that cas we remove it from the tree.
+
+
+
+
+## Consistency Model
+
+This protocol provides **eventual consistency** with **deterministic convergence**.  
+Each peer maintains an immutable local tree (partial replica) and coordinates via a single mutable pointer that serves as the canonical root reference.  
+Given identical merge strategies and histories, all replicas converge to the same state.
