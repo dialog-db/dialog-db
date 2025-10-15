@@ -13,7 +13,7 @@
 
 use dialog_common::ConditionalSend;
 
-pub use crate::artifact::{Attribute, Entity, Type, Value};
+pub use crate::artifact::{Attribute, Cause, Entity, Type, Value};
 
 /// Trait for types that can provide Type metadata
 ///
@@ -91,6 +91,8 @@ impl_into_type!(Vec<u8>, Type::Bytes);
 // Dialog-artifacts specific types
 impl_into_type!(Entity, Type::Entity);
 impl_into_type!(Attribute, Type::Symbol);
+
+impl_into_type!(Cause, Type::Bytes);
 
 /// Special implementation for Value type
 ///
@@ -204,5 +206,11 @@ impl Scalar for Vec<u8> {
 impl Scalar for Value {
     fn as_value(&self) -> Value {
         self.to_owned()
+    }
+}
+
+impl Scalar for Cause {
+    fn as_value(&self) -> Value {
+        Value::from(self.to_owned())
     }
 }

@@ -426,7 +426,8 @@ fn test_join_plan_with_two_fact_applications() {
         Term::Constant(Attribute::try_from("person/name".to_string()).unwrap()),
         Term::var("person"),
         Term::var("name"),
-        Cardinality::One,
+        Term::var("cause"),
+            Cardinality::One,
     );
 
     // Second: (person/age, of: ?person, is: ?age) - find person's age
@@ -434,7 +435,8 @@ fn test_join_plan_with_two_fact_applications() {
         Term::Constant(Attribute::try_from("person/age".to_string()).unwrap()),
         Term::var("person"),
         Term::var("age"),
-        Cardinality::One,
+        Term::var("cause"),
+            Cardinality::One,
     );
 
     // Create premises from the applications
@@ -472,7 +474,8 @@ fn test_join_plan_execution_order() {
         Term::Constant(Attribute::try_from("person/name".to_string()).unwrap()),
         Term::Constant(Entity::try_from("urn:alice".to_string()).unwrap()),
         Term::var("name"),
-        Cardinality::One,
+        Term::var("cause"),
+            Cardinality::One,
     );
 
     // Second: (greeting/text, of: ?name, is: ?greeting) - uses ?name from first
@@ -481,7 +484,8 @@ fn test_join_plan_execution_order() {
         Term::Constant(Attribute::try_from("greeting/text".to_string()).unwrap()),
         Term::var("name"),
         Term::var("greeting"),
-        Cardinality::One,
+        Term::var("cause"),
+            Cardinality::One,
     );
 
     let premises = vec![Premise::from(fact1), Premise::from(fact2)];
@@ -542,14 +546,16 @@ async fn test_join_plan_query_execution() -> anyhow::Result<()> {
         Term::Constant(Attribute::try_from("person/name".to_string()).unwrap()),
         Term::var("person"),
         Term::var("name"),
-        Cardinality::One,
+        Term::var("cause"),
+            Cardinality::One,
     );
 
     let fact2 = FactApplication::new(
         Term::Constant(Attribute::try_from("person/age".to_string()).unwrap()),
         Term::var("person"),
         Term::var("age"),
-        Cardinality::One,
+        Term::var("cause"),
+            Cardinality::One,
     );
 
     let premises = vec![Premise::from(fact1), Premise::from(fact2)];

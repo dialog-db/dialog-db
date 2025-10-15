@@ -145,13 +145,13 @@ pub enum FormulaEvaluationError {
     /// # Example
     /// ```should_panic
     /// # use dialog_query::math::{Sum};
-    /// # use dialog_query::{Term, Match, Value, Parameters, Formula};
+    /// # use dialog_query::{Term, selection::Answer, Value, Parameters, Formula};
     /// let mut parameters = Parameters::new();
     /// // Missing "with" parameter!
     /// parameters.insert("of".to_string(), Term::var("x"));
     ///
     /// let sum = Sum::apply(parameters).unwrap();
-    /// let input = Match::new().set(Term::var("x"), 5u32).unwrap();
+    /// let input = Answer::new().set(Term::var("x"), 5u32).unwrap();
     /// let result = sum.derive(input).unwrap(); // Will panic with RequiredParameter
     /// ```
     #[error("Formula application omits required parameter \"{parameter}\"")]
@@ -165,13 +165,13 @@ pub enum FormulaEvaluationError {
     /// # Example
     /// ```should_panic
     /// # use dialog_query::math::{Sum};
-    /// # use dialog_query::{Term, Match, Value, Parameters, Formula};
+    /// # use dialog_query::{Term, selection::Answer, Value, Parameters, Formula};
     /// # let mut parameters = Parameters::new();
     /// # parameters.insert("of".to_string(), Term::var("x"));
     /// # parameters.insert("with".to_string(), Term::var("y"));
     /// # parameters.insert("is".to_string(), Term::var("result"));
     /// # let sum = Sum::apply(parameters).unwrap();
-    /// let input = Match::new();
+    /// let input = Answer::new();
     /// // Variable ?x is not bound!
     /// let result = sum.derive(input).unwrap(); // Will panic with UnboundVariable
     /// ```
@@ -191,19 +191,19 @@ pub enum FormulaEvaluationError {
     /// ```ignore
     /// # use dialog_query::math::Sum;
     /// # use dialog_query::formula::{Formula};
-    /// # use dialog_query::{Term, Match, Value, Parameters};
+    /// # use dialog_query::{Term, selection::Answer, Value, Parameters};
     /// # let mut terms = Terms::new();
     /// # terms.insert("of".to_string(), Term::var("x"));
     /// # terms.insert("with".to_string(), Term::var("y"));
     /// # terms.insert("is".to_string(), Term::var("result"));
     /// # let app = Sum::apply(terms);
-    /// let input = Match::new()
+    /// let input = Answer::new()
     ///     .set(Term::var("x"), 5u32).unwrap()
     ///     .set(Term::var("y"), 3u32).unwrap()
     ///     .set(Term::var("result"), 10u32).unwrap(); // Already bound to 10
     ///
     /// // Behavior when trying to write to already bound variable is TBD
-    /// let result = app.expand(input);
+    /// let result = app.derive(input);
     /// // Implementation details for handling inconsistencies are still being refined
     /// ```
     #[error(
@@ -228,6 +228,60 @@ pub enum FormulaEvaluationError {
     /// ```
     #[error("Type mismatch: expected {expected}, got {actual}")]
     TypeMismatch { expected: Type, actual: Type },
+}
+
+impl From<InconsistencyError> for FormulaEvaluationError {
+    fn from(e: InconsistencyError) -> Self {
+        // Convert InconsistencyError by matching on its variants
+        // This is a compatibility bridge for Match-based formula operations
+        match e {
+            InconsistencyError::UnboundVariableError(var) => {
+                FormulaEvaluationError::UnboundVariable {
+                    parameter: var.clone(),
+                    term: crate::Term::var(&var),
+                }
+            }
+            InconsistencyError::AssignmentError(msg) => {
+                // This occurs when trying to set a variable that's already bound to a different value
+                // We don't have enough context to create proper VariableInconsistency,
+                // so wrap in TypeMismatch for now
+                eprintln!("Warning: InconsistencyError::AssignmentError in formula: {}", msg);
+                FormulaEvaluationError::TypeMismatch {
+                    expected: crate::artifact::Type::UnsignedInt,
+                    actual: crate::artifact::Type::UnsignedInt,
+                }
+            }
+            InconsistencyError::UnexpectedType { expected, actual } => {
+                FormulaEvaluationError::TypeMismatch { expected, actual }
+            }
+            InconsistencyError::UnconstrainedSelector => {
+                // This shouldn't happen in formula evaluation
+                FormulaEvaluationError::TypeMismatch {
+                    expected: crate::artifact::Type::String,
+                    actual: crate::artifact::Type::String,
+                }
+            }
+            InconsistencyError::TypeConversion(type_error) => {
+                let crate::artifact::TypeError::TypeMismatch(expected, actual) = type_error;
+                FormulaEvaluationError::TypeMismatch { expected, actual }
+            }
+            InconsistencyError::TypeError(msg) => {
+                eprintln!("Warning: InconsistencyError::TypeError in formula: {}", msg);
+                FormulaEvaluationError::TypeMismatch {
+                    expected: crate::artifact::Type::String,
+                    actual: crate::artifact::Type::String,
+                }
+            }
+            InconsistencyError::TypeMismatch { expected: _, actual: _ } => {
+                // TypeMismatch from Value comparison - we don't have type info directly
+                eprintln!("Warning: InconsistencyError::TypeMismatch in formula");
+                FormulaEvaluationError::TypeMismatch {
+                    expected: crate::artifact::Type::String,
+                    actual: crate::artifact::Type::UnsignedInt,
+                }
+            }
+        }
+    }
 }
 
 /// Errors that can occur during query planning.

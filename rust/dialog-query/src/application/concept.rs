@@ -1,14 +1,82 @@
 use super::fact::CONCEPT_OVERHEAD;
 use crate::context::new_context;
-use crate::cursor::Cursor;
 use crate::planner::{Fork, Join};
 use crate::predicate::Concept;
+use crate::selection::{Answer, Evidence};
 use crate::DeductiveRule;
 use crate::{
-    try_stream, Attribute, Environment, EvaluationContext, Parameters, Schema, Source,
-    Value,
+    try_stream, Attribute, Environment, EvaluationContext, Parameters, Schema, Source, Term, Value,
 };
 use std::fmt::Display;
+
+/// Extract an Answer with parameter names from an Answer with user variable names
+///
+/// This maps values from user-specified variable names to internal parameter names
+/// for scoped evaluation. All factors are copied with their original provenance.
+fn extract_parameters(
+    source: &Answer,
+    terms: &Parameters,
+) -> Result<Answer, crate::InconsistencyError> {
+    let mut answer = Answer::new();
+
+    for (param_name, user_term) in terms.iter() {
+        match user_term {
+            Term::Variable { name: Some(_), .. } => {
+                // For variables, map from user variable to parameter variable
+                let param_term = Term::<Value>::var(param_name);
+                if let Some(factors) = source.lookup(user_term) {
+                    answer.merge(Evidence::Parameter {
+                        term: &param_term,
+                        value: &factors.content(),
+                    })?;
+                }
+            }
+            Term::Constant(value) => {
+                // For constants, directly bind the parameter variable to the constant value
+                let param_term = Term::<Value>::var(param_name);
+                answer.merge(Evidence::Parameter {
+                    term: &param_term,
+                    value,
+                })?;
+            }
+            Term::Variable { name: None, .. } => {}
+        }
+    }
+
+    Ok(answer)
+}
+
+/// Merge an Answer with parameter names back into an Answer with user variable names
+///
+/// This maps values from internal parameter names back to user-specified variable names
+/// after evaluation. All factors are copied with their original provenance.
+fn merge_parameters(
+    base: &Answer,
+    result: &Answer,
+    terms: &Parameters,
+) -> Result<Answer, crate::InconsistencyError> {
+    let mut merged = base.clone();
+
+    // Map through parameters: for each parameter, if it exists in result,
+    // merge it into base under the user variable name
+    for (param_name, user_term) in terms.iter() {
+        // Skip constants - they were input parameters, not results to merge back
+        if matches!(user_term, Term::Constant(_)) {
+            continue;
+        }
+
+        // Try to get the factors for the parameter name from result
+        let param_term = Term::<Value>::var(param_name);
+        if let Some(factors) = result.lookup(&param_term) {
+            // Merge all factors under the user's variable name, preserving provenance
+            for factor in factors.evidence() {
+                merged.assign(user_term, factor)?;
+            }
+        }
+    }
+
+    Ok(merged)
+}
 
 /// Represents an application of a concept with specific term bindings.
 /// This is used when querying for entities that match a concept pattern.
@@ -173,19 +241,10 @@ impl ConceptApplication {
             for await each in context.selection {
                 let input = each?;
 
-                // For now, convert Answer to Match for concept evaluation
-                // TODO: Make concept evaluation work natively with Answers
-                let input_match = input.clone().into_match();
-
-                // Create cursor for bidirectional parameter mapping
-                let cursor = Cursor::new(input_match.clone(), app.terms.clone());
-
-                // Extract initial match with resolved constants for evaluation
-                let initial_match = crate::Match::try_from(&cursor)
+                // Extract answer with parameter names for scoped evaluation
+                // Maps user variable names → internal parameter names
+                let initial_answer = extract_parameters(&input, &app.terms)
                     .map_err(|e| crate::QueryError::FactStore(e.to_string()))?;
-
-                // Evaluate join with single-match selection converted to answers
-                let initial_answer = initial_match.into_answer();
                 let single_answers = futures_util::stream::once(async move { Ok(initial_answer) });
                 let eval_context = EvaluationContext {
                     selection: single_answers,
@@ -193,12 +252,13 @@ impl ConceptApplication {
                     scope: context.scope.clone(),
                 };
 
-                // Merge results back using cursor's bidirectional mapping
+                // Merge results back, mapping parameter names → user variable names
+                // All factors are copied with their original provenance
                 for await result in plan.clone().evaluate(eval_context) {
-                    let result_match = result?.into_match();
-                    let merged = cursor.merge(&result_match)
+                    let result_answer = result?;
+                    let merged = merge_parameters(&input, &result_answer, &app.terms)
                         .map_err(|e| crate::QueryError::FactStore(e.to_string()))?;
-                    yield merged.into_answer();
+                    yield merged;
                 }
             }
         }
@@ -294,7 +354,8 @@ mod tests {
         let application = ConceptApplication { terms, concept };
 
         // Execute the query
-        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(application.query(session)).await?;
+        let selection =
+            futures_util::TryStreamExt::try_collect::<Vec<_>>(application.query(session)).await?;
 
         // Should find both Alice and Bob with their name and age
         assert_eq!(selection.len(), 2, "Should find 2 people");
@@ -392,7 +453,10 @@ mod tests {
         };
 
         // Execute with bound entity scope
-        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(application.evaluate(context_with_scope)).await?;
+        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
+            application.evaluate(context_with_scope),
+        )
+        .await?;
 
         // Should still execute successfully and bind name and age
         // (even though we don't have the actual entity value in the match)

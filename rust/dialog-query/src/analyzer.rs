@@ -665,6 +665,7 @@ mod cost_model_tests {
             Term::Constant(the_attr),
             Term::Constant(entity_val),
             Term::Constant(Value::String("test".to_string())),
+            Term::var("cause"),
             crate::attribute::Cardinality::One,
         );
         let premise = Premise::from(app);
@@ -690,6 +691,7 @@ mod cost_model_tests {
             Term::Constant(the_attr),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
+            Term::var("cause"),
             crate::attribute::Cardinality::One,
         );
         let premise = Premise::from(app);
@@ -716,6 +718,7 @@ mod cost_model_tests {
             Term::Constant(the_attr),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
+            Term::var("cause"),
             crate::attribute::Cardinality::One,
         );
         let premise = Premise::from(app);
@@ -763,6 +766,7 @@ mod cost_model_tests {
             Term::Constant(the_attr),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
+            Term::var("cause"),
             crate::attribute::Cardinality::One,
         );
 
@@ -793,6 +797,7 @@ mod cost_model_tests {
             Term::Constant(the_attr.clone()),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("tag"),
+            Term::var("cause"),
             crate::attribute::Cardinality::One,
         );
 
@@ -800,6 +805,7 @@ mod cost_model_tests {
             Term::Constant(the_attr),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("tag"),
+            Term::var("cause"),
             crate::attribute::Cardinality::Many,
         );
 
@@ -843,6 +849,7 @@ mod cost_model_tests {
             Term::Constant(the_attr.clone()),
             Term::Constant(entity_val.clone()),
             Term::Constant(value_val.clone()),
+            Term::var("cause"),
             crate::attribute::Cardinality::One,
         );
 
@@ -850,6 +857,7 @@ mod cost_model_tests {
             Term::Constant(the_attr),
             Term::Constant(entity_val),
             Term::Constant(value_val),
+            Term::var("cause"),
             crate::attribute::Cardinality::Many,
         );
 
@@ -894,6 +902,7 @@ mod cost_model_tests {
             Term::Constant(the_attr),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
+            Term::var("cause"),
             crate::attribute::Cardinality::One,
         );
         let fact_analysis = Analysis::from(Premise::from(fact_app));
@@ -944,6 +953,7 @@ mod cost_model_tests {
             Term::Constant(the_attr.clone()),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
+            Term::var("cause"),
             crate::attribute::Cardinality::One,
         );
 
@@ -996,6 +1006,7 @@ mod cost_model_tests {
             Term::Constant(the_attr.clone()),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
+            Term::var("cause"),
             crate::attribute::Cardinality::One,
         );
 
@@ -1041,6 +1052,7 @@ mod cost_model_tests {
             Term::Constant(the_attr.clone()),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("value"),
+            Term::var("cause"),
             crate::attribute::Cardinality::One,
         );
 
@@ -1086,6 +1098,7 @@ mod cost_model_tests {
             Term::Constant(the_attr.clone()),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("tag"),
+            Term::var("cause"),
             crate::attribute::Cardinality::Many,
         );
 
@@ -1130,6 +1143,7 @@ mod cost_model_tests {
             Term::Constant(the_attr.clone()),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("tag"),
+            Term::var("cause"),
             crate::attribute::Cardinality::Many,
         );
 
@@ -1175,6 +1189,7 @@ mod cost_model_tests {
             Term::Constant(the_attr.clone()),
             Term::<Entity>::var("entity"),
             Term::<Value>::var("name"),
+            Term::var("cause"),
             crate::attribute::Cardinality::One,
         );
 
@@ -1184,6 +1199,7 @@ mod cost_model_tests {
             Term::Constant(age_attr),
             Term::<Entity>::var("entity"), // Already bound by p1
             Term::<Value>::var("age"),
+            Term::var("cause"),
             crate::attribute::Cardinality::One,
         );
 
@@ -1232,7 +1248,8 @@ fn debug_update_cost() {
         Term::Constant(the_attr),
         Term::<Entity>::var("entity"),
         Term::<Value>::var("value"),
-        crate::attribute::Cardinality::One,
+        Term::var("cause"),
+            crate::attribute::Cardinality::One,
     );
 
     let schema = app.schema();

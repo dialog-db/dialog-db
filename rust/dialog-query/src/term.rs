@@ -9,15 +9,13 @@
 //! serialization/deserialization, which allows clean separation between the API
 //! (`Term<T>`) and the JSON format (`TermSyntax<T>`).
 
-use std::collections::HashSet;
 use std::fmt;
 use std::marker::PhantomData;
 
 use crate::artifact::{Attribute, Entity, Type, Value};
 use crate::types::{IntoType, Scalar};
-use crate::InconsistencyError;
 use serde::{Deserialize, Serialize};
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 
 // #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 // pub enum Constraint {

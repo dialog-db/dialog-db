@@ -4,7 +4,7 @@ use crate::error::{CompileError, SchemaError};
 pub use crate::planner::Join;
 pub use crate::predicate::Concept;
 pub use crate::premise::Premise;
-pub use crate::{Application, Attribute, Dependencies, Parameters, Requirement, Value};
+pub use crate::{Application, Attribute, Cardinality, Dependencies, Parameters, Requirement, Value};
 use crate::{Term, Type};
 use std::fmt::Display;
 
@@ -117,7 +117,7 @@ impl From<&Concept> for DeductiveRule {
                     .expect("Failed to parse attribute name"),
             );
             premises.push(
-                FactApplication::new(the, this.clone(), Term::var(name), attribute.cardinality)
+                FactApplication::new(the, this.clone(), Term::var(name), Term::var("cause"), attribute.cardinality)
                     .into(),
             );
         }
@@ -150,14 +150,16 @@ fn test_rule_compiles_with_valid_premises() {
             Term::Constant("user/name".parse::<ArtifactAttribute>().unwrap()),
             this.clone(),
             Term::var("name"),
-            crate::attribute::Cardinality::One,
+            crate::attribute::Term::var("cause"),
+            Cardinality::One,
         )
         .into(),
         FactApplication::new(
             Term::Constant("user/age".parse::<ArtifactAttribute>().unwrap()),
             this,
             Term::var("age"),
-            crate::attribute::Cardinality::One,
+            crate::attribute::Term::var("cause"),
+            Cardinality::One,
         )
         .into(),
     ];
@@ -187,7 +189,8 @@ fn test_rule_fails_with_unconstrained_fact() {
         Term::var("key"),
         Term::<Entity>::var("user"),
         Term::var("value"),
-        crate::attribute::Cardinality::One,
+        crate::attribute::Term::var("cause"),
+            Cardinality::One,
     )
     .into()];
     assert!(DeductiveRule::new(conclusion, premises).is_err());
@@ -215,7 +218,8 @@ fn test_rule_fails_with_unused_parameter() {
         Term::Constant("user/name".parse::<ArtifactAttribute>().unwrap()),
         Term::<Entity>::var("this"),
         Term::var("name"),
-        crate::attribute::Cardinality::One,
+        crate::attribute::Term::var("cause"),
+            Cardinality::One,
     )
     .into()];
     let result = DeductiveRule::new(conclusion, premises);
@@ -271,14 +275,16 @@ fn test_rule_compiles_with_chained_dependencies() {
             Term::Constant("user/name".parse::<ArtifactAttribute>().unwrap()),
             this.clone(),
             Term::Constant(Value::String("jack".to_string())),
-            crate::attribute::Cardinality::One,
+            crate::attribute::Term::var("cause"),
+            Cardinality::One,
         )
         .into(),
         FactApplication::new(
             Term::var("key"),
             this,
             Term::var("value"),
-            crate::attribute::Cardinality::One,
+            crate::attribute::Term::var("cause"),
+            Cardinality::One,
         )
         .into(),
     ];
@@ -308,7 +314,8 @@ fn test_rule_parameter_name_vs_variable_name() {
         Term::Constant("user/name".parse::<ArtifactAttribute>().unwrap()),
         Term::<Entity>::var("this"),
         Term::var("key_var"), // Variable name is "key_var", not "key"
-        crate::attribute::Cardinality::One,
+        crate::attribute::Term::var("cause"),
+            Cardinality::One,
     )
     .into()];
 

@@ -23,10 +23,10 @@ pub struct SumInput {
     pub with: u32,
 }
 
-impl TryFrom<Cursor> for SumInput {
+impl TryFrom<&mut Cursor<'_>> for SumInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read("of")?;
         let with = cursor.read("with")?;
         Ok(SumInput { of, with })
@@ -94,8 +94,8 @@ impl Formula for Sum {
         dependencies
     }
 
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor.clone())?;
+    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
+        let input = Self::Input::try_from(cursor)?;
         Ok(Self::compute(input))
     }
 
@@ -122,10 +122,10 @@ pub struct DifferenceInput {
     pub subtract: u32,
 }
 
-impl TryFrom<Cursor> for DifferenceInput {
+impl TryFrom<&mut Cursor<'_>> for DifferenceInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read::<u32>("of")?;
         let subtract = cursor.read::<u32>("subtract")?;
         Ok(DifferenceInput { of, subtract })
@@ -185,8 +185,8 @@ impl Formula for Difference {
         dependencies
     }
 
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor.clone())?;
+    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
+        let input = Self::Input::try_from(cursor)?;
         Ok(Self::compute(input))
     }
 
@@ -209,10 +209,10 @@ pub struct ProductInput {
     pub times: u32,
 }
 
-impl TryFrom<Cursor> for ProductInput {
+impl TryFrom<&mut Cursor<'_>> for ProductInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read::<u32>("of")?;
         let times = cursor.read::<u32>("times")?;
         Ok(ProductInput { of, times })
@@ -272,8 +272,8 @@ impl Formula for Product {
         dependencies
     }
 
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor.clone())?;
+    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
+        let input = Self::Input::try_from(cursor)?;
         Ok(Self::compute(input))
     }
 
@@ -296,10 +296,10 @@ pub struct QuotientInput {
     pub by: u32,
 }
 
-impl TryFrom<Cursor> for QuotientInput {
+impl TryFrom<&mut Cursor<'_>> for QuotientInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read::<u32>("of")?;
         let by = cursor.read::<u32>("by")?;
         Ok(QuotientInput { of, by })
@@ -364,8 +364,8 @@ impl Formula for Quotient {
         dependencies
     }
 
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor.clone())?;
+    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
+        let input = Self::Input::try_from(cursor)?;
         Ok(Self::compute(input))
     }
 
@@ -388,10 +388,10 @@ pub struct ModuloInput {
     pub by: u32,
 }
 
-impl TryFrom<Cursor> for ModuloInput {
+impl TryFrom<&mut Cursor<'_>> for ModuloInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read::<u32>("of")?;
         let by = cursor.read::<u32>("by")?;
         Ok(ModuloInput { of, by })
@@ -456,8 +456,8 @@ impl Formula for Modulo {
         dependencies
     }
 
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor.clone())?;
+    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
+        let input = Self::Input::try_from(cursor)?;
         Ok(Self::compute(input))
     }
 
@@ -482,7 +482,7 @@ mod tests {
         terms.insert("is".to_string(), Term::var("result").into());
 
         // Create input match with x=5, y=3
-        let input = Match::new()
+        let input = crate::selection::Answer::new()
             .set(Term::var("x"), 5u32)
             .expect("Failed to set x")
             .set(Term::var("y"), 3u32)
@@ -499,42 +499,20 @@ mod tests {
         let output = &results[0];
 
         // Check that x and y are preserved
-        assert_eq!(output.get::<u32>(&Term::var("x")).ok(), Some(5));
-        assert_eq!(output.get::<u32>(&Term::var("y")).ok(), Some(3));
+        assert_eq!(output.resolve::<u32>(&Term::var("x")).ok(), Some(5));
+        assert_eq!(output.resolve::<u32>(&Term::var("y")).ok(), Some(3));
 
         // Check that result is computed correctly
-        assert_eq!(output.get::<u32>(&Term::var("result")).ok(), Some(8));
+        assert_eq!(output.resolve::<u32>(&Term::var("result")).ok(), Some(8));
         Ok(())
     }
 
-    #[test]
-    fn test_cursor_read_write() -> anyhow::Result<()> {
-        let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("test").into());
-
-        let source = Match::new()
-            .set(Term::var("test"), 42u32)
-            .expect("Failed to create test match");
-
-        let mut cursor = Cursor::new(source, terms);
-
-        // Test reading
-        let value = cursor.read::<u32>("value").expect("Failed to read value");
-        assert_eq!(value, 42);
-
-        // Test writing
-        let mut write_cursor = cursor.clone();
-        let new_value = Value::UnsignedInt(100);
-        write_cursor
-            .write("value", &new_value)
-            .expect("Failed to write value");
-
-        let written_value = write_cursor
-            .read::<u32>("value")
-            .expect("Failed to read written value");
-        assert_eq!(written_value, 100);
-        Ok(())
-    }
+    // Removed test_cursor_read_write:
+    // This test was for the deprecated Cursor.write() method which relied on
+    // Match's copy-on-write semantics. With Answer, we intentionally don't
+    // support mutable updates - formulas should return new Answer instances
+    // instead of mutating cursors. The write() method is deprecated and will
+    // be removed in query-2 when formulas are updated to work with Answer.
 
     #[test]
     fn test_sum_formula_missing_input() -> anyhow::Result<()> {
@@ -543,7 +521,7 @@ mod tests {
         terms.insert("with".to_string(), Term::var("missing").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new()
+        let input = crate::selection::Answer::new()
             .set(Term::var("x"), 5u32)
             .expect("Failed to set x");
 
@@ -569,7 +547,7 @@ mod tests {
         let app = Sum::apply(terms)?;
 
         // Test first input: 2 + 3 = 5
-        let input1 = Match::new()
+        let input1 = crate::selection::Answer::new()
             .set(Term::var("a"), 2u32)
             .unwrap()
             .set(Term::var("b"), 3u32)
@@ -578,12 +556,12 @@ mod tests {
         let results1 = app.derive(input1).expect("First expansion failed");
         assert_eq!(results1.len(), 1);
         let result1 = &results1[0];
-        assert_eq!(result1.get::<u32>(&Term::var("a")).ok(), Some(2));
-        assert_eq!(result1.get::<u32>(&Term::var("b")).ok(), Some(3));
-        assert_eq!(result1.get::<u32>(&Term::var("sum")).ok(), Some(5));
+        assert_eq!(result1.resolve::<u32>(&Term::var("a")).ok(), Some(2));
+        assert_eq!(result1.resolve::<u32>(&Term::var("b")).ok(), Some(3));
+        assert_eq!(result1.resolve::<u32>(&Term::var("sum")).ok(), Some(5));
 
         // Test second input: 10 + 15 = 25
-        let input2 = Match::new()
+        let input2 = crate::selection::Answer::new()
             .set(Term::var("a"), 10u32)
             .unwrap()
             .set(Term::var("b"), 15u32)
@@ -592,9 +570,9 @@ mod tests {
         let results2 = app.derive(input2).expect("Second expansion failed");
         assert_eq!(results2.len(), 1);
         let result2 = &results2[0];
-        assert_eq!(result2.get::<u32>(&Term::var("a")).ok(), Some(10));
-        assert_eq!(result2.get::<u32>(&Term::var("b")).ok(), Some(15));
-        assert_eq!(result2.get::<u32>(&Term::var("sum")).ok(), Some(25));
+        assert_eq!(result2.resolve::<u32>(&Term::var("a")).ok(), Some(10));
+        assert_eq!(result2.resolve::<u32>(&Term::var("b")).ok(), Some(15));
+        assert_eq!(result2.resolve::<u32>(&Term::var("sum")).ok(), Some(25));
         Ok(())
     }
 
@@ -625,7 +603,7 @@ mod tests {
         terms.insert("subtract".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new()
+        let input = crate::selection::Answer::new()
             .set(Term::var("x"), 10u32)
             .unwrap()
             .set(Term::var("y"), 3u32)
@@ -636,7 +614,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.get::<u32>(&Term::var("result")).ok(), Some(7));
+        assert_eq!(result.resolve::<u32>(&Term::var("result")).ok(), Some(7));
         Ok(())
     }
 
@@ -647,7 +625,7 @@ mod tests {
         terms.insert("subtract".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new()
+        let input = crate::selection::Answer::new()
             .set(Term::var("x"), 3u32)
             .unwrap()
             .set(Term::var("y"), 10u32)
@@ -661,7 +639,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         // Should saturate at 0
-        assert_eq!(result.get::<u32>(&Term::var("result")).ok(), Some(0));
+        assert_eq!(result.resolve::<u32>(&Term::var("result")).ok(), Some(0));
         Ok(())
     }
 
@@ -672,7 +650,7 @@ mod tests {
         terms.insert("times".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new()
+        let input = crate::selection::Answer::new()
             .set(Term::var("x"), 6u32)
             .unwrap()
             .set(Term::var("y"), 7u32)
@@ -683,7 +661,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.get::<u32>(&Term::var("result")).ok(), Some(42));
+        assert_eq!(result.resolve::<u32>(&Term::var("result")).ok(), Some(42));
         Ok(())
     }
 
@@ -694,7 +672,7 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new()
+        let input = crate::selection::Answer::new()
             .set(Term::var("x"), 15u32)
             .unwrap()
             .set(Term::var("y"), 3u32)
@@ -705,7 +683,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.get::<u32>(&Term::var("result")).ok(), Some(5));
+        assert_eq!(result.resolve::<u32>(&Term::var("result")).ok(), Some(5));
         Ok(())
     }
 
@@ -716,7 +694,7 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new()
+        let input = crate::selection::Answer::new()
             .set(Term::var("x"), 15u32)
             .unwrap()
             .set(Term::var("y"), 0u32)
@@ -739,7 +717,7 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new()
+        let input = crate::selection::Answer::new()
             .set(Term::var("x"), 17u32)
             .unwrap()
             .set(Term::var("y"), 5u32)
@@ -750,7 +728,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.get::<u32>(&Term::var("result")).ok(), Some(2));
+        assert_eq!(result.resolve::<u32>(&Term::var("result")).ok(), Some(2));
         Ok(())
     }
 
@@ -761,7 +739,7 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new()
+        let input = crate::selection::Answer::new()
             .set(Term::var("x"), 17u32)
             .unwrap()
             .set(Term::var("y"), 0u32)

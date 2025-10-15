@@ -1,64 +1,85 @@
-//! Cursor for reading and writing values in predicate application
+//! Cursor for reading values during formula evaluation
 //!
-//! The `Cursor` type provides a controlled interface for predicate application
-//! to read input values and write output values during evaluation. It maintains
-//! a mapping between application parameter names and their corresponding terms
-//! in the evaluation context.
+//! The `Cursor` type provides a controlled interface for formulas
+//! to read input values during evaluation. It maintains a mapping between
+//! formula parameter names and their corresponding terms in the evaluation context,
+//! and tracks which values were read for provenance tracking.
 //!
 //! # Overview
 //!
 //! A cursor consists of:
-//! - A `Match` containing the current variable bindings
-//! - A `Terms` mapping from parameter names to their term representations
-//!
-//! This design allows predicate applications to work with named parameters
-//! independently of how those parameters are bound in the evaluation context.
+//! - An `Answer` containing the current variable bindings and provenance
+//! - A `Parameters` mapping from parameter names to their term representations
+//! - Read tracking to record dependencies for Factor::Derived creation
 //!
 //! # Example
 //!
-//! ```
+//! ```ignore
 //! use dialog_query::cursor::Cursor;
-//! use dialog_query::{Term, Match, Value, Parameters};
+//! use dialog_query::{Term, Answer, Value, Parameters};
 //!
 //! let mut parameters = Parameters::new();
 //! parameters.insert("x".to_string(), Term::var("input_x"));
-//! parameters.insert("result".to_string(), Term::var("output_y"));
 //!
-//! let source = Match::new()
-//!     .set(Term::var("input_x"), 42u32).unwrap();
+//! let source = Answer::new();
+//! // ... populate answer with factors
 //!
-//! let cursor = Cursor::new(source, parameters);
+//! let mut cursor = Cursor::new(formula, source, parameters);
 //! let x: u32 = cursor.read("x").unwrap();  // Reads from variable "input_x"
-//! assert_eq!(x, 42);
 //! ```
 
 use crate::artifact::TypeError;
-use crate::error::FormulaEvaluationError;
-use crate::{Match, Parameters, Value};
+use crate::error::{FormulaEvaluationError, InconsistencyError};
+use crate::selection::{Answer, Factors};
+use crate::{Parameters, Value};
 
-/// A cursor for reading from and writing to matches during formula evaluation
+/// A cursor for reading and writing values during formula evaluation
 ///
-/// The cursor provides a mapping layer between application parameter names and
-/// the actual terms used in the evaluation context. This abstraction allows
-/// predicate applications to be defined independently of their usage context.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Cursor {
-    /// The current match containing variable bindings
-    pub source: Match,
+/// The cursor provides a mapping layer between formula parameter names and
+/// the actual terms used in the evaluation context. It tracks all reads
+/// to enable proper provenance tracking for derived values.
+///
+/// Cursors are specific to formula evaluation and should not be used for other purposes.
+#[derive(Debug)]
+pub struct Cursor<'a> {
+    /// The current answer containing variable bindings and provenance
+    ///
+    /// NOTE: Public for compatibility with existing formula implementations.
+    /// Use `source()` accessor method instead where possible.
+    pub source: Answer,
+
     /// Mapping from parameter names to query terms
+    ///
+    /// NOTE: Public for compatibility with existing formula implementations.
+    /// Use `terms()` accessor method instead where possible.
     pub terms: Parameters,
+
+    /// Tracks which parameters were read (for Factor::Derived provenance)
+    reads: std::collections::HashMap<String, Factors>,
+
+    /// The formula application that is evaluating this cursor
+    /// Used to create Factor::Derived with proper provenance
+    formula: &'a crate::application::formula::FormulaApplication,
 }
 
-// TODO: Rename cursor
-
-impl Cursor {
-    /// Create a new cursor from a match and term mappings
+impl<'a> Cursor<'a> {
+    /// Create a new cursor for formula evaluation
     ///
     /// # Arguments
-    /// * `source` - The match containing current variable bindings
+    /// * `formula` - The formula application being evaluated (for provenance tracking)
+    /// * `source` - The answer containing current variable bindings and provenance
     /// * `terms` - Mapping from formula parameter names to query terms
-    pub fn new(source: Match, terms: Parameters) -> Self {
-        Self { source, terms }
+    pub fn new(
+        formula: &'a crate::application::formula::FormulaApplication,
+        source: impl Into<Answer>,
+        terms: Parameters,
+    ) -> Self {
+        Self {
+            source: source.into(),
+            terms,
+            reads: std::collections::HashMap::new(),
+            formula,
+        }
     }
 
     /// Read a typed value from the cursor using a parameter name
@@ -80,24 +101,8 @@ impl Cursor {
     /// * `Err(UnboundVariable)` - If the term's variable is not bound
     /// * `Err(TypeMismatch)` - If the value cannot be converted to type T
     ///
-    /// # Example
-    /// ```
-    /// # use dialog_query::cursor::Cursor;
-    /// # use dialog_query::{Term, Match, Value, Parameters};
-    /// # let mut parameters = Parameters::new();
-    /// # parameters.insert("x".to_string(), Term::var("test_x"));
-    /// # parameters.insert("name".to_string(), Term::var("test_name"));
-    /// # let input = Match::new()
-    /// #     .set(Term::var("test_x"), 42u32).unwrap()
-    /// #     .set(Term::var("test_name"), "hello".to_string()).unwrap();
-    /// # let cursor = Cursor::new(input, parameters);
-    /// let x: u32 = cursor.read("x").unwrap();
-    /// let name: String = cursor.read("name").unwrap();
-    /// assert_eq!(x, 42);
-    /// assert_eq!(name, "hello");
-    /// ```
     pub fn read<T: TryFrom<Value, Error = TypeError>>(
-        &self,
+        &mut self,
         key: &str,
     ) -> Result<T, FormulaEvaluationError> {
         let term =
@@ -107,7 +112,13 @@ impl Cursor {
                     parameter: key.into(),
                 })?;
 
-        let value = self.source.resolve_value(term).map_err(|_| {
+        // Track what we read for provenance
+        if let Some(factors) = self.source.resolve_factors(term) {
+            self.reads.insert(key.to_string(), factors.clone());
+        }
+
+        // Get the value from the answer
+        let value = self.source.resolve::<Value>(term).map_err(|_| {
             FormulaEvaluationError::UnboundVariable {
                 term: term.clone(),
                 parameter: key.into(),
@@ -120,56 +131,11 @@ impl Cursor {
         })
     }
 
-    /// Write a value to the cursor using a parameter name
+    /// Get an immutable reference to the source answer
     ///
-    /// This method:
-    /// 1. Looks up the parameter name in the terms mapping
-    /// 2. Unifies the value with the corresponding term
-    /// 3. Updates the cursor's match with the new binding
-    ///
-    /// If the term is already bound to a different value, this will fail
-    /// with a `VariableInconsistency` error.
-    ///
-    /// # Arguments
-    /// * `key` - The formula parameter name
-    /// * `value` - The value to write
-    ///
-    /// # Returns
-    /// * `Ok(())` - If the write succeeded
-    /// * `Err(VariableInconsistency)` - If the term is already bound to a different value
-    ///
-    /// # Example
-    /// ```
-    /// # use dialog_query::cursor::Cursor;
-    /// # use dialog_query::{Term, Match, Value, Parameters};
-    /// # let mut parameters = Parameters::new();
-    /// # parameters.insert("result".to_string(), Term::var("output"));
-    /// # let source = Match::new();
-    /// # let mut cursor = Cursor::new(source, parameters);
-    /// cursor.write("result", &Value::UnsignedInt(42)).unwrap();
-    /// let result: u32 = cursor.read("result").unwrap();
-    /// assert_eq!(result, 42);
-    /// ```
-    pub fn write(&mut self, key: &str, value: &Value) -> Result<(), FormulaEvaluationError> {
-        if let Some(term) = self.terms.get(key) {
-            self.source = self
-                .source
-                .unify_value(term.clone(), value.clone())
-                .map_err(|_| FormulaEvaluationError::VariableInconsistency {
-                    parameter: key.into(),
-                    expected: term.clone(),
-                    actual: self.source.resolve(term),
-                })?;
-        }
-
-        Ok(())
-    }
-
-    /// Get an immutable reference to the underlying match
-    ///
-    /// This can be useful for accessing the match's variable bindings directly
+    /// This can be useful for accessing the answer's conclusions directly
     /// without going through the parameter mapping.
-    pub fn source(&self) -> &Match {
+    pub fn source(&self) -> &Answer {
         &self.source
     }
 
@@ -180,66 +146,67 @@ impl Cursor {
         &self.terms
     }
 
-    /// Merge values from a frame into the source match using the parameter mapping.
+    /// Get the tracked reads (which parameters were read during evaluation)
     ///
-    /// For each parameter in the cursor's terms:
-    /// - If it's a variable in the terms, look up the corresponding value in the frame
-    /// - Unify that value with the variable in the source match
+    /// Returns a mapping from parameter names to the Factors that were read.
+    /// This is used to create Factor::Derived with proper provenance.
+    pub fn reads(&self) -> &std::collections::HashMap<String, Factors> {
+        &self.reads
+    }
+
+    /// Consume the cursor and return the source answer and reads
     ///
-    /// This is the reverse operation of creating an initial match - it takes results
-    /// from evaluation and merges them back into the original context.
+    /// This is typically used after formula evaluation to access the
+    /// provenance information for creating derived factors.
+    pub fn into_parts(self) -> (Answer, std::collections::HashMap<String, Factors>) {
+        (self.source, self.reads)
+    }
+
+    // ===== Compatibility methods for Match-based formulas =====
+    // These will be removed once formulas are updated to work with Answer
+
+    /// Write a value to the cursor
+    ///
+    /// Creates a Factor::Derived with proper provenance tracking from the formula
+    /// and tracked reads. Fails if the parameter key is not in the terms mapping.
     ///
     /// # Arguments
-    /// * `frame` - The match containing evaluation results to merge
+    /// * `key` - The parameter name to write to (must exist in terms)
+    /// * `value` - The value to write
     ///
     /// # Returns
-    /// * `Ok(Match)` - New match with source data plus merged frame values
-    /// * `Err(InconsistencyError)` - If unification fails
-    pub fn merge(&self, frame: &Match) -> Result<Match, crate::InconsistencyError> {
-        let mut output = self.source.clone();
+    /// * `Ok(())` - Value written successfully
+    /// * `Err(RequiredParameter)` - If key is not in terms mapping
+    /// * `Err(VariableInconsistency)` - If assignment conflicts with existing value
+    pub fn write(&mut self, key: &str, value: &Value) -> Result<(), FormulaEvaluationError> {
+        use crate::selection::Factor;
 
-        for (param_name, term) in self.terms.iter() {
-            // If this parameter is a variable with a name, map it from frame to output
-            if let crate::Term::Variable {
-                name: Some(var_name),
-                ..
-            } = term
-            {
-                // Look up the value in the frame using the parameter name
-                if let Some(value) = frame.variables.get(param_name.as_str()) {
-                    // Bind the value to our variable name in the output
-                    output = output.unify(crate::Term::<Value>::var(var_name), value.clone())?;
-                }
+        // Fail if parameter not in terms (don't silently ignore)
+        let term =
+            self.terms
+                .get(key)
+                .ok_or_else(|| FormulaEvaluationError::RequiredParameter {
+                    parameter: key.into(),
+                })?;
+
+        // Create a Derived factor with proper provenance
+        let factor = Factor::Derived {
+            value: value.clone(),
+            from: self.reads.clone(), // Use the tracked reads as dependencies
+            formula: std::sync::Arc::new(self.formula.clone()), // Formula is always available
+        };
+
+        // Assign to the answer - this will fail if there's a conflicting value
+        self.source.assign(term, &factor).map_err(|_| {
+            // Convert assignment errors to VariableInconsistency
+            FormulaEvaluationError::VariableInconsistency {
+                parameter: key.into(),
+                actual: term.clone(),
+                expected: crate::Term::Constant(value.clone()),
             }
-        }
+        })?;
 
-        Ok(output)
-    }
-}
-
-/// Convert a Cursor into a Match by extracting all resolved constants.
-///
-/// This creates an initial match for evaluation by:
-/// 1. Resolving all terms in the cursor using the source match
-/// 2. Unifying any resolved constants into a new match
-///
-/// This is useful for creating the starting point for query evaluation.
-impl TryFrom<&Cursor> for Match {
-    type Error = crate::InconsistencyError;
-
-    fn try_from(cursor: &Cursor) -> Result<Self, Self::Error> {
-        let mut result = Match::new();
-
-        for (name, term) in cursor.terms.iter() {
-            let resolved = cursor.source.resolve(term);
-
-            // If resolved to a constant, bind it in the result match
-            if let crate::Term::Constant(value) = resolved {
-                result = result.unify(crate::Term::<Value>::var(name), value)?;
-            }
-        }
-
-        Ok(result)
+        Ok(())
     }
 }
 
@@ -248,39 +215,53 @@ mod tests {
     use super::*;
     use crate::Term;
 
+    // Helper to create a test formula for cursor tests
+    fn test_formula() -> crate::application::formula::FormulaApplication {
+        use std::sync::OnceLock;
+        static EMPTY_CELLS: OnceLock<crate::predicate::formula::Cells> = OnceLock::new();
+        let cells = EMPTY_CELLS.get_or_init(|| crate::predicate::formula::Cells::new());
+
+        crate::application::formula::FormulaApplication {
+            name: "test",
+            compute: |_| Ok(vec![]),
+            cost: 0,
+            parameters: crate::Parameters::new(),
+            cells,
+        }
+    }
+
     #[test]
-    fn test_cursor_read_write() {
+    fn test_cursor_read() {
+        use crate::selection::Answer;
+
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("test").into());
 
-        let source = Match::new()
+        let match_data = Answer::new()
             .set(Term::var("test"), 42u32)
             .expect("Failed to create test match");
 
-        let cursor = Cursor::new(source, terms);
+        let source = Answer::from(match_data);
+        let formula = test_formula();
+        let mut cursor = Cursor::new(&formula, source, terms);
 
         // Test reading
         let value = cursor.read::<u32>("value").expect("Failed to read value");
         assert_eq!(value, 42);
 
-        // Test writing
-        let mut write_cursor = cursor.clone();
-        let new_value = Value::UnsignedInt(100);
-        write_cursor
-            .write("value", &new_value)
-            .expect("Failed to write value");
-
-        let written_value = write_cursor
-            .read::<u32>("value")
-            .expect("Failed to read written value");
-        assert_eq!(written_value, 100);
+        // Verify read was tracked
+        assert_eq!(cursor.reads().len(), 1);
+        assert!(cursor.reads().contains_key("value"));
     }
 
     #[test]
     fn test_cursor_missing_parameter() {
+        use crate::selection::Answer;
+
         let terms = Parameters::new(); // Empty terms
-        let source = Match::new();
-        let cursor = Cursor::new(source, terms);
+        let source = Answer::from(Answer::new());
+        let formula = test_formula();
+        let mut cursor = Cursor::new(&formula, source, terms);
 
         let result = cursor.read::<u32>("missing");
         assert!(matches!(
@@ -291,11 +272,14 @@ mod tests {
 
     #[test]
     fn test_cursor_unbound_variable() {
+        use crate::selection::Answer;
+
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("unbound").into());
 
-        let source = Match::new(); // No bindings
-        let cursor = Cursor::new(source, terms);
+        let source = Answer::new(); // No bindings
+        let formula = test_formula();
+        let mut cursor = Cursor::new(&formula, source, terms);
 
         let result = cursor.read::<u32>("value");
         assert!(matches!(
@@ -305,94 +289,151 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_try_from_extracts_constants() {
-        use crate::artifact::Entity;
+    fn test_cursor_read_tracks_provenance() {
+        use crate::selection::Answer;
 
-        // Create parameters with mixed terms
         let mut params = Parameters::new();
-        params.insert("this".to_string(), Term::var("entity"));
-        params.insert(
-            "name".to_string(),
-            Term::Constant(Value::String("Alice".to_string())),
-        );
-        params.insert("age".to_string(), Term::var("person_age"));
+        params.insert("x".to_string(), Term::var("input_x"));
+        params.insert("y".to_string(), Term::var("input_y"));
 
-        // Create a match with some variable bindings
-        let entity = Entity::new().expect("entity creation should succeed");
-        let mut input = Match::new();
-        input = input
-            .set(Term::var("entity"), entity.clone())
-            .expect("set should succeed");
-        input = input
-            .set(Term::var("person_age"), 25u32)
+        let match_data = Answer::new()
+            .set(Term::var("input_x"), 10u32)
+            .expect("set should succeed")
+            .set(Term::var("input_y"), 20u32)
             .expect("set should succeed");
 
-        // Create cursor and convert to Match
-        let cursor = Cursor::new(input, params);
-        let result_match = Match::try_from(&cursor).expect("conversion should succeed");
+        let source = Answer::from(match_data);
+        let formula = test_formula();
+        let mut cursor = Cursor::new(&formula, source, params);
 
-        // Check that the result match has all resolved constants bound
-        assert_eq!(
-            result_match.get(&Term::<Value>::var("this")).ok(),
-            Some(Value::Entity(entity)),
-            "Variable 'entity' should be bound to entity constant"
-        );
-        assert_eq!(
-            result_match.get(&Term::<Value>::var("name")).ok(),
-            Some(Value::String("Alice".to_string())),
-            "Constant 'Alice' should be bound to name"
-        );
-        assert_eq!(
-            result_match.get(&Term::<Value>::var("age")).ok(),
-            Some(Value::UnsignedInt(25)),
-            "Variable 'person_age' should be bound to 25"
+        // Initially no reads tracked
+        assert_eq!(cursor.reads().len(), 0);
+
+        // Read x
+        let _x = cursor.read::<u32>("x").expect("read should succeed");
+        assert_eq!(cursor.reads().len(), 1);
+        assert!(cursor.reads().contains_key("x"));
+
+        // Read y
+        let _y = cursor.read::<u32>("y").expect("read should succeed");
+        assert_eq!(cursor.reads().len(), 2);
+        assert!(cursor.reads().contains_key("y"));
+    }
+
+    #[test]
+    fn test_answer_rejects_conflicting_assignment() {
+        use crate::selection::{Answer, Factor};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        // Create an Answer with a value already bound
+        let match_data = Answer::new()
+            .set(Term::var("test"), 42u32)
+            .expect("set should succeed");
+
+        let mut answer = Answer::from(match_data);
+
+        // Try to assign a conflicting value
+        use std::sync::OnceLock;
+        static EMPTY_CELLS: OnceLock<crate::predicate::formula::Cells> = OnceLock::new();
+        let cells = EMPTY_CELLS.get_or_init(|| crate::predicate::formula::Cells::new());
+
+        let conflicting_factor = Factor::Derived {
+            value: Value::UnsignedInt(100),
+            from: HashMap::new(),
+            formula: Arc::new(crate::application::formula::FormulaApplication {
+                name: "test".into(),
+                compute: |_| Ok(vec![]),
+                cost: 0,
+                parameters: crate::Parameters::new(),
+                cells,
+            }),
+        };
+
+        // This should fail because "test" is already bound to 42
+        let result = answer.assign(&Term::var("test"), &conflicting_factor);
+        assert!(
+            result.is_err(),
+            "Answer.assign() should reject conflicting value assignment"
         );
     }
 
     #[test]
-    fn test_cursor_merge_applies_frame() {
-        use crate::artifact::Entity;
+    #[allow(deprecated)]
+    fn test_cursor_write_rejects_conflicting_value() {
+        use crate::selection::Answer;
 
-        // Setup: cursor with parameters mapping implicit names to user variables
+        let mut terms = Parameters::new();
+        terms.insert("value".to_string(), Term::var("test").into());
+
+        // Create cursor with initial value
+        let source = Answer::new()
+            .set(Term::var("test"), 42u32)
+            .expect("Failed to create test match");
+
+        let formula = test_formula();
+        let mut cursor = Cursor::new(&formula, source, terms);
+
+        // Read the initial value to verify it's there
+        let value = cursor.read::<u32>("value").expect("Failed to read value");
+        assert_eq!(value, 42);
+
+        // Try to write a conflicting value - this should fail
+        let conflicting_value = Value::UnsignedInt(100);
+        let result = cursor.write("value", &conflicting_value);
+
+        assert!(
+            result.is_err(),
+            "Cursor.write() should reject conflicting value. \
+             Got Ok() but expected Err() when writing {} to variable already bound to {}",
+            100,
+            42
+        );
+
+        // Verify the original value is unchanged
+        let unchanged_value = cursor
+            .read::<u32>("value")
+            .expect("Failed to read value after conflict");
+        assert_eq!(
+            unchanged_value, 42,
+            "Original value should remain unchanged after failed write"
+        );
+    }
+
+    #[test]
+    fn test_cursor_into_parts() {
+        use crate::selection::Answer;
+
         let mut params = Parameters::new();
-        params.insert("this".to_string(), Term::var("my_entity"));
-        params.insert("name".to_string(), Term::var("my_name"));
+        params.insert("x".to_string(), Term::var("input_x"));
+        params.insert("y".to_string(), Term::var("input_y"));
 
-        let entity = Entity::new().expect("entity creation should succeed");
-        let source = Match::new()
-            .set(Term::var("original"), "original_value".to_string())
-            .expect("set should succeed");
-
-        let cursor = Cursor::new(source, params);
-
-        // Frame has values for the implicit variable names
-        let frame = Match::new()
-            .set(Term::var("this"), entity.clone())
+        let match_data = Answer::new()
+            .set(Term::var("input_x"), 10u32)
             .expect("set should succeed")
-            .set(Term::var("name"), "Alice".to_string())
+            .set(Term::var("input_y"), 20u32)
             .expect("set should succeed");
 
-        // Merge should map frame values to user variable names
-        let output = cursor.merge(&frame).expect("merge should succeed");
+        let source = Answer::from(match_data);
+        let formula = test_formula();
+        let mut cursor = Cursor::new(&formula, source, params);
 
-        // Check that:
-        // 1. Original source data is preserved
+        // Read some values to track reads
+        let _x = cursor.read::<u32>("x").expect("read should succeed");
+        let _y = cursor.read::<u32>("y").expect("read should succeed");
+
+        // Consume cursor and check parts
+        let (answer, reads) = cursor.into_parts();
+
+        // Verify we got the answer back
         assert_eq!(
-            output.get(&Term::<String>::var("original")).ok(),
-            Some("original_value".to_string()),
-            "Original source value should be preserved"
+            answer.resolve::<u32>(&Term::var("input_x")).ok(),
+            Some(10u32)
         );
 
-        // 2. Frame values are mapped to user variable names
-        assert_eq!(
-            output.get(&Term::<Value>::var("my_entity")).ok(),
-            Some(Value::Entity(entity)),
-            "Frame 'this' should be mapped to 'my_entity'"
-        );
-        assert_eq!(
-            output.get(&Term::<String>::var("my_name")).ok(),
-            Some("Alice".to_string()),
-            "Frame 'name' should be mapped to 'my_name'"
-        );
+        // Verify reads were tracked
+        assert_eq!(reads.len(), 2);
+        assert!(reads.contains_key("x"));
+        assert!(reads.contains_key("y"));
     }
 }

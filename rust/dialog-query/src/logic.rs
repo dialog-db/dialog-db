@@ -27,10 +27,10 @@ pub struct AndInput {
     pub right: bool,
 }
 
-impl TryFrom<Cursor> for AndInput {
+impl TryFrom<&mut Cursor<'_>> for AndInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
         let left = cursor.read::<bool>("left")?;
         let right = cursor.read::<bool>("right")?;
         Ok(AndInput { left, right })
@@ -83,8 +83,8 @@ impl Formula for And {
         dependencies
     }
 
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor.clone())?;
+    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
+        let input = Self::Input::try_from(cursor)?;
         Ok(Self::compute(input))
     }
 
@@ -107,10 +107,10 @@ pub struct OrInput {
     pub right: bool,
 }
 
-impl TryFrom<Cursor> for OrInput {
+impl TryFrom<&mut Cursor<'_>> for OrInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
         let left = cursor.read::<bool>("left")?;
         let right = cursor.read::<bool>("right")?;
         Ok(OrInput { left, right })
@@ -163,8 +163,8 @@ impl Formula for Or {
         dependencies
     }
 
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor.clone())?;
+    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
+        let input = Self::Input::try_from(cursor)?;
         Ok(Self::compute(input))
     }
 
@@ -185,10 +185,10 @@ pub struct NotInput {
     pub value: bool,
 }
 
-impl TryFrom<Cursor> for NotInput {
+impl TryFrom<&mut Cursor<'_>> for NotInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
         let value = cursor.read::<bool>("value")?;
         Ok(NotInput { value })
     }
@@ -238,8 +238,8 @@ impl Formula for Not {
         dependencies
     }
 
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor.clone())?;
+    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
+        let input = Self::Input::try_from(cursor)?;
         Ok(Self::compute(input))
     }
 
@@ -252,7 +252,7 @@ impl Formula for Not {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Match, Parameters, Term};
+    use crate::{selection::Answer, Parameters, Term};
 
     #[test]
     fn test_and_formula_true_true() -> anyhow::Result<()> {
@@ -261,7 +261,7 @@ mod tests {
         terms.insert("right".to_string(), Term::var("b").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("a"), true)
             .unwrap()
             .set(Term::var("b"), true)
@@ -272,7 +272,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.get::<bool>(&Term::var("result")).ok(), Some(true));
+        assert_eq!(result.resolve::<bool>(&Term::var("result")).ok(), Some(true));
         Ok(())
     }
 
@@ -283,7 +283,7 @@ mod tests {
         terms.insert("right".to_string(), Term::var("b").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("a"), true)
             .unwrap()
             .set(Term::var("b"), false)
@@ -294,7 +294,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.get::<bool>(&Term::var("result")).ok(), Some(false));
+        assert_eq!(result.resolve::<bool>(&Term::var("result")).ok(), Some(false));
         Ok(())
     }
 
@@ -305,7 +305,7 @@ mod tests {
         terms.insert("right".to_string(), Term::var("b").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("a"), false)
             .unwrap()
             .set(Term::var("b"), false)
@@ -316,7 +316,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.get::<bool>(&Term::var("result")).ok(), Some(false));
+        assert_eq!(result.resolve::<bool>(&Term::var("result")).ok(), Some(false));
         Ok(())
     }
 
@@ -327,7 +327,7 @@ mod tests {
         terms.insert("right".to_string(), Term::var("b").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("a"), true)
             .unwrap()
             .set(Term::var("b"), false)
@@ -338,7 +338,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.get::<bool>(&Term::var("result")).ok(), Some(true));
+        assert_eq!(result.resolve::<bool>(&Term::var("result")).ok(), Some(true));
         Ok(())
     }
 
@@ -349,7 +349,7 @@ mod tests {
         terms.insert("right".to_string(), Term::var("b").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("a"), false)
             .unwrap()
             .set(Term::var("b"), false)
@@ -360,7 +360,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.get::<bool>(&Term::var("result")).ok(), Some(false));
+        assert_eq!(result.resolve::<bool>(&Term::var("result")).ok(), Some(false));
         Ok(())
     }
 
@@ -370,14 +370,14 @@ mod tests {
         terms.insert("value".to_string(), Term::var("bool").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new().set(Term::var("bool"), true).unwrap();
+        let input = Answer::new().set(Term::var("bool"), true).unwrap();
 
         let app = Not::apply(terms)?;
         let results = app.derive(input).expect("Not formula failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.get::<bool>(&Term::var("result")).ok(), Some(false));
+        assert_eq!(result.resolve::<bool>(&Term::var("result")).ok(), Some(false));
         Ok(())
     }
 
@@ -387,7 +387,7 @@ mod tests {
         terms.insert("value".to_string(), Term::var("bool").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new().set(Term::var("bool"), false).unwrap();
+        let input = Answer::new().set(Term::var("bool"), false).unwrap();
 
         let app = Not::apply(terms)?;
 
@@ -395,7 +395,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.get::<bool>(&Term::var("result")).ok(), Some(true));
+        assert_eq!(result.resolve::<bool>(&Term::var("result")).ok(), Some(true));
         Ok(())
     }
 
@@ -407,7 +407,7 @@ mod tests {
         and_terms.insert("right".to_string(), Term::var("b").into());
         and_terms.insert("is".to_string(), Term::var("and_result").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("a"), true)
             .unwrap()
             .set(Term::var("b"), false)
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(not_results.len(), 1);
         let final_result = &not_results[0];
         assert_eq!(
-            final_result.get::<bool>(&Term::var("final_result")).ok(),
+            final_result.resolve::<bool>(&Term::var("final_result")).ok(),
             Some(true)
         );
         Ok(())

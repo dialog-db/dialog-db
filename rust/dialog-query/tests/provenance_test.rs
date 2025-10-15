@@ -36,6 +36,7 @@ async fn test_fact_application_with_provenance() -> Result<()> {
         Term::Constant(name_attr.clone()),
         Term::var("person"),
         Term::var("name"),
+        Term::var("cause"),
         Cardinality::Many,
     );
 
@@ -106,6 +107,7 @@ async fn test_provenance_tracks_multiple_facts() -> Result<()> {
         Term::Constant(name_attr.clone()),
         Term::var("person"),
         Term::var("name"),
+        Term::var("cause"),
         Cardinality::Many,
     );
 
@@ -156,6 +158,7 @@ async fn test_fact_application_query_with_provenance() -> Result<()> {
         Term::Constant(name_attr.clone()),
         Term::var("person"),
         Term::var("name"),
+        Term::var("cause"),
         Cardinality::Many,
     );
 
@@ -173,6 +176,7 @@ async fn test_fact_application_query_with_provenance() -> Result<()> {
         Term::Constant(name_attr.clone()),
         Term::Constant(alice.clone()),
         Term::Constant(Value::String("Alice".to_string())),
+        Term::var("cause"),
         Cardinality::Many,
     );
 
@@ -218,6 +222,7 @@ async fn test_query_with_blank_variables() -> Result<()> {
             content_type: Default::default(),
         }, // Blank variable
         Term::var("name"),
+        Term::var("cause"),
         Cardinality::Many,
     );
 

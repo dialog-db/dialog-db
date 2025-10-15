@@ -2,10 +2,9 @@ pub use super::Application;
 pub use crate::cursor::Cursor;
 pub use crate::error::{AnalyzerError, FormulaEvaluationError, PlanError, QueryError};
 use crate::predicate::formula::Cells;
-use crate::selection::TryExpand;
-pub use crate::{try_stream, EvaluationContext, Source};
+pub use crate::{try_stream, Answer, Answers, EvaluationContext, Source};
 
-pub use crate::{Environment, Match, Parameters, Requirement};
+pub use crate::{Environment, Parameters, Requirement};
 use std::fmt::Display;
 
 pub const PARAM_COST: usize = 10;
@@ -29,13 +28,13 @@ pub struct FormulaApplication {
     pub cost: usize,
 
     /// Function pointer to the formula's computation logic
-    pub compute: fn(&mut Cursor) -> Result<Vec<Match>, FormulaEvaluationError>,
+    pub compute: fn(&mut Cursor) -> Result<Vec<Answer>, FormulaEvaluationError>,
 }
 
 impl FormulaApplication {
-    /// Computes a single match using this formula
-    pub fn derive(&self, input: Match) -> Result<Vec<Match>, FormulaEvaluationError> {
-        let mut cursor = Cursor::new(input, self.parameters.clone());
+    /// Computes answers using this formula
+    pub fn derive(&self, input: Answer) -> Result<Vec<Answer>, FormulaEvaluationError> {
+        let mut cursor = Cursor::new(self, input, self.parameters.clone());
         (self.compute)(&mut cursor)
     }
 
@@ -56,11 +55,11 @@ impl FormulaApplication {
         self.parameters.clone()
     }
 
-    pub fn expand(&self, frame: Match) -> Result<Vec<Match>, QueryError> {
+    pub fn expand(&self, frame: Answer) -> Result<Vec<Answer>, QueryError> {
         let compute = self.compute;
-        let mut cursor = Cursor::new(frame, self.parameters.clone());
+        let mut cursor = Cursor::new(self, frame, self.parameters.clone());
         let expansion = compute(&mut cursor);
-        // Map results and omit inconsistent matches
+        // Map results and omit inconsistent answers
         match expansion {
             Ok(output) => Ok(output),
             Err(e) => match e {
@@ -85,18 +84,15 @@ impl FormulaApplication {
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
         &self,
         context: EvaluationContext<S, M>,
-    ) -> impl crate::selection::Answers {
-        // For now, convert to Match, evaluate, convert back to Answer
-        // TODO: Make formulas work natively with Answer and track provenance
+    ) -> impl Answers {
+        // Formulas now work natively with Answer and track provenance via Factor::Derived
         let formula = self.clone();
         try_stream! {
             for await each in context.selection {
-                let answer = each?;
-                let input_match = answer.into_match();
 
-                // Use try_expand on the match
-                for result_match in formula.expand(input_match)? {
-                    yield result_match.into_answer();
+                // Expand directly with Answer - no conversions needed
+                for answer in formula.expand(each?)? {
+                    yield answer;
                 }
             }
         }
@@ -164,12 +160,6 @@ impl FormulaApplication {
         //             }
         //         }
         //     }
-    }
-}
-
-impl TryExpand for FormulaApplication {
-    fn try_expand(&self, frame: Match) -> Result<Vec<Match>, QueryError> {
-        self.expand(frame)
     }
 }
 

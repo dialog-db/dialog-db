@@ -7,6 +7,7 @@ use anyhow::Result;
 use dialog_query::{
     artifact::{Artifacts, Attribute, Entity, Value},
     formulas::*,
+    selection::Answer,
     Fact, Formula, Parameters, Session, Term,
 };
 use dialog_storage::MemoryStorageBackend;
@@ -59,7 +60,7 @@ async fn test_formula_integration_math_operations() -> Result<()> {
     let sum_formula = Sum::apply(sum_terms)?;
 
     // Create input for sum: 10 + 5
-    let sum_input = dialog_query::Match::new()
+    let sum_input = Answer::new()
         .set(Term::var("x"), 10u32)
         .unwrap()
         .set(Term::var("y"), 5u32)
@@ -81,7 +82,7 @@ async fn test_formula_integration_math_operations() -> Result<()> {
     let diff_formula = Difference::apply(diff_terms)?;
 
     // Create input for difference: 20 - 8
-    let diff_input = dialog_query::Match::new()
+    let diff_input = Answer::new()
         .set(Term::var("a"), 20u32)
         .unwrap()
         .set(Term::var("b"), 8u32)
@@ -102,7 +103,7 @@ async fn test_formula_integration_math_operations() -> Result<()> {
 
     let product_formula = Product::apply(prod_terms)?;
 
-    let prod_input = dialog_query::Match::new()
+    let prod_input = Answer::new()
         .set(Term::var("p"), 6u32)
         .unwrap()
         .set(Term::var("q"), 7u32)
@@ -163,7 +164,7 @@ async fn test_formula_integration_string_operations() -> Result<()> {
     let concat_formula = Concatenate::apply(concat_terms)?;
 
     // Test concatenating "John" + " Doe"
-    let concat_input = dialog_query::Match::new()
+    let concat_input = Answer::new()
         .set(Term::var("fname"), "John".to_string())
         .unwrap()
         .set(Term::var("lname"), " Doe".to_string())
@@ -185,7 +186,7 @@ async fn test_formula_integration_string_operations() -> Result<()> {
 
     let length_formula = Length::apply(length_terms)?;
 
-    let length_input = dialog_query::Match::new()
+    let length_input = Answer::new()
         .set(Term::var("text"), "Hello World".to_string())
         .unwrap();
 
@@ -203,7 +204,7 @@ async fn test_formula_integration_string_operations() -> Result<()> {
 
     let upper_formula = Uppercase::apply(upper_terms)?;
 
-    let upper_input = dialog_query::Match::new()
+    let upper_input = Answer::new()
         .set(Term::var("input"), "hello world".to_string())
         .unwrap();
 
@@ -227,7 +228,7 @@ async fn test_formula_integration_type_conversions() -> Result<()> {
     let to_string_formula = ToString::apply(to_string_terms)?;
 
     // Test with number
-    let number_input = dialog_query::Match::new()
+    let number_input = Answer::new()
         .set(Term::var("input"), 42u32)
         .unwrap();
 
@@ -241,7 +242,7 @@ async fn test_formula_integration_type_conversions() -> Result<()> {
     );
 
     // Test with boolean
-    let bool_input = dialog_query::Match::new()
+    let bool_input = Answer::new()
         .set(Term::var("input"), true)
         .unwrap();
 
@@ -262,7 +263,7 @@ async fn test_formula_integration_type_conversions() -> Result<()> {
     let parse_formula = ParseNumber::apply(parse_terms)?;
 
     // Test valid number parsing
-    let parse_input = dialog_query::Match::new()
+    let parse_input = Answer::new()
         .set(Term::var("str_input"), "123".to_string())
         .unwrap();
 
@@ -274,7 +275,7 @@ async fn test_formula_integration_type_conversions() -> Result<()> {
     );
 
     // Test invalid number parsing (should return empty)
-    let invalid_input = dialog_query::Match::new()
+    let invalid_input = Answer::new()
         .set(Term::var("str_input"), "not a number".to_string())
         .unwrap();
 
@@ -297,7 +298,7 @@ async fn test_formula_integration_boolean_logic() -> Result<()> {
     let and_formula = And::apply(and_terms)?;
 
     // Test true AND true = true
-    let and_input = dialog_query::Match::new()
+    let and_input = Answer::new()
         .set(Term::var("a"), true)
         .unwrap()
         .set(Term::var("b"), true)
@@ -319,7 +320,7 @@ async fn test_formula_integration_boolean_logic() -> Result<()> {
     let or_formula = Or::apply(or_terms)?;
 
     // Test false OR true = true
-    let or_input = dialog_query::Match::new()
+    let or_input = Answer::new()
         .set(Term::var("x"), false)
         .unwrap()
         .set(Term::var("y"), true)
@@ -340,7 +341,7 @@ async fn test_formula_integration_boolean_logic() -> Result<()> {
     let not_formula = Not::apply(not_terms)?;
 
     // Test NOT true = false
-    let not_input = dialog_query::Match::new()
+    let not_input = Answer::new()
         .set(Term::var("input"), true)
         .unwrap();
 
@@ -365,7 +366,7 @@ async fn test_formula_chaining_integration() -> Result<()> {
 
     let parse_formula = ParseNumber::apply(parse_terms)?;
 
-    let parse_input = dialog_query::Match::new()
+    let parse_input = Answer::new()
         .set(Term::var("str_input"), "10".to_string())
         .unwrap();
 
@@ -425,7 +426,7 @@ async fn test_formula_error_handling() -> Result<()> {
 
     let quotient_formula = Quotient::apply(quotient_terms)?;
 
-    let division_by_zero_input = dialog_query::Match::new()
+    let division_by_zero_input = Answer::new()
         .set(Term::var("dividend"), 10u32)
         .unwrap()
         .set(Term::var("divisor"), 0u32)
@@ -443,7 +444,7 @@ async fn test_formula_error_handling() -> Result<()> {
 
     let modulo_formula = Modulo::apply(modulo_terms)?;
 
-    let modulo_by_zero_input = dialog_query::Match::new()
+    let modulo_by_zero_input = Answer::new()
         .set(Term::var("dividend"), 17u32)
         .unwrap()
         .set(Term::var("divisor"), 0u32)

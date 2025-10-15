@@ -6,7 +6,7 @@ use std::{
     str::FromStr,
 };
 
-use crate::{Attribute, DialogArtifactsError, Entity, make_reference};
+use crate::{Attribute, Cause, DialogArtifactsError, Entity, make_reference};
 use base58::{FromBase58, ToBase58};
 use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -639,6 +639,12 @@ impl From<f32> for Value {
 impl From<Attribute> for Value {
     fn from(value: Attribute) -> Self {
         Value::Symbol(value)
+    }
+}
+
+impl From<Cause> for Value {
+    fn from(value: Cause) -> Self {
+        Value::Bytes(value.to_vec())
     }
 }
 

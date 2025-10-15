@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{make_reference, reference_type};
 
-use super::{Artifact, Blake3Hash};
+use super::{Artifact, Blake3Hash, TypeError, Value, ValueDataType};
 
 /// A [`Cause`] is a reference to an [`Artifact`] that preceded a more recent
 /// version of the same [`Artifact`] (where same implies same [`Entity`] and
@@ -33,6 +33,26 @@ impl From<&Artifact> for Cause {
 impl Display for Cause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.to_base58())
+    }
+}
+
+impl TryFrom<Value> for Cause {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Bytes(b) => {
+                // Convert Vec<u8> to [u8; 32] for Blake3Hash
+                let mut hash_bytes = [0u8; 32];
+                let len = b.len().min(32);
+                hash_bytes[..len].copy_from_slice(&b[..len]);
+                Ok(Cause(hash_bytes))
+            }
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::Bytes,
+                value.data_type(),
+            )),
+        }
     }
 }
 

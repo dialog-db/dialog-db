@@ -43,120 +43,22 @@
 //! └─────────────────┘
 //! ```
 //!
-//! # Example: Sum Formula
+//! # Using Formulas
 //!
-//! Here's a complete example of implementing a Sum formula:
+//! Formulas provide computed transformations during query evaluation.
+//! See the formula implementations in `crate::math` and `crate::text` for examples.
 //!
 //! ```rust
-//! use std::sync::OnceLock;
-//! use dialog_query::{
-//!     Formula, Compute, Parameters, Term, Match, Value, Dependencies, Type,
-//!     error::FormulaEvaluationError, cursor::Cursor,
-//!     predicate::formula::Cells,
-//! };
+//! use dialog_query::{math::Sum, Formula, Parameters, Term};
 //!
-//! // 1. Define the formula struct with input and output fields
-//! #[derive(Debug, Clone)]
-//! struct Sum {
-//!     pub of: u32,      // Input field
-//!     pub with: u32,    // Input field
-//!     pub is: u32,      // Output field (computed)
-//! }
-//!
-//! // 2. Define the input type
-//! struct SumInput {
-//!     pub of: u32,
-//!     pub with: u32,
-//! }
-//!
-//! // 3. Implement conversion from Cursor to Input
-//! impl TryFrom<Cursor> for SumInput {
-//!     type Error = FormulaEvaluationError;
-//!
-//!     fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
-//!         Ok(SumInput {
-//!             of: cursor.read("of")?,
-//!             with: cursor.read("with")?,
-//!         })
-//!     }
-//! }
-//!
-//! // 4. Implement the Compute trait for the logic
-//! impl Compute for Sum {
-//!     fn compute(input: Self::Input) -> Vec<Self> {
-//!         vec![Sum {
-//!             of: input.of,
-//!             with: input.with,
-//!             is: input.of + input.with,  // The actual computation
-//!         }]
-//!     }
-//! }
-//!
-//! // 5. Define cells schema (static)
-//! static SUM_CELLS: OnceLock<Cells> = OnceLock::new();
-//!
-//! // 6. Implement the Formula trait
-//! impl Formula for Sum {
-//!     type Input = SumInput;
-//!     type Match = (); // Placeholder for future macro generation
-//!
-//!     fn operator() -> &'static str {
-//!         "sum"
-//!     }
-//!
-//!     fn cells() -> &'static Cells {
-//!         SUM_CELLS.get_or_init(|| {
-//!             Cells::define(|builder| {
-//!                 builder.cell("of", Type::UnsignedInt)
-//!                     .the("Number to add to")
-//!                     .required();
-//!                 builder.cell("with", Type::UnsignedInt)
-//!                     .the("Number to add")
-//!                     .required();
-//!                 builder.cell("is", Type::UnsignedInt)
-//!                     .the("Sum of numbers")
-//!                     .derived(5);
-//!             })
-//!         })
-//!     }
-//!
-//!     fn cost() -> usize {
-//!         5
-//!     }
-//!
-//!     fn dependencies() -> Dependencies {
-//!         let mut deps = Dependencies::new();
-//!         deps.require("of".into());
-//!         deps.require("with".into());
-//!         deps.provide("is".into());
-//!         deps
-//!     }
-//!
-//!     fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-//!         let input = Self::Input::try_from(cursor.clone())?;
-//!         Ok(Self::compute(input))
-//!     }
-//!
-//!     fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-//!         cursor.write("is", &Value::UnsignedInt(self.is.into()))
-//!     }
-//! }
-//!
-//! // 7. Use the formula in a query
+//! // Create a Sum formula application that binds variables x, y, and result
 //! let mut parameters = Parameters::new();
-//! parameters.insert("of".to_string(), Term::var("x").into());
-//! parameters.insert("with".to_string(), Term::var("y").into());
-//! parameters.insert("is".to_string(), Term::var("result").into());
+//! parameters.insert("of".to_string(), Term::var("x"));
+//! parameters.insert("with".to_string(), Term::var("y"));
+//! parameters.insert("is".to_string(), Term::var("result"));
 //!
-//! let app = Sum::apply(parameters).unwrap();
-//!
-//! // Apply to a match with x=5, y=3
-//! let input = Match::new()
-//!     .set(Term::var("x"), 5u32).unwrap()
-//!     .set(Term::var("y"), 3u32).unwrap();
-//!
-//! let results = app.derive(input).unwrap();
-//! assert_eq!(results[0].get::<u32>(&Term::var("result")).unwrap(), 8);
+//! let sum_formula = Sum::apply(parameters).unwrap();
+//! // The formula can now be used in query evaluation to compute result = x + y
 //! ```
 //!
 //! # Design Principles
@@ -211,7 +113,7 @@ use crate::cursor::Cursor;
 use crate::error::{FormulaEvaluationError, SchemaError, TypeError};
 use crate::types::Scalar;
 use crate::Schema;
-use crate::{Dependencies, Match, Parameters, Requirement};
+use crate::{Dependencies, Parameters, Requirement};
 
 /// Core trait for implementing formulas in the query system
 ///
@@ -246,7 +148,7 @@ pub trait Formula: Sized + Clone {
     ///
     /// This type must be constructible from a Cursor and should contain
     /// all the fields that the formula needs to read from the input.
-    type Input: TryFrom<Cursor, Error = FormulaEvaluationError>;
+    type Input: for<'a> TryFrom<&'a mut Cursor<'a>, Error = FormulaEvaluationError>;
 
     /// Match type for future pattern matching support
     ///
@@ -288,7 +190,7 @@ pub trait Formula: Sized + Clone {
     /// # Note
     /// Returning a `Vec` allows formulas to produce multiple outputs for
     /// a single input, enabling one-to-many transformations.
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError>;
+    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError>;
 
     /// Write this formula instance's output values to the cursor
     ///
@@ -303,20 +205,21 @@ pub trait Formula: Sized + Clone {
     /// * `Err(_)` - If writing fails (e.g., due to inconsistency)
     fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError>;
 
-    /// Convert derived outputs to Match instances
+    /// Convert derived outputs to Answer instances with proper provenance
     ///
     /// This method orchestrates the full formula evaluation:
     /// 1. Calls `derive` to compute outputs
-    /// 2. For each output, clones the cursor and calls `write`
-    /// 3. Collects the resulting matches
+    /// 2. For each output, calls `write` to add values to cursor
+    /// 3. Returns the Answer with Factor::Derived provenance
     ///
     /// This default implementation should work for most formulas.
-    fn derive_match(cursor: &mut Cursor) -> Result<Vec<Match>, FormulaEvaluationError> {
+    fn derive_match(cursor: &mut Cursor) -> Result<Vec<crate::selection::Answer>, FormulaEvaluationError> {
         let outputs = Self::derive(cursor)?;
         let mut results = Vec::new();
 
         for output in outputs {
             output.write(cursor)?;
+            // The cursor.write() calls create Factor::Derived with proper provenance
             results.push(cursor.source.clone());
         }
 

@@ -1,5 +1,5 @@
 use crate::application::{Application, FactApplication};
-pub use crate::artifact::{Attribute as ArtifactsAttribute, Entity, Value};
+pub use crate::artifact::{Attribute as ArtifactsAttribute, Cause, Entity, Value};
 use crate::error::{SchemaError, TypeError};
 pub use crate::predicate::Fact;
 pub use crate::types::{IntoType, Scalar, Type};
@@ -227,7 +227,32 @@ impl<T: Scalar> Attribute<T> {
         // Get the value term (is)
         let is = parameters.get("is").unwrap_or(&blank).clone();
 
-        Ok(FactApplication::new(the, of, is, self.cardinality))
+        // Get the cause term
+        let cause = parameters.get("cause").unwrap_or(&blank).clone();
+        let cause_term = match &cause {
+            Term::Variable { name, .. } => Term::<Cause>::Variable {
+                name: name.clone(),
+                content_type: Default::default(),
+            },
+            Term::Constant(v) => match v {
+                Value::Bytes(b) => {
+                    // Convert Vec<u8> to [u8; 32] for Blake3Hash
+                    let mut hash_bytes = [0u8; 32];
+                    let len = b.len().min(32);
+                    hash_bytes[..len].copy_from_slice(&b[..len]);
+                    Term::Constant(Cause(hash_bytes))
+                }
+                _ => Term::blank(),
+            },
+        };
+
+        Ok(FactApplication::new(
+            the,
+            of,
+            is,
+            cause_term,
+            self.cardinality,
+        ))
     }
 }
 

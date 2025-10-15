@@ -298,7 +298,7 @@ mod tests {
 
     use crate::{
         predicate::{self, concept::Attributes},
-        Attribute, Parameters, Selection, Type,
+        Attribute, Parameters, Type,
     };
 
     use super::*;

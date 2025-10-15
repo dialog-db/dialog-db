@@ -51,14 +51,14 @@ mod person {
         }
     }
 
-    impl TryFrom<dialog_query::selection::Match> for Person {
+    impl TryFrom<dialog_query::selection::Answer> for Person {
         type Error = dialog_query::error::InconsistencyError;
 
-        fn try_from(source: dialog_query::selection::Match) -> Result<Self, Self::Error> {
+        fn try_from(source: dialog_query::selection::Answer) -> Result<Self, Self::Error> {
             Ok(Person {
-                this: source.get(&PersonTerms::this())?,
-                name: source.get(&PersonTerms::name())?,
-                age: source.get(&PersonTerms::age())?,
+                this: source.resolve(&PersonTerms::this())?,
+                name: source.resolve(&PersonTerms::name())?,
+                age: source.resolve(&PersonTerms::age())?,
             })
         }
     }

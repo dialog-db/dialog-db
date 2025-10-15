@@ -25,10 +25,10 @@ pub struct ToStringInput {
     pub value: Value,
 }
 
-impl TryFrom<Cursor> for ToStringInput {
+impl TryFrom<&mut Cursor<'_>> for ToStringInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
         // Read the raw Value without type conversion since we accept any type
         let term =
             cursor
@@ -105,8 +105,8 @@ impl Formula for ToString {
         dependencies
     }
 
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor.clone())?;
+    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
+        let input = Self::Input::try_from(cursor)?;
         Ok(Self::compute(input))
     }
 
@@ -127,10 +127,10 @@ pub struct ParseNumberInput {
     pub text: String,
 }
 
-impl TryFrom<Cursor> for ParseNumberInput {
+impl TryFrom<&mut Cursor<'_>> for ParseNumberInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
         let text = cursor.read::<String>("text")?;
         Ok(ParseNumberInput { text })
     }
@@ -185,8 +185,8 @@ impl Formula for ParseNumber {
         dependencies
     }
 
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor.clone())?;
+    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
+        let input = Self::Input::try_from(cursor)?;
         Ok(Self::compute(input))
     }
 
@@ -199,7 +199,7 @@ impl Formula for ParseNumber {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Entity, Match, Parameters, Term};
+    use crate::{Entity, selection::Answer, Parameters, Term};
 
     #[test]
     fn test_to_string_number() -> anyhow::Result<()> {
@@ -207,7 +207,7 @@ mod tests {
         terms.insert("value".to_string(), Term::var("num").into());
         terms.insert("is".to_string(), Term::var("str").into());
 
-        let input = Match::new().set(Term::var("num"), 42u32).unwrap();
+        let input = Answer::new().set(Term::var("num"), 42u32).unwrap();
 
         let app = ToString::apply(terms)?;
         let results = app.derive(input).expect("ToString failed");
@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.get::<String>(&Term::var("str")).ok(),
+            result.resolve::<String>(&Term::var("str")).ok(),
             Some("42".to_string())
         );
         Ok(())
@@ -227,7 +227,7 @@ mod tests {
         terms.insert("value".to_string(), Term::var("bool").into());
         terms.insert("is".to_string(), Term::var("str").into());
 
-        let input = Match::new().set(Term::var("bool"), true).unwrap();
+        let input = Answer::new().set(Term::var("bool"), true).unwrap();
 
         let app = ToString::apply(terms)?;
         let results = app.derive(input).expect("ToString failed");
@@ -235,7 +235,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.get::<String>(&Term::var("str")).ok(),
+            result.resolve::<String>(&Term::var("str")).ok(),
             Some("true".to_string())
         );
         Ok(())
@@ -247,7 +247,7 @@ mod tests {
         terms.insert("value".to_string(), Term::var("text").into());
         terms.insert("is".to_string(), Term::var("str").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("text"), "hello".to_string())
             .unwrap();
 
@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.get::<String>(&Term::var("str")).ok(),
+            result.resolve::<String>(&Term::var("str")).ok(),
             Some("hello".to_string())
         );
         Ok(())
@@ -270,7 +270,7 @@ mod tests {
         terms.insert("is".to_string(), Term::var("str").into());
 
         let entity = Entity::new().unwrap();
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("entity"), entity.clone())
             .unwrap();
 
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.get::<String>(&Term::var("str")).ok(),
+            result.resolve::<String>(&Term::var("str")).ok(),
             Some(entity.to_string())
         );
         Ok(())
@@ -292,7 +292,7 @@ mod tests {
         terms.insert("text".to_string(), Term::var("str").into());
         terms.insert("is".to_string(), Term::var("num").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("str"), "123".to_string())
             .unwrap();
 
@@ -301,7 +301,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.get::<u32>(&Term::var("num")).ok(), Some(123));
+        assert_eq!(result.resolve::<u32>(&Term::var("num")).ok(), Some(123));
         Ok(())
     }
 
@@ -311,7 +311,7 @@ mod tests {
         terms.insert("text".to_string(), Term::var("str").into());
         terms.insert("is".to_string(), Term::var("num").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("str"), "  456  ".to_string())
             .unwrap();
 
@@ -320,7 +320,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.get::<u32>(&Term::var("num")).ok(), Some(456));
+        assert_eq!(result.resolve::<u32>(&Term::var("num")).ok(), Some(456));
         Ok(())
     }
 
@@ -330,7 +330,7 @@ mod tests {
         terms.insert("text".to_string(), Term::var("str").into());
         terms.insert("is".to_string(), Term::var("num").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("str"), "not a number".to_string())
             .unwrap();
 
@@ -350,7 +350,7 @@ mod tests {
         terms.insert("text".to_string(), Term::var("str").into());
         terms.insert("is".to_string(), Term::var("num").into());
 
-        let input = Match::new().set(Term::var("str"), "".to_string()).unwrap();
+        let input = Answer::new().set(Term::var("str"), "".to_string()).unwrap();
 
         let app = ParseNumber::apply(terms)?;
         let results = app
@@ -368,7 +368,7 @@ mod tests {
         terms.insert("text".to_string(), Term::var("str").into());
         terms.insert("is".to_string(), Term::var("num").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("str"), "-123".to_string())
             .unwrap();
 

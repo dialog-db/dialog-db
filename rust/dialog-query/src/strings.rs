@@ -26,10 +26,10 @@ pub struct ConcatenateInput {
     pub second: String,
 }
 
-impl TryFrom<Cursor> for ConcatenateInput {
+impl TryFrom<&mut Cursor<'_>> for ConcatenateInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
         let first = cursor.read::<String>("first")?;
         let second = cursor.read::<String>("second")?;
         Ok(ConcatenateInput { first, second })
@@ -82,8 +82,8 @@ impl Formula for Concatenate {
         dependencies
     }
 
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor.clone())?;
+    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
+        let input = Self::Input::try_from(cursor)?;
         Ok(Self::compute(input))
     }
 
@@ -104,10 +104,10 @@ pub struct LengthInput {
     pub of: String,
 }
 
-impl TryFrom<Cursor> for LengthInput {
+impl TryFrom<&mut Cursor<'_>> for LengthInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read::<String>("of")?;
         Ok(LengthInput { of })
     }
@@ -161,8 +161,8 @@ impl Formula for Length {
         dependencies
     }
 
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor.clone())?;
+    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
+        let input = Self::Input::try_from(cursor)?;
         Ok(Self::compute(input))
     }
 
@@ -183,10 +183,10 @@ pub struct UppercaseInput {
     pub of: String,
 }
 
-impl TryFrom<Cursor> for UppercaseInput {
+impl TryFrom<&mut Cursor<'_>> for UppercaseInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read::<String>("of")?;
         Ok(UppercaseInput { of })
     }
@@ -232,8 +232,8 @@ impl Formula for Uppercase {
         dependencies
     }
 
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor.clone())?;
+    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
+        let input = Self::Input::try_from(cursor)?;
         Ok(Self::compute(input))
     }
 
@@ -254,10 +254,10 @@ pub struct LowercaseInput {
     pub of: String,
 }
 
-impl TryFrom<Cursor> for LowercaseInput {
+impl TryFrom<&mut Cursor<'_>> for LowercaseInput {
     type Error = FormulaEvaluationError;
 
-    fn try_from(mut cursor: Cursor) -> Result<Self, Self::Error> {
+    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
         let of = cursor.read::<String>("of")?;
         Ok(LowercaseInput { of })
     }
@@ -303,8 +303,8 @@ impl Formula for Lowercase {
         dependencies
     }
 
-    fn derive(cursor: &Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor.clone())?;
+    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
+        let input = Self::Input::try_from(cursor)?;
         Ok(Self::compute(input))
     }
 
@@ -317,7 +317,7 @@ impl Formula for Lowercase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Match, Parameters, Term};
+    use crate::{selection::Answer, Parameters, Term};
 
     #[test]
     fn test_concatenate_formula() {
@@ -326,7 +326,7 @@ mod tests {
         terms.insert("second".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("x"), "Hello".to_string())
             .unwrap()
             .set(Term::var("y"), " World".to_string())
@@ -338,7 +338,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.get::<String>(&Term::var("result")).ok(),
+            result.resolve::<String>(&Term::var("result")).ok(),
             Some("Hello World".to_string())
         );
     }
@@ -349,7 +349,7 @@ mod tests {
         terms.insert("of".to_string(), Term::var("text").into());
         terms.insert("is".to_string(), Term::var("len").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("text"), "Hello".to_string())
             .unwrap();
 
@@ -358,7 +358,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.get::<u32>(&Term::var("len")).ok(), Some(5));
+        assert_eq!(result.resolve::<u32>(&Term::var("len")).ok(), Some(5));
     }
 
     #[test]
@@ -367,7 +367,7 @@ mod tests {
         terms.insert("of".to_string(), Term::var("text").into());
         terms.insert("is".to_string(), Term::var("upper").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("text"), "hello world".to_string())
             .unwrap();
 
@@ -377,7 +377,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.get::<String>(&Term::var("upper")).ok(),
+            result.resolve::<String>(&Term::var("upper")).ok(),
             Some("HELLO WORLD".to_string())
         );
     }
@@ -388,7 +388,7 @@ mod tests {
         terms.insert("of".to_string(), Term::var("text").into());
         terms.insert("is".to_string(), Term::var("lower").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("text"), "HELLO WORLD".to_string())
             .unwrap();
 
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.get::<String>(&Term::var("lower")).ok(),
+            result.resolve::<String>(&Term::var("lower")).ok(),
             Some("hello world".to_string())
         );
     }
@@ -409,14 +409,14 @@ mod tests {
         terms.insert("of".to_string(), Term::var("text").into());
         terms.insert("is".to_string(), Term::var("len").into());
 
-        let input = Match::new().set(Term::var("text"), "".to_string()).unwrap();
+        let input = Answer::new().set(Term::var("text"), "".to_string()).unwrap();
 
         let app = Length::apply(terms).expect("apply should work");
         let results = app.derive(input).expect("Length of empty string failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.get::<u32>(&Term::var("len")).ok(), Some(0));
+        assert_eq!(result.resolve::<u32>(&Term::var("len")).ok(), Some(0));
     }
 
     #[test]
@@ -426,7 +426,7 @@ mod tests {
         terms.insert("second".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = Match::new()
+        let input = Answer::new()
             .set(Term::var("x"), "".to_string())
             .unwrap()
             .set(Term::var("y"), "World".to_string())
@@ -440,7 +440,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.get::<String>(&Term::var("result")).ok(),
+            result.resolve::<String>(&Term::var("result")).ok(),
             Some("World".to_string())
         );
     }

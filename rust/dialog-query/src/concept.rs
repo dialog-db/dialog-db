@@ -108,7 +108,7 @@ impl<T: Match + Clone> From<&T> for ConceptApplication {
 }
 
 /// Describes an instance of a concept. It is expected that each concept is
-/// can be materialized from the selection::Match.
+/// can be materialized from the selection::Answer.
 pub trait Instance: ConditionalSend {
     /// Each instance has a corresponding entity and this method
     /// returns a reference to it.
@@ -122,8 +122,8 @@ mod tests {
     use crate::artifact::{Artifacts, Attribute as ArtifactAttribute};
     use crate::concept::Concept;
     use crate::term::Term;
-    use crate::Fact;
     use crate::Session;
+    use crate::{Answer, Fact};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -224,12 +224,12 @@ mod tests {
         type Term = PersonTerms;
     }
 
-    // Implement TryFrom<selection::Match> for Person
-    // This extracts values from the match by field name
-    impl TryFrom<crate::selection::Match> for Person {
+    // Implement TryFrom<selection::Answer> for Person
+    // This extracts values from the answer by field name
+    impl TryFrom<crate::selection::Answer> for Person {
         type Error = crate::error::InconsistencyError;
 
-        fn try_from(input: crate::selection::Match) -> Result<Self, Self::Error> {
+        fn try_from(input: Answer) -> Result<Self, Self::Error> {
             Ok(Person {
                 this: input.get(&<Self as Concept>::Term::this())?,
                 name: input.get(&<Self as Concept>::Term::name())?,

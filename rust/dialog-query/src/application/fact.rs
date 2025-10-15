@@ -8,14 +8,13 @@ use crate::query::{Circuit, Query};
 use crate::Cardinality;
 pub use crate::Environment;
 
-use crate::selection::{Answer, Answers, Factor};
+use crate::selection::{Answer, Answers, Evidence};
 use crate::Fact;
-use crate::{try_stream, EvaluationContext, Match, Source};
+use crate::{try_stream, EvaluationContext, Source};
 use crate::{Constraint, Dependency, Entity, Parameters, QueryError, Schema, Term, Type, Value};
 use dialog_artifacts::Cause;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
-use std::sync::Arc;
 use std::sync::OnceLock;
 
 pub const BASE_COST: usize = 100;
@@ -47,6 +46,7 @@ pub struct FactApplication {
     the: Term<Attribute>,
     of: Term<Entity>,
     is: Term<Value>,
+    cause: Term<Cause>,
 }
 
 impl FactApplication {
@@ -103,6 +103,7 @@ impl FactApplication {
             the: self.the.clone(),
             of: self.of.clone(),
             is: self.is.clone(),
+            cause: self.cause.clone(),
         }
     }
 
@@ -110,6 +111,7 @@ impl FactApplication {
         the: Term<Attribute>,
         of: Term<Entity>,
         is: Term<Value>,
+        cause: Term<Cause>,
         cardinality: Cardinality,
     ) -> Self {
         Self {
@@ -117,6 +119,7 @@ impl FactApplication {
             the,
             of,
             is,
+            cause,
         }
     }
 
@@ -133,6 +136,10 @@ impl FactApplication {
     /// Get the 'is' (value) term
     pub fn is(&self) -> &Term<Value> {
         &self.is
+    }
+
+    pub fn cause(&self) -> &Term<Cause> {
+        &self.cause
     }
 
     /// Estimate cost based on how many parameters are constrained and cardinality.
@@ -158,30 +165,18 @@ impl FactApplication {
 }
 
 impl FactApplication {
-    /// Resolves variables from the given selection match.
-    pub fn resolve(&self, source: &Match) -> Self {
-        let the = source.resolve(&self.the);
-        let of = source.resolve(&self.of);
-        let is = source.resolve(&self.is);
-
-        Self {
-            the,
-            of,
-            is,
-            cardinality: self.cardinality,
-        }
-    }
-
     /// Resolves variables from the given answer.
     pub fn resolve_from_answer(&self, source: &Answer) -> Self {
         let the = source.resolve_term(&self.the);
         let of = source.resolve_term(&self.of);
         let is = source.resolve_term(&self.is);
+        let cause = source.resolve_term(&self.cause);
 
         Self {
             the,
             of,
             is,
+            cause,
             cardinality: self.cardinality,
         }
     }
@@ -207,31 +202,28 @@ impl FactApplication {
                     let artifact = artifact?;
 
                     // Create fact for provenance tracking
-                    let fact = Arc::new(Fact::Assertion {
+                    let fact = Fact::Assertion {
                         the: artifact.the.clone(),
                         of: artifact.of.clone(),
                         is: artifact.is.clone(),
                         cause: artifact.cause.unwrap_or(Cause([0; 32])),
-                    });
+                    };
 
                     // Create a new answer by concluding variables and recording the application
-                    let mut output = input.clone();
+                    let mut answer = input.clone();
+                    answer.merge(Evidence::Selected {
+                        application: &selector,
+                        fact: &fact,
+                    })?;
 
-                    // Conclude binds named variables, ignores blanks and constants
-                    output.conclude(&selection.of.as_unknown(), &Factor::Of(Arc::clone(&fact)))?;
-                    output.conclude(&selection.the.as_unknown(), &Factor::The(Arc::clone(&fact)))?;
-                    output.conclude(&selection.is.as_unknown(), &Factor::Is(Arc::clone(&fact)))?;
 
-                    // Record the application -> fact mapping so we can realize later
-                    output.record(&selector, Arc::clone(&fact))?;
-
-                    yield output;
+                    yield answer;
                 }
             }
         }
     }
 
-    pub fn realize(&self, source: crate::selection::Match) -> Result<Fact<Value>, QueryError> {
+    pub fn realize(&self, source: crate::selection::Answer) -> Result<Fact<Value>, QueryError> {
         // Convert blank variables to internal names for retrieval
         let the_term = match &self.the {
             Term::Variable { name: None, .. } => Term::Variable {
@@ -276,18 +268,15 @@ impl FactApplication {
         let query = self.clone();
 
         try_stream! {
-            for await each in answers {
-                yield each?.realize(&query)?;
+            for await answer in answers {
+                yield answer?.realize(&query)?;
             }
         }
     }
 }
 
 impl Circuit for FactApplication {
-    fn evaluate<S: Source, M: Answers>(
-        &self,
-        context: EvaluationContext<S, M>,
-    ) -> impl Answers {
+    fn evaluate<S: Source, M: Answers>(&self, context: EvaluationContext<S, M>) -> impl Answers {
         // Use the Answer-based implementation
         self.evaluate_with_provenance(context.source, context.selection)
     }
@@ -350,9 +339,11 @@ impl Display for FactApplication {
 
         write!(f, "the: {},", self.the)?;
 
-        write!(f, "the: {},", self.of)?;
+        write!(f, "of: {},", self.of)?;
 
-        write!(f, "the: {},", self.is)?;
+        write!(f, "is: {},", self.is)?;
+
+        write!(f, "cause: {},", self.cause)?;
 
         write!(f, "}}")
     }
@@ -373,7 +364,6 @@ impl FactApplicationPlan {
     pub fn provides(&self) -> &Environment {
         &self.provides
     }
-
 }
 
 impl From<FactApplication> for Application {
