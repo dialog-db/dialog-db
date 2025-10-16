@@ -13,8 +13,7 @@ pub use super::context::{new_context, EvaluationPlan};
 pub use super::negation::Negation;
 pub use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, PlanError, QueryResult};
-pub use crate::Dependencies;
-pub use crate::{EvaluationContext, selection::Answers, Source};
+pub use crate::{selection::Answers, EvaluationContext, Source};
 use std::fmt::Display;
 
 /// Represents a premise in a rule - a condition that must be satisfied.

@@ -7,7 +7,7 @@ use dialog_query::predicate::fact::Fact;
 use dialog_query::predicate::{Concept, DeductiveRule};
 use dialog_query::term::Term;
 use dialog_query::Negation;
-use dialog_query::{Application, Dependencies, Environment, Parameters, Premise, Value};
+use dialog_query::{Application, Environment, Parameters, Premise, Value};
 use std::collections::HashSet;
 
 #[test]
@@ -32,21 +32,6 @@ fn test_concept_as_conclusion_operations() {
     assert!(param_names.contains(&"age"));
     assert!(!param_names.contains(&"height"));
     // "this" parameter is implied but not in attributes
-
-    // Test absent method
-    let mut dependencies = Dependencies::new();
-    dependencies.desire("name".into(), 100);
-
-    // Should find "this" as absent since it's not in dependencies
-    assert_eq!(concept.absent(&dependencies), Some("this"));
-
-    dependencies.desire("this".into(), 100);
-    // Now should find "age" as absent
-    assert_eq!(concept.absent(&dependencies), Some("age"));
-
-    dependencies.desire("age".into(), 100);
-    // Now nothing should be absent
-    assert_eq!(concept.absent(&dependencies), None);
 }
 
 #[test]

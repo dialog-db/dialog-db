@@ -2,56 +2,12 @@ use crate::application::{Application, FactApplication};
 pub use crate::artifact::{Attribute as ArtifactsAttribute, Cause, Entity, Value};
 use crate::error::{SchemaError, TypeError};
 pub use crate::predicate::Fact;
+pub use crate::schema::Cardinality;
 pub use crate::types::{IntoType, Scalar, Type};
 use crate::Parameters;
 pub use crate::{Premise, Term};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use std::marker::PhantomData;
-
-/// Cardinality indicates whether an attribute can have one or many values
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Cardinality {
-    One,
-    Many,
-}
-
-impl Cardinality {
-    /// Estimates the cost of a fact query given what's known about the triple (the, of, is).
-    ///
-    /// # Parameters
-    /// - `the`: Is the attribute known?
-    /// - `of`: Is the entity known?
-    /// - `is`: Is the value known?
-    ///
-    /// # Cost Model
-    /// The cost depends on how many components are known and the cardinality:
-    /// - 3 known (lookup): Precise lookup, low cost
-    /// - 2 known (select): Index-based selection
-    /// - 1 known (scan): Table/index scan
-    /// - 0 known: Unbound (should be rejected)
-    pub fn estimate(&self, the: bool, of: bool, is: bool) -> Option<usize> {
-        use crate::application::fact::*;
-
-        let count = (the as usize) + (of as usize) + (is as usize);
-
-        match (count, self) {
-            // Three constraints - fully bound lookup
-            (3, Cardinality::One) => Some(SEGMENT_READ_COST),
-            (3, Cardinality::Many) => Some(RANGE_READ_COST),
-
-            // Two constraints - index-based select
-            (2, Cardinality::One) => Some(SEGMENT_READ_COST),
-            (2, Cardinality::Many) => Some(RANGE_SCAN_COST),
-
-            // One constraint - table/index scan
-            (1, Cardinality::One) => Some(RANGE_SCAN_COST),
-            (1, Cardinality::Many) => Some(INDEX_SCAN),
-
-            // No constraints - unbound query
-            _ => None,
-        }
-    }
-}
 
 /// A relation specific to the attribute module containing cardinality information
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

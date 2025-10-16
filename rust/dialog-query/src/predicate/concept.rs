@@ -5,8 +5,8 @@ use crate::claim::concept::ConceptClaim;
 use crate::error::SchemaError;
 use crate::types::Scalar;
 use crate::{
-    Application, Attribute, Cardinality, Claim, Constraint, Dependencies, Entity, Parameters,
-    Requirement, Schema, Type, Value,
+    Application, Attribute, Cardinality, Claim, Constraint, Entity, Parameters, Requirement,
+    Schema, Type, Value,
 };
 use dialog_artifacts::DialogArtifactsError;
 use serde::{Deserialize, Serialize};
@@ -313,18 +313,6 @@ impl Concept {
 
     pub fn schema(&self) -> Schema {
         (&self.attributes).into()
-    }
-
-    /// Finds a parameter that is absent from the provided dependencies.
-    pub fn absent(&self, dependencies: &Dependencies) -> Option<&str> {
-        if !dependencies.contains("this") {
-            Some("this")
-        } else {
-            self.attributes
-                .keys()
-                .find(|name| !dependencies.contains(name))
-                .map(|name| name.as_ref())
-        }
     }
 
     /// Creates an application for this concept.

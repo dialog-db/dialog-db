@@ -5,13 +5,12 @@ pub use crate::context::new_context;
 pub use crate::error::{AnalyzerError, QueryResult};
 pub use crate::query::Output;
 use crate::query::{Circuit, Query};
+use crate::selection::{Answer, Answers, Evidence};
 use crate::Cardinality;
 pub use crate::Environment;
-
-use crate::selection::{Answer, Answers, Evidence};
 use crate::Fact;
 use crate::{try_stream, EvaluationContext, Source};
-use crate::{Constraint, Dependency, Entity, Parameters, QueryError, Schema, Term, Type, Value};
+use crate::{Constraint, Entity, Parameters, QueryError, Requirement, Schema, Term, Type, Value};
 use dialog_artifacts::Cause;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -60,7 +59,7 @@ impl FactApplication {
     fn static_schema() -> &'static Schema {
         static FACT_SCHEMA: OnceLock<Schema> = OnceLock::new();
         FACT_SCHEMA.get_or_init(|| {
-            let constraint = Dependency::some();
+            let requirement = Requirement::new();
             let mut schema = Schema::new();
 
             schema.insert(
@@ -68,7 +67,7 @@ impl FactApplication {
                 Constraint {
                     description: "Attribute of the fact".to_string(),
                     content_type: Some(Type::Symbol),
-                    requirement: constraint.member(),
+                    requirement: requirement.required(),
                     cardinality: Cardinality::One,
                 },
             );
@@ -78,7 +77,7 @@ impl FactApplication {
                 Constraint {
                     description: "Entity of the fact".to_string(),
                     content_type: Some(Type::Entity),
-                    requirement: constraint.member(),
+                    requirement: requirement.required(),
                     cardinality: Cardinality::One,
                 },
             );
@@ -88,7 +87,7 @@ impl FactApplication {
                 Constraint {
                     description: "Value of the fact".to_string(),
                     content_type: None, // Can be any type
-                    requirement: constraint.member(),
+                    requirement: requirement.required(),
                     cardinality: Cardinality::One,
                 },
             );

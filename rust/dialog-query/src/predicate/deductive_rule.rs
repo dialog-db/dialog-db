@@ -4,7 +4,7 @@ use crate::error::{CompileError, SchemaError};
 pub use crate::planner::Join;
 pub use crate::predicate::Concept;
 pub use crate::premise::Premise;
-pub use crate::{Application, Attribute, Cardinality, Dependencies, Parameters, Requirement, Value};
+pub use crate::{Application, Attribute, Cardinality, Parameters, Requirement, Value};
 use crate::{Term, Type};
 use std::fmt::Display;
 
@@ -117,8 +117,14 @@ impl From<&Concept> for DeductiveRule {
                     .expect("Failed to parse attribute name"),
             );
             premises.push(
-                FactApplication::new(the, this.clone(), Term::var(name), Term::var("cause"), attribute.cardinality)
-                    .into(),
+                FactApplication::new(
+                    the,
+                    this.clone(),
+                    Term::var(name),
+                    Term::var("cause"),
+                    attribute.cardinality,
+                )
+                .into(),
             );
         }
 
@@ -190,7 +196,7 @@ fn test_rule_fails_with_unconstrained_fact() {
         Term::<Entity>::var("user"),
         Term::var("value"),
         crate::attribute::Term::var("cause"),
-            Cardinality::One,
+        Cardinality::One,
     )
     .into()];
     assert!(DeductiveRule::new(conclusion, premises).is_err());
@@ -219,7 +225,7 @@ fn test_rule_fails_with_unused_parameter() {
         Term::<Entity>::var("this"),
         Term::var("name"),
         crate::attribute::Term::var("cause"),
-            Cardinality::One,
+        Cardinality::One,
     )
     .into()];
     let result = DeductiveRule::new(conclusion, premises);
@@ -315,7 +321,7 @@ fn test_rule_parameter_name_vs_variable_name() {
         Term::<Entity>::var("this"),
         Term::var("key_var"), // Variable name is "key_var", not "key"
         crate::attribute::Term::var("cause"),
-            Cardinality::One,
+        Cardinality::One,
     )
     .into()];
 
