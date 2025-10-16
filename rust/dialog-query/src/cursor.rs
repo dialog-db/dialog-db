@@ -120,7 +120,7 @@ impl Cursor {
         }
 
         // Get the value from the answer
-        let value = self.source.resolve::<Value>(term).map_err(|_| {
+        let value = self.source.resolve(term).map_err(|_| {
             FormulaEvaluationError::UnboundVariable {
                 term: term.clone(),
                 parameter: key.into(),
@@ -429,7 +429,7 @@ mod tests {
 
         // Verify we got the answer back
         assert_eq!(
-            answer.resolve::<u32>(&Term::var("input_x")).ok(),
+            answer.resolve(&Term::<u32>::var("input_x")).ok().and_then(|v| u32::try_from(v).ok()),
             Some(10u32)
         );
 

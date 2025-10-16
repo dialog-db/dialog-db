@@ -363,8 +363,8 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
 
             fn realize(&self, source: dialog_query::selection::Answer) -> std::result::Result<Self::Instance, dialog_query::QueryError> {
                 Ok(#struct_name {
-                    this: source.resolve(&self.this)?,
-                    #(#field_names: source.resolve(&self.#field_names)?),*
+                    this: source.get(&self.this)?,
+                    #(#field_names: source.get(&self.#field_names)?),*
                 })
             }
         }

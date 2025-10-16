@@ -636,7 +636,7 @@ impl Answer {
     /// For constants, converts the constant to a Value.
     ///
     /// Returns an error if the variable is not bound.
-    pub fn resolve_value<T>(&self, term: &Term<T>) -> Result<Value, InconsistencyError>
+    pub fn resolve<T>(&self, term: &Term<T>) -> Result<Value, InconsistencyError>
     where
         T: Scalar,
     {
@@ -683,42 +683,6 @@ impl Answer {
         }
     }
 
-    ///
-    /// For variables, looks up the binding and extracts the typed value from the factor.
-    /// For constants, returns the constant value directly.
-    ///
-    /// Returns an error if:
-    /// - The variable is not bound
-    /// - The value cannot be converted to type T
-    pub fn resolve<T>(&self, term: &Term<T>) -> Result<T, InconsistencyError>
-    where
-        T: Scalar + std::convert::TryFrom<Value>,
-    {
-        match term {
-            Term::Variable { name, .. } => {
-                if let Some(key) = name {
-                    if let Some(factors) = self.conclusions.get(key) {
-                        let value = factors.content();
-                        T::try_from(value.clone()).map_err(|_| {
-                            // Create a proper TypeError for type conversion errors
-                            InconsistencyError::TypeConversion(
-                                crate::artifact::TypeError::TypeMismatch(
-                                    T::TYPE.unwrap_or(Type::Bytes),
-                                    value.data_type(),
-                                ),
-                            )
-                        })
-                    } else {
-                        Err(InconsistencyError::UnboundVariableError(key.clone()))
-                    }
-                } else {
-                    Err(InconsistencyError::UnboundVariableError("".to_string()))
-                }
-            }
-            Term::Constant(constant) => Ok(constant.clone()),
-        }
-    }
-
     /// Convenience method to set a variable to a value without provenance tracking.
     /// This creates a Parameter factor for the value.
     /// Useful for testing and simple cases where provenance isn't needed.
@@ -739,7 +703,7 @@ impl Answer {
     where
         T: Scalar + std::convert::TryFrom<Value>,
     {
-        let value = self.resolve_value(term)?;
+        let value = self.resolve(term)?;
         let value_type = value.data_type();
         T::try_from(value).map_err(|_| {
             InconsistencyError::TypeConversion(crate::artifact::TypeError::TypeMismatch(
@@ -867,7 +831,7 @@ mod tests {
         answer.assign(&name_term_value, &factor).unwrap();
 
         // Resolve it using the type-safe method
-        let result = answer.resolve::<String>(&name_term);
+        let result = answer.resolve(&name_term).and_then(|v| String::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Alice");
     }
@@ -892,7 +856,7 @@ mod tests {
         answer.assign(&age_term_value, &factor).unwrap();
 
         // Resolve it using the type-safe method
-        let result = answer.resolve::<u32>(&age_term);
+        let result = answer.resolve(&age_term).and_then(|v| u32::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 25);
     }
@@ -917,7 +881,7 @@ mod tests {
         answer.assign(&score_term_value, &factor).unwrap();
 
         // Resolve it using the type-safe method
-        let result = answer.resolve::<i32>(&score_term);
+        let result = answer.resolve(&score_term).and_then(|v| i32::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), -10);
     }
@@ -942,7 +906,7 @@ mod tests {
         answer.assign(&active_term_value, &factor).unwrap();
 
         // Resolve it using the type-safe method
-        let result = answer.resolve::<bool>(&active_term);
+        let result = answer.resolve(&active_term).and_then(|v| bool::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), true);
     }
@@ -968,7 +932,7 @@ mod tests {
         answer.assign(&entity_term_value, &factor).unwrap();
 
         // Resolve it using the type-safe method
-        let result = answer.resolve::<Entity>(&entity_term);
+        let result = answer.resolve(&entity_term).and_then(|v| Entity::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), entity_value);
     }
@@ -979,7 +943,7 @@ mod tests {
         let constant_term = Term::Constant("constant_value".to_string());
 
         // Resolve constant directly
-        let result = answer.resolve::<String>(&constant_term);
+        let result = answer.resolve(&constant_term).and_then(|v| String::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "constant_value");
     }
@@ -990,7 +954,7 @@ mod tests {
         let name_term = Term::<String>::var("name");
 
         // Try to resolve unbound variable (should fail)
-        let result = answer.resolve::<String>(&name_term);
+        let result = answer.resolve(&name_term).and_then(|v| String::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_err());
         match result.unwrap_err() {
             InconsistencyError::UnboundVariableError(var) => {
@@ -1006,7 +970,7 @@ mod tests {
         let blank_term = Term::<String>::blank();
 
         // Try to resolve blank variable (should fail)
-        let result = answer.resolve::<String>(&blank_term);
+        let result = answer.resolve(&blank_term).and_then(|v| String::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_err());
         match result.unwrap_err() {
             InconsistencyError::UnboundVariableError(_) => {} // Expected
@@ -1034,7 +998,7 @@ mod tests {
 
         // Try to resolve it as a u32 (should fail)
         let age_term = Term::<u32>::var("name");
-        let result = answer.resolve::<u32>(&age_term);
+        let result = answer.resolve(&age_term).and_then(|v| u32::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_err());
         match result.unwrap_err() {
             InconsistencyError::TypeConversion(_) => {} // Expected
@@ -1137,9 +1101,9 @@ mod tests {
             .unwrap();
 
         // Resolve all values with correct types
-        let name_result = answer.resolve::<String>(&Term::var("name")).unwrap();
-        let age_result = answer.resolve::<u32>(&Term::var("age")).unwrap();
-        let active_result = answer.resolve::<bool>(&Term::var("active")).unwrap();
+        let name_result = String::try_from(answer.resolve::<String>(&Term::var("name")).unwrap()).unwrap();
+        let age_result = u32::try_from(answer.resolve::<u32>(&Term::var("age")).unwrap()).unwrap();
+        let active_result = bool::try_from(answer.resolve::<bool>(&Term::var("active")).unwrap()).unwrap();
 
         assert_eq!(name_result, "Bob");
         assert_eq!(age_result, 30);
@@ -1179,8 +1143,8 @@ mod tests {
         answer.extend(assignments).unwrap();
 
         // Verify all values were assigned
-        let name_result = answer.resolve::<String>(&Term::var("name")).unwrap();
-        let age_result = answer.resolve::<u32>(&Term::var("age")).unwrap();
+        let name_result = String::try_from(answer.resolve::<String>(&Term::var("name")).unwrap()).unwrap();
+        let age_result = u32::try_from(answer.resolve::<u32>(&Term::var("age")).unwrap()).unwrap();
 
         assert_eq!(name_result, "Charlie");
         assert_eq!(age_result, 35);

@@ -28,7 +28,7 @@ pub fn select<T: Into<Type>>(_term: Term<T>) -> Vec<T> {
 
 #[test]
 fn test_to_label() {
-    let _term = Term::Constant(Value::String("Hello".to_string()));
+    let _term: Term<Value> = Term::Constant(Value::String("Hello".to_string()));
     // assert_eq!(to_label(term), "String");
 }
 fn main() {

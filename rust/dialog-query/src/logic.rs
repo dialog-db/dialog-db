@@ -272,7 +272,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve::<bool>(&Term::var("result")).ok(), Some(true));
+        assert_eq!(result.resolve(&Term::<bool>::var("result")).ok().and_then(|v| bool::try_from(v).ok()), Some(true));
         Ok(())
     }
 
@@ -294,7 +294,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve::<bool>(&Term::var("result")).ok(), Some(false));
+        assert_eq!(result.resolve(&Term::<bool>::var("result")).ok().and_then(|v| bool::try_from(v).ok()), Some(false));
         Ok(())
     }
 
@@ -316,7 +316,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve::<bool>(&Term::var("result")).ok(), Some(false));
+        assert_eq!(result.resolve(&Term::<bool>::var("result")).ok().and_then(|v| bool::try_from(v).ok()), Some(false));
         Ok(())
     }
 
@@ -338,7 +338,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve::<bool>(&Term::var("result")).ok(), Some(true));
+        assert_eq!(result.resolve(&Term::<bool>::var("result")).ok().and_then(|v| bool::try_from(v).ok()), Some(true));
         Ok(())
     }
 
@@ -360,7 +360,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve::<bool>(&Term::var("result")).ok(), Some(false));
+        assert_eq!(result.resolve(&Term::<bool>::var("result")).ok().and_then(|v| bool::try_from(v).ok()), Some(false));
         Ok(())
     }
 
@@ -377,7 +377,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve::<bool>(&Term::var("result")).ok(), Some(false));
+        assert_eq!(result.resolve(&Term::<bool>::var("result")).ok().and_then(|v| bool::try_from(v).ok()), Some(false));
         Ok(())
     }
 
@@ -395,7 +395,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve::<bool>(&Term::var("result")).ok(), Some(true));
+        assert_eq!(result.resolve(&Term::<bool>::var("result")).ok().and_then(|v| bool::try_from(v).ok()), Some(true));
         Ok(())
     }
 
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(not_results.len(), 1);
         let final_result = &not_results[0];
         assert_eq!(
-            final_result.resolve::<bool>(&Term::var("final_result")).ok(),
+            final_result.resolve(&Term::<bool>::var("final_result")).ok().and_then(|v| bool::try_from(v).ok()),
             Some(true)
         );
         Ok(())

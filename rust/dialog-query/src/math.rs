@@ -499,11 +499,11 @@ mod tests {
         let output = &results[0];
 
         // Check that x and y are preserved
-        assert_eq!(output.resolve::<u32>(&Term::var("x")).ok(), Some(5));
-        assert_eq!(output.resolve::<u32>(&Term::var("y")).ok(), Some(3));
+        assert_eq!(output.resolve(&Term::<u32>::var("x")).ok().and_then(|v| u32::try_from(v).ok()), Some(5));
+        assert_eq!(output.resolve(&Term::<u32>::var("y")).ok().and_then(|v| u32::try_from(v).ok()), Some(3));
 
         // Check that result is computed correctly
-        assert_eq!(output.resolve::<u32>(&Term::var("result")).ok(), Some(8));
+        assert_eq!(output.resolve(&Term::<u32>::var("result")).ok().and_then(|v| u32::try_from(v).ok()), Some(8));
         Ok(())
     }
 
@@ -556,9 +556,9 @@ mod tests {
         let results1 = app.derive(input1).expect("First expansion failed");
         assert_eq!(results1.len(), 1);
         let result1 = &results1[0];
-        assert_eq!(result1.resolve::<u32>(&Term::var("a")).ok(), Some(2));
-        assert_eq!(result1.resolve::<u32>(&Term::var("b")).ok(), Some(3));
-        assert_eq!(result1.resolve::<u32>(&Term::var("sum")).ok(), Some(5));
+        assert_eq!(result1.resolve(&Term::<u32>::var("a")).ok().and_then(|v| u32::try_from(v).ok()), Some(2));
+        assert_eq!(result1.resolve(&Term::<u32>::var("b")).ok().and_then(|v| u32::try_from(v).ok()), Some(3));
+        assert_eq!(result1.resolve(&Term::<u32>::var("sum")).ok().and_then(|v| u32::try_from(v).ok()), Some(5));
 
         // Test second input: 10 + 15 = 25
         let input2 = Answer::new()
@@ -570,9 +570,9 @@ mod tests {
         let results2 = app.derive(input2).expect("Second expansion failed");
         assert_eq!(results2.len(), 1);
         let result2 = &results2[0];
-        assert_eq!(result2.resolve::<u32>(&Term::var("a")).ok(), Some(10));
-        assert_eq!(result2.resolve::<u32>(&Term::var("b")).ok(), Some(15));
-        assert_eq!(result2.resolve::<u32>(&Term::var("sum")).ok(), Some(25));
+        assert_eq!(result2.resolve(&Term::<u32>::var("a")).ok().and_then(|v| u32::try_from(v).ok()), Some(10));
+        assert_eq!(result2.resolve(&Term::<u32>::var("b")).ok().and_then(|v| u32::try_from(v).ok()), Some(15));
+        assert_eq!(result2.resolve(&Term::<u32>::var("sum")).ok().and_then(|v| u32::try_from(v).ok()), Some(25));
         Ok(())
     }
 
@@ -614,7 +614,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve::<u32>(&Term::var("result")).ok(), Some(7));
+        assert_eq!(result.resolve(&Term::<u32>::var("result")).ok().and_then(|v| u32::try_from(v).ok()), Some(7));
         Ok(())
     }
 
@@ -639,7 +639,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         // Should saturate at 0
-        assert_eq!(result.resolve::<u32>(&Term::var("result")).ok(), Some(0));
+        assert_eq!(result.resolve(&Term::<u32>::var("result")).ok().and_then(|v| u32::try_from(v).ok()), Some(0));
         Ok(())
     }
 
@@ -661,7 +661,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve::<u32>(&Term::var("result")).ok(), Some(42));
+        assert_eq!(result.resolve(&Term::<u32>::var("result")).ok().and_then(|v| u32::try_from(v).ok()), Some(42));
         Ok(())
     }
 
@@ -683,7 +683,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve::<u32>(&Term::var("result")).ok(), Some(5));
+        assert_eq!(result.resolve(&Term::<u32>::var("result")).ok().and_then(|v| u32::try_from(v).ok()), Some(5));
         Ok(())
     }
 
@@ -728,7 +728,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve::<u32>(&Term::var("result")).ok(), Some(2));
+        assert_eq!(result.resolve(&Term::<u32>::var("result")).ok().and_then(|v| u32::try_from(v).ok()), Some(2));
         Ok(())
     }
 

@@ -56,9 +56,9 @@ mod person {
 
         fn try_from(source: dialog_query::selection::Answer) -> Result<Self, Self::Error> {
             Ok(Person {
-                this: source.resolve(&PersonTerms::this())?,
-                name: source.resolve(&PersonTerms::name())?,
-                age: source.resolve(&PersonTerms::age())?,
+                this: source.get(&PersonTerms::this())?,
+                name: source.get(&PersonTerms::name())?,
+                age: source.get(&PersonTerms::age())?,
             })
         }
     }
@@ -81,9 +81,9 @@ mod person {
             source: dialog_query::selection::Answer,
         ) -> Result<Self::Instance, dialog_query::QueryError> {
             Ok(Self::Instance {
-                this: source.resolve(&self.this)?,
-                name: source.resolve(&self.name)?,
-                age: source.resolve(&self.age)?,
+                this: source.get(&self.this)?,
+                name: source.get(&self.name)?,
+                age: source.get(&self.age)?,
             })
         }
     }

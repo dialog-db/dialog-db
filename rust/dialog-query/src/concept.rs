@@ -291,14 +291,11 @@ mod tests {
         type Concept = Person;
         type Instance = Person;
 
-        fn realize(
-            &self,
-            source: Answer,
-        ) -> std::result::Result<Self::Instance, QueryError> {
+        fn realize(&self, source: Answer) -> std::result::Result<Self::Instance, QueryError> {
             Ok(Self::Instance {
-                this: source.resolve(&self.this)?,
-                name: source.resolve(&self.name)?,
-                age: source.resolve(&self.age)?,
+                this: source.get(&self.this)?,
+                name: source.get(&self.name)?,
+                age: source.get(&self.age)?,
             })
         }
     }

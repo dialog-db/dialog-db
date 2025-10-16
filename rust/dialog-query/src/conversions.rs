@@ -38,12 +38,14 @@ impl TryFrom<&mut Cursor> for ToStringInput {
                     parameter: "value".into(),
                 })?;
 
-        let value = cursor.source.resolve_value(term).map_err(|_| {
-            FormulaEvaluationError::UnboundVariable {
-                term: term.clone(),
-                parameter: "value".into(),
-            }
-        })?;
+        let value =
+            cursor
+                .source
+                .resolve(term)
+                .map_err(|_| FormulaEvaluationError::UnboundVariable {
+                    term: term.clone(),
+                    parameter: "value".into(),
+                })?;
 
         Ok(ToStringInput { value })
     }
@@ -83,11 +85,13 @@ impl Formula for ToString {
     fn cells() -> &'static Cells {
         TO_STRING_CELLS.get_or_init(|| {
             Cells::define(|builder| {
-                builder.cell("value", Type::String) // Note: accepts any type
+                builder
+                    .cell("value", Type::String) // Note: accepts any type
                     .the("Value to convert")
                     .required();
 
-                builder.cell("is", Type::String)
+                builder
+                    .cell("is", Type::String)
                     .the("String representation")
                     .derived(1);
             })
@@ -165,9 +169,13 @@ impl Formula for ParseNumber {
     fn cells() -> &'static Cells {
         PARSE_NUMBER_CELLS.get_or_init(|| {
             Cells::define(|builder| {
-                builder.cell("text", Type::String).the("String to parse").required();
+                builder
+                    .cell("text", Type::String)
+                    .the("String to parse")
+                    .required();
 
-                builder.cell("is", Type::UnsignedInt)
+                builder
+                    .cell("is", Type::UnsignedInt)
                     .the("Parsed number")
                     .derived(2);
             })
@@ -199,7 +207,7 @@ impl Formula for ParseNumber {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Entity, selection::Answer, Parameters, Term};
+    use crate::{selection::Answer, Entity, Parameters, Term};
 
     #[test]
     fn test_to_string_number() -> anyhow::Result<()> {
@@ -215,7 +223,10 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.resolve::<String>(&Term::var("str")).ok(),
+            result
+                .resolve(&Term::<String>::var("str"))
+                .ok()
+                .and_then(|v| String::try_from(v).ok()),
             Some("42".to_string())
         );
         Ok(())
@@ -235,7 +246,10 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.resolve::<String>(&Term::var("str")).ok(),
+            result
+                .resolve(&Term::<String>::var("str"))
+                .ok()
+                .and_then(|v| String::try_from(v).ok()),
             Some("true".to_string())
         );
         Ok(())
@@ -257,7 +271,10 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.resolve::<String>(&Term::var("str")).ok(),
+            result
+                .resolve(&Term::<String>::var("str"))
+                .ok()
+                .and_then(|v| String::try_from(v).ok()),
             Some("hello".to_string())
         );
         Ok(())
@@ -280,8 +297,8 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.resolve::<String>(&Term::var("str")).ok(),
-            Some(entity.to_string())
+            String::try_from(result.resolve(&Term::<String>::var("str"))?)?,
+            entity.to_string()
         );
         Ok(())
     }
@@ -301,7 +318,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve::<u32>(&Term::var("num")).ok(), Some(123));
+        assert_eq!(
+            result
+                .resolve(&Term::<u32>::var("num"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(123)
+        );
         Ok(())
     }
 
@@ -320,7 +343,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve::<u32>(&Term::var("num")).ok(), Some(456));
+        assert_eq!(
+            result
+                .resolve(&Term::<u32>::var("num"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(456)
+        );
         Ok(())
     }
 

@@ -58,8 +58,8 @@ async fn test_fact_application_with_provenance() -> Result<()> {
     assert!(answer.contains(&Term::<Value>::var("name")));
 
     // Resolve the values
-    let person_id: Entity = answer.resolve(&Term::var("person"))?;
-    let name_value: Value = answer.resolve(&Term::var("name"))?;
+    let person_id: Entity = answer.get(&Term::var("person"))?;
+    let name_value: Value = answer.resolve(&Term::<Value>::var("name"))?;
 
     assert_eq!(person_id, alice);
     assert_eq!(name_value, Value::String("Alice".to_string()));
