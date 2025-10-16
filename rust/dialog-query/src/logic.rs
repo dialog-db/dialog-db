@@ -27,7 +27,7 @@ pub struct AndInput {
     pub right: bool,
 }
 
-impl TryFrom<&mut Cursor<'_>> for AndInput {
+impl TryFrom<&mut Cursor> for AndInput {
     type Error = FormulaEvaluationError;
 
     fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
@@ -107,7 +107,7 @@ pub struct OrInput {
     pub right: bool,
 }
 
-impl TryFrom<&mut Cursor<'_>> for OrInput {
+impl TryFrom<&mut Cursor> for OrInput {
     type Error = FormulaEvaluationError;
 
     fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
@@ -185,7 +185,7 @@ pub struct NotInput {
     pub value: bool,
 }
 
-impl TryFrom<&mut Cursor<'_>> for NotInput {
+impl TryFrom<&mut Cursor> for NotInput {
     type Error = FormulaEvaluationError;
 
     fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {

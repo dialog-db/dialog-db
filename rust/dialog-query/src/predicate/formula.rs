@@ -149,7 +149,7 @@ pub trait Formula: Sized + Clone {
     ///
     /// This type must be constructible from a Cursor and should contain
     /// all the fields that the formula needs to read from the input.
-    type Input: for<'a> TryFrom<&'a mut Cursor<'a>, Error = FormulaEvaluationError>;
+    type Input: for<'a> TryFrom<&'a mut Cursor, Error = FormulaEvaluationError>;
 
     /// Match type for future pattern matching support
     ///

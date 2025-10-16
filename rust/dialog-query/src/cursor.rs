@@ -32,6 +32,7 @@ use crate::artifact::TypeError;
 use crate::error::FormulaEvaluationError;
 use crate::selection::{Answer, Factors};
 use crate::{Parameters, Value};
+use std::sync::Arc;
 
 /// A cursor for reading and writing values during formula evaluation
 ///
@@ -41,7 +42,7 @@ use crate::{Parameters, Value};
 ///
 /// Cursors are specific to formula evaluation and should not be used for other purposes.
 #[derive(Debug)]
-pub struct Cursor<'a> {
+pub struct Cursor {
     /// The current answer containing variable bindings and provenance
     ///
     /// NOTE: Public for compatibility with existing formula implementations.
@@ -59,10 +60,11 @@ pub struct Cursor<'a> {
 
     /// The formula application that is evaluating this cursor
     /// Used to create Factor::Derived with proper provenance
-    formula: &'a crate::application::formula::FormulaApplication,
+    /// Stored as Arc to avoid cloning the entire FormulaApplication
+    formula: Arc<crate::application::formula::FormulaApplication>,
 }
 
-impl<'a> Cursor<'a> {
+impl Cursor {
     /// Create a new cursor for formula evaluation
     ///
     /// # Arguments
@@ -70,7 +72,7 @@ impl<'a> Cursor<'a> {
     /// * `source` - The answer containing current variable bindings and provenance
     /// * `terms` - Mapping from formula parameter names to query terms
     pub fn new(
-        formula: &'a crate::application::formula::FormulaApplication,
+        formula: Arc<crate::application::formula::FormulaApplication>,
         source: impl Into<Answer>,
         terms: Parameters,
     ) -> Self {
@@ -193,7 +195,7 @@ impl<'a> Cursor<'a> {
         let factor = Factor::Derived {
             value: value.clone(),
             from: self.reads.clone(), // Use the tracked reads as dependencies
-            formula: std::sync::Arc::new(self.formula.clone()), // Formula is always available
+            formula: Arc::clone(&self.formula), // Clone the Arc, not the FormulaApplication
         };
 
         // Assign to the answer - this will fail if there's a conflicting value
@@ -243,7 +245,7 @@ mod tests {
 
         let source = Answer::from(match_data);
         let formula = test_formula();
-        let mut cursor = Cursor::new(&formula, source, terms);
+        let mut cursor = Cursor::new(Arc::new(formula.clone()), source, terms);
 
         // Test reading
         let value = cursor.read::<u32>("value").expect("Failed to read value");
@@ -261,7 +263,7 @@ mod tests {
         let terms = Parameters::new(); // Empty terms
         let source = Answer::from(Answer::new());
         let formula = test_formula();
-        let mut cursor = Cursor::new(&formula, source, terms);
+        let mut cursor = Cursor::new(Arc::new(formula.clone()), source, terms);
 
         let result = cursor.read::<u32>("missing");
         assert!(matches!(
@@ -279,7 +281,7 @@ mod tests {
 
         let source = Answer::new(); // No bindings
         let formula = test_formula();
-        let mut cursor = Cursor::new(&formula, source, terms);
+        let mut cursor = Cursor::new(Arc::new(formula.clone()), source, terms);
 
         let result = cursor.read::<u32>("value");
         assert!(matches!(
@@ -304,7 +306,7 @@ mod tests {
 
         let source = Answer::from(match_data);
         let formula = test_formula();
-        let mut cursor = Cursor::new(&formula, source, params);
+        let mut cursor = Cursor::new(Arc::new(formula.clone()), source, params);
 
         // Initially no reads tracked
         assert_eq!(cursor.reads().len(), 0);
@@ -372,7 +374,7 @@ mod tests {
             .expect("Failed to create test match");
 
         let formula = test_formula();
-        let mut cursor = Cursor::new(&formula, source, terms);
+        let mut cursor = Cursor::new(Arc::new(formula.clone()), source, terms);
 
         // Read the initial value to verify it's there
         let value = cursor.read::<u32>("value").expect("Failed to read value");
@@ -416,7 +418,7 @@ mod tests {
 
         let source = Answer::from(match_data);
         let formula = test_formula();
-        let mut cursor = Cursor::new(&formula, source, params);
+        let mut cursor = Cursor::new(Arc::new(formula.clone()), source, params);
 
         // Read some values to track reads
         let _x = cursor.read::<u32>("x").expect("read should succeed");

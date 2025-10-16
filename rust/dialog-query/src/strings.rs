@@ -26,7 +26,7 @@ pub struct ConcatenateInput {
     pub second: String,
 }
 
-impl TryFrom<&mut Cursor<'_>> for ConcatenateInput {
+impl TryFrom<&mut Cursor> for ConcatenateInput {
     type Error = FormulaEvaluationError;
 
     fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
@@ -104,7 +104,7 @@ pub struct LengthInput {
     pub of: String,
 }
 
-impl TryFrom<&mut Cursor<'_>> for LengthInput {
+impl TryFrom<&mut Cursor> for LengthInput {
     type Error = FormulaEvaluationError;
 
     fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
@@ -183,7 +183,7 @@ pub struct UppercaseInput {
     pub of: String,
 }
 
-impl TryFrom<&mut Cursor<'_>> for UppercaseInput {
+impl TryFrom<&mut Cursor> for UppercaseInput {
     type Error = FormulaEvaluationError;
 
     fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
@@ -254,7 +254,7 @@ pub struct LowercaseInput {
     pub of: String,
 }
 
-impl TryFrom<&mut Cursor<'_>> for LowercaseInput {
+impl TryFrom<&mut Cursor> for LowercaseInput {
     type Error = FormulaEvaluationError;
 
     fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {

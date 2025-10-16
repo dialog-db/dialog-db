@@ -23,7 +23,7 @@ pub struct SumInput {
     pub with: u32,
 }
 
-impl TryFrom<&mut Cursor<'_>> for SumInput {
+impl TryFrom<&mut Cursor> for SumInput {
     type Error = FormulaEvaluationError;
 
     fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
@@ -122,7 +122,7 @@ pub struct DifferenceInput {
     pub subtract: u32,
 }
 
-impl TryFrom<&mut Cursor<'_>> for DifferenceInput {
+impl TryFrom<&mut Cursor> for DifferenceInput {
     type Error = FormulaEvaluationError;
 
     fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
@@ -209,7 +209,7 @@ pub struct ProductInput {
     pub times: u32,
 }
 
-impl TryFrom<&mut Cursor<'_>> for ProductInput {
+impl TryFrom<&mut Cursor> for ProductInput {
     type Error = FormulaEvaluationError;
 
     fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
@@ -296,7 +296,7 @@ pub struct QuotientInput {
     pub by: u32,
 }
 
-impl TryFrom<&mut Cursor<'_>> for QuotientInput {
+impl TryFrom<&mut Cursor> for QuotientInput {
     type Error = FormulaEvaluationError;
 
     fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
@@ -388,7 +388,7 @@ pub struct ModuloInput {
     pub by: u32,
 }
 
-impl TryFrom<&mut Cursor<'_>> for ModuloInput {
+impl TryFrom<&mut Cursor> for ModuloInput {
     type Error = FormulaEvaluationError;
 
     fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {

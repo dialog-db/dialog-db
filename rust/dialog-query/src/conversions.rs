@@ -25,7 +25,7 @@ pub struct ToStringInput {
     pub value: Value,
 }
 
-impl TryFrom<&mut Cursor<'_>> for ToStringInput {
+impl TryFrom<&mut Cursor> for ToStringInput {
     type Error = FormulaEvaluationError;
 
     fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
@@ -127,7 +127,7 @@ pub struct ParseNumberInput {
     pub text: String,
 }
 
-impl TryFrom<&mut Cursor<'_>> for ParseNumberInput {
+impl TryFrom<&mut Cursor> for ParseNumberInput {
     type Error = FormulaEvaluationError;
 
     fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {

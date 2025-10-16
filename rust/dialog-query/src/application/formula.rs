@@ -6,6 +6,7 @@ pub use crate::{try_stream, Answer, Answers, EvaluationContext, Source};
 
 pub use crate::{Environment, Parameters, Requirement};
 use std::fmt::Display;
+use std::sync::Arc;
 
 pub const PARAM_COST: usize = 10;
 
@@ -34,7 +35,9 @@ pub struct FormulaApplication {
 impl FormulaApplication {
     /// Computes answers using this formula
     pub fn derive(&self, input: Answer) -> Result<Vec<Answer>, FormulaEvaluationError> {
-        let mut cursor = Cursor::new(self, input, self.parameters.clone());
+        // Create Arc from self for cursor - this is a cheap pointer clone, not cloning the whole struct
+        let formula = Arc::new(self.clone());
+        let mut cursor = Cursor::new(formula, input, self.parameters.clone());
         (self.compute)(&mut cursor)
     }
 
@@ -57,7 +60,8 @@ impl FormulaApplication {
 
     pub fn expand(&self, frame: Answer) -> Result<Vec<Answer>, QueryError> {
         let compute = self.compute;
-        let mut cursor = Cursor::new(self, frame, self.parameters.clone());
+        let formula = Arc::new(self.clone());
+        let mut cursor = Cursor::new(formula, frame, self.parameters.clone());
         let expansion = compute(&mut cursor);
         // Map results and omit inconsistent answers
         match expansion {
