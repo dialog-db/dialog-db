@@ -130,7 +130,7 @@ mod tests {
     use dialog_storage::MemoryStorageBackend;
 
     // Define a Person concept for testing using raw concept API
-    // This mirrors what the #[derive(Rule)] macro generates
+    // This mirrors what the #[derive(Concept)] macro generates
     #[derive(Debug, Clone)]
     struct Person {
         pub this: Entity,

@@ -1,11 +1,8 @@
-// Test to verify the Rule macro generates correct code with the fixes
+// Test to verify the Concept macro generates correct code with the fixes
 use dialog_query::concept::ConceptType;
-use dialog_query::rule::Rule as RuleTrait;
-use dialog_query::term::Term;
-use dialog_query::Entity;
-use dialog_query_macros::Rule;
+use dialog_query::{Concept, Entity, Term};
 
-#[derive(Rule, Debug, Clone)]
+#[derive(Concept, Debug, Clone)]
 pub struct TestPerson {
     pub this: Entity,
     pub name: String,

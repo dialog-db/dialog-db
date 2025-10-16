@@ -3,15 +3,14 @@
 use anyhow::Result;
 use dialog_query::{
     artifact::{Artifacts, Attribute, Entity, Value},
-    rule::Rule as RuleTrait,
     term::Term,
-    Fact, Rule, Session,
+    Concept, Fact, Match, Session,
 };
 use dialog_storage::MemoryStorageBackend;
 
 /// Helper function to commit claims using the transaction-based API
 
-#[derive(Rule, Debug, Clone)]
+#[derive(Concept, Debug, Clone)]
 pub struct Person {
     /// The entity this person represents
     pub this: Entity,
@@ -46,7 +45,7 @@ async fn test_person_concept_basic() -> Result<()> {
     session.transact(facts).await?;
 
     // Step 2: Create match patterns for querying
-    let alice_match = PersonMatch {
+    let alice_match = Match::<Person> {
         this: Term::var("person"),
         name: "Alice".into(),
     };

@@ -63,8 +63,8 @@ use crate::premise::Premise;
 ///     when1
 /// }
 ///
-/// // For generated Rule structs, use the derive macro and Attributes::of pattern:
-/// // #[derive(Rule, Debug, Clone)]
+/// // For generated Concept structs, use the derive macro and Attributes::of pattern:
+/// // #[derive(Concept, Debug, Clone)]
 /// // struct Person { name: String, age: u32 }
 /// // let query = PersonAttributes::of(Term::var("entity"));
 /// ```

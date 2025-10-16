@@ -1,24 +1,24 @@
-//! Procedural macros for generating rule definitions
+//! Procedural macros for generating concept definitions
 
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, Attribute, Data, DeriveInput, Expr, Fields, Lit, Meta, Type};
 
-/// Derive macro to generate Rule implementation from a struct definition.
+/// Derive macro to generate Concept implementation from a struct definition.
 ///
-/// This macro generates all the necessary boilerplate for implementing a rule,
+/// This macro generates all the necessary boilerplate for implementing a concept,
 /// including Match, Assert, Retract, and Attributes types.
 ///
 /// # Example
 ///
 /// This macro transforms input like:
 /// ```text
-/// use dialog_query::concept::Concept;
+/// use dialog_query::concept::Concept as ConceptTrait;
 /// use dialog_query::rule::Rule as RuleTrait;
 /// use dialog_query::Term;
-/// use dialog_query_macros::Rule;
+/// use dialog_query_macros::Concept;
 ///
-/// #[derive(Rule, Debug, Clone)]
+/// #[derive(Concept, Debug, Clone)]
 /// pub struct Person {
 ///     /// Name of the person
 ///     pub name: String,
@@ -51,8 +51,8 @@ use syn::{parse_macro_input, Attribute, Data, DeriveInput, Expr, Fields, Lit, Me
 /// - `PersonAttributes`: Fluent query builder with type-safe attribute matchers
 /// - `PERSON_NAME`: Static attribute constant for the name field
 /// - `PERSON_BIRTHDAY`: Static attribute constant for the birthday field
-#[proc_macro_derive(Rule)]
-pub fn derive_rule(input: TokenStream) -> TokenStream {
+#[proc_macro_derive(Concept)]
+pub fn derive_concept(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
     let struct_name = &input.ident;
@@ -64,14 +64,14 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
             _ => {
                 return syn::Error::new_spanned(
                     &input,
-                    "Rule can only be derived for structs with named fields",
+                    "Concept can only be derived for structs with named fields",
                 )
                 .to_compile_error()
                 .into();
             }
         },
         _ => {
-            return syn::Error::new_spanned(&input, "Rule can only be derived for structs")
+            return syn::Error::new_spanned(&input, "Concept can only be derived for structs")
                 .to_compile_error()
                 .into();
         }
@@ -439,8 +439,8 @@ pub fn derive_rule(input: TokenStream) -> TokenStream {
         }
 
         // Implement Rule trait
-        impl dialog_query::rule::Rule for #struct_name {
-            fn when(terms: Self::Match) -> dialog_query::rule::When {
+        impl #struct_name {
+            fn when(terms: dialog_query::Match<Self>) -> dialog_query::rule::When {
                 // Create fact selectors for each attribute with type conversion
                 let selectors = vec![
                     #(#rule_when_fields),*
@@ -553,8 +553,7 @@ fn to_snake_case(s: &str) -> String {
 /// # Example
 ///
 /// ```ignore
-/// use dialog_query_macros::Formula;
-/// use dialog_query::dsl::Input;
+/// use dialog_query::{Formula, Input};
 ///
 /// #[derive(Debug, Clone, Formula)]
 /// pub struct Sum {

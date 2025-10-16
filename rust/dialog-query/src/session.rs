@@ -306,7 +306,7 @@ mod tests {
     #[tokio::test]
     async fn test_session() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value};
-        use crate::{Fact, Term};
+        use crate::{Concept, Fact, Term};
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -404,14 +404,14 @@ mod tests {
     #[tokio::test]
     async fn test_matches_complete_conepts() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Entity};
-        use crate::Rule;
+        use crate::Concept;
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
         let store = Artifacts::anonymous(backend).await?;
         let mut session = Session::open(store);
 
-        #[derive(Debug, Clone, PartialEq, Rule)]
+        #[derive(Debug, Clone, PartialEq, Concept)]
         pub struct Person {
             this: Entity,
             name: String,
@@ -472,7 +472,7 @@ mod tests {
         // params.insert("name".into(), name.clone());
 
         // // Use new query API directly on application
-        // let application = person.apply(params)?;
+        // let application = Person::apply(params)?;
 
         // let selection = application.query(&session)?.collect_matches().await?;
         // assert_eq!(selection.len(), 2); // Should find just Alice and Bob
@@ -620,7 +620,7 @@ mod tests {
         use crate::{Concept, Fact, Rule, Term};
         use dialog_storage::MemoryStorageBackend;
 
-        #[derive(Clone, Debug, PartialEq, Rule)]
+        #[derive(Clone, Debug, PartialEq, Concept)]
         pub struct Employee {
             /// Employee
             pub this: Entity,
@@ -630,7 +630,7 @@ mod tests {
             pub job: String,
         }
 
-        #[derive(Clone, Debug, PartialEq, Rule)]
+        #[derive(Clone, Debug, PartialEq, Concept)]
         pub struct Stuff {
             pub this: Entity,
             /// Name of the stuff member

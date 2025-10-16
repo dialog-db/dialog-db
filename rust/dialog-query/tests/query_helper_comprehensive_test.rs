@@ -6,17 +6,17 @@ use dialog_query::{
     query::Output,
     rule::Match,
     term::Term,
-    Fact, Rule, Session,
+    Concept, Fact, Session,
 };
 use dialog_storage::MemoryStorageBackend;
 
-#[derive(Rule, Debug, Clone)]
+#[derive(Concept, Debug, Clone)]
 pub struct Person {
     pub this: Entity,
     pub name: String,
 }
 
-#[derive(Rule, Debug, Clone, PartialEq)]
+#[derive(Concept, Debug, Clone, PartialEq)]
 pub struct Employee {
     pub this: Entity,
     pub name: String,

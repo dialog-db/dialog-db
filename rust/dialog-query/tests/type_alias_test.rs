@@ -1,12 +1,12 @@
 //! Test that type aliases work correctly with IntoType trait-based type detection
 
-use dialog_query::{artifact::Entity, Rule};
+use dialog_query::{artifact::Entity, Concept, Rule};
 
 // Type alias - with trait-based detection, this should properly resolve to String's type
 type PersonName = String;
 type Age = u32;
 
-#[derive(Rule, Debug, Clone)]
+#[derive(Concept, Debug, Clone)]
 pub struct PersonWithAliases {
     pub this: Entity,
     pub name: PersonName,

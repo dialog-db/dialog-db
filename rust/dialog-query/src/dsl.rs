@@ -21,7 +21,7 @@ pub trait Quarriable {
 /// as shown below.
 ///
 /// ```rs
-/// #[derive(Debug, Clone, Rule)]
+/// #[derive(Debug, Clone, Concept)]
 /// pub struct Person {
 ///     this: Entity,
 ///     name: String,
