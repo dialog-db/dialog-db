@@ -1,6 +1,7 @@
 use crate::application::ConceptApplication;
 pub use crate::predicate::concept::{Attributes, ConceptType};
 use crate::query::{Output, Source};
+use crate::selection::Answer;
 use crate::{predicate, QueryError};
 use crate::{Application, Premise};
 use crate::{Entity, Parameters};
@@ -60,7 +61,7 @@ pub trait Match: Sized + Clone + ConditionalSend + Into<Parameters> + 'static {
     /// Instance of the concept that this match can produce.
     type Instance: Instance + ConditionalSend + Clone;
 
-    fn realize(&self, source: crate::selection::Answer) -> Result<Self::Instance, QueryError>;
+    fn realize(&self, source: Answer) -> Result<Self::Instance, QueryError>;
 
     fn conpect() -> predicate::Concept {
         use predicate::concept::ConceptType;
@@ -226,7 +227,7 @@ mod tests {
 
     // Implement TryFrom<selection::Answer> for Person
     // This extracts values from the answer by field name
-    impl TryFrom<crate::selection::Answer> for Person {
+    impl TryFrom<Answer> for Person {
         type Error = crate::error::InconsistencyError;
 
         fn try_from(input: Answer) -> Result<Self, Self::Error> {
@@ -292,7 +293,7 @@ mod tests {
 
         fn realize(
             &self,
-            source: crate::selection::Answer,
+            source: Answer,
         ) -> std::result::Result<Self::Instance, QueryError> {
             Ok(Self::Instance {
                 this: source.resolve(&self.this)?,

@@ -482,7 +482,7 @@ mod tests {
         terms.insert("is".to_string(), Term::var("result").into());
 
         // Create input match with x=5, y=3
-        let input = crate::selection::Answer::new()
+        let input = Answer::new()
             .set(Term::var("x"), 5u32)
             .expect("Failed to set x")
             .set(Term::var("y"), 3u32)
@@ -521,7 +521,7 @@ mod tests {
         terms.insert("with".to_string(), Term::var("missing").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = crate::selection::Answer::new()
+        let input = Answer::new()
             .set(Term::var("x"), 5u32)
             .expect("Failed to set x");
 
@@ -547,7 +547,7 @@ mod tests {
         let app = Sum::apply(terms)?;
 
         // Test first input: 2 + 3 = 5
-        let input1 = crate::selection::Answer::new()
+        let input1 = Answer::new()
             .set(Term::var("a"), 2u32)
             .unwrap()
             .set(Term::var("b"), 3u32)
@@ -561,7 +561,7 @@ mod tests {
         assert_eq!(result1.resolve::<u32>(&Term::var("sum")).ok(), Some(5));
 
         // Test second input: 10 + 15 = 25
-        let input2 = crate::selection::Answer::new()
+        let input2 = Answer::new()
             .set(Term::var("a"), 10u32)
             .unwrap()
             .set(Term::var("b"), 15u32)
@@ -603,7 +603,7 @@ mod tests {
         terms.insert("subtract".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = crate::selection::Answer::new()
+        let input = Answer::new()
             .set(Term::var("x"), 10u32)
             .unwrap()
             .set(Term::var("y"), 3u32)
@@ -625,7 +625,7 @@ mod tests {
         terms.insert("subtract".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = crate::selection::Answer::new()
+        let input = Answer::new()
             .set(Term::var("x"), 3u32)
             .unwrap()
             .set(Term::var("y"), 10u32)
@@ -650,7 +650,7 @@ mod tests {
         terms.insert("times".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = crate::selection::Answer::new()
+        let input = Answer::new()
             .set(Term::var("x"), 6u32)
             .unwrap()
             .set(Term::var("y"), 7u32)
@@ -672,7 +672,7 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = crate::selection::Answer::new()
+        let input = Answer::new()
             .set(Term::var("x"), 15u32)
             .unwrap()
             .set(Term::var("y"), 3u32)
@@ -694,7 +694,7 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = crate::selection::Answer::new()
+        let input = Answer::new()
             .set(Term::var("x"), 15u32)
             .unwrap()
             .set(Term::var("y"), 0u32)
@@ -717,7 +717,7 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = crate::selection::Answer::new()
+        let input = Answer::new()
             .set(Term::var("x"), 17u32)
             .unwrap()
             .set(Term::var("y"), 5u32)
@@ -739,7 +739,7 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
-        let input = crate::selection::Answer::new()
+        let input = Answer::new()
             .set(Term::var("x"), 17u32)
             .unwrap()
             .set(Term::var("y"), 0u32)

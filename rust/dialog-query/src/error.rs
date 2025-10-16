@@ -94,7 +94,16 @@ impl From<InconsistencyError> for QueryError {
             InconsistencyError::UnboundVariableError(var) => {
                 QueryError::UnboundVariable { variable_name: var }
             }
-            _ => QueryError::FactStore(err.to_string()),
+            InconsistencyError::TypeMismatch { expected, actual } => {
+                QueryError::VariableInconsistency {
+                    parameter: "value".to_string(),
+                    expected: Term::Constant(expected),
+                    actual: Term::Constant(actual),
+                }
+            }
+            _ => QueryError::InvalidTerm {
+                message: err.to_string(),
+            },
         }
     }
 }

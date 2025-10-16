@@ -29,7 +29,7 @@
 //! ```
 
 use crate::artifact::TypeError;
-use crate::error::{FormulaEvaluationError, InconsistencyError};
+use crate::error::FormulaEvaluationError;
 use crate::selection::{Answer, Factors};
 use crate::{Parameters, Value};
 

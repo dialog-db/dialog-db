@@ -587,6 +587,73 @@ impl<T: Scalar> From<&Option<Term<T>>> for Term<T> {
 
 // Removed From<Term<String>> for Term<Value> implementation to prevent type erasure
 
+// TryFrom implementations for converting Term<Value> to more specific Term types
+
+/// Convert Term<Value> to Term<Entity>
+impl TryFrom<Term<Value>> for Term<Entity> {
+    type Error = crate::artifact::TypeError;
+
+    fn try_from(term: Term<Value>) -> Result<Self, Self::Error> {
+        match term {
+            Term::Variable { name, .. } => Ok(Term::Variable {
+                name,
+                content_type: Default::default(),
+            }),
+            Term::Constant(Value::Entity(e)) => Ok(Term::Constant(e)),
+            Term::Constant(other) => Err(crate::artifact::TypeError::TypeMismatch(
+                Type::Entity,
+                other.data_type(),
+            )),
+        }
+    }
+}
+
+/// Convert Term<Value> to Term<Attribute>
+impl TryFrom<Term<Value>> for Term<crate::artifact::Attribute> {
+    type Error = crate::artifact::TypeError;
+
+    fn try_from(term: Term<Value>) -> Result<Self, Self::Error> {
+        match term {
+            Term::Variable { name, .. } => Ok(Term::Variable {
+                name,
+                content_type: Default::default(),
+            }),
+            Term::Constant(Value::Symbol(attr)) => Ok(Term::Constant(attr)),
+            Term::Constant(other) => Err(crate::artifact::TypeError::TypeMismatch(
+                Type::Symbol,
+                other.data_type(),
+            )),
+        }
+    }
+}
+
+/// Convert Term<Value> to Term<Cause>
+impl TryFrom<Term<Value>> for Term<crate::artifact::Cause> {
+    type Error = crate::artifact::TypeError;
+
+    fn try_from(term: Term<Value>) -> Result<Self, Self::Error> {
+        use crate::artifact::Cause;
+
+        match term {
+            Term::Variable { name, .. } => Ok(Term::Variable {
+                name,
+                content_type: Default::default(),
+            }),
+            Term::Constant(Value::Bytes(b)) => {
+                // Use TryFrom<Vec<u8>> for Cause (from reference_type! macro)
+                let cause = Cause::try_from(b).map_err(|_| {
+                    crate::artifact::TypeError::TypeMismatch(Type::Bytes, Type::Bytes)
+                })?;
+                Ok(Term::Constant(cause))
+            }
+            Term::Constant(other) => Err(crate::artifact::TypeError::TypeMismatch(
+                Type::Bytes,
+                other.data_type(),
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

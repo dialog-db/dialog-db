@@ -197,62 +197,32 @@ impl<T: Scalar> Attribute<T> {
             }
         }
 
-        let blank = Term::blank();
-        let blank_entity = Term::<Entity>::blank();
-
         // Get the attribute term - parse the string name to an Attribute
-        let attr_str = self.the();
         let the = Term::Constant(
-            attr_str
+            self.the()
                 .parse::<ArtifactsAttribute>()
                 .expect("Failed to parse attribute name"),
         );
 
-        // TODO: Verify that this is Term<Entity> instead.
-        // Get the entity term (this), converting from Term<Value> if needed
+        // Get the entity term (this), converting from Term<Value>
         let of = parameters
             .get("this")
-            .map(|t| match t {
-                Term::Variable { name, .. } => Term::<Entity>::Variable {
-                    name: name.clone(),
-                    content_type: Default::default(),
-                },
-                Term::Constant(v) => match v {
-                    Value::Entity(e) => Term::Constant(e.clone()),
-                    _ => blank_entity.clone(),
-                },
-            })
-            .unwrap_or_else(|| blank_entity.clone());
+            .and_then(|t| t.clone().try_into().ok())
+            .unwrap_or(Term::blank());
 
         // Get the value term (is)
-        let is = parameters.get("is").unwrap_or(&blank).clone();
+        let is = parameters
+            .get("is")
+            .and_then(|t| Some(t.clone()))
+            .unwrap_or(Term::blank());
 
         // Get the cause term
-        let cause = parameters.get("cause").unwrap_or(&blank).clone();
-        let cause_term = match &cause {
-            Term::Variable { name, .. } => Term::<Cause>::Variable {
-                name: name.clone(),
-                content_type: Default::default(),
-            },
-            Term::Constant(v) => match v {
-                Value::Bytes(b) => {
-                    // Convert Vec<u8> to [u8; 32] for Blake3Hash
-                    let mut hash_bytes = [0u8; 32];
-                    let len = b.len().min(32);
-                    hash_bytes[..len].copy_from_slice(&b[..len]);
-                    Term::Constant(Cause(hash_bytes))
-                }
-                _ => Term::blank(),
-            },
-        };
+        let cause = parameters
+            .get("cause")
+            .and_then(|t| t.clone().try_into().ok())
+            .unwrap_or(Term::blank());
 
-        Ok(FactApplication::new(
-            the,
-            of,
-            is,
-            cause_term,
-            self.cardinality,
-        ))
+        Ok(FactApplication::new(the, of, is, cause, self.cardinality))
     }
 }
 

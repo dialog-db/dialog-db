@@ -223,7 +223,7 @@ impl FactApplication {
         }
     }
 
-    pub fn realize(&self, source: crate::selection::Answer) -> Result<Fact<Value>, QueryError> {
+    pub fn realize(&self, source: Answer) -> Result<Fact<Value>, QueryError> {
         // Convert blank variables to internal names for retrieval
         let the_term = match &self.the {
             Term::Variable { name: None, .. } => Term::Variable {
@@ -283,7 +283,7 @@ impl Circuit for FactApplication {
 }
 
 impl Query<Fact> for FactApplication {
-    fn realize(&self, input: crate::selection::Answer) -> Result<Fact, QueryError> {
+    fn realize(&self, input: Answer) -> Result<Fact, QueryError> {
         input.realize(self)
     }
 }

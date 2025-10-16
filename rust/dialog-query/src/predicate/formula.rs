@@ -111,6 +111,7 @@ use serde::{Deserialize, Serialize};
 use crate::application::FormulaApplication;
 use crate::cursor::Cursor;
 use crate::error::{FormulaEvaluationError, SchemaError, TypeError};
+use crate::selection::Answer;
 use crate::types::Scalar;
 use crate::Schema;
 use crate::{Dependencies, Parameters, Requirement};
@@ -213,7 +214,7 @@ pub trait Formula: Sized + Clone {
     /// 3. Returns the Answer with Factor::Derived provenance
     ///
     /// This default implementation should work for most formulas.
-    fn derive_match(cursor: &mut Cursor) -> Result<Vec<crate::selection::Answer>, FormulaEvaluationError> {
+    fn derive_match(cursor: &mut Cursor) -> Result<Vec<Answer>, FormulaEvaluationError> {
         let outputs = Self::derive(cursor)?;
         let mut results = Vec::new();
 
