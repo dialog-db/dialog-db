@@ -6,6 +6,9 @@
 //! This crate implements the core query planning and execution functionality,
 //! designed to be equivalent to the TypeScript query engine in @query/.
 
+// Allow macro-generated code to reference this crate as `dialog_query::`
+extern crate self as dialog_query;
+
 pub mod analyzer;
 pub mod application;
 pub mod artifact;
@@ -17,6 +20,7 @@ pub mod context;
 pub mod conversions;
 pub mod cursor;
 pub mod dependencies;
+pub mod dsl;
 pub mod environment;
 pub mod error;
 pub mod fact;
@@ -46,12 +50,12 @@ pub use claim::Claim;
 pub use concept::Concept;
 pub use context::{EvaluationContext, EvaluationPlan};
 pub use dependencies::{Dependencies, Dependency, Group, Requirement};
-pub use dialog_query_macros::Rule;
+pub use dialog_query_macros::{Formula, Rule};
 pub use error::{InconsistencyError, QueryError};
 pub use fact::Fact;
 pub use negation::Negation;
 pub use parameters::Parameters;
-pub use predicate::{Compute, DeductiveRule, Formula};
+pub use predicate::{DeductiveRule, Formula, Output};
 pub use premise::Premise;
 pub use query::{Source, Store};
 pub use rule::{Premises, Rule, When};

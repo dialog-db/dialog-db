@@ -3,41 +3,26 @@
 //! This module provides formulas for common string operations including
 //! concatenation, length calculation, case conversion, and basic string processing.
 
-use crate::{
-    cursor::Cursor, error::FormulaEvaluationError, predicate::formula::Cells, Compute,
-    Dependencies, Formula, Type, Value,
-};
-use std::sync::OnceLock;
+pub use crate::Formula;
 
 // ============================================================================
 // String Operations: Concatenate, Length, Uppercase, Lowercase
 // ============================================================================
 
 /// Concatenate formula that joins two strings
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Formula)]
 pub struct Concatenate {
+    /// First string
     pub first: String,
+    /// Second string
     pub second: String,
+    /// Concatenated string
+    #[derived(cost = 2)]
     pub is: String,
 }
 
-pub struct ConcatenateInput {
-    pub first: String,
-    pub second: String,
-}
-
-impl TryFrom<&mut Cursor> for ConcatenateInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
-        let first = cursor.read::<String>("first")?;
-        let second = cursor.read::<String>("second")?;
-        Ok(ConcatenateInput { first, second })
-    }
-}
-
-impl Compute for Concatenate {
-    fn compute(input: Self::Input) -> Vec<Self> {
+impl Concatenate {
+    pub fn derive(input: dialog_query::dsl::Input<Self>) -> Vec<Self> {
         vec![Concatenate {
             first: input.first.clone(),
             second: input.second.clone(),
@@ -46,75 +31,18 @@ impl Compute for Concatenate {
     }
 }
 
-static CONCATENATE_CELLS: OnceLock<Cells> = OnceLock::new();
-
-impl Formula for Concatenate {
-    type Input = ConcatenateInput;
-    type Match = ();
-
-    fn operator() -> &'static str {
-        "concatenate"
-    }
-
-    fn cells() -> &'static Cells {
-        CONCATENATE_CELLS.get_or_init(|| {
-            Cells::define(|builder| {
-                builder.cell("first", Type::String).the("First string").required();
-
-                builder.cell("second", Type::String).the("Second string").required();
-
-                builder.cell("is", Type::String)
-                    .the("Concatenated string")
-                    .derived(2);
-            })
-        })
-    }
-
-    fn cost() -> usize {
-        2
-    }
-
-    fn dependencies() -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        dependencies.require("first".into());
-        dependencies.require("second".into());
-        dependencies.provide("is".into());
-        dependencies
-    }
-
-    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor)?;
-        Ok(Self::compute(input))
-    }
-
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-        let value = Value::String(self.is.clone());
-        cursor.write("is", &value)
-    }
-}
-
 /// Length formula that computes the length of a string
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, dialog_query_macros::Formula)]
 pub struct Length {
+    /// String to measure
     pub of: String,
+    /// Length of string
+    #[derived]
     pub is: u32,
 }
 
-pub struct LengthInput {
-    pub of: String,
-}
-
-impl TryFrom<&mut Cursor> for LengthInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
-        let of = cursor.read::<String>("of")?;
-        Ok(LengthInput { of })
-    }
-}
-
-impl Compute for Length {
-    fn compute(input: Self::Input) -> Vec<Self> {
+impl Length {
+    pub fn derive(input: dialog_query::dsl::Input<Self>) -> Vec<Self> {
         vec![Length {
             of: input.of.clone(),
             is: input.of.len() as u32,
@@ -122,78 +50,18 @@ impl Compute for Length {
     }
 }
 
-static LENGTH_CELLS: OnceLock<Cells> = OnceLock::new();
-
-impl Formula for Length {
-    type Input = LengthInput;
-    type Match = ();
-
-    fn operator() -> &'static str {
-        "length"
-    }
-
-    fn cells() -> &'static Cells {
-        use crate::predicate::formula::Cell;
-
-        LENGTH_CELLS.get_or_init(|| {
-            let mut cells = Cells::default();
-
-            let mut of_cell = Cell::new("of", Type::String);
-            of_cell.the("String to measure").required();
-            cells.insert(of_cell);
-
-            let mut is_cell = Cell::new("is", Type::UnsignedInt);
-            is_cell.the("Length of string").derived(1);
-            cells.insert(is_cell);
-
-            cells
-        })
-    }
-
-    fn cost() -> usize {
-        1
-    }
-
-    fn dependencies() -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        dependencies.require("of".into());
-        dependencies.provide("is".into());
-        dependencies
-    }
-
-    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor)?;
-        Ok(Self::compute(input))
-    }
-
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-        let value = Value::UnsignedInt(self.is.into());
-        cursor.write("is", &value)
-    }
-}
-
 /// Uppercase formula that converts a string to uppercase
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, dialog_query_macros::Formula)]
 pub struct Uppercase {
+    /// String to convert
     pub of: String,
+    /// Uppercase string
+    #[derived]
     pub is: String,
 }
 
-pub struct UppercaseInput {
-    pub of: String,
-}
-
-impl TryFrom<&mut Cursor> for UppercaseInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
-        let of = cursor.read::<String>("of")?;
-        Ok(UppercaseInput { of })
-    }
-}
-
-impl Compute for Uppercase {
-    fn compute(input: Self::Input) -> Vec<Self> {
+impl Uppercase {
+    pub fn derive(input: dialog_query::dsl::Input<Self>) -> Vec<Self> {
         vec![Uppercase {
             of: input.of.clone(),
             is: input.of.to_uppercase(),
@@ -201,116 +69,22 @@ impl Compute for Uppercase {
     }
 }
 
-static UPPERCASE_CELLS: OnceLock<Cells> = OnceLock::new();
-
-impl Formula for Uppercase {
-    type Input = UppercaseInput;
-    type Match = ();
-
-    fn operator() -> &'static str {
-        "uppercase"
-    }
-
-    fn cells() -> &'static Cells {
-        UPPERCASE_CELLS.get_or_init(|| {
-            Cells::define(|builder| {
-                builder.cell("of", Type::String).the("String to convert").required();
-
-                builder.cell("is", Type::String).the("Uppercase string").derived(1);
-            })
-        })
-    }
-
-    fn cost() -> usize {
-        1
-    }
-
-    fn dependencies() -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        dependencies.require("of".into());
-        dependencies.provide("is".into());
-        dependencies
-    }
-
-    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor)?;
-        Ok(Self::compute(input))
-    }
-
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-        let value = Value::String(self.is.clone());
-        cursor.write("is", &value)
-    }
-}
-
 /// Lowercase formula that converts a string to lowercase
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, dialog_query_macros::Formula)]
 pub struct Lowercase {
+    /// String to convert
     pub of: String,
+    /// Lowercase string
+    #[derived]
     pub is: String,
 }
 
-pub struct LowercaseInput {
-    pub of: String,
-}
-
-impl TryFrom<&mut Cursor> for LowercaseInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
-        let of = cursor.read::<String>("of")?;
-        Ok(LowercaseInput { of })
-    }
-}
-
-impl Compute for Lowercase {
-    fn compute(input: Self::Input) -> Vec<Self> {
+impl Lowercase {
+    pub fn derive(input: dialog_query::dsl::Input<Self>) -> Vec<Self> {
         vec![Lowercase {
             of: input.of.clone(),
             is: input.of.to_lowercase(),
         }]
-    }
-}
-
-static LOWERCASE_CELLS: OnceLock<Cells> = OnceLock::new();
-
-impl Formula for Lowercase {
-    type Input = LowercaseInput;
-    type Match = ();
-
-    fn operator() -> &'static str {
-        "lowercase"
-    }
-
-    fn cells() -> &'static Cells {
-        LOWERCASE_CELLS.get_or_init(|| {
-            Cells::define(|builder| {
-                builder.cell("of", Type::String).the("String to convert").required();
-
-                builder.cell("is", Type::String).the("Lowercase string").derived(1);
-            })
-        })
-    }
-
-    fn cost() -> usize {
-        1
-    }
-
-    fn dependencies() -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        dependencies.require("of".into());
-        dependencies.provide("is".into());
-        dependencies
-    }
-
-    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor)?;
-        Ok(Self::compute(input))
-    }
-
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-        let value = Value::String(self.is.clone());
-        cursor.write("is", &value)
     }
 }
 
@@ -338,7 +112,10 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.resolve(&Term::<String>::var("result")).ok().and_then(|v| String::try_from(v).ok()),
+            result
+                .resolve(&Term::<String>::var("result"))
+                .ok()
+                .and_then(|v| String::try_from(v).ok()),
             Some("Hello World".to_string())
         );
     }
@@ -358,7 +135,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve(&Term::<u32>::var("len")).ok().and_then(|v| u32::try_from(v).ok()), Some(5));
+        assert_eq!(
+            result
+                .resolve(&Term::<u32>::var("len"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(5)
+        );
     }
 
     #[test]
@@ -377,7 +160,10 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.resolve(&Term::<String>::var("upper")).ok().and_then(|v| String::try_from(v).ok()),
+            result
+                .resolve(&Term::<String>::var("upper"))
+                .ok()
+                .and_then(|v| String::try_from(v).ok()),
             Some("HELLO WORLD".to_string())
         );
     }
@@ -398,7 +184,10 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.resolve(&Term::<String>::var("lower")).ok().and_then(|v| String::try_from(v).ok()),
+            result
+                .resolve(&Term::<String>::var("lower"))
+                .ok()
+                .and_then(|v| String::try_from(v).ok()),
             Some("hello world".to_string())
         );
     }
@@ -409,14 +198,22 @@ mod tests {
         terms.insert("of".to_string(), Term::var("text").into());
         terms.insert("is".to_string(), Term::var("len").into());
 
-        let input = Answer::new().set(Term::var("text"), "".to_string()).unwrap();
+        let input = Answer::new()
+            .set(Term::var("text"), "".to_string())
+            .unwrap();
 
         let app = Length::apply(terms).expect("apply should work");
         let results = app.derive(input).expect("Length of empty string failed");
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve(&Term::<u32>::var("len")).ok().and_then(|v| u32::try_from(v).ok()), Some(0));
+        assert_eq!(
+            result
+                .resolve(&Term::<u32>::var("len"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(0)
+        );
     }
 
     #[test]
@@ -440,7 +237,10 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         assert_eq!(
-            result.resolve(&Term::<String>::var("result")).ok().and_then(|v| String::try_from(v).ok()),
+            result
+                .resolve(&Term::<String>::var("result"))
+                .ok()
+                .and_then(|v| String::try_from(v).ok()),
             Some("World".to_string())
         );
     }

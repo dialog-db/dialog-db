@@ -108,13 +108,14 @@ use std::fmt::Display;
 use crate::{Term, Type};
 use serde::{Deserialize, Serialize};
 
-use crate::application::FormulaApplication;
+use crate::application::formula::FormulaApplication;
 use crate::cursor::Cursor;
+pub use crate::dsl::{Input, Quarriable};
 use crate::error::{FormulaEvaluationError, SchemaError, TypeError};
 use crate::selection::Answer;
 use crate::types::Scalar;
 use crate::Schema;
-use crate::{Dependencies, Parameters, Requirement};
+use crate::{Parameters, Requirement};
 
 /// Core trait for implementing formulas in the query system
 ///
@@ -144,20 +145,20 @@ use crate::{Dependencies, Parameters, Requirement};
 /// # Example
 ///
 /// See the module-level documentation for a complete example.
-pub trait Formula: Sized + Clone {
+pub trait Formula: Quarriable + Output + Sized + Clone {
     /// The input type for this formula
     ///
     /// This type must be constructible from a Cursor and should contain
     /// all the fields that the formula needs to read from the input.
-    type Input: for<'a> TryFrom<&'a mut Cursor, Error = FormulaEvaluationError>;
+    type Input: In;
 
     /// Match type for future pattern matching support
     ///
     /// Currently unused. In future versions, this will be used by macros
     /// to generate pattern matching code for formula applications in queries.
-    type Match;
+    type Match: Match<Formula = Self>;
 
-    fn dependencies() -> Dependencies;
+    // fn dependencies() -> Dependencies;
 
     fn cost() -> usize;
     fn cells() -> &'static Cells;
@@ -171,27 +172,30 @@ pub trait Formula: Sized + Clone {
         Self::cells().keys()
     }
 
-    /// Derive output instances from the input cursor
+    /// Convert derived outputs to Answer instances with proper provenance
     ///
-    /// This method is responsible for:
-    /// 1. Reading input values from the cursor
-    /// 2. Performing the formula's computation
-    /// 3. Returning the computed output instances
+    /// This method orchestrates the full formula evaluation:
+    /// 1. Calls `derive` to compute outputs
+    /// 2. For each output, calls `write` to add values to cursor
+    /// 3. Returns the Answer with Factor::Derived provenance
     ///
-    /// Most implementations will delegate to `Compute::compute` after
-    /// extracting the input from the cursor.
-    ///
-    /// # Arguments
-    /// * `cursor` - The cursor providing access to input values
-    ///
-    /// # Returns
-    /// * `Ok(Vec<Self>)` - One or more output instances
-    /// * `Err(_)` - If reading inputs fails or computation cannot proceed
-    ///
-    /// # Note
-    /// Returning a `Vec` allows formulas to produce multiple outputs for
-    /// a single input, enabling one-to-many transformations.
-    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError>;
+    /// This default implementation should work for most formulas.
+
+    fn compute(cursor: &mut Cursor) -> Result<Vec<Answer>, FormulaEvaluationError> {
+        let mut answers = Vec::new();
+        let input: Self::Input = cursor.try_into()?;
+        for output in Self::derive(input) {
+            let mut cursor = cursor.clone();
+            Self::write(&output, &mut cursor)?;
+            answers.push(cursor.source);
+        }
+
+        Ok(answers)
+    }
+
+    /// This method contains actual logic for deriving an output from provided
+    /// inputs.
+    fn derive(input: Self::Input) -> Vec<Self>;
 
     /// Write this formula instance's output values to the cursor
     ///
@@ -204,28 +208,7 @@ pub trait Formula: Sized + Clone {
     /// # Returns
     /// * `Ok(())` - If all writes succeeded
     /// * `Err(_)` - If writing fails (e.g., due to inconsistency)
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError>;
-
-    /// Convert derived outputs to Answer instances with proper provenance
-    ///
-    /// This method orchestrates the full formula evaluation:
-    /// 1. Calls `derive` to compute outputs
-    /// 2. For each output, calls `write` to add values to cursor
-    /// 3. Returns the Answer with Factor::Derived provenance
-    ///
-    /// This default implementation should work for most formulas.
-    fn derive_match(cursor: &mut Cursor) -> Result<Vec<Answer>, FormulaEvaluationError> {
-        let outputs = Self::derive(cursor)?;
-        let mut results = Vec::new();
-
-        for output in outputs {
-            output.write(cursor)?;
-            // The cursor.write() calls create Factor::Derived with proper provenance
-            results.push(cursor.source.clone());
-        }
-
-        Ok(results)
-    }
+    // fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError>;
 
     /// Create a formula application with term bindings
     ///
@@ -253,14 +236,57 @@ pub trait Formula: Sized + Clone {
             cells,
             cost: Self::cost(),
             parameters: cells.conform(terms)?,
-            compute: |cursor| Self::derive_match(cursor),
+            compute: |cursor| Self::compute(cursor),
         })
     }
 }
 
-/// Trait for formulas that can compute their outputs
-pub trait Compute: Formula + Sized {
-    fn compute(input: Self::Input) -> Vec<Self>;
+pub trait Interface {
+    /// The input type for this formula
+    ///
+    /// This type must be constructible from a Cursor and should contain
+    /// all the fields that the formula needs to read from the input.
+    type Input: In;
+    type Output: Output;
+}
+
+impl<T: Formula> Interface for T {
+    type Input = T::Input;
+    type Output = T;
+}
+
+pub trait In: for<'a> TryFrom<&'a mut Cursor, Error = FormulaEvaluationError> {}
+impl<T: for<'a> TryFrom<&'a mut Cursor, Error = FormulaEvaluationError>> In for T {}
+
+pub trait Output {
+    /// Write this formula instance's output values to the cursor
+    ///
+    /// This method is called for each output instance produced by `derive`
+    /// to write the computed values back to the cursor.
+    ///
+    /// # Arguments
+    /// * `cursor` - The cursor to write output values to
+    ///
+    /// # Returns
+    /// * `Ok(())` - If all writes succeeded
+    /// * `Err(_)` - If writing fails (e.g., due to inconsistency)
+    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError>;
+}
+
+pub trait Match: Sized + Clone + Into<Parameters> {
+    type Formula: Formula<Match = Self>;
+}
+
+impl<T: Match + Clone> From<T> for FormulaApplication {
+    fn from(value: T) -> Self {
+        FormulaApplication {
+            name: T::Formula::operator(),
+            cells: T::Formula::cells(),
+            cost: T::Formula::cost(),
+            parameters: value.into(),
+            compute: |cursor| T::Formula::compute(cursor),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,13 +297,13 @@ pub struct Cell {
     description: String,
     /// Data type of this cell
     #[serde(rename = "type")]
-    content_type: Type,
+    content_type: Option<Type>,
     /// Requirement for this cell
     requirement: Requirement,
 }
 
 impl Cell {
-    pub fn new(name: &'static str, content_type: Type) -> Self {
+    pub fn new(name: &'static str, content_type: Option<Type>) -> Self {
         Cell {
             name: name.to_string(),
             description: String::new(),
@@ -287,7 +313,7 @@ impl Cell {
     }
 
     pub fn typed(&mut self, content_type: Type) -> &mut Self {
-        self.content_type = content_type;
+        self.content_type = Some(content_type);
         self
     }
 
@@ -318,7 +344,7 @@ impl Cell {
         &self.description
     }
 
-    pub fn content_type(&self) -> &Type {
+    pub fn content_type(&self) -> &Option<Type> {
         &self.content_type
     }
 
@@ -328,19 +354,26 @@ impl Cell {
 
     /// Type checks that provided term matches cells content type. If term
     pub fn check<'a, T: Scalar>(&self, term: &'a Term<T>) -> Result<&'a Term<T>, TypeError> {
-        let expected = self.content_type();
         // First we type check the input to ensure it matches cell's content type
-        if let Some(actual) = term.content_type() {
-            if &actual != expected {
-                // Convert the term to Term<Value> for the error
-                return Err(TypeError::TypeMismatch {
-                    expected: expected.clone(),
-                    actual: term.as_unknown(),
-                });
-            };
-        };
-
-        Ok(term)
+        match (self.content_type(), term.content_type()) {
+            // if expected is any (has no type) it checks
+            (None, _) => Ok(term),
+            // if cell is of some type and we're given term of unknown
+            // type that's also fine.
+            (_, None) => Ok(term),
+            // if expected isn't any (has no type) it must be equal
+            // to actual or it's a type missmatch.
+            (Some(expected), actual) => {
+                if Some(*expected) == actual {
+                    Ok(term)
+                } else {
+                    Err(TypeError::TypeMismatch {
+                        expected: expected.clone(),
+                        actual: term.as_unknown(),
+                    })
+                }
+            }
+        }
     }
 
     pub fn conform<'a, T: Scalar>(
@@ -368,10 +401,16 @@ impl Cell {
 
 impl Display for Cell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.requirement.is_required() {
-            write!(f, "?{}: {}", self.name, self.content_type)
+        let prefix = if self.requirement.is_required() {
+            ""
         } else {
-            write!(f, "{}: {}", self.name, self.content_type)
+            "?"
+        };
+
+        if let Some(content_type) = self.content_type {
+            write!(f, "{}{}: {}", prefix, self.name, content_type)
+        } else {
+            write!(f, "{}{}: Value", prefix, self.name)
         }
     }
 }
@@ -381,7 +420,7 @@ pub struct CellsBuilder {
 }
 
 impl CellsBuilder {
-    pub fn cell(&mut self, name: &'static str, content_type: Type) -> &mut Cell {
+    pub fn cell(&mut self, name: &'static str, content_type: Option<Type>) -> &mut Cell {
         let cell = Cell::new(name, content_type);
         self.cells.insert(name.to_string(), cell);
         self.cells.get_mut(name).unwrap()
@@ -472,7 +511,7 @@ impl From<&Cells> for Schema {
                 name.into(),
                 Constraint {
                     description: cell.description.clone(),
-                    content_type: Some(cell.content_type),
+                    content_type: cell.content_type,
                     requirement: cell.requirement.clone(),
                     cardinality: Cardinality::One,
                 },
@@ -486,19 +525,22 @@ impl From<&Cells> for Schema {
 fn test_cells() -> anyhow::Result<()> {
     let cells = Cells::define(|builder| {
         builder
-            .cell("name", Type::String)
+            .cell("name", Some(Type::String))
             .the("name field")
             .required();
 
         builder
-            .cell("age", Type::UnsignedInt)
+            .cell("age", Some(Type::UnsignedInt))
             .the("age field")
             .derived(15);
     });
 
     assert_eq!(cells.count(), 2);
     assert_eq!(cells.get("name").unwrap().name(), "name");
-    assert_eq!(*cells.get("name").unwrap().content_type(), Type::String);
+    assert_eq!(
+        *cells.get("name").unwrap().content_type(),
+        Some(Type::String)
+    );
     assert_eq!(cells.get("name").unwrap().description(), "name field");
     assert_eq!(
         cells.get("name").unwrap().requirement(),
@@ -506,7 +548,10 @@ fn test_cells() -> anyhow::Result<()> {
     );
 
     assert_eq!(cells.get("age").unwrap().name(), "age");
-    assert_eq!(*cells.get("age").unwrap().content_type(), Type::UnsignedInt);
+    assert_eq!(
+        *cells.get("age").unwrap().content_type(),
+        Some(Type::UnsignedInt)
+    );
     assert_eq!(cells.get("age").unwrap().description(), "age field");
     assert_eq!(
         cells.get("age").unwrap().requirement(),

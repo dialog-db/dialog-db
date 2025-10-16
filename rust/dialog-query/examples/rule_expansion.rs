@@ -119,6 +119,10 @@ mod person {
         type Retract = Retract;
     }
 
+    impl concept::Quarriable for Person {
+        type Query = Match;
+    }
+
     impl concept::ConceptType for Person {
         fn operator() -> &'static str {
             &NAMESPACE

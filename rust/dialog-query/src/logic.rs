@@ -3,42 +3,27 @@
 //! This module provides formulas for boolean operations including
 //! AND, OR, and NOT operations.
 
-use crate::{
-    cursor::Cursor, error::FormulaEvaluationError, predicate::formula::Cells, Compute,
-    Dependencies, Formula, Type, Value,
-};
-
-use std::sync::OnceLock;
+use crate::dsl::Input;
+use crate::Formula;
 
 // ============================================================================
 // Boolean Logic Operations: And, Or, Not
 // ============================================================================
 
 /// And formula that performs logical AND on two boolean values
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Formula)]
 pub struct And {
+    /// Left operand
     pub left: bool,
+    /// Right operand
     pub right: bool,
+    /// Result of AND operation
+    #[derived]
     pub is: bool,
 }
 
-pub struct AndInput {
-    pub left: bool,
-    pub right: bool,
-}
-
-impl TryFrom<&mut Cursor> for AndInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
-        let left = cursor.read::<bool>("left")?;
-        let right = cursor.read::<bool>("right")?;
-        Ok(AndInput { left, right })
-    }
-}
-
-impl Compute for And {
-    fn compute(input: Self::Input) -> Vec<Self> {
+impl And {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![And {
             left: input.left,
             right: input.right,
@@ -47,78 +32,20 @@ impl Compute for And {
     }
 }
 
-static AND_CELLS: OnceLock<Cells> = OnceLock::new();
-
-impl Formula for And {
-    type Input = AndInput;
-    type Match = ();
-
-    fn operator() -> &'static str {
-        "and"
-    }
-
-    fn cells() -> &'static Cells {
-        AND_CELLS.get_or_init(|| {
-            Cells::define(|builder| {
-                builder.cell("left", Type::Boolean).the("Left operand").required();
-
-                builder.cell("right", Type::Boolean).the("Right operand").required();
-
-                builder.cell("is", Type::Boolean)
-                    .the("Result of AND operation")
-                    .derived(1);
-            })
-        })
-    }
-
-    fn cost() -> usize {
-        1
-    }
-
-    fn dependencies() -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        dependencies.require("left".into());
-        dependencies.require("right".into());
-        dependencies.provide("is".into());
-        dependencies
-    }
-
-    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor)?;
-        Ok(Self::compute(input))
-    }
-
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-        let value = Value::Boolean(self.is);
-        cursor.write("is", &value)
-    }
-}
-
 /// Or formula that performs logical OR on two boolean values
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, dialog_query_macros::Formula)]
 pub struct Or {
+    /// Left operand
     pub left: bool,
+    /// Right operand
     pub right: bool,
+    /// Result of OR operation
+    #[derived]
     pub is: bool,
 }
 
-pub struct OrInput {
-    pub left: bool,
-    pub right: bool,
-}
-
-impl TryFrom<&mut Cursor> for OrInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
-        let left = cursor.read::<bool>("left")?;
-        let right = cursor.read::<bool>("right")?;
-        Ok(OrInput { left, right })
-    }
-}
-
-impl Compute for Or {
-    fn compute(input: Self::Input) -> Vec<Self> {
+impl Or {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![Or {
             left: input.left,
             right: input.right,
@@ -127,75 +54,18 @@ impl Compute for Or {
     }
 }
 
-static OR_CELLS: OnceLock<Cells> = OnceLock::new();
-
-impl Formula for Or {
-    type Input = OrInput;
-    type Match = ();
-
-    fn operator() -> &'static str {
-        "or"
-    }
-
-    fn cells() -> &'static Cells {
-        OR_CELLS.get_or_init(|| {
-            Cells::define(|builder| {
-                builder.cell("left", Type::Boolean).the("Left operand").required();
-
-                builder.cell("right", Type::Boolean).the("Right operand").required();
-
-                builder.cell("is", Type::Boolean)
-                    .the("Result of OR operation")
-                    .derived(1);
-            })
-        })
-    }
-
-    fn cost() -> usize {
-        1
-    }
-
-    fn dependencies() -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        dependencies.require("left".into());
-        dependencies.require("right".into());
-        dependencies.provide("is".into());
-        dependencies
-    }
-
-    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor)?;
-        Ok(Self::compute(input))
-    }
-
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-        let value = Value::Boolean(self.is);
-        cursor.write("is", &value)
-    }
-}
-
 /// Not formula that performs logical NOT on a boolean value
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, dialog_query_macros::Formula)]
 pub struct Not {
+    /// Boolean value to negate
     pub value: bool,
+    /// Result of NOT operation
+    #[derived]
     pub is: bool,
 }
 
-pub struct NotInput {
-    pub value: bool,
-}
-
-impl TryFrom<&mut Cursor> for NotInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
-        let value = cursor.read::<bool>("value")?;
-        Ok(NotInput { value })
-    }
-}
-
-impl Compute for Not {
-    fn compute(input: Self::Input) -> Vec<Self> {
+impl Not {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![Not {
             value: input.value,
             is: !input.value,
@@ -203,56 +73,10 @@ impl Compute for Not {
     }
 }
 
-static NOT_CELLS: OnceLock<Cells> = OnceLock::new();
-
-impl Formula for Not {
-    type Input = NotInput;
-    type Match = ();
-
-    fn operator() -> &'static str {
-        "not"
-    }
-
-    fn cells() -> &'static Cells {
-        NOT_CELLS.get_or_init(|| {
-            Cells::define(|builder| {
-                builder.cell("value", Type::Boolean)
-                    .the("Boolean value to negate")
-                    .required();
-
-                builder.cell("is", Type::Boolean)
-                    .the("Result of NOT operation")
-                    .derived(1);
-            })
-        })
-    }
-
-    fn cost() -> usize {
-        1
-    }
-
-    fn dependencies() -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        dependencies.require("value".into());
-        dependencies.provide("is".into());
-        dependencies
-    }
-
-    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor)?;
-        Ok(Self::compute(input))
-    }
-
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-        let value = Value::Boolean(self.is);
-        cursor.write("is", &value)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{selection::Answer, Parameters, Term};
+    use crate::{selection::Answer, Formula, Parameters, Term};
 
     #[test]
     fn test_and_formula_true_true() -> anyhow::Result<()> {
@@ -272,7 +96,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve(&Term::<bool>::var("result")).ok().and_then(|v| bool::try_from(v).ok()), Some(true));
+        assert_eq!(
+            result
+                .resolve(&Term::<bool>::var("result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
+            Some(true)
+        );
         Ok(())
     }
 
@@ -294,7 +124,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve(&Term::<bool>::var("result")).ok().and_then(|v| bool::try_from(v).ok()), Some(false));
+        assert_eq!(
+            result
+                .resolve(&Term::<bool>::var("result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
+            Some(false)
+        );
         Ok(())
     }
 
@@ -316,7 +152,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve(&Term::<bool>::var("result")).ok().and_then(|v| bool::try_from(v).ok()), Some(false));
+        assert_eq!(
+            result
+                .resolve(&Term::<bool>::var("result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
+            Some(false)
+        );
         Ok(())
     }
 
@@ -338,7 +180,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve(&Term::<bool>::var("result")).ok().and_then(|v| bool::try_from(v).ok()), Some(true));
+        assert_eq!(
+            result
+                .resolve(&Term::<bool>::var("result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
+            Some(true)
+        );
         Ok(())
     }
 
@@ -360,7 +208,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve(&Term::<bool>::var("result")).ok().and_then(|v| bool::try_from(v).ok()), Some(false));
+        assert_eq!(
+            result
+                .resolve(&Term::<bool>::var("result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
+            Some(false)
+        );
         Ok(())
     }
 
@@ -377,7 +231,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve(&Term::<bool>::var("result")).ok().and_then(|v| bool::try_from(v).ok()), Some(false));
+        assert_eq!(
+            result
+                .resolve(&Term::<bool>::var("result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
+            Some(false)
+        );
         Ok(())
     }
 
@@ -395,7 +255,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve(&Term::<bool>::var("result")).ok().and_then(|v| bool::try_from(v).ok()), Some(true));
+        assert_eq!(
+            result
+                .resolve(&Term::<bool>::var("result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
+            Some(true)
+        );
         Ok(())
     }
 
@@ -430,7 +296,10 @@ mod tests {
         assert_eq!(not_results.len(), 1);
         let final_result = &not_results[0];
         assert_eq!(
-            final_result.resolve(&Term::<bool>::var("final_result")).ok().and_then(|v| bool::try_from(v).ok()),
+            final_result
+                .resolve(&Term::<bool>::var("final_result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
             Some(true)
         );
         Ok(())

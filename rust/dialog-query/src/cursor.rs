@@ -41,7 +41,7 @@ use std::sync::Arc;
 /// to enable proper provenance tracking for derived values.
 ///
 /// Cursors are specific to formula evaluation and should not be used for other purposes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Cursor {
     /// The current answer containing variable bindings and provenance
     ///
@@ -107,6 +107,10 @@ impl Cursor {
         &mut self,
         key: &str,
     ) -> Result<T, FormulaEvaluationError> {
+        Ok(T::try_from(self.resolve(key)?)?)
+    }
+
+    pub fn resolve(&mut self, key: &str) -> Result<Value, FormulaEvaluationError> {
         let term =
             self.terms
                 .get(key)
@@ -120,17 +124,15 @@ impl Cursor {
         }
 
         // Get the value from the answer
-        let value = self.source.resolve(term).map_err(|_| {
-            FormulaEvaluationError::UnboundVariable {
-                term: term.clone(),
-                parameter: key.into(),
-            }
-        })?;
+        let value =
+            self.source
+                .resolve(term)
+                .map_err(|_| FormulaEvaluationError::UnboundVariable {
+                    term: term.clone(),
+                    parameter: key.into(),
+                })?;
 
-        T::try_from(value).map_err(|e| {
-            let TypeError::TypeMismatch(expected, actual) = e;
-            FormulaEvaluationError::TypeMismatch { expected, actual }
-        })
+        Ok(value)
     }
 
     /// Get an immutable reference to the source answer
@@ -209,6 +211,13 @@ impl Cursor {
         })?;
 
         Ok(())
+    }
+}
+
+impl From<TypeError> for FormulaEvaluationError {
+    fn from(error: TypeError) -> Self {
+        let TypeError::TypeMismatch(expected, actual) = error;
+        FormulaEvaluationError::TypeMismatch { expected, actual }
     }
 }
 
@@ -429,7 +438,10 @@ mod tests {
 
         // Verify we got the answer back
         assert_eq!(
-            answer.resolve(&Term::<u32>::var("input_x")).ok().and_then(|v| u32::try_from(v).ok()),
+            answer
+                .resolve(&Term::<u32>::var("input_x"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
             Some(10u32)
         );
 

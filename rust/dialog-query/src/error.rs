@@ -254,7 +254,10 @@ impl From<InconsistencyError> for FormulaEvaluationError {
                 // This occurs when trying to set a variable that's already bound to a different value
                 // We don't have enough context to create proper VariableInconsistency,
                 // so wrap in TypeMismatch for now
-                eprintln!("Warning: InconsistencyError::AssignmentError in formula: {}", msg);
+                eprintln!(
+                    "Warning: InconsistencyError::AssignmentError in formula: {}",
+                    msg
+                );
                 FormulaEvaluationError::TypeMismatch {
                     expected: crate::artifact::Type::UnsignedInt,
                     actual: crate::artifact::Type::UnsignedInt,
@@ -281,7 +284,10 @@ impl From<InconsistencyError> for FormulaEvaluationError {
                     actual: crate::artifact::Type::String,
                 }
             }
-            InconsistencyError::TypeMismatch { expected: _, actual: _ } => {
+            InconsistencyError::TypeMismatch {
+                expected: _,
+                actual: _,
+            } => {
                 // TypeMismatch from Value comparison - we don't have type info directly
                 eprintln!("Warning: InconsistencyError::TypeMismatch in formula");
                 FormulaEvaluationError::TypeMismatch {
@@ -290,6 +296,30 @@ impl From<InconsistencyError> for FormulaEvaluationError {
                 }
             }
         }
+    }
+}
+
+// Implement conversion from Infallible to FormulaEvaluationError because in our
+// Formula macro we generate code like shown below
+//
+// ```rs
+// impl TryFrom<Cursor> for MyFormulaInput {
+//     type Error = FormulaEvaluationError;
+//     fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
+//         cursor.resolve("field")?.try_into()?
+//     }
+// }
+// ```
+//
+// However if `field` of my `MyFormulaInput` has `Value` type doing `try_into()`
+// produces `Result<Value, Infallible>` that need to be converted to be
+// converted `FormulaEvaluationError`. Since `Infallible` can never occur, we
+// can simply mark this conversion as unreachable because in case of `Value` we
+// will always get `Ok(Value)`. Other types return `TypeError` that has
+// own `From<TypeError> for FormulaEvaluationError` implementation.
+impl From<std::convert::Infallible> for FormulaEvaluationError {
+    fn from(_: std::convert::Infallible) -> Self {
+        unreachable!("Infallible can not occur")
     }
 }
 

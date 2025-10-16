@@ -370,7 +370,8 @@ mod tests {
         // Use new query API directly on application
         let application = person.apply(params)?;
 
-        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(application.query(&session)).await?;
+        let selection =
+            futures_util::TryStreamExt::try_collect::<Vec<_>>(application.query(&session)).await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
 
         // Check that we have both Alice and Bob (order may vary)
@@ -580,7 +581,8 @@ mod tests {
         // Let's test with empty parameters first to see the exact error
         let application = person.apply(params)?;
 
-        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(application.query(&session)).await?;
+        let selection =
+            futures_util::TryStreamExt::try_collect::<Vec<_>>(application.query(&session)).await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
 
         // Check that we have both Alice and Bob (order may vary)

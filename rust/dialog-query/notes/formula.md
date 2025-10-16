@@ -8,13 +8,14 @@ pub struct Sum {
     of: usize,
     with: usize,
     // This is derived from the sum of `of` and `with`.
-    #[derived]
+    #[derived]  // Default cost is 1
     is: usize,
 }
 
-// You implement formula
-impl Compute for Sum {
-    fn compute(input: Self::Input) -> Vec<Self> {
+// You must manually implement the derive method with the formula logic
+impl Sum {
+    // The Formula trait's derive() method will call this
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![Sum {
             of: input.of,
             with: input.with,
@@ -22,123 +23,46 @@ impl Compute for Sum {
         }]
     }
 }
+```
 
+The `#[derive(Formula)]` macro generates:
+- `SumInput` struct with only non-derived fields (`of`, `with`)
+- `SumMatch` struct with all fields as `Term<T>` for pattern matching
+- `impl Formula for Sum` with operator(), cells(), cost(), dependencies(), derive()
+- `impl Output for Sum` with auto-generated `write()` that writes all derived fields
+- `impl Pattern for Sum`
+- `impl formula::Match for SumMatch`
+- `impl From<SumMatch> for Parameters`
+- `impl TryFrom<&mut Cursor> for SumInput`
 
+You must manually implement:
+- `impl Sum { pub fn derive(input: Input<Self>) -> Vec<Self> { ... } }` - the formula business logic
 
+Then use it like this in the rule bodies
 
-
-
-
-trait Compute:Formula {
-    fn compute(input: Self::Input) -> Vec<Self>;
-}
-
-trait Formula {
-    type Input: TryFrom<Cursor, Error = FormulaEvaluationError>;
-    type Match;
-
-    fn write(&self, cursor: Cursor) -> Result<(), FormulaEvaluationError>;
-
-    fn apply(terms: Match) -> FormulaApplication<Self> {
-        FormulaApplication::new(terms, PhantomData)
-    }
-}
-
-
-struct FormulaApplication<F> {
-    terms: Match,
-    _marker: PhantomData<F>,
-}
-
-impl<F: Formula> FormulaApplication {
-    fn new(terms: Match, _marker: PhantomData<F>) -> Self {
-        FormulaApplication { terms, _marker }
-    }
-
-    fn expand(source: Match) -> Result<Vec<Match>, FormulaEvaluationError>> {
-        let cursor = Cursor::new(source, self.terms);
-        let input = F::Input::try_from(cursor)?;
-        let output = F::compute(input);
-        let mut results = Vec::new();
-        for output in output {
-            let result = cursor.clone();
-            output.write(cursor)?;
-
-            vec.push(result.source);
-        }
-
-        Ok(results)
-    }
-
-    fn evaluate<S: Store, M: Selection>(&self, context: EvaluationContext<S, M>) -> impl Selection {
-        try_stream! {
-            for await frame in context.selection {
-                for output in Self::expand(frame?)? {
-                    yield output;
-                }
-            }
-        }
-    }
-}
-
-
-struct Cursor {
-    source: Match,
-    terms: Terms,
-}
-
-impl Cursor {
-    fn new(source: Match, terms: Terms) -> Self {
-        Cursor { source, terms }
-    }
-
-    fn read(&self, key: &str) -> Result<Term, FormulaEvaluationError> {
-        let term = self.terms.get(key).ok_or(FormulaEvaluationError::MissingTerm(key.to_string()))?;
-        self.source.get(term)
-    }
-
-    fn write(&mut self, key: &str, value: Term) -> Result<(), FormulaEvaluationError> {
-        let term = self.terms.get(key).ok_or(FormulaEvaluationError::MissingTerm(key.to_string()))?;
-
-        self.source = self.source.set(term, value)?;
-        Ok(())
-    }
-}
-
-// Derives expand into something like this
-
-pub struct SumInput {
-    of: usize,
-    with: usize,
-}
-
-impl TryFrom<Cursor> for SumInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
-        let of = cursor.read("of")?;
-        let with = cursor.read("with")?;
-        Ok(SumInput { of, with })
-    }
-}
-
-pub struct SumMatch {
-    of: Term<usize>,
-    with: Term<usize>,
-    is: Term<usize>
-}
-
-impl Formula for Sum {
-    type Input = SumInput;
-    type Match = SumMatch;
-
-    fn compute(input: Self::Input) -> Vec<Self> {
-        vec![Sum::compute(input)]
-    }
-
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-        cursor.write('is'.into(), self.is.clone())
-    }
-
+```rs
+SumMatch {
+  of: Term::var("x"),
+  with: Term::var("y"),
+  is: Term::var("z"),
 }
 ```
+
+## Derived Field Costs
+
+You can specify a cost for each derived field:
+
+```rs
+#[derive(Debug, Clone, Formula)]
+pub struct QuotientRemainder {
+    pub dividend: u32,
+    pub divisor: u32,
+    #[derived(cost = 3)]
+    pub quotient: u32,
+    #[derived(cost = 2)]
+    pub remainder: u32,
+}
+// Total formula cost will be 3 + 2 = 5
+```
+
+If you don't specify a cost, it defaults to 1

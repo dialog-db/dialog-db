@@ -3,56 +3,22 @@
 //! This module provides formulas for converting between different types,
 //! including string conversion and number parsing operations.
 
-use crate::{
-    cursor::Cursor, error::FormulaEvaluationError, predicate::formula::Cells, Compute,
-    Dependencies, Formula, Type, Value,
-};
-
-use std::sync::OnceLock;
+use crate::{dsl::Input, Formula, Value};
 
 // ============================================================================
 // Type Conversion Operations: ToString, ParseNumber
 // ============================================================================
 
 /// ToString formula that converts any supported type to string
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Formula)]
 pub struct ToString {
     pub value: Value,
+    #[derived]
     pub is: String,
 }
 
-pub struct ToStringInput {
-    pub value: Value,
-}
-
-impl TryFrom<&mut Cursor> for ToStringInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
-        // Read the raw Value without type conversion since we accept any type
-        let term =
-            cursor
-                .terms
-                .get("value")
-                .ok_or_else(|| FormulaEvaluationError::RequiredParameter {
-                    parameter: "value".into(),
-                })?;
-
-        let value =
-            cursor
-                .source
-                .resolve(term)
-                .map_err(|_| FormulaEvaluationError::UnboundVariable {
-                    term: term.clone(),
-                    parameter: "value".into(),
-                })?;
-
-        Ok(ToStringInput { value })
-    }
-}
-
-impl Compute for ToString {
-    fn compute(input: Self::Input) -> Vec<Self> {
+impl ToString {
+    pub fn derive(input: ToStringInput) -> Vec<Self> {
         let string_repr = match &input.value {
             Value::String(s) => s.clone(),
             Value::UnsignedInt(n) => n.to_string(),
@@ -72,76 +38,18 @@ impl Compute for ToString {
     }
 }
 
-static TO_STRING_CELLS: OnceLock<Cells> = OnceLock::new();
-
-impl Formula for ToString {
-    type Input = ToStringInput;
-    type Match = ();
-
-    fn operator() -> &'static str {
-        "to_string"
-    }
-
-    fn cells() -> &'static Cells {
-        TO_STRING_CELLS.get_or_init(|| {
-            Cells::define(|builder| {
-                builder
-                    .cell("value", Type::String) // Note: accepts any type
-                    .the("Value to convert")
-                    .required();
-
-                builder
-                    .cell("is", Type::String)
-                    .the("String representation")
-                    .derived(1);
-            })
-        })
-    }
-
-    fn cost() -> usize {
-        1
-    }
-
-    fn dependencies() -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        dependencies.require("value".into());
-        dependencies.provide("is".into());
-        dependencies
-    }
-
-    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor)?;
-        Ok(Self::compute(input))
-    }
-
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-        let value = Value::String(self.is.clone());
-        cursor.write("is", &value)
-    }
-}
-
 /// ParseNumber formula that converts a string to a number (u32)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Formula)]
 pub struct ParseNumber {
+    /// String to parse
     pub text: String,
+    /// Parsed number
+    #[derived(cost = 2)]
     pub is: u32,
 }
 
-pub struct ParseNumberInput {
-    pub text: String,
-}
-
-impl TryFrom<&mut Cursor> for ParseNumberInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
-        let text = cursor.read::<String>("text")?;
-        Ok(ParseNumberInput { text })
-    }
-}
-
-impl Compute for ParseNumber {
-    fn compute(input: Self::Input) -> Vec<Self> {
+impl ParseNumber {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
         // Try to parse the string as a u32
         match input.text.trim().parse::<u32>() {
             Ok(number) => vec![ParseNumber {
@@ -153,54 +61,6 @@ impl Compute for ParseNumber {
                 vec![]
             }
         }
-    }
-}
-
-static PARSE_NUMBER_CELLS: OnceLock<Cells> = OnceLock::new();
-
-impl Formula for ParseNumber {
-    type Input = ParseNumberInput;
-    type Match = ();
-
-    fn operator() -> &'static str {
-        "parse_number"
-    }
-
-    fn cells() -> &'static Cells {
-        PARSE_NUMBER_CELLS.get_or_init(|| {
-            Cells::define(|builder| {
-                builder
-                    .cell("text", Type::String)
-                    .the("String to parse")
-                    .required();
-
-                builder
-                    .cell("is", Type::UnsignedInt)
-                    .the("Parsed number")
-                    .derived(2);
-            })
-        })
-    }
-
-    fn cost() -> usize {
-        2
-    }
-
-    fn dependencies() -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        dependencies.require("text".into());
-        dependencies.provide("is".into());
-        dependencies
-    }
-
-    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor)?;
-        Ok(Self::compute(input))
-    }
-
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-        let value = Value::UnsignedInt(self.is.into());
-        cursor.write("is", &value)
     }
 }
 

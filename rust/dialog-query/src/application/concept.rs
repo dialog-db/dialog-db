@@ -458,13 +458,6 @@ mod tests {
         )
         .await?;
 
-        // Should still execute successfully and bind name and age
-        // (even though we don't have the actual entity value in the match)
-        assert!(
-            selection.len() >= 0,
-            "Should execute successfully with bound scope"
-        );
-
         Ok(())
     }
 }

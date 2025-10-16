@@ -429,7 +429,7 @@ where
                 if let Some(data_type) = T::TYPE {
                     write!(f, "?{}<{:?}>", name, data_type)
                 } else {
-                    write!(f, "?{}", name)
+                    write!(f, "?{}<Value>", name)
                 }
             }
             // Unnamed variables display as underscore

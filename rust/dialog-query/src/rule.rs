@@ -7,15 +7,8 @@
 //! and follows the patterns described in the design document at notes/rules.md.
 
 use crate::concept::Concept;
+pub use crate::dsl::{Claim, Instance, Match};
 use crate::premise::Premise;
-
-/// Utility type that simply gets associated type for the relation.
-#[allow(type_alias_bounds)]
-pub type Match<T: Concept> = T::Match;
-#[allow(type_alias_bounds)]
-pub type Claim<T: Concept> = T::Assert;
-#[allow(type_alias_bounds)]
-pub type Instance<T: Concept> = T::Instance;
 
 /// Collection of premises that must be satisfied for a rule to apply.
 ///

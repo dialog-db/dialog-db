@@ -1,4 +1,5 @@
 use crate::application::ConceptApplication;
+pub use crate::dsl::Quarriable;
 pub use crate::predicate::concept::{Attributes, ConceptType};
 use crate::query::{Output, Source};
 use crate::selection::Answer;
@@ -18,7 +19,7 @@ use futures_util::StreamExt;
 /// Concepts are used to describe conclusions of the rules, providing a mapping
 /// between conclusions and facts. In that sense you concepts are on-demand
 /// cache of all the conclusions from the associated rules.
-pub trait Concept: Clone + std::fmt::Debug + predicate::concept::ConceptType {
+pub trait Concept: Quarriable + Clone + std::fmt::Debug + predicate::concept::ConceptType {
     type Instance: Instance;
     /// Type representing a query of this concept. It is a set of terms
     /// corresponding to the set of attributes defined by this concept.
@@ -223,6 +224,10 @@ mod tests {
         type Assert = PersonAssert;
         type Retract = PersonRetract;
         type Term = PersonTerms;
+    }
+
+    impl Quarriable for Person {
+        type Query = PersonMatch;
     }
 
     // Implement TryFrom<selection::Answer> for Person

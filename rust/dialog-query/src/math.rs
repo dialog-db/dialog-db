@@ -1,47 +1,20 @@
-use std::{sync::OnceLock, usize};
-
-use crate::{
-    cursor::Cursor, error::FormulaEvaluationError, predicate::formula::Cells, Compute,
-    Dependencies, Formula, Term, Type, Value,
-};
+use crate::{dsl::Input, Formula};
 
 // ============================================================================
 // Example: Sum Formula Implementation
 // ============================================================================
 
 /// Example Sum formula that adds two numbers
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Formula)]
 pub struct Sum {
     pub of: u32,
     pub with: u32,
+    #[derived(cost = 5)]
     pub is: u32,
 }
 
-/// Input structure for Sum formula
-pub struct SumInput {
-    pub of: u32,
-    pub with: u32,
-}
-
-impl TryFrom<&mut Cursor> for SumInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
-        let of = cursor.read("of")?;
-        let with = cursor.read("with")?;
-        Ok(SumInput { of, with })
-    }
-}
-
-/// Match structure for Sum formula (for future macro generation)
-pub struct SumMatch {
-    pub of: Term<u32>,
-    pub with: Term<u32>,
-    pub is: Term<u32>,
-}
-
-impl Compute for Sum {
-    fn compute(input: Self::Input) -> Vec<Self> {
+impl Sum {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![Sum {
             of: input.of,
             with: input.with,
@@ -50,90 +23,24 @@ impl Compute for Sum {
     }
 }
 
-static SUM_CELLS: OnceLock<Cells> = OnceLock::new();
-
-impl Formula for Sum {
-    type Input = SumInput;
-    type Match = SumMatch;
-
-    fn operator() -> &'static str {
-        "sum"
-    }
-
-    fn cells() -> &'static Cells {
-        SUM_CELLS.get_or_init(|| {
-            Cells::define(|builder| {
-                builder
-                    .cell("of", Type::UnsignedInt)
-                    .the("Number to add to")
-                    .required();
-
-                builder
-                    .cell("with", Type::UnsignedInt)
-                    .the("Number to add")
-                    .required();
-
-                builder
-                    .cell("is", Type::UnsignedInt)
-                    .the("Sum of numbers")
-                    .derived(5);
-            })
-        })
-    }
-
-    fn cost() -> usize {
-        5
-    }
-
-    fn dependencies() -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        dependencies.require("of".into());
-        dependencies.require("with".into());
-        dependencies.provide("is".into());
-
-        dependencies
-    }
-
-    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor)?;
-        Ok(Self::compute(input))
-    }
-
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-        let value = Value::UnsignedInt(self.is.into());
-        cursor.write("is", &value)
-    }
-}
-
 // ============================================================================
 // Mathematical Operations: Difference, Product, Quotient, Modulo
 // ============================================================================
 
 /// Difference formula that subtracts two numbers
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Formula)]
 pub struct Difference {
+    /// Number to subtract from
     pub of: u32,
+    /// Number to subtract
     pub subtract: u32,
+    /// Difference
+    #[derived(cost = 2)]
     pub is: u32,
 }
 
-pub struct DifferenceInput {
-    pub of: u32,
-    pub subtract: u32,
-}
-
-impl TryFrom<&mut Cursor> for DifferenceInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
-        let of = cursor.read::<u32>("of")?;
-        let subtract = cursor.read::<u32>("subtract")?;
-        Ok(DifferenceInput { of, subtract })
-    }
-}
-
-impl Compute for Difference {
-    fn compute(input: Self::Input) -> Vec<Self> {
+impl Difference {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![Difference {
             of: input.of,
             subtract: input.subtract,
@@ -142,85 +49,20 @@ impl Compute for Difference {
     }
 }
 
-static DIFFERENCE_CELLS: OnceLock<Cells> = OnceLock::new();
-
-impl Formula for Difference {
-    type Input = DifferenceInput;
-    type Match = ();
-
-    fn operator() -> &'static str {
-        "difference"
-    }
-
-    fn cells() -> &'static Cells {
-        DIFFERENCE_CELLS.get_or_init(|| {
-            Cells::define(|builder| {
-                builder
-                    .cell("of", Type::UnsignedInt)
-                    .the("Number to subtract from")
-                    .required();
-
-                builder
-                    .cell("subtract", Type::UnsignedInt)
-                    .the("Number to subtract")
-                    .required();
-
-                builder
-                    .cell("is", Type::UnsignedInt)
-                    .the("Difference")
-                    .derived(2);
-            })
-        })
-    }
-
-    fn cost() -> usize {
-        2
-    }
-
-    fn dependencies() -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        dependencies.require("of".into());
-        dependencies.require("subtract".into());
-        dependencies.provide("is".into());
-        dependencies
-    }
-
-    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor)?;
-        Ok(Self::compute(input))
-    }
-
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-        let value = Value::UnsignedInt(self.is.into());
-        cursor.write("is", &value)
-    }
-}
-
 /// Product formula that multiplies two numbers
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Formula)]
 pub struct Product {
+    /// Number to multiply
     pub of: u32,
+    /// Times to multiply
     pub times: u32,
+    /// Result of multiplication
+    #[derived(cost = 5)]
     pub is: u32,
 }
 
-pub struct ProductInput {
-    pub of: u32,
-    pub times: u32,
-}
-
-impl TryFrom<&mut Cursor> for ProductInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
-        let of = cursor.read::<u32>("of")?;
-        let times = cursor.read::<u32>("times")?;
-        Ok(ProductInput { of, times })
-    }
-}
-
-impl Compute for Product {
-    fn compute(input: Self::Input) -> Vec<Self> {
+impl Product {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![Product {
             of: input.of,
             times: input.times,
@@ -229,85 +71,20 @@ impl Compute for Product {
     }
 }
 
-static PRODUCT_CELLS: OnceLock<Cells> = OnceLock::new();
-
-impl Formula for Product {
-    type Input = ProductInput;
-    type Match = ();
-
-    fn operator() -> &'static str {
-        "product"
-    }
-
-    fn cells() -> &'static Cells {
-        PRODUCT_CELLS.get_or_init(|| {
-            Cells::define(|builder| {
-                builder
-                    .cell("of", Type::UnsignedInt)
-                    .the("Number to multiply")
-                    .required();
-
-                builder
-                    .cell("times", Type::UnsignedInt)
-                    .the("Times to multiply")
-                    .required();
-
-                builder
-                    .cell("is", Type::UnsignedInt)
-                    .the("Result of multiplication")
-                    .derived(5);
-            })
-        })
-    }
-
-    fn cost() -> usize {
-        5
-    }
-
-    fn dependencies() -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        dependencies.require("of".into());
-        dependencies.require("times".into());
-        dependencies.provide("is".into());
-        dependencies
-    }
-
-    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor)?;
-        Ok(Self::compute(input))
-    }
-
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-        let value = Value::UnsignedInt(self.is.into());
-        cursor.write("is", &value)
-    }
-}
-
 /// Quotient formula that divides two numbers
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Formula)]
 pub struct Quotient {
+    /// Number to divide
     pub of: u32,
+    /// Number to divide by
     pub by: u32,
+    /// Result of division
+    #[derived(cost = 5)]
     pub is: u32,
 }
 
-pub struct QuotientInput {
-    pub of: u32,
-    pub by: u32,
-}
-
-impl TryFrom<&mut Cursor> for QuotientInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
-        let of = cursor.read::<u32>("of")?;
-        let by = cursor.read::<u32>("by")?;
-        Ok(QuotientInput { of, by })
-    }
-}
-
-impl Compute for Quotient {
-    fn compute(input: Self::Input) -> Vec<Self> {
+impl Quotient {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
         if input.by == 0 {
             // Return empty Vec for division by zero - this will be filtered out
             vec![]
@@ -321,85 +98,20 @@ impl Compute for Quotient {
     }
 }
 
-static QUOTIENT_CELLS: OnceLock<Cells> = OnceLock::new();
-
-impl Formula for Quotient {
-    type Input = QuotientInput;
-    type Match = ();
-
-    fn operator() -> &'static str {
-        "quotient"
-    }
-
-    fn cells() -> &'static Cells {
-        QUOTIENT_CELLS.get_or_init(|| {
-            Cells::define(|builder| {
-                builder
-                    .cell("of", Type::UnsignedInt)
-                    .the("Number to divide")
-                    .required();
-
-                builder
-                    .cell("by", Type::UnsignedInt)
-                    .the("Number to divide by")
-                    .required();
-
-                builder
-                    .cell("is", Type::UnsignedInt)
-                    .the("Result of division")
-                    .derived(5);
-            })
-        })
-    }
-
-    fn cost() -> usize {
-        5
-    }
-
-    fn dependencies() -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        dependencies.require("of".into());
-        dependencies.require("by".into());
-        dependencies.provide("is".into());
-        dependencies
-    }
-
-    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor)?;
-        Ok(Self::compute(input))
-    }
-
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-        let value = Value::UnsignedInt(self.is.into());
-        cursor.write("is", &value)
-    }
-}
-
 /// Modulo formula that computes remainder of division
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Formula)]
 pub struct Modulo {
+    /// Number to compute modulo of
     pub of: u32,
+    /// Number to compute modulo by
     pub by: u32,
+    /// Result of modulo operation
+    #[derived(cost = 10)]
     pub is: u32,
 }
 
-pub struct ModuloInput {
-    pub of: u32,
-    pub by: u32,
-}
-
-impl TryFrom<&mut Cursor> for ModuloInput {
-    type Error = FormulaEvaluationError;
-
-    fn try_from(cursor: &mut Cursor) -> Result<Self, Self::Error> {
-        let of = cursor.read::<u32>("of")?;
-        let by = cursor.read::<u32>("by")?;
-        Ok(ModuloInput { of, by })
-    }
-}
-
-impl Compute for Modulo {
-    fn compute(input: Self::Input) -> Vec<Self> {
+impl Modulo {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
         if input.by == 0 {
             // Return empty Vec for modulo by zero
             vec![]
@@ -413,62 +125,9 @@ impl Compute for Modulo {
     }
 }
 
-static MODULO_CELLS: OnceLock<Cells> = OnceLock::new();
-
-impl Formula for Modulo {
-    type Input = ModuloInput;
-    type Match = ();
-
-    fn operator() -> &'static str {
-        "modulo"
-    }
-
-    fn cells() -> &'static Cells {
-        MODULO_CELLS.get_or_init(|| {
-            Cells::define(|builder| {
-                builder
-                    .cell("of", Type::UnsignedInt)
-                    .the("Number to compute modulo of")
-                    .required();
-
-                builder
-                    .cell("by", Type::UnsignedInt)
-                    .the("Number to compute modulo by")
-                    .required();
-
-                builder
-                    .cell("is", Type::UnsignedInt)
-                    .the("Result of modulo operation")
-                    .derived(10);
-            })
-        })
-    }
-
-    fn cost() -> usize {
-        10
-    }
-
-    fn dependencies() -> Dependencies {
-        let mut dependencies = Dependencies::new();
-        dependencies.require("of".into());
-        dependencies.require("by".into());
-        dependencies.provide("is".into());
-        dependencies
-    }
-
-    fn derive(cursor: &mut Cursor) -> Result<Vec<Self>, FormulaEvaluationError> {
-        let input = Self::Input::try_from(cursor)?;
-        Ok(Self::compute(input))
-    }
-
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-        let value = Value::UnsignedInt(self.is.into());
-        cursor.write("is", &value)
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::error::FormulaEvaluationError;
     use crate::math::*;
     use crate::Term;
     use crate::*;
@@ -499,11 +158,29 @@ mod tests {
         let output = &results[0];
 
         // Check that x and y are preserved
-        assert_eq!(output.resolve(&Term::<u32>::var("x")).ok().and_then(|v| u32::try_from(v).ok()), Some(5));
-        assert_eq!(output.resolve(&Term::<u32>::var("y")).ok().and_then(|v| u32::try_from(v).ok()), Some(3));
+        assert_eq!(
+            output
+                .resolve(&Term::<u32>::var("x"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(5)
+        );
+        assert_eq!(
+            output
+                .resolve(&Term::<u32>::var("y"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(3)
+        );
 
         // Check that result is computed correctly
-        assert_eq!(output.resolve(&Term::<u32>::var("result")).ok().and_then(|v| u32::try_from(v).ok()), Some(8));
+        assert_eq!(
+            output
+                .resolve(&Term::<u32>::var("result"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(8)
+        );
         Ok(())
     }
 
@@ -556,9 +233,27 @@ mod tests {
         let results1 = app.derive(input1).expect("First expansion failed");
         assert_eq!(results1.len(), 1);
         let result1 = &results1[0];
-        assert_eq!(result1.resolve(&Term::<u32>::var("a")).ok().and_then(|v| u32::try_from(v).ok()), Some(2));
-        assert_eq!(result1.resolve(&Term::<u32>::var("b")).ok().and_then(|v| u32::try_from(v).ok()), Some(3));
-        assert_eq!(result1.resolve(&Term::<u32>::var("sum")).ok().and_then(|v| u32::try_from(v).ok()), Some(5));
+        assert_eq!(
+            result1
+                .resolve(&Term::<u32>::var("a"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(2)
+        );
+        assert_eq!(
+            result1
+                .resolve(&Term::<u32>::var("b"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(3)
+        );
+        assert_eq!(
+            result1
+                .resolve(&Term::<u32>::var("sum"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(5)
+        );
 
         // Test second input: 10 + 15 = 25
         let input2 = Answer::new()
@@ -570,9 +265,27 @@ mod tests {
         let results2 = app.derive(input2).expect("Second expansion failed");
         assert_eq!(results2.len(), 1);
         let result2 = &results2[0];
-        assert_eq!(result2.resolve(&Term::<u32>::var("a")).ok().and_then(|v| u32::try_from(v).ok()), Some(10));
-        assert_eq!(result2.resolve(&Term::<u32>::var("b")).ok().and_then(|v| u32::try_from(v).ok()), Some(15));
-        assert_eq!(result2.resolve(&Term::<u32>::var("sum")).ok().and_then(|v| u32::try_from(v).ok()), Some(25));
+        assert_eq!(
+            result2
+                .resolve(&Term::<u32>::var("a"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(10)
+        );
+        assert_eq!(
+            result2
+                .resolve(&Term::<u32>::var("b"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(15)
+        );
+        assert_eq!(
+            result2
+                .resolve(&Term::<u32>::var("sum"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(25)
+        );
         Ok(())
     }
 
@@ -614,7 +327,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve(&Term::<u32>::var("result")).ok().and_then(|v| u32::try_from(v).ok()), Some(7));
+        assert_eq!(
+            result
+                .resolve(&Term::<u32>::var("result"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(7)
+        );
         Ok(())
     }
 
@@ -639,7 +358,13 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = &results[0];
         // Should saturate at 0
-        assert_eq!(result.resolve(&Term::<u32>::var("result")).ok().and_then(|v| u32::try_from(v).ok()), Some(0));
+        assert_eq!(
+            result
+                .resolve(&Term::<u32>::var("result"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(0)
+        );
         Ok(())
     }
 
@@ -661,7 +386,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve(&Term::<u32>::var("result")).ok().and_then(|v| u32::try_from(v).ok()), Some(42));
+        assert_eq!(
+            result
+                .resolve(&Term::<u32>::var("result"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(42)
+        );
         Ok(())
     }
 
@@ -683,7 +414,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve(&Term::<u32>::var("result")).ok().and_then(|v| u32::try_from(v).ok()), Some(5));
+        assert_eq!(
+            result
+                .resolve(&Term::<u32>::var("result"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(5)
+        );
         Ok(())
     }
 
@@ -694,8 +431,10 @@ mod tests {
         terms.insert("by".to_string(), Term::var("y").into());
         terms.insert("is".to_string(), Term::var("result").into());
 
+        let x = Term::var("x");
+        print!("{:?}", &x);
         let input = Answer::new()
-            .set(Term::var("x"), 15u32)
+            .set(x, 15u32)
             .unwrap()
             .set(Term::var("y"), 0u32)
             .unwrap();
@@ -728,7 +467,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = &results[0];
-        assert_eq!(result.resolve(&Term::<u32>::var("result")).ok().and_then(|v| u32::try_from(v).ok()), Some(2));
+        assert_eq!(
+            result
+                .resolve(&Term::<u32>::var("result"))
+                .ok()
+                .and_then(|v| u32::try_from(v).ok()),
+            Some(2)
+        );
         Ok(())
     }
 

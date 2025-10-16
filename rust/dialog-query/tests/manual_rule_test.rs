@@ -1,8 +1,9 @@
 use dialog_query::artifact::{Entity, Type, Value};
 use dialog_query::attribute::{Attribute, Cardinality};
 use dialog_query::concept::{Concept, Instance, Instructions, Match as ConceptMatch};
+use dialog_query::dsl::Quarriable;
 use dialog_query::predicate::fact::Fact;
-use dialog_query::rule::{Premises, Rule, When};
+use dialog_query::rule::{Match, Premises, Rule, When};
 use dialog_query::term::Term;
 use dialog_query::types::Scalar;
 use dialog_query::Application;
@@ -153,6 +154,10 @@ impl Concept for Person {
     type Term = PersonTerms;
 }
 
+impl Quarriable for Person {
+    type Query = PersonMatch;
+}
+
 impl TryFrom<dialog_query::selection::Answer> for Person {
     type Error = dialog_query::error::InconsistencyError;
 
@@ -225,7 +230,7 @@ impl Premises for PersonMatch {
 }
 
 impl Rule for Person {
-    fn when(terms: Self::Match) -> When {
+    fn when(terms: Match<Self>) -> When {
         // Create fact selectors for each attribute
         // We need to convert the typed terms to Term<Value>
         let name_value_term = match &terms.name {

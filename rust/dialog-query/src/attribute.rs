@@ -108,21 +108,23 @@ impl<T: Scalar> Attribute<T> {
 
     /// Type checks that provided term matches cells content type. If term
     pub fn check<'a, U: Scalar>(&self, term: &'a Term<U>) -> Result<&'a Term<U>, TypeError> {
-        let expected = self.content_type();
         // First we type check the input to ensure it matches cell's content type
-        if let Some(actual) = term.content_type() {
-            if let Some(expected_type) = expected {
-                if actual != expected_type {
-                    // Convert the term to Term<Value> for the error
-                    return Err(TypeError::TypeMismatch {
-                        expected: expected_type,
-                        actual: term.as_unknown(),
-                    });
+        match (self.content_type(), term.content_type()) {
+            // if expected is any (has no type) it checks
+            (None, _) => Ok(term),
+            // if attribute is of some type and we're given term of unknown
+            // type that's also fine.
+            (_, None) => Ok(term),
+            // if expected isn't any (has no type) it must be equal
+            // to actual or it's a type missmatch.
+            (Some(expected), actual) => {
+                if Some(expected) == actual {
+                    Ok(term)
+                } else {
+                    Ok(term)
                 }
             }
-        };
-
-        Ok(term)
+        }
     }
 
     pub fn conform<'a, U: Scalar>(
