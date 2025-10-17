@@ -63,13 +63,13 @@ impl<S: Store> Session<S> {
 
     /// Install a new rule into the session
     pub fn install(mut self, rule: DeductiveRule) -> Self {
-        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator) {
+        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator().to_string()) {
             if !rules.contains(&rule) {
                 rules.push(rule);
             }
         } else {
             self.rules
-                .insert(rule.conclusion.operator.clone(), vec![rule.clone()]);
+                .insert(rule.conclusion.operator().into(), vec![rule.clone()]);
         }
 
         self
@@ -211,13 +211,13 @@ impl<S: ArtifactStore> QuerySession<S> {
     ///     .install(senior_rule);
     /// ```
     pub fn install(mut self, rule: DeductiveRule) -> Self {
-        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator) {
+        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator().to_string()) {
             if !rules.contains(&rule) {
                 rules.push(rule);
             }
         } else {
             self.rules
-                .insert(rule.conclusion.operator.clone(), vec![rule]);
+                .insert(rule.conclusion.operator().into(), vec![rule]);
         }
         self
     }
@@ -346,7 +346,7 @@ mod tests {
             ])
             .await?;
 
-        let person = predicate::Concept {
+        let person = predicate::Concept::Dynamic {
             operator: "person".into(),
             attributes: [
                 (
@@ -518,7 +518,7 @@ mod tests {
             Attribute::new(&"person", &"age", &"person age", Type::UnsignedInt),
         );
 
-        let person = predicate::Concept {
+        let person = predicate::Concept::Dynamic {
             operator: "person".into(),
             attributes: Attributes::from(attributes),
         };
@@ -543,7 +543,7 @@ mod tests {
         let store = Artifacts::anonymous(backend).await?;
         let mut session = Session::open(store);
 
-        let person = predicate::Concept {
+        let person = predicate::Concept::Dynamic {
             operator: "person".into(),
             attributes: [
                 (

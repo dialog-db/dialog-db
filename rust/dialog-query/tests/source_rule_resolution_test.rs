@@ -20,7 +20,7 @@ async fn test_session_source_rule_resolution() -> Result<()> {
 
     // Test 2: Install a rule and verify it can be resolved
 
-    let adult_conclusion = Concept {
+    let adult_conclusion = Concept::Dynamic {
         operator: "adult".into(),
         attributes: Attributes::from(vec![
             (
@@ -47,7 +47,7 @@ async fn test_session_source_rule_resolution() -> Result<()> {
     // Test 3: Verify the rule can be resolved
     let resolved_rules = session_with_rule.resolve_rules("adult");
     assert_eq!(resolved_rules.len(), 1);
-    assert_eq!(resolved_rules[0].conclusion.operator, "adult");
+    assert_eq!(resolved_rules[0].conclusion.operator(), "adult");
 
     // Test 4: Verify non-matching operator returns empty
     assert_eq!(session_with_rule.resolve_rules("person"), Vec::new());
@@ -77,14 +77,14 @@ async fn test_source_trait_compatibility() -> Result<()> {
     let query_session = query_session.install(rule.clone());
     let rules = query_with_source(&query_session, "test").await;
     assert_eq!(rules.len(), 1);
-    assert_eq!(rules[0].conclusion.operator, "test");
+    assert_eq!(rules[0].conclusion.operator(), "test");
 
     // Test with Session
     let mut session = Session::open(artifacts);
     session = session.install(rule.clone());
     let rules = query_with_source(&session, "test").await;
     assert_eq!(rules.len(), 1);
-    assert_eq!(rules[0].conclusion.operator, "test");
+    assert_eq!(rules[0].conclusion.operator(), "test");
 
     Ok(())
 }
@@ -100,7 +100,7 @@ async fn test_multiple_rules_same_operator() -> Result<()> {
     let query_session: QuerySession<_> = artifacts.into();
 
     // Create two different rules for the same concept
-    let concept1 = Concept {
+    let concept1 = Concept::Dynamic {
         operator: "person".into(),
         attributes: [(
             "name".to_string(),
@@ -109,7 +109,7 @@ async fn test_multiple_rules_same_operator() -> Result<()> {
         .into(),
     };
 
-    let concept2 = Concept {
+    let concept2 = Concept::Dynamic {
         operator: "person".into(),
         attributes: [(
             "age".to_string(),
@@ -137,7 +137,7 @@ async fn test_multiple_rules_same_operator() -> Result<()> {
 
     // Both rules should have the same operator but different attributes
     for rule in &rules {
-        assert_eq!(rule.conclusion.operator, "person");
+        assert_eq!(rule.conclusion.operator(), "person");
     }
 
     Ok(())
@@ -156,7 +156,7 @@ async fn test_explicit_conversion_pattern() -> Result<()> {
     assert_eq!(query_session.rules().len(), 0);
 
     // Test 2: Conversion with rule installation
-    let adult_concept = Concept {
+    let adult_concept = Concept::Dynamic {
         operator: "adult".into(),
         attributes: [(
             "name".to_string(),
@@ -175,7 +175,7 @@ async fn test_explicit_conversion_pattern() -> Result<()> {
 
     let resolved_rules = query_session.resolve_rules("adult");
     assert_eq!(resolved_rules.len(), 1);
-    assert_eq!(resolved_rules[0].conclusion.operator, "adult");
+    assert_eq!(resolved_rules[0].conclusion.operator(), "adult");
 
     // Test 3: Verify store is still accessible
     assert!(std::ptr::addr_of!(*query_session.store()) != std::ptr::null());

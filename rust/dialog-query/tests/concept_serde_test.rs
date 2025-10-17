@@ -5,7 +5,7 @@ use dialog_query::predicate::Concept;
 
 #[test]
 fn test_concept_serialization_to_specific_json() {
-    let concept = Concept {
+    let concept = Concept::Dynamic {
         operator: "user".to_string(),
         attributes: Attributes::from(vec![
             (
@@ -76,11 +76,11 @@ fn test_concept_deserialization_from_specific_json() {
 
     let concept: Concept = serde_json::from_str(json).expect("Should deserialize");
 
-    assert_eq!(concept.operator, "person");
-    assert_eq!(concept.attributes.count(), 2);
+    assert_eq!(concept.operator(), "person");
+    assert_eq!(concept.attributes().count(), 2);
 
     let email_attr = concept
-        .attributes
+        .attributes()
         .iter()
         .find(|(k, _)| *k == "email")
         .map(|(_, v)| v)
@@ -91,7 +91,7 @@ fn test_concept_deserialization_from_specific_json() {
     assert_eq!(email_attr.content_type, Some(Type::String));
 
     let active_attr = concept
-        .attributes
+        .attributes()
         .iter()
         .find(|(k, _)| *k == "active")
         .map(|(_, v)| v)
@@ -104,7 +104,7 @@ fn test_concept_deserialization_from_specific_json() {
 
 #[test]
 fn test_concept_round_trip_serialization() {
-    let original = Concept {
+    let original = Concept::Dynamic {
         operator: "game".to_string(),
         attributes: Attributes::from(vec![(
             "score".to_string(),
@@ -117,11 +117,24 @@ fn test_concept_round_trip_serialization() {
     let deserialized: Concept = serde_json::from_str(&json).expect("Should deserialize");
 
     // Should be identical
-    assert_eq!(original.operator, deserialized.operator);
-    assert_eq!(original.attributes.count(), deserialized.attributes.count());
+    assert_eq!(original.operator(), deserialized.operator());
+    assert_eq!(
+        original.attributes().count(),
+        deserialized.attributes().count()
+    );
 
-    let orig_score = original.attributes.iter().find(|(k, _)| *k == "score").map(|(_, v)| v).unwrap();
-    let deser_score = deserialized.attributes.iter().find(|(k, _)| *k == "score").map(|(_, v)| v).unwrap();
+    let orig_score = original
+        .attributes()
+        .iter()
+        .find(|(k, _)| *k == "score")
+        .map(|(_, v)| v)
+        .unwrap();
+    let deser_score = deserialized
+        .attributes()
+        .iter()
+        .find(|(k, _)| *k == "score")
+        .map(|(_, v)| v)
+        .unwrap();
     assert_eq!(orig_score.namespace, deser_score.namespace);
     assert_eq!(orig_score.name, deser_score.name);
     assert_eq!(orig_score.description, deser_score.description);
@@ -131,7 +144,7 @@ fn test_concept_round_trip_serialization() {
 #[test]
 fn test_expected_json_structure() {
     // Test that we get exactly the JSON structure we expect
-    let concept = Concept {
+    let concept = Concept::Dynamic {
         operator: "product".to_string(),
         attributes: Attributes::from(vec![(
             "id".to_string(),

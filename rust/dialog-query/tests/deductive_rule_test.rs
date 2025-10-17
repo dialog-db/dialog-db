@@ -12,7 +12,7 @@ use std::collections::HashSet;
 
 #[test]
 fn test_concept_as_conclusion_operations() {
-    let concept = Concept {
+    let concept = Concept::Dynamic {
         operator: "person".to_string(),
         attributes: Attributes::from(vec![
             (
@@ -27,7 +27,7 @@ fn test_concept_as_conclusion_operations() {
     };
 
     // Test that attributes are present
-    let param_names: Vec<&str> = concept.attributes.keys().collect();
+    let param_names: Vec<&str> = concept.attributes().keys().collect();
     assert!(param_names.contains(&"name"));
     assert!(param_names.contains(&"age"));
     assert!(!param_names.contains(&"height"));
@@ -36,7 +36,7 @@ fn test_concept_as_conclusion_operations() {
 
 #[test]
 fn test_concept_creation() {
-    let concept = Concept {
+    let concept = Concept::Dynamic {
         operator: "person".to_string(),
         attributes: Attributes::from(vec![(
             "name".to_string(),
@@ -44,14 +44,14 @@ fn test_concept_creation() {
         )]),
     };
 
-    assert_eq!(concept.operator, "person");
-    assert_eq!(concept.attributes.count(), 1);
-    assert!(concept.attributes.keys().any(|k| k == "name"));
+    assert_eq!(concept.operator(), "person");
+    assert_eq!(concept.attributes().count(), 1);
+    assert!(concept.attributes().keys().any(|k| k == "name"));
 }
 
 #[test]
 fn test_concept_application_analysis() {
-    let concept = Concept {
+    let concept = Concept::Dynamic {
         operator: "person".to_string(),
         attributes: Attributes::from(vec![
             (
@@ -86,7 +86,7 @@ fn test_concept_application_analysis() {
 #[test]
 fn test_deductive_rule_parameters() {
     let rule = DeductiveRule {
-        conclusion: Concept {
+        conclusion: Concept::Dynamic {
             operator: "adult".into(),
             attributes: [
                 (
@@ -131,7 +131,7 @@ fn test_premise_construction() {
 fn test_error_types() {
     // Test AnalyzerError creation
     let rule = DeductiveRule {
-        conclusion: Concept {
+        conclusion: Concept::Dynamic {
             operator: "test".to_string(),
             attributes: Attributes::new(),
         },
@@ -147,7 +147,7 @@ fn test_error_types() {
     let plan_error: PlanError = analyzer_error.into();
     match &plan_error {
         PlanError::UnusedParameter { rule: r, parameter } => {
-            assert_eq!(r.conclusion.operator, "test");
+            assert_eq!(r.conclusion.operator(), "test");
             assert_eq!(parameter, "test_param");
         }
         _ => panic!("Expected UnusedParameter variant"),
@@ -179,7 +179,7 @@ fn test_application_variants() {
     // Test other variants exist
     let mut terms = Parameters::new();
     terms.insert("test".to_string(), Term::var("test_var"));
-    let concept = Concept {
+    let concept = Concept::Dynamic {
         operator: "test".to_string(),
         attributes: Attributes::new(),
     };

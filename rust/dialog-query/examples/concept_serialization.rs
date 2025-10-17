@@ -3,7 +3,7 @@ use dialog_query::predicate::Concept;
 use dialog_query::Type;
 
 fn main() {
-    let concept = Concept {
+    let concept = Concept::Dynamic {
         operator: "user".to_string(),
         attributes: [
             (
@@ -29,12 +29,15 @@ fn main() {
     let deserialized: Concept = serde_json::from_str(&json).expect("Should deserialize");
     println!(
         "\nSuccessfully deserialized concept with operator: {}",
-        deserialized.operator
+        deserialized.operator()
     );
-    println!("Number of attributes: {}", deserialized.attributes.count());
+    println!(
+        "Number of attributes: {}",
+        deserialized.attributes().count()
+    );
 
     // Show the attributes
-    for (name, attr) in deserialized.attributes.iter() {
+    for (name, attr) in deserialized.attributes().iter() {
         let type_str = match attr.content_type {
             Some(ty) => format!("{}", ty),
             None => "Any".to_string(),

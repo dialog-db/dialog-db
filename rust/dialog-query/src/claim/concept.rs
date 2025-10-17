@@ -47,10 +47,3 @@ impl Edit for ConceptClaim {
         }
     }
 }
-
-
-impl From<ConceptClaim> for Claim {
-    fn from(claim: ConceptClaim) -> Self {
-        Claim::Concept(claim)
-    }
-}

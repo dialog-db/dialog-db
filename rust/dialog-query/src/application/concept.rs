@@ -116,7 +116,7 @@ impl ConceptApplication {
         if this_bound {
             // Entity is known - each attribute is a lookup (the + of known)
             let mut total = CONCEPT_OVERHEAD; // Add overhead for potential rule evaluation
-            for (name, attribute) in self.concept.attributes.iter() {
+            for (name, attribute) in self.concept.attributes().iter() {
                 // Check if this attribute's value is also bound
                 total += attribute.estimate(
                     true,
@@ -135,7 +135,7 @@ impl ConceptApplication {
             let mut unbound_one: Option<&Attribute<Value>> = None;
             let mut unbound_many: Option<&Attribute<Value>> = None;
 
-            for (name, attribute) in self.concept.attributes.iter() {
+            for (name, attribute) in self.concept.attributes().iter() {
                 if let Some(term) = self.terms.get(name) {
                     if env.contains(term) {
                         match attribute.cardinality {
@@ -196,7 +196,7 @@ impl ConceptApplication {
             // of=false (finding entity), is=bound
             let mut total = CONCEPT_OVERHEAD + lead.estimate(false, bound);
 
-            for (name, attribute) in self.concept.attributes.iter() {
+            for (name, attribute) in self.concept.attributes().iter() {
                 if lead != attribute {
                     total += attribute.estimate(
                         true,
@@ -274,7 +274,7 @@ impl ConceptApplication {
 
 impl Display for ConceptApplication {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {{", self.concept.operator)?;
+        write!(f, "{} {{", self.concept.operator())?;
         for (name, term) in self.terms.iter() {
             write!(f, "{}: {},", name, term)?;
         }
@@ -334,7 +334,7 @@ mod tests {
             .await?;
 
         // Create a person concept
-        let concept = Concept {
+        let concept = Concept::Dynamic {
             operator: "person".to_string(),
             attributes: vec![
                 ("name", Attribute::new("person", "name", "", Type::String)),
@@ -420,7 +420,7 @@ mod tests {
             .await?;
 
         // Create a person concept
-        let concept = Concept {
+        let concept = Concept::Dynamic {
             operator: "person".to_string(),
             attributes: vec![
                 ("name", Attribute::new("person", "name", "", Type::String)),
@@ -493,7 +493,7 @@ async fn test_concept_application_respects_constant_entity_parameter() -> anyhow
         ])
         .await?;
 
-    let concept = Concept {
+    let concept = Concept::Dynamic {
         operator: "person".to_string(),
         attributes: vec![(
             "name",
@@ -567,7 +567,7 @@ async fn test_concept_application_respects_constant_attribute_parameter() -> any
         ])
         .await?;
 
-    let concept = Concept {
+    let concept = Concept::Dynamic {
         operator: "person".to_string(),
         attributes: vec![
             (
@@ -659,7 +659,7 @@ async fn test_concept_application_respects_multiple_constant_parameters() -> any
         ])
         .await?;
 
-    let concept = Concept {
+    let concept = Concept::Dynamic {
         operator: "person".to_string(),
         attributes: vec![
             (

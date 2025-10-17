@@ -192,12 +192,37 @@ impl From<&Attributes> for Schema {
 /// Represents a concept which is a set of attributes that define an entity type.
 /// Concepts are similar to tables in relational databases but are more flexible
 /// as they can be derived from rules rather than just stored directly.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Concept {
-    /// Concept identifier used to look concepts up by.
-    pub operator: String,
-    /// Map of attribute names to their definitions for this concept.
-    pub attributes: Attributes,
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum Concept {
+    Dynamic {
+        operator: String,
+        attributes: Attributes,
+    },
+    Static {
+        operator: &'static str,
+        attributes: &'static Attributes,
+    },
+}
+
+// Manual Deserialize implementation that only supports the Dynamic variant
+impl<'de> Deserialize<'de> for Concept {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct DynamicConcept {
+            operator: String,
+            attributes: Attributes,
+        }
+
+        let dynamic = DynamicConcept::deserialize(deserializer)?;
+        Ok(Concept::Dynamic {
+            operator: dynamic.operator,
+            attributes: dynamic.attributes,
+        })
+    }
 }
 
 /// Trait for compile-time typed concepts that can be converted to runtime Concept.
@@ -218,7 +243,7 @@ where
     T: ConceptType,
 {
     fn from(_: T) -> Self {
-        Concept {
+        Concept::Dynamic {
             operator: T::operator().to_string(),
             attributes: T::attributes().clone(),
         }
@@ -293,32 +318,38 @@ impl From<Instance> for Vec<Artifact> {
 
 impl Concept {
     pub fn new(operator: String) -> Self {
-        Concept {
+        Concept::Dynamic {
             operator,
             attributes: Attributes::new(),
         }
     }
 
     pub fn attributes(&self) -> &Attributes {
-        &self.attributes
+        match self {
+            Self::Dynamic { attributes, .. } => &attributes,
+            Self::Static { attributes, .. } => &attributes,
+        }
     }
 
     pub fn operator(&self) -> &str {
-        &self.operator
+        match self {
+            Self::Dynamic { operator, .. } => &operator,
+            Self::Static { operator, .. } => &operator,
+        }
     }
 
     pub fn operands(&self) -> impl Iterator<Item = &str> {
-        std::iter::once("this").chain(self.attributes.keys().map(|key| key.as_ref()))
+        std::iter::once("this").chain(self.attributes().keys().map(|key| key.as_ref()))
     }
 
     pub fn schema(&self) -> Schema {
-        (&self.attributes).into()
+        self.attributes().into()
     }
 
     /// Creates an application for this concept.
     pub fn apply(&self, parameters: Parameters) -> Result<Application, SchemaError> {
         Ok(Application::Concept(ConceptApplication {
-            terms: self.attributes.conform(parameters)?,
+            terms: self.attributes().conform(parameters)?,
             concept: self.clone(),
         }))
     }
@@ -342,7 +373,7 @@ impl Concept {
     /// * `SchemaError::TypeError` - If an attribute value has the wrong type
     pub fn conform(&self, model: Model) -> Result<Instance, SchemaError> {
         let mut relations = vec![];
-        for (name, attribute) in self.attributes.iter() {
+        for (name, attribute) in self.attributes().iter() {
             if let Some(value) = model.attributes.get(name) {
                 let relation = attribute
                     .resolve(value.clone())
@@ -514,7 +545,7 @@ mod tests {
             ),
         ]);
 
-        let concept = Concept {
+        let concept = Concept::Dynamic {
             operator: "user".to_string(),
             attributes,
         };
@@ -576,11 +607,11 @@ mod tests {
 
         let concept: Concept = serde_json::from_str(json).expect("Should deserialize");
 
-        assert_eq!(concept.operator, "person");
-        assert_eq!(concept.attributes.count(), 2);
+        assert_eq!(concept.operator(), "person");
+        assert_eq!(concept.attributes().count(), 2);
 
         let email_attr = concept
-            .attributes
+            .attributes()
             .iter()
             .find(|(k, _)| *k == "email")
             .map(|(_, v)| v)
@@ -591,7 +622,7 @@ mod tests {
         assert_eq!(email_attr.content_type, Some(Type::String));
 
         let active_attr = concept
-            .attributes
+            .attributes()
             .iter()
             .find(|(k, _)| *k == "active")
             .map(|(_, v)| v)
@@ -604,7 +635,7 @@ mod tests {
 
     #[test]
     fn test_concept_round_trip_serialization() {
-        let original = Concept {
+        let original = Concept::Dynamic {
             operator: "game".to_string(),
             attributes: [(
                 "score",
@@ -618,17 +649,20 @@ mod tests {
         let deserialized: Concept = serde_json::from_str(&json).expect("Should deserialize");
 
         // Should be identical
-        assert_eq!(original.operator, deserialized.operator);
-        assert_eq!(original.attributes.count(), deserialized.attributes.count());
+        assert_eq!(original.operator(), deserialized.operator());
+        assert_eq!(
+            original.attributes().count(),
+            deserialized.attributes().count()
+        );
 
         let orig_score = original
-            .attributes
+            .attributes()
             .iter()
             .find(|(k, _)| *k == "score")
             .map(|(_, v)| v)
             .unwrap();
         let deser_score = deserialized
-            .attributes
+            .attributes()
             .iter()
             .find(|(k, _)| *k == "score")
             .map(|(_, v)| v)

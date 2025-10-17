@@ -1,4 +1,5 @@
 use crate::application::ConceptApplication;
+use crate::claim::concept::ConceptClaim;
 pub use crate::dsl::Quarriable;
 pub use crate::predicate::concept::{Attributes, ConceptType};
 use crate::query::{Output, Source};
@@ -9,6 +10,7 @@ use crate::{Entity, Parameters};
 use dialog_artifacts::Instruction;
 use dialog_common::ConditionalSend;
 use futures_util::StreamExt;
+use std::fmt::Debug;
 
 /// Concept is a set of attributes associated with entity representing an
 /// abstract idea. It is a tool for the domain modeling and in some regard
@@ -19,7 +21,7 @@ use futures_util::StreamExt;
 /// Concepts are used to describe conclusions of the rules, providing a mapping
 /// between conclusions and facts. In that sense you concepts are on-demand
 /// cache of all the conclusions from the associated rules.
-pub trait Concept: Quarriable + Clone + std::fmt::Debug + predicate::concept::ConceptType {
+pub trait Concept: Quarriable + Clone + Debug + ConceptType {
     type Instance: Instance;
     /// Type representing a query of this concept. It is a set of terms
     /// corresponding to the set of attributes defined by this concept.
@@ -36,7 +38,7 @@ pub trait Concept: Quarriable + Clone + std::fmt::Debug + predicate::concept::Co
     type Retract;
 
     fn concept() -> predicate::concept::Concept {
-        predicate::concept::Concept {
+        predicate::concept::Concept::Dynamic {
             operator: Self::operator().into(),
             attributes: Self::attributes().clone(),
         }
@@ -66,7 +68,7 @@ pub trait Match: Sized + Clone + ConditionalSend + Into<Parameters> + 'static {
 
     fn conpect() -> predicate::Concept {
         use predicate::concept::ConceptType;
-        predicate::Concept {
+        predicate::Concept::Dynamic {
             operator: Self::Concept::operator().into(),
             attributes: Self::Concept::attributes().clone(),
         }
@@ -122,10 +124,9 @@ mod tests {
     use super::*;
     use crate::artifact::Value;
     use crate::artifact::{Artifacts, Attribute as ArtifactAttribute};
-    use crate::concept::Concept;
     use crate::term::Term;
-    use crate::Session;
     use crate::{Answer, Fact};
+    use crate::{Concept, Session};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 

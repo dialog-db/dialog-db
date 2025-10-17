@@ -92,7 +92,7 @@ impl Display for DeductiveRule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} {{", self.operator())?;
         write!(f, "this: {},", Type::Entity)?;
-        for (name, attribute) in self.conclusion.attributes.iter() {
+        for (name, attribute) in self.conclusion.attributes().iter() {
             match attribute.content_type {
                 Some(ty) => write!(f, "{}: {},", name, ty)?,
                 None => write!(f, "{}: Any,", name)?,
@@ -109,7 +109,7 @@ impl From<&Concept> for DeductiveRule {
         let mut premises = Vec::new();
 
         let this = Term::<Entity>::var("this");
-        for (name, attribute) in concept.attributes.iter() {
+        for (name, attribute) in concept.attributes().iter() {
             let attr_str = attribute.the();
             let the = Term::Constant(
                 attr_str
@@ -136,7 +136,7 @@ impl From<&Concept> for DeductiveRule {
 fn test_rule_compiles_with_valid_premises() {
     use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
     // Rule: person(name, age) :- fact(user/name, ?user, name), fact(user/age, ?user, age)
-    let conclusion = Concept {
+    let conclusion = Concept::Dynamic {
         operator: "person".to_string(),
         attributes: vec![
             (
@@ -177,7 +177,7 @@ fn test_rule_compiles_with_valid_premises() {
 fn test_rule_fails_with_unconstrained_fact() {
     use crate::artifact::{Entity, Type};
     // Rule: person(key, value) :- fact(key, ?user, value) - all params unconstrained
-    let conclusion = Concept {
+    let conclusion = Concept::Dynamic {
         operator: "person".to_string(),
         attributes: vec![
             (
@@ -206,7 +206,7 @@ fn test_rule_fails_with_unconstrained_fact() {
 fn test_rule_fails_with_unused_parameter() {
     use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
     // Rule: person(name, age) :- fact(user/name, ?this, name) - 'age' unused
-    let conclusion = Concept {
+    let conclusion = Concept::Dynamic {
         operator: "person".to_string(),
         attributes: vec![
             (
@@ -239,7 +239,7 @@ fn test_rule_fails_with_unused_parameter() {
 fn test_rule_fails_with_no_premises() {
     use crate::artifact::Type;
     // Rule: person(name, age) :- (empty)
-    let conclusion = Concept {
+    let conclusion = Concept::Dynamic {
         operator: "person".to_string(),
         attributes: vec![
             (
@@ -261,7 +261,7 @@ fn test_rule_compiles_with_chained_dependencies() {
     use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
     // Rule: result(key, value) :- fact(user/name, ?user, "jack"), fact(key, ?user, value)
     // First fact constrains ?user, allowing second fact to be planned
-    let conclusion = Concept {
+    let conclusion = Concept::Dynamic {
         operator: "result".to_string(),
         attributes: vec![
             (
@@ -305,7 +305,7 @@ fn test_rule_parameter_name_vs_variable_name() {
     // This test ensures we correctly track variable names, not parameter names
     // Rule: result(key, value) :- fact(user/name, ?entity, key_var)
     // Parameter "is" maps to variable "key_var", not "key"
-    let conclusion = Concept {
+    let conclusion = Concept::Dynamic {
         operator: "result".to_string(),
         attributes: vec![(
             "key",

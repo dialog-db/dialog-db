@@ -1,8 +1,7 @@
 use crate::error::CompileError;
 use crate::{fact::Scalar, predicate::DeductiveRule};
 use crate::{
-    Environment, EvaluationContext, Parameters, Premise, Requirement, Schema, Source,
-    Term, Value,
+    Environment, EvaluationContext, Parameters, Premise, Requirement, Schema, Source, Term, Value,
 };
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -958,7 +957,7 @@ mod cost_model_tests {
         );
 
         // Create a ConceptApplication with single attribute
-        let concept = Concept {
+        let concept = Concept::Dynamic {
             operator: "user".to_string(),
             attributes: [(
                 "name",
@@ -1011,7 +1010,7 @@ mod cost_model_tests {
         );
 
         // Create a ConceptApplication with single attribute
-        let concept = Concept {
+        let concept = Concept::Dynamic {
             operator: "user".to_string(),
             attributes: [(
                 "name",
@@ -1057,7 +1056,7 @@ mod cost_model_tests {
         );
 
         // Create a ConceptApplication with single attribute
-        let concept = Concept {
+        let concept = Concept::Dynamic {
             operator: "user".to_string(),
             attributes: [(
                 "name",
@@ -1107,7 +1106,7 @@ mod cost_model_tests {
             crate::Attribute::new("user", "tags", "User tags", crate::Type::String);
         concept_attr.cardinality = crate::Cardinality::Many;
 
-        let concept = Concept {
+        let concept = Concept::Dynamic {
             operator: "user".to_string(),
             attributes: [("tags", concept_attr)].into(),
         };
@@ -1152,7 +1151,7 @@ mod cost_model_tests {
             crate::Attribute::new("user", "tags", "User tags", crate::Type::String);
         concept_attr.cardinality = crate::Cardinality::Many;
 
-        let concept = Concept {
+        let concept = Concept::Dynamic {
             operator: "user".to_string(),
             attributes: [("tags", concept_attr)].into(),
         };
@@ -1249,7 +1248,7 @@ fn debug_update_cost() {
         Term::<Entity>::var("entity"),
         Term::<Value>::var("value"),
         Term::var("cause"),
-            crate::attribute::Cardinality::One,
+        crate::attribute::Cardinality::One,
     );
 
     let schema = app.schema();

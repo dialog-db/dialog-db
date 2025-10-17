@@ -105,3 +105,8 @@ impl From<fact::Claim> for Claim {
         Claim::Fact(claim)
     }
 }
+impl From<concept::ConceptClaim> for Claim {
+    fn from(claim: concept::ConceptClaim) -> Self {
+        Claim::Concept(claim)
+    }
+}
