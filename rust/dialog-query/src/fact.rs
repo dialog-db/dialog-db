@@ -4,10 +4,14 @@ use std::hash::Hash;
 
 pub use super::claim::{fact, Claim};
 pub use super::predicate::fact::Fact as PredicateFact;
+pub use crate::application::FactApplication;
 pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Instruction, Value};
 use crate::claim::fact::Relation;
+pub use crate::dsl::Quarriable;
+pub use crate::error::SchemaError;
 pub use crate::query::Output;
 pub use crate::types::Scalar;
+pub use crate::Term;
 use dialog_artifacts::{Blake3Hash, CborEncoder, DialogArtifactsError, Encoder};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
@@ -59,6 +63,10 @@ pub enum Fact<T: Scalar + ConditionalSend = Value> {
         /// The cause of this fact
         cause: Cause,
     },
+}
+
+impl Quarriable for Fact {
+    type Query = PredicateFact;
 }
 
 impl<T: Scalar + ConditionalSend> Fact<T> {
@@ -196,6 +204,7 @@ impl From<fact::Claim> for Instruction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dialog_query::Match;
 
     #[test]
     fn test_fact_assert() {
@@ -356,7 +365,7 @@ mod integration_tests {
         session.transact(claims).await?;
 
         // Step 4: Test 1 - Query for user names
-        let query_names = Fact::<Value>::select().the("user/name").build()?;
+        let query_names = Fact::<Value>::select().the("user/name").compile()?;
 
         let facts = query_names
             .query(&Session::open(artifacts.clone()))
@@ -387,7 +396,7 @@ mod integration_tests {
         assert!(has_bob, "Should find Bob's name fact");
 
         // Step 5: Test 2 - Query for email
-        let query_email = Fact::<Value>::select().the("user/email").build()?;
+        let query_email = Fact::<Value>::select().the("user/email").compile()?;
 
         let email_facts = query_email
             .query(&Session::open(artifacts.clone()))
@@ -410,7 +419,7 @@ mod integration_tests {
         let query_alice = Fact::<Value>::select()
             .the("user/name")
             .of(alice.clone())
-            .build()?;
+            .compile()?;
 
         let alice_facts = query_alice
             .query(&Session::open(artifacts.clone()))
@@ -444,7 +453,7 @@ mod integration_tests {
         let query_constant = Fact::<Value>::select()
             .the("user/name")
             .of(alice.clone())
-            .build()?;
+            .compile()?;
 
         let results = query_constant
             .query(&Session::open(artifacts.clone()))
@@ -478,7 +487,7 @@ mod integration_tests {
         let query2 = Fact::<Value>::select()
             .the("user/name")
             .of(alice.clone())
-            .build()?;
+            .compile()?;
 
         let results2 = query2
             .query(&Session::open(artifacts.clone()))
@@ -526,7 +535,7 @@ mod integration_tests {
             .the("user/name")
             .of(alice.clone())
             .is(Value::String("Alice".to_string()))
-            .build()?;
+            .compile()?;
 
         let constant_results = all_constants_query
             .query(&Session::open(artifacts.clone()))
@@ -539,7 +548,7 @@ mod integration_tests {
         let mixed_query = Fact::<Value>::select()
             .the("user/name")
             .is(Value::String("Alice".to_string()))
-            .build()?;
+            .compile()?;
 
         let mixed_results = mixed_query
             .query(&Session::open(artifacts.clone()))
@@ -549,7 +558,7 @@ mod integration_tests {
         assert_eq!(mixed_results.len(), 1, "Should find Alice specifically");
 
         // Test 3: Find all names
-        let find_all_names = Fact::<Value>::select().the("user/name").build()?;
+        let find_all_names = Fact::<Value>::select().the("user/name").compile()?;
 
         let all_name_results = find_all_names
             .query(&Session::open(artifacts.clone()))
@@ -629,7 +638,7 @@ mod integration_tests {
         let admin_query = Fact::<Value>::select()
             .the("user/role")
             .is(Value::String("admin".to_string()))
-            .build()?;
+            .compile()?;
 
         let admin_results = admin_query
             .query(&Session::open(artifacts.clone()))
@@ -658,7 +667,7 @@ mod integration_tests {
         assert!(has_alice_admin && has_charlie_admin);
 
         // Query 2: Find all user roles
-        let role_query = Fact::<Value>::select().the("user/role").build()?;
+        let role_query = Fact::<Value>::select().the("user/role").compile()?;
 
         let role_results = role_query
             .query(&Session::open(artifacts.clone()))
@@ -672,7 +681,7 @@ mod integration_tests {
             .the("user/name")
             .of(bob.clone())
             .is(Value::String("Bob".to_string()))
-            .build()?;
+            .compile()?;
 
         let bob_results = bob_query
             .query(&Session::open(artifacts.clone()))
@@ -709,7 +718,7 @@ mod integration_tests {
         let mut session = Session::open(artifacts.clone());
         session.transact(facts).await?;
 
-        let query_with_variables = Fact::<Value>::select().the("user/name").build()?;
+        let query_with_variables = Fact::<Value>::select().the("user/name").compile()?;
 
         let results = query_with_variables
             .query(&Session::open(artifacts.clone()))
@@ -760,7 +769,7 @@ mod integration_tests {
         session.transact(facts).await?;
 
         // Pattern 1: Query for user names
-        let value_selector = Fact::<Value>::select().the("user/name").build()?;
+        let value_selector = Fact::<Value>::select().the("user/name").compile()?;
 
         let value_results = value_selector
             .query(&Session::open(artifacts.clone()))
@@ -780,7 +789,7 @@ mod integration_tests {
         let entity_selector = Fact::<Value>::select()
             .the("user/friend")
             .of(alice.clone())
-            .build()?;
+            .compile()?;
 
         let entity_results = entity_selector
             .query(&Session::open(artifacts.clone()))
@@ -799,7 +808,7 @@ mod integration_tests {
             .the("user/name")
             .of(alice.clone())
             .is(Value::String("Alice".to_string()))
-            .build()?;
+            .compile()?;
 
         let constant_results = constant_selector
             .query(&Session::open(artifacts.clone()))
@@ -844,7 +853,7 @@ mod integration_tests {
         let bob_query = Fact::<Value>::select()
             .the("user/name")
             .is(Value::String("Bob".to_string()))
-            .build()?;
+            .compile()?;
 
         let bob_results = bob_query
             .query(&Session::open(artifacts.clone()))
@@ -862,7 +871,7 @@ mod integration_tests {
         let admin_query = Fact::<Value>::select()
             .the("user/role")
             .is(Value::String("admin".to_string()))
-            .build()?;
+            .compile()?;
 
         let admin_results = admin_query
             .query(&Session::open(artifacts.clone()))
@@ -877,7 +886,7 @@ mod integration_tests {
         assert!(has_alice);
 
         // Pattern 3: Find all names
-        let names_query = Fact::<Value>::select().the("user/name").build()?;
+        let names_query = Fact::<Value>::select().the("user/name").compile()?;
 
         let name_results = names_query
             .query(&Session::open(artifacts.clone()))
@@ -918,7 +927,7 @@ mod integration_tests {
         let mixed_query = Fact::<Value>::select()
             .the("user/name")
             .of(alice.clone())
-            .build()?;
+            .compile()?;
 
         let results = mixed_query
             .query(&Session::open(artifacts.clone()))
@@ -948,7 +957,7 @@ mod integration_tests {
 
         // Try to build a query with no constants - this should fail at build time
         // since the ArtifactSelector conversion requires at least one constrained field
-        let result = Fact::<Value>::select().build();
+        let result = Fact::<Value>::select().compile();
 
         // Should fail because there are no constraints at all
         assert!(result.is_err(), "Query with no constraints should fail");
@@ -1006,7 +1015,7 @@ mod integration_tests {
         let admin_search = Fact::<Value>::select()
             .the("user/role")
             .is(Value::String("admin".to_string()))
-            .build()?;
+            .compile()?;
 
         let admin_results = admin_search
             .query(&Session::open(artifacts.clone()))
@@ -1022,7 +1031,7 @@ mod integration_tests {
         assert!(has_alice_admin);
 
         // Test 2: Find all user names
-        let name_search = Fact::<Value>::select().the("user/name").build()?;
+        let name_search = Fact::<Value>::select().the("user/name").compile()?;
 
         let name_results = name_search
             .query(&Session::open(artifacts.clone()))
@@ -1052,6 +1061,87 @@ mod integration_tests {
             _ => false,
         });
         assert!(has_alice_entity && has_bob_entity);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn match_fact() -> Result<()> {
+        use dialog_query::Match;
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        let facts = vec![
+            Fact::assert(
+                "user/name".parse::<Attribute>()?,
+                alice.clone(),
+                Value::String("Alice".to_string()),
+            ),
+            Fact::assert(
+                "user/friend".parse::<Attribute>()?,
+                alice.clone(),
+                Value::Entity(bob.clone()),
+            ),
+        ];
+
+        let mut session = Session::open(artifacts.clone());
+        session.transact(facts).await?;
+
+        // Pattern 1: Query for user names
+        let value_selector = Match::<Fact> {
+            the: "user/name".try_into()?,
+            of: Term::blank(),
+            is: Term::blank(),
+            cause: Term::blank(),
+        }
+        .compile()?;
+
+        let value_results = value_selector.query(&session).try_vec().await?;
+        assert_eq!(value_results.len(), 1);
+
+        let has_alice = value_results.iter().any(|f| match f {
+            Fact::Assertion { of, is, .. } => {
+                *of == alice && *is == Value::String("Alice".to_string())
+            }
+            _ => false,
+        });
+        assert!(has_alice);
+
+        // Pattern 2: Query for entity values (friends)
+        let entity_selector = Match::<Fact> {
+            the: "user/friend".try_into()?,
+            of: alice.clone().into(),
+            is: Term::blank(),
+            cause: Term::blank(),
+        }
+        .compile()?;
+
+        let entity_results = entity_selector.query(&session).try_vec().await?;
+        assert_eq!(entity_results.len(), 1);
+
+        let has_bob = entity_results.iter().any(|f| match f {
+            Fact::Assertion { is, .. } => *is == Value::Entity(bob.clone()),
+            _ => false,
+        });
+        assert!(has_bob);
+
+        // Pattern 3: Test with all constants
+        let constant_selector = Match::<Fact> {
+            the: "user/name".try_into()?,
+            of: alice.clone().into(),
+            is: "Alice".into(),
+            cause: Term::blank(),
+        }
+        .compile()?;
+
+        let constant_results = constant_selector
+            .query(&Session::open(artifacts.clone()))
+            .try_vec()
+            .await?;
+        assert_eq!(constant_results.len(), 1);
 
         Ok(())
     }

@@ -698,7 +698,7 @@ mod tests {
             .the("person/name")
             .of(Term::var("person"))
             .is(Value::String("NonExistent".to_string()))
-            .build()?;
+            .compile()?;
 
         let session = Session::open(artifacts);
         let no_results = missing_query.query(&session).try_vec().await?;

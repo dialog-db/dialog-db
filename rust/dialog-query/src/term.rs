@@ -13,6 +13,7 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use crate::artifact::{Attribute, Entity, Type, Value};
+use crate::error::SyntaxError;
 use crate::types::{IntoType, Scalar};
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
@@ -218,19 +219,13 @@ where
 /// be converted to and from Option<Type>.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(into = "Option<Type>", from = "Option<Type>")]
-pub struct ContentType<T: IntoType + Clone + 'static>(PhantomData<T>);
+pub struct ContentType<T: IntoType + Clone + 'static>(pub PhantomData<T>);
 
 impl<T: IntoType + Clone + 'static> Default for ContentType<T> {
     fn default() -> Self {
         ContentType(PhantomData)
     }
 }
-
-// impl<T: IntoType + Clone + 'static> From<PhantomData<T>> for Type {
-//     fn from(_value: PhantomData<T>) -> Self {
-//         T::into_type()
-//     }
-// }
 
 impl<T: IntoType + Clone + 'static> ContentType<T> {
     /// Returns true if `T` is `Value` as it can represent all supported data
@@ -518,6 +513,42 @@ impl From<String> for Term<String> {
 impl From<&str> for Term<String> {
     fn from(value: &str) -> Self {
         Term::Constant(value.to_string())
+    }
+}
+
+impl From<String> for Term<Value> {
+    fn from(value: String) -> Self {
+        Term::Constant(Value::String(value))
+    }
+}
+
+impl From<&str> for Term<Value> {
+    fn from(value: &str) -> Self {
+        Term::Constant(Value::String(value.to_string()))
+    }
+}
+
+impl TryFrom<String> for Term<Attribute> {
+    type Error = SyntaxError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value
+            .parse()
+            .map(Term::Constant)
+            .map_err(|_| SyntaxError::InvalidAttributeSyntax { actual: value })
+    }
+}
+
+impl TryFrom<&str> for Term<Attribute> {
+    type Error = SyntaxError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        value
+            .parse()
+            .map(Term::Constant)
+            .map_err(|_| SyntaxError::InvalidAttributeSyntax {
+                actual: value.into(),
+            })
     }
 }
 

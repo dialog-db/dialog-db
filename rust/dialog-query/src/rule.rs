@@ -7,7 +7,7 @@
 //! and follows the patterns described in the design document at notes/rules.md.
 
 use crate::concept::Concept;
-pub use crate::dsl::{Claim, Instance, Match};
+pub use crate::dsl::{Assert, Instance, Match};
 use crate::premise::Premise;
 
 /// Collection of premises that must be satisfied for a rule to apply.
@@ -34,14 +34,14 @@ use crate::premise::Premise;
 ///         .the("example/field1".parse::<dialog_query::artifact::Attribute>().unwrap())
 ///         .of(Term::var("entity"))
 ///         .is(Term::var("value1"))
-///         .build()
+///         .compile()
 ///         .unwrap();
 ///
 ///     let selector2 = predicate::Fact::new()
 ///         .the("example/field2".parse::<dialog_query::artifact::Attribute>().unwrap())
 ///         .of(Term::var("entity"))
 ///         .is(Term::var("value2"))
-///         .build()
+///         .compile()
 ///         .unwrap();
 ///
 ///     // Multiple syntax options for creating When:
@@ -174,19 +174,19 @@ impl<T: Into<Premise>, const N: usize> From<[T; N]> for When {
 ///         .the("attr1".parse::<dialog_query::artifact::Attribute>().unwrap())
 ///         .of(Term::var("entity"))
 ///         .is(Term::from(Value::String("value1".to_string())))
-///         .build()
+///         .compile()
 ///         .unwrap();
 ///     let selector2 = predicate::Fact::new()
 ///         .the("attr2".parse::<dialog_query::artifact::Attribute>().unwrap())
 ///         .of(Term::var("entity"))
 ///         .is(Term::var("value2"))
-///         .build()
+///         .compile()
 ///         .unwrap();
 ///     let selector3 = predicate::Fact::new()
 ///         .the("attr3".parse::<dialog_query::artifact::Attribute>().unwrap())
 ///         .of(Term::var("entity"))
 ///         .is(Term::var("value3"))
-///         .build()
+///         .compile()
 ///         .unwrap();
 ///     when![selector1, selector2, selector3]
 /// }

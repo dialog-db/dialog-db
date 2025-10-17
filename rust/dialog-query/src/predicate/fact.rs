@@ -54,7 +54,7 @@ impl Fact {
     }
 
     /// Convert the builder into a FactApplication
-    pub fn build(self) -> Result<FactApplication, SchemaError> {
+    pub fn compile(self) -> Result<FactApplication, SchemaError> {
         let mut params = Parameters::new();
         // Convert typed terms to Term<Value> for Parameters
         let the_value = match self.the {

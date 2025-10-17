@@ -647,13 +647,13 @@ mod tests {
                     .the("stuff/name")
                     .of(Term::var("this"))
                     .is(Term::var("name"))
-                    .build()?
+                    .compile()?
                     .into(),
                 Fact::<String>::select()
                     .the("stuff/role")
                     .of(Term::var("this"))
                     .is(Term::var("job"))
-                    .build()?
+                    .compile()?
                     .into(),
             ],
         )?;

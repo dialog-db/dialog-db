@@ -1,5 +1,6 @@
 pub use crate::concept::Concept;
 pub use crate::predicate::formula::Formula;
+pub use crate::rule::When;
 
 /// Represents predicates that can be applied using an associated `Query`
 /// type. This is used by predicate definitions like `Concept` and `Formula`
@@ -35,7 +36,6 @@ pub trait Quarriable {
 /// ```
 #[allow(type_alias_bounds)]
 pub type Match<T: Quarriable> = T::Query;
-#[allow(type_alias_bounds)]
 
 /// Type that can be used to reference input cells of the formula as shown below.
 ///
@@ -60,6 +60,15 @@ pub type Match<T: Quarriable> = T::Query;
 pub type Input<T: Formula> = T::Input;
 
 #[allow(type_alias_bounds)]
-pub type Claim<T: Concept> = T::Assert;
+pub type Assert<T: Concept> = T::Assert;
 #[allow(type_alias_bounds)]
 pub type Instance<T: Concept> = T::Instance;
+
+#[allow(type_alias_bounds)]
+pub type Terms<T: Concept> = T::Term;
+
+#[allow(type_alias_bounds)]
+pub type Query<T: Quarriable> = T::Query;
+
+#[allow(type_alias_bounds)]
+pub type Not<T: Concept> = T::Match;

@@ -474,3 +474,9 @@ pub enum CompileError {
         variable: String,
     },
 }
+
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum SyntaxError {
+    #[error("Attribute format is \"namespace/predicate\", but got \"{actual}\"")]
+    InvalidAttributeSyntax { actual: String },
+}

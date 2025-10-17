@@ -53,8 +53,10 @@ pub trait Source: ArtifactStore + Clone + Send + Sync + 'static {
 }
 
 pub trait Circuit: ConditionalSend + 'static {
-    fn evaluate<S: Source, M: selection::Answers>(&self, context: EvaluationContext<S, M>)
-        -> impl selection::Answers;
+    fn evaluate<S: Source, M: selection::Answers>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl selection::Answers;
 }
 
 pub trait Query<T: ConditionalSend + 'static>: Circuit + Clone + ConditionalSend {
@@ -134,7 +136,7 @@ mod tests {
             .the("user/name")
             .of(alice.clone())
             .is(Value::String("Alice".to_string()))
-            .build()?;
+            .compile()?;
 
         // Use the Query trait method - should succeed since all fields are constants
         let session = Session::open(artifacts.clone());
@@ -142,7 +144,7 @@ mod tests {
         assert!(result.is_ok()); // Should succeed with constants, returns empty stream
 
         // Query 2: Find all user/name facts using Query trait
-        let all_names_query = Fact::<Value>::select().the("user/name").build()?;
+        let all_names_query = Fact::<Value>::select().the("user/name").compile()?;
 
         let session = Session::open(artifacts.clone());
         let result = all_names_query.query(&session).try_vec().await;
@@ -152,7 +154,7 @@ mod tests {
         let email_query = Fact::<Value>::select()
             .the("user/email")
             .of(alice.clone())
-            .build()?;
+            .compile()?;
 
         let session = Session::open(artifacts);
         let result = email_query.query(&session).try_vec().await;
@@ -172,7 +174,7 @@ mod tests {
             .the("user/name") // Constant - used
             .of(Term::<Entity>::var("user")) // Variable - skipped
             .is(Term::<Value>::var("name")) // Variable - skippeda
-            .build()?;
+            .compile()?;
 
         // Should succeed since planning validation only rejects all-unbound queries, and this has a constant
         let session = Session::open(artifacts);
@@ -204,7 +206,7 @@ mod tests {
         let fact_selector = Fact::<Value>::select()
             .the("user/name")
             .of(alice.clone())
-            .build()?;
+            .compile()?;
 
         let session = Session::open(artifacts);
         let results = fact_selector.query(&session).try_vec().await?;
@@ -258,7 +260,7 @@ mod tests {
         let admin_result = Fact::<Value>::select()
             .the("user/role")
             .is(Value::String("admin".to_string()))
-            .build()?
+            .compile()?
             .query(&session)
             .try_vec()
             .await;
@@ -268,7 +270,7 @@ mod tests {
         let session = Session::open(artifacts);
         let names_result = Fact::<Value>::select()
             .the("user/name")
-            .build()?
+            .compile()?
             .query(&session)
             .try_vec()
             .await;
