@@ -135,14 +135,14 @@ impl<S: Store> Session<S> {
     ///     Fact::assert("user/name".parse()?, alice, "Alice".to_string()),
     /// ]).await?;
     /// ```
-    pub async fn transact<I: IntoIterator<Item = crate::claim::Claim>>(
+    pub async fn transact<T: Into<crate::claim::Claim>, I: IntoIterator<Item = T>>(
         &mut self,
         changes: I,
     ) -> Result<(), DialogArtifactsError> {
         let mut transaction = self.edit();
         // Go over each change and merge it into the transaction
         for claim in changes {
-            claim.merge(&mut transaction);
+            claim.into().merge(&mut transaction);
         }
 
         // commit transaction.

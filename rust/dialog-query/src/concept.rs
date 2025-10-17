@@ -1,12 +1,14 @@
 use crate::application::ConceptApplication;
-use crate::claim::concept::ConceptClaim;
+
+use crate::claim::{concept, concept::ConceptClaim};
+
 pub use crate::dsl::Quarriable;
 pub use crate::predicate::concept::Attributes;
 use crate::query::{Output, Source};
 use crate::selection::Answer;
+use crate::{claim, Entity, Parameters};
 use crate::{predicate, QueryError};
 use crate::{Application, Premise};
-use crate::{Entity, Parameters};
 use dialog_artifacts::Instruction;
 use dialog_common::ConditionalSend;
 use futures_util::StreamExt;
@@ -40,6 +42,24 @@ pub trait Concept: Quarriable + Clone + Debug {
     /// The static concept definition for this type.
     /// This is typically defined by the macro as a Concept::Static variant.
     const CONCEPT: predicate::concept::Concept;
+
+    fn instance(&self) -> concept::Instance;
+
+    fn assert(&self) -> claim::Claim {
+        claim::Claim::Concept(ConceptClaim::Assert(self.instance()))
+    }
+
+    fn retract(&self) -> claim::Claim {
+        claim::Claim::Concept(ConceptClaim::Retract(self.instance()))
+    }
+}
+
+/// Concept implements claim::Claim so that it could be transacted into
+/// a session.
+impl<T: Concept> From<T> for claim::Claim {
+    fn from(concept: T) -> Self {
+        claim::Claim::Concept(ConceptClaim::Assert(concept.instance()))
+    }
 }
 
 /// Every assertion or retraction can be decomposed into a set of
@@ -245,6 +265,27 @@ mod tests {
                 attributes: &ATTRS,
             }
         };
+
+        fn instance(&self) -> concept::Instance {
+            use crate::attribute::Relation;
+            use crate::types::Scalar;
+
+            concept::Instance {
+                this: self.this.clone(),
+                with: vec![
+                    Relation {
+                        the: "person/name".parse().expect("Failed to parse attribute"),
+                        is: self.name.as_value(),
+                        cardinality: crate::attribute::Cardinality::One,
+                    },
+                    Relation {
+                        the: "person/age".parse().expect("Failed to parse attribute"),
+                        is: self.age.as_value(),
+                        cardinality: crate::attribute::Cardinality::One,
+                    },
+                ],
+            }
+        }
     }
 
     impl Quarriable for Person {
@@ -749,62 +790,63 @@ mod tests {
         // Create test data
 
         let mut session = Session::open(artifacts.clone());
-        // session
-        //     .transact([
-        //         Employee {
-        //             this: alice.clone(),
-        //             name: "Alice".to_string(),
-        //             role: "cryptographer".to_string(),
-        //         }
-        //         .assert(),
-        //         Employee {
-        //             this: bob.clone(),
-        //             name: "Bob".to_string(),
-        //             role: "janitor".to_string(),
-        //         }
-        //         .assert(), // Fact::assert(
-        //                    //     "employee/name".parse::<ArtifactAttribute>()?,
-        //                    //     mallory.clone(),
-        //                    //     Value::String("Mallory".to_string()),
-        //                    // )
-        //                    // .into(),
-        //                    // Fact::assert(
-        //                    //     "employee/role".parse::<ArtifactAttribute>()?,
-        //                    //     mallory.clone(),
-        //                    //     Value::String("Hacker".to_string()),
-        //                    // )
-        //                    // .into(),
-        //     ])
-        //     .await?;
+        session
+            .transact([
+                Employee {
+                    this: alice.clone(),
+                    name: "Alice".to_string(),
+                    role: "cryptographer".to_string(),
+                }
+                .assert(),
+                Employee {
+                    this: bob.clone(),
+                    name: "Bob".to_string(),
+                    role: "janitor".to_string(),
+                }
+                .assert(),
+                Fact::assert(
+                    "employee/name".parse::<ArtifactAttribute>()?,
+                    mallory.clone(),
+                    Value::String("Mallory".to_string()),
+                )
+                .into(),
+                Fact::assert(
+                    "employee/role".parse::<ArtifactAttribute>()?,
+                    mallory.clone(),
+                    Value::String("Hacker".to_string()),
+                )
+                .into(),
+            ])
+            .await?;
 
-        // let employee = Match::<Employee> {
-        //     this: Term::var("this"),
-        //     name: Term::var("name"),
-        //     role: Term::var("role"),
-        // };
+        let employee = Match::<Employee> {
+            this: Term::var("this"),
+            name: Term::var("name"),
+            role: Term::var("role"),
+        };
 
-        // let employees = employee.query(session).try_vec().await?;
-        // assert_eq!(
-        //     employees.clone().sort(),
-        //     vec![
-        //         Employee {
-        //             this: bob.clone(),
-        //             name: "Bob".to_string(),
-        //             role: "janitor".to_string(),
-        //         },
-        //         Employee {
-        //             this: alice.clone(),
-        //             name: "Alice".to_string(),
-        //             role: "cryptographer".to_string(),
-        //         },
-        //         // Employee {
-        //         //     this: mallory.clone(),
-        //         //     name: "Mallory".to_string(),
-        //         //     role: "Hacker".to_string(),
-        //         // },
-        //     ]
-        //     .sort()
-        // );
+        let employees = employee.query(session).try_vec().await?;
+        assert_eq!(
+            employees.clone().sort(),
+            vec![
+                Employee {
+                    this: bob.clone(),
+                    name: "Bob".to_string(),
+                    role: "janitor".to_string(),
+                },
+                Employee {
+                    this: alice.clone(),
+                    name: "Alice".to_string(),
+                    role: "cryptographer".to_string(),
+                },
+                Employee {
+                    this: mallory.clone(),
+                    name: "Mallory".to_string(),
+                    role: "Hacker".to_string(),
+                },
+            ]
+            .sort()
+        );
 
         Ok(())
     }

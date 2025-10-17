@@ -119,6 +119,7 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
     let mut match_term_conversions = Vec::new();
     let mut attributes_tuples = Vec::new();
     let mut terms_methods = Vec::new();
+    let mut instance_relations = Vec::new();
 
     // Generate namespace from struct name (e.g., Person -> "person")
     let namespace = to_snake_case(&struct_name.to_string());
@@ -253,6 +254,16 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
                 content_type: #data_type_value,
                 marker: std::marker::PhantomData,
             })
+        });
+
+        // Generate Relation for instance() method
+        let attr_string = format!("{}/{}", namespace, field_name_str);
+        instance_relations.push(quote! {
+            dialog_query::attribute::Relation {
+                the: #attr_string.parse().expect("Failed to parse attribute"),
+                is: dialog_query::types::Scalar::as_value(&self.#field_name),
+                cardinality: dialog_query::attribute::Cardinality::One,
+            }
         });
     }
 
@@ -416,6 +427,15 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
                     operator: #namespace_lit,
                     attributes: &#attributes_const_name,
                 };
+
+            fn instance(&self) -> dialog_query::predicate::concept::Instance {
+                dialog_query::predicate::concept::Instance {
+                    this: self.this.clone(),
+                    with: vec![
+                        #(#instance_relations),*
+                    ]
+                }
+            }
         }
 
         impl dialog_query::dsl::Quarriable for #struct_name {

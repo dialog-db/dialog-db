@@ -246,7 +246,7 @@ pub struct Model {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Instance {
     /// The entity this instance represents
-    this: Entity,
+    pub this: Entity,
     /// The validated relations (attribute-value pairs) for this instance
     pub with: Vec<Relation>,
 }

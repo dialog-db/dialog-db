@@ -123,6 +123,31 @@ mod person {
                 operator: &NAMESPACE,
                 attributes: &PERSON_ATTRIBUTES,
             };
+
+        fn instance(&self) -> dialog_query::predicate::concept::Instance {
+            use dialog_query::attribute::Relation;
+            use dialog_query::types::Scalar;
+
+            dialog_query::predicate::concept::Instance {
+                this: self.this.clone(),
+                with: vec![
+                    Relation {
+                        the: "person/name"
+                            .parse()
+                            .expect("Failed to parse person/name attribute"),
+                        is: self.name.as_value(),
+                        cardinality: dialog_query::attribute::Cardinality::One,
+                    },
+                    Relation {
+                        the: "person/age"
+                            .parse()
+                            .expect("Failed to parse person/age attribute"),
+                        is: self.age.as_value(),
+                        cardinality: dialog_query::attribute::Cardinality::One,
+                    },
+                ],
+            }
+        }
     }
 
     impl concept::Quarriable for Person {
