@@ -411,12 +411,11 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             type Assert = #assert_name;
             type Retract = #retract_name;
 
-            fn concept() -> dialog_query::predicate::concept::Concept {
+            const CONCEPT: dialog_query::predicate::concept::Concept =
                 dialog_query::predicate::concept::Concept::Static {
                     operator: #namespace_lit,
                     attributes: &#attributes_const_name,
-                }
-            }
+                };
         }
 
         impl dialog_query::dsl::Quarriable for #struct_name {

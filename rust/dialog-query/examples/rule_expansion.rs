@@ -111,12 +111,6 @@ mod person {
         }
     }
 
-    const CONCEPT: dialog_query::predicate::concept::Concept =
-        dialog_query::predicate::concept::Concept::Static {
-            operator: &NAMESPACE,
-            attributes: &PERSON_ATTRIBUTES,
-        };
-
     impl concept::Concept for Person {
         type Instance = Person;
         type Match = Match;
@@ -124,9 +118,11 @@ mod person {
         type Assert = Assert;
         type Retract = Retract;
 
-        fn concept() -> dialog_query::predicate::concept::Concept {
-            CONCEPT
-        }
+        const CONCEPT: dialog_query::predicate::concept::Concept =
+            dialog_query::predicate::concept::Concept::Static {
+                operator: &NAMESPACE,
+                attributes: &PERSON_ATTRIBUTES,
+            };
     }
 
     impl concept::Quarriable for Person {

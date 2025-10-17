@@ -37,9 +37,9 @@ pub trait Concept: Quarriable + Clone + Debug {
     /// inductive rules to describe conditions for the of the concepts lifecycle.
     type Retract;
 
-    /// Returns the static concept definition for this type.
-    /// This is typically implemented by the macro to return a Concept::Static variant.
-    fn concept() -> predicate::concept::Concept;
+    /// The static concept definition for this type.
+    /// This is typically defined by the macro as a Concept::Static variant.
+    const CONCEPT: predicate::concept::Concept;
 }
 
 /// Every assertion or retraction can be decomposed into a set of
@@ -64,7 +64,7 @@ pub trait Match: Sized + Clone + ConditionalSend + Into<Parameters> + 'static {
     fn realize(&self, source: Answer) -> Result<Self::Instance, QueryError>;
 
     fn conpect() -> predicate::Concept {
-        Self::Concept::concept()
+        Self::Concept::CONCEPT
     }
 
     fn query<S: Source>(&self, source: S) -> impl Output<Self::Instance> {
@@ -207,12 +207,12 @@ mod tests {
         type Retract = PersonRetract;
         type Term = PersonTerms;
 
-        fn concept() -> predicate::concept::Concept {
+        const CONCEPT: predicate::concept::Concept = {
             use crate::artifact::{Type, Value};
             use crate::attribute::{Attribute, Cardinality};
             use std::marker::PhantomData;
 
-            static ATTRIBUTE_TUPLES: &[(&str, Attribute<Value>)] = &[
+            const ATTRIBUTE_TUPLES: &[(&str, Attribute<Value>)] = &[
                 (
                     "name",
                     Attribute {
@@ -237,14 +237,14 @@ mod tests {
                 ),
             ];
 
-            static ATTRS: predicate::concept::Attributes =
+            const ATTRS: predicate::concept::Attributes =
                 predicate::concept::Attributes::Static(ATTRIBUTE_TUPLES);
 
             predicate::concept::Concept::Static {
                 operator: "person",
                 attributes: &ATTRS,
             }
-        }
+        };
     }
 
     impl Quarriable for Person {
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn test_person_concept_creation() {
         // Test that the Person concept has the expected properties
-        let concept = Person::concept();
+        let concept = Person::CONCEPT;
         assert_eq!(concept.operator(), "person");
 
         // Test Person has 2 attributes (name and age)
@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn test_concept_name_consistency() {
         // Test that concept name is consistent across different access patterns
-        let concept = Person::concept();
+        let concept = Person::CONCEPT;
         assert_eq!(concept.operator(), "person");
 
         // The concept should have consistent naming
@@ -685,7 +685,7 @@ mod tests {
         assert!(params.get("age").is_some());
 
         // Test 2: Verify concept attributes are accessible
-        let concept = Person::concept();
+        let concept = Person::CONCEPT;
         let attrs = concept.attributes();
         assert_eq!(attrs.count(), 2); // name and age
 

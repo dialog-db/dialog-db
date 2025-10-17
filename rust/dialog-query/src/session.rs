@@ -641,7 +641,7 @@ mod tests {
 
         // employee can be derived from the stuff concept
         let employee_from_stuff = DeductiveRule::new(
-            <Employee as Concept>::concept(),
+            <Employee as Concept>::CONCEPT,
             vec![
                 Fact::<String>::select()
                     .the("stuff/name")
@@ -662,13 +662,13 @@ mod tests {
         let store = Artifacts::anonymous(backend).await?;
         let mut session = Session::open(store).install(employee_from_stuff);
 
-        let alice = Stuff::concept()
+        let alice = Stuff::CONCEPT
             .create()?
             .with("name", "Alice".to_string())
             .with("role", "manager".to_string())
             .assert()?;
 
-        let bob = Stuff::concept()
+        let bob = Stuff::CONCEPT
             .create()?
             .with("name", "Bob".to_string())
             .with("role", "developer".to_string())

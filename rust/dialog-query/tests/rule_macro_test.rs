@@ -30,7 +30,7 @@ fn test_derive_rule_generates_types() {
     assert_eq!(statements.len(), 2); // Should have 2 statements for name and birthday
 
     // Test that Person implements Concept
-    let concept = Person::concept();
+    let concept = Person::CONCEPT;
     assert_eq!(concept.operator(), "person");
 
     // Test the attributes() method

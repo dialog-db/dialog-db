@@ -141,15 +141,15 @@ impl Concept for Person {
     type Retract = PersonRetract;
     type Term = PersonTerms;
 
-    fn concept() -> dialog_query::predicate::concept::Concept {
-        static ATTRS: dialog_query::predicate::concept::Attributes =
+    const CONCEPT: dialog_query::predicate::concept::Concept = {
+        const ATTRS: dialog_query::predicate::concept::Attributes =
             dialog_query::predicate::concept::Attributes::Static(&[]);
 
         dialog_query::predicate::concept::Concept::Static {
             operator: "person",
             attributes: &ATTRS,
         }
-    }
+    };
 }
 
 impl Quarriable for Person {

@@ -20,7 +20,7 @@ fn main() {
     };
 
     // Test that the Concept trait is implemented
-    let concept = TestPerson::concept();
+    let concept = TestPerson::CONCEPT;
     assert_eq!(concept.operator(), "test.person");
 
     // Test that Rule trait is implemented
