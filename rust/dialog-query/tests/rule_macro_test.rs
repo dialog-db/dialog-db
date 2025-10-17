@@ -1,6 +1,6 @@
 use dialog_query::concept::ConceptType;
 use dialog_query::rule::{Match, Premises};
-use dialog_query::{Concept, Entity, Rule, Term, Type};
+use dialog_query::{Concept, Entity, Term, Type};
 
 #[derive(Concept, Debug, Clone)]
 pub struct Person {

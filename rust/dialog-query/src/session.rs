@@ -617,7 +617,7 @@ mod tests {
         use crate::artifact::{Artifacts, Entity};
         use crate::query::Output;
         use crate::rule::Match;
-        use crate::{Concept, Fact, Rule, Term};
+        use crate::{Concept, Fact, Term};
         use dialog_storage::MemoryStorageBackend;
 
         #[derive(Clone, Debug, PartialEq, Concept)]

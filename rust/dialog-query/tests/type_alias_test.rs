@@ -1,6 +1,6 @@
 //! Test that type aliases work correctly with IntoType trait-based type detection
 
-use dialog_query::{artifact::Entity, Concept, Rule};
+use dialog_query::{artifact::Entity, Concept};
 
 // Type alias - with trait-based detection, this should properly resolve to String's type
 type PersonName = String;
