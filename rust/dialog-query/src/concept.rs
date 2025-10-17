@@ -119,6 +119,36 @@ pub trait Instance: ConditionalSend {
     fn this(&self) -> Entity;
 }
 
+pub struct Assertion;
+pub struct Retraction;
+pub trait Change {
+    fn claim(instance: dialog_query::predicate::concept::Instance) -> ConceptClaim;
+}
+impl Change for Assertion {
+    fn claim(instance: dialog_query::predicate::concept::Instance) -> ConceptClaim {
+        ConceptClaim::Assert(instance)
+    }
+}
+impl Change for Retraction {
+    fn claim(instance: dialog_query::predicate::concept::Instance) -> ConceptClaim {
+        ConceptClaim::Retract(instance)
+    }
+}
+
+pub trait Claim: Sized {
+    type Change: Change;
+    fn instance(self) -> dialog_query::predicate::concept::Instance;
+    fn claim(self) -> ConceptClaim {
+        Self::Change::claim(self.instance())
+    }
+}
+
+impl<T: Claim> From<T> for ConceptClaim {
+    fn from(source: T) -> Self {
+        source.claim()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,6 +734,86 @@ mod tests {
         let session = Session::open(artifacts);
         let no_results = missing_query.query(&session).try_vec().await?;
         assert_eq!(no_results.len(), 0, "Should find no non-existent people");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_concept_dsl() -> Result<()> {
+        use crate::Match;
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct Employee {
+            this: Entity,
+            name: String,
+            role: String,
+        }
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        let mallory = Entity::new()?;
+
+        // Create test data
+
+        let mut session = Session::open(artifacts.clone());
+        // session
+        //     .transact([
+        //         Employee {
+        //             this: alice.clone(),
+        //             name: "Alice".to_string(),
+        //             role: "cryptographer".to_string(),
+        //         }
+        //         .assert(),
+        //         Employee {
+        //             this: bob.clone(),
+        //             name: "Bob".to_string(),
+        //             role: "janitor".to_string(),
+        //         }
+        //         .assert(), // Fact::assert(
+        //                    //     "employee/name".parse::<ArtifactAttribute>()?,
+        //                    //     mallory.clone(),
+        //                    //     Value::String("Mallory".to_string()),
+        //                    // )
+        //                    // .into(),
+        //                    // Fact::assert(
+        //                    //     "employee/role".parse::<ArtifactAttribute>()?,
+        //                    //     mallory.clone(),
+        //                    //     Value::String("Hacker".to_string()),
+        //                    // )
+        //                    // .into(),
+        //     ])
+        //     .await?;
+
+        // let employee = Match::<Employee> {
+        //     this: Term::var("this"),
+        //     name: Term::var("name"),
+        //     role: Term::var("role"),
+        // };
+
+        // let employees = employee.query(session).try_vec().await?;
+        // assert_eq!(
+        //     employees.clone().sort(),
+        //     vec![
+        //         Employee {
+        //             this: bob.clone(),
+        //             name: "Bob".to_string(),
+        //             role: "janitor".to_string(),
+        //         },
+        //         Employee {
+        //             this: alice.clone(),
+        //             name: "Alice".to_string(),
+        //             role: "cryptographer".to_string(),
+        //         },
+        //         // Employee {
+        //         //     this: mallory.clone(),
+        //         //     name: "Mallory".to_string(),
+        //         //     role: "Hacker".to_string(),
+        //         // },
+        //     ]
+        //     .sort()
+        // );
 
         Ok(())
     }
