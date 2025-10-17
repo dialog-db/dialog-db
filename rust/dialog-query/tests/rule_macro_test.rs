@@ -1,4 +1,3 @@
-use dialog_query::concept::ConceptType;
 use dialog_query::rule::{Match, Premises};
 use dialog_query::{Concept, Entity, Term, Type};
 
@@ -31,10 +30,11 @@ fn test_derive_rule_generates_types() {
     assert_eq!(statements.len(), 2); // Should have 2 statements for name and birthday
 
     // Test that Person implements Concept
-    assert_eq!(Person::operator(), "person");
+    let concept = Person::concept();
+    assert_eq!(concept.operator(), "person");
 
-    // Test the attributes() method through PersonAttributes
-    let attrs = Person::attributes().iter().collect::<Vec<_>>();
+    // Test the attributes() method
+    let attrs = concept.attributes().iter().collect::<Vec<_>>();
 
     assert_eq!(attrs.len(), 2);
     assert_eq!(attrs[0].0, "name");

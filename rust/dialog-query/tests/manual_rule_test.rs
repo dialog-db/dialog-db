@@ -134,24 +134,22 @@ pub mod person {
     ];
 }
 
-impl dialog_query::predicate::concept::ConceptType for Person {
-    fn operator() -> &'static str {
-        "person"
-    }
-
-    fn attributes() -> &'static dialog_query::predicate::concept::Attributes {
-        static ATTRS: dialog_query::predicate::concept::Attributes =
-            dialog_query::predicate::concept::Attributes::Static(&[]);
-        &ATTRS
-    }
-}
-
 impl Concept for Person {
     type Instance = Person;
     type Match = PersonMatch;
     type Assert = PersonAssert;
     type Retract = PersonRetract;
     type Term = PersonTerms;
+
+    fn concept() -> dialog_query::predicate::concept::Concept {
+        static ATTRS: dialog_query::predicate::concept::Attributes =
+            dialog_query::predicate::concept::Attributes::Static(&[]);
+
+        dialog_query::predicate::concept::Concept::Static {
+            operator: "person",
+            attributes: &ATTRS,
+        }
+    }
 }
 
 impl Quarriable for Person {

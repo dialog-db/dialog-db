@@ -14,7 +14,7 @@ I like to take inspiration from [Bevy]( https://bevy.org/learn/quick-start/getti
 > struct Name(String);
 > ```
 
-## Derived Rules
+## Derived Concept
 
 In dialog we have attributes that act very similar, however dialog needs to worry about on-wire serialization and interaction across tools in different languages, which comes with extra design considerations:
 
@@ -24,8 +24,10 @@ In dialog we have attributes that act very similar, however dialog needs to worr
 For this reason we take slightly different approach illustrated in by the following example:
 
 ```rs
-#[derive(Rule)]
+#[derive(Concept)]
 pub struct Person {
+    /// Entity representing this person
+    pub this: Entity,
     /// Name of the person
     pub name: String,
     /// Name of the person
@@ -50,7 +52,7 @@ In datomic this will translate to following schema
  :db/doc "Birthday of the person"}
 ```
 
-Derived `Rule` should also expand to the following form:
+Derived `Concept` should also expand to the following form:
 
 ```rs
 use dialog_query::attribute::{Attribute, MatchAttribute};
@@ -213,21 +215,12 @@ Structs that derive rules can be used to query the database for the matching fac
 
 ```rs
 fn main() {
-    // Define a variable for the person entity
-    let person = Term::var("person");
-
-    // Constraint that can be used match facts in which entity
-    // has `person/name` attribute with value `John`
-    let _named_john = Person(&person).name.is("John");
-
-    let _birthday = Person(&person).birthday.is(1983_07_03 as u32);
-
     // Predicate that can be used to query for `Person` with given
     // name `John` and birthday `1983_07_03`
-    let john = Match<Person> {
-        this: person.clone(),
-        name: Term::from("John"),
-        birthday: Term::from(1983_07_03u32),
+    let john = Match::<Person> {
+        this: Term::var("person"),
+        name: "John".into(),
+        birthday: 1983_07_03u32.into(),
     };
 
     let store = MemoryStorageBackend::default();
@@ -235,7 +228,7 @@ fn main() {
     let dialog = Dialog::open(artifacts);
 
     // Find for all `Person` that have name `John` and birthday `1983_07_03`
-    let results = dialog.query(john).await?;
+    let results = john.query(dialog).await?;
 }
 ```
 
@@ -273,27 +266,33 @@ Also note that disjunctions (logical or) is expressed through rule that share th
 We take a inspiration from datalog notation and allow defining additional disjunctions (from the default one that simply finds stored facts) using `#[rule]` attribute macro.
 
 ```rs
-#[derive(Rule)]
+#[derive(Concept)]
 pub struct Counter {
+    pub this: Entity,
     pub count: i32,
     pub title: String,
 }
 
-#[derive(Rule)]
-pub struct Increment;
+#[derive(Concept)]
+pub struct Increment {
+    pub this: Entity,
+};
+
+
+struct New(|counter| vec![counter]);
 
 // Rule that will match when there is no counter.
 #[rule(Counter)]
-fn new(counter: Match<Counter>) -> When {
+fn new(counter: Query<Counter>) -> When {
     When::from([
         // No counter exists at this time
-        Not<Counter> {
+        Not::<Counter> {
             this: Term::blank(),
             count: Term::blank(),
             title: Term::blank(),
         },
         // assert new counter next time
-        Assert<Counter> {
+        Assert::<Counter> {
             this: counter.this,
             count: 0,
             title: "basic counter".to_string(),
@@ -301,17 +300,18 @@ fn new(counter: Match<Counter>) -> When {
     ])
 }
 
+
 // Rule that will match when we have a counter and an
 // increment action associated with same entity.
 #[rule(Counter)]
-fn inc(terms: Match<Counter>) -> When {
+fn inc(counter: Query<Counter>) -> When {
     // We have want to find counter and capture it's count so we define a var.
     let count = Term::var("count");
 
     When::from([
         // We have a counter with count for it's current
         // count value.
-        Match<Counter> {
+        Match::<Counter> {
             this: counter.this,
             count,
             title: counter.title
@@ -319,14 +319,17 @@ fn inc(terms: Match<Counter>) -> When {
 
         // We also have `Incerment` fact asserted on the same
         // entity, signalling increment action taking place.
-        Match<Increment> { this: counter.this },
+        Match::<Increment> { this: counter.this },
 
-        // Built in oprator that derives an incremented term
-        // from provided term.
-        Math::inc(last_count).is(terms.count),
+        // Built in formula to calculate incremented value.
+        Match::<math::Sum> {
+            of: last_count,
+            with: 1,
+            is: counter.count
+        },
 
         // Going forward we will
-        Assert<Counter> {
+        Assert::<Counter> {
             this: counter.this,
             count: counter.count,
             title: counter.title

@@ -1,5 +1,4 @@
 // Test to verify the Concept macro generates correct code with the fixes
-use dialog_query::concept::ConceptType;
 use dialog_query::{Concept, Entity, Term};
 
 #[derive(Concept, Debug, Clone)]
@@ -21,7 +20,8 @@ fn main() {
     };
 
     // Test that the Concept trait is implemented
-    assert_eq!(TestPerson::operator(), "test.person");
+    let concept = TestPerson::concept();
+    assert_eq!(concept.operator(), "test.person");
 
     // Test that Rule trait is implemented
     let when = TestPerson::when(person_match);

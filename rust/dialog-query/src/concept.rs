@@ -1,7 +1,7 @@
 use crate::application::ConceptApplication;
 use crate::claim::concept::ConceptClaim;
 pub use crate::dsl::Quarriable;
-pub use crate::predicate::concept::{Attributes, ConceptType};
+pub use crate::predicate::concept::Attributes;
 use crate::query::{Output, Source};
 use crate::selection::Answer;
 use crate::{predicate, QueryError};
@@ -21,7 +21,7 @@ use std::fmt::Debug;
 /// Concepts are used to describe conclusions of the rules, providing a mapping
 /// between conclusions and facts. In that sense you concepts are on-demand
 /// cache of all the conclusions from the associated rules.
-pub trait Concept: Quarriable + Clone + Debug + ConceptType {
+pub trait Concept: Quarriable + Clone + Debug {
     type Instance: Instance;
     /// Type representing a query of this concept. It is a set of terms
     /// corresponding to the set of attributes defined by this concept.
@@ -37,12 +37,9 @@ pub trait Concept: Quarriable + Clone + Debug + ConceptType {
     /// inductive rules to describe conditions for the of the concepts lifecycle.
     type Retract;
 
-    fn concept() -> predicate::concept::Concept {
-        predicate::concept::Concept::Dynamic {
-            operator: Self::operator().into(),
-            attributes: Self::attributes().clone(),
-        }
-    }
+    /// Returns the static concept definition for this type.
+    /// This is typically implemented by the macro to return a Concept::Static variant.
+    fn concept() -> predicate::concept::Concept;
 }
 
 /// Every assertion or retraction can be decomposed into a set of
@@ -60,18 +57,14 @@ pub trait Instructions {
 /// concept. Each match should be translatable into a set of statements making
 /// it possible to spread it into a query.
 pub trait Match: Sized + Clone + ConditionalSend + Into<Parameters> + 'static {
-    type Concept: Concept + ConceptType;
+    type Concept: Concept;
     /// Instance of the concept that this match can produce.
     type Instance: Instance + ConditionalSend + Clone;
 
     fn realize(&self, source: Answer) -> Result<Self::Instance, QueryError>;
 
     fn conpect() -> predicate::Concept {
-        use predicate::concept::ConceptType;
-        predicate::Concept::Dynamic {
-            operator: Self::Concept::operator().into(),
-            attributes: Self::Concept::attributes().clone(),
-        }
+        Self::Concept::concept()
     }
 
     fn query<S: Source>(&self, source: S) -> impl Output<Self::Instance> {
@@ -206,13 +199,15 @@ mod tests {
         pub age: Term<u32>,
     }
 
-    // Implement ConceptType for Person
-    impl predicate::concept::ConceptType for Person {
-        fn operator() -> &'static str {
-            "person"
-        }
+    // Implement Concept for Person
+    impl Concept for Person {
+        type Instance = Person;
+        type Match = PersonMatch;
+        type Assert = PersonAssert;
+        type Retract = PersonRetract;
+        type Term = PersonTerms;
 
-        fn attributes() -> &'static predicate::concept::Attributes {
+        fn concept() -> predicate::concept::Concept {
             use crate::artifact::{Type, Value};
             use crate::attribute::{Attribute, Cardinality};
             use std::marker::PhantomData;
@@ -244,17 +239,12 @@ mod tests {
 
             static ATTRS: predicate::concept::Attributes =
                 predicate::concept::Attributes::Static(ATTRIBUTE_TUPLES);
-            &ATTRS
-        }
-    }
 
-    // Implement Concept for Person
-    impl Concept for Person {
-        type Instance = Person;
-        type Match = PersonMatch;
-        type Assert = PersonAssert;
-        type Retract = PersonRetract;
-        type Term = PersonTerms;
+            predicate::concept::Concept::Static {
+                operator: "person",
+                attributes: &ATTRS,
+            }
+        }
     }
 
     impl Quarriable for Person {
@@ -407,13 +397,12 @@ mod tests {
 
     #[test]
     fn test_person_concept_creation() {
-        use predicate::concept::ConceptType;
-
         // Test that the Person concept has the expected properties
-        assert_eq!(Person::operator(), "person");
+        let concept = Person::concept();
+        assert_eq!(concept.operator(), "person");
 
         // Test Person has 2 attributes (name and age)
-        let attributes = Person::attributes();
+        let attributes = concept.attributes();
         assert_eq!(attributes.count(), 2);
 
         // Verify attribute names
@@ -499,7 +488,8 @@ mod tests {
     #[test]
     fn test_concept_name_consistency() {
         // Test that concept name is consistent across different access patterns
-        assert_eq!(Person::operator(), "person");
+        let concept = Person::concept();
+        assert_eq!(concept.operator(), "person");
 
         // The concept should have consistent naming
         let _person = Person {
@@ -510,7 +500,7 @@ mod tests {
 
         // Instance should have the same concept name
         // (though our current Instance impl doesn't store concept info)
-        assert_eq!(Person::operator(), "person");
+        assert_eq!(concept.operator(), "person");
     }
 
     #[test]
@@ -695,7 +685,8 @@ mod tests {
         assert!(params.get("age").is_some());
 
         // Test 2: Verify concept attributes are accessible
-        let attrs = Person::attributes();
+        let concept = Person::concept();
+        let attrs = concept.attributes();
         assert_eq!(attrs.count(), 2); // name and age
 
         // Verify we can find specific attributes

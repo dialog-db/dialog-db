@@ -345,17 +345,6 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
         /// Const operator name for this concept
         pub const #operator_const_name: &str = #namespace_lit;
 
-        // Implement ConceptType trait for the Match struct
-        impl dialog_query::predicate::concept::ConceptType for #match_name {
-            fn operator() -> &'static str {
-                #namespace_lit
-            }
-
-            fn attributes() -> &'static dialog_query::predicate::concept::Attributes {
-                &#attributes_const_name
-            }
-        }
-
         // Implement Match trait for the Match struct
         impl dialog_query::concept::Match for #match_name {
             type Concept = #struct_name;
@@ -414,17 +403,6 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             }
         }
 
-        // Implement ConceptType trait for the struct
-        impl dialog_query::predicate::concept::ConceptType for #struct_name {
-            fn operator() -> &'static str {
-                #namespace_lit
-            }
-
-            fn attributes() -> &'static dialog_query::predicate::concept::Attributes {
-                &#attributes_const_name
-            }
-        }
-
         // Implement Concept trait
         impl dialog_query::concept::Concept for #struct_name {
             type Instance = #struct_name;
@@ -432,6 +410,13 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             type Term = #terms_name;
             type Assert = #assert_name;
             type Retract = #retract_name;
+
+            fn concept() -> dialog_query::predicate::concept::Concept {
+                dialog_query::predicate::concept::Concept::Static {
+                    operator: #namespace_lit,
+                    attributes: &#attributes_const_name,
+                }
+            }
         }
 
         impl dialog_query::dsl::Quarriable for #struct_name {
