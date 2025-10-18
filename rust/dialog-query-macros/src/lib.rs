@@ -456,6 +456,15 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             }
         }
 
+        // Implement Not trait to enable !concept syntax for retraction
+        impl std::ops::Not for #struct_name {
+            type Output = dialog_query::claim::Revert<Self>;
+
+            fn not(self) -> Self::Output {
+                dialog_query::claim::Claim::revert(self)
+            }
+        }
+
         impl dialog_query::dsl::Quarriable for #struct_name {
             type Query = #match_name;
         }

@@ -831,4 +831,143 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_concept_negation_with_not_operator() -> Result<()> {
+        use crate::artifact::Artifacts;
+        use crate::artifact::Attribute as ArtifactAttribute;
+        use dialog_storage::MemoryStorageBackend;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct Person {
+            this: Entity,
+            name: String,
+            age: usize,
+        }
+
+        let alice = Entity::new()?;
+
+        // Create test data - assert Alice
+        let mut session = Session::open(artifacts.clone());
+        let alice_person = Person {
+            this: alice.clone(),
+            name: "Alice".to_string(),
+            age: 25,
+        };
+
+        session.transact(vec![alice_person.clone()]).await?;
+
+        // Verify Alice exists
+        use crate::artifact::{ArtifactSelector, ArtifactStore};
+        use futures_util::TryStreamExt;
+
+        let session = Session::open(artifacts.clone());
+        let name_attr: ArtifactAttribute = "person/name".parse()?;
+        let age_attr: ArtifactAttribute = "person/age".parse()?;
+
+        let name_facts: Vec<_> = session
+            .select(ArtifactSelector::new().the(name_attr.clone()).of(alice.clone()))
+            .try_collect()
+            .await?;
+        assert_eq!(name_facts.len(), 1, "Should have Alice's name");
+        assert_eq!(
+            name_facts[0].is,
+            Value::String("Alice".to_string()),
+            "Name should be Alice"
+        );
+
+        let age_facts: Vec<_> = session
+            .select(ArtifactSelector::new().the(age_attr.clone()).of(alice.clone()))
+            .try_collect()
+            .await?;
+        assert_eq!(age_facts.len(), 1, "Should have Alice's age");
+        assert_eq!(
+            age_facts[0].is,
+            Value::UnsignedInt(25),
+            "Age should be 25"
+        );
+
+        // Now retract using !operator
+        let mut session = Session::open(artifacts.clone());
+        session.transact(vec![!alice_person]).await?;
+
+        // Verify Alice has been retracted
+        let session = Session::open(artifacts.clone());
+        let name_facts_after: Vec<_> = session
+            .select(ArtifactSelector::new().the(name_attr.clone()).of(alice.clone()))
+            .try_collect()
+            .await?;
+        assert_eq!(
+            name_facts_after.len(),
+            0,
+            "Should not have Alice's name after retraction"
+        );
+
+        let age_facts_after: Vec<_> = session
+            .select(ArtifactSelector::new().the(age_attr.clone()).of(alice.clone()))
+            .try_collect()
+            .await?;
+        assert_eq!(
+            age_facts_after.len(),
+            0,
+            "Should not have Alice's age after retraction"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_relation_negation_with_not_operator() -> Result<()> {
+        use crate::artifact::Artifacts;
+        use crate::artifact::Attribute as ArtifactAttribute;
+        use dialog_storage::MemoryStorageBackend;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+        let name_attr: ArtifactAttribute = "user/name".parse()?;
+
+        // Assert a relation
+        let mut session = Session::open(artifacts.clone());
+        let name_relation = Relation {
+            the: name_attr.clone(),
+            of: alice.clone(),
+            is: Value::String("Alice".to_string()),
+        };
+
+        session.transact(vec![name_relation.clone()]).await?;
+
+        // Verify relation exists
+        use crate::artifact::{ArtifactSelector, ArtifactStore};
+        use futures_util::TryStreamExt;
+
+        let session = Session::open(artifacts.clone());
+        let facts: Vec<_> = session
+            .select(ArtifactSelector::new().the(name_attr.clone()).of(alice.clone()))
+            .try_collect()
+            .await?;
+        assert_eq!(facts.len(), 1, "Should have name relation");
+
+        // Retract using ! operator
+        let mut session = Session::open(artifacts.clone());
+        session.transact(vec![!name_relation]).await?;
+
+        // Verify relation has been retracted
+        let session = Session::open(artifacts.clone());
+        let facts_after: Vec<_> = session
+            .select(ArtifactSelector::new().the(name_attr.clone()).of(alice.clone()))
+            .try_collect()
+            .await?;
+        assert_eq!(
+            facts_after.len(),
+            0,
+            "Should not have name relation after retraction"
+        );
+
+        Ok(())
+    }
 }
