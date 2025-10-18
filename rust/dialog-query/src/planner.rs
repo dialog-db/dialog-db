@@ -427,7 +427,7 @@ fn test_join_plan_with_two_fact_applications() {
         Term::var("person"),
         Term::var("name"),
         Term::var("cause"),
-            Cardinality::One,
+        Cardinality::One,
     );
 
     // Second: (person/age, of: ?person, is: ?age) - find person's age
@@ -436,7 +436,7 @@ fn test_join_plan_with_two_fact_applications() {
         Term::var("person"),
         Term::var("age"),
         Term::var("cause"),
-            Cardinality::One,
+        Cardinality::One,
     );
 
     // Create premises from the applications
@@ -475,7 +475,7 @@ fn test_join_plan_execution_order() {
         Term::Constant(Entity::try_from("urn:alice".to_string()).unwrap()),
         Term::var("name"),
         Term::var("cause"),
-            Cardinality::One,
+        Cardinality::One,
     );
 
     // Second: (greeting/text, of: ?name, is: ?greeting) - uses ?name from first
@@ -485,7 +485,7 @@ fn test_join_plan_execution_order() {
         Term::var("name"),
         Term::var("greeting"),
         Term::var("cause"),
-            Cardinality::One,
+        Cardinality::One,
     );
 
     let premises = vec![Premise::from(fact1), Premise::from(fact2)];
@@ -504,7 +504,7 @@ fn test_join_plan_execution_order() {
 async fn test_join_plan_query_execution() -> anyhow::Result<()> {
     use crate::application::FactApplication;
     use crate::session::Session;
-    use crate::{Cardinality, Fact, Term, Value};
+    use crate::{Cardinality, Fact, Relation, Term, Value};
     use dialog_artifacts::{Artifacts, Attribute, Entity};
     use dialog_storage::MemoryStorageBackend;
 
@@ -518,26 +518,26 @@ async fn test_join_plan_query_execution() -> anyhow::Result<()> {
 
     session
         .transact(vec![
-            Fact::assert(
-                "person/name".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("Alice".to_string()),
-            ),
-            Fact::assert(
-                "person/age".parse::<Attribute>()?,
-                alice.clone(),
-                Value::UnsignedInt(25),
-            ),
-            Fact::assert(
-                "person/name".parse::<Attribute>()?,
-                bob.clone(),
-                Value::String("Bob".to_string()),
-            ),
-            Fact::assert(
-                "person/age".parse::<Attribute>()?,
-                bob.clone(),
-                Value::UnsignedInt(30),
-            ),
+            Relation {
+                the: "person/name".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Relation {
+                the: "person/age".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::UnsignedInt(25),
+            },
+            Relation {
+                the: "person/name".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::String("Bob".to_string()),
+            },
+            Relation {
+                the: "person/age".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::UnsignedInt(30),
+            },
         ])
         .await?;
 
@@ -547,7 +547,7 @@ async fn test_join_plan_query_execution() -> anyhow::Result<()> {
         Term::var("person"),
         Term::var("name"),
         Term::var("cause"),
-            Cardinality::One,
+        Cardinality::One,
     );
 
     let fact2 = FactApplication::new(
@@ -555,14 +555,15 @@ async fn test_join_plan_query_execution() -> anyhow::Result<()> {
         Term::var("person"),
         Term::var("age"),
         Term::var("cause"),
-            Cardinality::One,
+        Cardinality::One,
     );
 
     let premises = vec![Premise::from(fact1), Premise::from(fact2)];
     let plan = Join::try_from(premises)?;
 
     // Execute the query
-    let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(plan.query(&session)?).await?;
+    let selection =
+        futures_util::TryStreamExt::try_collect::<Vec<_>>(plan.query(&session)?).await?;
 
     // Should find both Alice and Bob with their name and age
     assert_eq!(selection.len(), 2, "Should find 2 people");

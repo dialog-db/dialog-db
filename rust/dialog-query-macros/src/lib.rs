@@ -256,14 +256,14 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             })
         });
 
-        // Generate Relation for instance() method
+        // Generate Relation for IntoIterator implementation
         let attr_string = format!("{}/{}", namespace, field_name_str);
         instance_relations.push(quote! {
-            dialog_query::attribute::Relation {
-                the: #attr_string.parse().expect("Failed to parse attribute"),
-                is: dialog_query::types::Scalar::as_value(&self.#field_name),
-                cardinality: dialog_query::attribute::Cardinality::One,
-            }
+            dialog_query::Relation::new(
+                #attr_string.parse().expect("Failed to parse attribute"),
+                self.this.clone(),
+                dialog_query::types::Scalar::as_value(&self.#field_name),
+            )
         });
     }
 
@@ -427,14 +427,32 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
                     operator: #namespace_lit,
                     attributes: &#attributes_const_name,
                 };
+        }
 
-            fn instance(&self) -> dialog_query::predicate::concept::Instance {
-                dialog_query::predicate::concept::Instance {
-                    this: self.this.clone(),
-                    with: vec![
-                        #(#instance_relations),*
-                    ]
-                }
+        // Implement IntoIterator to convert concept into relations
+        impl IntoIterator for #struct_name {
+            type Item = dialog_query::Relation;
+            type IntoIter = std::vec::IntoIter<dialog_query::Relation>;
+
+            fn into_iter(self) -> Self::IntoIter {
+                vec![
+                    #(#instance_relations),*
+                ].into_iter()
+            }
+        }
+
+        // Implement Claim trait - direct implementation without iterator overhead
+        impl dialog_query::claim::Claim for #struct_name {
+            fn assert(self, transaction: &mut dialog_query::Transaction) {
+                #(
+                    #instance_relations.assert(transaction);
+                )*
+            }
+
+            fn retract(self, transaction: &mut dialog_query::Transaction) {
+                #(
+                    #instance_relations.retract(transaction);
+                )*
             }
         }
 

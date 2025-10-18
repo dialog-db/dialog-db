@@ -2,12 +2,12 @@
 
 use anyhow::Result;
 use dialog_query::{
-    artifact::{Artifacts, Attribute, Entity, Value},
     application::fact::FactApplication,
+    artifact::{Artifacts, Attribute, Entity, Value},
     query::Output,
     selection::{Answer, Answers},
     term::Term,
-    Cardinality, Fact, Session,
+    Cardinality, Fact, Relation, Session,
 };
 use dialog_storage::MemoryStorageBackend;
 use futures_util::stream::once;
@@ -22,14 +22,14 @@ async fn test_fact_application_with_provenance() -> Result<()> {
     let alice = Entity::new()?;
     let name_attr = "person/name".parse::<Attribute>()?;
 
-    let facts = vec![Fact::assert(
-        name_attr.clone(),
-        alice.clone(),
-        Value::String("Alice".to_string()),
-    )];
+    let claims = vec![Relation {
+        the: name_attr.clone(),
+        of: alice.clone(),
+        is: Value::String("Alice".to_string()),
+    }];
 
     let mut session = Session::open(artifacts.clone());
-    session.transact(facts).await?;
+    session.transact(claims).await?;
 
     // Step 2: Create FactApplication
     let fact_app = FactApplication::new(
@@ -86,21 +86,21 @@ async fn test_provenance_tracks_multiple_facts() -> Result<()> {
     let bob = Entity::new()?;
     let name_attr = "person/name".parse::<Attribute>()?;
 
-    let facts = vec![
-        Fact::assert(
-            name_attr.clone(),
-            alice.clone(),
-            Value::String("Alice".to_string()),
-        ),
-        Fact::assert(
-            name_attr.clone(),
-            bob.clone(),
-            Value::String("Bob".to_string()),
-        ),
+    let claims = vec![
+        Relation {
+            the: name_attr.clone(),
+            of: alice.clone(),
+            is: Value::String("Alice".to_string()),
+        },
+        Relation {
+            the: name_attr.clone(),
+            of: bob.clone(),
+            is: Value::String("Bob".to_string()),
+        },
     ];
 
     let mut session = Session::open(artifacts.clone());
-    session.transact(facts).await?;
+    session.transact(claims).await?;
 
     // Create FactApplication that matches all person names
     let fact_app = FactApplication::new(
@@ -144,14 +144,14 @@ async fn test_fact_application_query_with_provenance() -> Result<()> {
     let alice = Entity::new()?;
     let name_attr = "person/name".parse::<Attribute>()?;
 
-    let facts = vec![Fact::assert(
-        name_attr.clone(),
-        alice.clone(),
-        Value::String("Alice".to_string()),
-    )];
+    let claims = vec![Relation {
+        the: name_attr.clone(),
+        of: alice.clone(),
+        is: Value::String("Alice".to_string()),
+    }];
 
     let mut session = Session::open(artifacts.clone());
-    session.transact(facts).await?;
+    session.transact(claims).await?;
 
     // Test 1: Query with variables - should return Facts with proper cause
     let fact_app = FactApplication::new(
@@ -205,11 +205,11 @@ async fn test_query_with_blank_variables() -> Result<()> {
     let alice = Entity::new()?;
     let name_attr = "person/name".parse::<Attribute>()?;
 
-    let facts = vec![Fact::assert(
-        name_attr.clone(),
-        alice.clone(),
-        Value::String("Alice".to_string()),
-    )];
+    let facts = vec![Relation {
+        the: name_attr.clone(),
+        of: alice.clone(),
+        is: Value::String("Alice".to_string()),
+    }];
 
     let mut session = Session::open(artifacts.clone());
     session.transact(facts).await?;

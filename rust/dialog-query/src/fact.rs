@@ -2,11 +2,9 @@
 
 use std::hash::Hash;
 
-pub use super::claim::{fact, Claim};
 pub use super::predicate::fact::Fact as PredicateFact;
 pub use crate::application::FactApplication;
 pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Instruction, Value};
-use crate::claim::fact::Relation;
 pub use crate::dsl::Quarriable;
 pub use crate::error::SchemaError;
 pub use crate::query::Output;
@@ -70,18 +68,6 @@ impl Quarriable for Fact {
 }
 
 impl<T: Scalar + ConditionalSend> Fact<T> {
-    /// Create an assertion claim from individual components
-    pub fn assert<The: Into<Attribute>, Of: Into<Entity>>(the: The, of: Of, is: T) -> Claim {
-        let relation = Relation::new(the.into(), of.into(), is.as_value());
-        Claim::Fact(fact::Claim::Assert(relation))
-    }
-
-    /// Create a retraction claim from individual components
-    pub fn retract<The: Into<Attribute>, Of: Into<Entity>>(the: The, of: Of, is: T) -> Claim {
-        let relation = Relation::new(the.into(), of.into(), is.as_value());
-        Claim::Fact(fact::Claim::Retract(relation))
-    }
-
     pub fn select() -> PredicateFact {
         PredicateFact::new()
     }
@@ -124,26 +110,6 @@ impl<T: Scalar + ConditionalSend + ConditionalSync + Serialize> Fact<T> {
     }
 }
 
-/// Create a generic assertion claim from individual components
-pub fn assert<The: Into<Attribute>, Of: Into<Entity>, Is: Scalar>(
-    the: The,
-    of: Of,
-    is: Is,
-) -> Claim {
-    let relation = Relation::new(the.into(), of.into(), is.as_value());
-    Claim::Fact(fact::Claim::Assert(relation))
-}
-
-/// Create a generic retraction claim from individual components
-pub fn retract<The: Into<Attribute>, Of: Into<Entity>, Is: Scalar>(
-    the: The,
-    of: Of,
-    is: Is,
-) -> Claim {
-    let relation = Relation::new(the.into(), of.into(), is.as_value());
-    Claim::Fact(fact::Claim::Retract(relation))
-}
-
 /// Convert Assertion to Instruction for committing
 impl From<Assertion> for Instruction {
     fn from(assertion: Assertion) -> Self {
@@ -170,155 +136,6 @@ impl From<Retraction> for Instruction {
     }
 }
 
-/// Convert Claim to Instruction for committing (legacy API)
-///
-/// **Deprecated**: Use the `Edit` trait with `claim.merge(&mut transaction)` instead.
-impl From<fact::Claim> for Instruction {
-    fn from(claim: fact::Claim) -> Self {
-        match claim {
-            fact::Claim::Assert(relation) => {
-                let artifact = Artifact {
-                    the: relation.the,
-                    of: relation.of,
-                    is: relation.is.into(),
-                    cause: None,
-                };
-                Instruction::Assert(artifact)
-            }
-            fact::Claim::Retract(relation) => {
-                let artifact = Artifact {
-                    the: relation.the,
-                    of: relation.of,
-                    is: relation.is.into(),
-                    cause: None,
-                };
-                Instruction::Retract(artifact)
-            }
-        }
-    }
-}
-
-// Note: From implementations for external types (Attribute, Value) cannot be defined here
-// due to Rust's orphan rules. Users should use .parse() or explicit constructors instead.
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use dialog_query::Match;
-
-    #[test]
-    fn test_fact_assert() {
-        let entity = Entity::new().unwrap();
-        let claim = Fact::assert(
-            "user/name".parse::<Attribute>().unwrap(),
-            entity.clone(),
-            Value::String("Alice".to_string()),
-        );
-
-        match claim {
-            Claim::Fact(fact::Claim::Assert(relation)) => {
-                assert_eq!(relation.the.to_string(), "user/name");
-                assert_eq!(relation.of, entity);
-                assert_eq!(relation.is, Value::String("Alice".to_string()));
-            }
-            _ => panic!("Expected Claim::Fact(Assertion)"),
-        }
-    }
-
-    #[test]
-    fn test_fact_retract() {
-        let entity = Entity::new().unwrap();
-        let claim = Fact::retract(
-            "user/name".parse::<Attribute>().unwrap(),
-            entity.clone(),
-            Value::String("Alice".to_string()),
-        );
-
-        match claim {
-            Claim::Fact(fact::Claim::Retract(relation)) => {
-                assert_eq!(relation.the.to_string(), "user/name");
-                assert_eq!(relation.of, entity);
-                assert_eq!(relation.is, Value::String("Alice".to_string()));
-            }
-            _ => panic!("Expected Claim::Fact(Retraction)"),
-        }
-    }
-
-    #[test]
-    fn test_generic_static_functions() {
-        let entity = Entity::new().unwrap();
-
-        // Test generic static assert function with String type
-        let string_claim = assert(
-            "user/name".parse::<Attribute>().unwrap(),
-            entity.clone(),
-            "Alice".to_string(),
-        );
-
-        match string_claim {
-            Claim::Fact(fact::Claim::Assert(relation)) => {
-                assert_eq!(relation.the.to_string(), "user/name");
-                assert_eq!(relation.of, entity);
-                assert_eq!(relation.is, Value::String("Alice".to_string()));
-            }
-            _ => panic!("Expected Claim::Fact(Assertion)"),
-        }
-
-        // Test generic static retract function with u32 type
-        let number_claim = retract(
-            "user/age".parse::<Attribute>().unwrap(),
-            entity.clone(),
-            25u32,
-        );
-
-        match number_claim {
-            Claim::Fact(fact::Claim::Retract(relation)) => {
-                assert_eq!(relation.the.to_string(), "user/age");
-                assert_eq!(relation.of, entity);
-                assert_eq!(relation.is, Value::UnsignedInt(25u128));
-            }
-            _ => panic!("Expected Claim::Fact(Retraction)"),
-        }
-    }
-
-    #[test]
-    fn test_string_literal_support() {
-        let entity = Entity::new().unwrap();
-
-        // Test with Value type (need to construct Value explicitly)
-        let claim = Fact::<Value>::assert(
-            "user/name".parse::<Attribute>().unwrap(),
-            entity.clone(),
-            Value::String("Alice".to_string()), // Direct Value construction
-        );
-
-        match claim {
-            Claim::Fact(fact::Claim::Assert(relation)) => {
-                assert_eq!(relation.the.to_string(), "user/name");
-                assert_eq!(relation.of, entity);
-                assert_eq!(relation.is, Value::String("Alice".to_string()));
-            }
-            _ => panic!("Expected Claim::Fact(Assertion)"),
-        }
-
-        // Test with String type directly
-        let string_claim = Fact::<String>::assert(
-            "user/email".parse::<Attribute>().unwrap(),
-            entity.clone(),
-            "alice@example.com".to_string(),
-        );
-
-        match string_claim {
-            Claim::Fact(fact::Claim::Assert(relation)) => {
-                assert_eq!(relation.the.to_string(), "user/email");
-                assert_eq!(relation.of, entity);
-                assert_eq!(relation.is, Value::String("alice@example.com".to_string()));
-            }
-            _ => panic!("Expected Claim::Fact(Assertion)"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod integration_tests {
     //! Integration tests for the complete Fact workflow:
@@ -326,7 +143,7 @@ mod integration_tests {
 
     use super::*;
     use crate::artifact::{Artifacts, Attribute, Entity, Value};
-    use crate::Session;
+    use crate::{Claim, Relation, Session};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -341,23 +158,23 @@ mod integration_tests {
         let bob = Entity::new()?;
 
         // Step 2: Create facts using our Fact DSL
-        let alice_name = Fact::assert(
-            "user/name".parse::<Attribute>()?,
-            alice.clone(),
-            Value::String("Alice".to_string()),
-        );
+        let alice_name = Relation {
+            the: "user/name".parse::<Attribute>()?,
+            of: alice.clone(),
+            is: Value::String("Alice".to_string()),
+        };
 
-        let alice_email = Fact::assert(
-            "user/email".parse::<Attribute>()?,
-            alice.clone(),
-            Value::String("alice@example.com".to_string()),
-        );
+        let alice_email = Relation {
+            the: "user/email".parse::<Attribute>()?,
+            of: alice.clone(),
+            is: Value::String("alice@example.com".to_string()),
+        };
 
-        let bob_name = Fact::assert(
-            "user/name".parse::<Attribute>()?,
-            bob.clone(),
-            Value::String("Bob".to_string()),
-        );
+        let bob_name = Relation {
+            the: "user/name".parse::<Attribute>()?,
+            of: bob.clone(),
+            is: Value::String("Bob".to_string()),
+        };
 
         // Step 3: Commit using session API
         let claims = vec![alice_name, alice_email, bob_name];
@@ -440,14 +257,14 @@ mod integration_tests {
         let alice = Entity::new()?;
 
         // Step 1: Assert a fact
-        let alice_name = Fact::assert(
-            "user/name".parse::<Attribute>()?,
-            alice.clone(),
-            Value::String("Alice".to_string()),
-        );
+        let alice_name = Relation {
+            the: "user/name".parse::<Attribute>()?,
+            of: alice.clone(),
+            is: Value::String("Alice".to_string()),
+        };
 
         let mut session = Session::open(artifacts.clone());
-        session.transact(vec![alice_name]).await?;
+        session.transact(vec![alice_name.clone()]).await?;
 
         // Step 2: Verify fact exists
         let query_constant = Fact::<Value>::select()
@@ -473,15 +290,8 @@ mod integration_tests {
         });
         assert!(has_alice, "Should find Alice's name fact");
 
-        // Step 3: Retract the fact
-        let retraction = Fact::retract(
-            "user/name".parse::<Attribute>()?,
-            alice.clone(),
-            Value::String("Alice".to_string()),
-        );
-
         let mut session = Session::open(artifacts.clone());
-        session.transact(vec![retraction]).await?;
+        session.transact([!alice_name]).await?;
 
         // Step 4: Verify fact is gone
         let query2 = Fact::<Value>::select()
@@ -509,26 +319,26 @@ mod integration_tests {
         let bob = Entity::new()?;
 
         // Create facts
-        let facts = vec![
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("Alice".to_string()),
-            ),
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                bob.clone(),
-                Value::String("Bob".to_string()),
-            ),
-            Fact::assert(
-                "user/age".parse::<Attribute>()?,
-                alice.clone(),
-                Value::UnsignedInt(30),
-            ),
+        let claims = vec![
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::String("Bob".to_string()),
+            },
+            Relation {
+                the: "user/age".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::UnsignedInt(30),
+            },
         ];
 
         let mut session = Session::open(artifacts.clone());
-        session.transact(facts).await?;
+        session.transact(claims).await?;
 
         // Test 1: All constants
         let all_constants_query = Fact::<Value>::select()
@@ -597,42 +407,42 @@ mod integration_tests {
         let bob = Entity::new()?;
         let charlie = Entity::new()?;
 
-        let facts = vec![
+        let claims = vec![
             // Users and roles
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("Alice".to_string()),
-            ),
-            Fact::assert(
-                "user/role".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("admin".to_string()),
-            ),
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                bob.clone(),
-                Value::String("Bob".to_string()),
-            ),
-            Fact::assert(
-                "user/role".parse::<Attribute>()?,
-                bob.clone(),
-                Value::String("user".to_string()),
-            ),
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                charlie.clone(),
-                Value::String("Charlie".to_string()),
-            ),
-            Fact::assert(
-                "user/role".parse::<Attribute>()?,
-                charlie.clone(),
-                Value::String("admin".to_string()),
-            ),
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Relation {
+                the: "user/role".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("admin".to_string()),
+            },
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::String("Bob".to_string()),
+            },
+            Relation {
+                the: "user/role".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::String("user".to_string()),
+            },
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: charlie.clone(),
+                is: Value::String("Charlie".to_string()),
+            },
+            Relation {
+                the: "user/role".parse::<Attribute>()?,
+                of: charlie.clone(),
+                is: Value::String("admin".to_string()),
+            },
         ];
 
         let mut session = Session::open(artifacts.clone());
-        session.transact(facts).await?;
+        session.transact(claims).await?;
 
         // Query 1: Find all admins by role
         let admin_query = Fact::<Value>::select()
@@ -702,21 +512,21 @@ mod integration_tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let facts = vec![
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("Alice".to_string()),
-            ),
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                bob.clone(),
-                Value::String("Bob".to_string()),
-            ),
+        let claims = vec![
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::String("Bob".to_string()),
+            },
         ];
 
         let mut session = Session::open(artifacts.clone());
-        session.transact(facts).await?;
+        session.transact(claims).await?;
 
         let query_with_variables = Fact::<Value>::select().the("user/name").compile()?;
 
@@ -752,21 +562,21 @@ mod integration_tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let facts = vec![
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("Alice".to_string()),
-            ),
-            Fact::assert(
-                "user/friend".parse::<Attribute>()?,
-                alice.clone(),
-                Value::Entity(bob.clone()),
-            ),
+        let claims = vec![
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Relation {
+                the: "user/friend".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::Entity(bob.clone()),
+            },
         ];
 
         let mut session = Session::open(artifacts.clone());
-        session.transact(facts).await?;
+        session.transact(claims).await?;
 
         // Pattern 1: Query for user names
         let value_selector = Fact::<Value>::select().the("user/name").compile()?;
@@ -828,26 +638,26 @@ mod integration_tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let facts = vec![
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("Alice".to_string()),
-            ),
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                bob.clone(),
-                Value::String("Bob".to_string()),
-            ),
-            Fact::assert(
-                "user/role".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("admin".to_string()),
-            ),
+        let claims = vec![
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::String("Bob".to_string()),
+            },
+            Relation {
+                the: "user/role".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("admin".to_string()),
+            },
         ];
 
         let mut session = Session::open(artifacts.clone());
-        session.transact(facts).await?;
+        session.transact(claims).await?;
 
         // Pattern 1: Find Bob by name using string constant
         let bob_query = Fact::<Value>::select()
@@ -915,14 +725,14 @@ mod integration_tests {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
-        let facts = vec![Fact::assert(
-            "user/name".parse::<Attribute>()?,
-            alice.clone(),
-            Value::String("Alice".to_string()),
-        )];
+        let claims = vec![Relation {
+            the: "user/name".parse::<Attribute>()?,
+            of: alice.clone(),
+            is: Value::String("Alice".to_string()),
+        }];
 
         let mut session = Session::open(artifacts.clone());
-        session.transact(facts).await?;
+        session.transact(claims).await?;
 
         let mixed_query = Fact::<Value>::select()
             .the("user/name")
@@ -985,31 +795,31 @@ mod integration_tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let facts = vec![
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("Alice".to_string()),
-            ),
-            Fact::assert(
-                "user/role".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("admin".to_string()),
-            ),
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                bob.clone(),
-                Value::String("Bob".to_string()),
-            ),
-            Fact::assert(
-                "user/role".parse::<Attribute>()?,
-                bob.clone(),
-                Value::String("user".to_string()),
-            ),
+        let claims = vec![
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Relation {
+                the: "user/role".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("admin".to_string()),
+            },
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::String("Bob".to_string()),
+            },
+            Relation {
+                the: "user/role".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::String("user".to_string()),
+            },
         ];
 
         let mut session = Session::open(artifacts.clone());
-        session.transact(facts).await?;
+        session.transact(claims).await?;
 
         // Test 1: Find admin users using fluent query building
         let admin_search = Fact::<Value>::select()
@@ -1074,21 +884,21 @@ mod integration_tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let facts = vec![
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("Alice".to_string()),
-            ),
-            Fact::assert(
-                "user/friend".parse::<Attribute>()?,
-                alice.clone(),
-                Value::Entity(bob.clone()),
-            ),
+        let claims = vec![
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Relation {
+                the: "user/friend".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::Entity(bob.clone()),
+            },
         ];
 
         let mut session = Session::open(artifacts.clone());
-        session.transact(facts).await?;
+        session.transact(claims).await?;
 
         // Pattern 1: Query for user names
         let value_selector = Match::<Fact> {

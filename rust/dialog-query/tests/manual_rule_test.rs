@@ -150,30 +150,74 @@ impl Concept for Person {
             attributes: &ATTRS,
         }
     };
+}
 
-    fn instance(&self) -> dialog_query::predicate::concept::Instance {
-        use dialog_query::attribute::Relation;
+impl IntoIterator for Person {
+    type Item = dialog_query::Relation;
+    type IntoIter = std::vec::IntoIter<dialog_query::Relation>;
+
+    fn into_iter(self) -> Self::IntoIter {
         use dialog_query::types::Scalar;
 
-        dialog_query::predicate::concept::Instance {
-            this: self.this.clone(),
-            with: vec![
-                Relation {
-                    the: "person/name"
-                        .parse()
-                        .expect("Failed to parse person/name attribute"),
-                    is: self.name.as_value(),
-                    cardinality: dialog_query::attribute::Cardinality::One,
-                },
-                Relation {
-                    the: "person/age"
-                        .parse()
-                        .expect("Failed to parse person/age attribute"),
-                    is: self.age.as_value(),
-                    cardinality: dialog_query::attribute::Cardinality::One,
-                },
-            ],
-        }
+        vec![
+            dialog_query::Relation::new(
+                "person/name"
+                    .parse()
+                    .expect("Failed to parse person/name attribute"),
+                self.this.clone(),
+                self.name.as_value(),
+            ),
+            dialog_query::Relation::new(
+                "person/age"
+                    .parse()
+                    .expect("Failed to parse person/age attribute"),
+                self.this.clone(),
+                self.age.as_value(),
+            ),
+        ]
+        .into_iter()
+    }
+}
+
+impl dialog_query::claim::Claim for Person {
+    fn assert(self, transaction: &mut dialog_query::Transaction) {
+        use dialog_query::types::Scalar;
+        dialog_query::Relation::new(
+            "person/name"
+                .parse()
+                .expect("Failed to parse person/name attribute"),
+            self.this.clone(),
+            self.name.as_value(),
+        )
+        .assert(transaction);
+        dialog_query::Relation::new(
+            "person/age"
+                .parse()
+                .expect("Failed to parse person/age attribute"),
+            self.this.clone(),
+            self.age.as_value(),
+        )
+        .assert(transaction);
+    }
+
+    fn retract(self, transaction: &mut dialog_query::Transaction) {
+        use dialog_query::types::Scalar;
+        dialog_query::Relation::new(
+            "person/name"
+                .parse()
+                .expect("Failed to parse person/name attribute"),
+            self.this.clone(),
+            self.name.as_value(),
+        )
+        .retract(transaction);
+        dialog_query::Relation::new(
+            "person/age"
+                .parse()
+                .expect("Failed to parse person/age attribute"),
+            self.this.clone(),
+            self.age.as_value(),
+        )
+        .retract(transaction);
     }
 }
 

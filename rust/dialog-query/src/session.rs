@@ -130,19 +130,21 @@ impl<S: Store> Session<S> {
     ///
     /// let mut session = Session::open(store);
     ///
-    /// // Legacy API - use the new transaction-based methods instead
-    /// session.transact(vec![
-    ///     Fact::assert("user/name".parse()?, alice, "Alice".to_string()),
+    /// // Can pass any items that implement Into<Claim>
+    /// session.transact([
+    ///     Employee { this: alice, name: "Alice".into(), role: "CEO".into() },
+    ///     Relation { the: "user/name".parse()?, of: bob, is: "Bob".to_string() }
     /// ]).await?;
     /// ```
-    pub async fn transact<T: Into<crate::claim::Claim>, I: IntoIterator<Item = T>>(
-        &mut self,
-        changes: I,
-    ) -> Result<(), DialogArtifactsError> {
+    pub async fn transact<E, D>(&mut self, changes: D) -> Result<(), DialogArtifactsError>
+    where
+        E: Edit,
+        D: IntoIterator<Item = E>,
+    {
         let mut transaction = self.edit();
         // Go over each change and merge it into the transaction
-        for claim in changes {
-            claim.into().merge(&mut transaction);
+        for change in changes {
+            change.merge(&mut transaction);
         }
 
         // commit transaction.
@@ -298,7 +300,7 @@ mod tests {
 
     use crate::{
         predicate::{self, concept::Attributes},
-        Attribute, Parameters, Type,
+        Attribute, Parameters, Relation, Type,
     };
 
     use super::*;
@@ -318,31 +320,31 @@ mod tests {
 
         session
             .transact(vec![
-                Fact::assert(
-                    "person/name".parse::<ArtifactAttribute>()?,
-                    alice.clone(),
-                    Value::String("Alice".to_string()),
-                ),
-                Fact::assert(
-                    "person/age".parse::<ArtifactAttribute>()?,
-                    alice.clone(),
-                    Value::UnsignedInt(25),
-                ),
-                Fact::assert(
-                    "person/name".parse::<ArtifactAttribute>()?,
-                    bob.clone(),
-                    Value::String("Bob".to_string()),
-                ),
-                Fact::assert(
-                    "person/age".parse::<ArtifactAttribute>()?,
-                    bob.clone(),
-                    Value::UnsignedInt(30),
-                ),
-                Fact::assert(
-                    "person/name".parse::<ArtifactAttribute>()?,
-                    mallory.clone(),
-                    Value::String("Mallory".to_string()),
-                ),
+                Relation {
+                    the: "person/name".parse::<ArtifactAttribute>()?,
+                    of: alice.clone(),
+                    is: Value::String("Alice".to_string()),
+                },
+                Relation {
+                    the: "person/age".parse::<ArtifactAttribute>()?,
+                    of: alice.clone(),
+                    is: Value::UnsignedInt(25),
+                },
+                Relation {
+                    the: "person/name".parse::<ArtifactAttribute>()?,
+                    of: bob.clone(),
+                    is: Value::String("Bob".to_string()),
+                },
+                Relation {
+                    the: "person/age".parse::<ArtifactAttribute>()?,
+                    of: bob.clone(),
+                    is: Value::UnsignedInt(30),
+                },
+                Relation {
+                    the: "person/name".parse::<ArtifactAttribute>()?,
+                    of: mallory.clone(),
+                    is: Value::String("Mallory".to_string()),
+                },
             ])
             .await?;
 
@@ -559,16 +561,16 @@ mod tests {
         };
 
         let alice = person
-            .create()?
+            .create()
             .with("name", "Alice".to_string())
             .with("age", 25usize)
-            .assert()?;
+            .build()?;
 
         let bob = person
-            .create()?
+            .create()
             .with("name", "Bob".to_string())
             .with("age", 30usize)
-            .assert()?;
+            .build()?;
 
         session.transact(vec![alice, bob]).await?;
 
@@ -663,16 +665,16 @@ mod tests {
         let mut session = Session::open(store).install(employee_from_stuff);
 
         let alice = Stuff::CONCEPT
-            .create()?
+            .create()
             .with("name", "Alice".to_string())
             .with("role", "manager".to_string())
-            .assert()?;
+            .build()?;
 
         let bob = Stuff::CONCEPT
-            .create()?
+            .create()
             .with("name", "Bob".to_string())
             .with("role", "developer".to_string())
-            .assert()?;
+            .build()?;
 
         let _mallory = Stuff {
             this: Entity::new()?,

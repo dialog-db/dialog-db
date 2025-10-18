@@ -94,7 +94,7 @@ impl<T> Store for T where T: ArtifactStoreMut + Clone + ConditionalSend {}
 mod tests {
     use super::*;
     use crate::artifact::{Artifacts, Attribute, Entity, Value};
-    use crate::{Session, Term};
+    use crate::{Relation, Session, Term};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -108,26 +108,26 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let facts = vec![
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("Alice".to_string()),
-            ),
-            Fact::assert(
-                "user/email".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("alice@example.com".to_string()),
-            ),
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                bob.clone(),
-                Value::String("Bob".to_string()),
-            ),
+        let claims = vec![
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Relation {
+                the: "user/email".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("alice@example.com".to_string()),
+            },
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::String("Bob".to_string()),
+            },
         ];
 
         let mut session = Session::open(artifacts.clone());
-        session.transact(facts).await?;
+        session.transact(claims).await?;
 
         // Step 2: Test Query trait on FactSelector with constants
 
@@ -193,14 +193,14 @@ mod tests {
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
         let alice = Entity::new()?;
-        let facts = vec![Fact::assert(
-            "user/name".parse::<Attribute>()?,
-            alice.clone(),
-            Value::String("Alice".to_string()),
-        )];
+        let claims = vec![Relation {
+            the: "user/name".parse::<Attribute>()?,
+            of: alice.clone(),
+            is: Value::String("Alice".to_string()),
+        }];
 
         let mut session = Session::open(artifacts.clone());
-        session.transact(facts).await?;
+        session.transact(claims).await?;
 
         // Test with FactSelector
         let fact_selector = Fact::<Value>::select()
@@ -229,31 +229,31 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        let facts = vec![
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("Alice".to_string()),
-            ),
-            Fact::assert(
-                "user/role".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("admin".to_string()),
-            ),
-            Fact::assert(
-                "user/name".parse::<Attribute>()?,
-                bob.clone(),
-                Value::String("Bob".to_string()),
-            ),
-            Fact::assert(
-                "user/role".parse::<Attribute>()?,
-                bob.clone(),
-                Value::String("user".to_string()),
-            ),
+        let claims = vec![
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Relation {
+                the: "user/role".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("admin".to_string()),
+            },
+            Relation {
+                the: "user/name".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::String("Bob".to_string()),
+            },
+            Relation {
+                the: "user/role".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::String("user".to_string()),
+            },
         ];
 
         let mut session = Session::open(artifacts.clone());
-        session.transact(facts).await?;
+        session.transact(claims).await?;
 
         // Test fluent query building - should succeed with constants
         let session = Session::open(artifacts.clone());

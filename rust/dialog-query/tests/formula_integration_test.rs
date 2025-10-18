@@ -8,7 +8,7 @@ use dialog_query::{
     artifact::{Artifacts, Attribute, Entity, Value},
     formulas::*,
     selection::Answer,
-    Fact, Formula, Parameters, Session, Term,
+    Fact, Formula, Parameters, Relation, Session, Term,
 };
 use dialog_storage::MemoryStorageBackend;
 
@@ -23,33 +23,33 @@ async fn test_formula_integration_math_operations() -> Result<()> {
     let calculation_2 = Entity::new()?;
 
     // Store some basic math data
-    let facts = vec![
+    let claims = vec![
         // First calculation: 10 + 5
-        Fact::assert(
-            "calc/operand1".parse::<Attribute>()?,
-            calculation_1.clone(),
-            Value::UnsignedInt(10),
-        ),
-        Fact::assert(
-            "calc/operand2".parse::<Attribute>()?,
-            calculation_1.clone(),
-            Value::UnsignedInt(5),
-        ),
+        Relation {
+            the: "calc/operand1".parse::<Attribute>()?,
+            of: calculation_1.clone(),
+            is: Value::UnsignedInt(10),
+        },
+        Relation {
+            the: "calc/operand2".parse::<Attribute>()?,
+            of: calculation_1.clone(),
+            is: Value::UnsignedInt(5),
+        },
         // Second calculation: 20 - 8
-        Fact::assert(
-            "calc/operand1".parse::<Attribute>()?,
-            calculation_2.clone(),
-            Value::UnsignedInt(20),
-        ),
-        Fact::assert(
-            "calc/operand2".parse::<Attribute>()?,
-            calculation_2.clone(),
-            Value::UnsignedInt(8),
-        ),
+        Relation {
+            the: "calc/operand1".parse::<Attribute>()?,
+            of: calculation_2.clone(),
+            is: Value::UnsignedInt(20),
+        },
+        Relation {
+            the: "calc/operand2".parse::<Attribute>()?,
+            of: calculation_2.clone(),
+            is: Value::UnsignedInt(8),
+        },
     ];
 
     let mut session = Session::open(artifacts.clone());
-    session.transact(facts).await?;
+    session.transact(claims).await?;
 
     // Test Sum formula
     let mut sum_terms = Parameters::new();
@@ -129,31 +129,31 @@ async fn test_formula_integration_string_operations() -> Result<()> {
     let user_2 = Entity::new()?;
 
     // Store user name data
-    let facts = vec![
-        Fact::assert(
-            "user/first_name".parse::<Attribute>()?,
-            user_1.clone(),
-            Value::String("John".to_string()),
-        ),
-        Fact::assert(
-            "user/last_name".parse::<Attribute>()?,
-            user_1.clone(),
-            Value::String("Doe".to_string()),
-        ),
-        Fact::assert(
-            "user/first_name".parse::<Attribute>()?,
-            user_2.clone(),
-            Value::String("Jane".to_string()),
-        ),
-        Fact::assert(
-            "user/last_name".parse::<Attribute>()?,
-            user_2.clone(),
-            Value::String("Smith".to_string()),
-        ),
+    let claims = vec![
+        Relation {
+            the: "user/first_name".parse::<Attribute>()?,
+            of: user_1.clone(),
+            is: Value::String("John".to_string()),
+        },
+        Relation {
+            the: "user/last_name".parse::<Attribute>()?,
+            of: user_1.clone(),
+            is: Value::String("Doe".to_string()),
+        },
+        Relation {
+            the: "user/first_name".parse::<Attribute>()?,
+            of: user_2.clone(),
+            is: Value::String("Jane".to_string()),
+        },
+        Relation {
+            the: "user/last_name".parse::<Attribute>()?,
+            of: user_2.clone(),
+            is: Value::String("Smith".to_string()),
+        },
     ];
 
     let mut session = Session::open(artifacts.clone());
-    session.transact(facts).await?;
+    session.transact(claims).await?;
 
     // Test Concatenate formula to build full names
     let mut concat_terms = Parameters::new();
@@ -228,9 +228,7 @@ async fn test_formula_integration_type_conversions() -> Result<()> {
     let to_string_formula = ToString::apply(to_string_terms)?;
 
     // Test with number
-    let number_input = Answer::new()
-        .set(Term::var("input"), 42u32)
-        .unwrap();
+    let number_input = Answer::new().set(Term::var("input"), 42u32).unwrap();
 
     let string_results = to_string_formula.derive(number_input)?;
     assert_eq!(string_results.len(), 1);
@@ -242,9 +240,7 @@ async fn test_formula_integration_type_conversions() -> Result<()> {
     );
 
     // Test with boolean
-    let bool_input = Answer::new()
-        .set(Term::var("input"), true)
-        .unwrap();
+    let bool_input = Answer::new().set(Term::var("input"), true).unwrap();
 
     let bool_string_results = to_string_formula.derive(bool_input)?;
     assert_eq!(bool_string_results.len(), 1);
@@ -341,9 +337,7 @@ async fn test_formula_integration_boolean_logic() -> Result<()> {
     let not_formula = Not::apply(not_terms)?;
 
     // Test NOT true = false
-    let not_input = Answer::new()
-        .set(Term::var("input"), true)
-        .unwrap();
+    let not_input = Answer::new().set(Term::var("input"), true).unwrap();
 
     let not_results = not_formula.derive(not_input)?;
     assert_eq!(not_results.len(), 1);

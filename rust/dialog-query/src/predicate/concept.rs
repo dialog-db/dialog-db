@@ -1,16 +1,16 @@
 use crate::application::ConceptApplication;
-use crate::artifact::Artifact;
-use crate::attribute::Relation;
-use crate::claim::concept::ConceptClaim;
+use crate::attribute::Attribution;
+use crate::claim::Revert;
 use crate::error::SchemaError;
 use crate::types::Scalar;
 use crate::{
-    Application, Attribute, Cardinality, Claim, Constraint, Entity, Parameters, Requirement,
-    Schema, Type, Value,
+    Application, Attribute, Cardinality, Claim, Constraint, Entity, Parameters, Relation,
+    Requirement, Schema, Type, Value,
 };
-use dialog_artifacts::DialogArtifactsError;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ops::Not;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attributes {
@@ -225,7 +225,6 @@ impl<'de> Deserialize<'de> for Concept {
     }
 }
 
-
 /// A model representing the data for a concept instance before validation.
 ///
 /// This is an intermediate representation that holds raw values for each attribute
@@ -244,51 +243,50 @@ pub struct Model {
 /// with all attributes properly typed and confirmed to exist. Can be converted
 /// to artifacts for storage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Instance {
+pub struct Conception {
     /// The entity this instance represents
     pub this: Entity,
     /// The validated relations (attribute-value pairs) for this instance
-    pub with: Vec<Relation>,
+    pub with: Vec<Attribution>,
 }
-impl Instance {
+impl Conception {
     /// Returns a reference to the entity this instance represents.
     pub fn this(&self) -> &'_ Entity {
         &self.this
     }
 
     /// Returns a reference to the validated relations for this instance.
-    pub fn relations(&self) -> &'_ Vec<Relation> {
+    pub fn attributes(&self) -> &'_ Vec<Attribution> {
         &self.with
-    }
-
-    /// Converts this instance into a vector of artifacts for storage.
-    ///
-    /// This is a convenience method that delegates to the `From` implementation.
-    pub fn into_artifacts(self) -> Vec<Artifact> {
-        self.into()
     }
 }
 
-impl From<Instance> for Vec<Artifact> {
-    /// Converts a concept instance into a vector of artifacts.
-    ///
-    /// Each relation in the instance becomes an artifact with:
-    /// - `the`: The attribute identifier from the relation
-    /// - `of`: The entity this instance represents
-    /// - `is`: The value from the relation
-    /// - `cause`: None (no causal information)
-    fn from(value: Instance) -> Self {
-        let mut artifacts = vec![];
-        for relation in value.with {
-            artifacts.push(Artifact {
-                the: relation.the,
-                of: value.this.clone(),
-                is: relation.is,
-                cause: None,
-            })
+impl Claim for Conception {
+    fn assert(self, transaction: &mut crate::Transaction) {
+        for attribution in self.with {
+            transaction.associate(Relation::new(
+                attribution.the,
+                self.this.clone(),
+                attribution.is,
+            ));
         }
+    }
+    fn retract(self, transaction: &mut crate::Transaction) {
+        for attribution in self.with {
+            transaction.dissociate(Relation::new(
+                attribution.the,
+                self.this.clone(),
+                attribution.is,
+            ));
+        }
+    }
+}
 
-        artifacts
+impl Not for Conception {
+    type Output = Revert<Self>;
+
+    fn not(self) -> Self::Output {
+        self.revert()
     }
 }
 
@@ -347,7 +345,7 @@ impl Concept {
     /// # Errors
     /// * `SchemaError::MissingProperty` - If a required attribute is missing
     /// * `SchemaError::TypeError` - If an attribute value has the wrong type
-    pub fn conform(&self, model: Model) -> Result<Instance, SchemaError> {
+    pub fn conform(&self, model: Model) -> Result<Conception, SchemaError> {
         let mut relations = vec![];
         for (name, attribute) in self.attributes().iter() {
             if let Some(value) = model.attributes.get(name) {
@@ -361,7 +359,7 @@ impl Concept {
                 });
             }
         }
-        Ok(Instance {
+        Ok(Conception {
             this: model.this,
             with: relations,
         })
@@ -383,32 +381,8 @@ impl Concept {
     /// # Returns
     /// * `Ok(Builder)` - A builder for the new entity
     /// * `Err(DialogArtifactsError)` - If entity creation fails
-    pub fn create(&self) -> Result<Builder, DialogArtifactsError> {
+    pub fn create(&self) -> Builder {
         Builder::new(self)
-    }
-
-    /// Creates an assertion claim for a model validated against this concept.
-    ///
-    /// # Arguments
-    /// * `model` - The model to validate and assert
-    ///
-    /// # Returns
-    /// * `Ok(ConceptClaim)` - An assertion claim for the validated instance
-    /// * `Err(SchemaError)` - If model validation fails
-    pub fn assert(&self, model: Model) -> Result<ConceptClaim, SchemaError> {
-        Ok(ConceptClaim::Assert(self.conform(model)?))
-    }
-
-    /// Creates a retraction claim for a model validated against this concept.
-    ///
-    /// # Arguments
-    /// * `model` - The model to validate and retract
-    ///
-    /// # Returns
-    /// * `Ok(ConceptClaim)` - A retraction claim for the validated instance
-    /// * `Err(SchemaError)` - If model validation fails
-    pub fn retract(&self, model: Model) -> Result<ConceptClaim, SchemaError> {
-        Ok(ConceptClaim::Retract(self.conform(model)?))
     }
 }
 
@@ -432,8 +406,11 @@ impl<'a> Builder<'a> {
     /// # Returns
     /// * `Ok(Builder)` - A new builder with a fresh entity
     /// * `Err(DialogArtifactsError)` - If entity creation fails
-    pub fn new(concept: &'a Concept) -> Result<Self, DialogArtifactsError> {
-        Ok(Self::edit(Entity::new()?, concept))
+    pub fn new(concept: &'a Concept) -> Self {
+        Self::edit(
+            Entity::new().expect("should be able to generate new entity"),
+            concept,
+        )
     }
 
     /// Creates a new builder for editing an existing entity.
@@ -480,26 +457,8 @@ impl<'a> Builder<'a> {
     /// # Returns
     /// * `Ok(Instance)` - A validated instance if all attributes are valid
     /// * `Err(SchemaError)` - If validation fails
-    pub fn build(self) -> Result<Instance, SchemaError> {
+    pub fn build(self) -> Result<Conception, SchemaError> {
         self.concept.conform(self.model)
-    }
-
-    /// Builds the instance and creates an assertion claim.
-    ///
-    /// # Returns
-    /// * `Ok(Claim)` - An assertion claim for the validated instance
-    /// * `Err(SchemaError)` - If validation fails
-    pub fn assert(self) -> Result<Claim, SchemaError> {
-        Ok(ConceptClaim::Assert(self.build()?).into())
-    }
-
-    /// Builds the instance and creates a retraction claim.
-    ///
-    /// # Returns
-    /// * `Ok(Claim)` - A retraction claim for the validated instance
-    /// * `Err(SchemaError)` - If validation fails
-    pub fn retract(self) -> Result<Claim, SchemaError> {
-        Ok(ConceptClaim::Retract(self.build()?).into())
     }
 }
 

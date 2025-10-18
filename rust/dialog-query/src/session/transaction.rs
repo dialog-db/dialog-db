@@ -4,7 +4,8 @@
 //! Claims can now add operations to a Transaction which accumulates changes and optimizes before committing.
 
 use crate::artifact::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Value};
-use crate::claim::fact::AsRelation;
+use crate::relation::Relation;
+use crate::Claim;
 use futures_util::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -19,15 +20,15 @@ pub enum TransactionError {
     Storage(#[from] DialogArtifactsError),
 }
 
+/// Changes organized by entity -> attribute -> operation
+pub type Changes = HashMap<Entity, HashMap<Attribute, Change>>;
+
 /// Type of change
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change {
     Assert(Value),
     Retract(Value),
 }
-
-/// Changes organized by entity -> attribute -> operation
-pub type Changes = HashMap<Entity, HashMap<Attribute, Change>>;
 
 /// A transaction accumulates changes before committing them as instructions
 ///
@@ -47,30 +48,31 @@ impl Transaction {
         }
     }
 
-    /// Assert a relation (add it to the database)
-    pub fn assert<T: AsRelation>(&mut self, relation: T) {
-        self.mutate(
-            relation.the(),
-            relation.of(),
-            Change::Assert(relation.is().clone()),
-        )
+    pub fn assert<C: Claim>(&mut self, claim: C) -> &mut Self {
+        claim.assert(self);
+        self
     }
 
-    /// Retract a relation (remove it from the database)
-    pub fn retract<T: AsRelation>(&mut self, relation: T) {
-        self.mutate(
-            relation.the(),
-            relation.of(),
-            Change::Retract(relation.is().clone()),
-        )
+    pub fn retract<C: Claim>(&mut self, claim: C) -> &mut Self {
+        claim.retract(self);
+        self
+    }
+
+    pub fn associate(&mut self, relation: Relation) -> &mut Self {
+        self.insert(relation.the, relation.of, Change::Assert(relation.is))
+    }
+
+    pub fn dissociate(&mut self, relation: Relation) -> &mut Self {
+        self.insert(relation.the, relation.of, Change::Retract(relation.is))
     }
 
     /// Add a change operation - mutations simply replace with the latest value
-    pub(crate) fn mutate(&mut self, attribute: &Attribute, entity: &Entity, change: Change) {
+    fn insert(&mut self, the: Attribute, of: Entity, change: Change) -> &mut Self {
         self.changes
-            .entry(entity.clone())
+            .entry(of)
             .or_insert_with(HashMap::new)
-            .insert(attribute.clone(), change);
+            .insert(the, change);
+        self
     }
 
     /// Check if the transaction is empty
@@ -177,9 +179,9 @@ impl Stream for TransactionStream {
 /// Implement Edit for Transaction so transactions can be composed
 impl Edit for Transaction {
     fn merge(self, transaction: &mut Transaction) {
-        for (entity, attributes) in self.changes {
-            for (attribute, change) in attributes {
-                transaction.mutate(&attribute, &entity, change);
+        for (of, changes) in self.changes {
+            for (the, change) in changes {
+                transaction.insert(the, of.clone(), change);
             }
         }
     }
@@ -198,7 +200,7 @@ pub trait Edit {
 mod tests {
     use super::*;
     use crate::artifact::{Attribute, Entity, Value};
-    use crate::claim::fact::Relation;
+    use crate::Relation;
 
     #[test]
     fn test_transaction_basic_operations() -> anyhow::Result<()> {
@@ -207,7 +209,7 @@ mod tests {
 
         // Test basic assert
         let name_attr: Attribute = "user/name".parse()?;
-        transaction.assert(Relation {
+        transaction.associate(Relation {
             the: name_attr.clone(),
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
@@ -232,14 +234,14 @@ mod tests {
         let updated_value = Value::String("Alice Smith".to_string());
 
         // First operation
-        transaction.assert(Relation {
+        transaction.associate(Relation {
             the: name_attr.clone(),
             of: alice.clone(),
             is: initial_value.clone(),
         });
 
         // Second operation should replace the first
-        transaction.assert(Relation {
+        transaction.associate(Relation {
             the: name_attr.clone(),
             of: alice.clone(),
             is: updated_value.clone(),
@@ -265,13 +267,13 @@ mod tests {
         let bob = Entity::new()?;
 
         let name_attr: Attribute = "user/name".parse()?;
-        transaction.assert(Relation {
+        transaction.associate(Relation {
             the: name_attr.clone(),
             of: alice,
             is: Value::String("Alice".to_string()),
         });
 
-        transaction.assert(Relation {
+        transaction.associate(Relation {
             the: name_attr,
             of: bob,
             is: Value::String("Bob".to_string()),
@@ -293,13 +295,13 @@ mod tests {
         let bob = Entity::new()?;
 
         let name_attr: Attribute = "user/name".parse()?;
-        transaction.assert(Relation {
+        transaction.associate(Relation {
             the: name_attr.clone(),
             of: alice,
             is: Value::String("Alice".to_string()),
         });
 
-        transaction.assert(Relation {
+        transaction.associate(Relation {
             the: name_attr,
             of: bob,
             is: Value::String("Bob".to_string()),

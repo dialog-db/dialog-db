@@ -295,8 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concept_application_query_execution() -> anyhow::Result<()> {
-        use crate::fact::Fact;
-        use crate::session::Session;
+        use crate::{Fact, Relation, Session};
         use dialog_artifacts::{Artifacts, Attribute as ArtifactAttribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -310,26 +309,26 @@ mod tests {
 
         session
             .transact(vec![
-                Fact::assert(
-                    "person/name".parse::<ArtifactAttribute>()?,
-                    alice.clone(),
-                    Value::String("Alice".to_string()),
-                ),
-                Fact::assert(
-                    "person/age".parse::<ArtifactAttribute>()?,
-                    alice.clone(),
-                    Value::UnsignedInt(25),
-                ),
-                Fact::assert(
-                    "person/name".parse::<ArtifactAttribute>()?,
-                    bob.clone(),
-                    Value::String("Bob".to_string()),
-                ),
-                Fact::assert(
-                    "person/age".parse::<ArtifactAttribute>()?,
-                    bob.clone(),
-                    Value::UnsignedInt(30),
-                ),
+                Relation {
+                    the: "person/name".parse::<ArtifactAttribute>()?,
+                    of: alice.clone(),
+                    is: Value::String("Alice".to_string()),
+                },
+                Relation {
+                    the: "person/age".parse::<ArtifactAttribute>()?,
+                    of: alice.clone(),
+                    is: Value::UnsignedInt(25),
+                },
+                Relation {
+                    the: "person/name".parse::<ArtifactAttribute>()?,
+                    of: bob.clone(),
+                    is: Value::String("Bob".to_string()),
+                },
+                Relation {
+                    the: "person/age".parse::<ArtifactAttribute>()?,
+                    of: bob.clone(),
+                    is: Value::UnsignedInt(30),
+                },
             ])
             .await?;
 
@@ -392,8 +391,7 @@ mod tests {
     #[tokio::test]
     async fn test_concept_application_with_bound_entity_query() -> anyhow::Result<()> {
         use crate::context::new_context;
-        use crate::fact::Fact;
-        use crate::session::Session;
+        use crate::{Fact, Relation, Session};
         use dialog_artifacts::{Artifacts, Attribute as ArtifactAttribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -406,16 +404,16 @@ mod tests {
 
         session
             .transact(vec![
-                Fact::assert(
-                    "person/name".parse::<ArtifactAttribute>()?,
-                    alice.clone(),
-                    Value::String("Alice".to_string()),
-                ),
-                Fact::assert(
-                    "person/age".parse::<ArtifactAttribute>()?,
-                    alice.clone(),
-                    Value::UnsignedInt(25),
-                ),
+                Relation {
+                    the: "person/name".parse::<ArtifactAttribute>()?,
+                    of: alice.clone(),
+                    is: Value::String("Alice".to_string()),
+                },
+                Relation {
+                    the: "person/age".parse::<ArtifactAttribute>()?,
+                    of: alice.clone(),
+                    is: Value::UnsignedInt(25),
+                },
             ])
             .await?;
 
@@ -466,8 +464,7 @@ mod tests {
 async fn test_concept_application_respects_constant_entity_parameter() -> anyhow::Result<()> {
     use crate::application::concept::ConceptApplication;
     use crate::predicate::concept::Concept;
-    use crate::session::Session;
-    use crate::{Fact, Term, Value};
+    use crate::{Fact, Relation, Session, Term, Value};
     use dialog_artifacts::{Artifacts, Attribute, Entity};
     use dialog_storage::MemoryStorageBackend;
 
@@ -480,16 +477,16 @@ async fn test_concept_application_respects_constant_entity_parameter() -> anyhow
 
     session
         .transact(vec![
-            Fact::assert(
-                "person/name".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("Alice".to_string()),
-            ),
-            Fact::assert(
-                "person/name".parse::<Attribute>()?,
-                bob.clone(),
-                Value::String("Bob".to_string()),
-            ),
+            Relation {
+                the: "person/name".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Relation {
+                the: "person/name".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::String("Bob".to_string()),
+            },
         ])
         .await?;
 
@@ -530,8 +527,7 @@ async fn test_concept_application_respects_constant_entity_parameter() -> anyhow
 async fn test_concept_application_respects_constant_attribute_parameter() -> anyhow::Result<()> {
     use crate::application::concept::ConceptApplication;
     use crate::predicate::concept::Concept;
-    use crate::session::Session;
-    use crate::{Fact, Term, Value};
+    use crate::{Fact, Relation, Session, Term, Value};
     use dialog_artifacts::{Artifacts, Attribute, Entity};
     use dialog_storage::MemoryStorageBackend;
 
@@ -544,26 +540,26 @@ async fn test_concept_application_respects_constant_attribute_parameter() -> any
 
     session
         .transact(vec![
-            Fact::assert(
-                "person/name".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("Alice".to_string()),
-            ),
-            Fact::assert(
-                "person/age".parse::<Attribute>()?,
-                alice.clone(),
-                Value::UnsignedInt(25),
-            ),
-            Fact::assert(
-                "person/name".parse::<Attribute>()?,
-                bob.clone(),
-                Value::String("Bob".to_string()),
-            ),
-            Fact::assert(
-                "person/age".parse::<Attribute>()?,
-                bob.clone(),
-                Value::UnsignedInt(30),
-            ),
+            Relation {
+                the: "person/name".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Relation {
+                the: "person/age".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::UnsignedInt(25),
+            },
+            Relation {
+                the: "person/name".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::String("Bob".to_string()),
+            },
+            Relation {
+                the: "person/age".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::UnsignedInt(30),
+            },
         ])
         .await?;
 
@@ -620,10 +616,8 @@ async fn test_concept_application_respects_constant_attribute_parameter() -> any
 #[tokio::test]
 async fn test_concept_application_respects_multiple_constant_parameters() -> anyhow::Result<()> {
     use crate::application::concept::ConceptApplication;
-    use crate::fact::Fact;
     use crate::predicate::concept::Concept;
-    use crate::session::Session;
-    use crate::{Term, Value};
+    use crate::{Fact, Relation, Session, Term, Value};
     use dialog_artifacts::{Artifacts, Attribute, Entity};
     use dialog_storage::MemoryStorageBackend;
 
@@ -636,26 +630,26 @@ async fn test_concept_application_respects_multiple_constant_parameters() -> any
 
     session
         .transact(vec![
-            Fact::assert(
-                "person/name".parse::<Attribute>()?,
-                alice.clone(),
-                Value::String("Alice".to_string()),
-            ),
-            Fact::assert(
-                "person/age".parse::<Attribute>()?,
-                alice.clone(),
-                Value::UnsignedInt(25),
-            ),
-            Fact::assert(
-                "person/name".parse::<Attribute>()?,
-                bob.clone(),
-                Value::String("Bob".to_string()),
-            ),
-            Fact::assert(
-                "person/age".parse::<Attribute>()?,
-                bob.clone(),
-                Value::UnsignedInt(30),
-            ),
+            Relation {
+                the: "person/name".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Relation {
+                the: "person/age".parse::<Attribute>()?,
+                of: alice.clone(),
+                is: Value::UnsignedInt(25),
+            },
+            Relation {
+                the: "person/name".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::String("Bob".to_string()),
+            },
+            Relation {
+                the: "person/age".parse::<Attribute>()?,
+                of: bob.clone(),
+                is: Value::UnsignedInt(30),
+            },
         ])
         .await?;
 

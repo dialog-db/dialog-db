@@ -4,7 +4,7 @@ use anyhow::Result;
 use dialog_query::{
     artifact::{Artifacts, Attribute, Entity, Value},
     term::Term,
-    Concept, Fact, Match, Session,
+    Concept, Fact, Match, Relation, Session,
 };
 use dialog_storage::MemoryStorageBackend;
 
@@ -28,21 +28,21 @@ async fn test_person_concept_basic() -> Result<()> {
     let alice = Entity::new()?;
     let bob = Entity::new()?;
 
-    let facts = vec![
-        Fact::assert(
-            "person/name".parse::<Attribute>()?,
-            alice.clone(),
-            Value::String("Alice".to_string()),
-        ),
-        Fact::assert(
-            "person/name".parse::<Attribute>()?,
-            bob.clone(),
-            Value::String("Bob".to_string()),
-        ),
+    let claims = vec![
+        Relation {
+            the: "person/name".parse::<Attribute>()?,
+            of: alice.clone(),
+            is: Value::String("Alice".to_string()),
+        },
+        Relation {
+            the: "person/name".parse::<Attribute>()?,
+            of: bob.clone(),
+            is: Value::String("Bob".to_string()),
+        },
     ];
 
     let mut session = Session::open(artifacts.clone());
-    session.transact(facts).await?;
+    session.transact(claims).await?;
 
     // Step 2: Create match patterns for querying
     let alice_match = Match::<Person> {

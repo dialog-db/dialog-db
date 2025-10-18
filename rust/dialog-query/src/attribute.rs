@@ -11,7 +11,7 @@ pub use std::marker::PhantomData;
 
 /// A relation specific to the attribute module containing cardinality information
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Relation {
+pub struct Attribution {
     pub the: ArtifactsAttribute,
     pub is: Value,
     pub cardinality: Cardinality,
@@ -95,7 +95,7 @@ impl<T: Scalar> Attribute<T> {
         Ok(term)
     }
 
-    pub fn resolve(&self, value: Value) -> Result<Relation, TypeError> {
+    pub fn resolve(&self, value: Value) -> Result<Attribution, TypeError> {
         // Check type if content_type is specified
         let type_matches = match self.content_type {
             Some(expected) => value.data_type() == expected,
@@ -112,7 +112,7 @@ impl<T: Scalar> Attribute<T> {
                         actual: Term::Constant(Value::String(the_str.clone())),
                     })?;
 
-            Ok(Relation {
+            Ok(Attribution {
                 the: the_attr,
                 is: value.clone(),
                 cardinality: self.cardinality,

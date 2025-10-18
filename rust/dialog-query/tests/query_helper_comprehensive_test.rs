@@ -6,7 +6,7 @@ use dialog_query::{
     query::Output,
     rule::Match,
     term::Term,
-    Concept, Fact, Session,
+    Concept, Relation, Session,
 };
 use dialog_storage::MemoryStorageBackend;
 
@@ -31,21 +31,21 @@ async fn test_single_attribute_query_works() -> Result<()> {
     let alice = Entity::new()?;
     let bob = Entity::new()?;
 
-    let facts = vec![
-        Fact::assert(
-            "person/name".parse::<Attribute>()?,
-            alice.clone(),
-            Value::String("Alice".into()),
-        ),
-        Fact::assert(
-            "person/name".parse::<Attribute>()?,
-            bob.clone(),
-            Value::String("Bob".into()),
-        ),
+    let claims = vec![
+        Relation {
+            the: "person/name".parse::<Attribute>()?,
+            of: alice.clone(),
+            is: Value::String("Alice".into()),
+        },
+        Relation {
+            the: "person/name".parse::<Attribute>()?,
+            of: bob.clone(),
+            is: Value::String("Bob".into()),
+        },
     ];
 
     let mut session = Session::open(artifacts.clone());
-    session.transact(facts).await?;
+    session.transact(claims).await?;
 
     // ✅ This works: Single attribute with constant
     let alice_query = PersonMatch {
@@ -81,31 +81,31 @@ async fn test_multi_attribute_constant_query_works() -> Result<()> {
     let alice = Entity::new()?;
     let bob = Entity::new()?;
 
-    let facts = vec![
-        Fact::assert(
-            "employee/name".parse::<Attribute>()?,
-            alice.clone(),
-            Value::String("Alice".into()),
-        ),
-        Fact::assert(
-            "employee/department".parse::<Attribute>()?,
-            alice.clone(),
-            Value::String("Engineering".into()),
-        ),
-        Fact::assert(
-            "employee/name".parse::<Attribute>()?,
-            bob.clone(),
-            Value::String("Bob".into()),
-        ),
-        Fact::assert(
-            "employee/department".parse::<Attribute>()?,
-            bob.clone(),
-            Value::String("Sales".into()),
-        ),
+    let claims = vec![
+        Relation {
+            the: "employee/name".parse::<Attribute>()?,
+            of: alice.clone(),
+            is: Value::String("Alice".into()),
+        },
+        Relation {
+            the: "employee/department".parse::<Attribute>()?,
+            of: alice.clone(),
+            is: Value::String("Engineering".into()),
+        },
+        Relation {
+            the: "employee/name".parse::<Attribute>()?,
+            of: bob.clone(),
+            is: Value::String("Bob".into()),
+        },
+        Relation {
+            the: "employee/department".parse::<Attribute>()?,
+            of: bob.clone(),
+            is: Value::String("Sales".into()),
+        },
     ];
 
     let mut session = Session::open(artifacts.clone());
-    session.transact(facts).await?;
+    session.transact(claims).await?;
 
     // ✅ This works: Multi-attribute with all constants
     let alice_engineering_query = Match::<Employee> {
@@ -135,31 +135,31 @@ async fn test_multi_attribute_variable_query_limitation() -> Result<()> {
     let alice = Entity::new()?;
     let bob = Entity::new()?;
 
-    let facts = vec![
-        Fact::assert(
-            "employee/name".parse::<Attribute>()?,
-            alice.clone(),
-            Value::String("Alice".into()),
-        ),
-        Fact::assert(
-            "employee/department".parse::<Attribute>()?,
-            alice.clone(),
-            Value::String("Engineering".into()),
-        ),
-        Fact::assert(
-            "employee/name".parse::<Attribute>()?,
-            bob.clone(),
-            Value::String("Bob".into()),
-        ),
-        Fact::assert(
-            "employee/department".parse::<Attribute>()?,
-            bob.clone(),
-            Value::String("Sales".into()),
-        ),
+    let claims = vec![
+        Relation {
+            the: "employee/name".parse::<Attribute>()?,
+            of: alice.clone(),
+            is: Value::String("Alice".into()),
+        },
+        Relation {
+            the: "employee/department".parse::<Attribute>()?,
+            of: alice.clone(),
+            is: Value::String("Engineering".into()),
+        },
+        Relation {
+            the: "employee/name".parse::<Attribute>()?,
+            of: bob.clone(),
+            is: Value::String("Bob".into()),
+        },
+        Relation {
+            the: "employee/department".parse::<Attribute>()?,
+            of: bob.clone(),
+            is: Value::String("Sales".into()),
+        },
     ];
 
     let mut session = Session::open(artifacts.clone());
-    session.transact(facts).await?;
+    session.transact(claims).await?;
 
     // ⚠️ This has limitations: Multi-attribute with mixed constants and variables
     let engineering_query = EmployeeMatch {

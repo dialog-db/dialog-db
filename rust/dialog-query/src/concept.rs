@@ -1,14 +1,12 @@
 use crate::application::ConceptApplication;
 
-use crate::claim::{concept, concept::ConceptClaim};
-
 pub use crate::dsl::Quarriable;
 pub use crate::predicate::concept::Attributes;
 use crate::query::{Output, Source};
 use crate::selection::Answer;
-use crate::{claim, Entity, Parameters};
 use crate::{predicate, QueryError};
 use crate::{Application, Premise};
+use crate::{Entity, Parameters, Relation};
 use dialog_artifacts::Instruction;
 use dialog_common::ConditionalSend;
 use futures_util::StreamExt;
@@ -23,7 +21,7 @@ use std::fmt::Debug;
 /// Concepts are used to describe conclusions of the rules, providing a mapping
 /// between conclusions and facts. In that sense you concepts are on-demand
 /// cache of all the conclusions from the associated rules.
-pub trait Concept: Quarriable + Clone + Debug {
+pub trait Concept: Quarriable + IntoIterator<Item = Relation> + Clone + Debug {
     type Instance: Instance;
     /// Type representing a query of this concept. It is a set of terms
     /// corresponding to the set of attributes defined by this concept.
@@ -42,24 +40,6 @@ pub trait Concept: Quarriable + Clone + Debug {
     /// The static concept definition for this type.
     /// This is typically defined by the macro as a Concept::Static variant.
     const CONCEPT: predicate::concept::Concept;
-
-    fn instance(&self) -> concept::Instance;
-
-    fn assert(&self) -> claim::Claim {
-        claim::Claim::Concept(ConceptClaim::Assert(self.instance()))
-    }
-
-    fn retract(&self) -> claim::Claim {
-        claim::Claim::Concept(ConceptClaim::Retract(self.instance()))
-    }
-}
-
-/// Concept implements claim::Claim so that it could be transacted into
-/// a session.
-impl<T: Concept> From<T> for claim::Claim {
-    fn from(concept: T) -> Self {
-        claim::Claim::Concept(ConceptClaim::Assert(concept.instance()))
-    }
 }
 
 /// Every assertion or retraction can be decomposed into a set of
@@ -132,36 +112,6 @@ pub trait Instance: ConditionalSend {
     fn this(&self) -> Entity;
 }
 
-pub struct Assertion;
-pub struct Retraction;
-pub trait Change {
-    fn claim(instance: dialog_query::predicate::concept::Instance) -> ConceptClaim;
-}
-impl Change for Assertion {
-    fn claim(instance: dialog_query::predicate::concept::Instance) -> ConceptClaim {
-        ConceptClaim::Assert(instance)
-    }
-}
-impl Change for Retraction {
-    fn claim(instance: dialog_query::predicate::concept::Instance) -> ConceptClaim {
-        ConceptClaim::Retract(instance)
-    }
-}
-
-pub trait Claim: Sized {
-    type Change: Change;
-    fn instance(self) -> dialog_query::predicate::concept::Instance;
-    fn claim(self) -> ConceptClaim {
-        Self::Change::claim(self.instance())
-    }
-}
-
-impl<T: Claim> From<T> for ConceptClaim {
-    fn from(source: T) -> Self {
-        source.claim()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,7 +119,7 @@ mod tests {
     use crate::artifact::{Artifacts, Attribute as ArtifactAttribute};
     use crate::term::Term;
     use crate::{Answer, Fact};
-    use crate::{Concept, Session};
+    use crate::{Claim, Concept, Session, Transaction};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
@@ -265,26 +215,60 @@ mod tests {
                 attributes: &ATTRS,
             }
         };
+    }
 
-        fn instance(&self) -> concept::Instance {
-            use crate::attribute::Relation;
+    impl IntoIterator for Person {
+        type Item = Relation;
+        type IntoIter = std::vec::IntoIter<Relation>;
+
+        fn into_iter(self) -> Self::IntoIter {
             use crate::types::Scalar;
 
-            concept::Instance {
-                this: self.this.clone(),
-                with: vec![
-                    Relation {
-                        the: "person/name".parse().expect("Failed to parse attribute"),
-                        is: self.name.as_value(),
-                        cardinality: crate::attribute::Cardinality::One,
-                    },
-                    Relation {
-                        the: "person/age".parse().expect("Failed to parse attribute"),
-                        is: self.age.as_value(),
-                        cardinality: crate::attribute::Cardinality::One,
-                    },
-                ],
-            }
+            vec![
+                Relation::new(
+                    "person/name".parse().expect("Failed to parse attribute"),
+                    self.this.clone(),
+                    self.name.as_value(),
+                ),
+                Relation::new(
+                    "person/age".parse().expect("Failed to parse attribute"),
+                    self.this.clone(),
+                    self.age.as_value(),
+                ),
+            ]
+            .into_iter()
+        }
+    }
+
+    impl Claim for Person {
+        fn assert(self, transaction: &mut Transaction) {
+            use crate::types::Scalar;
+            transaction.associate(Relation {
+                the: "person/name".parse().expect("Failed to parse attribute"),
+                of: self.this.clone(),
+                is: self.name.as_value(),
+            });
+
+            transaction.associate(Relation {
+                the: "person/age".parse().expect("Failed to parse attribute"),
+                of: self.this.clone(),
+                is: self.age.as_value(),
+            });
+        }
+
+        fn retract(self, transaction: &mut Transaction) {
+            use crate::types::Scalar;
+            transaction.dissociate(Relation {
+                the: "person/name".parse().expect("Failed to parse attribute"),
+                of: self.this.clone(),
+                is: self.name.as_value(),
+            });
+
+            transaction.dissociate(Relation {
+                the: "person/age".parse().expect("Failed to parse attribute"),
+                of: self.this.clone(),
+                is: self.age.as_value(),
+            });
         }
     }
 
@@ -651,36 +635,36 @@ mod tests {
         let mallory = Entity::new()?;
 
         // Create test data
-        let facts = vec![
-            Fact::assert(
-                "person/name".parse::<ArtifactAttribute>()?,
-                alice.clone(),
-                Value::String("Alice".to_string()),
-            ),
-            Fact::assert(
-                "person/age".parse::<ArtifactAttribute>()?,
-                alice.clone(),
-                Value::UnsignedInt(25),
-            ),
-            Fact::assert(
-                "person/name".parse::<ArtifactAttribute>()?,
-                bob.clone(),
-                Value::String("Bob".to_string()),
-            ),
-            Fact::assert(
-                "person/age".parse::<ArtifactAttribute>()?,
-                bob.clone(),
-                Value::UnsignedInt(30),
-            ),
-            Fact::assert(
-                "person/name".parse::<ArtifactAttribute>()?,
-                mallory.clone(),
-                Value::String("Mallory".to_string()),
-            ),
+        let claims = vec![
+            Relation {
+                the: "person/name".parse::<ArtifactAttribute>()?,
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Relation {
+                the: "person/age".parse::<ArtifactAttribute>()?,
+                of: alice.clone(),
+                is: Value::UnsignedInt(25),
+            },
+            Relation {
+                the: "person/name".parse::<ArtifactAttribute>()?,
+                of: bob.clone(),
+                is: Value::String("Bob".to_string()),
+            },
+            Relation {
+                the: "person/age".parse::<ArtifactAttribute>()?,
+                of: bob.clone(),
+                is: Value::UnsignedInt(30),
+            },
+            Relation {
+                the: "person/name".parse::<ArtifactAttribute>()?,
+                of: mallory.clone(),
+                is: Value::String("Mallory".to_string()),
+            },
         ];
 
         let mut session = Session::open(artifacts.clone());
-        session.transact(facts).await?;
+        session.transact(claims).await?;
 
         // This is the real test - using PersonMatch to query for people
         let person_query = PersonMatch {
@@ -747,14 +731,14 @@ mod tests {
         let alice = Entity::new()?;
 
         // Create minimal test data
-        let facts = vec![Fact::assert(
-            "person/name".parse::<ArtifactAttribute>()?,
-            alice.clone(),
-            Value::String("Alice".to_string()),
-        )];
+        let claims = vec![Relation {
+            the: "person/name".parse::<ArtifactAttribute>()?,
+            of: alice.clone(),
+            is: Value::String("Alice".to_string()),
+        }];
 
         let mut session = Session::open(artifacts.clone());
-        session.transact(facts).await?;
+        session.transact(claims).await?;
 
         // Test: Search for non-existent person using individual fact selector
         let missing_query = Fact::<Value>::select()
@@ -790,34 +774,31 @@ mod tests {
         // Create test data
 
         let mut session = Session::open(artifacts.clone());
-        session
-            .transact([
-                Employee {
-                    this: alice.clone(),
-                    name: "Alice".to_string(),
-                    role: "cryptographer".to_string(),
-                }
-                .assert(),
-                Employee {
-                    this: bob.clone(),
-                    name: "Bob".to_string(),
-                    role: "janitor".to_string(),
-                }
-                .assert(),
-                Fact::assert(
-                    "employee/name".parse::<ArtifactAttribute>()?,
-                    mallory.clone(),
-                    Value::String("Mallory".to_string()),
-                )
-                .into(),
-                Fact::assert(
-                    "employee/role".parse::<ArtifactAttribute>()?,
-                    mallory.clone(),
-                    Value::String("Hacker".to_string()),
-                )
-                .into(),
-            ])
-            .await?;
+        let mut transaction = session.edit();
+
+        transaction
+            .assert(Employee {
+                this: alice.clone(),
+                name: "Alice".to_string(),
+                role: "cryptographer".to_string(),
+            })
+            .assert(Employee {
+                this: bob.clone(),
+                name: "Bob".to_string(),
+                role: "janitor".to_string(),
+            })
+            .assert(Relation {
+                the: "employee/name".parse::<ArtifactAttribute>()?,
+                of: mallory.clone(),
+                is: Value::String("Mallory".to_string()),
+            })
+            .assert(Relation {
+                the: "employee/role".parse::<ArtifactAttribute>()?,
+                of: mallory.clone(),
+                is: Value::String("Hacker".to_string()),
+            });
+
+        session.commit(transaction).await?;
 
         let employee = Match::<Employee> {
             this: Term::var("this"),
