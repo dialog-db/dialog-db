@@ -50,7 +50,7 @@ impl DeductiveRule {
 }
 
 /// Internal helper for rules before compilation
-struct UncompiledDeductiveRule {
+pub struct UncompiledDeductiveRule {
     conclusion: Concept,
     premises: Vec<Premise>,
 }

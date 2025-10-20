@@ -75,6 +75,39 @@ impl<S: Store> Session<S> {
         self
     }
 
+    /// Install a rule from a function
+    ///
+    /// This method provides a cleaner API for installing rules defined as functions.
+    /// The concept is specified via the type parameter.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use dialog_query::{Session, Query, When};
+    ///
+    /// // Define a rule as a simple function
+    /// fn counter_new(counter: Query<Counter>) -> When {
+    ///     // ... rule implementation
+    /// }
+    ///
+    /// // Install it - specify the Counter concept via turbofish
+    /// let session = Session::open(store)
+    ///     .install_rule::<Counter>(counter_new)?;
+    /// ```
+    pub fn install_rule<C: crate::concept::Concept>(
+        self,
+        func: impl Fn(C::Match) -> crate::rule::When,
+    ) -> Result<Self, crate::error::CompileError>
+    where
+        C::Match: Default,
+    {
+        let query = C::Match::default();
+        let when = func(query);
+        let premises = when.into_vec();
+        let rule = crate::predicate::DeductiveRule::new(C::CONCEPT, premises)?;
+        Ok(self.install(rule))
+    }
+
     /// Create a new transaction for imperative API usage
     ///
     /// Returns a Transaction that can be used to batch operations before committing.

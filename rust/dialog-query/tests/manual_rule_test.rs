@@ -32,6 +32,16 @@ pub struct PersonMatch {
     pub age: Term<u32>,
 }
 
+impl Default for PersonMatch {
+    fn default() -> Self {
+        Self {
+            this: Term::var("this"),
+            name: Term::var("name"),
+            age: Term::var("age"),
+        }
+    }
+}
+
 /// Assert pattern for Person - used in rule conclusions
 #[derive(Debug, Clone)]
 pub struct PersonAssert {
@@ -447,5 +457,28 @@ mod tests {
         // 2. Generate When conditions
         let conditions = Person::when(match_pattern);
         assert_eq!(conditions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_install_rule_api() {
+        use dialog_query::{Session, When};
+        use dialog_storage::MemoryStorageBackend;
+
+        // Define a rule function using the clean API
+        fn person_rule(person: PersonMatch) -> When {
+            Person::when(person)
+        }
+
+        // Create a session
+        let storage = MemoryStorageBackend::default();
+        let artifacts = dialog_query::artifact::Artifacts::anonymous(storage)
+            .await
+            .unwrap();
+
+        // Install the rule - specify the Person concept via turbofish
+        let result = Session::open(artifacts).install_rule::<Person>(person_rule);
+
+        // Should compile and install successfully
+        assert!(result.is_ok(), "Rule should install successfully");
     }
 }
