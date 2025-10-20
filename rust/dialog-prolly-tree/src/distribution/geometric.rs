@@ -19,7 +19,7 @@ where
     Hash: HashType<HASH_SIZE>,
 {
     fn rank(key: &Key) -> Rank {
-        let key_hash = blake3::hash(key.as_ref());
+        let key_hash = blake3::hash(key.bytes());
         compute_geometric_rank(key_hash.as_bytes(), BRANCH_FACTOR)
     }
 }

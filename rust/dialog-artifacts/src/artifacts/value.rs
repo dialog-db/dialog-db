@@ -1,3 +1,9 @@
+//! Value types for semantic triple objects.
+//!
+//! This module defines the [`Value`] enum which represents all possible value
+//! types that can be stored as the object part of semantic triples, along with
+//! type information and serialization utilities.
+
 use std::{
     fmt::{Display, Formatter},
     hash::Hash,
