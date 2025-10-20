@@ -143,6 +143,7 @@ mod tests {
 
     // PersonAssert for assertions - uses typed Terms, no 'this' field
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     struct PersonAssert {
         pub name: Term<String>,
         pub age: Term<u32>,
@@ -150,6 +151,7 @@ mod tests {
 
     // PersonRetract for retractions - uses typed Terms, no 'this' field
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     struct PersonRetract {
         pub name: Term<String>,
         pub age: Term<u32>,
