@@ -279,10 +279,8 @@ pub struct Increment {
 };
 
 
-struct New(|counter| vec![counter]);
 
 // Rule that will match when there is no counter.
-#[rule(Counter)]
 fn new(counter: Query<Counter>) -> When {
     When::from([
         // No counter exists at this time
@@ -303,7 +301,6 @@ fn new(counter: Query<Counter>) -> When {
 
 // Rule that will match when we have a counter and an
 // increment action associated with same entity.
-#[rule(Counter)]
 fn inc(counter: Query<Counter>) -> When {
     // We have want to find counter and capture it's count so we define a var.
     let count = Term::var("count");
@@ -348,8 +345,8 @@ async fn main() -> Result<()> {
     let artifacts = Artifacts::anonymous(store).await?;
 
     let session = Dialog::open(artifacts)
-        .with(Counter::new)
-        .with(Counter::inc);
+        .install(new)?
+        .install(inc)?;
 
     // Finds either existing counter or creates and persists one
     // with `Counter::new` rule.
@@ -359,6 +356,6 @@ async fn main() -> Result<()> {
 
 ### Execution Model
 
-It is worth elaborating on rule execution model. Time of the execution is arbitrary, that is when above example runs the query it may find facts for the counter in which cases non of the rules will be executed. However if the counter is not found `Counter::new` rule will be executed which will claim a `Counter` that engine will decompose into set of facts and commit them to the database - effectively caching rule execution for next runs.
+It is worth elaborating on rule execution model. Time of the execution is arbitrary, that is when above example runs the query it may find facts for the counter in which cases non of the rules will be executed. However if the counter is not found `new` rule will be executed which will claim a `Counter` that engine will decompose into set of facts and commit them to the database - effectively caching rule execution for next runs.
 
-This execution model allows multiple concurrent applications to share same database while maintaining desired invariants, for example one application may not have `Counter::new` rule or `Counter::inc` rule, however if it stores a `Counter` and an `Increment` fact, another application that has those rules will react next time `Counter` is being queried and update it according to their rules. Furthermore, updates will propagate to other applications as it does not matter if update logic was imperative (using .commit) or declarative through rules.
+This execution model allows multiple concurrent applications to share same database while maintaining desired invariants, for example one application may not have `new` rule or `inc` rule, however if it stores a `Counter` and an `Increment` fact, another application that has those rules will react next time `Counter` is being queried and update it according to their rules. Furthermore, updates will propagate to other applications as it does not matter if update logic was imperative (using .commit) or declarative through rules.

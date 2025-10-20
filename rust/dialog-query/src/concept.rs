@@ -56,12 +56,16 @@ pub trait Instructions {
 /// Concepts can be matched and this trait describes an abstract match for the
 /// concept. Each match should be translatable into a set of statements making
 /// it possible to spread it into a query.
-pub trait Match: Sized + Clone + ConditionalSend + Into<Parameters> + 'static {
+pub trait Match: Sized + Clone + ConditionalSend + Default + Into<Parameters> + 'static {
     type Concept: Concept;
     /// Instance of the concept that this match can produce.
     type Instance: Instance + ConditionalSend + Clone;
 
     fn realize(&self, source: Answer) -> Result<Self::Instance, QueryError>;
+
+    fn to_concept(&self) -> predicate::Concept {
+        Self::Concept::CONCEPT
+    }
 
     fn conpect() -> predicate::Concept {
         Self::Concept::CONCEPT
@@ -139,6 +143,16 @@ mod tests {
         pub this: Term<Entity>,
         pub name: Term<String>,
         pub age: Term<u32>,
+    }
+
+    impl Default for PersonMatch {
+        fn default() -> Self {
+            Self {
+                this: Term::var("this"),
+                name: Term::var("name"),
+                age: Term::var("age"),
+            }
+        }
     }
 
     struct PersonTerms;
@@ -869,7 +883,11 @@ mod tests {
         let age_attr: ArtifactAttribute = "person/age".parse()?;
 
         let name_facts: Vec<_> = session
-            .select(ArtifactSelector::new().the(name_attr.clone()).of(alice.clone()))
+            .select(
+                ArtifactSelector::new()
+                    .the(name_attr.clone())
+                    .of(alice.clone()),
+            )
             .try_collect()
             .await?;
         assert_eq!(name_facts.len(), 1, "Should have Alice's name");
@@ -880,15 +898,15 @@ mod tests {
         );
 
         let age_facts: Vec<_> = session
-            .select(ArtifactSelector::new().the(age_attr.clone()).of(alice.clone()))
+            .select(
+                ArtifactSelector::new()
+                    .the(age_attr.clone())
+                    .of(alice.clone()),
+            )
             .try_collect()
             .await?;
         assert_eq!(age_facts.len(), 1, "Should have Alice's age");
-        assert_eq!(
-            age_facts[0].is,
-            Value::UnsignedInt(25),
-            "Age should be 25"
-        );
+        assert_eq!(age_facts[0].is, Value::UnsignedInt(25), "Age should be 25");
 
         // Now retract using !operator
         let mut session = Session::open(artifacts.clone());
@@ -897,7 +915,11 @@ mod tests {
         // Verify Alice has been retracted
         let session = Session::open(artifacts.clone());
         let name_facts_after: Vec<_> = session
-            .select(ArtifactSelector::new().the(name_attr.clone()).of(alice.clone()))
+            .select(
+                ArtifactSelector::new()
+                    .the(name_attr.clone())
+                    .of(alice.clone()),
+            )
             .try_collect()
             .await?;
         assert_eq!(
@@ -907,7 +929,11 @@ mod tests {
         );
 
         let age_facts_after: Vec<_> = session
-            .select(ArtifactSelector::new().the(age_attr.clone()).of(alice.clone()))
+            .select(
+                ArtifactSelector::new()
+                    .the(age_attr.clone())
+                    .of(alice.clone()),
+            )
             .try_collect()
             .await?;
         assert_eq!(
@@ -947,7 +973,11 @@ mod tests {
 
         let session = Session::open(artifacts.clone());
         let facts: Vec<_> = session
-            .select(ArtifactSelector::new().the(name_attr.clone()).of(alice.clone()))
+            .select(
+                ArtifactSelector::new()
+                    .the(name_attr.clone())
+                    .of(alice.clone()),
+            )
             .try_collect()
             .await?;
         assert_eq!(facts.len(), 1, "Should have name relation");
@@ -959,7 +989,11 @@ mod tests {
         // Verify relation has been retracted
         let session = Session::open(artifacts.clone());
         let facts_after: Vec<_> = session
-            .select(ArtifactSelector::new().the(name_attr.clone()).of(alice.clone()))
+            .select(
+                ArtifactSelector::new()
+                    .the(name_attr.clone())
+                    .of(alice.clone()),
+            )
             .try_collect()
             .await?;
         assert_eq!(

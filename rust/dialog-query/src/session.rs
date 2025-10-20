@@ -61,8 +61,8 @@ impl<S: Store> Session<S> {
         }
     }
 
-    /// Install a new rule into the session
-    pub fn install(mut self, rule: DeductiveRule) -> Self {
+    /// Register a new rule into the session
+    pub fn register(mut self, rule: DeductiveRule) -> Self {
         if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator().to_string()) {
             if !rules.contains(&rule) {
                 rules.push(rule);
@@ -75,37 +75,29 @@ impl<S: Store> Session<S> {
         self
     }
 
-    /// Install a rule from a function
+    /// Install a rule from a function - concept inferred from function parameter.
     ///
-    /// This method provides a cleaner API for installing rules defined as functions.
-    /// The concept is specified via the type parameter.
-    ///
-    /// # Examples
-    ///
+    /// # Example
     /// ```ignore
-    /// use dialog_query::{Session, Query, When};
-    ///
-    /// // Define a rule as a simple function
-    /// fn counter_new(counter: Query<Counter>) -> When {
+    /// fn person_rule(person: Query<Person>) -> When {
     ///     // ... rule implementation
     /// }
     ///
-    /// // Install it - specify the Counter concept via turbofish
-    /// let session = Session::open(store)
-    ///     .install_rule::<Counter>(counter_new)?;
+    /// session.install(person_rule)?;
     /// ```
-    pub fn install_rule<C: crate::concept::Concept>(
+    pub fn install<M>(
         self,
-        func: impl Fn(C::Match) -> crate::rule::When,
+        func: impl Fn(M) -> crate::rule::When,
     ) -> Result<Self, crate::error::CompileError>
     where
-        C::Match: Default,
+        M: crate::concept::Match,
     {
-        let query = C::Match::default();
+        let query = M::default();
+        let concept = query.to_concept();
         let when = func(query);
         let premises = when.into_vec();
-        let rule = crate::predicate::DeductiveRule::new(C::CONCEPT, premises)?;
-        Ok(self.install(rule))
+        let rule = crate::predicate::DeductiveRule::new(concept, premises)?;
+        Ok(self.register(rule))
     }
 
     /// Create a new transaction for imperative API usage
@@ -695,7 +687,7 @@ mod tests {
 
         let backend = MemoryStorageBackend::default();
         let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store).install(employee_from_stuff);
+        let mut session = Session::open(store).register(employee_from_stuff);
 
         let alice = Stuff::CONCEPT
             .create()

@@ -72,6 +72,17 @@ mod person {
         pub name: Term<String>,
         pub age: Term<u32>,
     }
+
+    impl Default for Match {
+        fn default() -> Self {
+            Self {
+                this: Term::var("this"),
+                name: Term::var("name"),
+                age: Term::var("age"),
+            }
+        }
+    }
+
     impl concept::Match for Match {
         type Concept = Person;
         type Instance = Person;

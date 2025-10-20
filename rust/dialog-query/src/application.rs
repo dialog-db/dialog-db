@@ -3,7 +3,6 @@ pub mod fact;
 pub mod formula;
 
 pub use crate::analyzer::AnalyzerError;
-use crate::application;
 pub use crate::context::new_context;
 pub use crate::error::{PlanError, QueryResult};
 pub use crate::premise::{Negation, Premise};

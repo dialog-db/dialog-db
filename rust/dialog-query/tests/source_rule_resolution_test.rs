@@ -42,7 +42,7 @@ async fn test_session_source_rule_resolution() -> Result<()> {
         ],
     };
 
-    let session_with_rule = session.install(rule.clone());
+    let session_with_rule = session.register(rule.clone());
 
     // Test 3: Verify the rule can be resolved
     let resolved_rules = session_with_rule.resolve_rules("adult");
@@ -81,7 +81,7 @@ async fn test_source_trait_compatibility() -> Result<()> {
 
     // Test with Session
     let mut session = Session::open(artifacts);
-    session = session.install(rule.clone());
+    session = session.register(rule.clone());
     let rules = query_with_source(&session, "test").await;
     assert_eq!(rules.len(), 1);
     assert_eq!(rules[0].conclusion.operator(), "test");

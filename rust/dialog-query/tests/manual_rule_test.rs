@@ -475,10 +475,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Install the rule - specify the Person concept via turbofish
-        let result = Session::open(artifacts).install_rule::<Person>(person_rule);
-
-        // Should compile and install successfully
-        assert!(result.is_ok(), "Rule should install successfully");
+        let result = Session::open(artifacts).install(person_rule);
+        assert!(result.is_ok(), "install should work");
     }
 }

@@ -307,6 +307,15 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             #(#match_fields),*
         }
 
+        impl Default for #match_name {
+            fn default() -> Self {
+                Self {
+                    this: dialog_query::Term::var("this"),
+                    #(#field_names: dialog_query::Term::var(#field_name_lits)),*
+                }
+            }
+        }
+
         #[derive(Debug, Clone, PartialEq)]
         pub struct #terms_name {}
         impl #terms_name {
