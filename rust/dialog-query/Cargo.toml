@@ -27,11 +27,19 @@ dialog-common = { workspace = true }
 futures-util = { workspace = true }
 futures-core = { workspace = true }
 async-stream = { workspace = true }
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 
 # Macro utilities
 paste = "1.0"
 dialog-query-macros = { workspace = true }
+
+# Tokio with platform-specific features
+# wasm32 only supports: sync, macros, io-util, rt, time
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+wasm-bindgen-futures = "0.4"
 
 
 [dev-dependencies]

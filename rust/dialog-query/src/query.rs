@@ -1,7 +1,7 @@
 //! Query trait for polymorphic querying across different store types
 
 use async_stream::try_stream;
-pub use dialog_common::ConditionalSend;
+pub use dialog_common::{ConditionalSend, ConditionalSync};
 
 use crate::artifact::{ArtifactStore, ArtifactStoreMut};
 pub use crate::context::new_context;
@@ -37,7 +37,7 @@ impl<S, T: ConditionalSend> Output<T> for S where
 /// This trait extends ArtifactStore with rule resolution capabilities, allowing
 /// query evaluation to access both stored facts and registered deductive rules.
 /// This enables rule-based inference during query execution.
-pub trait Source: ArtifactStore + Clone + Send + Sync + 'static {
+pub trait Source: ArtifactStore + Clone + ConditionalSend + ConditionalSync + 'static {
     /// Resolve rules for the given operator
     ///
     /// Returns all deductive rules that have conclusions matching the given operator.

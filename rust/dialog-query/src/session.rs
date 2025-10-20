@@ -6,7 +6,10 @@
 
 pub mod transaction;
 
-use crate::artifact::{ArtifactStore, DialogArtifactsError};
+pub use crate::artifact::{
+    Artifact, ArtifactSelector, ArtifactStore, ConditionalSend, ConditionalSync, Constrained,
+    DialogArtifactsError,
+};
 use crate::query::Source;
 use crate::session::transaction::{Transaction, TransactionError};
 use crate::{DeductiveRule, Store};
@@ -283,10 +286,9 @@ impl<S: ArtifactStore + Clone + Send + Sync + 'static> Source for QuerySession<S
 impl<S: ArtifactStore> ArtifactStore for QuerySession<S> {
     fn select(
         &self,
-        artifact_selector: crate::artifact::ArtifactSelector<crate::artifact::Constrained>,
-    ) -> impl futures_core::Stream<
-        Item = Result<crate::artifact::Artifact, crate::artifact::DialogArtifactsError>,
-    > + crate::artifact::ConditionalSend
+        artifact_selector: ArtifactSelector<Constrained>,
+    ) -> impl futures_core::Stream<Item = Result<Artifact, DialogArtifactsError>>
+           + ConditionalSend
            + 'static {
         self.store.select(artifact_selector)
     }
@@ -296,20 +298,19 @@ impl<S: ArtifactStore> ArtifactStore for QuerySession<S> {
 ///
 /// This implementation allows Session to be used directly with the Query trait
 /// while providing access to both stored artifacts and registered rules.
-impl<S: Store + Sync + 'static> Source for Session<S> {
+impl<S: Store + ConditionalSend + ConditionalSync + 'static> Source for Session<S> {
     fn resolve_rules(&self, operator: &str) -> Vec<DeductiveRule> {
         self.rules.get(operator).cloned().unwrap_or_default()
     }
 }
 
 /// Forward ArtifactStore methods to the wrapped store
-impl<S: Store> crate::artifact::ArtifactStore for Session<S> {
+impl<S: Store> ArtifactStore for Session<S> {
     fn select(
         &self,
-        artifact_selector: crate::artifact::ArtifactSelector<crate::artifact::Constrained>,
-    ) -> impl futures_core::Stream<
-        Item = Result<crate::artifact::Artifact, crate::artifact::DialogArtifactsError>,
-    > + crate::artifact::ConditionalSend
+        artifact_selector: ArtifactSelector<Constrained>,
+    ) -> impl futures_core::Stream<Item = Result<Artifact, DialogArtifactsError>>
+           + ConditionalSend
            + 'static {
         self.store.select(artifact_selector)
     }

@@ -677,6 +677,7 @@ dependencies = [
  "thiserror 2.0.12",
  "tokio",
  "tokio-test",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

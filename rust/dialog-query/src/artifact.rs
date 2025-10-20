@@ -6,7 +6,7 @@ pub use dialog_artifacts::{
 };
 pub use futures_util::stream::Stream;
 
-pub use dialog_common::ConditionalSend;
+pub use dialog_common::{ConditionalSend, ConditionalSync};
 // For testing, we can access MemoryStorageBackend through dialog-artifacts
 // to ensure version consistency
 pub trait Store: ArtifactStore + Clone + Send + 'static {}
