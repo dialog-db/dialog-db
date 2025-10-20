@@ -379,14 +379,14 @@ mod tests {
                     assert!(selector.parameters().get("of").is_some());
                     assert!(selector.parameters().get("is").is_some());
                 }
-                Premise::Apply(Application::Constraint(_)) => {
-                    panic!("Unexpected ApplyConstraint premise in test");
-                }
                 Premise::Apply(Application::Formula(_)) => {
                     panic!("Unexpected ApplyFormula premise in test");
                 }
                 Premise::Apply(Application::Concept(_)) => {
                     panic!("Unexpected Realize premise in test");
+                }
+                Premise::Constrain(_) => {
+                    panic!("Unexpected Constraint premise in test");
                 }
                 Premise::Exclude(_) => {
                     panic!("Unexpected Exclude premise in test");
@@ -416,11 +416,11 @@ mod tests {
                     assert!(selector.parameters().get("of").is_some());
                     assert!(selector.parameters().get("is").is_some());
                 }
-                Premise::Apply(Application::Constraint(_)) => {
-                    panic!("Unexpected Constraint application premise in test");
-                }
                 Premise::Apply(Application::Formula(_)) => {
                     panic!("Unexpected ApplyFormula premise in test");
+                }
+                Premise::Constrain(_) => {
+                    panic!("Unexpected Constraint premise in test");
                 }
                 Premise::Apply(Application::Concept(_)) => {
                     panic!("Unexpected Realize premise in test");

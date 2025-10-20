@@ -12,11 +12,11 @@
 use std::fmt;
 use std::marker::PhantomData;
 
-use crate::application::constraint::ConstraintApplication;
 use crate::artifact::{Attribute, Entity, Type, Value};
+use crate::constraint::{Constraint, Equality};
 use crate::error::SyntaxError;
 use crate::types::{IntoType, Scalar};
-use crate::Application;
+use crate::Premise;
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 
@@ -373,7 +373,7 @@ where
 
     /// Creates an equality constraint between this term and another term.
     ///
-    /// This method creates a `ConstraintApplication` that enforces equality
+    /// This method creates a `Constraint::Equality` that enforces equality
     /// between the two terms during query evaluation. The constraint supports
     /// bidirectional inference: if one term is bound, the other will be inferred.
     ///
@@ -384,12 +384,8 @@ where
     /// // Create a constraint that x equals y
     /// let constraint = Term::<Value>::var("x").is(Term::<Value>::var("y"));
     /// ```
-    pub fn is<Other: Into<Term<T>>>(self, other: Other) -> Application {
-        ConstraintApplication {
-            this: self.as_unknown(),
-            is: other.into().as_unknown(),
-        }
-        .into()
+    pub fn is<Other: Into<Term<T>>>(self, other: Other) -> Premise {
+        Constraint::Equality(Equality::new(self.as_unknown(), other.into().as_unknown())).into()
     }
 
     pub fn as_unknown(&self) -> Term<Value> {
@@ -945,44 +941,44 @@ mod tests {
 
     #[test]
     fn test_term_eq_creates_constraint() {
-        use crate::Application;
+        use crate::Premise;
 
         // Create two variable terms
         let x = Term::<Value>::var("x");
         let y = Term::<Value>::var("y");
 
-        // Use eq() to create an equality constraint
-        let constraint_app = x.is(y);
+        // Use is() to create an equality constraint
+        let premise = x.is(y);
 
-        // Verify it creates an Application
-        match constraint_app {
-            Application::Constraint(constraint) => {
+        // Verify it creates a Constraint Premise
+        match premise {
+            Premise::Constrain(Constraint::Equality(constraint)) => {
                 // Verify the constraint has the right structure
                 assert_eq!(constraint.this.name(), Some("x"));
                 assert_eq!(constraint.is.name(), Some("y"));
             }
-            _ => panic!("Expected Constraint application"),
+            _ => panic!("Expected Constraint premise"),
         }
     }
 
     #[test]
     fn test_term_eq_with_constant() {
-        use crate::Application;
+        use crate::Premise;
 
         // Create a variable and a constant
         let x = Term::<Value>::var("x");
         let constant = Term::Constant(Value::from(42));
 
-        // Use eq() to create a constraint between variable and constant
-        let constraint_app = x.is(constant);
+        // Use is() to create a constraint between variable and constant
+        let premise = x.is(constant);
 
-        // Verify it creates an Application
-        match constraint_app {
-            Application::Constraint(constraint) => {
+        // Verify it creates a Constraint Premise
+        match premise {
+            Premise::Constrain(Constraint::Equality(constraint)) => {
                 assert_eq!(constraint.this.name(), Some("x"));
                 assert!(constraint.is.is_constant());
             }
-            _ => panic!("Expected Constraint application"),
+            _ => panic!("Expected Constraint premise"),
         }
     }
 }

@@ -9,6 +9,7 @@ use async_stream::try_stream;
 
 pub use super::application::Application;
 use super::application::{FactApplication, FormulaApplication};
+pub use super::constraint::Constraint;
 pub use super::context::{new_context, EvaluationPlan};
 pub use super::negation::Negation;
 pub use crate::environment::Environment;
@@ -17,11 +18,17 @@ pub use crate::{selection::Answers, EvaluationContext, Source};
 use std::fmt::Display;
 
 /// Represents a premise in a rule - a condition that must be satisfied.
-/// Can be either a positive application or a negated exclusion.
+///
+/// Premises can be:
+/// - **Applications**: Query the knowledge base (facts, concepts, formulas)
+/// - **Constraints**: Express relationships between variables (equality, etc.)
+/// - **Exclusions**: Negated premises that filter out matches
 #[derive(Debug, Clone, PartialEq)]
 pub enum Premise {
-    /// A positive premise that produces matches.
+    /// A positive premise that queries the knowledge base.
     Apply(Application),
+    /// A constraint that relates variables (equality, comparison, etc.).
+    Constrain(Constraint),
     /// A negated premise that excludes matches from the selection.
     Exclude(Negation),
 }
@@ -32,6 +39,7 @@ impl Premise {
     pub fn estimate(&self, env: &crate::Environment) -> Option<usize> {
         match self {
             Premise::Apply(application) => application.estimate(env),
+            Premise::Constrain(constraint) => constraint.estimate(env),
             Premise::Exclude(negation) => negation.estimate(env),
         }
     }
@@ -39,6 +47,7 @@ impl Premise {
     pub fn parameters(&self) -> crate::Parameters {
         match self {
             Premise::Apply(application) => application.parameters(),
+            Premise::Constrain(constraint) => constraint.parameters(),
             Premise::Exclude(negation) => negation.parameters(),
         }
     }
@@ -46,6 +55,7 @@ impl Premise {
     pub fn schema(&self) -> crate::Schema {
         match self {
             Premise::Apply(application) => application.schema(),
+            Premise::Constrain(constraint) => constraint.schema(),
             Premise::Exclude(negation) => negation.schema(),
         }
     }
@@ -71,6 +81,11 @@ impl Premise {
                         yield each?;
                     }
                 },
+                Premise::Constrain(constraint) => {
+                    for await each in constraint.evaluate(context) {
+                        yield each?;
+                    }
+                },
                 Premise::Exclude(negation) => {
                     for await each in negation.evaluate(context) {
                         yield each?;
@@ -92,8 +107,15 @@ impl Display for Premise {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Premise::Apply(application) => Display::fmt(&application, f),
+            Premise::Constrain(constraint) => Display::fmt(&constraint, f),
             Premise::Exclude(negation) => Display::fmt(&negation, f),
         }
+    }
+}
+
+impl From<Constraint> for Premise {
+    fn from(constraint: Constraint) -> Self {
+        Premise::Constrain(constraint)
     }
 }
 

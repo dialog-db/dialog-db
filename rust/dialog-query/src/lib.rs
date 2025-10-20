@@ -16,6 +16,7 @@ pub mod attribute;
 
 pub mod claim;
 pub mod concept;
+pub mod constraint;
 pub mod context;
 pub mod conversions;
 pub mod cursor;
