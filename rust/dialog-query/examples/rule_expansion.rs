@@ -1,4 +1,3 @@
-use dialog_query::rule::Premises;
 use dialog_query::{Entity, Term};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,24 +207,12 @@ mod person {
     impl concept::Quarriable for Person {
         type Query = Match;
     }
-
-    impl dialog_query::rule::Premises for Match {
-        type IntoIter = std::vec::IntoIter<dialog_query::Premise>;
-
-        fn premises(self) -> Self::IntoIter {
-            // For now return empty - proper implementation would convert Match to statements
-            vec![].into_iter()
-        }
-    }
 }
 
 fn main() {
-    let alice = person::Match {
+    let _alice = person::Match {
         this: Term::var("person"),
         name: Term::var("Alice"),
         age: Term::blank(),
     };
-
-    let _statements = alice.premises();
-    // TODO: Implement main function
 }

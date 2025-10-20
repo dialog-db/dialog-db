@@ -7,7 +7,7 @@ use dialog_query::{
     query::Output,
     selection::{Answer, Answers},
     term::Term,
-    Cardinality, Fact, Relation, Session,
+    Cardinality, Relation, Session,
 };
 use dialog_storage::MemoryStorageBackend;
 use futures_util::stream::once;

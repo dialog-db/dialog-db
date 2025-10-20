@@ -1,6 +1,5 @@
 pub use crate::concept::Concept;
 pub use crate::predicate::formula::Formula;
-pub use crate::rule::When;
 
 /// Represents predicates that can be applied using an associated `Query`
 /// type. This is used by predicate definitions like `Concept` and `Formula`

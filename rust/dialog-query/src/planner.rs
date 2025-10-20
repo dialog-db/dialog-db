@@ -504,7 +504,7 @@ fn test_join_plan_execution_order() {
 async fn test_join_plan_query_execution() -> anyhow::Result<()> {
     use crate::application::FactApplication;
     use crate::session::Session;
-    use crate::{Cardinality, Fact, Relation, Term, Value};
+    use crate::{Cardinality, Relation, Term, Value};
     use dialog_artifacts::{Artifacts, Attribute, Entity};
     use dialog_storage::MemoryStorageBackend;
 

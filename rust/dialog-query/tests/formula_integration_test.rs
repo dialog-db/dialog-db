@@ -8,7 +8,7 @@ use dialog_query::{
     artifact::{Artifacts, Attribute, Entity, Value},
     formulas::*,
     selection::Answer,
-    Fact, Formula, Parameters, Relation, Session, Term,
+    Formula, Parameters, Relation, Session, Term,
 };
 use dialog_storage::MemoryStorageBackend;
 

@@ -59,7 +59,7 @@ pub use predicate::{DeductiveRule, Formula, Output};
 pub use premise::Premise;
 pub use query::{Source, Store};
 pub use relation::Relation;
-pub use rule::{Premises, Rule, When};
+pub use rule::{Premises, When};
 pub use schema::{Field, Requirement, Schema};
 pub use session::transaction::{Edit, Transaction, TransactionError};
 pub use session::{QuerySession, Session};
@@ -101,7 +101,7 @@ pub mod prelude {
     pub use crate::environment::Environment;
     pub use crate::error::QueryError;
     pub use crate::premise::Premise;
-    pub use crate::rule::{Premises, Rule, When};
+    pub use crate::rule::Premises;
     pub use crate::term::Term;
     pub use crate::types::IntoType;
     // Macros are automatically available due to #[macro_export]

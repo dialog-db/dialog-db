@@ -1,13 +1,11 @@
+use dialog_query::application::ConceptApplication;
 use dialog_query::artifact::{Entity, Type, Value};
 use dialog_query::attribute::{Attribute, Cardinality};
-use dialog_query::concept::{Concept, Instance, Instructions, Match as ConceptMatch};
+use dialog_query::concept::{Concept, Instance, Match as ConceptMatch};
 use dialog_query::dsl::Quarriable;
-use dialog_query::predicate::fact::Fact;
-use dialog_query::rule::{Match, Premises, Rule, When};
+use dialog_query::rule::Match;
 use dialog_query::term::Term;
-use dialog_query::types::Scalar;
-use dialog_query::Application;
-use dialog_query::Premise;
+use dialog_query::{Application, Premise};
 use std::marker::PhantomData;
 
 /// Manual implementation of Person struct with Concept and Rule traits
@@ -153,7 +151,7 @@ impl Concept for Person {
 
     const CONCEPT: dialog_query::predicate::concept::Concept = {
         const ATTRS: dialog_query::predicate::concept::Attributes =
-            dialog_query::predicate::concept::Attributes::Static(&[]);
+            dialog_query::predicate::concept::Attributes::Static(person::ATTRIBUTE_TUPLES);
 
         dialog_query::predicate::concept::Concept::Static {
             operator: "person",
@@ -275,21 +273,26 @@ impl ConceptMatch for PersonMatch {
     }
 }
 
-// TODO: Attributes trait no longer exists - replaced by ConceptType
-// impl Attributes for PersonAttributes {
-//     fn attributes() -> &'static [(&'static str, Attribute<Value>)] {
-//         person::ATTRIBUTE_TUPLES
-//     }
-//
-//     fn of<T: Into<Term<Entity>>>(entity: T) -> Self {
-//         let entity = entity.into();
-//         PersonAttributes {
-//             this: entity.clone(),
-//             name: person::NAME_ATTR.of(entity.clone()),
-//             age: person::AGE_ATTR.of(entity),
-//         }
-//     }
-// }
+impl From<PersonMatch> for ConceptApplication {
+    fn from(source: PersonMatch) -> Self {
+        ConceptApplication {
+            terms: source.into(),
+            concept: Person::CONCEPT,
+        }
+    }
+}
+
+impl From<PersonMatch> for Application {
+    fn from(source: PersonMatch) -> Self {
+        Application::Concept(source.into())
+    }
+}
+
+impl From<PersonMatch> for Premise {
+    fn from(source: PersonMatch) -> Self {
+        Premise::Apply(source.into())
+    }
+}
 
 impl Instance for Person {
     fn this(&self) -> Entity {
@@ -298,166 +301,9 @@ impl Instance for Person {
     }
 }
 
-impl Premises for PersonMatch {
-    type IntoIter = std::vec::IntoIter<Premise>;
-
-    fn premises(self) -> Self::IntoIter {
-        Person::when(self).into_iter()
-    }
-}
-
-impl Rule for Person {
-    fn when(terms: Match<Self>) -> When {
-        // Create fact selectors for each attribute
-        // We need to convert the typed terms to Term<Value>
-        let name_value_term = match &terms.name {
-            Term::Variable { name, .. } => Term::Variable {
-                name: name.clone(),
-                content_type: Default::default(),
-            },
-            Term::Constant(value) => Term::Constant(value.as_value()),
-        };
-
-        let age_value_term = match &terms.age {
-            Term::Variable { name, .. } => Term::Variable {
-                name: name.clone(),
-                content_type: Default::default(),
-            },
-            Term::Constant(value) => Term::Constant(value.as_value()),
-        };
-
-        let name_fact = Fact::select()
-            .the("person/name")
-            .of(terms.this.clone())
-            .is(name_value_term);
-
-        let age_fact = Fact::select()
-            .the("person/age")
-            .of(terms.this.clone())
-            .is(age_value_term);
-
-        // Return When collection with both facts
-        [name_fact, age_fact].into()
-    }
-}
-
-// Implement Instructions for PersonAssert
-impl Instructions for PersonAssert {
-    type IntoIter = std::vec::IntoIter<dialog_artifacts::Instruction>;
-
-    fn instructions(self) -> Self::IntoIter {
-        // For now, return empty vec as placeholder
-        // In real implementation, this would generate Assert instructions
-        vec![].into_iter()
-    }
-}
-
-// Implement Instructions for PersonRetract
-impl Instructions for PersonRetract {
-    type IntoIter = std::vec::IntoIter<dialog_artifacts::Instruction>;
-
-    fn instructions(self) -> Self::IntoIter {
-        // For now, return empty vec as placeholder
-        // In real implementation, this would generate Retract instructions
-        vec![].into_iter()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_person_rule_when() {
-        let entity = Term::var("person_entity");
-        let person_match = PersonMatch {
-            this: entity.clone(),
-            name: Term::var("person_name"),
-            age: Term::var("person_age"),
-        };
-
-        let when_statements = Person::when(person_match);
-
-        // Should have 2 statements - one for each attribute
-        assert_eq!(when_statements.len(), 2);
-
-        // Each statement should be a FactSelector
-        for statement in &when_statements {
-            match statement {
-                Premise::Apply(Application::Fact(selector)) => {
-                    assert!(selector.parameters().get("the").is_some());
-                    assert!(selector.parameters().get("of").is_some());
-                    assert!(selector.parameters().get("is").is_some());
-                }
-                Premise::Apply(Application::Formula(_)) => {
-                    panic!("Unexpected ApplyFormula premise in test");
-                }
-                Premise::Apply(Application::Concept(_)) => {
-                    panic!("Unexpected Realize premise in test");
-                }
-                Premise::Constrain(_) => {
-                    panic!("Unexpected Constraint premise in test");
-                }
-                Premise::Exclude(_) => {
-                    panic!("Unexpected Exclude premise in test");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_person_match_as_statements() {
-        let entity = Term::var("entity");
-        let person_match = PersonMatch {
-            this: entity,
-            name: Term::from("John".to_string()),
-            age: Term::from(25u32),
-        };
-
-        // Test that PersonMatch can be used as Statements
-        let statements: Vec<Premise> = person_match.premises().collect();
-        assert_eq!(statements.len(), 2);
-
-        // Verify the generated statements
-        for statement in statements {
-            match statement {
-                Premise::Apply(Application::Fact(selector)) => {
-                    assert!(selector.parameters().get("the").is_some());
-                    assert!(selector.parameters().get("of").is_some());
-                    assert!(selector.parameters().get("is").is_some());
-                }
-                Premise::Apply(Application::Formula(_)) => {
-                    panic!("Unexpected ApplyFormula premise in test");
-                }
-                Premise::Constrain(_) => {
-                    panic!("Unexpected Constraint premise in test");
-                }
-                Premise::Apply(Application::Concept(_)) => {
-                    panic!("Unexpected Realize premise in test");
-                }
-                Premise::Exclude(_) => {
-                    panic!("Unexpected Exclude premise in test");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_usage_pattern() {
-        // This test demonstrates the expected usage pattern
-
-        // 1. Create a match pattern with variables
-        let entity = Term::var("p");
-        let match_pattern = PersonMatch {
-            this: entity.clone(),
-            name: Term::var("name"),
-            age: Term::var("age"),
-        };
-
-        // 2. Generate When conditions
-        let conditions = Person::when(match_pattern);
-        assert_eq!(conditions.len(), 2);
-    }
 
     #[tokio::test]
     async fn test_install_rule_api() {
@@ -465,8 +311,12 @@ mod tests {
         use dialog_storage::MemoryStorageBackend;
 
         // Define a rule function using the clean API
-        fn person_rule(person: PersonMatch) -> When {
-            Person::when(person)
+        fn person_rule(person: Match<Person>) -> impl When {
+            (Match::<Person> {
+                this: person.this,
+                name: person.name,
+                age: person.age,
+            },)
         }
 
         // Create a session

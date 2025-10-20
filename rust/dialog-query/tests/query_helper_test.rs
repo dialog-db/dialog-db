@@ -4,7 +4,7 @@ use anyhow::Result;
 use dialog_query::{
     artifact::{Artifacts, Attribute, Entity, Value},
     term::Term,
-    Concept, Fact, Match, Relation, Session,
+    Concept, Match, Relation, Session,
 };
 use dialog_storage::MemoryStorageBackend;
 

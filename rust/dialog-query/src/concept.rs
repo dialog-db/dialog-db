@@ -5,9 +5,7 @@ pub use crate::predicate::concept::Attributes;
 use crate::query::{Output, Source};
 use crate::selection::Answer;
 use crate::{predicate, QueryError};
-use crate::{Application, Premise};
 use crate::{Entity, Parameters, Relation};
-use dialog_artifacts::Instruction;
 use dialog_common::ConditionalSend;
 use futures_util::StreamExt;
 use std::fmt::Debug;
@@ -40,17 +38,6 @@ pub trait Concept: Quarriable + IntoIterator<Item = Relation> + Clone + Debug {
     /// The static concept definition for this type.
     /// This is typically defined by the macro as a Concept::Static variant.
     const CONCEPT: predicate::concept::Concept;
-}
-
-/// Every assertion or retraction can be decomposed into a set of
-/// assertion / retraction.
-///
-/// This trait enables us to define each Concpet::Assert and Concpet::Retract
-/// such that it could be decomposed into a set of instructions which can be
-/// then be committed.
-pub trait Instructions {
-    type IntoIter: IntoIterator<Item = Instruction>;
-    fn instructions(self) -> Self::IntoIter;
 }
 
 /// Concepts can be matched and this trait describes an abstract match for the

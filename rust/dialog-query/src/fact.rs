@@ -143,7 +143,7 @@ mod integration_tests {
 
     use super::*;
     use crate::artifact::{Artifacts, Attribute, Entity, Value};
-    use crate::{Claim, Relation, Session};
+    use crate::{Relation, Session};
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 

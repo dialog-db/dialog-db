@@ -78,23 +78,28 @@ impl<S: Store> Session<S> {
     /// Install a rule from a function - concept inferred from function parameter.
     ///
     /// # Example
-    /// ```ignore
-    /// fn person_rule(person: Query<Person>) -> When {
-    ///     // ... rule implementation
+    /// ```rust,ignore
+    /// use dialog_query::{Session, Match, IntoWhen};
+    ///
+    /// fn person_rule(person: Match<Person>) -> impl IntoWhen {
+    ///     (
+    ///         Match::<Employee> {
+    ///             this: person.this,
+    ///             name: person.name
+    ///         },
+    ///     )
     /// }
     ///
     /// session.install(person_rule)?;
     /// ```
-    pub fn install<M>(
-        self,
-        func: impl Fn(M) -> crate::rule::When,
-    ) -> Result<Self, crate::error::CompileError>
+    pub fn install<M, W>(self, rule: impl Fn(M) -> W) -> Result<Self, crate::error::CompileError>
     where
         M: crate::concept::Match,
+        W: crate::rule::When,
     {
         let query = M::default();
         let concept = query.to_concept();
-        let when = func(query);
+        let when = rule(query).into_premises();
         let premises = when.into_vec();
         let rule = crate::predicate::DeductiveRule::new(concept, premises)?;
         Ok(self.register(rule))
@@ -324,7 +329,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::{
-        predicate::{self, concept::Attributes},
+        predicate::{self, concept::Attributes, Fact},
         Attribute, Parameters, Relation, Type,
     };
 
@@ -333,7 +338,7 @@ mod tests {
     #[tokio::test]
     async fn test_session() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value};
-        use crate::{Concept, Fact, Term};
+        use crate::Term;
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -436,7 +441,7 @@ mod tests {
 
         let backend = MemoryStorageBackend::default();
         let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+        let mut _session = Session::open(store);
 
         #[derive(Debug, Clone, PartialEq, Concept)]
         pub struct Person {
@@ -555,7 +560,7 @@ mod tests {
         mixed_params.insert("name".into(), Term::var("person_name")); // This matches
         mixed_params.insert("age".into(), Term::blank()); // This matches but is blank
 
-        let application = person.apply(mixed_params)?;
+        person.apply(mixed_params)?;
 
         Ok(())
     }
@@ -763,14 +768,27 @@ mod tests {
         }
 
         // Define a rule using the clean function API - no manual DeductiveRule construction!
-        fn employee_from_stuff(employee: Match<Employee>) -> When {
+        fn employee_from_stuff(employee: Match<Employee>) -> impl When {
             // This rule says: "An employee exists when there's stuff with matching attributes"
             // The premises check for stuff/name and stuff/role matching employee/name and employee/job
-            When::from([Match::<Stuff> {
-                this: employee.this,
-                name: employee.name,
-                role: employee.job,
-            }])
+            (
+                Match::<Stuff> {
+                    this: employee.this.clone(),
+                    name: employee.name.clone(),
+                    role: employee.job,
+                },
+                Fact {
+                    the: "stuff/name"
+                        .parse::<crate::artifact::Attribute>()
+                        .unwrap()
+                        .into(),
+                    of: employee.this,
+                    is: employee.name.as_unknown(),
+                    cause: Term::blank(),
+                }
+                .compile()
+                .unwrap(),
+            )
         }
 
         let backend = MemoryStorageBackend::default();

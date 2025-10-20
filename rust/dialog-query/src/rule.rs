@@ -6,84 +6,40 @@
 //! The design is based on the TypeScript implementation in @query/src/plan/rule.js
 //! and follows the patterns described in the design document at notes/rules.md.
 
-use crate::concept::Concept;
 pub use crate::dsl::{Assert, Instance, Match};
 use crate::premise::Premise;
 
-/// Collection of premises that must be satisfied for a rule to apply.
+/// Trait for types that can be converted into a When collection
 ///
-/// This type represents the "when" part of rules - the conditions that must be true for a rule to fire.
-/// It supports multiple clean syntax options for rule definitions.
+/// This trait enables ergonomic rule definitions by allowing various types
+/// to be used as rule premises:
+/// - Single items: `Into<Premise>` types
+/// - Tuples: `(Match<A>, Match<B>, ...)`
+/// - Arrays: `[Match<A>; N]`
+/// - Vectors: `Vec<Match<A>>`
 ///
-/// # Design Goal
+/// # Examples
 ///
-/// Enable clean, readable rule definitions through multiple ergonomic approaches:
-/// - Array syntax: `[premise1, premise2].into()` (works with any `T: Into<Premise>`)
-/// - Macro syntax: `when![premise1, premise2]`
-/// - Vec syntax: `vec![premise1, premise2].into()`
-/// - Mixed approaches for maximum flexibility
-///
-/// # Usage Patterns
-///
-/// ```rust
-/// use dialog_query::{When, Term, predicate, when};
-///
-/// // Example of creating When collections with different syntax options
-/// fn demonstrate_when_creation() -> When {
-///     let selector1 = predicate::Fact::new()
-///         .the("example/field1".parse::<dialog_query::artifact::Attribute>().unwrap())
-///         .of(Term::var("entity"))
-///         .is(Term::var("value1"))
-///         .compile()
-///         .unwrap();
-///
-///     let selector2 = predicate::Fact::new()
-///         .the("example/field2".parse::<dialog_query::artifact::Attribute>().unwrap())
-///         .of(Term::var("entity"))
-///         .is(Term::var("value2"))
-///         .compile()
-///         .unwrap();
-///
-///     // Multiple syntax options for creating When:
-///
-///     // Option 1: Array syntax with From trait - clean and direct
-///     let when1: When = [selector1.clone(), selector2.clone()].into();
-///
-///     // Option 2: Vec syntax
-///     let when2: When = vec![selector1.clone(), selector2.clone()].into();
-///
-///     // Option 3: Macro syntax - clean and readable
-///     let when3: When = when![selector1.clone(), selector2.clone()];
-///
-///     // All approaches create equivalent When collections
-///     assert_eq!(when1.len(), 2);
-///     assert_eq!(when2.len(), 2);
-///     assert_eq!(when3.len(), 2);
-///
-///     when1
+/// ```rust,ignore
+/// // Return a tuple of different Match types
+/// fn my_rule(emp: Match<Employee>) -> impl When {
+///     (
+///         Match::<Stuff> { this: emp.this, ... },
+///         Match::<OtherStuff> { ... },
+///     )
 /// }
-///
-/// // For generated Concept structs, use the derive macro and Attributes::of pattern:
-/// // #[derive(Concept, Debug, Clone)]
-/// // struct Person { name: String, age: u32 }
-/// // let query = PersonAttributes::of(Term::var("entity"));
 /// ```
-/// Trait for types that can be converted into multiple statements
-///
-/// This enables flexible composition where single items, collections, or custom
-/// types can all contribute statements to rule conditions.
-pub trait Premises {
-    type IntoIter: IntoIterator<Item = Premise>;
-    fn premises(self) -> Self::IntoIter;
+pub trait When {
+    fn into_premises(self) -> Premises;
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct When(Vec<Premise>);
+pub struct Premises(Vec<Premise>);
 
-impl When {
+impl Premises {
     /// Create a new empty When collection
     pub fn new() -> Self {
-        When(Vec::new())
+        Premises(Vec::new())
     }
 
     /// Get the number of statements
@@ -102,8 +58,8 @@ impl When {
     }
 
     /// Add a statement-producing item to this When
-    pub fn extend<T: Premises>(&mut self, items: T) {
-        self.0.extend(items.premises());
+    pub fn extend<T: When>(&mut self, items: T) {
+        self.0.extend(items.into_premises());
     }
 
     /// Get the inner Vec for compatibility
@@ -117,14 +73,7 @@ impl When {
     }
 }
 
-impl Premises for When {
-    type IntoIter = std::vec::IntoIter<Premise>;
-    fn premises(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
-impl IntoIterator for When {
+impl IntoIterator for Premises {
     type Item = Premise;
     type IntoIter = std::vec::IntoIter<Premise>;
 
@@ -133,7 +82,7 @@ impl IntoIterator for When {
     }
 }
 
-impl<'a> IntoIterator for &'a When {
+impl<'a> IntoIterator for &'a Premises {
     type Item = &'a Premise;
     type IntoIter = std::slice::Iter<'a, Premise>;
 
@@ -142,23 +91,304 @@ impl<'a> IntoIterator for &'a When {
     }
 }
 
-impl<T: Into<Premise>> From<Vec<T>> for When {
+impl<T: Into<Premise>> From<Vec<T>> for Premises {
     fn from(source: Vec<T>) -> Self {
         let mut premises = vec![];
         for each in source {
             premises.push(each.into());
         }
-        When(premises)
+        Premises(premises)
     }
 }
 
-impl<T: Into<Premise>, const N: usize> From<[T; N]> for When {
+impl<T: Into<Premise>, const N: usize> From<[T; N]> for Premises {
     fn from(source: [T; N]) -> Self {
         let mut premises = vec![];
         for each in source {
             premises.push(each.into());
         }
-        When(premises)
+        Premises(premises)
+    }
+}
+
+// Implement IntoWhen for When itself
+impl When for Premises {
+    fn into_premises(self) -> Premises {
+        self
+    }
+}
+
+// Implement IntoWhen for arrays
+impl<T: Into<Premise>, const N: usize> When for [T; N] {
+    fn into_premises(self) -> Premises {
+        self.into()
+    }
+}
+
+// Implement IntoWhen for Vec
+impl<T: Into<Premise>> When for Vec<T> {
+    fn into_premises(self) -> Premises {
+        self.into()
+    }
+}
+
+// Implement IntoWhen for tuples of different sizes
+// This allows heterogeneous premise types in a single rule
+
+impl<T1> When for (T1,)
+where
+    T1: Into<Premise>,
+{
+    fn into_premises(self) -> Premises {
+        Premises(vec![self.0.into()])
+    }
+}
+
+impl<T1, T2> When for (T1, T2)
+where
+    T1: Into<Premise>,
+    T2: Into<Premise>,
+{
+    fn into_premises(self) -> Premises {
+        Premises(vec![self.0.into(), self.1.into()])
+    }
+}
+
+impl<T1, T2, T3> When for (T1, T2, T3)
+where
+    T1: Into<Premise>,
+    T2: Into<Premise>,
+    T3: Into<Premise>,
+{
+    fn into_premises(self) -> Premises {
+        Premises(vec![self.0.into(), self.1.into(), self.2.into()])
+    }
+}
+
+impl<T1, T2, T3, T4> When for (T1, T2, T3, T4)
+where
+    T1: Into<Premise>,
+    T2: Into<Premise>,
+    T3: Into<Premise>,
+    T4: Into<Premise>,
+{
+    fn into_premises(self) -> Premises {
+        Premises(vec![
+            self.0.into(),
+            self.1.into(),
+            self.2.into(),
+            self.3.into(),
+        ])
+    }
+}
+
+impl<T1, T2, T3, T4, T5> When for (T1, T2, T3, T4, T5)
+where
+    T1: Into<Premise>,
+    T2: Into<Premise>,
+    T3: Into<Premise>,
+    T4: Into<Premise>,
+    T5: Into<Premise>,
+{
+    fn into_premises(self) -> Premises {
+        Premises(vec![
+            self.0.into(),
+            self.1.into(),
+            self.2.into(),
+            self.3.into(),
+            self.4.into(),
+        ])
+    }
+}
+
+impl<T1, T2, T3, T4, T5, T6> When for (T1, T2, T3, T4, T5, T6)
+where
+    T1: Into<Premise>,
+    T2: Into<Premise>,
+    T3: Into<Premise>,
+    T4: Into<Premise>,
+    T5: Into<Premise>,
+    T6: Into<Premise>,
+{
+    fn into_premises(self) -> Premises {
+        Premises(vec![
+            self.0.into(),
+            self.1.into(),
+            self.2.into(),
+            self.3.into(),
+            self.4.into(),
+            self.5.into(),
+        ])
+    }
+}
+
+impl<T1, T2, T3, T4, T5, T6, T7> When for (T1, T2, T3, T4, T5, T6, T7)
+where
+    T1: Into<Premise>,
+    T2: Into<Premise>,
+    T3: Into<Premise>,
+    T4: Into<Premise>,
+    T5: Into<Premise>,
+    T6: Into<Premise>,
+    T7: Into<Premise>,
+{
+    fn into_premises(self) -> Premises {
+        Premises(vec![
+            self.0.into(),
+            self.1.into(),
+            self.2.into(),
+            self.3.into(),
+            self.4.into(),
+            self.5.into(),
+            self.6.into(),
+        ])
+    }
+}
+
+impl<T1, T2, T3, T4, T5, T6, T7, T8> When for (T1, T2, T3, T4, T5, T6, T7, T8)
+where
+    T1: Into<Premise>,
+    T2: Into<Premise>,
+    T3: Into<Premise>,
+    T4: Into<Premise>,
+    T5: Into<Premise>,
+    T6: Into<Premise>,
+    T7: Into<Premise>,
+    T8: Into<Premise>,
+{
+    fn into_premises(self) -> Premises {
+        Premises(vec![
+            self.0.into(),
+            self.1.into(),
+            self.2.into(),
+            self.3.into(),
+            self.4.into(),
+            self.5.into(),
+            self.6.into(),
+            self.7.into(),
+        ])
+    }
+}
+
+impl<T1, T2, T3, T4, T5, T6, T7, T8, T9> When for (T1, T2, T3, T4, T5, T6, T7, T8, T9)
+where
+    T1: Into<Premise>,
+    T2: Into<Premise>,
+    T3: Into<Premise>,
+    T4: Into<Premise>,
+    T5: Into<Premise>,
+    T6: Into<Premise>,
+    T7: Into<Premise>,
+    T8: Into<Premise>,
+    T9: Into<Premise>,
+{
+    fn into_premises(self) -> Premises {
+        Premises(vec![
+            self.0.into(),
+            self.1.into(),
+            self.2.into(),
+            self.3.into(),
+            self.4.into(),
+            self.5.into(),
+            self.6.into(),
+            self.7.into(),
+            self.8.into(),
+        ])
+    }
+}
+
+impl<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10> When for (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10)
+where
+    T1: Into<Premise>,
+    T2: Into<Premise>,
+    T3: Into<Premise>,
+    T4: Into<Premise>,
+    T5: Into<Premise>,
+    T6: Into<Premise>,
+    T7: Into<Premise>,
+    T8: Into<Premise>,
+    T9: Into<Premise>,
+    T10: Into<Premise>,
+{
+    fn into_premises(self) -> Premises {
+        Premises(vec![
+            self.0.into(),
+            self.1.into(),
+            self.2.into(),
+            self.3.into(),
+            self.4.into(),
+            self.5.into(),
+            self.6.into(),
+            self.7.into(),
+            self.8.into(),
+            self.9.into(),
+        ])
+    }
+}
+
+impl<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11> When
+    for (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11)
+where
+    T1: Into<Premise>,
+    T2: Into<Premise>,
+    T3: Into<Premise>,
+    T4: Into<Premise>,
+    T5: Into<Premise>,
+    T6: Into<Premise>,
+    T7: Into<Premise>,
+    T8: Into<Premise>,
+    T9: Into<Premise>,
+    T10: Into<Premise>,
+    T11: Into<Premise>,
+{
+    fn into_premises(self) -> Premises {
+        Premises(vec![
+            self.0.into(),
+            self.1.into(),
+            self.2.into(),
+            self.3.into(),
+            self.4.into(),
+            self.5.into(),
+            self.6.into(),
+            self.7.into(),
+            self.8.into(),
+            self.9.into(),
+            self.10.into(),
+        ])
+    }
+}
+
+impl<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12> When
+    for (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12)
+where
+    T1: Into<Premise>,
+    T2: Into<Premise>,
+    T3: Into<Premise>,
+    T4: Into<Premise>,
+    T5: Into<Premise>,
+    T6: Into<Premise>,
+    T7: Into<Premise>,
+    T8: Into<Premise>,
+    T9: Into<Premise>,
+    T10: Into<Premise>,
+    T11: Into<Premise>,
+    T12: Into<Premise>,
+{
+    fn into_premises(self) -> Premises {
+        Premises(vec![
+            self.0.into(),
+            self.1.into(),
+            self.2.into(),
+            self.3.into(),
+            self.4.into(),
+            self.5.into(),
+            self.6.into(),
+            self.7.into(),
+            self.8.into(),
+            self.9.into(),
+            self.10.into(),
+            self.11.into(),
+        ])
     }
 }
 
@@ -169,7 +399,7 @@ impl<T: Into<Premise>, const N: usize> From<[T; N]> for When {
 /// ```rust
 /// use dialog_query::{when, When, Term, predicate, artifact::Value};
 ///
-/// fn example() -> When {
+/// fn example() -> impl When {
 ///     let selector1 = predicate::Fact::new()
 ///         .the("attr1".parse::<dialog_query::artifact::Attribute>().unwrap())
 ///         .of(Term::var("entity"))
@@ -188,63 +418,15 @@ impl<T: Into<Premise>, const N: usize> From<[T; N]> for When {
 ///         .is(Term::var("value3"))
 ///         .compile()
 ///         .unwrap();
+///
 ///     when![selector1, selector2, selector3]
 /// }
 /// ```
 #[macro_export]
 macro_rules! when {
     [$($item:expr),* $(,)?] => {
-        vec![$($item),*].into()
+        $crate::rule::Premises::from(vec![$($item),*])
     };
-}
-
-/// A rule that derives facts from conditions
-///
-/// This trait represents the core abstraction for rule-based deduction in the dialog-query system.
-/// Rules follow the datalog pattern of "when conditions are met, then conclusions can be drawn".
-///
-/// # Design Philosophy
-///
-/// Rules are inspired by datalog and implement conditional logic:
-/// - **Conditions (when)**: A set of premises that must all be satisfied
-/// - **Conclusions (match)**: What can be derived when conditions are met
-///
-/// The design follows the patterns described in notes/rules.md, enabling clean,
-/// declarative rule definitions that look similar to datalog syntax.
-///
-/// # Type Safety
-///
-/// Rules are associated with Concepts which provide:
-/// - `Match`: The match pattern with Term-wrapped fields for querying
-/// - `Claim`: The claim pattern for asserting derived facts
-/// - `Attributes`: Builder pattern with attribute matchers
-///
-/// The Concept association ensures proper type safety and consistent patterns.
-pub trait Rule: Concept {
-    /// Define the conditions (premises) that must be satisfied for this rule to apply
-    ///
-    /// This method defines the "when" part of the rule - all returned premises must
-    /// be satisfied for the rule to fire. The premises are evaluated as a conjunction
-    /// (logical AND).
-    ///
-    /// # Parameters
-    ///
-    /// - `terms`: The match pattern with variable bindings that this rule is checking
-    ///
-    /// # Return Pattern
-    ///
-    /// Return premises using the clean When syntax:
-    /// - `[premise1, premise2].into()` - Array syntax
-    /// - `when![premise1, premise2]` - Macro syntax
-    /// - `vec![premise1, premise2].into()` - Vec syntax
-    ///
-    /// # Implementation Notes
-    ///
-    /// - All premises must be satisfied (AND logic)
-    /// - Premises typically use variables from the match pattern
-    /// - Variables create joins across premises
-    /// - The match pattern provides the context for generating appropriate premises
-    fn when(terms: Self::Match) -> When;
 }
 
 #[cfg(test)]

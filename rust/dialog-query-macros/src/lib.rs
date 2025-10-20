@@ -522,7 +522,7 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 
         // Implement Rule trait
         impl #struct_name {
-            fn when(terms: dialog_query::Match<Self>) -> dialog_query::rule::When {
+            fn when(terms: dialog_query::Match<Self>) -> dialog_query::rule::Premises {
                 // Create fact selectors for each attribute with type conversion
                 let selectors = vec![
                     #(#rule_when_fields),*
@@ -530,39 +530,6 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 
                 // Return When collection with all selectors
                 selectors.into()
-            }
-        }
-
-
-
-        // Implement Premises for Match to enable it to be used as a premise
-        impl dialog_query::rule::Premises for #match_name {
-            type IntoIter = std::vec::IntoIter<dialog_query::Premise>;
-
-            fn premises(self) -> Self::IntoIter {
-                #struct_name::when(self).into_iter()
-            }
-        }
-
-        // Implement Instructions for Assert
-        impl dialog_query::concept::Instructions for #assert_name {
-            type IntoIter = std::vec::IntoIter<dialog_artifacts::Instruction>;
-
-            fn instructions(self) -> Self::IntoIter {
-                // For now, return empty vec as placeholder
-                // In real implementation, this would generate Assert instructions
-                vec![].into_iter()
-            }
-        }
-
-        // Implement Instructions for Retract
-        impl dialog_query::concept::Instructions for #retract_name {
-            type IntoIter = std::vec::IntoIter<dialog_artifacts::Instruction>;
-
-            fn instructions(self) -> Self::IntoIter {
-                // For now, return empty vec as placeholder
-                // In real implementation, this would generate Retract instructions
-                vec![].into_iter()
             }
         }
     };

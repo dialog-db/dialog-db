@@ -295,7 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concept_application_query_execution() -> anyhow::Result<()> {
-        use crate::{Fact, Relation, Session};
+        use crate::{Relation, Session};
         use dialog_artifacts::{Artifacts, Attribute as ArtifactAttribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -391,7 +391,7 @@ mod tests {
     #[tokio::test]
     async fn test_concept_application_with_bound_entity_query() -> anyhow::Result<()> {
         use crate::context::new_context;
-        use crate::{Fact, Relation, Session};
+        use crate::{Relation, Session};
         use dialog_artifacts::{Artifacts, Attribute as ArtifactAttribute, Entity};
         use dialog_storage::MemoryStorageBackend;
 
@@ -451,10 +451,8 @@ mod tests {
         };
 
         // Execute with bound entity scope
-        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            application.evaluate(context_with_scope),
-        )
-        .await?;
+        futures_util::TryStreamExt::try_collect::<Vec<_>>(application.evaluate(context_with_scope))
+            .await?;
 
         Ok(())
     }
@@ -464,7 +462,7 @@ mod tests {
 async fn test_concept_application_respects_constant_entity_parameter() -> anyhow::Result<()> {
     use crate::application::concept::ConceptApplication;
     use crate::predicate::concept::Concept;
-    use crate::{Fact, Relation, Session, Term, Value};
+    use crate::{Relation, Session, Term, Value};
     use dialog_artifacts::{Artifacts, Attribute, Entity};
     use dialog_storage::MemoryStorageBackend;
 
@@ -527,7 +525,7 @@ async fn test_concept_application_respects_constant_entity_parameter() -> anyhow
 async fn test_concept_application_respects_constant_attribute_parameter() -> anyhow::Result<()> {
     use crate::application::concept::ConceptApplication;
     use crate::predicate::concept::Concept;
-    use crate::{Fact, Relation, Session, Term, Value};
+    use crate::{Relation, Session, Term, Value};
     use dialog_artifacts::{Artifacts, Attribute, Entity};
     use dialog_storage::MemoryStorageBackend;
 
@@ -617,7 +615,7 @@ async fn test_concept_application_respects_constant_attribute_parameter() -> any
 async fn test_concept_application_respects_multiple_constant_parameters() -> anyhow::Result<()> {
     use crate::application::concept::ConceptApplication;
     use crate::predicate::concept::Concept;
-    use crate::{Fact, Relation, Session, Term, Value};
+    use crate::{Relation, Session, Term, Value};
     use dialog_artifacts::{Artifacts, Attribute, Entity};
     use dialog_storage::MemoryStorageBackend;
 
