@@ -7,9 +7,17 @@
 //! or implement a [StorageBackend]. When you have selected these things, you
 //! can construct a [Storage]:
 //!
-//! ```ignore
-//! let encoder = /* Some encoder */;
-//! let backend = /* Some storage backend */;
+//! ```rust
+//! use dialog_storage::{Storage, CborEncoder, MemoryStorageBackend};
+//!
+//! // Create a CBOR encoder for serialization/deserialization
+//! let encoder = CborEncoder;
+//!
+//! // Create an in-memory storage backend with explicit types
+//! // Using [u8; 32] as the key type and Vec<u8> as the value type
+//! let backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
+//!
+//! // Combine them into a Storage instance
 //! let storage = Storage {
 //!     encoder,
 //!     backend
@@ -18,6 +26,9 @@
 //!
 //! The prepared `storage` will automatically implement
 //! [ContentAddressedStorage] for bounds-matching encoders and storage backends.
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub mod web;
 
 mod encoder;
 pub use encoder::*;

@@ -1,7 +1,7 @@
 use anyhow::Result;
-use dialog_prolly_tree::{BasicEncoder, GeometricDistribution, Tree};
-use dialog_storage::{Storage, make_target_storage};
-use rand::{Rng, rng};
+use dialog_prolly_tree::{GeometricDistribution, Tree};
+use dialog_storage::{CborEncoder, Storage, make_target_storage};
+use rand::{Rng, thread_rng as rng};
 
 fn random() -> Vec<u8> {
     let mut buffer = [0u8; 32];
@@ -20,7 +20,7 @@ async fn platform_specific_storage() -> Result<()> {
     let (backend, _temp) = make_target_storage().await?;
     let storage = Storage {
         backend,
-        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
+        encoder: CborEncoder,
     };
     let mut tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage);
 

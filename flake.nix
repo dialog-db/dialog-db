@@ -82,6 +82,7 @@
 
         common-dev-tools = with pkgs; [
           cargo-nextest
+          playwright-test
           nodejs
         ];
 
@@ -90,11 +91,148 @@
           common-dev-tools
           ++ [
             static-web-server
+            leptosfmt
+            cargo-generate
           ]
           ++ lib.optionals stdenv.isLinux [
             chromium
             chromedriver
+            playwright-driver
           ];
+
+        dialog-artifacts-web =
+          let
+
+            rust-toolchain = rustToolchain ("stable");
+
+            rust-platform = pkgs.makeRustPlatform {
+              cargo = rust-toolchain;
+              rustc = rust-toolchain;
+            };
+          in
+          rust-platform.buildRustPackage {
+            name = "dialog-artifacts";
+            src = ./.;
+            doCheck = false;
+            env = {
+              RUST_BACKTRACE = "full";
+            };
+            buildPhase = ''
+              # NOTE: wasm-pack currently requires a writable $HOME
+              # directory to be set
+              # SEE: https://github.com/rustwasm/wasm-pack/issues/1318#issuecomment-1713377536
+              export HOME=`pwd`
+
+              wasm-pack build --release --scope dialog-db --target web --weak-refs -m no-install ./rust/dialog-artifacts
+            '';
+            installPhase = ''
+              mkdir -p $out/@dialog-db
+              cp -r ./rust/dialog-artifacts/pkg $out/@dialog-db/dialog-artifacts
+              rm $out/@dialog-db/dialog-artifacts/.gitignore
+            '';
+
+            nativeBuildInputs = common-build-inputs "stable";
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              outputHashes = { };
+            };
+          };
+
+
+        dialog-artifacts-web-tests = with pkgs;
+          buildNpmPackage {
+            pname = "dialog-artifacts-web-tests";
+            version = "0.1.0";
+            src = ./typescript/dialog-artifacts-web-tests/.;
+            npmDepsHash = "sha256-o0NiimFWGXf8xQlsmQ+L+B11RqNStu7TVo5iw1GU5sU=";
+
+            buildInputs = [
+              dialog-artifacts-web
+              dialog-experimental
+            ];
+
+            nativeBuildInputs = common-build-inputs "stable" ++ [
+              chromium
+            ];
+
+            env = {
+              CHROME_PATH = "${chromium}/bin/chromium";
+            };
+
+            buildPhase = ''
+              cp -r ${dialog-artifacts-web}/@dialog-db/dialog-artifacts ./dialog-artifacts
+            '';
+
+            checkPhase = ''
+              npm test
+            '';
+
+            # TODO: Can't seem to get headless tests to run under chroot
+            doCheck = false;
+          };
+
+        dialog-experimental = with pkgs;
+          buildNpmPackage {
+            pname = "@dialog-db/experimental";
+            version = "0.1.0";
+
+            src = ./typescript/dialog-experimental/.;
+
+            # npmDepsHash = lib.fakeHash;
+            npmDepsHash = "sha256-qcnrYVltgUUXWQRFT9TzYfHOcdUswfEI/j6WkZ41HmU=";
+
+            nativeBuildInputs = common-build-inputs "stable" ++ [
+              playwright-driver
+            ];
+
+            env = {
+              PLAYWRIGHT_BROWSERS_PATH = playwright-driver.browsers;
+              PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = true;
+              PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = true;
+              npm_config_loglevel = "verbose";
+            };
+
+            buildPhase = ''
+              mkdir -p src/artifacts
+              cp -r ${dialog-artifacts-web}/@dialog-db/dialog-artifacts/* src/artifacts/
+              npm run build
+            '';
+
+            installPhase = ''
+              mkdir -p $out/@dialog-db/experimental
+              cp -r ./src \
+                ./dist \
+                ./tsconfig.json \
+                ./package.json \
+                ./package-lock.json \
+                ./web-test-runner.config.mjs \
+                ./test $out/@dialog-db/experimental
+            '';
+
+            checkPhase = ''
+              npm test
+            '';
+
+            # TODO: Can't seem to get headless tests to run under chroot
+            doCheck = false;
+          };
+
+        npm-packages = with pkgs; stdenv.mkDerivation {
+          pname = "npm_packages";
+          version = "0.1.0";
+          buildInputs = [
+            dialog-artifacts-web
+            dialog-experimental
+          ];
+          src = ./.;
+          buildPhase = "";
+          installPhase = ''
+            mkdir -p $out/@dialog-db
+            cp -r ${dialog-artifacts-web}/@dialog-db/dialog-artifacts $out/@dialog-db
+            cp -r ${dialog-experimental}/@dialog-db/experimental $out/@dialog-db
+          '';
+        };
+
       in
       {
         devShells = {
@@ -107,47 +245,21 @@
                 export PATH=$PATH:./node_modules/.bin
                 export CHROMEDRIVER="${chromedriver}/bin/chromedriver"
                 export WASM_BINDGEN_TEST_TIMEOUT=180
+                export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1
+                export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1;
+                export PLAYWRIGHT_BROWSERS_PATH=${playwright-driver.browsers}
               '';
             };
         };
 
-        packages = {
-          dialog-artifacts-web =
-            let
-
-              rust-toolchain = rustToolchain ("stable");
-
-              rust-platform = pkgs.makeRustPlatform {
-                cargo = rust-toolchain;
-                rustc = rust-toolchain;
-              };
-            in
-            rust-platform.buildRustPackage {
-              name = "dialog-artifacts";
-              src = ./.;
-              doCheck = false;
-              env = {
-                RUST_BACKTRACE = "full";
-              };
-              buildPhase = ''
-                # NOTE: wasm-pack currently requires a writable $HOME
-                # directory to be set
-                # SEE: https://github.com/rustwasm/wasm-pack/issues/1318#issuecomment-1713377536
-                export HOME=`pwd`
-
-                wasm-pack build --release --target web --weak-refs -m no-install ./rust/dialog-artifacts
-              '';
-              installPhase = ''
-                mkdir -p $out
-                cp -r ./rust/dialog-artifacts/pkg $out/dialog-artifacts
-              '';
-
-              nativeBuildInputs = common-build-inputs "stable";
-              cargoLock = {
-                lockFile = ./Cargo.lock;
-              };
-            };
+        checks = {
+          inherit dialog-experimental dialog-artifacts-web-tests;
         };
+
+        packages =
+          {
+            inherit dialog-artifacts-web dialog-experimental npm-packages;
+          };
       }
     );
 }

@@ -9,8 +9,10 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
+default = ["csv"]
+debug = []
 helpers = ["dep:anyhow"]
+csv = ["dep:csv-async"]
 
 [dependencies]
 dialog-common = { workspace = true }
@@ -23,20 +25,28 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
 blake3 = { workspace = true }
+csv-async = { workspace = true, optional = true, features = ["tokio"] }
+ed25519-dalek = { workspace = true }
 futures-util = { workspace = true }
 leb128 = { workspace = true }
 rand = { workspace = true }
+rand_core = { workspace = true }
 rand_chacha = { workspace = true }
+serde = { workspace = true }
+serde-big-array = { workspace = true }
+serde_json = { workspace = true }
 static_assertions = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync", "macros"] }
+tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
+url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 dialog-storage = { workspace = true, features = ["helpers"] }
 anyhow = { workspace = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-getrandom = { workspace = true, features = ["wasm_js"] }
+# getrandom = { workspace = true, features = ["wasm_js"] }
+getrandom = { workspace = true, features = ["js"] }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 
@@ -44,5 +54,13 @@ wasm-bindgen-futures = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+reqwest = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+tokio = { workspace = true, features = [
+    "io-util",
+    "io-std",
+    "sync",
+    "macros",
+    "rt",
+    "rt-multi-thread",
+] }

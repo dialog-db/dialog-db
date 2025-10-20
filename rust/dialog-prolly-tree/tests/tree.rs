@@ -1,6 +1,6 @@
 use anyhow::Result;
-use dialog_prolly_tree::{BasicEncoder, GeometricDistribution, Tree};
-use dialog_storage::{MeasuredStorageBackend, MemoryStorageBackend, Storage, StorageCache};
+use dialog_prolly_tree::{GeometricDistribution, Tree};
+use dialog_storage::{CborEncoder, MeasuredStorage, MemoryStorageBackend, Storage, StorageCache};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -18,7 +18,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 async fn basic_set_and_get() -> Result<()> {
     let storage = Arc::new(Mutex::new(Storage {
         backend: MemoryStorageBackend::default(),
-        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
+        encoder: CborEncoder,
     }));
     let mut tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage.clone());
 
@@ -51,7 +51,7 @@ async fn basic_set_and_get() -> Result<()> {
 async fn basic_delete() -> Result<()> {
     let storage = Arc::new(Mutex::new(Storage {
         backend: MemoryStorageBackend::default(),
-        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
+        encoder: CborEncoder,
     }));
     let mut expected_tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage.clone());
 
@@ -80,7 +80,7 @@ async fn basic_delete() -> Result<()> {
 async fn delete_from_tree_with_one_entry() -> Result<()> {
     let storage = Arc::new(Mutex::new(Storage {
         backend: MemoryStorageBackend::default(),
-        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
+        encoder: CborEncoder,
     }));
 
     let mut tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage.clone());
@@ -100,11 +100,11 @@ async fn delete_from_tree_with_one_entry() -> Result<()> {
 async fn create_tree_from_set() -> Result<()> {
     let iter_storage = Arc::new(Mutex::new(Storage {
         backend: MemoryStorageBackend::default(),
-        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
+        encoder: CborEncoder,
     }));
     let collection_storage = Arc::new(Mutex::new(Storage {
         backend: MemoryStorageBackend::default(),
-        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
+        encoder: CborEncoder,
     }));
     let mut iter_tree =
         Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(iter_storage.clone());
@@ -141,7 +141,7 @@ async fn create_tree_from_set() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn larger_random_tree() -> Result<()> {
-    use rand::{Rng, rng};
+    use rand::{Rng, thread_rng as rng};
 
     fn random() -> Vec<u8> {
         let mut buffer = [0u8; 32];
@@ -152,7 +152,7 @@ async fn larger_random_tree() -> Result<()> {
     let mut ledger = vec![];
     let storage = Storage {
         backend: MemoryStorageBackend::default(),
-        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
+        encoder: CborEncoder,
     };
     let mut tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage);
     for _ in 1..1024 {
@@ -173,7 +173,7 @@ async fn larger_random_tree() -> Result<()> {
 async fn restores_tree_from_hash() -> Result<()> {
     let storage = Arc::new(Mutex::new(Storage {
         backend: MemoryStorageBackend::default(),
-        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
+        encoder: CborEncoder,
     }));
     let mut tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage.clone());
 
@@ -200,7 +200,7 @@ async fn lru_store_caches() -> Result<()> {
     let root_hash = {
         let storage = Storage {
             backend: backend.clone(),
-            encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
+            encoder: CborEncoder,
         };
         let mut collection = BTreeMap::default();
         for i in 0..1024u32 {
@@ -214,11 +214,11 @@ async fn lru_store_caches() -> Result<()> {
         tree.hash().unwrap().to_owned()
     };
 
-    let tracking = Arc::new(Mutex::new(MeasuredStorageBackend::new(backend)));
+    let tracking = Arc::new(Mutex::new(MeasuredStorage::new(backend)));
     let lru = StorageCache::new(tracking.clone(), 10)?;
     let storage = Storage {
         backend: lru,
-        encoder: BasicEncoder::<Vec<u8>, Vec<u8>>::default(),
+        encoder: CborEncoder,
     };
     let mut tree =
         Tree::<32, 32, GeometricDistribution, _, _, _, _>::from_hash(&root_hash, storage).await?;

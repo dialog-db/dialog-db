@@ -1,4 +1,4 @@
-use crate::{Block, DialogProllyTreeError, Entry, KeyType, Node, Reference, ValueType};
+use crate::{DialogProllyTreeError, Entry, KeyType, Node, Reference, ValueType};
 use async_trait::async_trait;
 use dialog_storage::{ContentAddressedStorage, HashType};
 use nonempty::NonEmpty;
@@ -18,11 +18,7 @@ where
     /// be ordered and follow rank rules.
     async fn adopt(
         children: NonEmpty<Self>,
-        storage: &mut impl ContentAddressedStorage<
-            HASH_SIZE,
-            Block = Block<HASH_SIZE, Key, Value, Hash>,
-            Hash = Hash,
-        >,
+        storage: &mut impl ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
     ) -> Result<Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>, DialogProllyTreeError>;
 }
 
@@ -37,11 +33,7 @@ where
 {
     async fn adopt(
         children: NonEmpty<Self>,
-        storage: &mut impl ContentAddressedStorage<
-            HASH_SIZE,
-            Block = Block<HASH_SIZE, Key, Value, Hash>,
-            Hash = Hash,
-        >,
+        storage: &mut impl ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
     ) -> Result<Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>, DialogProllyTreeError> {
         Node::segment(children, storage).await
     }
@@ -58,11 +50,7 @@ where
 {
     async fn adopt(
         children: NonEmpty<Self>,
-        storage: &mut impl ContentAddressedStorage<
-            HASH_SIZE,
-            Block = Block<HASH_SIZE, Key, Value, Hash>,
-            Hash = Hash,
-        >,
+        storage: &mut impl ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
     ) -> Result<Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>, DialogProllyTreeError> {
         Node::branch(children, storage).await
     }
@@ -80,11 +68,7 @@ where
 {
     async fn adopt(
         children: NonEmpty<Self>,
-        storage: &mut impl ContentAddressedStorage<
-            HASH_SIZE,
-            Block = Block<HASH_SIZE, Key, Value, Hash>,
-            Hash = Hash,
-        >,
+        storage: &mut impl ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
     ) -> Result<Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>, DialogProllyTreeError> {
         Node::branch(children.map(|node| node.reference().clone()), storage).await
     }

@@ -60,6 +60,7 @@ where
     type Error = Backend::Error;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        self.cache.lock().await.insert(key.clone(), value.clone());
         self.backend.set(key, value).await
     }
 

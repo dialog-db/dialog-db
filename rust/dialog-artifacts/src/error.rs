@@ -19,11 +19,15 @@ pub enum DialogArtifactsError {
 
     /// Raw bytes could not be interpreted as a version
     #[error("Could not convert bytes into version: {0}")]
-    InvalidVersion(String),
+    InvalidRevision(String),
 
     /// Raw bytes could not be interpreted as a database index key
     #[error("Could not convert bytes into key: {0}")]
     InvalidKey(String),
+
+    /// Could not interpret some string as a URI
+    #[error("Could not parse as URI: {0}")]
+    InvalidUri(String),
 
     /// Raw bytes could not be interpreted as a typed value
     #[error("Could not convert bytes into value: {0}")]
@@ -44,6 +48,10 @@ pub enum DialogArtifactsError {
     /// Raw bytes could not be interpreted as an entity
     #[error("Could not convert bytes into entity: {0}")]
     InvalidEntity(String),
+
+    /// An attempt to export the database failed
+    #[error("Could not export data: {0}")]
+    Export(String),
 
     /// Attempted to query with an unconstrained [`ArtifactSelector`]
     #[error("An artifact selector must specify at least one field")]

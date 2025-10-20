@@ -2,7 +2,12 @@ on:
   workflow_dispatch:
   pull_request:
   push:
-    branches: [main]
+    branches:
+      - main
+      # Run CI for brannches with this prefix so that radicle integration
+      # can pick those CI jobs and report them in patches (equivalent of pull
+      # requests)
+      - patches/*
 
 name: 'Test'
 
@@ -22,19 +27,17 @@ jobs:
           ignore-missing-flake-lock: false
 
   lint_rust:
-      name: 'Lint Rust'
-      needs: ['lint_nix']
-      runs-on: 'ubuntu-latest'
-      steps:
-        - uses: actions/checkout@v4
-        - uses: actions/download-artifact@v4
-        - uses: Swatinem/rust-cache@v2
-        - uses: ./.github/actions/setup-nix
-        - name: "Run lints"
-          shell: bash
-          run: |
-            nix develop --command cargo fmt --all -- --check
-            nix develop --command cargo clippy --all -- -D warnings
+    name: 'Lint Rust'
+    needs: ['lint_nix']
+    runs-on: 'ubuntu-latest'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-nix
+      - name: 'Run lints'
+        shell: bash
+        run: |
+          nix develop --command cargo fmt --all -- --check
+          nix develop --command cargo clippy --all -- -D warnings
 
   lints:
     name: 'Lints'
@@ -51,20 +54,36 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
       - uses: ./.github/actions/setup-nix
-      - name: "Run `npm test`"
+      - name: 'Run `npm test`'
         shell: bash
         run: |
-          nix build .#dialog-artifacts-web
+          nix build .#npm-packages
 
           nix develop --command bash -c "cat << 'EOF' | bash
-          cd rust/dialog-artifacts/javascript_tests
+
+          set -eufo pipefail
+
+          pushd typescript/dialog-artifacts-web-tests
+          ln -s ../../result/@dialog-db/dialog-artifacts ./
           npm ci
           npm test
+          popd
+
+          cp -r ./result/@dialog-db/experimental ./dialog-experimental
+          chmod -R 755 ./dialog-experimental
+          cd ./dialog-experimental
+          npm ci
+          npm test
+
           EOF"
       - uses: actions/upload-artifact@v4
         with:
           name: dialog-artifacts
-          path: ./result/dialog-artifacts
+          path: ./result/@dialog-db/dialog-artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dialog-experimental
+          path: ./result/@dialog-db/experimental
 
   rust_crates:
     name: 'Rust Crates'
@@ -81,7 +100,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
       - uses: ./.github/actions/setup-nix
-      - name: "Run `cargo test`"
+      - name: 'Run `cargo test`'
         shell: bash
         run: |
           # Ensure we don't pick up a built-in chrome / chromedriver

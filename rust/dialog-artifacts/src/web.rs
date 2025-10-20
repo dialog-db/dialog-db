@@ -1,8 +1,9 @@
 //! Web bindings for the `dialog-artifacts` crate.
 //!
-//! Example usage:
+//! Example usage in JavaScript:
 //!
 //! ```ignore
+//! // This is JavaScript code that uses the WASM bindings, not a Rust doctest
 //! import { Artifacts, generateEntity, InstructionType, ValueDataType } from "dialog-artifacts";
 //!
 //! let artifacts = await Artifacts.open("test");
@@ -27,19 +28,22 @@
 //! }
 //! ```
 
-use std::{pin::Pin, sync::Arc};
+use std::{pin::Pin, str::FromStr, sync::Arc};
 
 use base58::{FromBase58, ToBase58};
-use dialog_storage::{IndexedDbStorageBackend, StorageCache};
+use dialog_storage::{
+    Blake3Hash, IndexedDbStorageBackend, StorageCache, web::ObjectSafeStorageBackend,
+};
 use futures_util::{Stream, StreamExt};
-use tokio::sync::RwLock;
+use rand::{Rng, distributions::Alphanumeric};
+use tokio::sync::{Mutex, RwLock};
 use wasm_bindgen::{convert::TryFromJsValue, prelude::*};
 use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
-    Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Artifacts, Attribute, Blake3Hash,
-    Cause, DialogArtifactsError, Entity, HASH_SIZE, Instruction, RawEntity, Revision, Value,
-    ValueDataType, artifacts::selector::Constrained,
+    Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute, Cause,
+    DialogArtifactsError, Entity, HASH_SIZE, Instruction, Value, ValueDataType,
+    artifacts::selector::Constrained,
 };
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -158,9 +162,11 @@ pub fn decode(encoded: String) -> Result<Vec<u8>, JsValue> {
 }
 
 /// Generate a unique, valid `Entity`
+// TODO: Change this to pass a string when the query engine supports URI
+// entities
 #[wasm_bindgen(js_name = "generateEntity")]
-pub fn generate_entity() -> Vec<u8> {
-    RawEntity::from(Entity::new()).to_vec()
+pub fn generate_entity() -> Result<Vec<u8>, JsError> {
+    Ok(Entity::new().map(|entity| entity.to_string().as_bytes().to_owned())?)
 }
 
 /// Used to specify if an `Instruction` is an assertion or a retraction
@@ -173,7 +179,7 @@ pub enum InstructionTypeBinding {
     Retract = 1,
 }
 
-type WebStorageBackend = StorageCache<IndexedDbStorageBackend<Blake3Hash, Vec<u8>>>;
+type WebStorageBackend = Arc<Mutex<dyn ObjectSafeStorageBackend>>;
 
 const STORAGE_CACHE_CAPACITY: usize = 2usize.pow(16);
 
@@ -186,35 +192,42 @@ pub struct ArtifactsBinding {
 
 #[wasm_bindgen(js_class = "Artifacts")]
 impl ArtifactsBinding {
+    /// Initialize a new, empty [`Artifacts`] with a randomly generated
+    /// identifier
+    #[wasm_bindgen]
+    pub async fn anonymous() -> Result<Self, JsError> {
+        let identifier = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(32)
+            .map(char::from)
+            .collect();
+
+        Self::open(identifier).await
+    }
+
+    /// The name used to uniquely identify the data of this [`Artifacts`]
+    /// instance
+    #[wasm_bindgen]
+    pub async fn identifier(&self) -> String {
+        self.artifacts.read().await.identifier().to_owned()
+    }
+
     /// Construct a new `Artifacts`, backed by a database. If the same name is
     /// used for multiple instances (or across sessions), the same database will
     /// be used.
-    ///
-    /// An optional revision may be provided. If it is, the database will
-    /// attempt to open with the root at the specified revision.
-    ///
-    /// If no revision is specified, the database will start in an empty state
-    /// (with no query-able data; even when re-using a database that has data
-    /// stored in it).
-    // TODO: Support well-known hash for "empty" database
     #[wasm_bindgen]
-    pub async fn open(
-        #[wasm_bindgen(js_name = "dbName")] db_name: &str,
-        revision: Option<Vec<u8>>,
-    ) -> Result<Self, JsError> {
+    pub async fn open(identifier: String) -> Result<Self, JsError> {
         let storage_backend = StorageCache::new(
-            IndexedDbStorageBackend::new(db_name, "dialog-artifact-blocks")
+            IndexedDbStorageBackend::new(&identifier, "dialog-artifact-blocks")
                 .await
                 .map_err(|error| DialogArtifactsError::from(error))?,
             STORAGE_CACHE_CAPACITY,
         )
         .map_err(|error| DialogArtifactsError::from(error))?;
 
-        let artifacts = if let Some(revision) = revision {
-            Artifacts::restore(Revision::try_from(revision)?, storage_backend).await?
-        } else {
-            Artifacts::new(storage_backend)
-        };
+        // Erase the type:
+        let storage_backend: WebStorageBackend = Arc::new(Mutex::new(storage_backend));
+        let artifacts = Artifacts::open(identifier.to_owned(), storage_backend).await?;
 
         Ok(Self {
             artifacts: Arc::new(RwLock::new(artifacts)),
@@ -226,13 +239,8 @@ impl ArtifactsBinding {
     /// suitable for use with `Artifacts.restore`, for example when re-opening
     /// the triple store on future sessions.
     #[wasm_bindgen]
-    pub async fn revision(&self) -> Option<Vec<u8>> {
-        self.artifacts
-            .read()
-            .await
-            .revision()
-            .await
-            .map(|revision| revision.into())
+    pub async fn revision(&self) -> Result<Vec<u8>, JsError> {
+        Ok(self.artifacts.read().await.revision().await?.to_vec())
     }
 
     /// Persist a set of data in the triple store. The returned prommise
@@ -243,7 +251,7 @@ impl ArtifactsBinding {
     /// abandoned and the revision remains the same as it was at the start of
     /// the transaction.
     #[wasm_bindgen]
-    pub async fn commit(&mut self, iterable: &InstructionIterableDuckType) -> Result<(), JsError> {
+    pub async fn commit(&self, iterable: &InstructionIterableDuckType) -> Result<Vec<u8>, JsError> {
         let Some(iterator) = js_sys::try_iter(iterable).map_err(js_value_to_error)? else {
             return Err(JsError::new("Only iterables are allowed"));
         };
@@ -257,7 +265,31 @@ impl ArtifactsBinding {
             }
         });
 
-        self.artifacts.write().await.commit(iterator).await?;
+        Ok(self
+            .artifacts
+            .write()
+            .await
+            .commit(iterator)
+            .await?
+            .to_vec())
+    }
+
+    /// Reset the root of the database to `revision` if provided, or else reset
+    /// to the stored root if available, or else to an empty database.
+    #[wasm_bindgen]
+    pub async fn reset(&self, revision: Option<Vec<u8>>) -> Result<(), JsError> {
+        let revision = if let Some(revision) = revision {
+            Some(Blake3Hash::try_from(revision).map_err(|bytes: Vec<u8>| {
+                DialogArtifactsError::InvalidRevision(format!(
+                    "Incorrect byte length (expected {HASH_SIZE}, received {})",
+                    bytes.len()
+                ))
+            })?)
+        } else {
+            None
+        };
+
+        self.artifacts.write().await.reset(revision).await?;
 
         Ok(())
     }
@@ -364,7 +396,6 @@ impl TryFrom<Value> for JsValue {
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         let data_type = JsValue::from(value.data_type());
         let value = match value {
-            Value::Null => JsValue::null(),
             Value::Bytes(bytes) => {
                 let result = Uint8Array::new_with_length(bytes.len() as u32);
                 result.copy_from(bytes.as_ref());
@@ -402,10 +433,9 @@ impl From<Attribute> for JsValue {
 
 impl From<Entity> for JsValue {
     fn from(value: Entity) -> Self {
-        let value = RawEntity::from(value);
-        let result = Uint8Array::new_with_length(HASH_SIZE as u32);
-        result.copy_from(&value);
-        JsValue::from(result)
+        // TODO: Change this to pass a string when the query
+        // engine supports URI entities
+        JsValue::from(value.to_string().as_bytes().to_owned())
     }
 }
 
@@ -463,19 +493,26 @@ impl TryFrom<JsValue> for Attribute {
     }
 }
 
+// TODO: Change this to expect a string when the query engine supports URI entities
+// impl TryFrom<JsValue> for Entity {
+//     type Error = JsError;
+
+//     fn try_from(entity: JsValue) -> Result<Self, Self::Error> {
+//         let entity = entity.as_string().ok_or_else(|| {
+//             DialogArtifactsError::InvalidEntity(format!("Expected a string, got '{:?}'", entity))
+//         })?;
+//         Ok(Entity::from_str(&entity)?)
+//     }
+// }
+
 impl TryFrom<JsValue> for Entity {
     type Error = JsError;
 
     fn try_from(entity: JsValue) -> Result<Self, Self::Error> {
         let bytes = entity.dyn_into::<Uint8Array>().map_err(js_value_to_error)?;
-        let raw_entity: RawEntity = bytes.to_vec().try_into().map_err(|value: Vec<u8>| {
-            DialogArtifactsError::InvalidEntity(format!(
-                "Wrong length; expected {}, got {}",
-                HASH_SIZE,
-                value.len()
-            ))
-        })?;
-        Ok(Entity::from(raw_entity))
+        let string = String::from_utf8(bytes.to_vec())
+            .map_err(|error| DialogArtifactsError::InvalidEntity(format!("{error}")))?;
+        Ok(Entity::from_str(&string)?)
     }
 }
 
@@ -516,33 +553,25 @@ impl TryFrom<(ValueDataType, JsValue)> for Value {
 
     fn try_from((data_type, value): (ValueDataType, JsValue)) -> Result<Self, Self::Error> {
         if value.is_undefined() {
-            return if matches!(data_type, ValueDataType::Null) {
-                Ok(Value::Null)
-            } else {
-                Err(DialogArtifactsError::InvalidValue(
-                    "Non-null data type must be initialized with a value".into(),
-                )
-                .into())
-            };
+            return Err(DialogArtifactsError::InvalidValue(
+                "Non-null data type must be initialized with a value".into(),
+            )
+            .into());
         };
 
         let value = match data_type {
-            ValueDataType::Null => Value::Null,
             ValueDataType::Bytes => {
                 let byte_array: Uint8Array = value.dyn_into().map_err(js_value_to_error)?;
                 Value::Bytes(byte_array.to_vec())
             }
             ValueDataType::Entity => {
-                let byte_array: Uint8Array = value.dyn_into().map_err(js_value_to_error)?;
-                let raw_entity: RawEntity =
-                    byte_array.to_vec().try_into().map_err(|value: Vec<u8>| {
-                        DialogArtifactsError::InvalidEntity(format!(
-                            "Wrong length; expected {}, got {}",
-                            HASH_SIZE,
-                            value.len()
-                        ))
-                    })?;
-                Value::Entity(raw_entity)
+                let string = value.as_string().ok_or_else(|| {
+                    DialogArtifactsError::InvalidEntity(format!(
+                        "Expected a string, got '{:?}'",
+                        value
+                    ))
+                })?;
+                Value::Entity(string.parse()?)
             }
             ValueDataType::Boolean => Value::Boolean(value.is_truthy()),
             ValueDataType::String => Value::String(value.as_string().ok_or_else(|| {

@@ -3,5 +3,10 @@
   "rust-analyzer.procMacro.ignored": {
     "async-trait": ["async_trait"]
   },
-  "deno.enablePaths": ["js/r2s3-proxy"]
+  "[github-actions-workflow]": {
+    "prettier.singleQuote": true
+  },
+  "[jsonc]": {
+    "prettier.tabWidth": 4
+  }
 }

@@ -1,0 +1,307 @@
+//! Boolean logic formulas for the query system
+//!
+//! This module provides formulas for boolean operations including
+//! AND, OR, and NOT operations.
+
+use crate::dsl::Input;
+use crate::Formula;
+
+// ============================================================================
+// Boolean Logic Operations: And, Or, Not
+// ============================================================================
+
+/// And formula that performs logical AND on two boolean values
+#[derive(Debug, Clone, Formula)]
+pub struct And {
+    /// Left operand
+    pub left: bool,
+    /// Right operand
+    pub right: bool,
+    /// Result of AND operation
+    #[derived]
+    pub is: bool,
+}
+
+impl And {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
+        vec![And {
+            left: input.left,
+            right: input.right,
+            is: input.left && input.right,
+        }]
+    }
+}
+
+/// Or formula that performs logical OR on two boolean values
+#[derive(Debug, Clone, dialog_query_macros::Formula)]
+pub struct Or {
+    /// Left operand
+    pub left: bool,
+    /// Right operand
+    pub right: bool,
+    /// Result of OR operation
+    #[derived]
+    pub is: bool,
+}
+
+impl Or {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
+        vec![Or {
+            left: input.left,
+            right: input.right,
+            is: input.left || input.right,
+        }]
+    }
+}
+
+/// Not formula that performs logical NOT on a boolean value
+#[derive(Debug, Clone, dialog_query_macros::Formula)]
+pub struct Not {
+    /// Boolean value to negate
+    pub value: bool,
+    /// Result of NOT operation
+    #[derived]
+    pub is: bool,
+}
+
+impl Not {
+    pub fn derive(input: Input<Self>) -> Vec<Self> {
+        vec![Not {
+            value: input.value,
+            is: !input.value,
+        }]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{selection::Answer, Formula, Parameters, Term};
+
+    #[test]
+    fn test_and_formula_true_true() -> anyhow::Result<()> {
+        let mut terms = Parameters::new();
+        terms.insert("left".to_string(), Term::var("a").into());
+        terms.insert("right".to_string(), Term::var("b").into());
+        terms.insert("is".to_string(), Term::var("result").into());
+
+        let input = Answer::new()
+            .set(Term::var("a"), true)
+            .unwrap()
+            .set(Term::var("b"), true)
+            .unwrap();
+
+        let app = And::apply(terms)?;
+        let results = app.derive(input).expect("And formula failed");
+
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
+        assert_eq!(
+            result
+                .resolve(&Term::<bool>::var("result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_and_formula_true_false() -> anyhow::Result<()> {
+        let mut terms = Parameters::new();
+        terms.insert("left".to_string(), Term::var("a").into());
+        terms.insert("right".to_string(), Term::var("b").into());
+        terms.insert("is".to_string(), Term::var("result").into());
+
+        let input = Answer::new()
+            .set(Term::var("a"), true)
+            .unwrap()
+            .set(Term::var("b"), false)
+            .unwrap();
+
+        let app = And::apply(terms)?;
+        let results = app.derive(input).expect("And formula failed");
+
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
+        assert_eq!(
+            result
+                .resolve(&Term::<bool>::var("result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
+            Some(false)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_and_formula_false_false() -> anyhow::Result<()> {
+        let mut terms = Parameters::new();
+        terms.insert("left".to_string(), Term::var("a").into());
+        terms.insert("right".to_string(), Term::var("b").into());
+        terms.insert("is".to_string(), Term::var("result").into());
+
+        let input = Answer::new()
+            .set(Term::var("a"), false)
+            .unwrap()
+            .set(Term::var("b"), false)
+            .unwrap();
+
+        let app = And::apply(terms)?;
+        let results = app.derive(input).expect("And formula failed");
+
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
+        assert_eq!(
+            result
+                .resolve(&Term::<bool>::var("result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
+            Some(false)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_or_formula_true_false() -> anyhow::Result<()> {
+        let mut terms = Parameters::new();
+        terms.insert("left".to_string(), Term::var("a").into());
+        terms.insert("right".to_string(), Term::var("b").into());
+        terms.insert("is".to_string(), Term::var("result").into());
+
+        let input = Answer::new()
+            .set(Term::var("a"), true)
+            .unwrap()
+            .set(Term::var("b"), false)
+            .unwrap();
+
+        let app = Or::apply(terms)?;
+        let results = app.derive(input).expect("Or formula failed");
+
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
+        assert_eq!(
+            result
+                .resolve(&Term::<bool>::var("result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_or_formula_false_false() -> anyhow::Result<()> {
+        let mut terms = Parameters::new();
+        terms.insert("left".to_string(), Term::var("a").into());
+        terms.insert("right".to_string(), Term::var("b").into());
+        terms.insert("is".to_string(), Term::var("result").into());
+
+        let input = Answer::new()
+            .set(Term::var("a"), false)
+            .unwrap()
+            .set(Term::var("b"), false)
+            .unwrap();
+
+        let app = Or::apply(terms)?;
+        let results = app.derive(input).expect("Or formula failed");
+
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
+        assert_eq!(
+            result
+                .resolve(&Term::<bool>::var("result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
+            Some(false)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_not_formula_true() -> anyhow::Result<()> {
+        let mut terms = Parameters::new();
+        terms.insert("value".to_string(), Term::var("bool").into());
+        terms.insert("is".to_string(), Term::var("result").into());
+
+        let input = Answer::new().set(Term::var("bool"), true).unwrap();
+
+        let app = Not::apply(terms)?;
+        let results = app.derive(input).expect("Not formula failed");
+
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
+        assert_eq!(
+            result
+                .resolve(&Term::<bool>::var("result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
+            Some(false)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_not_formula_false() -> anyhow::Result<()> {
+        let mut terms = Parameters::new();
+        terms.insert("value".to_string(), Term::var("bool").into());
+        terms.insert("is".to_string(), Term::var("result").into());
+
+        let input = Answer::new().set(Term::var("bool"), false).unwrap();
+
+        let app = Not::apply(terms)?;
+
+        let results = app.derive(input).expect("Not formula failed");
+
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
+        assert_eq!(
+            result
+                .resolve(&Term::<bool>::var("result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_chained_logic_operations() -> anyhow::Result<()> {
+        // Test AND then NOT: !(true && false) = !false = true
+        let mut and_terms = Parameters::new();
+        and_terms.insert("left".to_string(), Term::var("a").into());
+        and_terms.insert("right".to_string(), Term::var("b").into());
+        and_terms.insert("is".to_string(), Term::var("and_result").into());
+
+        let input = Answer::new()
+            .set(Term::var("a"), true)
+            .unwrap()
+            .set(Term::var("b"), false)
+            .unwrap();
+
+        let and_app = And::apply(and_terms)?;
+        let and_results = and_app.derive(input).expect("And formula failed");
+        let and_result = &and_results[0];
+
+        // Now apply NOT to the result
+        let mut not_terms = Parameters::new();
+        not_terms.insert("value".to_string(), Term::var("and_result").into());
+        not_terms.insert("is".to_string(), Term::var("final_result").into());
+
+        let not_app = Not::apply(not_terms)?;
+        let not_results = not_app
+            .derive(and_result.clone())
+            .expect("Not formula failed");
+
+        assert_eq!(not_results.len(), 1);
+        let final_result = &not_results[0];
+        assert_eq!(
+            final_result
+                .resolve(&Term::<bool>::var("final_result"))
+                .ok()
+                .and_then(|v| bool::try_from(v).ok()),
+            Some(true)
+        );
+        Ok(())
+    }
+}
