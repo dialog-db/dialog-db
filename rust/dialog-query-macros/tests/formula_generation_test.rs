@@ -12,7 +12,10 @@ pub struct Term<T>(std::marker::PhantomData<T>);
 #[derive(Debug, Clone)]
 pub struct Cells;
 impl Cells {
-    pub fn define<F>(_f: F) -> Self where F: FnOnce(&mut ()) {
+    pub fn define<F>(_f: F) -> Self
+    where
+        F: FnOnce(&mut ()),
+    {
         Cells
     }
 }
@@ -20,7 +23,9 @@ impl Cells {
 #[derive(Debug, Clone)]
 pub struct Dependencies;
 impl Dependencies {
-    pub fn new() -> Self { Dependencies }
+    pub fn new() -> Self {
+        Dependencies
+    }
     pub fn require(&mut self, _s: String) {}
     pub fn provide(&mut self, _s: String) {}
 }

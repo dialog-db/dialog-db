@@ -1,7 +1,7 @@
 //! Query execution plans - traits and context for evaluation
 
 pub use crate::query::Source;
-pub use crate::{try_stream, selection::Answer, selection::Answers, Value};
+pub use crate::{selection::Answer, selection::Answers, try_stream, Value};
 pub use dialog_common::ConditionalSend;
 pub use futures_util::stream::once;
 use std::collections::BTreeMap;
@@ -85,8 +85,7 @@ pub trait EvaluationPlan: Clone + std::fmt::Debug + ConditionalSend {
     fn provides(&self) -> &Environment;
     /// Execute this plan with the given context and return result answers with provenance
     /// This follows the familiar-query pattern where answers flow through the evaluation
-    fn evaluate<S: Source, M: Answers>(&self, context: EvaluationContext<S, M>)
-        -> impl Answers;
+    fn evaluate<S: Source, M: Answers>(&self, context: EvaluationContext<S, M>) -> impl Answers;
 }
 
 #[cfg(test)]
