@@ -281,10 +281,10 @@ pub struct Increment {
 
 
 // Rule that will match when there is no counter.
-fn new(counter: Query<Counter>) -> When {
-    When::from([
+fn new(counter: Query<Counter>) -> impl When {
+    (
         // No counter exists at this time
-        Not::<Counter> {
+        !Match::<Counter> {
             this: Term::blank(),
             count: Term::blank(),
             title: Term::blank(),
@@ -295,17 +295,17 @@ fn new(counter: Query<Counter>) -> When {
             count: 0,
             title: "basic counter".to_string(),
         }
-    ])
+    )
 }
 
 
 // Rule that will match when we have a counter and an
 // increment action associated with same entity.
-fn inc(counter: Query<Counter>) -> When {
+fn inc(counter: Query<Counter>) -> impl When {
     // We have want to find counter and capture it's count so we define a var.
     let count = Term::var("count");
 
-    When::from([
+    (
         // We have a counter with count for it's current
         // count value.
         Match::<Counter> {
@@ -331,7 +331,7 @@ fn inc(counter: Query<Counter>) -> When {
             count: counter.count,
             title: counter.title
         }
-    ])
+    )
 }
 ```
 
