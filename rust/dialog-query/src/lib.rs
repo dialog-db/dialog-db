@@ -6,6 +6,13 @@
 //! This crate implements the core query planning and execution functionality,
 //! designed to be equivalent to the TypeScript query engine in @query/.
 
+// TODO: Large error types - Many functions return Result<T, E> where E contains large types
+// like QueryError (344 bytes), InconsistencyError (320 bytes), and TypeError (161 bytes).
+// These error types contain large Value/Term types that make the Result enum large.
+// Consider boxing error fields in the future to reduce Result sizes, but this would be
+// a breaking API change. For now, we allow this clippy warning.
+#![allow(clippy::result_large_err)]
+
 // Allow macro-generated code to reference this crate as `dialog_query::`
 extern crate self as dialog_query;
 

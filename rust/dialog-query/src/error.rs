@@ -9,6 +9,11 @@ use crate::term::Term;
 pub use thiserror::Error;
 
 /// Errors that can occur during query planning and execution
+///
+/// TODO: Large enum variant - VariableInconsistency (344 bytes) contains two Term<Value> fields
+/// which are large. Consider boxing these fields or the entire variant to reduce memory usage.
+/// Most error variants are small (24 bytes), so this wastes significant memory.
+#[allow(clippy::large_enum_variant)]
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum QueryError {
     /// A variable was referenced but not bound in the current scope
@@ -120,6 +125,10 @@ impl From<PlanError> for QueryError {
     }
 }
 
+/// TODO: Large enum variant - TypeMismatch (320 bytes) contains two Value fields which are large
+/// (160 bytes each). Consider boxing these fields to reduce the enum size from 320 bytes to ~24 bytes,
+/// matching the other error variants.
+#[allow(clippy::large_enum_variant)]
 #[derive(Error, Debug)]
 pub enum InconsistencyError {
     #[error("Variable type is inconsistent with value: {0}")]

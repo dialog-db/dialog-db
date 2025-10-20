@@ -23,6 +23,11 @@ use std::fmt::Display;
 /// - **Applications**: Query the knowledge base (facts, concepts, formulas)
 /// - **Constraints**: Express relationships between variables (equality, etc.)
 /// - **Exclusions**: Negated premises that filter out matches
+///
+/// TODO: Large enum variant - Constrain (320 bytes) is much larger than other variants.
+/// The Constraint type contains large Value types. Consider boxing Constraint to reduce
+/// memory usage when storing Apply/Exclude variants.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Premise {
     /// A positive premise that queries the knowledge base.

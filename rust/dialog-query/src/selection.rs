@@ -232,9 +232,9 @@ impl PartialEq for Factor {
                 // Compare values, input factors, and formula pointer
                 v1 == v2
                     && f1.len() == f2.len()
-                    && f1.iter().all(|(k, factors1)| {
-                        f2.get(k).is_some_and(|factors2| factors1 == factors2)
-                    })
+                    && f1
+                        .iter()
+                        .all(|(k, factors1)| f2.get(k).is_some_and(|factors2| factors1 == factors2))
                     && Arc::ptr_eq(formula1, formula2)
             }
             (Factor::Parameter { value: v1 }, Factor::Parameter { value: v2 }) => v1 == v2,

@@ -68,10 +68,7 @@ impl Transaction {
 
     /// Add a change operation - mutations simply replace with the latest value
     fn insert(&mut self, the: Attribute, of: Entity, change: Change) -> &mut Self {
-        self.changes
-            .entry(of)
-            .or_default()
-            .insert(the, change);
+        self.changes.entry(of).or_default().insert(the, change);
         self
     }
 

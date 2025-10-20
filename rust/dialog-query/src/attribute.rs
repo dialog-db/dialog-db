@@ -73,7 +73,7 @@ impl<T: Scalar> Attribute<T> {
             (_, None) => Ok(term),
             // if expected isn't any (has no type) it must be equal
             // to actual or it's a type missmatch.
-            (Some(_expected), _actual) => Ok(term)
+            (Some(_expected), _actual) => Ok(term),
         }
     }
 
@@ -163,10 +163,7 @@ impl<T: Scalar> Attribute<T> {
             .unwrap_or(Term::blank());
 
         // Get the value term (is)
-        let is = parameters
-            .get("is")
-            .cloned()
-            .unwrap_or(Term::blank());
+        let is = parameters.get("is").cloned().unwrap_or(Term::blank());
 
         // Get the cause term
         let cause = parameters

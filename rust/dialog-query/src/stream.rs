@@ -35,9 +35,7 @@ where
 type PinnedSendStream<T> = std::pin::Pin<Box<dyn SendStream<T>>>;
 
 #[allow(clippy::type_complexity)]
-pub fn fork_stream<S, T>(
-    input: S,
-) -> (PinnedSendStream<T>, PinnedSendStream<T>)
+pub fn fork_stream<S, T>(input: S) -> (PinnedSendStream<T>, PinnedSendStream<T>)
 where
     S: SendStream<T> + ConditionalSend + 'static,
     T: Clone + ConditionalSend + 'static,

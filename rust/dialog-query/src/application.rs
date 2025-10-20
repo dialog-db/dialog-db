@@ -20,6 +20,11 @@ pub use std::fmt::Display;
 /// Note: Constraints are no longer part of Application - they are now separate
 /// Premise variants since they don't query the knowledge base but rather express
 /// relationships between variables.
+///
+/// TODO: Large enum variant - FactApplication (448 bytes) is much larger than other variants.
+/// Consider boxing in future to reduce memory footprint. This would require boxing FactApplication
+/// to avoid wasting 350+ bytes when storing Concept/Formula variants.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Application {
     /// Direct fact selection from the knowledge base
