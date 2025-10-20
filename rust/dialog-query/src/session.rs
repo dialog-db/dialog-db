@@ -734,4 +734,114 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_install_rule_api() -> anyhow::Result<()> {
+        use crate::artifact::{Artifacts, Entity};
+        use crate::query::Output;
+        use crate::rule::When;
+        use crate::{Concept, Match, Term};
+        use dialog_storage::MemoryStorageBackend;
+
+        #[derive(Clone, Debug, PartialEq, Concept)]
+        pub struct Employee {
+            /// Employee
+            pub this: Entity,
+            /// Employee Name
+            pub name: String,
+            /// The job title of the employee
+            pub job: String,
+        }
+
+        #[derive(Clone, Debug, PartialEq, Concept)]
+        pub struct Stuff {
+            pub this: Entity,
+            /// Name of the stuff member
+            pub name: String,
+            /// Role of the stuff member
+            pub role: String,
+        }
+
+        // Define a rule using the clean function API - no manual DeductiveRule construction!
+        fn employee_from_stuff(employee: Match<Employee>) -> When {
+            // This rule says: "An employee exists when there's stuff with matching attributes"
+            // The premises check for stuff/name and stuff/role matching employee/name and employee/job
+            When::from([Match::<Stuff> {
+                this: employee.this,
+                name: employee.name,
+                role: employee.job,
+            }])
+        }
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+
+        // Install the rule using the clean API - no turbofish needed!
+        // The type inference works: Employee is inferred from the function parameter
+        let mut session = Session::open(store).install(employee_from_stuff)?;
+
+        // Create test data as Stuff
+        let alice = Stuff::CONCEPT
+            .create()
+            .with("name", "Alice".to_string())
+            .with("role", "manager".to_string())
+            .build()?;
+
+        let bob = Stuff::CONCEPT
+            .create()
+            .with("name", "Bob".to_string())
+            .with("role", "developer".to_string())
+            .build()?;
+
+        session.transact(vec![alice, bob]).await?;
+
+        // Verify Stuff records exist
+        let query_stuff = Match::<Stuff> {
+            this: Term::var("stuff"),
+            name: Term::var("name"),
+            role: Term::var("job"),
+        };
+
+        let stuff = query_stuff.query(session.clone()).try_vec().await?;
+        assert_eq!(stuff.len(), 2, "Should have 2 Stuff records");
+
+        // Query for Employees - the rule should derive them from Stuff
+        let query_employee = Match::<Employee> {
+            this: Term::var("employee"),
+            name: Term::var("name"),
+            job: Term::var("job"),
+        };
+
+        let employees = Output::try_vec(query_employee.query(session)).await?;
+
+        // The rule should have derived 2 Employee instances from the 2 Stuff instances
+        assert_eq!(
+            employees.len(),
+            2,
+            "Rule should derive 2 employees from stuff"
+        );
+
+        // Verify the derived data is correct
+        let mut found_alice = false;
+        let mut found_bob = false;
+
+        for employee in employees {
+            match employee.name.as_str() {
+                "Alice" => {
+                    assert_eq!(employee.job, "manager");
+                    found_alice = true;
+                }
+                "Bob" => {
+                    assert_eq!(employee.job, "developer");
+                    found_bob = true;
+                }
+                name => panic!("Unexpected employee: {}", name),
+            }
+        }
+
+        assert!(found_alice, "Should find Alice as an employee");
+        assert!(found_bob, "Should find Bob as an employee");
+
+        Ok(())
+    }
 }

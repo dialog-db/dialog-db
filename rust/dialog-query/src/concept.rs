@@ -56,7 +56,7 @@ pub trait Instructions {
 /// Concepts can be matched and this trait describes an abstract match for the
 /// concept. Each match should be translatable into a set of statements making
 /// it possible to spread it into a query.
-pub trait Match: Sized + Clone + ConditionalSend + Default + Into<Parameters> + 'static {
+pub trait Match: Sized + Clone + ConditionalSend + Default + 'static {
     type Concept: Concept;
     /// Instance of the concept that this match can produce.
     type Instance: Instance + ConditionalSend + Clone;
@@ -71,8 +71,11 @@ pub trait Match: Sized + Clone + ConditionalSend + Default + Into<Parameters> + 
         Self::Concept::CONCEPT
     }
 
-    fn query<S: Source>(&self, source: S) -> impl Output<Self::Instance> {
-        let application: ConceptApplication = self.into();
+    fn query<S: Source>(&self, source: S) -> impl Output<Self::Instance>
+    where
+        ConceptApplication: From<Self>,
+    {
+        let application: ConceptApplication = self.to_owned().into();
         let cloned = self.clone();
         application
             .query(source)
@@ -81,30 +84,12 @@ pub trait Match: Sized + Clone + ConditionalSend + Default + Into<Parameters> + 
 }
 
 // Blanket impl for &T -> Parameters that uses the generated From<T> impl
-impl<T: Match + Clone> From<&T> for Parameters {
+impl<T> From<&T> for Parameters
+where
+    T: Match + Clone + Into<Parameters>,
+{
     fn from(source: &T) -> Self {
         source.clone().into()
-    }
-}
-
-impl<T: Match + Clone> From<&T> for Premise {
-    fn from(source: &T) -> Self {
-        Premise::Apply(source.into())
-    }
-}
-
-impl<T: Match + Clone> From<&T> for Application {
-    fn from(source: &T) -> Self {
-        Application::Concept(source.into())
-    }
-}
-
-impl<T: Match + Clone> From<&T> for ConceptApplication {
-    fn from(source: &T) -> Self {
-        ConceptApplication {
-            terms: source.into(),
-            concept: T::conpect(),
-        }
     }
 }
 
@@ -348,6 +333,16 @@ mod tests {
             terms.insert("age".into(), age_term);
 
             terms
+        }
+    }
+
+    // Implement From<PersonMatch> for ConceptApplication
+    impl From<PersonMatch> for ConceptApplication {
+        fn from(source: PersonMatch) -> Self {
+            ConceptApplication {
+                terms: source.into(),
+                concept: Person::CONCEPT,
+            }
         }
     }
 

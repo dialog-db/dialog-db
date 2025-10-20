@@ -393,7 +393,8 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
                 source: S,
             ) -> impl dialog_query::query::Output<#struct_name> {
                 use futures_util::StreamExt;
-                let application: dialog_query::application::concept::ConceptApplication = self.into();
+                // .into() works cleanly - the generated From<#match_name> for ConceptApplication handles it
+                let application: dialog_query::application::concept::ConceptApplication = self.clone().into();
                 let cloned = self.clone();
                 application
                     .query(source)
@@ -415,6 +416,47 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             }
         }
 
+        // Implement From<Match> for Premise - enables Match::<Concept> { ... } in When::from([...])
+        impl From<#match_name> for dialog_query::Premise {
+            fn from(source: #match_name) -> Self {
+                let app = dialog_query::application::concept::ConceptApplication {
+                    terms: source.into(),
+                    concept: #struct_name::CONCEPT,
+                };
+                dialog_query::Premise::Apply(dialog_query::Application::Concept(app))
+            }
+        }
+
+        // Implement From<Match> for Application
+        impl From<#match_name> for dialog_query::Application {
+            fn from(source: #match_name) -> Self {
+                let app = dialog_query::application::concept::ConceptApplication {
+                    terms: source.into(),
+                    concept: #struct_name::CONCEPT,
+                };
+                dialog_query::Application::Concept(app)
+            }
+        }
+
+        // Implement From<Match> for ConceptApplication - enables .into() without type annotation
+        impl From<#match_name> for dialog_query::application::concept::ConceptApplication {
+            fn from(source: #match_name) -> Self {
+                dialog_query::application::concept::ConceptApplication {
+                    terms: source.into(),
+                    concept: #struct_name::CONCEPT,
+                }
+            }
+        }
+
+        // Implement From<&Match> for ConceptApplication - enables .into() on references
+        impl From<&#match_name> for dialog_query::application::concept::ConceptApplication {
+            fn from(source: &#match_name) -> Self {
+                dialog_query::application::concept::ConceptApplication {
+                    terms: source.into(),
+                    concept: #struct_name::CONCEPT,
+                }
+            }
+        }
 
         // Implement Instance trait for the concept struct
         impl dialog_query::concept::Instance for #struct_name {
