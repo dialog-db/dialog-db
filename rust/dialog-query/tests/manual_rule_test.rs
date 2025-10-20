@@ -379,6 +379,9 @@ mod tests {
                     assert!(selector.parameters().get("of").is_some());
                     assert!(selector.parameters().get("is").is_some());
                 }
+                Premise::Apply(Application::Constraint(_)) => {
+                    panic!("Unexpected ApplyConstraint premise in test");
+                }
                 Premise::Apply(Application::Formula(_)) => {
                     panic!("Unexpected ApplyFormula premise in test");
                 }
@@ -412,6 +415,9 @@ mod tests {
                     assert!(selector.parameters().get("the").is_some());
                     assert!(selector.parameters().get("of").is_some());
                     assert!(selector.parameters().get("is").is_some());
+                }
+                Premise::Apply(Application::Constraint(_)) => {
+                    panic!("Unexpected Constraint application premise in test");
                 }
                 Premise::Apply(Application::Formula(_)) => {
                     panic!("Unexpected ApplyFormula premise in test");

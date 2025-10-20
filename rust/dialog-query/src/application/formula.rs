@@ -176,9 +176,3 @@ impl Display for FormulaApplication {
         write!(f, "}}")
     }
 }
-
-impl From<FormulaApplication> for Application {
-    fn from(application: FormulaApplication) -> Self {
-        Application::Formula(application)
-    }
-}

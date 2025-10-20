@@ -12,9 +12,11 @@
 use std::fmt;
 use std::marker::PhantomData;
 
+use crate::application::constraint::ConstraintApplication;
 use crate::artifact::{Attribute, Entity, Type, Value};
 use crate::error::SyntaxError;
 use crate::types::{IntoType, Scalar};
+use crate::Application;
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 
@@ -372,8 +374,12 @@ where
     /// Builder method for fluent API (placeholder implementation)
     ///
     /// Currently returns self unchanged - may be expanded for query building
-    pub fn is<Is: Into<Term<T>>>(self, _other: Is) -> Self {
-        self
+    pub fn is<Is: Into<Term<T>>>(self, is: Is) -> Application {
+        ConstraintApplication {
+            this: self.as_unknown(),
+            is: is.into().as_unknown(),
+        }
+        .into()
     }
 
     pub fn as_unknown(&self) -> Term<Value> {

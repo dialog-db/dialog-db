@@ -4,8 +4,8 @@ use crate::claim::Revert;
 use crate::error::SchemaError;
 use crate::types::Scalar;
 use crate::{
-    Application, Attribute, Cardinality, Claim, Constraint, Entity, Parameters, Relation,
-    Requirement, Schema, Type, Value,
+    Application, Attribute, Cardinality, Claim, Entity, Field, Parameters, Relation, Requirement,
+    Schema, Type, Value,
 };
 
 use serde::{Deserialize, Serialize};
@@ -163,7 +163,7 @@ impl From<&Attributes> for Schema {
         for (name, attribute) in attributes.iter() {
             schema.insert(
                 name.into(),
-                Constraint {
+                Field {
                     description: attribute.description.into(),
                     content_type: attribute.content_type,
                     requirement: Requirement::Optional,
@@ -176,7 +176,7 @@ impl From<&Attributes> for Schema {
         if !schema.contains("this") {
             schema.insert(
                 "this".into(),
-                Constraint {
+                Field {
                     description: "The entity that this model represents".into(),
                     content_type: Some(Type::Entity),
                     requirement: Requirement::Optional,

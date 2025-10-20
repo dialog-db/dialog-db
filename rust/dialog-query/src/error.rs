@@ -2,6 +2,7 @@
 
 pub use crate::analyzer::AnalyzerError;
 pub use crate::analyzer::Required;
+pub use crate::application::constraint::ConstraintApplication;
 pub use crate::application::Application;
 use crate::artifact::{DialogArtifactsError, Type, Value};
 pub use crate::predicate::DeductiveRule;
@@ -22,6 +23,9 @@ pub enum QueryError {
     /// A formula evaluation error
     #[error("Formula application omits required parameter: \"{parameter}\"")]
     RequiredFormulaParamater { parameter: String },
+
+    #[error("Constraint requirements have not been met: {constraint:?}")]
+    ConstraintViolation { constraint: ConstraintApplication },
 
     /// A variable was used inconsistently in a formula
     #[error("Variable inconsistency: {parameter:?} has actual value {actual:?} but expected {expected:?}")]

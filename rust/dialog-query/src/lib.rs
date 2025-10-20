@@ -59,7 +59,7 @@ pub use premise::Premise;
 pub use query::{Source, Store};
 pub use relation::Relation;
 pub use rule::{Premises, Rule, When};
-pub use schema::{Constraint, Requirement, Schema};
+pub use schema::{Field, Requirement, Schema};
 pub use session::transaction::{Edit, Transaction, TransactionError};
 pub use session::{QuerySession, Session};
 

@@ -7,45 +7,45 @@ use crate::Type;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Schema that maps parameter names to their constraints
+/// Schema defines set of named fields
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Schema {
-    constraints: HashMap<String, Constraint>,
+    pub(crate) fields: HashMap<String, Field>,
 }
 
 impl Schema {
     pub fn new() -> Self {
         Self {
-            constraints: HashMap::new(),
+            fields: HashMap::new(),
         }
     }
 
-    pub fn insert(&mut self, name: String, constraint: Constraint) {
-        self.constraints.insert(name, constraint);
+    pub fn insert(&mut self, name: String, constraint: Field) {
+        self.fields.insert(name, constraint);
     }
 
     pub fn contains(&self, name: &str) -> bool {
-        self.constraints.contains_key(name)
+        self.fields.contains_key(name)
     }
 
-    pub fn get(&self, name: &str) -> Option<&Constraint> {
-        self.constraints.get(name)
+    pub fn get(&self, name: &str) -> Option<&Field> {
+        self.fields.get(name)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &Constraint)> {
-        self.constraints.iter()
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Field)> {
+        self.fields.iter()
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut Constraint)> {
-        self.constraints.iter_mut()
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut Field)> {
+        self.fields.iter_mut()
     }
 
     pub fn len(&self) -> usize {
-        self.constraints.len()
+        self.fields.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.constraints.is_empty()
+        self.fields.is_empty()
     }
 }
 
@@ -100,16 +100,16 @@ impl Cardinality {
     }
 }
 
-/// Constraint descriptor - describes a parameter's type and requirement
+/// Field descriptor describes a type cardinality and fields requirement type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Constraint {
+pub struct Field {
     pub description: String,
     pub content_type: Option<Type>,
     pub requirement: Requirement,
     pub cardinality: Cardinality,
 }
 
-impl Constraint {
+impl Field {
     pub fn new(description: String, content_type: Option<Type>, requirement: Requirement) -> Self {
         Self {
             description,

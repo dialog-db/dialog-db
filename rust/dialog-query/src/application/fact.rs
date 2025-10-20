@@ -10,7 +10,7 @@ use crate::Cardinality;
 pub use crate::Environment;
 use crate::Fact;
 use crate::{try_stream, EvaluationContext, Source};
-use crate::{Constraint, Entity, Parameters, QueryError, Requirement, Schema, Term, Type, Value};
+use crate::{Entity, Field, Parameters, QueryError, Requirement, Schema, Term, Type, Value};
 use dialog_artifacts::Cause;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -64,7 +64,7 @@ impl FactApplication {
 
             schema.insert(
                 "the".to_string(),
-                Constraint {
+                Field {
                     description: "Attribute of the fact".to_string(),
                     content_type: Some(Type::Symbol),
                     requirement: requirement.required(),
@@ -74,7 +74,7 @@ impl FactApplication {
 
             schema.insert(
                 "of".to_string(),
-                Constraint {
+                Field {
                     description: "Entity of the fact".to_string(),
                     content_type: Some(Type::Entity),
                     requirement: requirement.required(),
@@ -84,7 +84,7 @@ impl FactApplication {
 
             schema.insert(
                 "is".to_string(),
-                Constraint {
+                Field {
                     description: "Value of the fact".to_string(),
                     content_type: None, // Can be any type
                     requirement: requirement.required(),
@@ -362,11 +362,5 @@ impl FactApplicationPlan {
 
     pub fn provides(&self) -> &Environment {
         &self.provides
-    }
-}
-
-impl From<FactApplication> for Application {
-    fn from(selector: FactApplication) -> Self {
-        Application::Fact(selector)
     }
 }

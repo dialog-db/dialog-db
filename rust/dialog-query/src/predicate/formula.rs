@@ -504,12 +504,12 @@ impl<T: Iterator<Item = Cell>> From<T> for Cells {
 
 impl From<&Cells> for Schema {
     fn from(cells: &Cells) -> Self {
-        use crate::{Cardinality, Constraint};
+        use crate::{Cardinality, Field};
         let mut schema = Schema::new();
         for (name, cell) in cells.iter() {
             schema.insert(
                 name.into(),
-                Constraint {
+                Field {
                     description: cell.description.clone(),
                     content_type: cell.content_type,
                     requirement: cell.requirement.clone(),
