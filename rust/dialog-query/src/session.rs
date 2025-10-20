@@ -63,7 +63,7 @@ impl<S: Store> Session<S> {
 
     /// Register a new rule into the session
     pub fn register(mut self, rule: DeductiveRule) -> Self {
-        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator().to_string()) {
+        if let Some(rules) = self.rules.get_mut(rule.conclusion.operator()) {
             if !rules.contains(&rule) {
                 rules.push(rule);
             }
@@ -243,7 +243,7 @@ impl<S: ArtifactStore> QuerySession<S> {
     ///     .install(senior_rule);
     /// ```
     pub fn install(mut self, rule: DeductiveRule) -> Self {
-        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator().to_string()) {
+        if let Some(rules) = self.rules.get_mut(rule.conclusion.operator()) {
             if !rules.contains(&rule) {
                 rules.push(rule);
             }
@@ -275,10 +275,7 @@ impl<S: ArtifactStore + Clone + Send + Sync + 'static> From<S> for QuerySession<
 /// Implement Source trait for QuerySession to provide rule resolution capabilities
 impl<S: ArtifactStore + Clone + Send + Sync + 'static> Source for QuerySession<S> {
     fn resolve_rules(&self, operator: &str) -> Vec<DeductiveRule> {
-        self.rules
-            .get(operator)
-            .map(|rules| rules.clone())
-            .unwrap_or_else(Vec::new)
+        self.rules.get(operator).cloned().unwrap_or_default()
     }
 }
 
@@ -301,10 +298,7 @@ impl<S: ArtifactStore> ArtifactStore for QuerySession<S> {
 /// while providing access to both stored artifacts and registered rules.
 impl<S: Store + Sync + 'static> Source for Session<S> {
     fn resolve_rules(&self, operator: &str) -> Vec<DeductiveRule> {
-        self.rules
-            .get(operator)
-            .map(|rules| rules.clone())
-            .unwrap_or_else(Vec::new)
+        self.rules.get(operator).cloned().unwrap_or_default()
     }
 }
 

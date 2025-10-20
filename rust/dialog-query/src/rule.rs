@@ -33,13 +33,13 @@ pub trait When {
     fn into_premises(self) -> Premises;
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Premises(Vec<Premise>);
 
 impl Premises {
     /// Create a new empty When collection
     pub fn new() -> Self {
-        Premises(Vec::new())
+        Self::default()
     }
 
     /// Get the number of statements

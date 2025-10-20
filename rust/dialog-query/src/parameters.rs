@@ -3,11 +3,11 @@ use std::collections::HashMap;
 
 /// Represents set of bindings used in the rule or formula applications. It is
 /// effectively a map of terms (constant or variable) keyed by parameter names.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Parameters(HashMap<String, Term<Value>>);
 impl Parameters {
     pub fn new() -> Self {
-        Self(HashMap::new())
+        Self::default()
     }
     /// Returns the term associated with the given parameter name, if has one.
     pub fn get(&self, name: &str) -> Option<&Term<Value>> {

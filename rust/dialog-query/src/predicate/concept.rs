@@ -53,6 +53,12 @@ impl<'a> ExactSizeIterator for AttributesIter<'a> {
     }
 }
 
+impl Default for Attributes {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Attributes {
     /// Returns an iterator over all dependencies as (name, requirement) pairs.
     pub fn iter(&self) -> AttributesIter<'_> {
@@ -80,7 +86,7 @@ impl Attributes {
     /// Conforms the provided parameters conform to the schema of the cells.
     pub fn conform(&self, parameters: Parameters) -> Result<Parameters, SchemaError> {
         for (name, attribute) in self.iter() {
-            let parameter = parameters.get(&name);
+            let parameter = parameters.get(name);
             attribute
                 .conform(parameter)
                 .map_err(|e| e.at(name.into()))?;
@@ -300,20 +306,20 @@ impl Concept {
 
     pub fn attributes(&self) -> &Attributes {
         match self {
-            Self::Dynamic { attributes, .. } => &attributes,
-            Self::Static { attributes, .. } => &attributes,
+            Self::Dynamic { attributes, .. } => attributes,
+            Self::Static { attributes, .. } => attributes,
         }
     }
 
     pub fn operator(&self) -> &str {
         match self {
-            Self::Dynamic { operator, .. } => &operator,
-            Self::Static { operator, .. } => &operator,
+            Self::Dynamic { operator, .. } => operator,
+            Self::Static { operator, .. } => operator,
         }
     }
 
     pub fn operands(&self) -> impl Iterator<Item = &str> {
-        std::iter::once("this").chain(self.attributes().keys().map(|key| key.as_ref()))
+        std::iter::once("this").chain(self.attributes().keys())
     }
 
     pub fn schema(&self) -> Schema {
@@ -373,7 +379,7 @@ impl Concept {
     /// # Returns
     /// A builder that can be used to set attribute values for the entity
     pub fn edit(&self, entity: Entity) -> Builder {
-        Builder::edit(entity, &self)
+        Builder::edit(entity, self)
     }
 
     /// Creates a builder for creating a new entity with this concept's schema.

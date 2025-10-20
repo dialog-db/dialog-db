@@ -230,7 +230,7 @@ impl ConceptApplication {
         let concept = self.concept.clone();
 
         let mut rules = vec![DeductiveRule::from(&concept)];
-        rules.extend(context.source.resolve_rules(&concept.operator()));
+        rules.extend(context.source.resolve_rules(concept.operator()));
         let plan = rules
             .iter()
             .map(|rule| Join::from(&rule.premises))
@@ -267,8 +267,7 @@ impl ConceptApplication {
     pub fn query<S: Source>(&self, source: S) -> impl crate::selection::Answers {
         let store = source.clone();
         let context = new_context(store);
-        let selection = self.evaluate(context);
-        selection
+        self.evaluate(context)
     }
 }
 

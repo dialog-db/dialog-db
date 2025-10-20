@@ -32,12 +32,12 @@ where
     tokio::spawn(future);
 }
 
+type PinnedSendStream<T> = std::pin::Pin<Box<dyn SendStream<T>>>;
+
+#[allow(clippy::type_complexity)]
 pub fn fork_stream<S, T>(
     input: S,
-) -> (
-    std::pin::Pin<Box<dyn SendStream<T>>>,
-    std::pin::Pin<Box<dyn SendStream<T>>>,
-)
+) -> (PinnedSendStream<T>, PinnedSendStream<T>)
 where
     S: SendStream<T> + ConditionalSend + 'static,
     T: Clone + ConditionalSend + 'static,

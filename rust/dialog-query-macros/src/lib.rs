@@ -578,9 +578,8 @@ fn extract_doc_comments(attrs: &[Attribute]) -> String {
 
 fn to_snake_case(s: &str) -> String {
     let mut result = String::new();
-    let mut chars = s.chars().peekable();
 
-    while let Some(ch) = chars.next() {
+    for ch in s.chars() {
         if ch.is_uppercase() {
             if !result.is_empty() {
                 result.push('.');

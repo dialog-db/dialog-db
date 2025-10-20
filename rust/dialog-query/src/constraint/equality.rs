@@ -52,7 +52,7 @@ impl Equality {
     /// The schema describes what parameters the constraint requires to be evaluable.
     pub fn schema(&self) -> Schema {
         let mut schema = Schema::new();
-        let requirement = Requirement::new();
+        let requirement = Requirement::new_group();
         schema.insert(
             "this".into(),
             Field {

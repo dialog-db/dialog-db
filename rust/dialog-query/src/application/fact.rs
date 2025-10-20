@@ -59,7 +59,7 @@ impl FactApplication {
     fn static_schema() -> &'static Schema {
         static FACT_SCHEMA: OnceLock<Schema> = OnceLock::new();
         FACT_SCHEMA.get_or_init(|| {
-            let requirement = Requirement::new();
+            let requirement = Requirement::new_group();
             let mut schema = Schema::new();
 
             schema.insert(

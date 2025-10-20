@@ -18,6 +18,12 @@ pub struct Fact {
     pub cause: Term<Cause>,
 }
 
+impl Default for Fact {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Fact {
     /// Create a new empty Fact selector with all blank terms
     pub fn new() -> Self {

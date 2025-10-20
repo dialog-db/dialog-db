@@ -42,11 +42,12 @@ pub enum AnalyzerError {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Required(HashSet<String>);
+
 impl Required {
     pub fn new() -> Self {
-        Required(HashSet::new())
+        Self::default()
     }
     pub fn clear(&mut self) {
         self.0.clear();
@@ -90,11 +91,12 @@ impl Display for Required {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Desired(HashMap<String, usize>);
+
 impl Desired {
     pub fn new() -> Self {
-        Desired(HashMap::new())
+        Self::default()
     }
     pub fn count(&self) -> usize {
         self.0.len()

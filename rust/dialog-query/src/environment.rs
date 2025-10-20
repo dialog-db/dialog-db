@@ -6,7 +6,7 @@ use crate::types::Scalar;
 use std::collections::HashSet;
 
 /// Tracks variable bindings during query planning
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Environment {
     /// Set of variables that have already been bound.
     pub variables: HashSet<String>,
@@ -14,9 +14,7 @@ pub struct Environment {
 
 impl Environment {
     pub fn new() -> Self {
-        Self {
-            variables: HashSet::new(),
-        }
+        Self::default()
     }
 
     pub fn size(&self) -> usize {
@@ -129,8 +127,8 @@ impl IntoIterator for &Environment {
     fn into_iter(self) -> Self::IntoIter {
         let vars = &self.variables;
 
-        vars.into_iter()
-            .map(|var| Term::<crate::artifact::Value>::var(var))
+        vars.iter()
+            .map(Term::<crate::artifact::Value>::var)
             .collect::<Vec<_>>()
             .into_iter()
     }

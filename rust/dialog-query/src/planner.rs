@@ -48,7 +48,7 @@ impl Planner {
     fn done(&self) -> bool {
         match self {
             Self::Idle { .. } => false,
-            Self::Active { candidates } => candidates.len() == 0,
+            Self::Active { candidates } => candidates.is_empty(),
         }
     }
 
@@ -114,7 +114,7 @@ impl Planner {
                     let analysis = candidates.remove(best_index);
                     Plan::try_from(analysis)
                 } else {
-                    Self::fail(&candidates)
+                    Self::fail(candidates)
                 }
             }
         }
@@ -284,9 +284,10 @@ impl Join {
 /// Recursive chain structure for joining 2+ plan steps.
 /// This explicit recursion at the value level avoids type-level recursion
 /// that would cause compiler stack overflow.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum Chain {
     /// Base case - passes through the selection unchanged.
+    #[default]
     Empty,
     /// Recursive case - joins a plan with the rest of the join chain.
     Join(Box<Chain>, Plan),
@@ -295,7 +296,7 @@ pub enum Chain {
 impl Chain {
     /// Creates a new empty join (identity).
     pub fn new() -> Self {
-        Chain::Empty
+        Self::default()
     }
 
     /// Adds a plan to this join chain.
@@ -340,8 +341,9 @@ impl Chain {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum Fork {
+    #[default]
     Empty,
     Solo(Join),
     Duet(Join, Join),
@@ -351,7 +353,7 @@ pub enum Fork {
 impl Fork {
     /// Creates a new empty join (identity).
     pub fn new() -> Self {
-        Self::Empty
+        Self::default()
     }
 
     /// Creates a new join of two plans.
@@ -384,7 +386,7 @@ impl Fork {
 
                     let scope = context.scope.clone();
                     let source = context.source.clone();
-                    let left_output = left.evaluate(EvaluationContext { selection:left_input, source: source, scope });
+                    let left_output = left.evaluate(EvaluationContext { selection:left_input, source, scope });
                     let right_output = right.evaluate(EvaluationContext { selection:right_input, source: context.source, scope: context.scope });
 
                     tokio::pin!(left_output);
@@ -399,7 +401,7 @@ impl Fork {
 
                     let scope = context.scope.clone();
                     let source = context.source.clone();
-                    let left_output = left.evaluate(EvaluationContext { selection:left_input, source: source, scope });
+                    let left_output = left.evaluate(EvaluationContext { selection:left_input, source, scope });
                     let right_output = right.evaluate(EvaluationContext { selection:right_input, source: context.source, scope: context.scope });
 
                     tokio::pin!(left_output);

@@ -71,8 +71,9 @@ pub use stream::*;
 pub use term::*;
 pub use types::IntoType;
 
-/// Formula library exports
 pub mod formulas {
+    //! Formula library exports
+    //!
     //! Built-in formulas for common data transformations
     //!
     //! This module provides a comprehensive library of formulas for:

@@ -180,7 +180,6 @@ pub trait Formula: Quarriable + Output + Sized + Clone {
     /// 3. Returns the Answer with Factor::Derived provenance
     ///
     /// This default implementation should work for most formulas.
-
     fn compute(cursor: &mut Cursor) -> Result<Vec<Answer>, FormulaEvaluationError> {
         let mut answers = Vec::new();
         let input: Self::Input = cursor.try_into()?;
@@ -196,19 +195,6 @@ pub trait Formula: Quarriable + Output + Sized + Clone {
     /// This method contains actual logic for deriving an output from provided
     /// inputs.
     fn derive(input: Self::Input) -> Vec<Self>;
-
-    /// Write this formula instance's output values to the cursor
-    ///
-    /// This method is called for each output instance produced by `derive`
-    /// to write the computed values back to the cursor.
-    ///
-    /// # Arguments
-    /// * `cursor` - The cursor to write output values to
-    ///
-    /// # Returns
-    /// * `Ok(())` - If all writes succeeded
-    /// * `Err(_)` - If writing fails (e.g., due to inconsistency)
-    // fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError>;
 
     /// Create a formula application with term bindings
     ///
@@ -368,7 +354,7 @@ impl Cell {
                     Ok(term)
                 } else {
                     Err(TypeError::TypeMismatch {
-                        expected: expected.clone(),
+                        expected: *expected,
                         actual: term.as_unknown(),
                     })
                 }
@@ -427,7 +413,7 @@ impl CellsBuilder {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(transparent)]
 pub struct Cells(HashMap<String, Cell>);
 impl Cells {
@@ -440,10 +426,6 @@ impl Cells {
         };
         define(&mut builder);
         Self(builder.cells)
-    }
-
-    pub fn default() -> Self {
-        Cells(HashMap::new())
     }
 
     pub fn insert(&mut self, cell: Cell) {
@@ -482,17 +464,11 @@ impl Cells {
     /// Conforms the provided parameters conform to the schema of the cells.
     pub fn conform(&self, parameters: Parameters) -> Result<Parameters, SchemaError> {
         for (name, cell) in self.iter() {
-            let parameter = parameters.get(&name);
+            let parameter = parameters.get(name);
             cell.conform(parameter).map_err(|e| e.at(name.into()))?;
         }
 
         Ok(parameters)
-    }
-}
-
-impl Default for Cells {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

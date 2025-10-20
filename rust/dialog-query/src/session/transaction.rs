@@ -70,7 +70,7 @@ impl Transaction {
     fn insert(&mut self, the: Attribute, of: Entity, change: Change) -> &mut Self {
         self.changes
             .entry(of)
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(the, change);
         self
     }

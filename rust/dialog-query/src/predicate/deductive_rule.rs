@@ -31,7 +31,7 @@ impl DeductiveRule {
     }
 
     pub fn operator(&self) -> &str {
-        &self.conclusion.operator()
+        self.conclusion.operator()
     }
     pub fn operands(&self) -> impl Iterator<Item = &str> {
         self.conclusion.operands()

@@ -148,7 +148,7 @@ pub enum Requirement {
 }
 
 impl Requirement {
-    pub fn new() -> Group {
+    pub fn new_group() -> Group {
         Group::new()
     }
     /// Checks if this is a required (non-derivable) dependency.
@@ -177,6 +177,12 @@ impl Requirement {
 /// Identifier for a choice group
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Group(usize);
+
+impl Default for Group {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Group {
     pub fn new() -> Self {

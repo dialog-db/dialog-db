@@ -233,7 +233,7 @@ impl PartialEq for Factor {
                 v1 == v2
                     && f1.len() == f2.len()
                     && f1.iter().all(|(k, factors1)| {
-                        f2.get(k).map_or(false, |factors2| factors1 == factors2)
+                        f2.get(k).is_some_and(|factors2| factors1 == factors2)
                     })
                     && Arc::ptr_eq(formula1, formula2)
             }
@@ -317,7 +317,7 @@ impl From<&Factors> for Fact {
 
 /// Describes answer to the query. It captures facts from which answer was
 /// concluded and tracks which FactApplication produced which facts.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Answer {
     /// Conclusions: named variable bindings where we've concluded values from facts.
     /// Maps variable names to their values with provenance (which facts support this binding).
@@ -353,10 +353,7 @@ pub enum Evidence<'a> {
 impl Answer {
     /// Create new empty answer.
     pub fn new() -> Self {
-        Self {
-            conclusions: HashMap::new(),
-            facts: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Get all tracked facts from the applications.
@@ -605,7 +602,7 @@ impl Answer {
         match term {
             Term::Variable {
                 name: Some(name), ..
-            } => self.conclusions.get(name.into()),
+            } => self.conclusions.get(name),
             Term::Variable { name: None, .. } => None,
             Term::Constant(_) => None,
         }
