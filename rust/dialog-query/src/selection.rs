@@ -441,7 +441,7 @@ impl Answer {
         ))
     }
 
-    pub fn merge<'a>(&mut self, evidence: Evidence<'a>) -> Result<(), InconsistencyError> {
+    pub fn merge(&mut self, evidence: Evidence<'_>) -> Result<(), InconsistencyError> {
         match evidence {
             Evidence::Selected { application, fact } => {
                 let fact = Arc::new(fact.to_owned());

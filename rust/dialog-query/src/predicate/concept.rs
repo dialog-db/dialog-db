@@ -44,7 +44,7 @@ impl<'a> Iterator for AttributesIter<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for AttributesIter<'a> {
+impl ExactSizeIterator for AttributesIter<'_> {
     fn len(&self) -> usize {
         match self {
             AttributesIter::Static(iter) => iter.len(),
