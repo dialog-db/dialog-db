@@ -12,7 +12,7 @@ use crate::{DialogArtifactsError, ENTITY_LENGTH, make_reference, mutable_slice};
 /// plain string URIs (which typically represent an [`Entity`]) and their other
 /// representations such as their byte representation when used as a component
 /// of an index key.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Uri(Url);
 

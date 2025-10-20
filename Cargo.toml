@@ -22,7 +22,9 @@ members = [
     "rust/dialog-dbsp",
     "rust/dialog-encoding",
     "rust/dialog-prolly-tree",
-    "rust/dialog-storage",
+    "rust/dialog-query",
+    "rust/dialog-query-macros",
+    "rust/dialog-storage"
 ]
 resolver = "2"
 
@@ -96,8 +98,14 @@ path = "./rust/dialog-encoding"
 [workspace.dependencies.dialog-prolly-tree]
 path = "./rust/dialog-prolly-tree"
 
+[workspace.dependencies.dialog-query]
+path = "./rust/dialog-query"
+
 [workspace.dependencies.dialog-storage]
 path = "./rust/dialog-storage"
+
+[workspace.dependencies.dialog-query-macros]
+path = "./rust/dialog-query-macros"
 
 # [patch.crates-io]
 # # TODO: https://github.com/gwierzchowski/csv-async/issues/27

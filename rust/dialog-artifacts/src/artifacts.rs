@@ -38,8 +38,9 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_prolly_tree::{Entry, GeometricDistribution, Tree};
-use dialog_storage::{
-    Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Storage, StorageBackend,
+pub use dialog_storage::{
+    Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, Storage,
+    StorageBackend,
 };
 use futures_util::{Stream, StreamExt};
 use std::{ops::Range, sync::Arc};
