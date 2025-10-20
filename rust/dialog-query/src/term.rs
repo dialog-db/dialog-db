@@ -371,13 +371,23 @@ where
         }
     }
 
-    /// Builder method for fluent API (placeholder implementation)
+    /// Creates an equality constraint between this term and another term.
     ///
-    /// Currently returns self unchanged - may be expanded for query building
-    pub fn is<Is: Into<Term<T>>>(self, is: Is) -> Application {
+    /// This method creates a `ConstraintApplication` that enforces equality
+    /// between the two terms during query evaluation. The constraint supports
+    /// bidirectional inference: if one term is bound, the other will be inferred.
+    ///
+    /// # Example
+    /// ```
+    /// use dialog_query::{Term, Value};
+    ///
+    /// // Create a constraint that x equals y
+    /// let constraint = Term::<Value>::var("x").is(Term::<Value>::var("y"));
+    /// ```
+    pub fn is<Other: Into<Term<T>>>(self, other: Other) -> Application {
         ConstraintApplication {
             this: self.as_unknown(),
-            is: is.into().as_unknown(),
+            is: other.into().as_unknown(),
         }
         .into()
     }
@@ -931,5 +941,48 @@ mod tests {
         let unknown = Term::<Value>::var("unknown");
 
         assert_eq!(unknown.content_type(), None);
+    }
+
+    #[test]
+    fn test_term_eq_creates_constraint() {
+        use crate::Application;
+
+        // Create two variable terms
+        let x = Term::<Value>::var("x");
+        let y = Term::<Value>::var("y");
+
+        // Use eq() to create an equality constraint
+        let constraint_app = x.is(y);
+
+        // Verify it creates an Application
+        match constraint_app {
+            Application::Constraint(constraint) => {
+                // Verify the constraint has the right structure
+                assert_eq!(constraint.this.name(), Some("x"));
+                assert_eq!(constraint.is.name(), Some("y"));
+            }
+            _ => panic!("Expected Constraint application"),
+        }
+    }
+
+    #[test]
+    fn test_term_eq_with_constant() {
+        use crate::Application;
+
+        // Create a variable and a constant
+        let x = Term::<Value>::var("x");
+        let constant = Term::Constant(Value::from(42));
+
+        // Use eq() to create a constraint between variable and constant
+        let constraint_app = x.is(constant);
+
+        // Verify it creates an Application
+        match constraint_app {
+            Application::Constraint(constraint) => {
+                assert_eq!(constraint.this.name(), Some("x"));
+                assert!(constraint.is.is_constant());
+            }
+            _ => panic!("Expected Constraint application"),
+        }
     }
 }
