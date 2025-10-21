@@ -1,5 +1,5 @@
 //! Integration tests for R2 storage backend
-//! 
+//!
 //! These tests will only run when the following environment variables are set:
 //! - R2_KEY: R2 access key
 //! - R2_SECRET: R2 secret key
@@ -45,7 +45,7 @@ fn setup_r2_backend() -> Result<RestStorageBackend<Vec<u8>, Vec<u8>>, DialogStor
     let r2_url = env::var("R2_URL").expect("R2_URL environment variable not set");
     let r2_bucket = env::var("R2_BUCKET").unwrap_or_else(|_| "dialog-test-bucket".to_string());
     let prefix = test_prefix();
-    
+
     // Set up S3Credentials for R2
     let s3_creds = S3Credentials {
         access_key_id: r2_key,
@@ -55,7 +55,7 @@ fn setup_r2_backend() -> Result<RestStorageBackend<Vec<u8>, Vec<u8>>, DialogStor
         expires: 86400, // 24 hours
         session_token: None,
     };
-    
+
     // Create the config with S3 authentication
     let config = RestStorageConfig {
         endpoint: r2_url,
@@ -65,7 +65,7 @@ fn setup_r2_backend() -> Result<RestStorageBackend<Vec<u8>, Vec<u8>>, DialogStor
         headers: Vec::new(),
         ..Default::default()
     };
-    
+
     // Convert the error type
     match RestStorageBackend::new(config) {
         Ok(backend) => Ok(backend),
@@ -80,20 +80,20 @@ async fn test_r2_setup_and_basic_write() -> Result<()> {
         println!("Skipping R2 tests as environment variables are not set");
         return Ok(());
     }
-    
+
     let mut backend = setup_r2_backend()?;
-    
+
     // Test writing to R2
     let test_key = vec![1, 2, 3];
     let test_value = vec![4, 5, 6];
     let result = backend.set(test_key.clone(), test_value.clone()).await;
-    
+
     assert!(result.is_ok(), "Failed to write to R2: {:?}", result);
-    
+
     // Clean up
     // Note: In a real test, we would delete the object, but this simplified implementation
     // doesn't implement delete functionality yet.
-    
+
     Ok(())
 }
 
@@ -104,19 +104,23 @@ async fn test_r2_read() -> Result<()> {
         println!("Skipping R2 tests as environment variables are not set");
         return Ok(());
     }
-    
+
     let mut backend = setup_r2_backend()?;
-    
+
     // Write a test value
     let test_key = vec![10, 11, 12];
     let test_value = vec![13, 14, 15];
     backend.set(test_key.clone(), test_value.clone()).await?;
-    
+
     // Read it back
     let retrieved = backend.get(&test_key).await?;
-    
-    assert_eq!(retrieved, Some(test_value), "Retrieved value doesn't match what was written");
-    
+
+    assert_eq!(
+        retrieved,
+        Some(test_value),
+        "Retrieved value doesn't match what was written"
+    );
+
     Ok(())
 }
 
@@ -127,17 +131,17 @@ async fn test_r2_read_nonexistent() -> Result<()> {
         println!("Skipping R2 tests as environment variables are not set");
         return Ok(());
     }
-    
+
     let backend = setup_r2_backend()?;
-    
+
     // Generate a random key that we haven't written to
     let nonexistent_key = vec![100, 101, 102];
-    
+
     // Try to read it
     let retrieved = backend.get(&nonexistent_key).await?;
-    
+
     assert_eq!(retrieved, None, "Expected None for nonexistent key");
-    
+
     Ok(())
 }
 
@@ -148,31 +152,35 @@ async fn test_r2_bulk_operations() -> Result<()> {
         println!("Skipping R2 tests as environment variables are not set");
         return Ok(());
     }
-    
+
     let mut backend = setup_r2_backend()?;
-    
+
     // Create a stream of test data
     use async_stream::try_stream;
-    
+
     let source_stream = try_stream! {
         for i in 0..3 {
             yield (vec![i, i+1, i+2], vec![i+3, i+4, i+5]);
         }
     };
-    
+
     // Write the data in bulk
     backend.write(source_stream).await?;
-    
+
     // Verify the data was written
     for i in 0..3 {
-        let key = vec![i, i+1, i+2];
-        let expected_value = vec![i+3, i+4, i+5];
+        let key = vec![i, i + 1, i + 2];
+        let expected_value = vec![i + 3, i + 4, i + 5];
         let retrieved = backend.get(&key).await?;
-        
-        assert_eq!(retrieved, Some(expected_value), 
-            "Retrieved value doesn't match what was written for key {:?}", key);
+
+        assert_eq!(
+            retrieved,
+            Some(expected_value),
+            "Retrieved value doesn't match what was written for key {:?}",
+            key
+        );
     }
-    
+
     Ok(())
 }
 
@@ -183,29 +191,33 @@ async fn test_r2_larger_data() -> Result<()> {
         println!("Skipping R2 tests as environment variables are not set");
         return Ok(());
     }
-    
+
     let mut backend = setup_r2_backend()?;
-    
+
     // Create a larger test value (~10KB)
     let test_key = vec![50, 51, 52];
     let mut test_value = Vec::with_capacity(10_000);
     for i in 0..10_000 {
         test_value.push((i % 256) as u8);
     }
-    
+
     // Write the large value
     backend.set(test_key.clone(), test_value.clone()).await?;
-    
+
     // Read it back
     let retrieved = backend.get(&test_key).await?;
-    
-    assert_eq!(retrieved, Some(test_value), "Retrieved large value doesn't match what was written");
-    
+
+    assert_eq!(
+        retrieved,
+        Some(test_value),
+        "Retrieved large value doesn't match what was written"
+    );
+
     Ok(())
 }
 
 /// Helper test to clean up test data
-/// 
+///
 /// This test isn't automatically run, but can be executed manually:
 /// ```
 /// cargo test --package dialog-storage -- storage::backend::r2_tests::cleanup_test_data --exact --nocapture
@@ -217,11 +229,15 @@ async fn cleanup_test_data() -> Result<()> {
         println!("Skipping R2 tests as environment variables are not set");
         return Ok(());
     }
-    
+
     // This would require implementing a delete method or using the AWS SDK directly.
     // For simplicity, we'll just log that this would clean up data.
-    println!("NOTE: This test would normally clean up test data, but the current implementation doesn't support delete operations.");
-    println!("To clean up test data manually, check the R2 console for objects with the 'dialog-test-' prefix.");
-    
+    println!(
+        "NOTE: This test would normally clean up test data, but the current implementation doesn't support delete operations."
+    );
+    println!(
+        "To clean up test data manually, check the R2 console for objects with the 'dialog-test-' prefix."
+    );
+
     Ok(())
 }

@@ -106,6 +106,7 @@ pub struct Authorization {
     /// AWS region
     pub region: String,
     /// S3/R2 bucket name
+    #[allow(dead_code)]
     pub bucket: String,
     /// Expiration time in seconds
     pub expires: u64,
@@ -213,16 +214,19 @@ impl Authorization {
     }
 
     /// Get the payload header string
+    #[allow(dead_code)]
     pub fn payload_header(&self) -> String {
         derive_payload_header(self)
     }
 
     /// Get the payload body string
+    #[allow(dead_code)]
     pub fn payload_body(&self) -> String {
         derive_payload_body(self).unwrap()
     }
 
     /// Get the complete signing payload string
+    #[allow(dead_code)]
     pub fn signing_payload(&self) -> String {
         derive_signing_payload(self).unwrap()
     }

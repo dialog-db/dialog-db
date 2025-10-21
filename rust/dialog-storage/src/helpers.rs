@@ -48,6 +48,8 @@ where
 }
 
 /// Create a REST-based storage backend with default binary key/value types
-pub fn make_rest_binary_storage(config: RestStorageConfig) -> Result<RestStorageBackend<Vec<u8>, Vec<u8>>> {
+pub fn make_rest_binary_storage(
+    config: RestStorageConfig,
+) -> Result<RestStorageBackend<Vec<u8>, Vec<u8>>> {
     make_rest_storage(config)
 }
