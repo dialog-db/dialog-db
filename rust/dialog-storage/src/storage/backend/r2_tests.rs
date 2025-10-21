@@ -1,18 +1,13 @@
-//! Integration tests for R2 storage backend
+//! Integration tests for S3/R2 storage backend
 //!
-//! These tests will only run when the following environment variables are set:
-//! - R2_KEY: R2 access key
-//! - R2_SECRET: R2 secret key
-//! - R2_URL: R2 endpoint URL
-//! - R2_BUCKET: R2 bucket name (optional, will use "dialog-test-bucket" if not set)
-//!
-//! To run these tests specifically:
-//! ```
-//! export R2_KEY=your_access_key
-//! export R2_SECRET=your_secret_key
-//! export R2_URL=https://your-account.r2.cloudflarestorage.com
-//! export R2_BUCKET=your-bucket-name
-//! cargo test --package dialog-storage -- storage::backend::r2_tests
+//! Run with environment variables:
+//! ```bash
+//! R2S3_HOST=https://account.r2.cloudflarestorage.com \
+//!   R2S3_REGION=auto \
+//!   R2S3_BUCKET=my-bucket \
+//!   R2S3_ACCESS_KEY_ID=xxx \
+//!   R2S3_SECRET_ACCESS_KEY=yyy \
+//!   cargo test --package dialog-storage -- storage::backend::r2_tests
 //! ```
 
 use std::env;
@@ -63,7 +58,7 @@ fn setup_r2_backend() -> Result<RestStorageBackend<Vec<u8>, Vec<u8>>, DialogStor
     let config = RestStorageConfig {
         endpoint: env::var("R2S3_HOST").expect("R2S3_HOST environment variable not set"),
         auth_method: AuthMethod::S3(s3_creds),
-        bucket: env::var("R2S3_BUCKET").into(),
+        bucket: Some(env::var("R2S3_BUCKET").expect("R2S3_BUCKET environment variable not set")),
         key_prefix: Some(prefix),
         headers: Vec::new(),
         ..Default::default()
