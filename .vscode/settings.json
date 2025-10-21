@@ -1,12 +1,14 @@
 {
-  "rust-analyzer.cargo.target": "wasm32-unknown-unknown",
-  "rust-analyzer.procMacro.ignored": {
-    "async-trait": ["async_trait"]
-  },
-  "[github-actions-workflow]": {
-    "prettier.singleQuote": true
-  },
-  "[jsonc]": {
-    "prettier.tabWidth": 4
-  }
+    "rust-analyzer.cargo.target": null,
+    "rust-analyzer.procMacro.ignored": {
+        "async-trait": [
+            "async_trait"
+        ]
+    },
+    "[github-actions-workflow]": {
+        "prettier.singleQuote": true
+    },
+    "[jsonc]": {
+        "prettier.tabWidth": 4
+    }
 }
