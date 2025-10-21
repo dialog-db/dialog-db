@@ -9,6 +9,8 @@ use crate::IndexedDbStorageBackend;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use base58::ToBase58;
 
+use crate::{RestStorageBackend, RestStorageConfig};
+
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 type MakeTargetStorageOutput<K> = (IndexedDbStorageBackend<K, Vec<u8>>, ());
 #[cfg(not(target_arch = "wasm32"))]
@@ -34,4 +36,20 @@ where
         let storage = FileSystemStorageBackend::<K, Vec<u8>>::new(root.path()).await?;
         Ok((storage, root))
     }
+}
+
+/// Create a REST-based storage backend for testing or usage
+pub fn make_rest_storage<K, V>(config: RestStorageConfig) -> Result<RestStorageBackend<K, V>>
+where
+    K: AsRef<[u8]> + Clone + dialog_common::ConditionalSync + From<Vec<u8>>,
+    V: AsRef<[u8]> + From<Vec<u8>> + Clone + dialog_common::ConditionalSync,
+{
+    Ok(RestStorageBackend::new(config)?)
+}
+
+/// Create a REST-based storage backend with default binary key/value types
+pub fn make_rest_binary_storage(
+    config: RestStorageConfig,
+) -> Result<RestStorageBackend<Vec<u8>, Vec<u8>>> {
+    make_rest_storage(config)
 }

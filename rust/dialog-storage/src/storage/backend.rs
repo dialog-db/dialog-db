@@ -14,6 +14,12 @@ mod indexeddb;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub use indexeddb::*;
 
+mod rest;
+pub use rest::*;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod r2_tests;
+
 #[cfg(not(target_arch = "wasm32"))]
 mod fs;
 #[cfg(not(target_arch = "wasm32"))]
