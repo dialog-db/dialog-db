@@ -26,7 +26,11 @@ use crate::{
 
 /// Check if the required environment variables are set
 fn r2_env_vars_present() -> bool {
-    env::var("R2_KEY").is_ok() && env::var("R2_SECRET").is_ok() && env::var("R2_URL").is_ok()
+    env::var("R2S3_HOST").is_ok()
+        && env::var("R2S3_REGION").is_ok()
+        && env::var("R2S3_BUCKET").is_ok()
+        && env::var("R2S3_ACCESS_KEY_ID").is_ok()
+        && env::var("R2S3_SECRET_ACCESS_KEY").is_ok()
 }
 
 /// Create a test prefix to isolate test data
@@ -40,17 +44,16 @@ fn test_prefix() -> String {
 
 /// Set up the R2 storage backend with credentials from environment variables
 fn setup_r2_backend() -> Result<RestStorageBackend<Vec<u8>, Vec<u8>>, DialogStorageError> {
-    let r2_key = env::var("R2_KEY").expect("R2_KEY environment variable not set");
-    let r2_secret = env::var("R2_SECRET").expect("R2_SECRET environment variable not set");
-    let r2_url = env::var("R2_URL").expect("R2_URL environment variable not set");
-    let r2_bucket = env::var("R2_BUCKET").unwrap_or_else(|_| "dialog-test-bucket".to_string());
     let prefix = test_prefix();
 
     // Set up S3Credentials for R2
     let s3_creds = S3Credentials {
-        access_key_id: r2_key,
-        secret_access_key: r2_secret,
-        region: "auto".to_string(), // R2 uses "auto" region
+        access_key_id: env::var("R2S3_ACCESS_KEY_ID")
+            .expect("R2S3_ACCESS_KEY_ID environment variable not set"),
+        secret_access_key: env::var("R2S3_SECRET_ACCESS_KEY")
+            .expect("R2S3_ACCESS_KEY_ID environment variable not set"),
+        // Uses "auto" as a fallback region
+        region: env::var("R2S3_REGION").unwrap_or("auto".into()),
         public_read: false,
         expires: 86400, // 24 hours
         session_token: None,
@@ -58,9 +61,9 @@ fn setup_r2_backend() -> Result<RestStorageBackend<Vec<u8>, Vec<u8>>, DialogStor
 
     // Create the config with S3 authentication
     let config = RestStorageConfig {
-        endpoint: r2_url,
+        endpoint: env::var("R2S3_HOST").expect("R2S3_HOST environment variable not set"),
         auth_method: AuthMethod::S3(s3_creds),
-        bucket: Some(r2_bucket),
+        bucket: env::var("R2S3_BUCKET").into(),
         key_prefix: Some(prefix),
         headers: Vec::new(),
         ..Default::default()
