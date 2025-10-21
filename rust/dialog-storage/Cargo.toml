@@ -9,6 +9,7 @@ license.workspace = true
 helpers = ["tempfile", "anyhow", "rand"]
 http_tests = []
 r2_tests = []
+s3_integration_tests = []
 
 [dependencies]
 dialog-common = { workspace = true }
@@ -45,14 +46,19 @@ wasm-bindgen = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 blake3 = { workspace = true }
-chrono = "0.4"
-tokio-test = "0.4"
-mockito = "1.2"
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0"
 rand = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+bytes = "1.0"
+chrono = "0.4"
+tokio-test = "0.4"
+mockito = "1.2"
+s3s = "0.12.0-rc.3"
+hyper = "1.0"
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+http-body-util = "0.1"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = [
   "sync",

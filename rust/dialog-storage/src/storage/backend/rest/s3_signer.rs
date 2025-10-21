@@ -147,28 +147,28 @@ impl Authorization {
 
         // Get host from options
         let host = derive_host(options)?;
-        
+
         // Create base URL
         let url_str = format!("https://{}/{}", host, options.key);
         let base_url = Url::parse(&url_str)?;
-        
+
         // Create headers
         let mut base_headers = HeaderMap::new();
         base_headers.insert(
             HeaderName::from_static(HOST_HEADER),
             HeaderValue::from_str(&host)?,
         );
-        
+
         if let Some(checksum) = &options.checksum {
             base_headers.insert(
                 HeaderName::from_static(CHECKSUM_SHA256),
                 HeaderValue::from_str(checksum)?,
             );
         }
-        
+
         // Derive credential scope
         let scope = derive_scope(&date, &options.region, &options.service);
-        
+
         // Create instance to compute all components
         let mut auth = Self {
             service: options.service.clone(),
@@ -187,41 +187,41 @@ impl Authorization {
             session_token: credentials.session_token.clone(),
             public_read: options.public_read,
             url: base_url,
-            signature: String::new(),  // Will be computed later
-            signing_key: Vec::new(),   // Will be computed later
+            signature: String::new(),         // Will be computed later
+            signing_key: Vec::new(),          // Will be computed later
             signed_headers: HeaderMap::new(), // Will be computed later
-            search_params: Vec::new(), // Will be computed later
+            search_params: Vec::new(),        // Will be computed later
         };
-        
+
         // Compute the signed headers
         auth.signed_headers = derive_headers(&auth)?;
-        
-        // Compute search parameters 
+
+        // Compute search parameters
         auth.search_params = derive_search_params(&auth)?;
-        
+
         // Compute signing key
         auth.signing_key = derive_signing_key(&auth)?;
-        
+
         // Calculate signature
         let signing_payload = derive_signing_payload(&auth)?;
         auth.signature = hex_encode(&hmac_sign(&auth.signing_key, signing_payload.as_bytes()));
-        
+
         // Build the final URL
         auth.url = build_url(&auth)?;
-        
+
         Ok(auth)
     }
-    
+
     /// Get the payload header string
     pub fn payload_header(&self) -> String {
         derive_payload_header(self)
     }
-    
+
     /// Get the payload body string
     pub fn payload_body(&self) -> String {
         derive_payload_body(self).unwrap()
     }
-    
+
     /// Get the complete signing payload string
     pub fn signing_payload(&self) -> String {
         derive_signing_payload(self).unwrap()
@@ -232,16 +232,16 @@ impl Authorization {
 fn build_url(auth: &Authorization) -> Result<Url, Box<dyn std::error::Error>> {
     let url_str = format!("https://{}{}", auth.host, auth.pathname);
     let mut url = Url::parse(&url_str)?;
-    
+
     // Add all search parameters
     for (name, value) in &auth.search_params {
         url.query_pairs_mut().append_pair(name, value);
     }
-    
+
     // Add the signature
     url.query_pairs_mut()
         .append_pair(AMZ_SIGNATURE_QUERY_PARAM, &auth.signature);
-    
+
     Ok(url)
 }
 
@@ -254,11 +254,11 @@ pub fn format_timestamp(time: &DateTime<Utc>) -> String {
 fn derive_signing_payload(auth: &Authorization) -> Result<String, Box<dyn std::error::Error>> {
     let payload_header = derive_payload_header(auth);
     let payload_body = derive_payload_body(auth)?;
-    
+
     // Hash the payload body
     let body_hash = sha256_hash(payload_body.as_bytes());
     let body_hash_hex = hex_encode(&body_hash);
-    
+
     // Combine the header and body hash
     Ok(format!("{}\n{}", payload_header, body_hash_hex))
 }
@@ -267,9 +267,7 @@ fn derive_signing_payload(auth: &Authorization) -> Result<String, Box<dyn std::e
 fn derive_payload_header(auth: &Authorization) -> String {
     format!(
         "{}\n{}\n{}",
-        ALGORITHM_IDENTIFIER,
-        auth.timestamp,
-        auth.scope
+        ALGORITHM_IDENTIFIER, auth.timestamp, auth.scope
     )
 }
 
@@ -277,25 +275,20 @@ fn derive_payload_header(auth: &Authorization) -> String {
 fn derive_payload_body(auth: &Authorization) -> Result<String, Box<dyn std::error::Error>> {
     // Generate search params URL string
     let search_params_str = format_search_params(&auth.search_params)?;
-    
+
     // Format the headers string
     let headers_str = format_headers(&auth.signed_headers);
-    
+
     // Get signed headers string
     let signed_headers_str = format_signed_headers(&auth.signed_headers);
-    
+
     // Format the pathname
     let path = format_path(&auth.pathname);
-    
+
     // Build the complete body
     Ok(format!(
         "{}\n{}\n{}\n{}\n\n{}\n{}",
-        auth.method,
-        path,
-        search_params_str,
-        headers_str,
-        signed_headers_str,
-        UNSIGNED_PAYLOAD
+        auth.method, path, search_params_str, headers_str, signed_headers_str, UNSIGNED_PAYLOAD
     ))
 }
 
@@ -306,27 +299,28 @@ pub fn format_path(pathname: &str) -> String {
 
 /// Format headers according to AWS requirements
 pub fn format_headers(headers: &HeaderMap) -> String {
-    let mut header_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    
+    let mut header_map: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
     // Process all headers and gather values
     for (name, value) in headers.iter() {
         let key = name.as_str().to_lowercase();
         let val = value.to_str().unwrap_or_default().trim().to_string();
-        
+
         header_map.entry(key).or_default().push(val);
     }
-    
+
     // Sort the keys
     let mut keys: Vec<String> = header_map.keys().cloned().collect();
     keys.sort();
-    
+
     // Format lines
     let mut lines = Vec::new();
     for key in keys {
         let values = header_map.get(&key).unwrap();
         lines.push(format!("{}:{}", key, values.join(";")));
     }
-    
+
     // Join with newlines
     lines.join("\n")
 }
@@ -335,29 +329,29 @@ pub fn format_headers(headers: &HeaderMap) -> String {
 fn format_search_params(params: &[(String, String)]) -> Result<String, Box<dyn std::error::Error>> {
     let mut seen_keys = std::collections::HashSet::new();
     let mut filtered_params = Vec::new();
-    
+
     // Filter with the same logic as TypeScript
     for (key, value) in params {
         if key.is_empty() || seen_keys.contains(key) {
             continue;
         }
-        
+
         seen_keys.insert(key.clone());
         filtered_params.push((key.clone(), value.clone()));
     }
-    
+
     // Sort parameters
     filtered_params.sort_by(|(k1, v1), (k2, v2)| match k1.cmp(k2) {
         std::cmp::Ordering::Equal => v1.cmp(v2),
         other => other,
     });
-    
+
     // Build query string with correct encoding
     let query_parts: Vec<String> = filtered_params
         .iter()
         .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
         .collect();
-    
+
     Ok(query_parts.join("&"))
 }
 
@@ -371,12 +365,12 @@ fn format_signed_headers(headers: &HeaderMap) -> String {
 /// Create signed headers
 fn derive_headers(auth: &Authorization) -> Result<HeaderMap, Box<dyn std::error::Error>> {
     let mut headers = HeaderMap::new();
-    
+
     // Copy headers from the base
     for (name, value) in auth.base_headers.iter() {
         headers.insert(name.clone(), value.clone());
     }
-    
+
     // Ensure host is set
     if !headers.contains_key(HOST_HEADER) {
         headers.insert(
@@ -384,7 +378,7 @@ fn derive_headers(auth: &Authorization) -> Result<HeaderMap, Box<dyn std::error:
             HeaderValue::from_str(&auth.host)?,
         );
     }
-    
+
     // Add checksum if present
     if let Some(checksum) = &auth.checksum {
         headers.insert(
@@ -392,44 +386,49 @@ fn derive_headers(auth: &Authorization) -> Result<HeaderMap, Box<dyn std::error:
             HeaderValue::from_str(checksum)?,
         );
     }
-    
+
     Ok(headers)
 }
 
 /// Create search parameters
-fn derive_search_params(auth: &Authorization) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+fn derive_search_params(
+    auth: &Authorization,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
     let mut params = Vec::new();
-    
+
     // Add standard parameters
-    params.push((ALGORITHM_QUERY_PARAM.to_string(), ALGORITHM_IDENTIFIER.to_string()));
+    params.push((
+        ALGORITHM_QUERY_PARAM.to_string(),
+        ALGORITHM_IDENTIFIER.to_string(),
+    ));
     params.push((SHA256_HEADER.to_string(), UNSIGNED_PAYLOAD.to_string()));
-    
+
     // Add credential
     params.push((
         CREDENTIAL_QUERY_PARAM.to_string(),
         format!("{}/{}", auth.credentials.access_key_id, auth.scope),
     ));
-    
+
     // Add date and expiration
     params.push((AMZ_DATE_QUERY_PARAM.to_string(), auth.timestamp.clone()));
     params.push((EXPIRES_QUERY_PARAM.to_string(), auth.expires.to_string()));
-    
+
     // Add session token if present
     if let Some(token) = &auth.session_token {
         params.push((AMZ_SECURITY_TOKEN_QUERY_PARAM.to_string(), token.clone()));
     }
-    
+
     // Add ACL if public read
     if auth.public_read {
         params.push((AMZ_ACL_QUERY_PARAM.to_string(), PUBLIC_READ.to_string()));
     }
-    
+
     // Add signed headers
     params.push((
         SIGNED_HEADERS_QUERY_PARAM.to_string(),
         format_signed_headers(&auth.signed_headers),
     ));
-    
+
     Ok(params)
 }
 
@@ -444,7 +443,7 @@ fn derive_host(options: &SignOptions) -> Result<String, Box<dyn std::error::Erro
     } else {
         format!("{}.s3.{}.amazonaws.com", options.bucket, options.region)
     };
-    
+
     Ok(host)
 }
 
@@ -511,8 +510,8 @@ pub fn percent_encode(s: &str) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use std::collections::HashMap;
     use reqwest::header::HeaderMap;
+    use std::collections::HashMap;
 
     /// Utility function to extract the signature from a URL for easier testing
     fn extract_signature_from_url(url: &str) -> String {
@@ -523,7 +522,7 @@ mod tests {
             .expect("Signature not found in URL")
             .to_string()
     }
-    
+
     #[test]
     fn test_s3_sign() {
         let auth = authorize(
@@ -555,8 +554,8 @@ mod tests {
 
         // Check the signing key matches
         let expected_key: [u8; 32] = [
-            79, 106, 222, 178, 108, 52, 104, 178, 205, 22, 58, 104, 193, 109, 221, 37,
-            179, 183, 58, 87, 9, 22, 242, 56, 155, 133, 98, 156, 239, 136, 247, 8,
+            79, 106, 222, 178, 108, 52, 104, 178, 205, 22, 58, 104, 193, 109, 221, 37, 179, 183,
+            58, 87, 9, 22, 242, 56, 155, 133, 98, 156, 239, 136, 247, 8,
         ];
         assert_eq!(auth.signing_key, expected_key);
 
@@ -618,8 +617,8 @@ mod tests {
 
         // Check the signing key matches
         let expected_key: [u8; 32] = [
-            79, 106, 222, 178, 108, 52, 104, 178, 205, 22, 58, 104, 193, 109, 221, 37,
-            179, 183, 58, 87, 9, 22, 242, 56, 155, 133, 98, 156, 239, 136, 247, 8,
+            79, 106, 222, 178, 108, 52, 104, 178, 205, 22, 58, 104, 193, 109, 221, 37, 179, 183,
+            58, 87, 9, 22, 242, 56, 155, 133, 98, 156, 239, 136, 247, 8,
         ];
         assert_eq!(auth.signing_key, expected_key);
 
@@ -679,8 +678,8 @@ mod tests {
 
         // Check the signing key matches
         let expected_key: [u8; 32] = [
-            79, 106, 222, 178, 108, 52, 104, 178, 205, 22, 58, 104, 193, 109, 221, 37,
-            179, 183, 58, 87, 9, 22, 242, 56, 155, 133, 98, 156, 239, 136, 247, 8,
+            79, 106, 222, 178, 108, 52, 104, 178, 205, 22, 58, 104, 193, 109, 221, 37, 179, 183,
+            58, 87, 9, 22, 242, 56, 155, 133, 98, 156, 239, 136, 247, 8,
         ];
         assert_eq!(auth.signing_key, expected_key);
 
@@ -742,8 +741,8 @@ mod tests {
 
         // Check the signing key matches
         let expected_key: [u8; 32] = [
-            79, 106, 222, 178, 108, 52, 104, 178, 205, 22, 58, 104, 193, 109, 221, 37,
-            179, 183, 58, 87, 9, 22, 242, 56, 155, 133, 98, 156, 239, 136, 247, 8,
+            79, 106, 222, 178, 108, 52, 104, 178, 205, 22, 58, 104, 193, 109, 221, 37, 179, 183,
+            58, 87, 9, 22, 242, 56, 155, 133, 98, 156, 239, 136, 247, 8,
         ];
         assert_eq!(auth.signing_key, expected_key);
 
@@ -774,7 +773,7 @@ mod tests {
 
     #[test]
     fn test_derive_scope() {
-        let date = "20220101";  // The input date should be just the date part, not the full timestamp
+        let date = "20220101"; // The input date should be just the date part, not the full timestamp
         let region = "us-east-1";
         let service = "s3";
 

@@ -17,7 +17,7 @@ pub use indexeddb::*;
 mod rest;
 pub use rest::*;
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod r2_tests;
 
 #[cfg(not(target_arch = "wasm32"))]
