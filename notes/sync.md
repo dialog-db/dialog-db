@@ -255,53 +255,77 @@ Merge logic could be described as follows
 ```rs
 #[derive(Debug, Clone)]
 pub enum Replica {
-    /// Replica in a state where current tree has diverged from /// the origin tree.
-    Diverged { remote: Remote, origin: Tree, tree: Tree }
-    /// Replica in a state where it has changes since last push.
-    Converged { remote: Remote, tree: Tree }
+    /// Replica in a state where current tree has diverged from the origin tree.
+    Diverged {
+        branch: Branch,
+        origin: Tree,
+        tree: Tree,
+    }
+    /// Replica in a state where it is same as the origin tree.
+    Converged {
+        branch: Branch,
+        tree: Tree
+    }
 }
 
-impl Replica {
+impl<R: Remote> Replica<R> {
   /// Computed changes that were made since last push
   pub fn changes(&self) -> impl Differntial {
       match self {
-        Converged { .. } => Differential::empty(),
-        Diverged { origin, tree, .. } => Differntial::from((draft, origin))
+        Self::Converged { .. } => Differential::empty(),
+        Self::Diverged { origin, tree, .. } => Differntial::from((draft, origin))
       }
   }
 
   pub fn origin(&self) -> &Tree {
     match self {
-      Converged { tree ..} => tree,
-      Diverged { origin, .. } => origin,
+      Self::Converged { tree ..} => tree,
+      Self::Diverged { origin, .. } => origin,
     }
   }
 
   pub fn tree(&self) -> &Tree {
     match self {
-        Converged { tree, .. } => tree,
-        Diverged { tree, .. } => tree,
+        Self::Converged { tree, .. } => tree,
+        Self::Diverged { tree, .. } => tree,
     }
   }
 
-  async fn pull(&mut self) -> Result<&mut Self> {
-    let remote = self.remote();
-    let revision = self.remote.fetch().await?;
+    pub fn branch(&self) -> &Branch {
+        match self {
+            Self::Converged { branch, .. } => branch,
+            Self::Diverged { branch, .. } => branch,
+        }
+    }
 
+  async fn pull(&mut self) -> Result<&mut Self> {
+      let revision = self.branch().fetch().await?;
+      self.rebase(revision).await?
+  }
+
+
+  async fn rebase(&mut self, revision: Revision) -> Result<&mut Self> {
     match self {
-        Converged { remote, tree } => {
-            let revision = self.remote.fetch().await?;
-            if revision != tree.revision()? {
-                *self = Converged(Tree::load(revision)?, remote);
+        Self::Converged { branch, tree } => {
+            // If revision upstream tree changed but we have no
+            // local changes we simply upgrade the tree revision.
+            if revision != tree.revision() {
+                *tree = Tree::load(revision)?;
             };
         }
-        Diverged { remote, origin, tree } => {
-            let revision = self.remote.fetch().await?;
-            if revision != origin.revision()? {
-                let upstream = Tree::load(revision)?;
-                let tree = integrate(upstream, self.changes())?;
+        Self::Diverged { branch, tree, origin } => {
+            if revision != tree.revision()? {
+                let target = Tree::load(revision)?;
+                let tree = target.merge(self.changes()).await?;
 
-                *self = Content { remote, tree };
+                if revision == tree.revision()? {
+                    *self = Self::Converged { branch, tree };
+                }
+                // update origin to the remote tree
+                // and update tree so it contains local changes
+                // on top
+                *origin = target;
+                *tree = tree;
             };
         }
     }
@@ -310,43 +334,49 @@ impl Replica {
   }
 
   async fn push(&mut self) -> Result<&mut Self> {
-      let remote = match self {
-          Converged { remote, .. } => remote,
-          Diverged { remote, .. } => remote,
-      };
-
      loop {
-        let revision = self.tree();
-        if let Ok(_) = remote.publish(tree.revision()).await {
-          *self = Converged(remote, tree);
-          return Ok(self);
-        } else {
-          self.pull().await?;
-        }
+        match self {
+            // we have no changes so we are done
+            Self::Converged { branch, tree } => {
+                return Ok(self);
+            }
+            Self::Diverged { branch, tree, origin } => {
+                let publish = branch
+                    .swap(origin.revision()? tree.revision()?;
+
+                match publish {
+                    // if swapped successfully we've converged
+                    Ok(_) => {
+                        self* = Self::Converged { branch, tree };
+                        return Ok(self);
+                    }
+                    // if revision has shanged upstream we need
+                    // to rebase our changes on top.
+                    Err(Swap::RevisionMismatch { actual, .. }) => {
+                        self.rebase(actual);
+                    }
+                    // Other errors propagate.
+                    Err(err) => {
+                        return Err(err);
+                    }
+                };
+            }
+         }
      }
   }
 }
 
-pub enum Remote {
-    Ephemeral(RwLock<Revision>),
+/// The RevisionUpgrade type encodes compare-and-swap semantics:
+pub struct RevisionUpgrade {
+    pub revision: Revision,  // The new revision to publish
+    pub origin: Revision,    // The expected current revision (for CAS)
 }
 
-impl Remote {
-    pub fn revision(&self) -> Result<Revision> {
-        match {
-            Self::Ephemeral(lock) => lock.get_cloned()
-        }
-    }
-    pub async fn fetch(&mut self) -> Result<Revision> {
-        self.revision()
-    }
-    pub async fn publish(&mut self, revision: &Revision) -> Result<Revision> {
-        match {
-            Self::Ephemeral(lock) => lock.set(revision)
-        }
-    }
-}
-
+pub trait RevisionStorageBackend:
+    StorageBackend<
+        Key = Subject,
+        Value = RevisionUpgrade,
+        Error = RevisionBackendError> {}
 ```
 
 ### Differentiation

@@ -1,9 +1,9 @@
+use super::Blake3Hash;
+use crate::DialogArtifactsError;
+use base58::ToBase58;
 use dialog_storage::{CborEncoder, Encoder};
 use serde::{Deserialize, Serialize};
-
-use crate::DialogArtifactsError;
-
-use super::Blake3Hash;
+use std::fmt::{Display, Formatter};
 
 /// A hash representing a null [`Revision`] that represents an empty (perhaps
 /// newly created) [`Artifacts`].
@@ -38,5 +38,12 @@ impl Revision {
     /// reference to the bytes
     pub async fn as_reference(&self) -> Result<Blake3Hash, DialogArtifactsError> {
         Ok(CborEncoder.encode(self).await?.0)
+    }
+}
+
+impl Display for Revision {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let bytes: &[u8] = self.index();
+        write!(f, "#{}", ToBase58::to_base58(bytes))
     }
 }
