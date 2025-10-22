@@ -10,12 +10,12 @@
 
 ## Architecture Overview
 
-A **Mutable Pointer** represents the canonical shared root of a tree, while the **Archive** stores immutable, hash-addressed blobs representing tree nodes.
+Dialog synchronization changes through git like remotes. Remote consists of a revision **Register** that holds record announcing canonical root of the search tree and tree **Archive** that stores immutable, hash-addressed blobs representing tree nodes.
 
 ```mermaid
 graph TD
     subgraph Remote
-        A[Mutable Pointer]
+        A[Register]
         B[Archive Store S3/IPFS/R2]
     end
 
@@ -35,29 +35,29 @@ The synchronization process follows this sequence:
 sequenceDiagram
     participant Archive
     participant Local
-    participant Remote Pointer
-    Local->>Remote Pointer: HEAD /did (query root)
-    Remote Pointer-->>Local: 200 ETag=abc123
+    participant Register
+    Local->>Register: HEAD /did (query root)
+    Register-->>Local: 200 ETag=abc123
     Local->>Archive: GET blobs for root abc123 (Fetch)
     Archive-->>Local: 200
-		
+
     Local->>Local: merge(local, remote)
     Local->>Archive: PUT new blobs (Put)
-    Local->>Remote Pointer: PATCH /did (Push)
+    Local->>Register: PATCH /did (Push)
     Remote Pointer-->>Local: 200 OK or 412 Precondition Failed
 ```
 
 ---
 
-## Mutable Pointer
+## Register
 
-A **Mutable Pointer** represents the shared state of the tree and serves as a single authoritative reference — conceptually similar to a Git remote reference. It stores only the root hash and enforces access and consistency constraints.
+A **Register** represents the shared state of the tree and serves as a single authoritative reference — conceptually similar to a Git remote reference. It stores only the root hash and enforces access and consistency constraints.
 
-### Query Mutable Pointer
+### Query Register
 
 #### Authorization
 
-A `HEAD` request is used to query the latest known root of the tree. 
+A `HEAD` request is used to query the latest known root of the tree.
 
 Requests **MUST** include a valid `Authorization` header:
 
@@ -77,7 +77,7 @@ The payload has the following structure:
 }
 ```
 
-The signer **MUST** match `payload.iss`, `payload.sub`, and the `did:key` being queried. 
+The signer **MUST** match `payload.iss`, `payload.sub`, and the `did:key` being queried.
 If authorization is invalid, the server **MUST** return `401 Unauthorized`.
 
 > ℹ️ In future versions, [UCAN][]s or other decentralized auth mechanisms may replace this simple signature-based scheme.
@@ -97,11 +97,11 @@ last-modified: Tue, 23 Sep 2025 05:41:40 GMT
 ETag: af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
 ```
 
-> ℹ️ In the future we may add `GET` request support to read latest payload that was published. 
+> ℹ️ In the future we may add `GET` request support to read latest payload that was published.
 
 ---
 
-### Update Mutable Pointer
+### Update Register
 
 Updating a mutable pointer follows [Compare-and-Swap](https://en.wikipedia.org/wiki/Compare-and-swap) semantics:
 the remote root is updated from `A → B`, where
@@ -190,12 +190,12 @@ Content-Type: application/json
 
 ## Archive
 
-The **Archive** is a shared data store over a commodity backend such as S3, R2, or IPFS. 
+The **Archive** is a shared data store over a commodity backend such as S3, R2, or IPFS.
 It stores **hash-addressed blobs** representing encoded tree index and segment nodes.
 
 Access control (read/write) is managed out of band and tied directly to the backend’s authentication.
 
-> **Note:** The Mutable Pointer is fully decoupled from the archive — it SHOULD NOT have access to it, nor verify that uploaded roots are archived.
+> **Note:** The **register** is fully decoupled from the **archive** — it SHOULD NOT have access to it, nor verify that uploaded roots are archived.
 
 More advanced implementations may require proof-based updates (e.g., Merkle inclusion proofs or signed archive commitments) to enforce stronger consistency invariants.
 
@@ -214,7 +214,7 @@ The **Fetch** phase discovers the latest remote state and materializes a **parti
 Steps:
 
 1. Determine the last known remote root (`ETag`).
-2. Query the mutable pointer for the current remote root.
+2. Query the register for the current remote root.
 3. Load tree from the root, which will get root node from archive unless it's available in local cache.
 
 Fetch create replica of the tree that in the next phase can be merged into a local replica.
@@ -239,7 +239,7 @@ In order to merge local and remote trees we need to identify what changes have o
   │  └─ P11@g                    │  └─ P11@g
   │     └─ ...                   │     └─ ...
 ► └─ P17@b                       └─ P88@w
-     ├─ ...                         └─ ...    
+     ├─ ...                         └─ ...
      └─ P17@k
         └─ ...
 ```
@@ -254,54 +254,99 @@ Merge logic could be described as follows
 
 ```rs
 #[derive(Debug, Clone)]
-pub struct Replica {
-  current: Tree
-  checkpoint: Tree
-  upstream: MutablePointer
+pub enum Replica {
+    /// Replica in a state where current tree has diverged from /// the origin tree.
+    Diverged { remote: Remote, origin: Tree, tree: Tree }
+    /// Replica in a state where it has changes since last push.
+    Converged { remote: Remote, tree: Tree }
 }
 
 impl Replica {
   /// Computed changes that were made since last push
-  fn changes(&self) -> impl Differntial {
-     Differntial::from((self.current, self.checkpoint))
+  pub fn changes(&self) -> impl Differntial {
+      match self {
+        Converged { .. } => Differential::empty(),
+        Diverged { origin, tree, .. } => Differntial::from((draft, origin))
+      }
   }
-  
-  /// Computes `remote` tree with local changes. Expects
-  /// remote to be diverged from remote
-  async fn merge(&mut self, remote: &Tree) -> Result<&mut Self> {
-    // if remote has not changed from last chekpoint
-    // replica represents current state
-    if remote.root() != self.checkpoint.root() {
-      // inegrate changes into remote tree to derive
-      // merged tree & produce new replica with it
-      // and old checkpoint
-      self.current = integrate(remote, self.changes())?;
+
+  pub fn origin(&self) -> &Tree {
+    match self {
+      Converged { tree ..} => tree,
+      Diverged { origin, .. } => origin,
     }
-    
-    Ok(self)
   }
-  
+
+  pub fn tree(&self) -> &Tree {
+    match self {
+        Converged { tree, .. } => tree,
+        Diverged { tree, .. } => tree,
+    }
+  }
+
   async fn pull(&mut self) -> Result<&mut Self> {
-    let root = self.upstream.query().await?;
-    if root != self.checkpoint.root() {
-       self.merge(Tree::load(root)).await;
-    } 
-    
-    
+    let remote = self.remote();
+    let revision = self.remote.fetch().await?;
+
+    match self {
+        Converged { remote, tree } => {
+            let revision = self.remote.fetch().await?;
+            if revision != tree.revision()? {
+                *self = Converged(Tree::load(revision)?, remote);
+            };
+        }
+        Diverged { remote, origin, tree } => {
+            let revision = self.remote.fetch().await?;
+            if revision != origin.revision()? {
+                let upstream = Tree::load(revision)?;
+                let tree = integrate(upstream, self.changes())?;
+
+                *self = Content { remote, tree };
+            };
+        }
+    }
+
     Ok(self)
   }
-  
-  async fn push(&self) -> Result<&mut Self> {
+
+  async fn push(&mut self) -> Result<&mut Self> {
+      let remote = match self {
+          Converged { remote, .. } => remote,
+          Diverged { remote, .. } => remote,
+      };
+
      loop {
-        let checkpoint = self.current.clone()
-        if let Ok(_) = upstream.assert(checkpoint.root()).await {
-          self.checkpoint = checkpoint
+        let revision = self.tree();
+        if let Ok(_) = remote.publish(tree.revision()).await {
+          *self = Converged(remote, tree);
+          return Ok(self);
         } else {
           self.pull().await?;
         }
      }
   }
 }
+
+pub enum Remote {
+    Ephemeral(RwLock<Revision>),
+}
+
+impl Remote {
+    pub fn revision(&self) -> Result<Revision> {
+        match {
+            Self::Ephemeral(lock) => lock.get_cloned()
+        }
+    }
+    pub async fn fetch(&mut self) -> Result<Revision> {
+        self.revision()
+    }
+    pub async fn publish(&mut self, revision: &Revision) -> Result<Revision> {
+        match {
+            Self::Ephemeral(lock) => lock.set(revision)
+        }
+    }
+}
+
 ```
 
 ### Differentiation
@@ -360,6 +405,6 @@ Target tree may contain an entry for the same key with a same hash, in that cas 
 
 ## Consistency Model
 
-This protocol provides **eventual consistency** with **deterministic convergence**.  
-Each peer maintains an immutable local tree (partial replica) and coordinates via a single mutable pointer that serves as the canonical root reference.  
+This protocol provides **eventual consistency** with **deterministic convergence**.
+Each peer maintains an immutable local tree (partial replica) and coordinates via a single mutable pointer that serves as the canonical root reference.
 Given identical merge strategies and histories, all replicas converge to the same state.
