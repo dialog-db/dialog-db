@@ -254,129 +254,130 @@ Merge logic could be described as follows
 
 ```rs
 #[derive(Debug, Clone)]
-pub enum Replica {
-    /// Replica in a state where current tree has diverged from the origin tree.
-    Diverged {
-        branch: Branch,
-        origin: Tree,
-        tree: Tree,
-    }
-    /// Replica in a state where it is same as the origin tree.
-    Converged {
-        branch: Branch,
-        tree: Tree
-    }
+pub struct Branch {
+    /// Local branch identifier identifier
+    id: String,
+
+    /// Revision from from which working in tree evolved.
+    origin: Revision,
+    /// Current revision of the tree.
+    current: Revision,
+
+    /// Upstream represents coordination mechanism with collaborators,
+    /// where you can fetch latest agreed upon revision and where you
+    /// can publish new revision so others can integrate it into their
+    /// work tree.
+    upstream: Option<Uri>,
 }
 
-impl<R: Remote> Replica<R> {
-  /// Computed changes that were made since last push
-  pub fn changes(&self) -> impl Differntial {
-      match self {
-        Self::Converged { .. } => Differential::empty(),
-        Self::Diverged { origin, tree, .. } => Differntial::from((draft, origin))
-      }
-  }
+pub struct RevisionChange {
+    revision: Revision,
+    origin: Option<Revision>,
+}
 
-  pub fn origin(&self) -> &Tree {
-    match self {
-      Self::Converged { tree ..} => tree,
-      Self::Diverged { origin, .. } => origin,
-    }
-  }
 
-  pub fn tree(&self) -> &Tree {
-    match self {
-        Self::Converged { tree, .. } => tree,
-        Self::Diverged { tree, .. } => tree,
-    }
-  }
+pub struct Replica<B: Backend> {
+    branch: Branch,
+    backend: B
+}
 
-    pub fn branch(&self) -> &Branch {
-        match self {
-            Self::Converged { branch, .. } => branch,
-            Self::Diverged { branch, .. } => branch,
+trait Backend {
+    fn artifacts(&self) -> impl StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = ArchiveStorageError>;
+
+    fn revisions(&self) -> impl AtomicStorageBackend<Key = String, Value = Revision, Error = RevisionStorageError>;
+}
+
+impl<B: Backend> Replica<B> {
+    /// Computed changes that were made since last push
+    pub fn changes(&self) -> impl Differntial {
+        if self.branch.current != self.branch.origin {
+            let current = Tree::load(self.backend, self.branch.current);
+            let origin = Tree::load(self.backend, self.branch.origin);
+            Differntial::from((current, origin))
+        } else {
+            Differntial::empty()
         }
     }
 
-  async fn pull(&mut self) -> Result<&mut Self> {
-      let revision = self.branch().fetch().await?;
-      self.rebase(revision).await?
-  }
-
-
-  async fn rebase(&mut self, revision: Revision) -> Result<&mut Self> {
-    match self {
-        Self::Converged { branch, tree } => {
-            // If revision upstream tree changed but we have no
-            // local changes we simply upgrade the tree revision.
-            if revision != tree.revision() {
-                *tree = Tree::load(revision)?;
-            };
+    /// Pulls latest revision from the audience
+    async fn pull(&mut self) -> Result<&mut Self> {
+        if let Some(upstream) = self.branch.upstream {
+            let revisions = self.backend.revisions();
+            let revision = revisions.resolve(&upstream).await?;
+            self.rebase(revision).await?
         }
-        Self::Diverged { branch, tree, origin } => {
-            if revision != tree.revision()? {
-                let target = Tree::load(revision)?;
-                let tree = target.merge(self.changes()).await?;
+        Ok(self)
+    }
 
-                if revision == tree.revision()? {
-                    *self = Self::Converged { branch, tree };
+    /// Rebases local changes onto the provided revision.
+    async fn rebase(&mut self, revision: Revision) -> Result<&mut Self> {
+        // If we don't have local changes we simply reset branch to a
+        // provided revision
+        if self.branch.origin == self.branch.current {
+            *self.branch.current = revision;
+            *self.branch.origin = revision;
+        }
+        // If provided revision is the same as current revision we don't // need to rebase changes we simply need to update the branch
+        // origin branch
+        else if revision == self.branch.current {
+            *self.branch.origin = revision;
+        }
+        // Otherwise we compute differential between origin and current
+        // trees and merge them into the tree loaded from the the
+        // provided revision.
+        else {
+            let target = Tree::load(self.backend, revision)?;
+            let tree = target.merge(self.changes()).await?;
+            let revision = tree.revision()?;
+
+            *self.branch.current = revision;
+            *self.branch.origin = revision;
+        }
+
+        Ok(self)
+    }
+
+    /// Pushes local changes to the upstream.
+    async fn push(&mut self) -> Result<&mut Self> {
+        if let Some(upstream) = self.branch.upstream {
+            let revisions = self.backend.revisions();
+            loop {
+                match self {
+                    // capture because current branch can change while
+                    // we're pushing
+                    let revision = self.current.branch.clone();
+                    let origin = if self.origin.isEmpty() {
+                        None
+                    } else {
+                        Some(self.origin.clone())
+                    };
+
+                    let upgrade = revisions.swap(
+                        upstream.clone(),
+                        revision.clone(),
+                        origin
+                    );
+
+                    match upgrade {
+                        // if swapped successfully we've converged
+                        Ok(_) => {
+                            self.branch.origin = revision;
+                        }
+                        // if revision has shanged upstream we need
+                        // to rebase our changes on top.
+                        Err(Swap::RevisionMismatch { actual, .. }) => {
+                            self.rebase(actual);
+                        }
+                        // Other errors propagate.
+                        Err(err) => {
+                            return Err(err);
+                        }
+                    }
                 }
-                // update origin to the remote tree
-                // and update tree so it contains local changes
-                // on top
-                *origin = target;
-                *tree = tree;
-            };
+            }
         }
     }
-
-    Ok(self)
-  }
-
-  async fn push(&mut self) -> Result<&mut Self> {
-     loop {
-        match self {
-            // we have no changes so we are done
-            Self::Converged { branch, tree } => {
-                return Ok(self);
-            }
-            Self::Diverged { branch, tree, origin } => {
-                let publish = branch
-                    .swap(origin.revision()? tree.revision()?;
-
-                match publish {
-                    // if swapped successfully we've converged
-                    Ok(_) => {
-                        self* = Self::Converged { branch, tree };
-                        return Ok(self);
-                    }
-                    // if revision has shanged upstream we need
-                    // to rebase our changes on top.
-                    Err(Swap::RevisionMismatch { actual, .. }) => {
-                        self.rebase(actual);
-                    }
-                    // Other errors propagate.
-                    Err(err) => {
-                        return Err(err);
-                    }
-                };
-            }
-         }
-     }
-  }
 }
-
-/// The RevisionUpgrade type encodes compare-and-swap semantics:
-pub struct RevisionUpgrade {
-    pub revision: Revision,  // The new revision to publish
-    pub origin: Revision,    // The expected current revision (for CAS)
-}
-
-pub trait RevisionStorageBackend:
-    StorageBackend<
-        Key = Subject,
-        Value = RevisionUpgrade,
-        Error = RevisionBackendError> {}
 ```
 
 ### Differentiation

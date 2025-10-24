@@ -4,15 +4,9 @@
 //! Backends store and retrieve types implementing `RevisionUpgrade` with compare-and-swap semantics.
 
 use dialog_artifacts::Revision;
-use dialog_storage::{DialogStorageError, StorageBackend};
+use dialog_storage::{AtomicStorageBackend, DialogStorageError};
 use std::fmt::Display;
 use thiserror::Error;
-
-mod memory;
-pub use memory::*;
-
-mod rest;
-pub use rest::*;
 
 /// Represents a subject (DID) that owns a revision
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -48,51 +42,9 @@ impl From<&str> for Subject {
     }
 }
 
-/// Trait for types that represent a revision upgrade with compare-and-swap semantics.
-///
-/// Types implementing this trait contain both:
-/// - `revision()` - The new revision being published
-/// - `origin()` - The revision this upgrade is based on (expected current value)
-///
-/// When storing, backends must check that the current revision matches `origin()`
-/// before updating to `revision()`. This provides atomic compare-and-swap semantics.
-pub trait RevisionUpgrade {
-    /// Get the new revision being published
-    fn revision(&self) -> &Revision;
-
-    /// Get the expected current revision (for CAS check)
-    fn origin(&self) -> &Revision;
-}
-
-/// Simple struct implementing RevisionUpgrade
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RevisionUpgradeRecord {
-    /// The new revision
-    pub revision: Revision,
-    /// The prior revision being upgraded from (for CAS check)
-    pub origin: Revision,
-}
-
-impl RevisionUpgradeRecord {
-    /// Create a new revision upgrade
-    pub fn new(origin: Revision, revision: Revision) -> Self {
-        Self { revision, origin }
-    }
-}
-
-impl RevisionUpgrade for RevisionUpgradeRecord {
-    fn revision(&self) -> &Revision {
-        &self.revision
-    }
-
-    fn origin(&self) -> &Revision {
-        &self.origin
-    }
-}
-
 /// Error type for revision backend operations
 #[derive(Debug, Error)]
-pub enum RevisionBackendError {
+pub enum RevisionStorageBackendError {
     /// Access to the subject is not authorized
     #[error("Access to {subject} is not authorized: {reason}")]
     Unauthorized { subject: Subject, reason: String },
@@ -101,8 +53,8 @@ pub enum RevisionBackendError {
     #[error("Upgrading {subject} failed: expected {expected:?}, got {actual:?}")]
     RevisionMismatch {
         subject: Subject,
-        expected: Revision,
-        actual: Revision,
+        expected: Option<Revision>,
+        actual: Option<Revision>,
     },
 
     /// Failed to fetch the current revision
@@ -126,21 +78,18 @@ pub enum RevisionBackendError {
 /// - Key = Subject
 /// - Value: impl RevisionUpgrade
 /// - Error = RevisionBackendError
-pub trait RevisionStorageBackend: StorageBackend<Key = Subject, Error = RevisionBackendError>
-where
-    Self::Value: RevisionUpgrade,
+pub trait RevisionStorageBackend:
+    AtomicStorageBackend<Key = Subject, Value = Revision, Error = RevisionStorageBackendError>
 {
 }
 
-impl<T> RevisionStorageBackend for T
-where
-    T: StorageBackend<Key = Subject, Error = RevisionBackendError>,
-    T::Value: RevisionUpgrade,
+impl<T: AtomicStorageBackend<Key = Subject, Value = Revision, Error = RevisionStorageBackendError>>
+    RevisionStorageBackend for T
 {
 }
 
-impl From<RevisionBackendError> for DialogStorageError {
-    fn from(error: RevisionBackendError) -> Self {
+impl From<RevisionStorageBackendError> for DialogStorageError {
+    fn from(error: RevisionStorageBackendError) -> Self {
         DialogStorageError::StorageBackend(error.to_string())
     }
 }
