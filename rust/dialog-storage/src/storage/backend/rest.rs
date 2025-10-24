@@ -6,8 +6,6 @@ use base58::ToBase58;
 use base64::Engine;
 use dialog_common::ConditionalSync;
 use futures_util::Stream;
-use md5;
-use reqwest::{Client, Request as ReqwestRequest, RequestBuilder};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
@@ -104,7 +102,7 @@ impl Authority {
         let access = Access {
             region: self.policy.region.to_string(),
             bucket: request.bucket().into(),
-            key: request.key().into(),
+            key: request.key(),
             checksum: None,
             endpoint: Some(self.policy.host.clone()),
             expires: self.policy.expires,
@@ -178,32 +176,51 @@ pub enum AuthMethod {
     S3(S3Authority),
 }
 
+/// Precondition for PUT operations to enable compare-and-swap semantics
 pub enum Precondition<'a> {
+    /// No precondition - unconditional write
     None,
+    /// Create only if key doesn't exist (If-None-Match: *)
     Create,
+    /// Replace only if current value matches (If-Match: <etag>)
     Replace(&'a [u8]),
 }
 
+/// HTTP request abstraction for S3/R2 operations
 pub enum Request<'a> {
+    /// PUT request to store a value
     Put {
+        /// S3/R2 host endpoint
         host: &'a str,
+        /// Object key (bytes to be encoded)
         key: &'a [u8],
+        /// Object value (body)
         value: &'a [u8],
+        /// Bucket name
         bucket: &'a str,
+        /// Optional key prefix path
         path: Option<&'a str>,
+        /// Precondition for compare-and-swap
         precondition: Precondition<'a>,
+        /// Authentication method
         auth: &'a AuthMethod,
     },
+    /// GET request to retrieve a value
     Get {
+        /// S3/R2 host endpoint
         host: &'a str,
+        /// Bucket name
         bucket: &'a str,
+        /// Optional key prefix path
         path: Option<&'a str>,
+        /// Object key (bytes to be encoded)
         key: &'a [u8],
+        /// Authentication method
         auth: &'a AuthMethod,
     },
 }
 
-impl<'a> Request<'a> {
+impl Request<'_> {
     fn method(&self) -> reqwest::Method {
         match self {
             Request::Put { .. } => reqwest::Method::PUT,
@@ -629,7 +646,7 @@ where
 
         // Add precondition headers to enforce CAS semantics.
         request = match &when {
-            Some(value) => request.header("If-Match", format!("\"{:x}\"", md5::compute(&value))),
+            Some(value) => request.header("If-Match", format!("\"{:x}\"", md5::compute(value))),
             None => request.header("If-None-Match", "*"),
         };
 
