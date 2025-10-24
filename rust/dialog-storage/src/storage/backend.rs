@@ -43,6 +43,34 @@ pub trait StorageBackend: Clone {
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error>;
 }
 
+/// An [AtomicStorageBackend] is a facade over some generalized storage
+/// substrate that is capable of storing values with compare and swap (CAS)
+/// semantics and retrieving values by some key.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait AtomicStorageBackend: Clone {
+    /// The key type used by this [AtomicStorageBackend]
+    type Key: ConditionalSync;
+    /// The value type able to be stored by this [AtomicStorageBackend]
+    type Value: ConditionalSend;
+    /// The error type produced by this [AtomicStorageBackend]
+    type Error: ConditionalSend;
+
+    /// Atomically sets the `value` for the given `key` if `when` is `None`
+    /// and `key` has no value, or if `when` is `Some(value)` and key is set
+    /// to equal `value`. Returns `Ok(())` if value was set, otherwise returns
+    /// an `Error(Self::Error)`.
+    async fn swap(
+        &mut self,
+        key: Self::Key,
+        value: Self::Value,
+        when: Option<Self::Value>,
+    ) -> Result<(), Self::Error>;
+
+    /// Retrieve a value (if any) stored against the given key
+    async fn resolve(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error>;
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<T> StorageBackend for Box<T>
