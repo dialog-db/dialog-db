@@ -3,7 +3,8 @@
 //! This module provides implementations of `StorageBackend` for revision management.
 //! Backends store and retrieve types implementing `RevisionUpgrade` with compare-and-swap semantics.
 
-use dialog_artifacts::Revision;
+// Use the artifacts revision type (not the replica revision type)
+use dialog_artifacts::artifacts::Revision;
 use dialog_storage::{AtomicStorageBackend, DialogStorageError};
 use std::fmt::Display;
 use thiserror::Error;

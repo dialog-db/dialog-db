@@ -4,5 +4,6 @@ pub mod backend;
 
 pub use backend::{RevisionStorageBackend, RevisionStorageBackendError, Subject};
 
-pub use dialog_artifacts::Revision;
+// Re-export the artifacts revision type (not the replica revision type)
+pub use dialog_artifacts::artifacts::Revision;
 pub use dialog_storage::StorageBackend;

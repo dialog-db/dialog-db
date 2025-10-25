@@ -1895,7 +1895,7 @@ mod local_s3_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod s3 {
     use async_trait::async_trait;
     use hyper::server::conn::http1;
