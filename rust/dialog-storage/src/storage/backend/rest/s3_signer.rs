@@ -31,9 +31,89 @@ pub struct Credentials {
     pub session_token: Option<String>,
 }
 
+impl Credentials {
+    pub fn authorize(&self, options: &Access) -> Result<Authorization, Box<dyn std::error::Error>> {
+        // Get current time or use the provided time option
+        let datetime = match options.time {
+            Some(time) => time,
+            None => DateTime::<Utc>::from(SystemTime::now()),
+        };
+
+        // Format the timestamp
+        let timestamp = format_timestamp(&datetime);
+        let date = timestamp[0..8].to_string();
+
+        // Get host from options
+        let host = derive_host(options)?;
+
+        // Create base URL
+        let url_str = format!("https://{}/{}", host, options.key);
+        let base_url = Url::parse(&url_str)?;
+
+        // Create headers
+        let mut base_headers = HeaderMap::new();
+        base_headers.insert(
+            HeaderName::from_static(HOST_HEADER),
+            HeaderValue::from_str(&host)?,
+        );
+
+        if let Some(checksum) = &options.checksum {
+            base_headers.insert(
+                HeaderName::from_static(CHECKSUM_SHA256),
+                HeaderValue::from_str(checksum)?,
+            );
+        }
+
+        // Derive credential scope
+        let scope = derive_scope(&date, &options.region, &options.service);
+
+        // Create instance to compute all components
+        let mut auth = Authorization {
+            service: options.service.clone(),
+            credentials: self.clone(),
+            method: options.method.clone(),
+            host: host.clone(),
+            pathname: base_url.path().to_string(),
+            base_headers,
+            timestamp: timestamp.clone(),
+            date: date.clone(),
+            region: options.region.clone(),
+            bucket: options.bucket.clone(),
+            expires: options.expires,
+            scope: scope.clone(),
+            checksum: options.checksum.clone(),
+            session_token: self.session_token.clone(),
+            public_read: options.public_read,
+            url: base_url,
+            signature: String::new(),         // Will be computed later
+            signing_key: Vec::new(),          // Will be computed later
+            signed_headers: HeaderMap::new(), // Will be computed later
+            search_params: Vec::new(),        // Will be computed later
+        };
+
+        // Compute the signed headers
+        auth.signed_headers = derive_headers(&auth)?;
+
+        // Compute search parameters
+        auth.search_params = derive_search_params(&auth)?;
+
+        // Compute signing key
+        auth.signing_key = derive_signing_key(&auth)?;
+
+        // Calculate signature
+        let signing_payload = derive_signing_payload(&auth)?;
+        auth.signature = hex_encode(&hmac_sign(&auth.signing_key, signing_payload.as_bytes()));
+
+        // Build the final URL
+        auth.url = build_url(&auth)?;
+
+        Ok(auth)
+    }
+}
+
 /// Options for signing an S3/R2 request
 #[derive(Debug, Clone)]
-pub struct SignOptions {
+pub struct Access {
     pub region: String,
     pub bucket: String,
     pub key: String,
@@ -46,7 +126,7 @@ pub struct SignOptions {
     pub time: Option<DateTime<Utc>>,
 }
 
-impl Default for SignOptions {
+impl Default for Access {
     fn default() -> Self {
         Self {
             region: "auto".to_string(),
@@ -61,27 +141,6 @@ impl Default for SignOptions {
             time: None,
         }
     }
-}
-
-/// Create authorization for S3/R2 storage
-pub fn authorize(
-    credentials: &Credentials,
-    options: &SignOptions,
-) -> Result<Authorization, Box<dyn std::error::Error>> {
-    Authorization::create(credentials, options)
-}
-
-/// Sign a URL for AWS S3 or compatible storage (like Cloudflare R2)
-///
-/// This function generates AWS SigV4 signed URLs that are compatible with S3 and R2 storage backends.
-/// It implements the AWS SigV4 algorithm to produce signatures that are compatible with the
-/// TypeScript implementation.
-pub fn sign_url(
-    credentials: &Credentials,
-    options: &SignOptions,
-) -> Result<Url, Box<dyn std::error::Error>> {
-    let auth = authorize(credentials, options)?;
-    Ok(auth.url)
 }
 
 /// Authorization for S3/R2 storage access
@@ -131,88 +190,6 @@ pub struct Authorization {
 }
 
 impl Authorization {
-    /// Create a new authorization
-    pub fn create(
-        credentials: &Credentials,
-        options: &SignOptions,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        // Get current time or use the provided time option
-        let datetime = match options.time {
-            Some(time) => time,
-            None => DateTime::<Utc>::from(SystemTime::now()),
-        };
-
-        // Format the timestamp
-        let timestamp = format_timestamp(&datetime);
-        let date = timestamp[0..8].to_string();
-
-        // Get host from options
-        let host = derive_host(options)?;
-
-        // Create base URL
-        let url_str = format!("https://{}/{}", host, options.key);
-        let base_url = Url::parse(&url_str)?;
-
-        // Create headers
-        let mut base_headers = HeaderMap::new();
-        base_headers.insert(
-            HeaderName::from_static(HOST_HEADER),
-            HeaderValue::from_str(&host)?,
-        );
-
-        if let Some(checksum) = &options.checksum {
-            base_headers.insert(
-                HeaderName::from_static(CHECKSUM_SHA256),
-                HeaderValue::from_str(checksum)?,
-            );
-        }
-
-        // Derive credential scope
-        let scope = derive_scope(&date, &options.region, &options.service);
-
-        // Create instance to compute all components
-        let mut auth = Self {
-            service: options.service.clone(),
-            credentials: credentials.clone(),
-            method: options.method.clone(),
-            host: host.clone(),
-            pathname: base_url.path().to_string(),
-            base_headers,
-            timestamp: timestamp.clone(),
-            date: date.clone(),
-            region: options.region.clone(),
-            bucket: options.bucket.clone(),
-            expires: options.expires,
-            scope: scope.clone(),
-            checksum: options.checksum.clone(),
-            session_token: credentials.session_token.clone(),
-            public_read: options.public_read,
-            url: base_url,
-            signature: String::new(),         // Will be computed later
-            signing_key: Vec::new(),          // Will be computed later
-            signed_headers: HeaderMap::new(), // Will be computed later
-            search_params: Vec::new(),        // Will be computed later
-        };
-
-        // Compute the signed headers
-        auth.signed_headers = derive_headers(&auth)?;
-
-        // Compute search parameters
-        auth.search_params = derive_search_params(&auth)?;
-
-        // Compute signing key
-        auth.signing_key = derive_signing_key(&auth)?;
-
-        // Calculate signature
-        let signing_payload = derive_signing_payload(&auth)?;
-        auth.signature = hex_encode(&hmac_sign(&auth.signing_key, signing_payload.as_bytes()));
-
-        // Build the final URL
-        auth.url = build_url(&auth)?;
-
-        Ok(auth)
-    }
-
     /// Get the payload header string
     #[allow(dead_code)]
     pub fn payload_header(&self) -> String {
@@ -437,7 +414,7 @@ fn derive_search_params(
 }
 
 /// Calculate the host part of the URL
-fn derive_host(options: &SignOptions) -> Result<String, Box<dyn std::error::Error>> {
+fn derive_host(options: &Access) -> Result<String, Box<dyn std::error::Error>> {
     let host = if let Some(endpoint) = &options.endpoint {
         let endpoint_url = Url::parse(endpoint)?;
         let host = endpoint_url.host_str().ok_or_else(|| {
@@ -529,13 +506,14 @@ mod tests {
 
     #[test]
     fn test_s3_sign() {
-        let auth = authorize(
-            &Credentials {
-                access_key_id: "my-id".to_string(),
-                secret_access_key: "top secret".to_string(),
-                session_token: None,
-            },
-            &SignOptions {
+        let credentials = Credentials {
+            access_key_id: "my-id".to_string(),
+            secret_access_key: "top secret".to_string(),
+            session_token: None,
+        };
+
+        let auth = credentials
+            .authorize(&Access {
                 region: "auto".to_string(),
                 bucket: "pale".to_string(),
                 key: "file/path".to_string(),
@@ -546,9 +524,8 @@ mod tests {
                 public_read: false,
                 service: "s3".to_string(),
                 time: Some(Utc.with_ymd_and_hms(2025, 5, 7, 5, 48, 59).unwrap()),
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
 
         // Check the final URL matches exactly
         assert_eq!(
@@ -590,13 +567,13 @@ mod tests {
 
     #[test]
     fn test_r2_sign() {
-        let auth = authorize(
-            &Credentials {
-                access_key_id: "my-id".to_string(),
-                secret_access_key: "top secret".to_string(),
-                session_token: None,
-            },
-            &SignOptions {
+        let credentials = Credentials {
+            access_key_id: "my-id".to_string(),
+            secret_access_key: "top secret".to_string(),
+            session_token: None,
+        };
+        let auth = credentials
+            .authorize(&Access {
                 region: "auto".to_string(),
                 bucket: "pale".to_string(),
                 key: "file/path".to_string(),
@@ -609,9 +586,8 @@ mod tests {
                 public_read: false,
                 service: "s3".to_string(),
                 time: Some(Utc.with_ymd_and_hms(2025, 5, 7, 5, 48, 59).unwrap()),
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
 
         // Check the final URL matches exactly
         assert_eq!(
@@ -653,13 +629,13 @@ mod tests {
 
     #[test]
     fn test_s3_with_checksum() {
-        let auth = authorize(
-            &Credentials {
-                access_key_id: "my-id".to_string(),
-                secret_access_key: "top secret".to_string(),
-                session_token: None,
-            },
-            &SignOptions {
+        let credentials = Credentials {
+            access_key_id: "my-id".to_string(),
+            secret_access_key: "top secret".to_string(),
+            session_token: None,
+        };
+        let auth = credentials
+            .authorize(&Access {
                 region: "auto".to_string(),
                 bucket: "pale".to_string(),
                 key: "file/path".to_string(),
@@ -670,9 +646,8 @@ mod tests {
                 public_read: false,
                 service: "s3".to_string(),
                 time: Some(Utc.with_ymd_and_hms(2025, 5, 7, 5, 48, 59).unwrap()),
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
 
         // Check the final URL matches exactly
         assert_eq!(
@@ -714,13 +689,14 @@ mod tests {
 
     #[test]
     fn test_r2_with_checksum() {
-        let auth = authorize(
-            &Credentials {
-                access_key_id: "my-id".to_string(),
-                secret_access_key: "top secret".to_string(),
-                session_token: None,
-            },
-            &SignOptions {
+        let credentials = Credentials {
+            access_key_id: "my-id".to_string(),
+            secret_access_key: "top secret".to_string(),
+            session_token: None,
+        };
+
+        let auth = credentials
+            .authorize(&Access {
                 region: "auto".to_string(),
                 bucket: "pale".to_string(),
                 key: "file/path".to_string(),
@@ -733,9 +709,8 @@ mod tests {
                 public_read: false,
                 service: "s3".to_string(),
                 time: Some(Utc.with_ymd_and_hms(2025, 5, 7, 5, 48, 59).unwrap()),
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
 
         // Check the final URL matches exactly
         assert_eq!(

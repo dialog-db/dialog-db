@@ -41,7 +41,8 @@
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub mod web;
 
-mod artifacts;
+/// Core artifacts types and functionality for operating on artifacts
+pub mod artifacts;
 pub use artifacts::*;
 
 mod reference;

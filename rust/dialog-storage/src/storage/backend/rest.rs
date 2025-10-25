@@ -2,6 +2,7 @@ use std::marker::PhantomData;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
+use base58::ToBase58;
 use base64::Engine;
 use dialog_common::ConditionalSync;
 use futures_util::Stream;
@@ -10,9 +11,12 @@ use thiserror::Error;
 use url::Url;
 
 mod s3_signer;
-use s3_signer::{Credentials as S3SignerCredentials, SignOptions, sign_url};
+use s3_signer::{Access, Credentials};
 
-use crate::{DialogStorageError, StorageBackend, StorageSink, StorageSource};
+use crate::{
+    AtomicStorageBackend, DialogStorageError, StorageBackend, StorageSink, StorageSource,
+    storage::backend::rest::s3_signer::Authorization,
+};
 
 /// Errors that can occur when using the REST storage backend
 #[derive(Error, Debug)]
@@ -60,9 +64,73 @@ impl From<reqwest::Error> for RestStorageBackendError {
     }
 }
 
+/// Represents an AWS S3-compatible storage policy used by `Authority` to
+/// when authorizing requests.
+pub struct AccessPolicy {
+    /// Host like "https://s3.amazonaws.com" or
+    /// "https://xxx.r2.cloudflarestorage.com"
+    pub host: String,
+    /// AWS region (defaults to "auto" for R2)
+    pub region: String,
+    /// Whether to make objects readable publicly
+    pub public_read: bool,
+    /// URL signature expiration in seconds (default: 86400 - 24 hours)
+    pub expires: u64,
+}
+
+/// Represents an AWS S3-compatible storage backend authority
+/// that can authorize requests by creating a pre-signed requests.
+pub struct Authority {
+    credentials: Credentials,
+    policy: AccessPolicy,
+}
+
+impl Authority {
+    /// Create a new authority with the given credentials and policy
+    pub fn new(credentials: Credentials, policy: AccessPolicy) -> Self {
+        Self {
+            credentials,
+            policy,
+        }
+    }
+
+    /// Authorize a request with the given credentials and policy
+    pub fn authorize(
+        &self,
+        request: Request<'_>,
+    ) -> Result<Authorization, RestStorageBackendError> {
+        let access = Access {
+            region: self.policy.region.to_string(),
+            bucket: request.bucket().into(),
+            key: request.key(),
+            checksum: None,
+            endpoint: Some(self.policy.host.clone()),
+            expires: self.policy.expires,
+            method: match request.method() {
+                reqwest::Method::GET => "GET",
+                reqwest::Method::PUT => "PUT",
+                reqwest::Method::POST => "POST",
+                reqwest::Method::DELETE => "DELETE",
+                _ => unreachable!(),
+            }
+            .into(),
+            public_read: self.policy.public_read,
+            service: "s3".into(),
+            time: None,
+        };
+
+        self.credentials.authorize(&access).map_err(|e| {
+            RestStorageBackendError::OperationFailed(format!(
+                "Failed to generate signed URL: {}",
+                e
+            ))
+        })
+    }
+}
+
 /// AWS S3/R2 credentials configuration
 #[derive(Clone, Debug)]
-pub struct S3Credentials {
+pub struct S3Authority {
     /// AWS Access Key ID
     pub access_key_id: String,
 
@@ -82,7 +150,7 @@ pub struct S3Credentials {
     pub expires: u64,
 }
 
-impl Default for S3Credentials {
+impl Default for S3Authority {
     fn default() -> Self {
         Self {
             access_key_id: String::new(),
@@ -105,8 +173,116 @@ pub enum AuthMethod {
     Bearer(String),
 
     /// AWS S3/R2 authentication with signed URLs
-    S3(S3Credentials),
+    S3(S3Authority),
 }
+
+/// Precondition for PUT operations to enable compare-and-swap semantics
+pub enum Precondition<'a> {
+    /// No precondition - unconditional write
+    None,
+    /// Create only if key doesn't exist (If-None-Match: *)
+    Create,
+    /// Replace only if current value matches (If-Match: <etag>)
+    Replace(&'a [u8]),
+}
+
+/// HTTP request abstraction for S3/R2 operations
+pub enum Request<'a> {
+    /// PUT request to store a value
+    Put {
+        /// S3/R2 host endpoint
+        host: &'a str,
+        /// Object key (bytes to be encoded)
+        key: &'a [u8],
+        /// Object value (body)
+        value: &'a [u8],
+        /// Bucket name
+        bucket: &'a str,
+        /// Optional key prefix path
+        path: Option<&'a str>,
+        /// Precondition for compare-and-swap
+        precondition: Precondition<'a>,
+        /// Authentication method
+        auth: &'a AuthMethod,
+    },
+    /// GET request to retrieve a value
+    Get {
+        /// S3/R2 host endpoint
+        host: &'a str,
+        /// Bucket name
+        bucket: &'a str,
+        /// Optional key prefix path
+        path: Option<&'a str>,
+        /// Object key (bytes to be encoded)
+        key: &'a [u8],
+        /// Authentication method
+        auth: &'a AuthMethod,
+    },
+}
+
+impl Request<'_> {
+    fn method(&self) -> reqwest::Method {
+        match self {
+            Request::Put { .. } => reqwest::Method::PUT,
+            Request::Get { .. } => reqwest::Method::GET,
+        }
+    }
+
+    fn bucket(&self) -> &str {
+        match self {
+            Request::Put { bucket, .. } => bucket,
+            Request::Get { bucket, .. } => bucket,
+        }
+    }
+
+    fn key(&self) -> String {
+        let name = match self {
+            Request::Put { key, .. } => base58::ToBase58::to_base58(*key),
+            Request::Get { key, .. } => base58::ToBase58::to_base58(*key),
+        };
+        let path = match self {
+            Request::Put { path, .. } => path,
+            Request::Get { path, .. } => path,
+        };
+
+        if let Some(path) = path {
+            format!("{}/{}", path, name)
+        } else {
+            name
+        }
+    }
+}
+
+// impl<'a> TryFrom<Request<'a>> for Url {
+//     type Error = RestStorageBackendError;
+//     fn try_from(source: Request<'a>) -> Result<Self, Self::Error> {
+//         let key = source.key();
+//         let bucket = source.bucket();
+
+//         // Prepare the signing options
+//         let sign_options = Access {
+//             region: credentials.region.clone(),
+//             bucket,
+//             key,
+//             checksum,
+//             endpoint: Some(self.config.endpoint.clone()),
+//             expires: credentials.expires,
+//             method: method.to_string(),
+//             public_read: credentials.public_read,
+//             service: "s3".to_string(),
+//             time: None,
+//         };
+
+//         let request = reqwest::Request::new(source.method(), url);
+//     }
+// }
+
+// impl<'a> TryFrom<Request<'a>> for reqwest::RequestBuilder {
+//     type Error = RestStorageBackendError;
+//     fn try_from(source: Request<'a>) -> Result<Self, Self::Error> {
+//         let request = reqwest::Request::new(source.method(), url);
+//     }
+// }
 
 /// Configuration for the REST storage backend
 #[derive(Clone, Debug)]
@@ -128,9 +304,6 @@ pub struct RestStorageConfig {
 
     /// Optional timeout for requests in seconds
     pub timeout_seconds: Option<u64>,
-
-    /// Enable chunked uploads for large files
-    pub chunked_upload: bool,
 }
 
 impl Default for RestStorageConfig {
@@ -142,7 +315,6 @@ impl Default for RestStorageConfig {
             key_prefix: None,
             headers: Vec::new(),
             timeout_seconds: Some(30),
-            chunked_upload: false,
         }
     }
 }
@@ -192,12 +364,17 @@ where
         })
     }
 
+    /// Get the configuration of the backend
+    pub fn config(&self) -> &RestStorageConfig {
+        &self.config
+    }
+
     /// Build the URL for a given key
     fn build_url(&self, key: &[u8], method: &str) -> Result<Url, RestStorageBackendError> {
         let key_str = base64::engine::general_purpose::STANDARD.encode(key);
 
         // For S3/R2 signed URLs
-        if let AuthMethod::S3(credentials) = &self.config.auth_method {
+        if let AuthMethod::S3(authority) = &self.config.auth_method {
             // If using S3/R2 auth, the bucket must be set
             let bucket = match &self.config.bucket {
                 Some(bucket) => bucket.clone(),
@@ -215,42 +392,37 @@ where
                 key_str
             };
 
-            // Calculate checksum for PUT operations
-            let checksum = if method == "PUT" {
-                // We'll calculate this later when we have the actual data
-                None
-            } else {
-                None
-            };
-
             // Prepare the signing options
-            let sign_options = SignOptions {
-                region: credentials.region.clone(),
+            let access = Access {
+                region: authority.region.clone(),
                 bucket,
                 key: object_key,
-                checksum,
+                checksum: None,
                 endpoint: Some(self.config.endpoint.clone()),
-                expires: credentials.expires,
+                expires: authority.expires,
                 method: method.to_string(),
-                public_read: credentials.public_read,
+                public_read: authority.public_read,
                 service: "s3".to_string(),
                 time: None,
             };
 
             // Convert our credentials to the format expected by the signer
-            let signer_credentials = S3SignerCredentials {
-                access_key_id: credentials.access_key_id.clone(),
-                secret_access_key: credentials.secret_access_key.clone(),
-                session_token: credentials.session_token.clone(),
+            let credentials = Credentials {
+                access_key_id: authority.access_key_id.clone(),
+                secret_access_key: authority.secret_access_key.clone(),
+                session_token: authority.session_token.clone(),
             };
 
             // Generate the signed URL
-            sign_url(&signer_credentials, &sign_options).map_err(|e| {
-                RestStorageBackendError::OperationFailed(format!(
-                    "Failed to generate signed URL: {}",
-                    e
-                ))
-            })
+            credentials
+                .authorize(&access)
+                .map(|auth| auth.url)
+                .map_err(|e| {
+                    RestStorageBackendError::OperationFailed(format!(
+                        "Failed to generate signed URL: {}",
+                        e
+                    ))
+                })
         } else {
             // For non-S3 authentication, use the original URL building logic
             let base_url = self.config.endpoint.trim_end_matches('/');
@@ -269,7 +441,7 @@ where
     }
 
     /// Calculate SHA-256 checksum for a value
-    fn calculate_checksum(&self, value: &[u8]) -> String {
+    pub fn calculate_checksum(&self, value: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(value);
         let hash = hasher.finalize();
@@ -279,7 +451,7 @@ where
     }
 
     /// Build the signed URL for a PUT operation with the value's checksum
-    fn build_put_url(&self, key: &[u8], value: &[u8]) -> Result<Url, RestStorageBackendError> {
+    pub fn build_put_url(&self, key: &[u8], value: &[u8]) -> Result<Url, RestStorageBackendError> {
         // For S3/R2 signed URLs
         if let AuthMethod::S3(credentials) = &self.config.auth_method {
             // If using S3/R2 auth, the bucket must be set
@@ -304,7 +476,7 @@ where
             let checksum = Some(self.calculate_checksum(value));
 
             // Prepare the signing options
-            let sign_options = SignOptions {
+            let sign_options = Access {
                 region: credentials.region.clone(),
                 bucket,
                 key: object_key,
@@ -318,19 +490,22 @@ where
             };
 
             // Convert our credentials to the format expected by the signer
-            let signer_credentials = S3SignerCredentials {
+            let signer_credentials = Credentials {
                 access_key_id: credentials.access_key_id.clone(),
                 secret_access_key: credentials.secret_access_key.clone(),
                 session_token: credentials.session_token.clone(),
             };
 
             // Generate the signed URL
-            sign_url(&signer_credentials, &sign_options).map_err(|e| {
-                RestStorageBackendError::OperationFailed(format!(
-                    "Failed to generate signed URL: {}",
-                    e
-                ))
-            })
+            signer_credentials
+                .authorize(&sign_options)
+                .map(|auth| auth.url)
+                .map_err(|e| {
+                    RestStorageBackendError::OperationFailed(format!(
+                        "Failed to generate signed URL: {}",
+                        e
+                    ))
+                })
         } else {
             // For non-S3 authentication, use the standard URL building
             self.build_url(key, "PUT")
@@ -338,7 +513,11 @@ where
     }
 
     /// Add authentication and custom headers to a request
-    fn prepare_request(&self, request_builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn prepare_request(
+        &self,
+        request_builder: reqwest::RequestBuilder,
+        checksum: Option<&str>,
+    ) -> reqwest::RequestBuilder {
         let mut builder = request_builder;
 
         // Add authentication headers based on the chosen method
@@ -350,8 +529,9 @@ where
                 builder = builder.header("Authorization", format!("Bearer {token}"));
             }
             AuthMethod::S3(_) => {
-                // For S3/R2, authentication is handled via the signed URL
-                // No additional headers needed here
+                if let Some(checksum) = checksum {
+                    builder = builder.header("x-amz-checksum-sha256", checksum);
+                }
             }
         }
 
@@ -363,20 +543,41 @@ where
         builder
     }
 
-    /// Prepare a request with S3 authentication headers if needed
-    fn prepare_s3_request(
+    fn prepare_put_request(
         &self,
-        mut request_builder: reqwest::RequestBuilder,
-        checksum: Option<&str>,
-    ) -> reqwest::RequestBuilder {
-        // For S3 requests, we need to add the checksum header if available
-        if let AuthMethod::S3(_) = &self.config.auth_method {
-            if let Some(checksum_value) = checksum {
-                request_builder = request_builder.header("x-amz-checksum-sha256", checksum_value);
-            }
-        }
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<reqwest::RequestBuilder, RestStorageBackendError> {
+        let value_bytes = value.to_vec();
 
-        self.prepare_request(request_builder)
+        // For S3/R2, we need to generate a signed URL with the value's checksum
+        if let AuthMethod::S3(_) = &self.config.auth_method {
+            let url = self.build_put_url(key, &value_bytes)?;
+
+            // Calculate checksum for the value
+            let checksum = self.calculate_checksum(&value_bytes);
+
+            // Prepare the request with the checksum header
+            let request =
+                self.prepare_request(self.client.put(url).body(value_bytes), Some(&checksum));
+
+            Ok(request)
+        } else {
+            // For regular REST storage
+            let url = self.build_url(key, "PUT")?;
+
+            let request = self.prepare_request(self.client.put(url).body(value_bytes), None);
+
+            Ok(request)
+        }
+    }
+
+    fn prepare_get_request(
+        &self,
+        key: &[u8],
+    ) -> Result<reqwest::RequestBuilder, RestStorageBackendError> {
+        let url = self.build_url(key, "GET")?;
+        Ok(self.prepare_request(self.client.get(url), None))
     }
 }
 
@@ -392,52 +593,22 @@ where
     type Error = RestStorageBackendError;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        let value_bytes = value.as_ref().to_vec();
-
-        // For S3/R2, we need to generate a signed URL with the value's checksum
-        if let AuthMethod::S3(_) = &self.config.auth_method {
-            let url = self.build_put_url(key.as_ref(), &value_bytes)?;
-
-            // Calculate checksum for the value
-            let checksum = self.calculate_checksum(&value_bytes);
-
-            // Prepare the request with the checksum header
-            let request =
-                self.prepare_s3_request(self.client.put(url).body(value_bytes), Some(&checksum));
-
-            let response = request.send().await?;
-
-            if !response.status().is_success() {
-                return Err(RestStorageBackendError::OperationFailed(format!(
-                    "Failed to set value with S3 signed URL. Status: {}",
-                    response.status()
-                )));
-            }
+        let request = self.prepare_put_request(key.as_ref(), value.as_ref())?;
+        let response = request.send().await?;
+        let status = response.status();
+        if status.is_success() {
+            Ok(())
         } else {
-            // For regular REST storage
-            let url = self.build_url(key.as_ref(), "PUT")?;
-
-            let request = self.prepare_request(self.client.put(url).body(value_bytes));
-
-            let response = request.send().await?;
-
-            if !response.status().is_success() {
-                return Err(RestStorageBackendError::OperationFailed(format!(
-                    "Failed to set value. Status: {}",
-                    response.status()
-                )));
-            }
+            Err(RestStorageBackendError::OperationFailed(format!(
+                "Failed to set value: {}",
+                status
+            )))
         }
-
-        Ok(())
     }
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        // Generate the URL, which will be signed if using S3/R2
-        let url = self.build_url(key.as_ref(), "GET")?;
-
-        // Prepare the request (no special headers needed for GET)
-        let request = self.prepare_request(self.client.get(url));
+        // Prepare get request
+        let request = self.prepare_get_request(key.as_ref())?;
 
         let response = request.send().await?;
 
@@ -451,6 +622,118 @@ where
                 "Failed to get value. Status: {status}"
             ))),
         }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Key, Value> AtomicStorageBackend for RestStorageBackend<Key, Value>
+where
+    Key: AsRef<[u8]> + Clone + ConditionalSync,
+    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
+{
+    type Key = Key;
+    type Value = Value;
+    type Error = RestStorageBackendError;
+
+    async fn swap(
+        &mut self,
+        key: Self::Key,
+        value: Self::Value,
+        when: Option<Self::Value>,
+    ) -> Result<(), Self::Error> {
+        let mut request = self.prepare_put_request(key.as_ref(), value.as_ref())?;
+
+        // Add precondition headers to enforce CAS semantics.
+        request = match &when {
+            Some(value) => request.header("If-Match", format!("\"{:x}\"", md5::compute(value))),
+            None => request.header("If-None-Match", "*"),
+        };
+
+        let response = request.send().await?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        // If precondition failed, we should fetch the latest version so we can
+        // report actual value if it is different or retry with a different
+        // etag if same, which may happen if multipart upload was used, which
+        // should not happen, but it still good to handle such case gracefully.
+        if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
+            // Fetch latest revision to see if we it has changed
+            let request = self.prepare_get_request(key.as_ref())?;
+            let latest = request.send().await?;
+            let etag = latest.headers().get("etag").cloned();
+            let status = latest.status();
+
+            // If key is not found we just need to set If-None-Match: *
+            let actual = if status == reqwest::StatusCode::NOT_FOUND {
+                None
+            }
+            // If fetching latest was successful, we read etag from its headers
+            else if status.is_success() {
+                Some(latest.bytes().await?)
+            } else {
+                Err(RestStorageBackendError::RequestFailed(format!(
+                    "Failed to fetch object after put with precondition was rejected: {}",
+                    response.status()
+                )))?
+            };
+
+            // figure out what etag should we retry put with
+            let precondition = match (when, actual) {
+                (None, None) => Ok(etag),
+                (Some(expected), Some(actual)) => {
+                    if expected.as_ref() != actual.as_ref() {
+                        Err(RestStorageBackendError::OperationFailed(format!(
+                            "Precondition failed, expected key {} to have value {} instead of {}",
+                            ToBase58::to_base58(key.as_ref()),
+                            ToBase58::to_base58(expected.as_ref()),
+                            ToBase58::to_base58(actual.as_ref())
+                        )))
+                    } else {
+                        Ok(etag)
+                    }
+                }
+                (Some(expected), None) => Err(RestStorageBackendError::OperationFailed(format!(
+                    "Precondition failed, expected key {} to have value {} but it was not found",
+                    ToBase58::to_base58(key.as_ref()),
+                    ToBase58::to_base58(expected.as_ref())
+                ))),
+                (None, Some(actual)) => Err(RestStorageBackendError::OperationFailed(format!(
+                    "Precondition failed, expected key {} to not exist but it was found with value {}",
+                    ToBase58::to_base58(key.as_ref()),
+                    ToBase58::to_base58(actual.as_ref())
+                ))),
+            }?;
+
+            let mut request = self.prepare_put_request(key.as_ref(), value.as_ref())?;
+            request = match precondition {
+                Some(etag) => request.header("If-Match", etag),
+                None => request.header("If-None-Match", "*"),
+            };
+
+            let retry = request.send().await?;
+
+            if retry.status().is_success() {
+                return Ok(());
+            } else {
+                return Err(RestStorageBackendError::OperationFailed(format!(
+                    "Retry PUT failed: {}",
+                    retry.status()
+                )));
+            }
+        } else {
+            Err(RestStorageBackendError::OperationFailed(format!(
+                "swap failed: {}",
+                response.status()
+            )))
+        }
+    }
+
+    async fn resolve(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        StorageBackend::get(self, key).await
     }
 }
 
@@ -491,7 +774,7 @@ where
                 let key = "_list";
 
                 // Prepare the signing options for the list operation
-                let sign_options = SignOptions {
+                let access = Access {
                     region: credentials.region.clone(),
                     bucket,
                     key: key.to_string(),
@@ -505,14 +788,15 @@ where
                     };
 
                 // Convert our credentials to the format expected by the signer
-                let signer_credentials = S3SignerCredentials {
+                let signer_credentials = Credentials {
                     access_key_id: credentials.access_key_id.clone(),
                     secret_access_key: credentials.secret_access_key.clone(),
                     session_token: credentials.session_token.clone(),
                 };
 
                 // Generate the signed URL
-                sign_url(&signer_credentials, &sign_options)
+                signer_credentials.authorize(&access)
+                    .map(|auth| auth.url)
                     .map_err(|e| RestStorageBackendError::OperationFailed(
                         format!("Failed to generate signed URL for list operation: {}", e)
                     ))?
@@ -526,7 +810,7 @@ where
             };
 
             // Send the listing request
-            let request = self.prepare_request(self.client.get(list_url));
+            let request = self.prepare_request(self.client.get(list_url), None);
             let response = request.send().await?;
 
             if !response.status().is_success() {
@@ -554,7 +838,7 @@ where
 
                 let key = Key::from(key_bytes);
 
-                if let Some(value) = self.get(&key).await? {
+                if let Some(value) = StorageBackend::get(self, &key).await? {
                     yield (key, value);
                 }
             }
@@ -721,7 +1005,6 @@ mod unit_tests {
         assert!(config.key_prefix.is_none());
         assert!(config.headers.is_empty());
         assert_eq!(config.timeout_seconds, Some(30));
-        assert!(!config.chunked_upload);
     }
 
     #[test]
@@ -738,7 +1021,7 @@ mod unit_tests {
 
     #[test]
     fn test_s3_credentials_default() {
-        let creds = S3Credentials::default();
+        let creds = S3Authority::default();
 
         assert_eq!(creds.access_key_id, "");
         assert_eq!(creds.secret_access_key, "");
@@ -763,7 +1046,7 @@ mod unit_tests {
 
     #[test]
     fn test_s3_signed_url_generation() {
-        let s3_creds = S3Credentials {
+        let s3_creds = S3Authority {
             access_key_id: "test-access-key".to_string(),
             secret_access_key: "test-secret-key".to_string(),
             region: "us-east-1".to_string(),
@@ -810,7 +1093,7 @@ mod unit_tests {
 
     #[test]
     fn test_put_url_with_checksum() {
-        let s3_creds = S3Credentials {
+        let s3_creds = S3Authority {
             access_key_id: "test-access-key".to_string(),
             secret_access_key: "test-secret-key".to_string(),
             region: "us-east-1".to_string(),
@@ -871,14 +1154,14 @@ mod unit_tests {
         let req_builder = client.get("https://example.com/test");
 
         // We can't directly test the request builder, so we just verify that the code runs
-        let _prepared = backend.prepare_request(req_builder);
+        let _prepared = backend.prepare_request(req_builder, None);
 
         // This is a simple test to ensure the code path is covered
         assert!(true);
     }
 }
 
-#[cfg(all(test, feature = "http_tests", not(target_arch = "wasm32")))]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use anyhow::Result;
@@ -910,7 +1193,7 @@ mod tests {
         let endpoint = server.url();
 
         // Use fixed credentials for testing
-        let s3_creds = S3Credentials {
+        let s3_creds = S3Authority {
             access_key_id: "test-access-key".to_string(),
             secret_access_key: "test-secret-key".to_string(),
             region: "us-east-1".to_string(),
@@ -1034,45 +1317,6 @@ mod tests {
 
         backend.set(vec![1, 2, 3], vec![4, 5, 6]).await?;
         mock.assert();
-
-        Ok(())
-    }
-
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    #[ignore] // S3 signing doesn't work with mockito's IP-based URLs (bucket.127.0.0.1 is invalid)
-    async fn it_uses_s3_authentication() -> Result<()> {
-        let (mut backend, mut server) = create_s3_test_backend().await;
-
-        // Key as base64: AQID
-        let key = vec![1, 2, 3];
-        let value = vec![4, 5, 6];
-
-        // The URL will contain AWS query parameters, so we use a wildcard match
-        // We'll check for the presence of the checksum header
-        let put_mock = server
-            .mock("PUT", mockito::Matcher::Any)
-            .match_header("x-amz-checksum-sha256", mockito::Matcher::Any)
-            .with_status(200)
-            .with_body("")
-            .create();
-
-        // For GET requests we just need to acknowledge the S3 query parameters
-        let get_mock = server
-            .mock("GET", mockito::Matcher::Any)
-            .with_status(200)
-            .with_body(&[4, 5, 6])
-            .create();
-
-        // Test set operation
-        backend.set(key.clone(), value.clone()).await?;
-        put_mock.assert();
-
-        // Test get operation
-        let retrieved = backend.get(&key).await?;
-        get_mock.assert();
-
-        assert_eq!(retrieved, Some(value));
 
         Ok(())
     }
@@ -1296,149 +1540,28 @@ mod tests {
 }
 
 /// Local S3 server tests using s3s for end-to-end testing
-#[cfg(all(test, feature = "s3_integration_tests", not(target_arch = "wasm32")))]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod local_s3_tests {
     use super::*;
     use hyper::server::conn::http1;
     use hyper_util::rt::TokioIo;
+    use s3;
     use s3s::dto::*;
     use s3s::{S3, S3Request, S3Response, S3Result};
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
     use tokio::net::TcpListener;
 
-    /// Simple in-memory S3 backend for testing
-    #[derive(Clone)]
-    struct InMemoryS3 {
-        storage: Arc<RwLock<HashMap<String, Vec<u8>>>>,
-    }
-
-    impl InMemoryS3 {
-        fn new() -> Self {
-            Self {
-                storage: Arc::new(RwLock::new(HashMap::new())),
-            }
-        }
-
-        fn make_key(bucket: &str, key: &str) -> String {
-            format!("{}/{}", bucket, key)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl S3 for InMemoryS3 {
-        async fn get_object(
-            &self,
-            req: S3Request<GetObjectInput>,
-        ) -> S3Result<S3Response<GetObjectOutput>> {
-            let input = req.input;
-            let full_key = Self::make_key(&input.bucket, &input.key);
-
-            let storage = self.storage.read().unwrap();
-            match storage.get(&full_key) {
-                Some(data) => {
-                    let mut output = GetObjectOutput::default();
-                    // Convert Vec<u8> -> Bytes -> Body -> StreamingBlob
-                    let body = s3s::Body::from(bytes::Bytes::from(data.clone()));
-                    output.body = Some(s3s::dto::StreamingBlob::from(body));
-                    output.content_length = Some(data.len() as i64);
-                    Ok(S3Response::new(output))
-                }
-                None => Err(s3s::S3Error::new(s3s::S3ErrorCode::NoSuchKey)),
-            }
-        }
-
-        async fn put_object(
-            &self,
-            req: S3Request<PutObjectInput>,
-        ) -> S3Result<S3Response<PutObjectOutput>> {
-            let input = req.input;
-            let full_key = Self::make_key(&input.bucket, &input.key);
-
-            // Read the body - StreamingBlob wraps a streaming body
-            let body_bytes = match input.body {
-                Some(body) => {
-                    // Convert StreamingBlob to Body (http_body type)
-                    let s3s_body: s3s::Body = body.into();
-                    // Collect the streaming body into bytes
-                    use http_body_util::BodyExt;
-                    let collected = s3s_body
-                        .collect()
-                        .await
-                        .map_err(|_| s3s::S3Error::new(s3s::S3ErrorCode::InternalError))?;
-                    collected.to_bytes()
-                }
-                None => bytes::Bytes::new(),
-            };
-
-            let mut storage = self.storage.write().unwrap();
-            storage.insert(full_key, body_bytes.to_vec());
-
-            let output = PutObjectOutput::default();
-            Ok(S3Response::new(output))
-        }
-
-        async fn head_object(
-            &self,
-            req: S3Request<HeadObjectInput>,
-        ) -> S3Result<S3Response<HeadObjectOutput>> {
-            let input = req.input;
-            let full_key = Self::make_key(&input.bucket, &input.key);
-
-            let storage = self.storage.read().unwrap();
-            match storage.get(&full_key) {
-                Some(data) => {
-                    let mut output = HeadObjectOutput::default();
-                    output.content_length = Some(data.len() as i64);
-                    Ok(S3Response::new(output))
-                }
-                None => Err(s3s::S3Error::new(s3s::S3ErrorCode::NoSuchKey)),
-            }
-        }
-    }
-
-    /// Helper to start a local S3 server for testing
-    async fn start_local_s3_server() -> anyhow::Result<(String, tokio::task::JoinHandle<()>)> {
-        let s3_service = InMemoryS3::new();
-        let s3_handler = s3s::service::S3ServiceBuilder::new(s3_service).build();
-
-        // Bind to a random available port
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let addr = listener.local_addr()?;
-        let endpoint = format!("http://{}", addr);
-
-        let handle = tokio::spawn(async move {
-            loop {
-                let (stream, _) = match listener.accept().await {
-                    Ok(x) => x,
-                    Err(_) => break,
-                };
-
-                let io = TokioIo::new(stream);
-                let service = s3_handler.clone();
-
-                tokio::spawn(async move {
-                    let _ = http1::Builder::new().serve_connection(io, service).await;
-                });
-            }
-        });
-
-        // Give the server a moment to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        Ok((endpoint, handle))
-    }
-
     #[tokio::test]
     async fn test_local_s3_set_and_get() -> anyhow::Result<()> {
-        let (endpoint, _handle) = start_local_s3_server().await?;
+        let service = s3::start().await?;
 
         // Note: We use no auth for the local test server since S3 signing doesn't work
         // with IP-based URLs (it creates bucket.127.0.0.1 which is invalid).
         // The real S3 signing is tested with mockito unit tests and the environment-based
         // integration tests with real S3/R2 endpoints.
         let config = RestStorageConfig {
-            endpoint,
+            endpoint: service.endpoint().into(),
             auth_method: AuthMethod::None,
             bucket: Some("test-bucket".to_string()),
             key_prefix: Some("test".to_string()),
@@ -1463,10 +1586,10 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_multiple_operations() -> anyhow::Result<()> {
-        let (endpoint, _handle) = start_local_s3_server().await?;
+        let service = s3::start().await?;
 
         let config = RestStorageConfig {
-            endpoint,
+            endpoint: service.endpoint().into(),
             auth_method: AuthMethod::None,
             bucket: Some("test-bucket".to_string()),
             ..Default::default()
@@ -1501,10 +1624,10 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_large_value() -> anyhow::Result<()> {
-        let (endpoint, _handle) = start_local_s3_server().await?;
+        let service = s3::start().await?;
 
         let config = RestStorageConfig {
-            endpoint,
+            endpoint: service.endpoint().into(),
             auth_method: AuthMethod::None,
             bucket: Some("test-bucket".to_string()),
             ..Default::default()
@@ -1522,6 +1645,543 @@ mod local_s3_tests {
         assert_eq!(retrieved, Some(value));
 
         Ok(())
+    }
+
+    const ALICE: &str = "did:key:z6Mkk89bC3JrVqKie71YEcc5M1SMVxuCgNx6zLZ8SYJsxALi";
+
+    #[tokio::test]
+    async fn test_local_s3_atomic_swap_ok() -> anyhow::Result<()> {
+        let service = s3::start().await?;
+
+        let config = RestStorageConfig {
+            endpoint: service.endpoint().into(),
+            auth_method: AuthMethod::None,
+            bucket: Some("test-bucket".to_string()),
+            key_prefix: Some("branch".to_string()),
+            ..Default::default()
+        };
+
+        let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+        let v1: Vec<u8> = "v1".into();
+        let key: Vec<u8> = ALICE.into();
+
+        // We try to create new branch record
+        store.swap(key.clone(), v1.clone(), None).await?;
+
+        assert_eq!(
+            store.resolve(&key).await?.unwrap(),
+            v1.clone(),
+            "resolved to stored record"
+        );
+
+        let v2: Vec<u8> = "v2".into();
+        // We try to update v1 -> v2
+        store
+            .swap(key.clone(), v2.clone(), Some(v1.clone()))
+            .await?;
+
+        assert_eq!(
+            store.resolve(&key).await?.unwrap(),
+            v2.clone(),
+            "resolved to new record"
+        );
+
+        Ok(())
+    }
+    #[tokio::test]
+    async fn test_local_s3_atomic_swap_rejects_on_missmatch() -> anyhow::Result<()> {
+        let service = s3::start().await?;
+
+        let config = RestStorageConfig {
+            endpoint: service.endpoint().into(),
+            auth_method: AuthMethod::None,
+            bucket: Some("test-bucket".to_string()),
+            key_prefix: Some("branch".to_string()),
+            ..Default::default()
+        };
+
+        let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+        let v1: Vec<u8> = "v1".into();
+        let key: Vec<u8> = ALICE.into();
+
+        // We try to create new branch record
+        store.swap(key.clone(), v1.clone(), None).await?;
+
+        assert_eq!(
+            store.resolve(&key).await?.unwrap(),
+            v1.clone(),
+            "resolved to stored record"
+        );
+
+        let v2: Vec<u8> = "v2".into();
+        let v3: Vec<u8> = "v3".into();
+
+        // We try to update v2 -> v3
+        let result = store.swap(key.clone(), v3.clone(), Some(v2.clone())).await;
+
+        assert!(
+            matches!(result, Err(RestStorageBackendError::OperationFailed(_))),
+            "swap failed"
+        );
+
+        assert_eq!(
+            store.resolve(&key).await?.unwrap(),
+            v1.clone(),
+            "resolved to old record"
+        );
+
+        Ok(())
+    }
+    #[tokio::test]
+    async fn test_local_s3_atomic_swap_rejects_on_assumed() -> anyhow::Result<()> {
+        let service = s3::start().await?;
+
+        let config = RestStorageConfig {
+            endpoint: service.endpoint().into(),
+            auth_method: AuthMethod::None,
+            bucket: Some("test-bucket".to_string()),
+            key_prefix: Some("branch".to_string()),
+            ..Default::default()
+        };
+
+        let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+        let v1: Vec<u8> = "v1".into();
+        let v2: Vec<u8> = "v2".into();
+        let key: Vec<u8> = ALICE.into();
+
+        // We try to swap v1 -> v2
+        let result = store.swap(key.clone(), v2.clone(), Some(v1.clone())).await;
+
+        assert!(
+            matches!(result, Err(RestStorageBackendError::OperationFailed(_))),
+            "swap failed"
+        );
+
+        Ok(())
+    }
+    #[tokio::test]
+    async fn test_local_s3_swap_when_none_key_missing_ok() -> anyhow::Result<()> {
+        let service = s3::start().await?;
+        let config = RestStorageConfig {
+            endpoint: service.endpoint().into(),
+            auth_method: AuthMethod::None,
+            bucket: Some("test-bucket".to_string()),
+            key_prefix: Some("branch".to_string()),
+            ..Default::default()
+        };
+        let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+        let key: Vec<u8> = ALICE.into();
+        let value: Vec<u8> = b"v1".to_vec();
+
+        // when=None and key missing → success
+        store.swap(key.clone(), value.clone(), None).await?;
+        assert_eq!(store.resolve(&key).await?.unwrap(), value);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_swap_when_some_key_missing_fail() -> anyhow::Result<()> {
+        let service = s3::start().await?;
+        let config = RestStorageConfig {
+            endpoint: service.endpoint().into(),
+            auth_method: AuthMethod::None,
+            bucket: Some("test-bucket".to_string()),
+            key_prefix: Some("branch".to_string()),
+            ..Default::default()
+        };
+        let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+        let key: Vec<u8> = ALICE.into();
+        let expected: Vec<u8> = b"v1".to_vec();
+        let new_val: Vec<u8> = b"v2".to_vec();
+
+        // when=Some but key missing → fail
+        let result = store.swap(key.clone(), new_val, Some(expected)).await;
+        assert!(matches!(
+            result,
+            Err(RestStorageBackendError::OperationFailed(_))
+        ));
+        assert!(store.resolve(&key).await?.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_swap_when_none_key_exists_fail() -> anyhow::Result<()> {
+        let service = s3::start().await?;
+        let config = RestStorageConfig {
+            endpoint: service.endpoint().into(),
+            auth_method: AuthMethod::None,
+            bucket: Some("test-bucket".to_string()),
+            key_prefix: Some("branch".to_string()),
+            ..Default::default()
+        };
+        let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+        let key: Vec<u8> = ALICE.into();
+        let existing: Vec<u8> = b"v1".to_vec();
+        let new_val: Vec<u8> = b"v2".to_vec();
+
+        // Prepopulate the key
+        store.swap(key.clone(), existing.clone(), None).await?;
+
+        // when=None and key exists → fail
+        let result = store.swap(key.clone(), new_val, None).await;
+        assert!(matches!(
+            result,
+            Err(RestStorageBackendError::OperationFailed(_))
+        ));
+        assert_eq!(store.resolve(&key).await?.unwrap(), existing);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_swap_when_some_key_matches_ok() -> anyhow::Result<()> {
+        let service = s3::start().await?;
+        let config = RestStorageConfig {
+            endpoint: service.endpoint().into(),
+            auth_method: AuthMethod::None,
+            bucket: Some("test-bucket".to_string()),
+            key_prefix: Some("branch".to_string()),
+            ..Default::default()
+        };
+        let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+        let key: Vec<u8> = ALICE.into();
+        let existing: Vec<u8> = b"v1".to_vec();
+        let new_val: Vec<u8> = b"v2".to_vec();
+
+        // Prepopulate the key
+        store.swap(key.clone(), existing.clone(), None).await?;
+
+        // when=Some and matches existing → success
+        store
+            .swap(key.clone(), new_val.clone(), Some(existing.clone()))
+            .await?;
+        assert_eq!(store.resolve(&key).await?.unwrap(), new_val);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_swap_when_some_key_mismatch_fail() -> anyhow::Result<()> {
+        let service = s3::start().await?;
+        let config = RestStorageConfig {
+            endpoint: service.endpoint().into(),
+            auth_method: AuthMethod::None,
+            bucket: Some("test-bucket".to_string()),
+            key_prefix: Some("branch".to_string()),
+            ..Default::default()
+        };
+        let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+        let key: Vec<u8> = ALICE.into();
+        let existing: Vec<u8> = b"v1".to_vec();
+        let wrong_expected: Vec<u8> = b"vX".to_vec();
+        let new_val: Vec<u8> = b"v2".to_vec();
+
+        // Prepopulate the key
+        store.swap(key.clone(), existing.clone(), None).await?;
+
+        // when=Some but doesn't match existing → fail
+        let result = store
+            .swap(key.clone(), new_val.clone(), Some(wrong_expected))
+            .await;
+        assert!(matches!(
+            result,
+            Err(RestStorageBackendError::OperationFailed(_))
+        ));
+        assert_eq!(store.resolve(&key).await?.unwrap(), existing);
+
+        Ok(())
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod s3 {
+    use async_trait::async_trait;
+    use hyper::server::conn::http1;
+    use hyper_util::rt::TokioIo;
+    use md5;
+    use s3s::crypto::Md5;
+    use s3s::dto::*;
+    use s3s::service::S3ServiceBuilder;
+    use s3s::{S3, S3Request, S3Response, S3Result, s3_error};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::SystemTime;
+    use tokio::net::TcpListener;
+    use tokio::sync::RwLock;
+
+    /// Simple in-memory backend for testing.
+    ///
+    /// Structure: bucket_name -> key -> StoredObject
+    #[derive(Clone, Default)]
+    pub struct InMemoryS3 {
+        buckets: Arc<RwLock<HashMap<String, HashMap<String, StoredObject>>>>,
+    }
+
+    pub struct Service {
+        pub endpoint: String,
+        shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    }
+    impl Service {
+        pub fn stop(self) -> Result<(), ()> {
+            self.shutdown_tx.send(())
+        }
+
+        pub fn endpoint(&self) -> &str {
+            &self.endpoint
+        }
+    }
+
+    pub async fn start() -> anyhow::Result<Service> {
+        InMemoryS3::start2().await
+    }
+
+    impl InMemoryS3 {
+        pub async fn start() -> anyhow::Result<Service> {
+            Self::serve(Self::default()).await
+        }
+
+        pub async fn start2() -> anyhow::Result<Service> {
+            let s3_handler = S3ServiceBuilder::new(Self::default()).build();
+
+            // Bind to a random available port
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let addr = listener.local_addr()?;
+            let endpoint = format!("http://{}", addr);
+
+            let handle = tokio::spawn(async move {
+                loop {
+                    let (stream, _) = match listener.accept().await {
+                        Ok(x) => x,
+                        Err(_) => break,
+                    };
+
+                    let io = TokioIo::new(stream);
+                    let service = s3_handler.clone();
+
+                    tokio::spawn(async move {
+                        let _ = http1::Builder::new().serve_connection(io, service).await;
+                    });
+                }
+            });
+            let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+
+            // Give the server a moment to start
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+            Ok(Service {
+                endpoint,
+                shutdown_tx,
+            })
+        }
+
+        async fn serve(self) -> anyhow::Result<Service> {
+            use hyper::server::conn::http1;
+            use hyper_util::rt::TokioIo;
+            use s3s::service::S3ServiceBuilder;
+            use tokio::net::TcpListener;
+
+            let s3_handler = S3ServiceBuilder::new(self).build();
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let addr = listener.local_addr()?;
+            let endpoint = format!("http://{}", addr);
+
+            let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        Ok((stream, _)) = listener.accept() => {
+                            let io = TokioIo::new(stream);
+                            let service = s3_handler.clone();
+                            tokio::spawn(async move {
+                                let _ = http1::Builder::new().serve_connection(io, service).await;
+                            });
+                        }
+                        _ = &mut shutdown_rx => {
+                            break;
+                        }
+                    }
+                }
+            });
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+            Ok(Service {
+                endpoint,
+                shutdown_tx,
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct StoredObject {
+        data: Vec<u8>,
+        metadata: Option<HashMap<String, String>>,
+        last_modified: SystemTime,
+        e_tag: String,
+    }
+
+    impl StoredObject {
+        fn new(data: Vec<u8>, metadata: Option<HashMap<String, String>>) -> Self {
+            let checksum = md5::compute(&data);
+            let e_tag = format!("\"{:x}\"", checksum);
+            StoredObject {
+                data,
+                metadata,
+                e_tag,
+                last_modified: SystemTime::now(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl S3 for InMemoryS3 {
+        async fn put_object(
+            &self,
+            req: s3s::S3Request<PutObjectInput>,
+        ) -> S3Result<S3Response<PutObjectOutput>> {
+            let key = &req.input.key;
+
+            let mut buckets = self.buckets.write().await;
+            let bucket = buckets.entry(req.input.bucket.clone()).or_default();
+
+            // check preconditions
+            if let Some(existing) = bucket.get(key) {
+                // Check If-Match
+                if let Some(ref cond) = req.input.if_match {
+                    if &existing.e_tag != cond {
+                        return Err(s3_error!(PreconditionFailed));
+                    }
+                }
+
+                // Check If-None-Match
+                if let Some(ref cond) = req.input.if_none_match {
+                    if cond == "*" || &existing.e_tag == cond {
+                        return Err(s3_error!(PreconditionFailed));
+                    }
+                }
+            } else {
+                // Object does not exist
+                // If-Match should fail if specified
+                if req.input.if_match.is_some() {
+                    return Err(s3_error!(PreconditionFailed));
+                }
+            }
+
+            let mut body = req.input.body.ok_or_else(|| s3_error!(IncompleteBody))?;
+            // Convert StreamingBlob to Body (http_body type)
+            let s3s_body: s3s::Body = body.into();
+            // Collect the streaming body into bytes
+            use http_body_util::BodyExt;
+            let collected = s3s_body
+                .collect()
+                .await
+                .map_err(|_| s3s::S3Error::new(s3s::S3ErrorCode::InternalError))?;
+            let data = collected.to_bytes();
+
+            let stored = StoredObject::new(data.into(), req.input.metadata.clone());
+            let e_tag = stored.e_tag.clone();
+            bucket.insert(key.clone(), stored);
+
+            Ok(S3Response::new(PutObjectOutput {
+                e_tag: Some(ETag::Strong(e_tag)),
+                ..Default::default()
+            }))
+        }
+
+        async fn get_object(
+            &self,
+            req: s3s::S3Request<GetObjectInput>,
+        ) -> S3Result<S3Response<GetObjectOutput>> {
+            let key = &req.input.key;
+
+            let mut buckets = self.buckets.write().await;
+            let bucket = buckets.entry(req.input.bucket.clone()).or_default();
+            let obj = bucket.get(key).ok_or_else(|| s3_error!(NoSuchKey))?;
+
+            let content_length = obj.data.len() as i64;
+            let data = obj.data.clone();
+
+            let body = s3s::Body::from(bytes::Bytes::from(data.clone()));
+
+            Ok(S3Response::new(GetObjectOutput {
+                body: Some(StreamingBlob::from(body)),
+                content_length: Some(content_length),
+                last_modified: Some(Timestamp::from(obj.last_modified)),
+                e_tag: Some(ETag::Strong(obj.e_tag.clone())),
+                metadata: obj.metadata.clone(),
+                ..Default::default()
+            }))
+        }
+
+        async fn delete_object(
+            &self,
+            req: s3s::S3Request<DeleteObjectInput>,
+        ) -> S3Result<S3Response<DeleteObjectOutput>> {
+            let key = &req.input.key;
+
+            let mut buckets = self.buckets.write().await;
+            let bucket = buckets.entry(req.input.bucket.clone()).or_default();
+            bucket.remove(key);
+            Ok(S3Response::new(DeleteObjectOutput::default()))
+        }
+
+        async fn list_objects_v2(
+            &self,
+            req: s3s::S3Request<ListObjectsV2Input>,
+        ) -> S3Result<S3Response<ListObjectsV2Output>> {
+            let prefix = req.input.prefix.clone().unwrap_or_default();
+            let max_keys = req.input.max_keys.unwrap_or(1000) as usize;
+
+            let mut buckets = self.buckets.write().await;
+            let bucket = buckets.entry(req.input.bucket.clone()).or_default();
+
+            let mut objects: Vec<Object> = bucket
+                .iter()
+                .filter(|(k, _)| k.starts_with(&prefix))
+                .take(max_keys)
+                .map(|(k, v)| Object {
+                    key: Some(k.clone()),
+                    size: Some(v.data.len() as i64),
+                    last_modified: Some(Timestamp::from(v.last_modified)),
+                    e_tag: Some(ETag::Strong(v.e_tag.clone())),
+                    ..Default::default()
+                })
+                .collect();
+            let key_count = objects.len();
+
+            Ok(S3Response::new(ListObjectsV2Output {
+                contents: Some(objects),
+                key_count: Some(key_count as i32),
+                max_keys: Some(max_keys as i32),
+                is_truncated: Some(false),
+                name: Some(req.input.bucket.clone()),
+                ..Default::default()
+            }))
+        }
+
+        async fn head_object(
+            &self,
+            req: S3Request<HeadObjectInput>,
+        ) -> S3Result<S3Response<HeadObjectOutput>> {
+            let key = &req.input.key;
+
+            // Look up the object
+            let mut buckets = self.buckets.write().await;
+            let bucket = buckets.entry(req.input.bucket.clone()).or_default();
+            let obj = bucket.get(key).ok_or_else(|| s3_error!(NoSuchKey))?;
+
+            // Construct the response
+            Ok(S3Response::new(HeadObjectOutput {
+                content_length: Some(obj.data.len() as i64),
+                e_tag: Some(ETag::Strong(obj.e_tag.clone())),
+                last_modified: Some(Timestamp::from(obj.last_modified)),
+                metadata: obj.metadata.clone(),
+                ..Default::default()
+            }))
+        }
     }
 }
 
@@ -1576,7 +2236,7 @@ mod s3_integration_tests {
         let secret_access_key = env::var("R2S3_SECRET_ACCESS_KEY")
             .map_err(|_| anyhow::anyhow!("R2S3_SECRET_ACCESS_KEY environment variable not set"))?;
 
-        let s3_credentials = S3Credentials {
+        let s3_credentials = S3Authority {
             access_key_id,
             secret_access_key,
             session_token: None,
@@ -1592,12 +2252,10 @@ mod s3_integration_tests {
             key_prefix: Some("test-prefix".to_string()),
             headers: Vec::new(),
             timeout_seconds: Some(30),
-            chunked_upload: false,
         })
     }
 
     #[tokio::test]
-    #[ignore] // Only run when explicitly requested with environment variables set
     async fn test_s3_set_and_get() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let mut backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
@@ -1617,7 +2275,6 @@ mod s3_integration_tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_s3_get_missing_key() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
@@ -1632,7 +2289,6 @@ mod s3_integration_tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_s3_overwrite_value() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let mut backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
@@ -1659,7 +2315,6 @@ mod s3_integration_tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_s3_large_value() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let mut backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
@@ -1679,7 +2334,6 @@ mod s3_integration_tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_s3_multiple_keys() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let mut backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
@@ -1705,7 +2359,6 @@ mod s3_integration_tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_s3_binary_data() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let mut backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
@@ -1725,7 +2378,6 @@ mod s3_integration_tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_s3_checksum_verification() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let mut backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
@@ -1744,7 +2396,6 @@ mod s3_integration_tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_s3_bulk_operations() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let mut backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;

@@ -16,7 +16,7 @@ use anyhow::Result;
 
 use crate::{
     DialogStorageError, RestStorageBackend, RestStorageConfig, StorageBackend, StorageSink,
-    storage::backend::rest::{AuthMethod, S3Credentials},
+    storage::backend::rest::{AuthMethod, S3Authority},
 };
 
 /// Check if the required environment variables are set
@@ -42,7 +42,7 @@ fn setup_r2_backend() -> Result<RestStorageBackend<Vec<u8>, Vec<u8>>, DialogStor
     let prefix = test_prefix();
 
     // Set up S3Credentials for R2
-    let s3_creds = S3Credentials {
+    let s3_creds = S3Authority {
         access_key_id: env::var("R2S3_ACCESS_KEY_ID")
             .expect("R2S3_ACCESS_KEY_ID environment variable not set"),
         secret_access_key: env::var("R2S3_SECRET_ACCESS_KEY")
