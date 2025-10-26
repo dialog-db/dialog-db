@@ -4,12 +4,41 @@ use std::{
     ops::{Bound, RangeBounds},
 };
 
-use async_stream::try_stream;
+use async_stream::{stream, try_stream};
 use dialog_storage::{ContentAddressedStorage, HashType};
 use futures_core::Stream;
 use nonempty::NonEmpty;
 
 use crate::{Adopter, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
+
+/// Represents a change in the key-value store.
+pub enum Change<Key, Value>
+where
+    Key: KeyType + 'static,
+    Value: ValueType,
+{
+    /// Adds an entry to the key-value store.
+    Add(Entry<Key, Value>),
+    /// Removes an entry from the key-value store.
+    Remove(Entry<Key, Value>),
+}
+
+/// Represents a differential stream of changes in the key-value store.
+pub trait Differential<Key, Value>:
+    Stream<Item = Result<Change<Key, Value>, DialogProllyTreeError>>
+where
+    Key: KeyType + 'static,
+    Value: ValueType,
+{
+}
+
+impl<Key, Value, T> Differential<Key, Value> for T
+where
+    Key: KeyType + 'static,
+    Value: ValueType,
+    T: Stream<Item = Result<Change<Key, Value>, DialogProllyTreeError>>,
+{
+}
 
 /// A key-value store backed by a Ranked Prolly Tree with configurable storage,
 /// encoding and rank distribution.
@@ -144,6 +173,80 @@ where
             }
             None => Ok(()),
         }
+    }
+
+    /// Returns a difference between this and the other tree. Applying returned
+    /// differential onto `other` tree should produce this `tree`.
+    pub fn difference<Store>(
+        &self,
+        other: Tree<BRANCH_FACTOR, HASH_SIZE, Distribution, Key, Value, Hash, Store>,
+    ) -> impl Stream<Item = Result<Change<Key, Value>, DialogProllyTreeError>> + '_
+    where
+        // Can have a different storage implementation.
+        Store: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+    {
+        stream! {
+            match (self.root(), other.root()) {
+                (None, None) => {
+                }
+                // if we have a root but other does not
+                // then difference simply adds everything
+                (Some(_), None) => {
+                    for await entry in self.stream() {
+                        yield Ok(Change::Add(entry?));
+                    }
+                }
+                (None, Some(_)) => {
+                    for await entry in other.stream() {
+                        yield Ok(Change::Remove(entry?));
+                    }
+                }
+                (Some(after), Some(before)) => {
+                    if after.hash() != before.hash()   {
+                        let after_children = after.references()?;
+                        let before_children = before.references()?;
+
+                        for child in after_children {
+                            let child_hash = child.hash();
+                            let upper_bound = child.upper_bound();
+                        }
+
+                    }
+                }
+            }
+        }
+    }
+
+    /// Integrates changes into this tree and either succeeds or fails.
+    pub async fn integrate<Changes>(
+        &mut self,
+        changes: Changes,
+    ) -> Result<(), DialogProllyTreeError>
+    where
+        Changes: IntoIterator<Item = Change<Key, Value>>,
+    {
+        // copy root here in case we fail integration and need to revert
+        let root = self.root.clone();
+
+        // TODO: This seems very inefficient way to integrate changes into the
+        // tree but it's ok for now.
+        let result: Result<(), DialogProllyTreeError> = {
+            for change in changes {
+                match change {
+                    Change::Add(entry) => self.set(entry.key, entry.value).await?,
+                    Change::Remove(entry) => self.delete(&entry.key).await?,
+                }
+            }
+            Ok(())
+        };
+
+        // If integration fails we set the root back to the original
+        // as this operation must be atomic.
+        if result.is_err() {
+            self.root = root;
+        }
+
+        result
     }
 
     /// Returns an async stream over all entries.

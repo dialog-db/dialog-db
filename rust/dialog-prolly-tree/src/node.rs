@@ -154,6 +154,15 @@ where
         self.block.into_entries()
     }
 
+    /// Get children data as  [`Reference`]s.
+    ///
+    /// The result is an error if this [`Node`] is a segment.
+    pub fn references(
+        &self,
+    ) -> Result<&NonEmpty<Reference<HASH_SIZE, Key, Hash>>, DialogProllyTreeError> {
+        self.block.references()
+    }
+
     /// Load all the child references of this [`Node`] from storage as [`Node`]s
     /// and return them
     pub async fn load_children<Storage>(
