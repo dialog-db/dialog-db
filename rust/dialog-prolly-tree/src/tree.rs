@@ -177,14 +177,7 @@ where
 
     /// Returns a difference between this and the other tree. Applying returned
     /// differential onto `other` tree should produce this `tree`.
-    pub fn difference<Store>(
-        &self,
-        other: Tree<BRANCH_FACTOR, HASH_SIZE, Distribution, Key, Value, Hash, Store>,
-    ) -> impl Stream<Item = Result<Change<Key, Value>, DialogProllyTreeError>> + '_
-    where
-        // Can have a different storage implementation.
-        Store: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
-    {
+    pub fn difference(&self, other: Self) -> impl Differential<Key, Value> {
         stream! {
             match (self.root(), other.root()) {
                 (None, None) => {
