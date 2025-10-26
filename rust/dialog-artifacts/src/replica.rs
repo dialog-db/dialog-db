@@ -214,12 +214,12 @@ impl<'a, P: Platform> BranchView<'a, P> {
     /// pull. It assumes that current revision is based of the base revision
     /// and that subtrees that were updated are available locally, which would
     /// have been fetched in order to produce an update.
-    pub fn difference(&self) -> impl Differential<Key, State<Datum>> {
+    pub fn differentiate(&self) -> impl Differential<Key, State<Datum>> {
         let archive = self.platform.archive();
         stream! {
             let before:Index<Key, Datum, P::Storage> = Tree::from_hash(self.model.base().index().hash(), archive.clone()).await?;
             let after = Tree::from_hash(self.model.revision().index().hash(), archive.clone()).await?;
-            for await change in after.difference(before) {
+            for await change in after.differentiate(before) {
                 yield change;
             }
         }

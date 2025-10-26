@@ -4,41 +4,13 @@ use std::{
     ops::{Bound, RangeBounds},
 };
 
+use super::differential::{Change, Differential};
 use async_stream::{stream, try_stream};
 use dialog_storage::{ContentAddressedStorage, HashType};
 use futures_core::Stream;
 use nonempty::NonEmpty;
 
 use crate::{Adopter, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
-
-/// Represents a change in the key-value store.
-pub enum Change<Key, Value>
-where
-    Key: KeyType + 'static,
-    Value: ValueType,
-{
-    /// Adds an entry to the key-value store.
-    Add(Entry<Key, Value>),
-    /// Removes an entry from the key-value store.
-    Remove(Entry<Key, Value>),
-}
-
-/// Represents a differential stream of changes in the key-value store.
-pub trait Differential<Key, Value>:
-    Stream<Item = Result<Change<Key, Value>, DialogProllyTreeError>>
-where
-    Key: KeyType + 'static,
-    Value: ValueType,
-{
-}
-
-impl<Key, Value, T> Differential<Key, Value> for T
-where
-    Key: KeyType + 'static,
-    Value: ValueType,
-    T: Stream<Item = Result<Change<Key, Value>, DialogProllyTreeError>>,
-{
-}
 
 /// A key-value store backed by a Ranked Prolly Tree with configurable storage,
 /// encoding and rank distribution.
@@ -177,10 +149,11 @@ where
 
     /// Returns a difference between this and the other tree. Applying returned
     /// differential onto `other` tree should produce this `tree`.
-    pub fn difference(&self, other: Self) -> impl Differential<Key, Value> {
+    pub fn differentiate(&self, other: Self) -> impl Differential<Key, Value> + '_ {
         stream! {
             match (self.root(), other.root()) {
                 (None, None) => {
+                    // Both trees are empty - no changes
                 }
                 // if we have a root but other does not
                 // then difference simply adds everything
@@ -195,39 +168,85 @@ where
                     }
                 }
                 (Some(after), Some(before)) => {
-                    if after.hash() != before.hash()   {
-                        let after_children = after.references()?;
-                        let before_children = before.references()?;
+                    // Use the differential module to compute changes
+                    let diff = crate::differential::differentiate(
+                        before.clone(),
+                        after.clone(),
+                        &self.storage
+                    );
 
-                        for child in after_children {
-                            let child_hash = child.hash();
-                            let upper_bound = child.upper_bound();
-                        }
-
+                    for await change in diff {
+                        yield change;
                     }
                 }
             }
         }
     }
 
-    /// Integrates changes into this tree and either succeeds or fails.
+    /// Integrates changes into this tree with deterministic conflict resolution.
+    ///
+    /// Applies a differential (stream of changes) with Last-Write-Wins conflict resolution
+    /// based on value hashes. This ensures eventual consistency across replicas.
+    ///
+    /// # Conflict Resolution
+    ///
+    /// - **Add**: If key exists with different value, compare hashes - higher hash wins
+    /// - **Remove**: Only removes if the exact entry (key+value) exists
+    ///
+    /// The operation is atomic - if any change fails, the entire integration is rolled back.
     pub async fn integrate<Changes>(
         &mut self,
         changes: Changes,
     ) -> Result<(), DialogProllyTreeError>
     where
         Changes: IntoIterator<Item = Change<Key, Value>>,
+        Value: AsRef<[u8]>,
     {
-        // copy root here in case we fail integration and need to revert
+        // Copy root here in case we fail integration and need to revert
         let root = self.root.clone();
 
-        // TODO: This seems very inefficient way to integrate changes into the
-        // tree but it's ok for now.
         let result: Result<(), DialogProllyTreeError> = {
             for change in changes {
                 match change {
-                    Change::Add(entry) => self.set(entry.key, entry.value).await?,
-                    Change::Remove(entry) => self.delete(&entry.key).await?,
+                    Change::Add(entry) => {
+                        // Check if key already exists
+                        match self.get(&entry.key).await? {
+                            None => {
+                                // Key doesn't exist - insert it
+                                self.set(entry.key, entry.value).await?;
+                            }
+                            Some(existing_value) => {
+                                if existing_value == entry.value {
+                                    // Same value - no-op (idempotent)
+                                } else {
+                                    // Different values - resolve conflict by comparing hashes
+                                    let existing_hash = existing_value.hash();
+                                    let new_hash = entry.value.hash();
+
+                                    if new_hash > existing_hash {
+                                        // New value wins - update
+                                        self.set(entry.key, entry.value).await?;
+                                    }
+                                    // Else: existing wins, no-op
+                                }
+                            }
+                        }
+                    }
+                    Change::Remove(entry) => {
+                        // Check if key exists
+                        match self.get(&entry.key).await? {
+                            None => {
+                                // Key doesn't exist - no-op (already removed)
+                            }
+                            Some(existing_value) => {
+                                if existing_value == entry.value {
+                                    // Same value - remove it
+                                    self.delete(&entry.key).await?;
+                                }
+                                // Else: different value - no-op (concurrent update)
+                            }
+                        }
+                    }
                 }
             }
             Ok(())

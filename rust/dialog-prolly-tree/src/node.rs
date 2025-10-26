@@ -135,6 +135,11 @@ where
         &self.reference
     }
 
+    /// Returns the upper bound key of this node.
+    pub fn upper_bound(&self) -> &Key {
+        self.reference.upper_bound()
+    }
+
     /// Returns the [`Hash`] for this [`Node`] used to retrieve from
     /// [`ContentAddressedStorage`].
     pub fn hash(&self) -> &Hash {
