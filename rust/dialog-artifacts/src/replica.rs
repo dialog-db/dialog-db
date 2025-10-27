@@ -1,10 +1,10 @@
 pub use super::uri::Uri;
 use crate::artifacts::NULL_REVISION_HASH as EMPTY_INDEX;
 use crate::constants::HASH_SIZE;
-use crate::{Artifacts, Datum, Index, Key, State};
+use crate::{Datum, Index, Key, State};
 use async_stream::stream;
 use dialog_common::ConditionalSync;
-use dialog_prolly_tree::{Change, Delta, DialogProllyTreeError, Differential, Node, Tree};
+use dialog_prolly_tree::{Differential, Tree};
 use dialog_storage::{
     AtomicStorageBackend, Blake3Hash, CborEncoder, DialogStorageError, Storage, StorageBackend,
 };
@@ -220,10 +220,9 @@ impl<'a, P: Platform> BranchView<'a, P> {
         stream! {
             let before:Index<Key, Datum, P::Storage> = Tree::from_hash(self.model.base().index().hash(), archive.clone()).await?;
             let after:Index<Key, Datum, P::Storage> = Tree::from_hash(self.model.revision().index().hash(), archive.clone()).await?;
-            let delta = Delta::from((&before, &after));
 
-            // differentiate(before, after, storage)
-            for await change in delta.stream() {
+            let diff = before.differentiate(&after);
+            for await change in diff {
                 yield change;
             }
         }

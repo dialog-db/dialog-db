@@ -5,12 +5,11 @@ use std::{
 };
 
 use super::differential::Change;
+use crate::{Adopter, Delta, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
 use async_stream::try_stream;
 use dialog_storage::{ContentAddressedStorage, HashType};
 use futures_core::Stream;
 use nonempty::NonEmpty;
-
-use crate::{Adopter, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
 
 /// A key-value store backed by a Ranked Prolly Tree with configurable storage,
 /// encoding and rank distribution.
@@ -149,39 +148,17 @@ where
 
     /// Returns a difference between this and the other tree. Applying returned
     /// differential onto `other` tree should produce this `tree`.
-    // pub fn differentiate(&self, other: Self) -> impl Differential<Key, Value> + '_ {
-    // stream! {
-    //     match (self.root(), other.root()) {
-    //         (None, None) => {
-    //             // Both trees are empty - no changes
-    //         }
-    //         // if we have a root but other does not
-    //         // then difference simply adds everything
-    //         (Some(_), None) => {
-    //             for await entry in self.stream() {
-    //                 yield Ok(Change::Add(entry?));
-    //             }
-    //         }
-    //         (None, Some(_)) => {
-    //             for await entry in other.stream() {
-    //                 yield Ok(Change::Remove(entry?));
-    //             }
-    //         }
-    //         (Some(after), Some(before)) => {
-    //             // Use the differential module to compute changes
-    //             let diff = crate::differential::differentiate(
-    //                 before.clone(),
-    //                 after.clone(),
-    //                 &self.storage
-    //             );
-
-    //             for await change in diff {
-    //                 yield change;
-    //             }
-    //         }
-    //     }
-    // }
-    // }
+    pub fn differentiate<'a>(
+        &'a self,
+        other: &'a Self,
+    ) -> impl crate::differential::Differential<Key, Value> + 'a {
+        let delta = Delta::from((other, self));
+        try_stream! {
+            for await change in delta.stream() {
+                yield change?;
+            }
+        }
+    }
 
     /// Integrates changes into this tree with deterministic conflict resolution.
     ///
