@@ -152,8 +152,9 @@ where
         &'a self,
         other: &'a Self,
     ) -> impl crate::differential::Differential<Key, Value> + 'a {
-        let delta = Delta::from((other, self));
+        let mut delta = Delta::from((other, self));
         try_stream! {
+            delta.expand().await?;
             for await change in delta.stream() {
                 yield change?;
             }
