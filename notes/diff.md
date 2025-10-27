@@ -2,7 +2,7 @@
 
 ## Overview
 
-The differentiation algorithm computes the set of changes between two search trees by performing a parallel tree walk with hash-based pruning. The output is a stream of `Change` events representing entries that were added or removed.
+The differentiation algorithm computes the set of changes between two search trees using a **sparse tree** representation with prune-expand-stream approach. The output is a stream of `Change` events representing entries that were added or removed.
 
 ```rust
 pub enum Change<Key, Value> {
@@ -10,7 +10,7 @@ pub enum Change<Key, Value> {
     Remove(Entry<Key, Value>),
 }
 
-pub fn differentiate(checkpoint: Tree, current: Tree) -> Stream<Change>
+pub fn differentiate(before: &Tree, after: &Tree) -> impl Differential
 ```
 
 ---
@@ -22,390 +22,290 @@ pub fn differentiate(checkpoint: Tree, current: Tree) -> Stream<Change>
 The fundamental optimization: **if two nodes have the same hash, their entire subtrees are identical and can be skipped**.
 
 ```yaml
-checkpoint@abc         current@abc
-├─ node1@xyz          ├─ node1@xyz
-│  └─ ...             │  └─ ...
-└─ node2@def          └─ node2@def
-   └─ ...                └─ ...
+before@abc           after@abc
+├─ node1@xyz         ├─ node1@xyz
+│  └─ ...            │  └─ ...
+└─ node2@def         └─ node2@def
+   └─ ...               └─ ...
 ```
 
-If `checkpoint.hash == current.hash`, we emit **no changes** and return immediately.
+If `before.hash == after.hash`, we emit **no changes** and return immediately.
 
-### 2. Ordered Comparison
+### 2. Sparse Tree Representation
 
-Both trees store entries in sorted order by key. We can walk them in parallel using a two-cursor algorithm, similar to merging sorted arrays.
+A **sparse tree** is a subset of nodes from the original tree that represents only the portions that differ. Instead of walking the entire tree structure, we maintain only the nodes that are relevant to the diff.
 
-### 3. Upper Bound Navigation
+### 3. Prune-Expand-Stream Cycle
 
-Each node (whether IndexNode/Branch or Segment) has an `upper_bound` - the maximum key in that node or subtree. This allows us to:
-- Align cursors between trees
-- Detect boundary shifts
-- Navigate efficiently through misaligned ranges
+The algorithm alternates between:
+- **Prune**: Remove nodes with identical hashes from both sparse trees
+- **Expand**: Replace branch nodes with their children to expose more detail
+- **Repeat**: Until only differing segment (leaf) nodes remain
+- **Stream**: Two-cursor walk over remaining segments to yield changes
 
-### 4. Range-Based Comparison
+### 4. Ordered Comparison
 
-When boundaries don't align between trees (due to boundary insertions or removals), we identify the misaligned **range** and compare all references within that range.
-
-**Boundary shifts occur when**:
-- **Boundary removed**: Children from the removed boundary shift to the next parent
-- **Boundary inserted**: A range splits into multiple boundaries
+Both trees store entries in sorted order by key. Once we reach segments, we can walk them in parallel using a two-cursor algorithm, similar to merging sorted arrays.
 
 ---
 
 ## Algorithm Structure
 
+### High-Level Flow
+
 ```
-differentiate(checkpoint, current)
+differentiate(before, after)
   ├─ If both None → return empty stream
-  ├─ If checkpoint None → add_all(current)
-  ├─ If current None → remove_all(checkpoint)
-  └─ diff_nodes(checkpoint.root, current.root)
+  ├─ If before None → add_all(after)
+  ├─ If after None → remove_all(before)
+  └─ delta = Delta::from((before, after))
+     ├─ delta.expand() // Prune and expand until only segments remain
+     └─ delta.stream() // Two-cursor walk to yield changes
 ```
 
-### `diff_nodes(before: Node, after: Node)`
+### Delta Structure
 
-Compares two nodes and dispatches to the appropriate handler:
-
-```
-diff_nodes(before, after)
-  ├─ If before.hash == after.hash → Skip (identical)
-  ├─ If both segments → diff_entries(before, after)
-  ├─ If both branches → diff_ranges(before, after)
-  └─ If one branch, one segment → extract entries from both, diff_entries
-```
-
-**Note**: Trees can have different heights if one has grown significantly. When comparing a branch against a segment, we extract all entries from the branch's subtree and compare them against the segment's entries.
-
----
-
-## Entry Comparison: `diff_entries`
-
-At the leaf level (or when comparing extracted entries), we use a two-cursor walk of sorted entry lists.
-
-### Example: Modified Entries
-
-```yaml
-checkpoint                current
-├─ Entry(k1, v1)         ├─ Entry(k1, v1)
-├─ Entry(k2, v2)         ├─ Entry(k2, v2')    (value changed)
-├─ Entry(k3, v3)         ├─ Entry(k4, v4)     (k3 removed, k4 added)
-└─ Entry(k5, v5)         └─ Entry(k5, v5)
-```
-
-**Two-cursor walk**:
-
-| Step | Checkpoint | Current | Comparison | Output |
-|------|-----------|---------|------------|--------|
-| 1 | `k1:v1` | `k1:v1` | Entries equal | Skip, advance both |
-| 2 | `k2:v2` | `k2:v2'` | Keys equal, values differ | `Remove(k2:v2)`, `Add(k2:v2')`, advance both |
-| 3 | `k3:v3` | `k4:v4` | `k3 < k4` | `Remove(k3:v3)`, advance checkpoint |
-| 4 | `k5:v5` | `k4:v4` | `k5 > k4` | `Add(k4:v4)`, advance current |
-| 5 | `k5:v5` | `k5:v5` | Entries equal | Skip, advance both |
-
-**Output stream**:
-```rust
-Remove(Entry { key: k2, value: v2 })
-Add(Entry { key: k2, value: v2' })
-Remove(Entry { key: k3, value: v3 })
-Add(Entry { key: k4, value: v4 })
-```
-
----
-
-## Range Comparison: `diff_ranges`
-
-This is the core of the algorithm when comparing IndexNode children. We walk two sorted lists of references, identifying aligned and misaligned ranges.
-
-### Key Insight: Boundary Shifts
-
-When a boundary entry is removed or added, the geometric distribution changes, causing boundary shifts:
-- **Boundary removed**: Children shift to the next parent
-- **Boundary inserted**: Range splits into multiple nodes
-
-### Example: Boundary Removal
-
-**Initial state** (checkpoint):
-```yaml
-checkpoint
-├─ ref_a [bound=k3]
-│   ├─ ref_a1 [bound=k0]
-│   ├─ ref_a2 [bound=k1]
-│   └─ ref_a3 [bound=k3]
-├─ ref_b [bound=k5]
-│   ├─ ref_b1 [bound=k4]
-│   └─ ref_b2 [bound=k5]
-└─ ref_c [bound=k7]
-    ├─ ref_c1 [bound=k6]
-    └─ ref_c2 [bound=k7]
-```
-
-**After removing entry `k4`** (current):
-```yaml
-current
-├─ ref_a [bound=k3]
-│   ├─ ref_a1 [bound=k0]
-│   ├─ ref_a2 [bound=k1]
-│   └─ ref_a3 [bound=k3]
-└─ ref_c [bound=k7]
-    ├─ ref_b2 [bound=k5]  ← Shifted from ref_b!
-    ├─ ref_c1 [bound=k6]
-    └─ ref_c2 [bound=k7]
-```
-
-**What happened**:
-- Removing entry `k4` caused boundary `ref_b@k5` to disappear
-- Children of `ref_b` shifted to `ref_c`
-- Simply calling `remove_all(ref_b)` would be wrong!
-
-### Range-Based Algorithm
-
-When we encounter misaligned boundaries, we collect references in the misaligned range and compare their children.
-
-**Walk sequence** for the example above:
-
-| Step | Checkpoint Cursor | Current Cursor | Action |
-|------|------------------|----------------|--------|
-| 1 | `ref_a@k3` | `ref_a@k3` | Bounds match, compare normally |
-| 2 | `ref_b@k5` | `ref_c@k7` | **Misalignment detected!** |
-| | | | Checkpoint range: `(k3..k5]` |
-| | | | Current range: `(k3..k7]` |
-| | | | Checkpoint refs: `[ref_b@k5]` |
-| | | | Current refs: `[ref_c@k7]` |
-| | | | Load checkpoint children: `[ref_b1@k4, ref_b2@k5]` |
-| | | | Load current children: `[ref_b2@k5, ref_c1@k6, ref_c2@k7]` |
-| | | | **Compare these child lists** |
-
-Wait, this isn't quite right. Let me reconsider...
-
-Actually, looking at the structure again:
-- Checkpoint has `[ref_a@k3, ref_b@k5, ref_c@k7]`
-- Current has `[ref_a@k3, ref_c@k7]`
-
-When we hit the misalignment:
-- We're at `ref_b@k5` in checkpoint
-- We're at `ref_c@k7` in current
-- We need to collect until we find matching hashes
-
-But `ref_c@k7` in both trees might not have the same hash (because current's `ref_c` now contains `ref_b2`).
-
-So the range should be:
-- Checkpoint: collect `[ref_b@k5, ref_c@k7]` 
-- Current: collect `[ref_c@k7]`
-- Load all their children and compare
-
-### Cases for Range Comparison
-
-#### Case 1: Bounds Match, Hashes Match
-```yaml
-checkpoint: ref_a@k5 (hash=abc)
-current:    ref_a@k5 (hash=abc)
-```
-
-**Action**: Skip (identical subtree), advance both cursors.
-
-#### Case 2: Bounds Match, Hashes Differ
-
-```yaml
-checkpoint: ref_a@k5 (hash=abc)
-current:    ref_a@k5 (hash=xyz)
-```
-
-**Action**: Range contains just these nodes' children
-- Load children from both refs
-- Compare the children lists
-
-#### Case 3: Misaligned Boundaries (Different Bounds)
-
-```yaml
-checkpoint: [ref_a@k3, ref_b@k5, ref_c@k7]
-current:    [ref_a@k3, ref_k@k6, ref_c@k7]
-```
-
-If `ref_c@k7` has the same hash in both trees, we can stop collecting at the previous boundary:
-
-**Action**:
-- Checkpoint range: `(k3..k5]` → refs: `[ref_b@k5]`
-- Current range: `(k3..k6]` → refs: `[ref_k@k6]`
-- Load children from both refs
-- Compare the children lists
-- Skip `ref_c@k7` (identical)
-
-If `ref_c@k7` differs, we include it in the range:
-
-**Action**:
-- Checkpoint range: `(k3..k7]` → refs: `[ref_b@k5, ref_c@k7]`
-- Current range: `(k3..k7]` → refs: `[ref_k@k6, ref_c@k7]`
-- Load children from all refs
-- Compare the children lists
-
-#### Case 4: One Side Exhausted
-
-```yaml
-checkpoint: [ref_a@k3]
-current:    [ref_a@k3, ref_b@k5, ref_c@k7]
-```
-
-**Action**:
-- After comparing `ref_a`, checkpoint cursor is exhausted
-- Current has remaining refs: `[ref_b@k5, ref_c@k7]`
-- Load all children from current refs
-- Call `add_all` on those children
-
-### Range Definition
-
-A **range** is defined by two bounds:
-- **Start**: Previous reference's upper_bound (exclusive), or tree minimum if first ref
-- **End**: Last reference's upper_bound before the next matching ref (inclusive)
-
-For example, `(k3..k5]` means:
-- All keys `> k3` and `<= k5`
-- In byte array terms: lexicographically greater than k3, up to and including k5
-
----
-
-## Implementation Approaches
-
-### Recursive Approach
-
-The pseudocode shown earlier uses recursion: when we find a range, we recursively call `diff_reference_lists` on the children.
-
-### Stack-Based Approach
-
-Alternatively, we can use a stack to avoid recursion:
+The `Delta` struct maintains two sparse trees representing the differing portions:
 
 ```rust
-fn differentiate(checkpoint: Tree, current: Tree) -> Stream<Change> {
-    let mut stack = vec![(checkpoint.root, current.root)];
-    
-    stream! {
-        while let Some((before, after)) = stack.pop() {
-            if before.hash() == after.hash() {
-                continue; // Skip identical subtrees
+/// Represents the difference between two prolly trees.
+///
+/// `Delta` maintains two [`SparseTree`]s representing the differing portions of
+/// two trees being compared. The first tree is the "before" state, and the second
+/// is the "after" state.
+pub(crate) struct Delta<'a, ...>(
+    SparseTree<'a, ...>,  // before
+    SparseTree<'a, ...>,  // after
+)
+```
+
+### Expand Phase
+
+The expand phase alternates between pruning and expanding until only segments remain:
+
+```rust
+impl Delta {
+    async fn expand(&mut self) -> Result<()> {
+        let Self(before, after) = self;
+        loop {
+            // Prune shared nodes using two-cursor walk
+            before.prune(after);
+
+            // Try to expand both sides
+            let before_expanded = before.expand().await?;
+            let after_expanded = after.expand().await?;
+
+            // If neither side expanded, we're done expanding
+            if !before_expanded && !after_expanded {
+                break;
             }
-            
-            if before.is_segment() && after.is_segment() {
-                // Leaf level - emit changes
-                for change in diff_entries(before, after) {
-                    yield change;
+        }
+
+        // Final prune after reaching segments
+        before.prune(after);
+
+        Ok(())
+    }
+}
+```
+
+**Prune step:**
+- Compare nodes at the same position in both sparse trees
+- If hashes match, remove both nodes (identical subtree)
+- If hashes differ, keep both nodes for further expansion
+
+**Expand step:**
+- For each branch node remaining in the sparse trees
+- Load its children from storage
+- Replace the branch node with its children in the sparse tree
+
+**Termination:**
+- Loop ends when nothing is left to expand (we reached segments)
+- At this point, all branches have been expanded or pruned
+
+### Stream Phase
+
+Once only segments remain, perform a two-cursor walk:
+
+```rust
+fn stream(&self) -> impl Stream<Item = Result<Change>> {
+    let mut before_cursor = self.before.segments();
+    let mut after_cursor = self.after.segments();
+
+    loop {
+        match (before_cursor.peek(), after_cursor.peek()) {
+            // Keys match
+            (Some(b), Some(a)) if b.key == a.key => {
+                if b.value != a.value {
+                    // Value changed
+                    yield Change::Remove(b);
+                    yield Change::Add(a);
                 }
-            } else {
-                // Identify ranges at this level
-                let ranges = identify_ranges(before, after);
-                
-                // Load children for each range and push to stack
-                for (before_refs, after_refs) in ranges {
-                    let before_children = load_all_children(before_refs);
-                    let after_children = load_all_children(after_refs);
-                    
-                    // Push child pairs onto stack
-                    for (b, a) in pair_children(before_children, after_children) {
-                        stack.push((b, a));
-                    }
-                }
+                // Keys match - advance both
+                before_cursor.next();
+                after_cursor.next();
             }
+            // Before key < after key
+            (Some(b), Some(a)) if b.key < a.key => {
+                yield Change::Remove(b);
+                before_cursor.next();
+            }
+            // Before key > after key
+            (Some(b), Some(a)) => {
+                yield Change::Add(a);
+                after_cursor.next();
+            }
+            // Only before remains
+            (Some(b), None) => {
+                yield Change::Remove(b);
+                before_cursor.next();
+            }
+            // Only after remains
+            (None, Some(a)) => {
+                yield Change::Add(a);
+                after_cursor.next();
+            }
+            // Both exhausted
+            (None, None) => break,
         }
     }
 }
 ```
 
-**Benefits of stack-based approach**:
-- No recursion depth limits
-- Easier to control traversal order
-- Can implement breadth-first or depth-first easily
-- Clearer separation of "finding ranges" vs "processing ranges"
-
 ---
 
-## Performance Characteristics
+## Example Walkthrough
 
-### Time Complexity
+### Setup
 
-- **Best case**: O(log n) - Trees differ only at root, identical hashes below
-- **Worst case**: O(n) - Every entry differs, must walk entire tree
-- **Average case**: O(k log n) - k changed entries scattered across log n levels
+```yaml
+before:                          after:
+  IndexNode@abc                    IndexNode@xyz
+  ├─ Segment@111 [k1,k2]          ├─ Segment@111 [k1,k2]    (same)
+  └─ Segment@222 [k3,k4]          └─ Segment@333 [k3,k5]    (different)
+```
 
-### Space Complexity
+### Iteration 1: Initial Prune
 
-- **Streaming**: O(1) constant memory for the stream itself
-- **Stack depth**: O(log n) for recursion or explicit stack
-- **Node loading**: Only loads nodes that differ or are in misaligned ranges
-- **Collected refs**: Temporary O(m) where m is refs in a misaligned range
+**Sparse trees:**
+- before: `[IndexNode@abc]`
+- after: `[IndexNode@xyz]`
 
-### Optimizations
+**Prune check:**
+- `abc != xyz` → keep both
 
-1. **Hash pruning**: Entire subtrees skipped with single hash comparison
-2. **Lazy loading**: Only loads nodes that potentially differ
-3. **Streaming output**: No need to materialize full diff in memory
-4. **Smart range detection**: Only collect until finding matching hashes
+**Result:** No pruning, proceed to expand
+
+### Iteration 2: Expand Branches
+
+**Expand:**
+- Load children of `IndexNode@abc`: `[Segment@111, Segment@222]`
+- Load children of `IndexNode@xyz`: `[Segment@111, Segment@333]`
+
+**Sparse trees:**
+- before: `[Segment@111, Segment@222]`
+- after: `[Segment@111, Segment@333]`
+
+### Iteration 3: Prune Segments
+
+**Prune check:**
+- Position 0: `Segment@111 == Segment@111` → remove both
+- Position 1: `Segment@222 != Segment@333` → keep both
+
+**Sparse trees:**
+- before: `[Segment@222]`
+- after: `[Segment@333]`
+
+**Only segments check:** Yes → exit expand loop
+
+### Stream Phase
+
+**Two-cursor walk:**
+- before: `[k3:v3, k4:v4]`
+- after: `[k3:v3', k5:v5]`
+
+| Step | Before | After | Action |
+|------|--------|-------|--------|
+| 1 | `k3:v3` | `k3:v3'` | Keys match, values differ → `Remove(k3:v3)`, `Add(k3:v3')` |
+| 2 | `k4:v4` | `k5:v5` | `k4 < k5` → `Remove(k4:v4)` |
+| 3 | Done | `k5:v5` | Only after → `Add(k5:v5)` |
+
+**Output stream:**
+```rust
+Remove(Entry { key: k3, value: v3 })
+Add(Entry { key: k3, value: v3' })
+Remove(Entry { key: k4, value: v4 })
+Add(Entry { key: k5, value: v5 })
+```
+
+## Remaining Problem: Different Tree Heights
+
+> ⚠️  **Suboptimal Behavior with Height Differences**
+>
+> The current algorithm exhibits suboptimal behavior when comparing trees of different heights. When comparing nodes at different heights, the hash comparison will **never** discover equal nodes, causing the algorithm to expand all the way down to segments before discovering what to prune.
+>
+> **Example: Containment Scenario**
+>
+> Consider two trees where `tree1` has 100 entries and `tree2` has 1000 entries, with the first 100 entries identical:
+>
+> ```yaml
+> tree1 (height=2):
+>   IndexNode@abc
+>   └─ Segments [k1..k100]
+>
+> tree2 (height=3):
+>   IndexNode@xyz
+>   └─ IndexNode@def
+>      ├─ Segments [k1..k100]    (identical to tree1!)
+>      └─ Segments [k101..k1000]
+> ```
+>
+> **What happens:**
+> 1. Compare `IndexNode@abc` (height 2) with `IndexNode@xyz` (height 3)
+> 2. Hashes don't match (different heights, different structure)
+> 3. Expand `tree2` one level: `IndexNode@def` vs `IndexNode@abc`
+> 4. Still don't match (different heights)
+> 5. Continue expanding until both are at segment level
+> 6. **Only then** discover that segments for k1..k100 are identical
+> 7. End up reading far more nodes than necessary
+>
+> **Impact:**
+> - Reads O(height_difference × branching_factor) extra nodes
+> - In the example above, we read the entire tree2 structure down to segments
+> - Negates the benefit of hash-based pruning for the shared portion
+>
+> **Potential Solutions:**
+> - Height-aware comparison: when heights differ, expand the taller tree first
+> - Hash comparison at segment level: compare segment hashes even when nested at different depths
+> - Hybrid approach: use range queries to skip ahead in taller trees
 
 ---
 
 ## Edge Cases
 
-### Empty Trees
 
-```rust
-differentiate(empty, tree_with_data)
-// → add_all(tree_with_data)
-
-differentiate(tree_with_data, empty)
-// → remove_all(tree_with_data)
-```
-
-### Identical Trees
-
-```rust
-differentiate(tree@abc123, tree@abc123)
-// → Empty stream (root hash match)
-```
-
-### Height Mismatch
+### Height Mismatch (Same Data)
 
 ```yaml
-checkpoint (small tree):
-└─ segment [bound=k1]
-   └─ Entry(k1, v1)
+before (height=1):
+└─ Segment [k1:v1]
 
-current (large tree):
-└─ IndexNode [bound=k1]
-   └─ IndexNode [bound=k1]
-      └─ segment [bound=k1]
-         └─ Entry(k1, v1)
+after (height=3):
+└─ IndexNode
+   └─ IndexNode
+      └─ Segment [k1:v1]
 ```
 
-Both extract to `[Entry(k1, v1)]`, so the diff is empty.
+Both will expand to `[Entry(k1:v1)]`, resulting in an empty diff. However, this requires expanding the entire `after` tree (see performance warning above).
 
----
+### Subset Relationship
 
-## Error Handling
-
-### Fatal Errors (Fail Fast)
-
-1. **Missing blocks**: If a node reference can't be loaded from storage
-2. **Structural inconsistencies**: If tree invariants are violated
-
-All errors propagate immediately, stopping the stream.
-
-### No Partial Results
-
-If differentiation fails halfway through, the entire operation fails. There are no partial diffs - it's all or nothing.
-
----
-
-## Integration with Sync Protocol
-
-From sync.md, differentiation is used in the merge process:
-
-```rust
-// Compute what changed locally
-let changes = differentiate(branch.base, branch.current);
-
-// Apply those changes to the fetched remote tree
-let merged = remote_tree.integrate(changes).await?;
+```yaml
+before: [k1, k2, k3]
+after:  [k1, k2, k3, k4, k5]
 ```
 
-This enables:
-- ✅ Only loads nodes that differ
-- ✅ Handles boundary shifts correctly
-- ✅ Cached subtrees remain cached (no refetch if unchanged)
-- ✅ Deterministic conflict resolution via integrate
+If `after` fully contains `before` with additional entries, the algorithm will:
+1. Identify shared subtrees through hash comparison (if at same height)
+2. Yield only `Add(k4)` and `Add(k5)` changes
+3. **BUT**: if trees have different heights, will expand all the way to segments (suboptimal)
