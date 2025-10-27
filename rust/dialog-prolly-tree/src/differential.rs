@@ -1,5 +1,5 @@
-use crate::{DialogProllyTreeError, Entry, KeyType, Node, Reference, Tree, ValueType};
-use async_stream::{stream, try_stream};
+use crate::{DialogProllyTreeError, Entry, KeyType, Node, Tree, ValueType};
+use async_stream::try_stream;
 use dialog_storage::{ContentAddressedStorage, HashType};
 use futures_core::Stream;
 
@@ -33,33 +33,7 @@ where
 {
 }
 
-/// A section is a list of references that differ between before and after.
-#[derive(Debug, Clone)]
-pub struct Section<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Value, Hash>(
-    Vec<Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>>,
-)
-where
-    Key: KeyType + 'static,
-    Value: ValueType,
-    Hash: HashType<HASH_SIZE>;
-
-impl<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Value, Hash>
-    Section<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>
-where
-    Key: KeyType + 'static,
-    Value: ValueType,
-    Hash: HashType<HASH_SIZE>,
-{
-    pub fn new() -> Self {
-        Section(vec![])
-    }
-
-    pub fn from(nodes: Vec<Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>>) -> Self {
-        Section(nodes)
-    }
-}
-
-/// A section is a list of references that differ between before and after.
+/// A sparse view of a tree containing only the nodes that differ between two trees.
 #[derive(Debug, Clone)]
 pub struct SparseTree<'a, const F: u32, const H: usize, S: Settings<F, H>> {
     storage: &'a S::Storage,
@@ -67,6 +41,7 @@ pub struct SparseTree<'a, const F: u32, const H: usize, S: Settings<F, H>> {
 }
 
 impl<'a, const F: u32, const H: usize, S: Settings<F, H>> SparseTree<'a, F, H, S> {
+    /// Creates a sparse view of the given tree.
     pub fn from(
         tree: &'a Tree<F, H, S::Distribution, S::Key, S::Value, S::Hash, S::Storage>,
     ) -> Self {
@@ -76,6 +51,7 @@ impl<'a, const F: u32, const H: usize, S: Settings<F, H>> SparseTree<'a, F, H, S
         SparseTree { storage, nodes }
     }
 
+    /// Returns the upper bound of the key range covered by this tree.
     pub fn upper_bound(&self) -> Option<&S::Key> {
         self.nodes.last().map(|node| node.reference().upper_bound())
     }
@@ -85,14 +61,23 @@ impl<'a, const F: u32, const H: usize, S: Settings<F, H>> SparseTree<'a, F, H, S
     /// or false if we reached the segment nodes and there is nothing more to
     /// expand.
     pub async fn expand(&mut self) -> Result<bool, DialogProllyTreeError> {
-        let nodes = &mut self.nodes;
         let mut expanded = false;
-        for offset in 0..nodes.len() {
-            let node = &nodes[offset];
-            if node.is_branch() {
-                let children = node.load_children(self.storage).await?;
-                nodes.splice(offset..offset, children);
+        let mut offset = 0;
+
+        while offset < self.nodes.len() {
+            if self.nodes[offset].is_branch() {
+                let children = self.nodes[offset].load_children(self.storage).await?;
+                let children_vec: Vec<_> = Vec::from(children);
+                let num_children = children_vec.len();
+
+                // Replace the branch node with its children
+                self.nodes.splice(offset..offset + 1, children_vec);
+
+                // Skip past the newly inserted children
+                offset += num_children;
                 expanded = true;
+            } else {
+                offset += 1;
             }
         }
 
@@ -157,8 +142,8 @@ impl<'a, const F: u32, const H: usize, S: Settings<F, H>> SparseTree<'a, F, H, S
     /// ```
     pub fn prune(&mut self, other: &mut Self) {
         use std::cmp::Ordering;
-        let Self(left) = self;
-        let Self(right) = other;
+        let left = &mut self.nodes;
+        let right = &mut other.nodes;
 
         // Read indices
         let mut at_left = 0;
@@ -256,22 +241,26 @@ impl<'a, const F: u32, const H: usize, S: Settings<F, H>> SparseTree<'a, F, H, S
     }
 }
 
+/// Trait encapsulating all the settings so we can carry those as group
+/// as opposed to bunch of different parameters.
 pub trait Settings<const BRANCH_FACTOR: u32, const HASH_SIZE: usize> {
     const BRANCH_FACTOR: u32;
     const HASH_SIZE: usize;
     type Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Self::Key, Self::Hash>;
     type Key: KeyType + 'static;
-    type Value: ValueType;
+    type Value: ValueType + PartialEq;
     type Hash: HashType<HASH_SIZE>;
     type Storage: ContentAddressedStorage<HASH_SIZE, Hash = Self::Hash>;
 }
 
+/// Represents a difference between two trees.
 pub struct Delta<'a, const F: u32, const H: usize, S: Settings<F, H>>(
     SparseTree<'a, F, H, S>,
     SparseTree<'a, F, H, S>,
 );
 
 impl<'a, const F: u32, const H: usize, S: Settings<F, H>> Delta<'a, F, H, S> {
+    /// Creates a difference between two trees.
     pub fn from(
         pair: (
             &'a Tree<F, H, S::Distribution, S::Key, S::Value, S::Hash, S::Storage>,
@@ -297,420 +286,69 @@ impl<'a, const F: u32, const H: usize, S: Settings<F, H>> Delta<'a, F, H, S> {
         Ok(())
     }
 
-    pub fn stream(&self) -> impl Differential<S::Key, S::Value> {
+    pub fn stream(&'a self) -> impl Differential<S::Key, S::Value> + 'a
+    where
+        S::Value: PartialEq,
+    {
         let Delta(left, right) = self;
         let left_entries = left.stream();
         let right_entries = right.stream();
-        // Here we need to diff them now
-    }
-}
 
-/// Represents a difference between two trees as sections.
-/// Sections can be descended (one level) or expanded (until segments).
-pub struct Difference<
-    'a,
-    const BRANCH_FACTOR: u32,
-    const HASH_SIZE: usize,
-    Key,
-    Value,
-    Hash,
-    Storage,
-> where
-    Key: KeyType + 'static,
-    Value: ValueType + PartialEq + 'a,
-    Hash: HashType<HASH_SIZE> + PartialEq + 'a,
-    Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
-{
-    /// Sections that differ in the before tree
-    before_sections: Vec<Section<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>>,
-    /// Sections that differ in the after tree
-    after_sections: Vec<Section<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>>,
-    storage: &'a Storage,
-    _phantom: std::marker::PhantomData<(Value,)>,
-}
+        try_stream! {
+            futures_util::pin_mut!(left_entries);
+            futures_util::pin_mut!(right_entries);
 
-impl<'a, const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Value, Hash, Storage>
-    Difference<'a, BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash, Storage>
-where
-    Key: KeyType + 'static,
-    Value: ValueType + PartialEq + 'a,
-    Hash: HashType<HASH_SIZE> + PartialEq + 'a,
-    Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
-{
-    /// Create a new Difference from two nodes.
-    pub fn new(
-        before: Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>,
-        after: Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>,
-        storage: &'a Storage,
-    ) -> Result<Self, DialogProllyTreeError> {
-        // Start with one section containing the root references
-        let before_sections = if before.is_segment() {
-            vec![]
-        } else {
-            vec![Section::from(&before)?]
-        };
+            use futures_util::StreamExt;
 
-        let after_sections = if after.is_segment() {
-            vec![]
-        } else {
-            vec![Section::from(&after)?]
-        };
-
-        Ok(Self {
-            before_sections,
-            after_sections,
-            storage,
-            _phantom: std::marker::PhantomData,
-        })
-    }
-
-    /// Descend one level - expand all sections by loading children and comparing.
-    /// This prunes matching refs and creates narrower sections.
-    pub async fn descend(&mut self) -> Result<(), DialogProllyTreeError> {
-        let mut new_before_sections = Vec::new();
-        let mut new_after_sections = Vec::new();
-
-        // Process each pair of sections
-        for section_idx in 0..self.before_sections.len().max(self.after_sections.len()) {
-            let before_section = self.before_sections.get(section_idx);
-            let after_section = self.after_sections.get(section_idx);
-
-            match (before_section, after_section) {
-                (Some(before_refs), Some(after_refs)) => {
-                    // Load nodes concurrently
-                    let before_futures: Vec<_> = before_refs
-                        .iter()
-                        .map(|r| {
-                            Node::<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>::from_hash(
-                                r.hash().clone(),
-                                self.storage,
-                            )
-                        })
-                        .collect();
-
-                    let after_futures: Vec<_> = after_refs
-                        .iter()
-                        .map(|r| {
-                            Node::<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>::from_hash(
-                                r.hash().clone(),
-                                self.storage,
-                            )
-                        })
-                        .collect();
-
-                    let mut before_nodes = Vec::new();
-                    for future in before_futures {
-                        before_nodes.push(future.await?);
-                    }
-
-                    let mut after_nodes = Vec::new();
-                    for future in after_futures {
-                        after_nodes.push(future.await?);
-                    }
-
-                    // Check if all are segments
-                    let all_segments = before_nodes.iter().all(|n| n.is_segment())
-                        && after_nodes.iter().all(|n| n.is_segment());
-
-                    if all_segments {
-                        // Keep as is - ready for entry diffing
-                        new_before_sections.push(before_refs.clone());
-                        new_after_sections.push(after_refs.clone());
-                    } else {
-                        // Collect child refs (or keep segment refs)
-                        let mut before_child_refs = Vec::new();
-                        for (idx, node) in before_nodes.into_iter().enumerate() {
-                            if node.is_branch() {
-                                before_child_refs.extend(node.references()?.iter().cloned());
-                            } else {
-                                // Keep segment ref
-                                before_child_refs.push(before_refs[idx].clone());
-                            }
-                        }
-
-                        let mut after_child_refs = Vec::new();
-                        for (idx, node) in after_nodes.into_iter().enumerate() {
-                            if node.is_branch() {
-                                after_child_refs.extend(node.references()?.iter().cloned());
-                            } else {
-                                // Keep segment ref
-                                after_child_refs.push(after_refs[idx].clone());
-                            }
-                        }
-
-                        // Compare and prune
-                        let sub_sections =
-                            Self::compare_sections(&before_child_refs, &after_child_refs);
-                        for (before_sub, after_sub) in sub_sections {
-                            new_before_sections.push(before_sub);
-                            new_after_sections.push(after_sub);
-                        }
-                    }
-                }
-                (Some(before_refs), None) => {
-                    // Only before - keep as is
-                    new_before_sections.push(before_refs.clone());
-                    new_after_sections.push(Vec::new());
-                }
-                (None, Some(after_refs)) => {
-                    // Only after - keep as is
-                    new_before_sections.push(Vec::new());
-                    new_after_sections.push(after_refs.clone());
-                }
-                (None, None) => unreachable!(),
-            }
-        }
-
-        self.before_sections = new_before_sections;
-        self.after_sections = new_after_sections;
-
-        Ok(())
-    }
-
-    /// Check if all sections have reached segments (ready for entry diffing).
-    pub async fn is_at_segments(&self) -> Result<bool, DialogProllyTreeError> {
-        for section in &self.before_sections {
-            for reference in section {
-                let node = Node::<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>::from_hash(
-                    reference.hash().clone(),
-                    self.storage,
-                )
-                .await?;
-                if node.is_branch() {
-                    return Ok(false);
-                }
-            }
-        }
-
-        for section in &self.after_sections {
-            for reference in section {
-                let node = Node::<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>::from_hash(
-                    reference.hash().clone(),
-                    self.storage,
-                )
-                .await?;
-                if node.is_branch() {
-                    return Ok(false);
-                }
-            }
-        }
-
-        Ok(true)
-    }
-
-    /// Expand sections by descending until all sections reach segments.
-    pub async fn expand(&mut self) -> Result<(), DialogProllyTreeError> {
-        while !self.is_at_segments().await? {
-            self.descend().await?;
-        }
-        Ok(())
-    }
-
-    /// Convert into a stream that yields changes.
-    /// Sections should be expanded to segments first via `expand()`.
-    pub fn into_stream(self) -> impl Differential<Key, Value> + 'a {
-        let storage = self.storage;
-        let before_sections = self.before_sections;
-        let after_sections = self.after_sections;
-
-        stream! {
-            // Process each pair of sections
-            for section_idx in 0..before_sections.len().max(after_sections.len()) {
-                let before_section = before_sections.get(section_idx);
-                let after_section = after_sections.get(section_idx);
-
-                match (before_section, after_section) {
-                    (Some(before_refs), Some(after_refs)) => {
-                        if before_refs.is_empty() {
-                            // All additions
-                            for reference in after_refs {
-                                let node = match Node::<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>::from_hash(
-                                    reference.hash().clone(),
-                                    storage,
-                                ).await {
-                                    Ok(n) => n,
-                                    Err(e) => { yield Err(e); continue; }
-                                };
-                                let entries = match collect_all_entries::<BRANCH_FACTOR, HASH_SIZE, _, _, _, _>(node, storage).await {
-                                    Ok(e) => e,
-                                    Err(e) => { yield Err(e); continue; }
-                                };
-                                for entry in entries {
-                                    yield Ok(Change::Add(entry));
-                                }
-                            }
-                            continue;
-                        }
-
-                        if after_refs.is_empty() {
-                            // All removals
-                            for reference in before_refs {
-                                let node = match Node::<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>::from_hash(
-                                    reference.hash().clone(),
-                                    storage,
-                                ).await {
-                                    Ok(n) => n,
-                                    Err(e) => { yield Err(e); continue; }
-                                };
-                                let entries = match collect_all_entries::<BRANCH_FACTOR, HASH_SIZE, _, _, _, _>(node, storage).await {
-                                    Ok(e) => e,
-                                    Err(e) => { yield Err(e); continue; }
-                                };
-                                for entry in entries {
-                                    yield Ok(Change::Remove(entry));
-                                }
-                            }
-                            continue;
-                        }
-
-                        // Load segment nodes and collect entries
-                        let mut before_entries = Vec::new();
-                        for reference in before_refs {
-                            let node = match Node::<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>::from_hash(
-                                reference.hash().clone(),
-                                storage,
-                            ).await {
-                                Ok(n) => n,
-                                Err(e) => { yield Err(e); continue; }
-                            };
-                            let entries = match collect_all_entries::<BRANCH_FACTOR, HASH_SIZE, _, _, _, _>(node, storage).await {
-                                Ok(e) => e,
-                                Err(e) => { yield Err(e); continue; }
-                            };
-                            before_entries.extend(entries);
-                        }
-
-                        let mut after_entries = Vec::new();
-                        for reference in after_refs {
-                            let node = match Node::<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>::from_hash(
-                                reference.hash().clone(),
-                                storage,
-                            ).await {
-                                Ok(n) => n,
-                                Err(e) => { yield Err(e); continue; }
-                            };
-                            let entries = match collect_all_entries::<BRANCH_FACTOR, HASH_SIZE, _, _, _, _>(node, storage).await {
-                                Ok(e) => e,
-                                Err(e) => { yield Err(e); continue; }
-                            };
-                            after_entries.extend(entries);
-                        }
-
-                        // Diff entries
-                        let changes = diff_entries(before_entries, after_entries);
-                        for change in changes {
-                            yield Ok(change);
-                        }
-                    }
-                    (Some(before_refs), None) => {
-                        // All removals
-                        for reference in before_refs {
-                            let node = match Node::<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>::from_hash(
-                                reference.hash().clone(),
-                                storage,
-                            ).await {
-                                Ok(n) => n,
-                                Err(e) => { yield Err(e); continue; }
-                            };
-                            let entries = match collect_all_entries::<BRANCH_FACTOR, HASH_SIZE, _, _, _, _>(node, storage).await {
-                                Ok(e) => e,
-                                Err(e) => { yield Err(e); continue; }
-                            };
-                            for entry in entries {
-                                yield Ok(Change::Remove(entry));
-                            }
-                        }
-                    }
-                    (None, Some(after_refs)) => {
-                        // All additions
-                        for reference in after_refs {
-                            let node = match Node::<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>::from_hash(
-                                reference.hash().clone(),
-                                storage,
-                            ).await {
-                                Ok(n) => n,
-                                Err(e) => { yield Err(e); continue; }
-                            };
-                            let entries = match collect_all_entries::<BRANCH_FACTOR, HASH_SIZE, _, _, _, _>(node, storage).await {
-                                Ok(e) => e,
-                                Err(e) => { yield Err(e); continue; }
-                            };
-                            for entry in entries {
-                                yield Ok(Change::Add(entry));
-                            }
-                        }
-                    }
-                    (None, None) => unreachable!(),
-                }
-            }
-        }
-    }
-
-    /// Compare two lists of references and return sections that differ.
-    /// Each section is a range that needs further comparison.
-    fn compare_sections(
-        before_refs: &[Reference<HASH_SIZE, Key, Hash>],
-        after_refs: &[Reference<HASH_SIZE, Key, Hash>],
-    ) -> Vec<(
-        Vec<Reference<HASH_SIZE, Key, Hash>>,
-        Vec<Reference<HASH_SIZE, Key, Hash>>,
-    )> {
-        let mut result = Vec::new();
-        let mut before_idx = 0;
-        let mut after_idx = 0;
-
-        while before_idx < before_refs.len() || after_idx < after_refs.len() {
-            let mut before_section = Vec::new();
-            let mut after_section = Vec::new();
+            let mut left_next = left_entries.next().await;
+            let mut right_next = right_entries.next().await;
 
             loop {
-                if before_idx >= before_refs.len() || after_idx >= after_refs.len() {
-                    while before_idx < before_refs.len() {
-                        before_section.push(before_refs[before_idx].clone());
-                        before_idx += 1;
+                match (&left_next, &right_next) {
+                    (None, None) => break,
+                    (Some(Ok(left_entry)), None) => {
+                        // All remaining entries from left are removals
+                        yield Change::Remove(left_entry.clone());
+                        left_next = left_entries.next().await;
                     }
-                    while after_idx < after_refs.len() {
-                        after_section.push(after_refs[after_idx].clone());
-                        after_idx += 1;
+                    (None, Some(Ok(right_entry))) => {
+                        // All remaining entries from right are additions
+                        yield Change::Add(right_entry.clone());
+                        right_next = right_entries.next().await;
                     }
-                    break;
-                }
-
-                let before_ref = &before_refs[before_idx];
-                let after_ref = &after_refs[after_idx];
-
-                if before_ref.upper_bound() == after_ref.upper_bound() {
-                    if before_ref.hash() == after_ref.hash() {
-                        // Same hash - prune (exclusive of these refs)
-                        before_idx += 1;
-                        after_idx += 1;
-                        break;
-                    } else {
-                        // Different hashes - include in section
-                        before_section.push(before_ref.clone());
-                        after_section.push(after_ref.clone());
-                        before_idx += 1;
-                        after_idx += 1;
+                    (Some(Err(_)), _) | (_, Some(Err(_))) => {
+                        // Error in one of the streams - stop processing
                         break;
                     }
-                } else {
-                    // Advance side with smaller bound
-                    if before_ref.upper_bound() < after_ref.upper_bound() {
-                        before_section.push(before_ref.clone());
-                        before_idx += 1;
-                    } else {
-                        after_section.push(after_ref.clone());
-                        after_idx += 1;
+                    (Some(Ok(left_entry)), Some(Ok(right_entry))) => {
+                        use std::cmp::Ordering;
+                        match left_entry.key.cmp(&right_entry.key) {
+                            Ordering::Less => {
+                                // Left key is smaller - it was removed
+                                yield Change::Remove(left_entry.clone());
+                                left_next = left_entries.next().await;
+                            }
+                            Ordering::Greater => {
+                                // Right key is smaller - it was added
+                                yield Change::Add(right_entry.clone());
+                                right_next = right_entries.next().await;
+                            }
+                            Ordering::Equal => {
+                                // Same key - check values
+                                if left_entry.value != right_entry.value {
+                                    // Value changed
+                                    yield Change::Remove(left_entry.clone());
+                                    yield Change::Add(right_entry.clone());
+                                }
+                                // If values are equal, skip (no change)
+                                left_next = left_entries.next().await;
+                                right_next = right_entries.next().await;
+                            }
+                        }
                     }
                 }
-            }
-
-            if !before_section.is_empty() || !after_section.is_empty() {
-                result.push((before_section, after_section));
             }
         }
-
-        result
     }
 }
 
@@ -833,66 +471,248 @@ where
     Hash: HashType<HASH_SIZE> + PartialEq + 'a,
     Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
 {
-    stream! {
+    try_stream! {
         // Early exit if identical
         if before.hash() == after.hash() {
             return;
         }
 
-        eprintln!("differentiate: before.is_segment()={}, after.is_segment()={}",
-                  before.is_segment(), after.is_segment());
+        // Create sparse trees (initially just the root nodes)
+        let mut before_nodes = vec![before];
+        let mut after_nodes = vec![after];
 
-        // Special case: if both are segments, diff entries directly
-        if before.is_segment() && after.is_segment() {
-            eprintln!("Both segments - diffing entries directly");
-            let before_entries = match before.into_entries() {
-                Ok(e) => Vec::from(e),
-                Err(e) => { yield Err(e); return; }
-            };
-            let after_entries = match after.into_entries() {
-                Ok(e) => Vec::from(e),
-                Err(e) => { yield Err(e); return; }
-            };
+        // Repeatedly prune and expand until we reach segments
+        loop {
+            // Prune shared nodes using two-cursor walk
+            prune_nodes(&mut before_nodes, &mut after_nodes);
 
-            eprintln!("before_entries.len()={}, after_entries.len()={}",
-                      before_entries.len(), after_entries.len());
+            // Try to expand both sides
+            let before_expanded = expand_nodes::<BRANCH_FACTOR, HASH_SIZE, _, _, _, _>(
+                &mut before_nodes,
+                storage
+            ).await?;
 
-            for change in diff_entries(before_entries, after_entries) {
-                eprintln!("Yielding change: {:?}", match &change {
-                    Change::Add(_) => "Add",
-                    Change::Remove(_) => "Remove",
-                });
-                yield Ok(change);
+            let after_expanded = expand_nodes::<BRANCH_FACTOR, HASH_SIZE, _, _, _, _>(
+                &mut after_nodes,
+                storage
+            ).await?;
+
+            // If neither side expanded, we're done expanding
+            if !before_expanded && !after_expanded {
+                break;
             }
-            return;
         }
 
-        // Create Difference and expand to segments
-        let mut diff = match Difference::new(before, after, storage) {
-            Ok(d) => d,
-            Err(e) => { yield Err(e); return; }
-        };
+        // Final prune after reaching segments
+        prune_nodes(&mut before_nodes, &mut after_nodes);
 
-        eprintln!("After new: before_sections.len()={}, after_sections.len()={}",
-                  diff.before_sections.len(), diff.after_sections.len());
+        // Stream entries from both sparse trees and diff them
+        let before_stream = stream_nodes(&before_nodes, storage);
+        let after_stream = stream_nodes(&after_nodes, storage);
 
-        match diff.expand().await {
-            Ok(()) => {},
-            Err(e) => { yield Err(e); return; }
+        futures_util::pin_mut!(before_stream);
+        futures_util::pin_mut!(after_stream);
+
+        use futures_util::StreamExt;
+
+        let mut before_next = before_stream.next().await;
+        let mut after_next = after_stream.next().await;
+
+        loop {
+            match (&before_next, &after_next) {
+                (None, None) => break,
+                (Some(Ok(before_entry)), None) => {
+                    // Remaining before entries are removals
+                    yield Change::Remove(before_entry.clone());
+                    before_next = before_stream.next().await;
+                }
+                (None, Some(Ok(after_entry))) => {
+                    // Remaining after entries are additions
+                    yield Change::Add(after_entry.clone());
+                    after_next = after_stream.next().await;
+                }
+                (Some(Err(_)), _) | (_, Some(Err(_))) => {
+                    // Error in one of the streams - stop processing
+                    break;
+                }
+                (Some(Ok(before_entry)), Some(Ok(after_entry))) => {
+                    use std::cmp::Ordering;
+                    match before_entry.key.cmp(&after_entry.key) {
+                        Ordering::Less => {
+                            // Before key is smaller - it was removed
+                            yield Change::Remove(before_entry.clone());
+                            before_next = before_stream.next().await;
+                        }
+                        Ordering::Greater => {
+                            // After key is smaller - it was added
+                            yield Change::Add(after_entry.clone());
+                            after_next = after_stream.next().await;
+                        }
+                        Ordering::Equal => {
+                            // Same key - check values
+                            if before_entry.value != after_entry.value {
+                                // Value changed
+                                yield Change::Remove(before_entry.clone());
+                                yield Change::Add(after_entry.clone());
+                            }
+                            // If values are equal, skip (no change)
+                            before_next = before_stream.next().await;
+                            after_next = after_stream.next().await;
+                        }
+                    }
+                }
+            }
         }
+    }
+}
 
-        eprintln!("After expand: before_sections.len()={}, after_sections.len()={}",
-                  diff.before_sections.len(), diff.after_sections.len());
+/// Prune shared nodes from two node vectors using two-cursor walk.
+fn prune_nodes<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Value, Hash>(
+    left: &mut Vec<Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>>,
+    right: &mut Vec<Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>>,
+) where
+    Key: KeyType,
+    Value: ValueType,
+    Hash: HashType<HASH_SIZE>,
+{
+    use std::cmp::Ordering;
 
-        // Stream the changes
-        let stream = diff.into_stream();
-        for await change in stream {
-            eprintln!("Yielding change from stream: {:?}", match &change {
-                Ok(Change::Add(_)) => "Add",
-                Ok(Change::Remove(_)) => "Remove",
-                Err(_) => "Error",
-            });
-            yield change;
+    let mut at_left = 0;
+    let mut at_right = 0;
+    let mut to_left = 0;
+    let mut to_right = 0;
+
+    while at_left < left.len() && at_right < right.len() {
+        let left_node = &left[at_left];
+        let right_node = &right[at_right];
+
+        match left_node.upper_bound().cmp(right_node.upper_bound()) {
+            Ordering::Less => {
+                // Left node is unique - keep it
+                if to_left != at_left {
+                    left.swap(to_left, at_left);
+                }
+                to_left += 1;
+                at_left += 1;
+            }
+            Ordering::Greater => {
+                // Right node is unique - keep it
+                if to_right != at_right {
+                    right.swap(to_right, at_right);
+                }
+                to_right += 1;
+                at_right += 1;
+            }
+            Ordering::Equal => {
+                // Same key range - check if shared
+                if left_node.hash() != right_node.hash() {
+                    // Different content - keep both
+                    if to_left != at_left {
+                        left.swap(to_left, at_left);
+                    }
+                    if to_right != at_right {
+                        right.swap(to_right, at_right);
+                    }
+                    to_left += 1;
+                    to_right += 1;
+                }
+                // else identical (shared) - skip both
+                at_left += 1;
+                at_right += 1;
+            }
+        }
+    }
+
+    // Move remaining nodes from left
+    if at_left < left.len() && to_left != at_left {
+        let remaining = left.len() - at_left;
+        for offset in 0..remaining {
+            left.swap(to_left + offset, at_left + offset);
+        }
+        to_left += remaining;
+    } else if at_left == left.len() {
+        // all done
+    } else {
+        to_left = left.len();
+    }
+
+    // Move remaining nodes from right
+    if at_right < right.len() && to_right != at_right {
+        let remaining = right.len() - at_right;
+        for offset in 0..remaining {
+            right.swap(to_right + offset, at_right + offset);
+        }
+        to_right += remaining;
+    } else if at_right == right.len() {
+        // all done
+    } else {
+        to_right = right.len();
+    }
+
+    left.truncate(to_left);
+    right.truncate(to_right);
+}
+
+/// Expand all branch nodes in the vector by replacing them with their children.
+/// Returns true if any expansion occurred.
+async fn expand_nodes<
+    'a,
+    const BRANCH_FACTOR: u32,
+    const HASH_SIZE: usize,
+    Key,
+    Value,
+    Hash,
+    Storage,
+>(
+    nodes: &mut Vec<Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>>,
+    storage: &'a Storage,
+) -> Result<bool, DialogProllyTreeError>
+where
+    Key: KeyType,
+    Value: ValueType,
+    Hash: HashType<HASH_SIZE>,
+    Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+{
+    let mut expanded = false;
+    let mut offset = 0;
+
+    while offset < nodes.len() {
+        if nodes[offset].is_branch() {
+            let children = nodes[offset].load_children(storage).await?;
+            let children_vec: Vec<_> = Vec::from(children);
+            let num_children = children_vec.len();
+
+            // Replace the branch node with its children
+            nodes.splice(offset..offset + 1, children_vec);
+
+            // Skip past the newly inserted children
+            offset += num_children;
+            expanded = true;
+        } else {
+            offset += 1;
+        }
+    }
+
+    Ok(expanded)
+}
+
+/// Stream all entries from a vector of nodes.
+fn stream_nodes<'a, const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Value, Hash, Storage>(
+    nodes: &'a [Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>],
+    storage: &'a Storage,
+) -> impl Stream<Item = Result<Entry<Key, Value>, DialogProllyTreeError>> + 'a
+where
+    Key: KeyType,
+    Value: ValueType,
+    Hash: HashType<HASH_SIZE>,
+    Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+{
+    try_stream! {
+        for node in nodes {
+            let range = node.get_range(.., storage);
+            for await entry in range {
+                yield entry?;
+            }
         }
     }
 }

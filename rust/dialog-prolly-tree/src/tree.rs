@@ -4,8 +4,8 @@ use std::{
     ops::{Bound, RangeBounds},
 };
 
-use super::differential::{Change, Differential};
-use async_stream::{stream, try_stream};
+use super::differential::Change;
+use async_stream::try_stream;
 use dialog_storage::{ContentAddressedStorage, HashType};
 use futures_core::Stream;
 use nonempty::NonEmpty;
@@ -149,39 +149,39 @@ where
 
     /// Returns a difference between this and the other tree. Applying returned
     /// differential onto `other` tree should produce this `tree`.
-    pub fn differentiate(&self, other: Self) -> impl Differential<Key, Value> + '_ {
-        stream! {
-            match (self.root(), other.root()) {
-                (None, None) => {
-                    // Both trees are empty - no changes
-                }
-                // if we have a root but other does not
-                // then difference simply adds everything
-                (Some(_), None) => {
-                    for await entry in self.stream() {
-                        yield Ok(Change::Add(entry?));
-                    }
-                }
-                (None, Some(_)) => {
-                    for await entry in other.stream() {
-                        yield Ok(Change::Remove(entry?));
-                    }
-                }
-                (Some(after), Some(before)) => {
-                    // Use the differential module to compute changes
-                    let diff = crate::differential::differentiate(
-                        before.clone(),
-                        after.clone(),
-                        &self.storage
-                    );
+    // pub fn differentiate(&self, other: Self) -> impl Differential<Key, Value> + '_ {
+    // stream! {
+    //     match (self.root(), other.root()) {
+    //         (None, None) => {
+    //             // Both trees are empty - no changes
+    //         }
+    //         // if we have a root but other does not
+    //         // then difference simply adds everything
+    //         (Some(_), None) => {
+    //             for await entry in self.stream() {
+    //                 yield Ok(Change::Add(entry?));
+    //             }
+    //         }
+    //         (None, Some(_)) => {
+    //             for await entry in other.stream() {
+    //                 yield Ok(Change::Remove(entry?));
+    //             }
+    //         }
+    //         (Some(after), Some(before)) => {
+    //             // Use the differential module to compute changes
+    //             let diff = crate::differential::differentiate(
+    //                 before.clone(),
+    //                 after.clone(),
+    //                 &self.storage
+    //             );
 
-                    for await change in diff {
-                        yield change;
-                    }
-                }
-            }
-        }
-    }
+    //             for await change in diff {
+    //                 yield change;
+    //             }
+    //         }
+    //     }
+    // }
+    // }
 
     /// Integrates changes into this tree with deterministic conflict resolution.
     ///

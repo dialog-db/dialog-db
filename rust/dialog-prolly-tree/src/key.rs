@@ -24,7 +24,7 @@ impl KeyType for Vec<u8> {
 
 /// A value that may be stored within a [Tree]
 pub trait ValueType:
-    std::fmt::Debug + ConditionalSync + Clone + Serialize + DeserializeOwned
+    std::fmt::Debug + ConditionalSync + Clone + PartialEq + Serialize + DeserializeOwned
 {
     /// Compute a deterministic hash of this value for conflict resolution.
     /// Default implementation uses BLAKE3.

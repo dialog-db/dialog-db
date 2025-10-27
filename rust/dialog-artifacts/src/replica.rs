@@ -4,13 +4,14 @@ use crate::constants::HASH_SIZE;
 use crate::{Artifacts, Datum, Index, Key, State};
 use async_stream::stream;
 use dialog_common::ConditionalSync;
-use dialog_prolly_tree::{Change, DialogProllyTreeError, Differential, Node, Tree};
+use dialog_prolly_tree::{Change, Delta, DialogProllyTreeError, Differential, Node, Tree};
 use dialog_storage::{
     AtomicStorageBackend, Blake3Hash, CborEncoder, DialogStorageError, Storage, StorageBackend,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use thiserror::Error;
+
 /// Cryptographic identifier like Ed25519 public key representing
 /// an principal that produced a change. We may
 pub type Principal = [u8; 32];
@@ -218,8 +219,11 @@ impl<'a, P: Platform> BranchView<'a, P> {
         let archive = self.platform.archive();
         stream! {
             let before:Index<Key, Datum, P::Storage> = Tree::from_hash(self.model.base().index().hash(), archive.clone()).await?;
-            let after = Tree::from_hash(self.model.revision().index().hash(), archive.clone()).await?;
-            for await change in after.differentiate(before) {
+            let after:Index<Key, Datum, P::Storage> = Tree::from_hash(self.model.revision().index().hash(), archive.clone()).await?;
+            let delta = Delta::from((&before, &after));
+
+            // differentiate(before, after, storage)
+            for await change in delta.stream() {
                 yield change;
             }
         }
