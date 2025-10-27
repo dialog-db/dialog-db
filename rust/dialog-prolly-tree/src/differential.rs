@@ -241,16 +241,15 @@ where
 
 /// Represents a difference between two trees as a pair of sparse trees.
 /// Provides methods to expand the difference and stream changes.
-pub(crate) struct Delta<'a, const F: u32, const H: usize, Key, Value, Hash, Storage>
+pub(crate) struct Delta<'a, const F: u32, const H: usize, Key, Value, Hash, Storage>(
+    SparseTree<'a, F, H, Key, Value, Hash, Storage>,
+    SparseTree<'a, F, H, Key, Value, Hash, Storage>,
+)
 where
     Key: KeyType + 'static,
     Value: ValueType,
     Hash: HashType<H>,
-    Storage: ContentAddressedStorage<H, Hash = Hash>,
-{
-    before: SparseTree<'a, F, H, Key, Value, Hash, Storage>,
-    after: SparseTree<'a, F, H, Key, Value, Hash, Storage>,
-}
+    Storage: ContentAddressedStorage<H, Hash = Hash>;
 
 impl<'a, const F: u32, const H: usize, Key, Value, Hash, Storage>
     Delta<'a, F, H, Key, Value, Hash, Storage>
@@ -266,19 +265,19 @@ where
             &'a Tree<F, H, Distription, Key, Value, Hash, Storage>,
         ),
     ) -> Self {
-        Self {
-            before: SparseTree {
+        Self(
+            SparseTree {
                 storage: left.storage(),
                 nodes: left.root().map(|root| vec![root.clone()]).unwrap_or(vec![]),
             },
-            after: SparseTree {
+            SparseTree {
                 storage: right.storage(),
                 nodes: right
                     .root()
                     .map(|root| vec![root.clone()])
                     .unwrap_or(vec![]),
             },
-        }
+        )
     }
 
     /// Creates a new Delta from two nodes.
@@ -287,28 +286,29 @@ where
         after: Node<F, H, Key, Value, Hash>,
         storage: &'a Storage,
     ) -> Self {
-        Self {
-            before: SparseTree {
+        Self(
+            SparseTree {
                 storage,
                 nodes: vec![before],
             },
-            after: SparseTree {
+            SparseTree {
                 storage,
                 nodes: vec![after],
             },
-        }
+        )
     }
 
     /// Expands the difference by repeatedly pruning shared nodes and expanding
     /// branch nodes until only segment nodes remain that differ between the trees.
     pub async fn expand(&mut self) -> Result<(), DialogProllyTreeError> {
+        let Self(before, after) = self;
         loop {
             // Prune shared nodes using two-cursor walk
-            self.before.prune(&mut self.after);
+            before.prune(after);
 
             // Try to expand both sides
-            let before_expanded = self.before.expand().await?;
-            let after_expanded = self.after.expand().await?;
+            let before_expanded = before.expand().await?;
+            let after_expanded = after.expand().await?;
 
             // If neither side expanded, we're done expanding
             if !before_expanded && !after_expanded {
@@ -317,7 +317,7 @@ where
         }
 
         // Final prune after reaching segments
-        self.before.prune(&mut self.after);
+        before.prune(after);
 
         Ok(())
     }
@@ -327,8 +327,9 @@ where
     /// This performs a two-cursor walk over the entry streams from both sparse trees,
     /// yielding Add and Remove changes as appropriate.
     pub fn stream(&'a self) -> impl Differential<Key, Value> + 'a {
-        let before_stream = self.before.stream();
-        let after_stream = self.after.stream();
+        let Self(before, after) = self;
+        let before_stream = before.stream();
+        let after_stream = after.stream();
 
         try_stream! {
             futures_util::pin_mut!(before_stream);
