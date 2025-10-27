@@ -4,6 +4,7 @@ use dialog_storage::{ContentAddressedStorage, HashType};
 use futures_core::Stream;
 
 /// Represents a change in the key-value store.
+#[derive(Clone)]
 pub enum Change<Key, Value>
 where
     Key: KeyType + 'static,
@@ -353,9 +354,17 @@ where
                         yield Change::Add(after_entry.clone());
                         after_next = after_stream.next().await;
                     }
-                    (Some(Err(_)), _) | (_, Some(Err(_))) => {
-                        // Error in one of the streams - stop processing
-                        break;
+                    (Some(Err(_)), _) => {
+                        // Propagate error from before stream
+                        if let Some(Err(err)) = std::mem::replace(&mut before_next, None) {
+                            Err(err)?;
+                        }
+                    }
+                    (_, Some(Err(_))) => {
+                        // Propagate error from after stream
+                        if let Some(Err(err)) = std::mem::replace(&mut after_next, None) {
+                            Err(err)?;
+                        }
                     }
                     (Some(Ok(before_entry)), Some(Ok(after_entry))) => {
                         use std::cmp::Ordering;
@@ -649,7 +658,9 @@ mod tests {
             value: vec![20],
         })];
 
-        tree.integrate(changes).await.unwrap();
+        tree.integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
 
         assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(vec![10]));
         assert_eq!(tree.get(&vec![2]).await.unwrap(), Some(vec![20]));
@@ -671,7 +682,9 @@ mod tests {
             value: vec![10],
         })];
 
-        tree.integrate(changes).await.unwrap();
+        tree.integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
 
         assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(vec![10]));
     }
@@ -696,7 +709,9 @@ mod tests {
             value: new_value.clone(),
         })];
 
-        tree.integrate(changes).await.unwrap();
+        tree.integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
 
         // Check which value won based on hash
         use crate::ValueType;
@@ -726,7 +741,9 @@ mod tests {
             value: vec![10],
         })];
 
-        tree.integrate(changes).await.unwrap();
+        tree.integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
 
         assert_eq!(tree.get(&vec![1]).await.unwrap(), None);
         assert_eq!(tree.get(&vec![2]).await.unwrap(), Some(vec![20]));
@@ -748,7 +765,9 @@ mod tests {
             value: vec![20],
         })];
 
-        tree.integrate(changes).await.unwrap();
+        tree.integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
 
         assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(vec![10]));
         assert_eq!(tree.get(&vec![2]).await.unwrap(), None);
@@ -770,7 +789,9 @@ mod tests {
             value: vec![20], // Wrong value
         })];
 
-        tree.integrate(changes).await.unwrap();
+        tree.integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
 
         // Entry should still exist with original value
         assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(vec![10]));
@@ -826,8 +847,14 @@ mod tests {
         };
 
         // Integrate changes
-        tree_a.integrate(changes_b).await.unwrap();
-        tree_b.integrate(changes_a).await.unwrap();
+        tree_a
+            .integrate(changes_b.into())
+            .await
+            .unwrap();
+        tree_b
+            .integrate(changes_a.into())
+            .await
+            .unwrap();
 
         // Both should converge to the same value (deterministic by hash)
         let final_a = tree_a.get(&vec![1]).await.unwrap();
@@ -845,5 +872,404 @@ mod tests {
         } else {
             assert_eq!(final_a, Some(vec![30]));
         }
+    }
+
+    // ========================================================================
+    // Roundtrip tests: Verify differentiate + integrate produces original tree
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_roundtrip_empty_to_populated() {
+        let backend = MemoryStorageBackend::default();
+        let mut target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut start = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Target has entries, start is empty
+        target.set(vec![1], vec![10]).await.unwrap();
+        target.set(vec![2], vec![20]).await.unwrap();
+        target.set(vec![3], vec![30]).await.unwrap();
+
+        // Compute diff and integrate
+        // Need to collect changes to avoid borrow checker issues
+        // (diff holds immutable ref to start, but integrate needs mutable ref)
+        let changes = {
+            let diff = target.differentiate(&start);
+            pin_mut!(diff);
+            let mut changes = Vec::new();
+            while let Some(result) = diff.next().await {
+                changes.push(result.unwrap());
+            }
+            changes
+        };
+        start
+            .integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        // Verify start now matches target
+        assert_eq!(start.get(&vec![1]).await.unwrap(), Some(vec![10]));
+        assert_eq!(start.get(&vec![2]).await.unwrap(), Some(vec![20]));
+        assert_eq!(start.get(&vec![3]).await.unwrap(), Some(vec![30]));
+    }
+
+    #[tokio::test]
+    async fn test_roundtrip_populated_to_empty() {
+        let backend = MemoryStorageBackend::default();
+        let target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut start = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Start has entries, target is empty
+        start.set(vec![1], vec![10]).await.unwrap();
+        start.set(vec![2], vec![20]).await.unwrap();
+        start.set(vec![3], vec![30]).await.unwrap();
+
+        // Compute diff and integrate
+        // Need to collect changes to avoid borrow checker issues
+        // (diff holds immutable ref to start, but integrate needs mutable ref)
+        let changes = {
+            let diff = target.differentiate(&start);
+            pin_mut!(diff);
+            let mut changes = Vec::new();
+            while let Some(result) = diff.next().await {
+                changes.push(result.unwrap());
+            }
+            changes
+        };
+        start
+            .integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        // Verify start is now empty
+        assert_eq!(start.get(&vec![1]).await.unwrap(), None);
+        assert_eq!(start.get(&vec![2]).await.unwrap(), None);
+        assert_eq!(start.get(&vec![3]).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_roundtrip_mixed_changes() {
+        let backend = MemoryStorageBackend::default();
+        let mut target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut start = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Start state: keys 1, 2, 3
+        start.set(vec![1], vec![10]).await.unwrap();
+        start.set(vec![2], vec![20]).await.unwrap();
+        start.set(vec![3], vec![30]).await.unwrap();
+
+        // Target state: keys 2 (modified), 3, 4
+        target.set(vec![2], vec![22]).await.unwrap(); // Modified
+        target.set(vec![3], vec![30]).await.unwrap(); // Same
+        target.set(vec![4], vec![40]).await.unwrap(); // Added
+        // Key 1 removed
+
+        // Compute diff and integrate
+        // Need to collect changes to avoid borrow checker issues
+        // (diff holds immutable ref to start, but integrate needs mutable ref)
+        let changes = {
+            let diff = target.differentiate(&start);
+            pin_mut!(diff);
+            let mut changes = Vec::new();
+            while let Some(result) = diff.next().await {
+                changes.push(result.unwrap());
+            }
+            changes
+        };
+        start
+            .integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        // Verify start now matches target
+        assert_eq!(start.get(&vec![1]).await.unwrap(), None);
+        assert_eq!(start.get(&vec![2]).await.unwrap(), Some(vec![22]));
+        assert_eq!(start.get(&vec![3]).await.unwrap(), Some(vec![30]));
+        assert_eq!(start.get(&vec![4]).await.unwrap(), Some(vec![40]));
+    }
+
+    #[tokio::test]
+    async fn test_roundtrip_large_tree() {
+        let backend = MemoryStorageBackend::default();
+        let mut target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut start = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Create large trees with many entries
+        for i in 0u16..100 {
+            start
+                .set(vec![i as u8], vec![(i * 10) as u8])
+                .await
+                .unwrap();
+        }
+
+        for i in 50u16..150 {
+            target
+                .set(vec![i as u8], vec![(i * 20) as u8])
+                .await
+                .unwrap();
+        }
+
+        // Compute diff and integrate
+        // Need to collect changes to avoid borrow checker issues
+        // (diff holds immutable ref to start, but integrate needs mutable ref)
+        let changes = {
+            let diff = target.differentiate(&start);
+            pin_mut!(diff);
+            let mut changes = Vec::new();
+            while let Some(result) = diff.next().await {
+                changes.push(result.unwrap());
+            }
+            changes
+        };
+        start
+            .integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        // Verify start now matches target
+        for i in 0u16..50 {
+            assert_eq!(start.get(&vec![i as u8]).await.unwrap(), None);
+        }
+        for i in 50u16..150 {
+            assert_eq!(
+                start.get(&vec![i as u8]).await.unwrap(),
+                Some(vec![(i * 20) as u8])
+            );
+        }
+    }
+
+    // ========================================================================
+    // Edge case tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_differentiate_both_empty() {
+        let backend = MemoryStorageBackend::default();
+        let tree1 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let tree2 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        let changes = tree1.differentiate(&tree2);
+        pin_mut!(changes);
+        let mut count = 0;
+        while let Some(_) = changes.next().await {
+            count += 1;
+        }
+
+        assert_eq!(count, 0, "Both empty trees should have no changes");
+    }
+
+    #[tokio::test]
+    async fn test_differentiate_single_entry_trees() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree1 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut tree2 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        tree1.set(vec![1], vec![10]).await.unwrap();
+        tree2.set(vec![1], vec![20]).await.unwrap();
+
+        let changes = tree1.differentiate(&tree2);
+        pin_mut!(changes);
+        let mut adds = Vec::new();
+        let mut removes = Vec::new();
+
+        while let Some(result) = changes.next().await {
+            match result.unwrap() {
+                Change::Add(entry) => adds.push(entry),
+                Change::Remove(entry) => removes.push(entry),
+            }
+        }
+
+        // Should have one remove (old value) and one add (new value)
+        assert_eq!(removes.len(), 1);
+        assert_eq!(removes[0].value, vec![20]);
+        assert_eq!(adds.len(), 1);
+        assert_eq!(adds[0].value, vec![10]);
+    }
+
+    #[tokio::test]
+    async fn test_differentiate_disjoint_trees() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree1 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut tree2 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Completely disjoint key sets
+        tree1.set(vec![1], vec![10]).await.unwrap();
+        tree1.set(vec![3], vec![30]).await.unwrap();
+        tree1.set(vec![5], vec![50]).await.unwrap();
+
+        tree2.set(vec![2], vec![20]).await.unwrap();
+        tree2.set(vec![4], vec![40]).await.unwrap();
+        tree2.set(vec![6], vec![60]).await.unwrap();
+
+        let changes = tree1.differentiate(&tree2);
+        pin_mut!(changes);
+        let mut adds = Vec::new();
+        let mut removes = Vec::new();
+
+        while let Some(result) = changes.next().await {
+            match result.unwrap() {
+                Change::Add(entry) => adds.push(entry),
+                Change::Remove(entry) => removes.push(entry),
+            }
+        }
+
+        // All of tree2's entries should be removed, all of tree1's added
+        assert_eq!(removes.len(), 3);
+        assert_eq!(adds.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_differentiate_subset_superset() {
+        let backend = MemoryStorageBackend::default();
+        let mut superset = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut subset = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Subset: keys 2, 3
+        subset.set(vec![2], vec![20]).await.unwrap();
+        subset.set(vec![3], vec![30]).await.unwrap();
+
+        // Superset: keys 1, 2, 3, 4
+        superset.set(vec![1], vec![10]).await.unwrap();
+        superset.set(vec![2], vec![20]).await.unwrap();
+        superset.set(vec![3], vec![30]).await.unwrap();
+        superset.set(vec![4], vec![40]).await.unwrap();
+
+        let changes = superset.differentiate(&subset);
+        pin_mut!(changes);
+        let mut adds = Vec::new();
+        let mut removes = Vec::new();
+
+        while let Some(result) = changes.next().await {
+            match result.unwrap() {
+                Change::Add(entry) => adds.push(entry),
+                Change::Remove(entry) => removes.push(entry),
+            }
+        }
+
+        // Should add keys 1 and 4
+        assert_eq!(adds.len(), 2);
+        assert_eq!(removes.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_differentiate_all_modified() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree1 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut tree2 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Same keys, all different values (except i=0 where both are [0])
+        for i in 0u8..10 {
+            tree1.set(vec![i], vec![i * 2]).await.unwrap();
+            tree2.set(vec![i], vec![i]).await.unwrap();
+        }
+
+        let changes = tree1.differentiate(&tree2);
+        pin_mut!(changes);
+        let mut count = 0;
+
+        while let Some(result) = changes.next().await {
+            result.unwrap();
+            count += 1;
+        }
+
+        // 9 keys modified (i=0 has same value in both) = 9 * 2 = 18 changes total
+        assert_eq!(count, 18);
+    }
+
+    #[tokio::test]
+    async fn test_roundtrip_preserves_hash() {
+        let backend = MemoryStorageBackend::default();
+        let mut target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut start = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Set up target state
+        for i in 0..20 {
+            target.set(vec![i], vec![i * 3]).await.unwrap();
+        }
+        let target_hash = target.hash().unwrap().clone();
+
+        // Set up different start state
+        for i in 10..30 {
+            start.set(vec![i], vec![i * 5]).await.unwrap();
+        }
+
+        // Compute diff and integrate
+        // Need to collect changes to avoid borrow checker issues
+        // (diff holds immutable ref to start, but integrate needs mutable ref)
+        let changes = {
+            let diff = target.differentiate(&start);
+            pin_mut!(diff);
+            let mut changes = Vec::new();
+            while let Some(result) = diff.next().await {
+                changes.push(result.unwrap());
+            }
+            changes
+        };
+        start
+            .integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        // Hash should match after integration
+        assert_eq!(start.hash().unwrap(), &target_hash);
     }
 }

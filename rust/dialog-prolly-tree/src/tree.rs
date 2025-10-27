@@ -146,8 +146,10 @@ where
         }
     }
 
-    /// Returns a difference between this and the other tree. Applying returned
-    /// differential onto `other` tree should produce this `tree`.
+    /// Returns a difference between this tree and the other tree.
+    ///
+    /// Applying the returned differential onto `other` will transform it to match `self`.
+    /// In other words: `other.integrate(self.differentiate(other))` will make `other == self`.
     pub fn differentiate<'a>(
         &'a self,
         other: &'a Self,
@@ -177,14 +179,18 @@ where
         changes: Changes,
     ) -> Result<(), DialogProllyTreeError>
     where
-        Changes: IntoIterator<Item = Change<Key, Value>>,
+        Changes: crate::differential::Differential<Key, Value>,
         Value: AsRef<[u8]>,
     {
+        use futures_util::StreamExt;
+
         // Copy root here in case we fail integration and need to revert
         let root = self.root.clone();
 
         let result: Result<(), DialogProllyTreeError> = {
-            for change in changes {
+            futures_util::pin_mut!(changes);
+            while let Some(change_result) = changes.next().await {
+                let change = change_result?;
                 match change {
                     Change::Add(entry) => {
                         // Check if key already exists

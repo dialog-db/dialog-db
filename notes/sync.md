@@ -382,16 +382,14 @@ impl<B: Backend> Replica<B> {
 
 ### Differentiation
 
-It is best to think of our search tree as a sorted set of entries. Differential between last **checkpoint** (tree that was succesfully pushed) and **current** working tree can be represented as a set of entries added or removed.
-
+It is best to think of our search tree as a sorted set of entries. The differential between the last **checkpoint** (tree that was successfully pushed) and **current** working tree can be represented as a stream of entries added or removed.
 
 ```rust
-trait Differential: TryStream<Change> {
-  fn from(source: (Tree, Tree)) -> Self
-}
+/// A differential is a stream of changes
+trait Differential: Stream<Item = Result<Change, Error>> {}
 
 pub enum Change {
-  Remove(Entry)
+  Remove(Entry),
   Add(Entry),
 }
 ```
@@ -402,6 +400,8 @@ ZSet weight can be out of -1/+1 range but my understanding is that for collectio
 </details>
 
 > ✨ Computing differential should not require replicating subtrees that have not changed because those can be skipped over. It is also highly likely that subtrees that have changed will already be in cache because to change them we had to replicate first
+>
+> For details see [explanation of the  algorithm](./diff.md).
 
 
 ### Integration
