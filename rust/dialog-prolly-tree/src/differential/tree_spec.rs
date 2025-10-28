@@ -256,10 +256,11 @@ impl TreeDescriptor {
             None
         };
 
-        // NOW enable journaling - only reads from differentiate() will be recorded
+        // Enable journaling before loading tree from hash
+        // Root reads will be journaled but marked as Skip since Tree holds root in memory
         storage.backend.enable_journal();
 
-        // Load tree from hash - we want this to be journaled.
+        // Load tree from hash so root is freshly loaded (not from temp_tree)
         let tree = if let Some(hash) = root_hash {
             crate::Tree::from_hash(&hash, storage.clone()).await?
         } else {
@@ -425,6 +426,84 @@ impl TreeSpec {
         &self.tree
     }
 
+    /// Print detailed tree structure with boundaries and hashes
+    pub async fn print_structure(&self) {
+        eprintln!("\n=== Tree Structure ===");
+
+        if let Some(root) = self.tree.root() {
+            Self::print_node(root, "", true, &self.storage).await;
+        } else {
+            eprintln!("(empty tree)");
+        }
+    }
+
+    fn print_node<'a>(
+        node: &'a crate::Node<4, 32, Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
+        prefix: &'a str,
+        is_last: bool,
+        storage: &'a dialog_storage::Storage<
+            32,
+            dialog_storage::CborEncoder,
+            dialog_storage::JournaledStorage<dialog_storage::MemoryStorageBackend<[u8; 32], Vec<u8>>>,
+        >,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
+        Box::pin(async move {
+            let boundary_str = String::from_utf8_lossy(node.upper_bound());
+
+            // Extract rank from the encoded boundary
+            let upper_bound = node.upper_bound();
+            let rank = if upper_bound.len() >= 2 && upper_bound[upper_bound.len() - 2] == 0x00 {
+                upper_bound[upper_bound.len() - 1]
+            } else {
+                1
+            };
+
+            let hash = node.hash();
+            let hash_short = format!("{:02x}{:02x}{:02x}{:02x}", hash[0], hash[1], hash[2], hash[3]);
+
+            if prefix.is_empty() {
+                // Root node - no connector
+                eprintln!("{}[{}]@{}", boundary_str, rank, hash_short);
+            } else {
+                let connector = if is_last { "└── " } else { "├── " };
+                eprintln!("{}{}{}[{}]@{}", prefix, connector, boundary_str, rank, hash_short);
+            }
+
+            if node.is_branch() {
+                if let Ok(refs) = node.references() {
+                    let child_prefix = format!("{}{}",  prefix, if is_last { "    " } else { "│   " });
+
+                    for (i, child_ref) in refs.iter().enumerate() {
+                        let is_last_child = i == refs.len() - 1;
+
+                        // Try to load the child node
+                        match crate::Node::from_reference(child_ref.clone(), storage).await {
+                            Ok(child_node) => {
+                                // Successfully loaded - recurse
+                                Self::print_node(&child_node, &child_prefix, is_last_child, storage).await;
+                            }
+                            Err(_) => {
+                                // Failed to load - just show the reference
+                                let boundary_str = String::from_utf8_lossy(child_ref.upper_bound());
+                                let upper_bound = child_ref.upper_bound();
+                                let rank = if upper_bound.len() >= 2 && upper_bound[upper_bound.len() - 2] == 0x00 {
+                                    upper_bound[upper_bound.len() - 1]
+                                } else {
+                                    1
+                                };
+                                let hash = child_ref.hash();
+                                let hash_short = format!("{:02x}{:02x}{:02x}{:02x}", hash[0], hash[1], hash[2], hash[3]);
+
+                                let connector = if is_last_child { "└── " } else { "├── " };
+                                eprintln!("{}{}{}[{}]@{} (ref)", child_prefix, connector, boundary_str, rank, hash_short);
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     pub fn assert(&self) {
         let reads = self.storage.backend.get_reads();
 
@@ -572,5 +651,15 @@ impl TreeSpec {
         }
 
         panic!("{}", output);
+    }
+}
+
+impl std::fmt::Debug for TreeSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Use the current runtime
+        tokio::runtime::Handle::current().block_on(async {
+            self.print_structure().await;
+        });
+        write!(f, "")
     }
 }
