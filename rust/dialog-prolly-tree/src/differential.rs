@@ -3,6 +3,11 @@ use async_stream::try_stream;
 use dialog_storage::{ContentAddressedStorage, HashType};
 use futures_core::Stream;
 
+#[cfg(test)]
+mod tree_spec;
+#[cfg(test)]
+mod tree_spec_macro;
+
 /// Represents a change in the key-value store.
 #[derive(Clone)]
 pub enum Change<Key, Value>
@@ -457,8 +462,13 @@ where
 mod tests {
     use super::*;
     use crate::{GeometricDistribution, Tree};
-    use dialog_storage::{Blake3Hash, CborEncoder, MemoryStorageBackend, Storage};
+    use anyhow::Result;
+    use dialog_storage::{
+        Blake3Hash, CborEncoder, JournaledStorage, MeasuredStorage, MemoryStorageBackend, Storage,
+    };
     use futures_util::{StreamExt, pin_mut};
+    use std::collections::{HashMap, HashSet};
+    use std::ops::Deref;
 
     type TestTree = Tree<
         32,
@@ -1308,384 +1318,225 @@ mod tests {
     }
 
     // ========================================================================
-    // Performance tests using MeasuredStorage
+    // Performance tests using JournaledStorage
     // ========================================================================
 
-    use dialog_storage::MeasuredStorage;
+    use crate::Distribution;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    type MeasuredTree = Tree<
-        32,
+    // Type alias for the journaled storage backend used in tests
+    type TestJournaledStorage =
+        JournaledStorage<MeasuredStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
+
+    // Use smaller branching factor for easier testing of tall trees
+    type JournaledTree = Tree<
+        4, // Small branching factor
         32,
         GeometricDistribution,
         Vec<u8>,
         Vec<u8>,
         Blake3Hash,
-        Arc<
-            Mutex<
-                Storage<
-                    32,
-                    CborEncoder,
-                    MeasuredStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
-                >,
-            >,
-        >,
+        Arc<Mutex<Storage<32, CborEncoder, TestJournaledStorage>>>,
     >;
 
     #[tokio::test]
-    async fn test_shared_segments_are_skipped() {
-        // This test verifies that when trees share common segments,
-        // we skip over them without reading their contents
-        let backend = MeasuredStorage::new(MemoryStorageBackend::default());
-        let storage = Arc::new(Mutex::new(Storage {
+    async fn test_diff_shared_left_subtree() -> Result<()> {
+        use crate::tree_spec;
+
+        let backend = JournaledStorage::new(MemoryStorageBackend::default());
+        let storage = Storage {
             encoder: CborEncoder,
             backend,
-        }));
+        };
 
-        // Create a base tree with many entries
-        let mut base_tree = MeasuredTree::new(storage.clone());
-        for i in 0..100u8 {
-            base_tree.set(vec![i], vec![i]).await.unwrap();
-        }
+        // Define tree structures using tree_spec! macro with read/prune expectations
+        // () indicates nodes that should be pruned (not read)
+        let spec_a = tree_spec![
+            [                ..l]
+            [..e, f..i,      ..l]
+        ]
+        .build(storage.clone())
+        .await
+        .unwrap();
 
-        // Create tree1 = base + one extra entry
-        let mut tree1 = MeasuredTree::new(storage.clone());
-        for i in 0..100u8 {
-            tree1.set(vec![i], vec![i]).await.unwrap();
-        }
-        tree1.set(vec![200], vec![200]).await.unwrap();
+        let spec_b = tree_spec![
+            [                  ..s]
+            [f..i, ..m,        ..s]
+        ]
+        .build(storage.clone())
+        .await
+        .unwrap();
 
-        // Reset read counter
-        {
-            let storage_lock = storage.lock().await;
-            let reads_before = storage_lock.backend.reads();
-            drop(storage_lock);
+        // Run differentiate (journal is automatically enabled after build)
+        let host_b = spec_b.tree().clone();
+        let diff = host_b.differentiate(spec_a.tree());
+        // consume so we actually perform reads
+        let _: Vec<_> = diff.collect().await;
 
-            // Now differentiate - should skip shared segments
-            let changes = tree1.differentiate(&base_tree);
-            pin_mut!(changes);
-            let mut count = 0;
-            while let Some(result) = changes.next().await {
-                result.unwrap();
-                count += 1;
-            }
+        spec_a.assert();
+        spec_b.assert();
 
-            assert_eq!(count, 1, "Should only have one add change");
-
-            let storage_lock = storage.lock().await;
-            let reads_after = storage_lock.backend.reads();
-            let diff_reads = reads_after - reads_before;
-
-            // We should read far fewer nodes than if we read the entire tree
-            // Ideally we only read nodes along the path to the difference
-            // For a tree with 100 entries, full read would be >> 10 nodes
-            // With pruning, we should read < 10 nodes
-            println!("Reads during diff: {}", diff_reads);
-
-            // This assertion documents current behavior
-            // A well-optimized implementation should read < 10 nodes
-            // If this fails, it means we're not pruning effectively
-            assert!(
-                diff_reads < 20,
-                "Expected < 20 reads for shared segments, got {}",
-                diff_reads
-            );
-        }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_subset_relationship_with_same_height() {
-        // Test case where one tree is fully contained in another
-        // Both have the same height, so pruning should work well
-        let backend = MeasuredStorage::new(MemoryStorageBackend::default());
-        let storage = Arc::new(Mutex::new(Storage {
+    async fn test_diff_fully_disjoint_trees() -> Result<()> {
+        use crate::tree_spec;
+
+        let backend = JournaledStorage::new(MemoryStorageBackend::default());
+        let storage = Storage {
             encoder: CborEncoder,
             backend,
-        }));
+        };
 
-        // Small tree: 50 entries
-        let mut small_tree = MeasuredTree::new(storage.clone());
-        for i in 0..50u8 {
-            small_tree.set(vec![i], vec![i]).await.unwrap();
-        }
+        // Scenario: Trees have completely different key ranges - NO shared segments
+        // Tree A has keys a-i, Tree B has keys p-x (completely disjoint)
+        // All segments from both trees must be read since nothing is shared
+        let spec_a = tree_spec![
+            [                         ..i]
+            [..a, ..d, ..e, ..f, ..g, ..i]
+        ]
+        .build(storage.clone())
+        .await
+        .unwrap();
 
-        // Large tree: 50 entries (same) + 50 more
-        let mut large_tree = MeasuredTree::new(storage.clone());
-        for i in 0..100u8 {
-            large_tree.set(vec![i], vec![i]).await.unwrap();
-        }
+        let spec_b = tree_spec![
+            [                         ..x]
+            [..p, ..s, ..t, ..u, ..v, ..x]
+        ]
+        .build(storage.clone())
+        .await
+        .unwrap();
 
-        // Reset read counter
-        {
-            let storage_lock = storage.lock().await;
-            let reads_before = storage_lock.backend.reads();
-            drop(storage_lock);
+        let host_b = spec_b.tree().clone();
+        let diff = host_b.differentiate(spec_a.tree());
+        let _: Vec<_> = diff.collect().await;
 
-            // Differentiate large from small
-            let changes = large_tree.differentiate(&small_tree);
-            pin_mut!(changes);
-            let mut count = 0;
-            while let Some(result) = changes.next().await {
-                result.unwrap();
-                count += 1;
-            }
+        spec_a.assert();
+        spec_b.assert();
 
-            assert_eq!(count, 50, "Should have 50 add changes");
-
-            let storage_lock = storage.lock().await;
-            let reads_after = storage_lock.backend.reads();
-            let diff_reads = reads_after - reads_before;
-
-            println!("Reads for subset diff (same height): {}", diff_reads);
-
-            // With good pruning, we should skip the shared portion
-            // and only read nodes related to the additional 50 entries
-            assert!(
-                diff_reads < 30,
-                "Expected < 30 reads when trees share structure, got {}",
-                diff_reads
-            );
-        }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_subset_relationship_with_different_heights() {
-        // Test case where one tree is fully contained in another
-        // BUT they have different heights - this should expose the performance issue
-        let backend = MeasuredStorage::new(MemoryStorageBackend::default());
-        let storage = Arc::new(Mutex::new(Storage {
+    async fn test_diff_subset_superset() -> Result<()> {
+        use crate::tree_spec;
+
+        let backend = JournaledStorage::new(MemoryStorageBackend::default());
+        let storage = Storage {
             encoder: CborEncoder,
             backend,
-        }));
+        };
 
-        // Small tree: just a few entries (will be shallow)
-        let mut small_tree = MeasuredTree::new(storage.clone());
-        for i in 0..10u8 {
-            small_tree.set(vec![i], vec![i]).await.unwrap();
-        }
+        // Scenario: Tree A is fully contained within Tree B (subset/superset)
+        // Tree A has keys e-n, Tree B has keys a-s
+        // Only the edges of B (a-d and o-s) should be read, middle is shared
+        let spec_a = tree_spec![
+            [     ..n]
+            [..e, ..n]
+        ]
+        .build(storage.clone())
+        .await
+        .unwrap();
 
-        // Large tree: same entries + many more (will be taller due to size)
-        let mut large_tree = MeasuredTree::new(storage.clone());
-        for i in 0..200u8 {
-            large_tree.set(vec![i], vec![i]).await.unwrap();
-        }
+        let spec_b = tree_spec![
+            [                   ..s]
+            [..a, (..e), (..n), ..s]
+        ]
+        .build(storage.clone())
+        .await
+        .unwrap();
 
-        println!("Small tree: 10 entries, Large tree: 200 entries");
+        let host_b = spec_b.tree().clone();
+        let diff = host_b.differentiate(spec_a.tree());
+        let _: Vec<_> = diff.collect().await;
 
-        // Reset read counter
-        let storage_lock = storage.lock().await;
-        let reads_before = storage_lock.backend.reads();
-        drop(storage_lock);
+        spec_a.assert();
+        spec_b.assert();
 
-        // Differentiate large from small
-        let changes = large_tree.differentiate(&small_tree);
-        pin_mut!(changes);
-        let mut count = 0;
-        while let Some(result) = changes.next().await {
-            result.unwrap();
-            count += 1;
-        }
-
-        assert_eq!(count, 190, "Should have 190 add changes");
-
-        let storage_lock = storage.lock().await;
-        let reads_after = storage_lock.backend.reads();
-        let diff_reads = reads_after - reads_before;
-
-        println!(
-            "Reads for subset diff (likely different heights): {}",
-            diff_reads
-        );
-
-        // This test DOCUMENTS THE PROBLEM:
-        // With different heights, we can't prune shared segments early
-        // so we end up reading many more nodes than necessary
-        //
-        // EXPECTED BEHAVIOR (after fix): < 30 reads
-        // CURRENT BEHAVIOR: likely > 50 reads
-        //
-        // This warning documents the issue when it occurs
-        if diff_reads > 50 {
-            println!("WARNING: Performance issue detected!");
-            println!("With different tree sizes, we read {} nodes", diff_reads);
-            println!("This is likely because trees have different heights");
-            println!("We can't detect shared segments until reaching leaves");
-            println!("See notes/diff.md for details on the height-mismatch problem");
-        }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_no_shared_entries_minimal_reads() {
-        // Baseline test: when trees share nothing, we must read everything
-        let backend = MeasuredStorage::new(MemoryStorageBackend::default());
-        let storage = Arc::new(Mutex::new(Storage {
+    async fn test_diff_single_key_change() -> Result<()> {
+        use crate::tree_spec;
+
+        let backend = JournaledStorage::new(MemoryStorageBackend::default());
+        let storage = Storage {
             encoder: CborEncoder,
             backend,
-        }));
+        };
 
-        // Tree 1: keys 0-49
-        let mut tree1 = MeasuredTree::new(storage.clone());
-        for i in 0..50u8 {
-            tree1.set(vec![i], vec![i]).await.unwrap();
-        }
+        // Scenario: Large trees differing by single key in the middle
+        // Tree A has keys a-s, Tree B has keys a-s with 'k' modified
+        // Only the path to the changed segment should be read
+        let spec_a = tree_spec![
+            [                    ..s]
+            [..a, ..f, ..k, ..p, ..s]
+        ]
+        .build(storage.clone())
+        .await
+        .unwrap();
 
-        // Tree 2: keys 100-149 (completely disjoint)
-        let mut tree2 = MeasuredTree::new(storage.clone());
-        for i in 100..150u8 {
-            tree2.set(vec![i], vec![i]).await.unwrap();
-        }
+        // Tree B: modify key 'k' to create a different hash
+        // We'll build with a slightly different range to simulate the change
+        let spec_b = tree_spec![
+            [                             ..s]
+            [(..a), (..f), j..k, (..p), (..s)]
+        ]
+        .build(storage.clone())
+        .await
+        .unwrap();
 
-        // Reset read counter
-        {
-            let storage_lock = storage.lock().await;
-            let reads_before = storage_lock.backend.reads();
-            drop(storage_lock);
+        let host_b = spec_b.tree().clone();
+        let diff = host_b.differentiate(spec_a.tree());
+        let _: Vec<_> = diff.collect().await;
 
-            // Differentiate - no shared segments to prune
-            let changes = tree1.differentiate(&tree2);
-            pin_mut!(changes);
-            let mut count = 0;
-            while let Some(result) = changes.next().await {
-                result.unwrap();
-                count += 1;
-            }
+        spec_a.assert();
+        spec_b.assert();
 
-            assert_eq!(count, 100, "Should have 50 removes + 50 adds");
-
-            let storage_lock = storage.lock().await;
-            let reads_after = storage_lock.backend.reads();
-            let diff_reads = reads_after - reads_before;
-
-            println!("Reads for disjoint trees: {}", diff_reads);
-
-            // With no shared segments, we need to read most/all nodes
-            // This is expected and unavoidable
-        }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_partially_shared_tree_pruning() {
-        // Test where trees share some segments but not others
-        let backend = MeasuredStorage::new(MemoryStorageBackend::default());
-        let storage = Arc::new(Mutex::new(Storage {
+    async fn test_diff_different_heights() -> Result<()> {
+        use crate::tree_spec;
+
+        let backend = JournaledStorage::new(MemoryStorageBackend::default());
+        let storage = Storage {
             encoder: CborEncoder,
             backend,
-        }));
+        };
 
-        // Base: 0-99
-        let mut tree1 = MeasuredTree::new(storage.clone());
-        for i in 0..100u8 {
-            tree1.set(vec![i], vec![i]).await.unwrap();
-        }
+        // Scenario: Trees of different heights
+        // Tree A is shallow (height 1), Tree B is taller (height 2)
+        // This tests how differential handles height mismatches
+        let spec_a = tree_spec![
+            [     ..e]
+            [..a, ..e]
+        ]
+        .build(storage.clone())
+        .await
+        .unwrap();
 
-        // Modified: 0-49 same, 50-99 different, 100-149 new
-        let mut tree2 = MeasuredTree::new(storage.clone());
-        for i in 0..50u8 {
-            tree2.set(vec![i], vec![i]).await.unwrap(); // Same
-        }
-        for i in 50..100u8 {
-            tree2.set(vec![i], vec![i * 2]).await.unwrap(); // Different
-        }
-        for i in 100..150u8 {
-            tree2.set(vec![i], vec![i]).await.unwrap(); // New
-        }
+        let spec_b = tree_spec![
+            [                              ..z]
+            [..f,                ..p,      ..z]
+            [..a, ..c, ..f, ..k, ..p, ..t, ..z]
+        ]
+        .build(storage.clone())
+        .await
+        .unwrap();
 
-        // Reset read counter
-        {
-            let storage_lock = storage.lock().await;
-            let reads_before = storage_lock.backend.reads();
-            drop(storage_lock);
+        let host_b = spec_b.tree().clone();
+        let diff = host_b.differentiate(spec_a.tree());
+        let _: Vec<_> = diff.collect().await;
 
-            // Differentiate
-            let changes = tree2.differentiate(&tree1);
-            pin_mut!(changes);
-            let mut adds = Vec::new();
-            let mut removes = Vec::new();
-            while let Some(result) = changes.next().await {
-                match result.unwrap() {
-                    Change::Add(e) => adds.push(e),
-                    Change::Remove(e) => removes.push(e),
-                }
-            }
+        spec_a.assert();
+        spec_b.assert();
 
-            // 50 modified (50 removes + 50 adds) + 50 new adds = 150 changes
-            assert_eq!(removes.len(), 50);
-            assert_eq!(adds.len(), 100);
-
-            let storage_lock = storage.lock().await;
-            let reads_after = storage_lock.backend.reads();
-            let diff_reads = reads_after - reads_before;
-
-            println!("Reads for partially shared tree: {}", diff_reads);
-
-            // We should be able to skip the shared portion (0-49)
-            // and only read nodes for the differing/new portions
-            // This verifies that pruning works for partially shared trees
-        }
-    }
-
-    #[tokio::test]
-    async fn test_extreme_size_difference() {
-        // Test with extreme size difference to really stress the height mismatch case
-        // Small tree (3 entries) vs very large tree (same 3 + 1000 more)
-        let backend = MeasuredStorage::new(MemoryStorageBackend::default());
-        let storage = Arc::new(Mutex::new(Storage {
-            encoder: CborEncoder,
-            backend,
-        }));
-
-        // Tiny tree: just 3 entries
-        let mut tiny_tree = MeasuredTree::new(storage.clone());
-        tiny_tree.set(vec![0], vec![0]).await.unwrap();
-        tiny_tree.set(vec![1], vec![1]).await.unwrap();
-        tiny_tree.set(vec![2], vec![2]).await.unwrap();
-
-        // Huge tree: same 3 entries + 1000 more
-        let mut huge_tree = MeasuredTree::new(storage.clone());
-        for i in 0..255u8 {
-            huge_tree.set(vec![i], vec![i]).await.unwrap();
-        }
-
-        println!("Tiny tree: 3 entries, Huge tree: 255 entries");
-
-        // Reset read counter
-        let storage_lock = storage.lock().await;
-        let reads_before = storage_lock.backend.reads();
-        drop(storage_lock);
-
-        // Differentiate huge from tiny
-        let changes = huge_tree.differentiate(&tiny_tree);
-        pin_mut!(changes);
-        let mut count = 0;
-        while let Some(result) = changes.next().await {
-            result.unwrap();
-            count += 1;
-        }
-
-        assert_eq!(count, 252, "Should have 252 add changes (255 - 3)");
-
-        let storage_lock = storage.lock().await;
-        let reads_after = storage_lock.backend.reads();
-        let diff_reads = reads_after - reads_before;
-
-        println!("Reads for extreme size diff: {}", diff_reads);
-
-        // With such different sizes, the trees almost certainly have different heights
-        // If we see a large number of reads (e.g., > 30), that's the height mismatch problem
-        // IDEAL: Should only read nodes for the differing portion
-        // PROBLEM: May read entire huge tree structure down to leaves
-        if diff_reads > 30 {
-            println!("HEIGHT MISMATCH ISSUE DETECTED!");
-            println!(
-                "Read {} nodes - likely expanding entire tree due to height difference",
-                diff_reads
-            );
-        } else {
-            println!(
-                "Good performance - only {} reads despite size difference",
-                diff_reads
-            );
-        }
+        Ok(())
     }
 }

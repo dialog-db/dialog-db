@@ -81,8 +81,8 @@ pub fn build_rank_map(levels: &[Vec<Vec<u8>>]) -> HashMap<Vec<u8>, u32> {
 pub enum NodeOp {
     /// Node should be read during differentiation
     Read,
-    /// Node should be pruned (not read) during differentiation
-    Prune,
+    /// Node is in memory and doesn't need to be read (e.g., root nodes)
+    Skip,
 }
 
 pub enum NodeDescriptor {
@@ -100,7 +100,7 @@ pub struct TreeDescriptor(pub Vec<Vec<NodeDescriptor>>);
 
 impl TreeDescriptor {
     /// Validate the tree structure
-    fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
+    fn validate(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if self.0.is_empty() {
             return Err("TreeDescriptor must have at least one level".into());
         }
@@ -168,7 +168,7 @@ impl TreeDescriptor {
                 dialog_storage::MemoryStorageBackend<[u8; 32], Vec<u8>>,
             >,
         >,
-    ) -> Result<TreeSpec, Box<dyn std::error::Error>> {
+    ) -> Result<TreeSpec, Box<dyn std::error::Error + Send + Sync>> {
         use std::collections::BTreeMap;
 
         // Validate the tree structure first
@@ -190,7 +190,7 @@ impl TreeDescriptor {
             let height = self.0.len() - 1 - level_idx;
 
             for descriptor in level_descriptors {
-                let (first_key, upper_bound, is_pruned) = match descriptor {
+                let (first_key, upper_bound, is_skipped) = match descriptor {
                     NodeDescriptor::Range(first, last) => {
                         (Some(first.as_str()), last.as_str(), false)
                     }
@@ -202,8 +202,8 @@ impl TreeDescriptor {
                 };
 
                 let boundary = upper_bound.as_bytes().to_vec();
-                let expected_op = if is_pruned {
-                    NodeOp::Prune
+                let expected_op = if is_skipped {
+                    NodeOp::Skip
                 } else {
                     NodeOp::Read
                 };
@@ -236,13 +236,13 @@ impl TreeDescriptor {
             btree_collection.insert(encoded_key, key.clone());
         }
 
-        let tree = crate::Tree::from_collection(btree_collection, storage.clone()).await?;
+        let temp_tree = crate::Tree::from_collection(btree_collection, storage.clone()).await?;
 
         // Now build NodeSpec levels from the actual tree
         let max_height = self.0.len() - 1;
         let mut spec = vec![Vec::new(); self.0.len()];
 
-        if let Some(root) = tree.root() {
+        let root_hash = if let Some(root) = temp_tree.root() {
             Box::pin(Self::build_spec_from_node(
                 &mut spec,
                 root,
@@ -251,10 +251,20 @@ impl TreeDescriptor {
                 &expected_ops,
             ))
             .await;
-        }
+            Some(*root.hash())
+        } else {
+            None
+        };
 
-        // Enable journaling after building - tests will now record reads
+        // NOW enable journaling - only reads from differentiate() will be recorded
         storage.backend.enable_journal();
+
+        // Load tree from hash - we want this to be journaled.
+        let tree = if let Some(hash) = root_hash {
+            crate::Tree::from_hash(&hash, storage.clone()).await?
+        } else {
+            temp_tree
+        };
 
         Ok(TreeSpec {
             spec,
@@ -321,16 +331,19 @@ impl TreeDescriptor {
             return;
         }
 
-        if let Ok(children) = node.load_children(storage).await {
-            for child in children {
-                Box::pin(Self::build_spec_from_node(
-                    spec,
-                    &child,
-                    storage,
-                    height - 1,
-                    expected_ops,
-                ))
-                .await;
+        // Only recurse if we have more levels to go and height won't underflow
+        if height > 0 {
+            if let Ok(children) = node.load_children(storage).await {
+                for child in children {
+                    Box::pin(Self::build_spec_from_node(
+                        spec,
+                        &child,
+                        storage,
+                        height - 1,
+                        expected_ops,
+                    ))
+                    .await;
+                }
             }
         }
     }
@@ -421,7 +434,7 @@ impl TreeSpec {
         // Build expected/actual based on NodeSpecs
         // Use (boundary, height) tuples as keys
         let mut expected_reads = HashSet::new();
-        let mut expected_prunes = HashSet::new();
+        let mut unexpected_reads = HashSet::new();
         let mut actual_reads = HashSet::new();
 
         for level in &self.spec {
@@ -433,8 +446,8 @@ impl TreeSpec {
                     NodeOp::Read => {
                         expected_reads.insert(key.clone());
                     }
-                    NodeOp::Prune => {
-                        expected_prunes.insert(key.clone());
+                    NodeOp::Skip => {
+                        unexpected_reads.insert(key.clone());
                     }
                 }
 
@@ -446,10 +459,10 @@ impl TreeSpec {
 
         // Compare expected vs actual
         let missing_reads: Vec<_> = expected_reads.difference(&actual_reads).collect();
-        let wrongly_read: Vec<_> = actual_reads.intersection(&expected_prunes).collect();
+        let wrongly_read: Vec<_> = actual_reads.intersection(&unexpected_reads).collect();
         let unexpected_reads: Vec<_> = actual_reads
             .difference(&expected_reads)
-            .filter(|n| !expected_prunes.contains(n))
+            .filter(|n| !unexpected_reads.contains(n))
             .collect();
 
         // If everything matches, return early
@@ -484,7 +497,7 @@ impl TreeSpec {
             for (i, node) in level.iter().enumerate() {
                 let boundary_str = String::from_utf8_lossy(&node.boundary);
                 let content = match node.expected_op {
-                    NodeOp::Prune => format!("(..{})", boundary_str),
+                    NodeOp::Skip => format!("(..{})", boundary_str),
                     NodeOp::Read => format!("..{}", boundary_str),
                 };
                 if i > 0 {
@@ -505,7 +518,7 @@ impl TreeSpec {
                 let was_read = actual_reads.contains(&key);
 
                 let (content, color_len) = match node.expected_op {
-                    NodeOp::Prune => {
+                    NodeOp::Skip => {
                         if was_read {
                             (format!("{}(..{}){}", RED, boundary_str, RESET), 9)
                         } else {
@@ -543,7 +556,7 @@ impl TreeSpec {
         }
 
         if !wrongly_read.is_empty() {
-            output.push_str("\n❌ Expected prunes were read:\n");
+            output.push_str("\n❌ Expected skips were read:\n");
             for node_ref in &wrongly_read {
                 let boundary = String::from_utf8_lossy(&node_ref.0);
                 output.push_str(&format!("  - {} @ height {}\n", boundary, node_ref.1));
