@@ -167,13 +167,13 @@ where
     Hash: HashType<H>,
     Storage: ContentAddressedStorage<H, Hash = Hash>,
 {
-    /// Expands loaded branch nodes whose upper bound falls within the given range.
+    /// Expands loaded branch nodes and Refs whose upper bound falls within the given range.
     ///
-    /// This does NOT load the children from storage - it only extracts the references from
-    /// the parent node. The children remain as unloaded `SparseTreeNode::Ref` until explicitly loaded.
+    /// For loaded branch nodes, this extracts their child references.
+    /// For Refs, this loads them from storage and then extracts their child references if they're branches.
     ///
     /// Returns true if any expansion happened.
-    pub fn expand<R>(&mut self, range: R) -> Result<bool, DialogProllyTreeError>
+    pub async fn expand<R>(&mut self, range: R) -> Result<bool, DialogProllyTreeError>
     where
         R: std::ops::RangeBounds<Key>,
         Key: KeyType,
@@ -186,15 +186,50 @@ where
         while offset < self.nodes.len() {
             let node = &self.nodes[offset];
 
-            // Check if this node's upper bound is within the target range
-            let in_range = match range.end_bound() {
-                Bound::Included(end) => node.upper_bound() <= end,
-                Bound::Excluded(end) => node.upper_bound() < end,
-                Bound::Unbounded => true,
-            } && match range.start_bound() {
-                Bound::Included(start) => node.upper_bound() >= start,
-                Bound::Excluded(start) => node.upper_bound() > start,
-                Bound::Unbounded => true,
+            // For branch nodes, we need to check if they MIGHT contain children in the range
+            // A branch with upper bound "f" might have children "a", "c", "f"
+            // So we should expand it if it's >= the range start (it might overlap)
+            let is_branch = matches!(node, SparseTreeNode::Node(n) if n.is_branch());
+
+            eprintln!(
+                "  expand check: node={:?}, is_branch={}, range={:?}..={:?}",
+                String::from_utf8_lossy(node.upper_bound().bytes()),
+                is_branch,
+                match range.start_bound() {
+                    Bound::Included(k) => format!("{:?}", String::from_utf8_lossy(k.bytes())),
+                    Bound::Excluded(k) => format!(">{:?}", String::from_utf8_lossy(k.bytes())),
+                    Bound::Unbounded => "unbounded".to_string(),
+                },
+                match range.end_bound() {
+                    Bound::Included(k) => format!("{:?}", String::from_utf8_lossy(k.bytes())),
+                    Bound::Excluded(k) => format!("<{:?}", String::from_utf8_lossy(k.bytes())),
+                    Bound::Unbounded => "unbounded".to_string(),
+                }
+            );
+
+            let in_range = if is_branch {
+                // For branches: expand if the node might contain children in the range
+                // This means: node.upper_bound() >= range.start (node might have children in range)
+                (match range.start_bound() {
+                    Bound::Included(start) => node.upper_bound() >= start,
+                    Bound::Excluded(start) => node.upper_bound() > start,
+                    Bound::Unbounded => true,
+                }) && (match range.end_bound() {
+                    // Also check we're not completely past the range
+                    Bound::Included(_) | Bound::Excluded(_) => true, // We'll filter children later
+                    Bound::Unbounded => true,
+                })
+            } else {
+                // For leaf nodes: only expand if the upper bound is exactly in the range
+                (match range.end_bound() {
+                    Bound::Included(end) => node.upper_bound() <= end,
+                    Bound::Excluded(end) => node.upper_bound() < end,
+                    Bound::Unbounded => true,
+                }) && (match range.start_bound() {
+                    Bound::Included(start) => node.upper_bound() >= start,
+                    Bound::Excluded(start) => node.upper_bound() > start,
+                    Bound::Unbounded => true,
+                })
             };
 
             if !in_range {
@@ -202,27 +237,75 @@ where
                 continue;
             }
 
-            // Only expand loaded branch nodes
-            if let SparseTreeNode::Node(node) = &self.nodes[offset] {
-                if node.is_branch() {
-                    if let Ok(refs) = node.references() {
-                        // Convert references to SparseTreeNode::Ref
-                        let children: Vec<SparseTreeNode<F, H, Key, Value, Hash>> = refs
-                            .iter()
-                            .map(|r| SparseTreeNode::Ref(r.clone()))
-                            .collect();
+            // Load and expand Refs and loaded branch nodes
+            match &self.nodes[offset] {
+                SparseTreeNode::Ref(reference) => {
+                    // Load the Ref from storage
+                    let node: Node<F, H, Key, Value, Hash> =
+                        Node::from_hash(reference.hash().clone(), self.storage).await?;
 
-                        let num_children = children.len();
-                        // Replace the branch node with its child references
-                        self.nodes.splice(offset..offset + 1, children);
-                        offset += num_children; // Skip past the children we just added
-                        expanded = true;
-                        continue;
+                    // If it's a branch, expand it
+                    if node.is_branch() {
+                        if let Ok(refs) = node.references() {
+                            eprintln!(
+                                "EXPAND: boundary={:?} into {} children",
+                                String::from_utf8_lossy(node.upper_bound().bytes()),
+                                refs.len()
+                            );
+                            // Convert references to SparseTreeNode::Ref
+                            let children: Vec<SparseTreeNode<F, H, Key, Value, Hash>> = refs
+                                .iter()
+                                .map(|r| {
+                                    eprintln!(
+                                        "  -> child boundary={:?}",
+                                        String::from_utf8_lossy(r.upper_bound().bytes())
+                                    );
+                                    SparseTreeNode::Ref(r.clone())
+                                })
+                                .collect();
+
+                            let num_children = children.len();
+                            // Replace the Ref with its child references
+                            self.nodes.splice(offset..offset + 1, children);
+                            offset += num_children; // Skip past the children we just added
+                            expanded = true;
+                            continue;
+                        }
                     }
+                    // If it's a leaf, just leave it as a Ref
+                    offset += 1;
+                }
+                SparseTreeNode::Node(node) => {
+                    if node.is_branch() {
+                        if let Ok(refs) = node.references() {
+                            eprintln!(
+                                "EXPAND: boundary={:?} into {} children",
+                                String::from_utf8_lossy(node.upper_bound().bytes()),
+                                refs.len()
+                            );
+                            // Convert references to SparseTreeNode::Ref
+                            let children: Vec<SparseTreeNode<F, H, Key, Value, Hash>> = refs
+                                .iter()
+                                .map(|r| {
+                                    eprintln!(
+                                        "  -> child boundary={:?}",
+                                        String::from_utf8_lossy(r.upper_bound().bytes())
+                                    );
+                                    SparseTreeNode::Ref(r.clone())
+                                })
+                                .collect();
+
+                            let num_children = children.len();
+                            // Replace the branch node with its child references
+                            self.nodes.splice(offset..offset + 1, children);
+                            offset += num_children; // Skip past the children we just added
+                            expanded = true;
+                            continue;
+                        }
+                    }
+                    offset += 1;
                 }
             }
-
-            offset += 1;
         }
 
         Ok(expanded)
@@ -289,6 +372,30 @@ where
         let left = &mut self.nodes;
         let right = &mut other.nodes;
 
+        eprintln!(
+            "PRUNE: left={} nodes, right={} nodes",
+            left.len(),
+            right.len()
+        );
+        for (i, node) in left.iter().enumerate() {
+            let hash_bytes = node.hash().bytes();
+            eprintln!(
+                "  Left[{}]: boundary={:?}, hash=[{:?}]",
+                i,
+                String::from_utf8_lossy(node.upper_bound().bytes()),
+                &hash_bytes[..4]
+            );
+        }
+        for (i, node) in right.iter().enumerate() {
+            let hash_bytes = node.hash().bytes();
+            eprintln!(
+                "  Right[{}]: boundary={:?}, hash=[{:?}]",
+                i,
+                String::from_utf8_lossy(node.upper_bound().bytes()),
+                &hash_bytes[..4]
+            );
+        }
+
         // Read indices
         let mut at_left = 0;
         let mut at_right = 0;
@@ -302,9 +409,16 @@ where
             let left_node = &left[at_left];
             let right_node = &right[at_right];
 
+            let left_boundary = String::from_utf8_lossy(left_node.upper_bound().bytes());
+            let right_boundary = String::from_utf8_lossy(right_node.upper_bound().bytes());
+
             match left_node.upper_bound().cmp(right_node.upper_bound()) {
                 Ordering::Less => {
                     // left node is unique → keep it
+                    eprintln!(
+                        "  Compare: {:?} < {:?} - keeping left",
+                        left_boundary, right_boundary
+                    );
                     if to_left != at_left {
                         left.swap(to_left, at_left);
                     }
@@ -313,6 +427,10 @@ where
                 }
                 Ordering::Greater => {
                     // right node is unique → keep it
+                    eprintln!(
+                        "  Compare: {:?} > {:?} - keeping right",
+                        left_boundary, right_boundary
+                    );
                     if to_right != at_right {
                         right.swap(to_right, at_right);
                     }
@@ -323,6 +441,10 @@ where
                     // Same key range — possible shared content
                     if left_node.hash() != right_node.hash() {
                         // Different content → keep both
+                        eprintln!(
+                            "  Compare: {:?} - different hashes - keeping both",
+                            left_boundary
+                        );
                         if to_left != at_left {
                             left.swap(to_left, at_left);
                         }
@@ -331,6 +453,8 @@ where
                         }
                         to_left += 1;
                         to_right += 1;
+                    } else {
+                        eprintln!("  Compare: {:?} - SAME hash - PRUNING both", left_boundary);
                     }
                     // else identical (shared) → skip both
                     at_left += 1;
@@ -489,89 +613,79 @@ where
     pub async fn expand(&mut self) -> Result<(), DialogProllyTreeError> {
         use std::cmp::Ordering;
 
-        let Self(before, after) = self;
+        let Self(source, target) = self;
 
         loop {
             // First, prune any nodes with matching boundaries and hashes
-            before.prune(after);
+            source.prune(target);
 
             // Compare boundaries and expand strategically
             // Use two-finger walk to compare sorted node lists
             let mut expanded = false;
-            let mut before_idx = 0;
-            let mut after_idx = 0;
+            let mut source_idx = 0;
+            let mut target_idx = 0;
 
-            while before_idx < before.nodes.len() && after_idx < after.nodes.len() {
-                let before_bound = before.nodes[before_idx].upper_bound().clone();
-                let after_bound = after.nodes[after_idx].upper_bound().clone();
+            while source_idx < source.nodes.len() && target_idx < target.nodes.len() {
+                let source_bound = source.nodes[source_idx].upper_bound().clone();
+                let target_bound = target.nodes[target_idx].upper_bound().clone();
 
-                match before_bound.cmp(&after_bound) {
+                match source_bound.cmp(&target_bound) {
                     Ordering::Less => {
-                        // Before node has smaller boundary - expand the AFTER tree (larger boundary)
-                        // Need to expand up to after_bound to include the after node itself
-                        if after.expand(..=after_bound.clone())? {
+                        // Source node has smaller boundary
+                        // Expand ONLY the TARGET node (larger boundary) to see if it contains
+                        // something matching the source node
+                        eprintln!(
+                            "  COMPARE: source={:?} < target={:?} → expanding target",
+                            String::from_utf8_lossy(source_bound.bytes()),
+                            String::from_utf8_lossy(target_bound.bytes())
+                        );
+                        if target.expand(..=target_bound.clone()).await? {
                             expanded = true;
+                            break; // Restart comparison after expansion
                         }
-                        before_idx += 1;
+                        // Target couldn't be expanded, so source node is unique
+                        source_idx += 1;
                     }
                     Ordering::Greater => {
-                        // After node has smaller boundary - expand the BEFORE tree (larger boundary)
-                        // Need to expand up to before_bound to include the before node itself
-                        if before.expand(..=before_bound.clone())? {
+                        // Target node has smaller boundary
+                        // Expand ONLY the SOURCE node (larger boundary) to see if it contains
+                        // something matching the target node
+                        eprintln!(
+                            "  COMPARE: source={:?} > target={:?} → expanding source",
+                            String::from_utf8_lossy(source_bound.bytes()),
+                            String::from_utf8_lossy(target_bound.bytes())
+                        );
+                        if source.expand(..=source_bound.clone()).await? {
                             expanded = true;
+                            break; // Restart comparison after expansion
                         }
-                        after_idx += 1;
+                        // Source couldn't be expanded, so target node is unique
+                        target_idx += 1;
                     }
                     Ordering::Equal => {
-                        // Same boundary - check if hashes differ or if one is a branch
-                        let before_is_branch = matches!(&before.nodes[before_idx], SparseTreeNode::Node(n) if n.is_branch());
-                        let after_is_branch = matches!(&after.nodes[after_idx], SparseTreeNode::Node(n) if n.is_branch());
-
-                        if before_is_branch != after_is_branch {
-                            // One is a branch and one is a leaf - expand the branch
-                            if before_is_branch {
-                                if before.expand(..=before_bound.clone())? {
-                                    expanded = true;
-                                }
-                            } else {
-                                if after.expand(..=after_bound)? {
-                                    expanded = true;
-                                }
-                            }
-                            // Don't increment indices - need to recompare after expansion
-                            break;
-                        } else if before.nodes[before_idx].hash() != after.nodes[after_idx].hash() {
-                            // Same type but different hashes - need to expand both
-                            if before.expand(..=before_bound.clone())? {
+                        // Same boundary - check if hashes differ
+                        if source.nodes[source_idx].hash() != target.nodes[target_idx].hash() {
+                            // Different hashes - need to expand both to find the difference
+                            if source.expand(..=source_bound.clone()).await? {
                                 expanded = true;
                             }
-                            if after.expand(..=after_bound)? {
+                            if target.expand(..=target_bound.clone()).await? {
                                 expanded = true;
+                            }
+                            // Don't increment - need to recompare after expansion
+                            if expanded {
+                                break;
                             }
                         }
                         // If hashes match, prune will remove them (already done above)
-                        before_idx += 1;
-                        after_idx += 1;
+                        source_idx += 1;
+                        target_idx += 1;
                     }
                 }
             }
 
-            // Expand any remaining nodes
-            while before_idx < before.nodes.len() {
-                let before_bound = before.nodes[before_idx].upper_bound().clone();
-                if before.expand(..=before_bound)? {
-                    expanded = true;
-                }
-                before_idx += 1;
-            }
-
-            while after_idx < after.nodes.len() {
-                let after_bound = after.nodes[after_idx].upper_bound().clone();
-                if after.expand(..=after_bound)? {
-                    expanded = true;
-                }
-                after_idx += 1;
-            }
+            // Don't expand remaining nodes - they are pure adds/removes that don't need expansion
+            // The comparison loop has already expanded everything that needs comparing
 
             // If nothing was expanded, we've reached a fixed point
             if !expanded {
@@ -587,67 +701,67 @@ where
     /// This performs a two-cursor walk over the entry streams from both sparse trees,
     /// yielding Add and Remove changes as appropriate.
     pub fn stream(&'a self) -> impl Differential<Key, Value> + 'a {
-        let Self(before, after) = self;
-        let before_stream = before.stream();
-        let after_stream = after.stream();
+        let Self(source, target) = self;
+        let source_stream = source.stream();
+        let target_stream = target.stream();
 
         try_stream! {
-            futures_util::pin_mut!(before_stream);
-            futures_util::pin_mut!(after_stream);
+            futures_util::pin_mut!(source_stream);
+            futures_util::pin_mut!(target_stream);
 
             use futures_util::StreamExt;
 
-            let mut before_next = before_stream.next().await;
-            let mut after_next = after_stream.next().await;
+            let mut source_next = source_stream.next().await;
+            let mut target_next = target_stream.next().await;
 
             loop {
-                match (&before_next, &after_next) {
+                match (&source_next, &target_next) {
                     (None, None) => break,
-                    (Some(Ok(before_entry)), None) => {
-                        // Remaining before entries are removals
-                        yield Change::Remove(before_entry.clone());
-                        before_next = before_stream.next().await;
+                    (Some(Ok(source_entry)), None) => {
+                        // Remaining source entries are removals
+                        yield Change::Remove(source_entry.clone());
+                        source_next = source_stream.next().await;
                     }
-                    (None, Some(Ok(after_entry))) => {
-                        // Remaining after entries are additions
-                        yield Change::Add(after_entry.clone());
-                        after_next = after_stream.next().await;
+                    (None, Some(Ok(target_entry))) => {
+                        // Remaining target entries are additions
+                        yield Change::Add(target_entry.clone());
+                        target_next = target_stream.next().await;
                     }
                     (Some(Err(_)), _) => {
-                        // Propagate error from before stream
-                        if let Some(Err(err)) = std::mem::replace(&mut before_next, None) {
+                        // Propagate error from source stream
+                        if let Some(Err(err)) = std::mem::replace(&mut source_next, None) {
                             Err(err)?;
                         }
                     }
                     (_, Some(Err(_))) => {
-                        // Propagate error from after stream
-                        if let Some(Err(err)) = std::mem::replace(&mut after_next, None) {
+                        // Propagate error from target stream
+                        if let Some(Err(err)) = std::mem::replace(&mut target_next, None) {
                             Err(err)?;
                         }
                     }
-                    (Some(Ok(before_entry)), Some(Ok(after_entry))) => {
+                    (Some(Ok(source_entry)), Some(Ok(target_entry))) => {
                         use std::cmp::Ordering;
-                        match before_entry.key.cmp(&after_entry.key) {
+                        match source_entry.key.cmp(&target_entry.key) {
                             Ordering::Less => {
-                                // Before key is smaller - it was removed
-                                yield Change::Remove(before_entry.clone());
-                                before_next = before_stream.next().await;
+                                // Source key is smaller - it was removed
+                                yield Change::Remove(source_entry.clone());
+                                source_next = source_stream.next().await;
                             }
                             Ordering::Greater => {
-                                // After key is smaller - it was added
-                                yield Change::Add(after_entry.clone());
-                                after_next = after_stream.next().await;
+                                // Target key is smaller - it was added
+                                yield Change::Add(target_entry.clone());
+                                target_next = target_stream.next().await;
                             }
                             Ordering::Equal => {
                                 // Same key - check values
-                                if before_entry.value != after_entry.value {
+                                if source_entry.value != target_entry.value {
                                     // Value changed
-                                    yield Change::Remove(before_entry.clone());
-                                    yield Change::Add(after_entry.clone());
+                                    yield Change::Remove(source_entry.clone());
+                                    yield Change::Add(target_entry.clone());
                                 }
                                 // If values are equal, skip (no change)
-                                before_next = before_stream.next().await;
-                                after_next = after_stream.next().await;
+                                source_next = source_stream.next().await;
+                                target_next = target_stream.next().await;
                             }
                         }
                     }
@@ -1754,16 +1868,16 @@ mod tests {
         .unwrap();
 
         let spec_b = tree_spec![
-            [                                ..z]
-            [            ..f,      ..p,      ..z]
-            [(..a), ..c, ..f, ..k, ..p, ..t, ..z]
+            [                                        ..z]
+            [            ..f,        (..p),        (..z)]
+            [(..a), ..c, ..f, (..k), (..p), (..t), (..z)]
         ]
         .build(storage_b.clone())
         .await
         .unwrap();
 
-        let host_b = spec_b.tree().clone();
-        let diff = host_b.differentiate(spec_a.tree());
+        let host_a = spec_a.tree().clone();
+        let diff = host_a.differentiate(spec_b.tree());
         let _: Vec<_> = diff.collect().await;
 
         println!("A {}", spec_a.visualize().await);
