@@ -2,7 +2,6 @@ use crate::{DialogProllyTreeError, Entry, KeyType, Node, Reference, Tree, ValueT
 use async_stream::try_stream;
 use dialog_storage::{ContentAddressedStorage, HashType};
 use futures_core::Stream;
-use std::ops::RangeBounds;
 
 #[cfg(test)]
 mod tree_spec;
@@ -207,22 +206,10 @@ where
             if let SparseTreeNode::Node(node) = &self.nodes[offset] {
                 if node.is_branch() {
                     if let Ok(refs) = node.references() {
-                        eprintln!(
-                            "EXPAND: Expanding node with boundary {:?} into {} children",
-                            String::from_utf8_lossy(node.upper_bound().bytes()),
-                            refs.len()
-                        );
-
                         // Convert references to SparseTreeNode::Ref
                         let children: Vec<SparseTreeNode<F, H, Key, Value, Hash>> = refs
                             .iter()
-                            .map(|r| {
-                                eprintln!(
-                                    "  -> child ref boundary {:?}",
-                                    String::from_utf8_lossy(r.upper_bound().bytes())
-                                );
-                                SparseTreeNode::Ref(r.clone())
-                            })
+                            .map(|r| SparseTreeNode::Ref(r.clone()))
                             .collect();
 
                         let num_children = children.len();
@@ -302,12 +289,6 @@ where
         let left = &mut self.nodes;
         let right = &mut other.nodes;
 
-        eprintln!(
-            "PRUNE: Starting with left={} nodes, right={} nodes",
-            left.len(),
-            right.len()
-        );
-
         // Read indices
         let mut at_left = 0;
         let mut at_right = 0;
@@ -321,16 +302,9 @@ where
             let left_node = &left[at_left];
             let right_node = &right[at_right];
 
-            let left_boundary = String::from_utf8_lossy(left_node.upper_bound().bytes());
-            let right_boundary = String::from_utf8_lossy(right_node.upper_bound().bytes());
-
             match left_node.upper_bound().cmp(right_node.upper_bound()) {
                 Ordering::Less => {
                     // left node is unique → keep it
-                    eprintln!(
-                        "PRUNE: Left {:?} < Right {:?} - keeping left",
-                        left_boundary, right_boundary
-                    );
                     if to_left != at_left {
                         left.swap(to_left, at_left);
                     }
@@ -339,10 +313,6 @@ where
                 }
                 Ordering::Greater => {
                     // right node is unique → keep it
-                    eprintln!(
-                        "PRUNE: Left {:?} > Right {:?} - keeping right",
-                        left_boundary, right_boundary
-                    );
                     if to_right != at_right {
                         right.swap(to_right, at_right);
                     }
@@ -353,10 +323,6 @@ where
                     // Same key range — possible shared content
                     if left_node.hash() != right_node.hash() {
                         // Different content → keep both
-                        eprintln!(
-                            "PRUNE: Boundary {:?} - different hashes - keeping both",
-                            left_boundary
-                        );
                         if to_left != at_left {
                             left.swap(to_left, at_left);
                         }
@@ -365,12 +331,6 @@ where
                         }
                         to_left += 1;
                         to_right += 1;
-                    } else {
-                        // Identical (shared) → skip both
-                        eprintln!(
-                            "PRUNE: Boundary {:?} - SAME hash - PRUNING both",
-                            left_boundary
-                        );
                     }
                     // else identical (shared) → skip both
                     at_left += 1;
@@ -408,40 +368,6 @@ where
         // Drop the unused tail of each vector
         left.truncate(to_left);
         right.truncate(to_right);
-
-        eprintln!(
-            "PRUNE: After pruning, left has {} nodes, right has {} nodes",
-            left.len(),
-            right.len()
-        );
-        for (i, node) in left.iter().enumerate() {
-            let node_type = match node {
-                SparseTreeNode::Node(n) if n.is_branch() => "Branch",
-                SparseTreeNode::Node(_) => "Segment",
-                SparseTreeNode::Ref(_) => "Ref",
-            };
-            eprintln!(
-                "  Left[{}]: {:?} ({}), hash={:?}",
-                i,
-                node.upper_bound(),
-                node_type,
-                node.hash()
-            );
-        }
-        for (i, node) in right.iter().enumerate() {
-            let node_type = match node {
-                SparseTreeNode::Node(n) if n.is_branch() => "Branch",
-                SparseTreeNode::Node(_) => "Segment",
-                SparseTreeNode::Ref(_) => "Ref",
-            };
-            eprintln!(
-                "  Right[{}]: {:?} ({}), hash={:?}",
-                i,
-                node.upper_bound(),
-                node_type,
-                node.hash()
-            );
-        }
     }
 
     /// Returns an async stream over all entries in this sparse tree.
@@ -451,24 +377,12 @@ where
         try_stream! {
             for sparse_node in &self.nodes {
                 // Load the node if it's a reference
-                let boundary_str = String::from_utf8_lossy(sparse_node.upper_bound().bytes());
-                let node_type = match sparse_node {
-                    SparseTreeNode::Node(n) if n.is_branch() => "Branch(already loaded)",
-                    SparseTreeNode::Node(_) => "Segment(already loaded)",
-                    SparseTreeNode::Ref(_) => "Ref(will load from storage)",
-                };
-                eprintln!("STREAM: Processing node with boundary {:?} - {}", boundary_str, node_type);
-
                 let node = sparse_node.clone().load(self.storage).await?;
-                eprintln!("STREAM: Node loaded, getting range...");
 
                 let range = node.get_range(.., self.storage);
                 for await entry in range {
                     match entry {
-                        Ok(e) => {
-                            eprintln!("STREAM: Yielding entry with key {:?}", String::from_utf8_lossy(e.key.bytes()));
-                            yield e;
-                        }
+                        Ok(e) => yield e,
                         Err(err) => yield Err(err)?,
                     }
                 }
@@ -581,9 +495,6 @@ where
             // First, prune any nodes with matching boundaries and hashes
             before.prune(after);
 
-            eprintln!("DELTA EXPAND: Before tree has {} nodes", before.nodes.len());
-            eprintln!("DELTA EXPAND: After tree has {} nodes", after.nodes.len());
-
             // Compare boundaries and expand strategically
             // Use two-finger walk to compare sorted node lists
             let mut expanded = false;
@@ -597,14 +508,16 @@ where
                 match before_bound.cmp(&after_bound) {
                     Ordering::Less => {
                         // Before node has smaller boundary - expand the AFTER tree (larger boundary)
-                        if after.expand(..=before_bound)? {
+                        // Need to expand up to after_bound to include the after node itself
+                        if after.expand(..=after_bound.clone())? {
                             expanded = true;
                         }
                         before_idx += 1;
                     }
                     Ordering::Greater => {
                         // After node has smaller boundary - expand the BEFORE tree (larger boundary)
-                        if before.expand(..=after_bound)? {
+                        // Need to expand up to before_bound to include the before node itself
+                        if before.expand(..=before_bound.clone())? {
                             expanded = true;
                         }
                         after_idx += 1;
@@ -614,24 +527,8 @@ where
                         let before_is_branch = matches!(&before.nodes[before_idx], SparseTreeNode::Node(n) if n.is_branch());
                         let after_is_branch = matches!(&after.nodes[after_idx], SparseTreeNode::Node(n) if n.is_branch());
 
-                        eprintln!(
-                            "DELTA EXPAND: Comparing boundary {:?}",
-                            String::from_utf8_lossy(before_bound.bytes())
-                        );
-                        eprintln!(
-                            "  Before: is_branch={}, hash={:?}",
-                            before_is_branch,
-                            before.nodes[before_idx].hash()
-                        );
-                        eprintln!(
-                            "  After:  is_branch={}, hash={:?}",
-                            after_is_branch,
-                            after.nodes[after_idx].hash()
-                        );
-
                         if before_is_branch != after_is_branch {
                             // One is a branch and one is a leaf - expand the branch
-                            eprintln!("  -> Height mismatch! Expanding branch node");
                             if before_is_branch {
                                 if before.expand(..=before_bound.clone())? {
                                     expanded = true;
@@ -645,15 +542,12 @@ where
                             break;
                         } else if before.nodes[before_idx].hash() != after.nodes[after_idx].hash() {
                             // Same type but different hashes - need to expand both
-                            eprintln!("  -> Different hashes! Expanding both");
                             if before.expand(..=before_bound.clone())? {
                                 expanded = true;
                             }
                             if after.expand(..=after_bound)? {
                                 expanded = true;
                             }
-                        } else {
-                            eprintln!("  -> Same hash! Will be pruned");
                         }
                         // If hashes match, prune will remove them (already done above)
                         before_idx += 1;
@@ -677,17 +571,6 @@ where
                     expanded = true;
                 }
                 after_idx += 1;
-            }
-
-            if expanded {
-                eprintln!(
-                    "DELTA EXPAND: Before expanded to {} nodes",
-                    before.nodes.len()
-                );
-                eprintln!(
-                    "DELTA EXPAND: After expanded to {} nodes",
-                    after.nodes.len()
-                );
             }
 
             // If nothing was expanded, we've reached a fixed point
@@ -1677,7 +1560,7 @@ mod tests {
         // () indicates nodes that should be pruned (not read)
         let spec_a = tree_spec![
             [                  ..l]
-            [..e, (f..i),      ..l]
+            [(..e), (f..i),      ..l]
         ]
         .build(storage_a.clone())
         .await
@@ -1685,7 +1568,8 @@ mod tests {
 
         let spec_b = tree_spec![
             [                  ..s]
-            [(f..i), ..m,      ..s]
+            [(..e), (f..i), ..m, ..s]
+            // [..b, ..e, (f..i), ..m,      ..s]
         ]
         .build(storage_b.clone())
         .await
@@ -1784,18 +1668,11 @@ mod tests {
         .await
         .unwrap();
 
-        // eprintln!("\n========== TREE A ==========");
-        // println!("{}", spec_a.visualize().await);
-        // println!("\n========== TREE B ==========");
-        // println!("{}", spec_b.visualize().await);
-
         let host_a = spec_a.tree().clone();
         let diff = host_a.differentiate(spec_b.tree());
         let _: Vec<_> = diff.collect().await;
 
-        println!("-------------- {:#?}", spec_a.spec);
-        println!("-------------- {:#?}", spec_a.descriptor);
-
+        spec_a.assert();
         spec_b.assert();
 
         Ok(())
@@ -1805,48 +1682,46 @@ mod tests {
     async fn test_diff_single_key_change() -> Result<()> {
         use crate::tree_spec;
 
-        let backend = JournaledStorage::new(MemoryStorageBackend::default());
-        let storage = Storage {
+        let backend = MemoryStorageBackend::default();
+
+        let storage_a = Storage {
             encoder: CborEncoder,
-            backend,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        let storage_b = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
         };
 
         // Scenario: Two trees with only one differing segment
-        // Tree A has segments ending at 'a', 'f', 'k', 'p', 's'
-        // Tree B has the same segments, but 'k' contains different keys (j-k instead of g-k)
-        // Segments 'a', 'f', 'p', 's' are shared (same boundary, same hash) so should not be read
-        // Only the changed segment 'k' should be read from both trees
+        // Tree A has segments ending at 'a', 'e'
+        // Tree B has segments ending at 'a', 'f', 'k', 'p', 's' with different 'k' segment
+        // Segment 'a' is shared (same boundary, same hash) so should not be read
+        // Only the changed segments should be read from both trees
         let spec_a = tree_spec![
-            [     ..e]
-            [..a, ..e]
-            // [                ..s]
-            //   [(..f), ..k, (p..s)]
+            [          ..e]
+            [(..a),    ..e]
         ]
-        .build(storage.clone())
+        .build(storage_a.clone())
         .await
         .unwrap();
 
-        // Tree B: modify key 'k' to create a different hash
-        // We'll build with a slightly different range to simulate the change
+        // Tree B: has more segments, with 'a' shared but different keys in 'k' segment
         let spec_b = tree_spec![
-            [                             ..s]
-            [(..a), (..f), j..k, (..p), (..s)]
+            [                       ..s]
+            [(..a), ..f, j..k, ..p, ..s]
         ]
-        .build(storage.clone())
+        .build(storage_b.clone())
         .await
         .unwrap();
-
-        eprintln!("\n=== BEFORE DIFF ===");
-        eprintln!("Tree A:\n{}", spec_a.visualize().await);
-        eprintln!("Tree B:\n{}", spec_b.visualize().await);
 
         let host_b = spec_b.tree().clone();
         let diff = host_b.differentiate(spec_a.tree());
         let _: Vec<_> = diff.collect().await;
 
-        eprintln!("\n=== AFTER DIFF ===");
-
         spec_a.assert();
+        spec_b.assert();
 
         Ok(())
     }
@@ -1855,35 +1730,44 @@ mod tests {
     async fn test_diff_different_heights() -> Result<()> {
         use crate::tree_spec;
 
-        let backend = JournaledStorage::new(MemoryStorageBackend::default());
-        let storage = Storage {
+        let backend = MemoryStorageBackend::default();
+
+        let storage_a = Storage {
             encoder: CborEncoder,
-            backend,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        let storage_b = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
         };
 
         // Scenario: Trees of different heights
         // Tree A is shallow (height 1), Tree B is taller (height 2)
         // This tests how differential handles height mismatches
         let spec_a = tree_spec![
-            [     ..e]
-            [..a, ..e]
+            [       ..e]
+            [(..a), ..e]
         ]
-        .build(storage.clone())
+        .build(storage_a.clone())
         .await
         .unwrap();
 
         let spec_b = tree_spec![
-            [                              ..z]
-            [..f,                ..p,      ..z]
-            [..a, ..c, ..f, ..k, ..p, ..t, ..z]
+            [                                ..z]
+            [            ..f,      ..p,      ..z]
+            [(..a), ..c, ..f, ..k, ..p, ..t, ..z]
         ]
-        .build(storage.clone())
+        .build(storage_b.clone())
         .await
         .unwrap();
 
         let host_b = spec_b.tree().clone();
         let diff = host_b.differentiate(spec_a.tree());
         let _: Vec<_> = diff.collect().await;
+
+        println!("A {}", spec_a.visualize().await);
+        println!("B {}", spec_b.visualize().await);
 
         spec_a.assert();
         spec_b.assert();

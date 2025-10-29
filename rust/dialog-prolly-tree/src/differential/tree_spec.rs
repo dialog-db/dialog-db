@@ -247,6 +247,9 @@ impl TreeDescriptor {
         let max_height = self.0.len() - 1;
         let mut spec = vec![Vec::new(); self.0.len()];
 
+        // Disable journaling during spec building to avoid tracking child loads
+        storage.backend.disable_journal();
+
         let root_hash = if let Some(root) = temp_tree.root() {
             Box::pin(Self::build_spec_from_node(
                 &mut spec,
@@ -261,7 +264,7 @@ impl TreeDescriptor {
             None
         };
 
-        // Enable journaling to track root read
+        // Re-enable journaling to track root and differential reads
         storage.backend.enable_journal();
 
         // Load tree from hash so root is freshly loaded (not from temp_tree)
