@@ -3,8 +3,6 @@
 //! Note: These tests verify type generation at compile-time.
 //! The actual presence and structure of generated types is validated by compilation success.
 
-use dialog_query_macros::Formula;
-
 // Mock types for testing since dialog_query isn't available in macros crate tests
 #[derive(Debug, Clone)]
 pub struct Term<T>(std::marker::PhantomData<T>);
@@ -45,18 +43,7 @@ impl IntoType for u32 {
 
 // Need a minimal mock of dialog_query module for the generated code
 mod dialog_query {
-    pub mod term {
-        pub use super::super::Term;
-    }
-    pub mod predicate {
-        pub mod formula {
-            pub use super::super::super::Cells;
-        }
-    }
-    pub use super::{Dependencies, Type};
-    pub mod types {
-        pub use super::super::IntoType;
-    }
+    pub mod term {}
 }
 
 /// Test formula with multiple input fields and one derived field

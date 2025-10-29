@@ -45,6 +45,9 @@ pub mod web;
 pub mod artifacts;
 pub use artifacts::*;
 
+/// Replica abstraction for dialog
+pub mod replica;
+
 mod reference;
 pub use reference::*;
 

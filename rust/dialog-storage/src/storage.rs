@@ -16,6 +16,9 @@ pub use overlay::*;
 mod measure;
 pub use measure::*;
 
+mod journal;
+pub use journal::*;
+
 mod transfer;
 use serde::{Serialize, de::DeserializeOwned};
 pub use transfer::*;

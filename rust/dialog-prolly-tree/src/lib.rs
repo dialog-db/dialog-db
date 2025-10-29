@@ -57,3 +57,6 @@ pub use reference::*;
 
 mod adopter;
 pub use adopter::*;
+
+mod differential;
+pub use differential::*;

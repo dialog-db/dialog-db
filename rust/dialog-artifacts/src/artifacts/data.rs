@@ -13,7 +13,7 @@ use crate::{Artifact, Cause, make_reference};
 use crate::{Artifacts, Attribute, Entity};
 
 /// A [`Datum`] is the layout of data stored in one of the indexes of [`Artifacts`]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Datum {
     /// The stringified [`Entity`] associated with this [`Datum`]
     pub entity: String,

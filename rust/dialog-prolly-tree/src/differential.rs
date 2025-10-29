@@ -1,0 +1,1835 @@
+use crate::{DialogProllyTreeError, Entry, KeyType, Node, Reference, Tree, ValueType};
+use async_stream::try_stream;
+use dialog_storage::{ContentAddressedStorage, HashType};
+use futures_core::Stream;
+
+#[cfg(test)]
+mod tree_spec;
+#[cfg(test)]
+mod tree_spec_macro;
+
+/// Represents a change in the key-value store.
+#[derive(Clone)]
+pub enum Change<Key, Value>
+where
+    Key: KeyType + 'static,
+    Value: ValueType,
+{
+    /// Adds an entry to the key-value store.
+    Add(Entry<Key, Value>),
+    /// Removes an entry from the key-value store.
+    Remove(Entry<Key, Value>),
+}
+
+/// Represents a differential stream of changes in the key-value store.
+pub trait Differential<Key, Value>:
+    Stream<Item = Result<Change<Key, Value>, DialogProllyTreeError>>
+where
+    Key: KeyType + 'static,
+    Value: ValueType,
+{
+}
+
+/// Default implementation for the `Differential` for matching streams.
+impl<Key, Value, T> Differential<Key, Value> for T
+where
+    Key: KeyType + 'static,
+    Value: ValueType,
+    T: Stream<Item = Result<Change<Key, Value>, DialogProllyTreeError>>,
+{
+}
+
+/// Helper struct to convert Vec<Change<Key, Value>> into a Differential stream.
+///
+/// This allows using a pre-computed vector of changes as a differential.
+pub struct VecDifferential<Key, Value>
+where
+    Key: KeyType + 'static,
+    Value: ValueType,
+{
+    changes: Vec<Change<Key, Value>>,
+    index: usize,
+}
+
+impl<Key, Value> VecDifferential<Key, Value>
+where
+    Key: KeyType + 'static,
+    Value: ValueType,
+{
+    /// Create a new VecDifferential from a vector of changes
+    pub fn new(changes: Vec<Change<Key, Value>>) -> Self {
+        Self { changes, index: 0 }
+    }
+}
+
+impl<Key, Value> From<Vec<Change<Key, Value>>> for VecDifferential<Key, Value>
+where
+    Key: KeyType + 'static,
+    Value: ValueType,
+{
+    fn from(changes: Vec<Change<Key, Value>>) -> Self {
+        Self::new(changes)
+    }
+}
+
+impl<Key, Value> Stream for VecDifferential<Key, Value>
+where
+    Key: KeyType + 'static + Unpin,
+    Value: ValueType + Unpin,
+{
+    type Item = Result<Change<Key, Value>, DialogProllyTreeError>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.index < this.changes.len() {
+            let change = this.changes[this.index].clone();
+            this.index += 1;
+            std::task::Poll::Ready(Some(Ok(change)))
+        } else {
+            std::task::Poll::Ready(None)
+        }
+    }
+}
+
+/// Represents either a loaded node or an unloaded reference.
+/// This allows us to defer loading nodes from storage until we actually need them.
+#[derive(Debug, Clone)]
+pub(crate) enum SparseTreeNode<const F: u32, const H: usize, Key, Value, Hash>
+where
+    Key: KeyType + 'static,
+    Value: ValueType,
+    Hash: HashType<H>,
+{
+    /// A fully loaded node (already read from storage or held in memory)
+    Node(Node<F, H, Key, Value, Hash>),
+    /// An unloaded reference (hash + boundary, can be loaded on demand)
+    Ref(Reference<H, Key, Hash>),
+}
+
+impl<const F: u32, const H: usize, Key, Value, Hash> SparseTreeNode<F, H, Key, Value, Hash>
+where
+    Key: KeyType + 'static,
+    Value: ValueType,
+    Hash: HashType<H>,
+{
+    /// Get the upper bound of this node or reference
+    fn upper_bound(&self) -> &Key {
+        match self {
+            SparseTreeNode::Node(node) => node.upper_bound(),
+            SparseTreeNode::Ref(ref_) => ref_.upper_bound(),
+        }
+    }
+
+    /// Get the hash of this node or reference
+    fn hash(&self) -> &Hash {
+        match self {
+            SparseTreeNode::Node(node) => node.hash(),
+            SparseTreeNode::Ref(ref_) => ref_.hash(),
+        }
+    }
+
+    /// Load this as a node (returns the node if already loaded, or loads from storage)
+    async fn load<Storage>(
+        self,
+        storage: &Storage,
+    ) -> Result<Node<F, H, Key, Value, Hash>, DialogProllyTreeError>
+    where
+        Storage: ContentAddressedStorage<H, Hash = Hash>,
+    {
+        match self {
+            SparseTreeNode::Node(node) => Ok(node),
+            SparseTreeNode::Ref(ref_) => Node::from_reference(ref_, storage).await,
+        }
+    }
+}
+
+/// A sparse view of a tree containing only the nodes that differ between two trees.
+#[derive(Debug, Clone)]
+pub(crate) struct SparseTree<'a, const F: u32, const H: usize, Key, Value, Hash, Storage>
+where
+    Key: KeyType + 'static,
+    Value: ValueType,
+    Hash: HashType<H>,
+    Storage: ContentAddressedStorage<H, Hash = Hash>,
+{
+    storage: &'a Storage,
+    nodes: Vec<SparseTreeNode<F, H, Key, Value, Hash>>,
+}
+
+impl<const F: u32, const H: usize, Key, Value, Hash, Storage>
+    SparseTree<'_, F, H, Key, Value, Hash, Storage>
+where
+    Key: KeyType + 'static,
+    Value: ValueType,
+    Hash: HashType<H>,
+    Storage: ContentAddressedStorage<H, Hash = Hash>,
+{
+    /// Expands loaded branch nodes and Refs whose upper bound falls within the given range.
+    ///
+    /// For loaded branch nodes, this extracts their child references.
+    /// For Refs, this loads them from storage and then extracts their child references if they're branches.
+    ///
+    /// Returns true if any expansion happened.
+    pub async fn expand<R>(&mut self, range: R) -> Result<bool, DialogProllyTreeError>
+    where
+        R: std::ops::RangeBounds<Key>,
+        Key: KeyType,
+    {
+        use std::ops::Bound;
+
+        let mut expanded = false;
+        let mut offset = 0;
+
+        while offset < self.nodes.len() {
+            let node = &self.nodes[offset];
+
+            // For branch nodes, we need to check if they MIGHT contain children in the range
+            // A branch with upper bound "f" might have children "a", "c", "f"
+            // So we should expand it if it's >= the range start (it might overlap)
+            let is_branch = matches!(node, SparseTreeNode::Node(n) if n.is_branch());
+
+            let in_range = if is_branch {
+                // For branches: expand if the node might contain children in the range
+                // This means: node.upper_bound() >= range.start (node might have children in range)
+                (match range.start_bound() {
+                    Bound::Included(start) => node.upper_bound() >= start,
+                    Bound::Excluded(start) => node.upper_bound() > start,
+                    Bound::Unbounded => true,
+                }) && (match range.end_bound() {
+                    // Also check we're not completely past the range
+                    Bound::Included(_) | Bound::Excluded(_) => true, // We'll filter children later
+                    Bound::Unbounded => true,
+                })
+            } else {
+                // For leaf nodes: only expand if the upper bound is exactly in the range
+                (match range.end_bound() {
+                    Bound::Included(end) => node.upper_bound() <= end,
+                    Bound::Excluded(end) => node.upper_bound() < end,
+                    Bound::Unbounded => true,
+                }) && (match range.start_bound() {
+                    Bound::Included(start) => node.upper_bound() >= start,
+                    Bound::Excluded(start) => node.upper_bound() > start,
+                    Bound::Unbounded => true,
+                })
+            };
+
+            if !in_range {
+                offset += 1;
+                continue;
+            }
+
+            // Load and expand Refs and loaded branch nodes
+            match &self.nodes[offset] {
+                SparseTreeNode::Ref(reference) => {
+                    // Load the Ref from storage
+                    let node: Node<F, H, Key, Value, Hash> =
+                        Node::from_hash(reference.hash().clone(), self.storage).await?;
+
+                    // If it's a branch, expand it
+                    if node.is_branch() {
+                        if let Ok(refs) = node.references() {
+                            // Convert references to SparseTreeNode::Ref
+                            let children: Vec<SparseTreeNode<F, H, Key, Value, Hash>> = refs
+                                .iter()
+                                .map(|r| SparseTreeNode::Ref(r.clone()))
+                                .collect();
+
+                            let num_children = children.len();
+                            // Replace the Ref with its child references
+                            self.nodes.splice(offset..offset + 1, children);
+                            offset += num_children; // Skip past the children we just added
+                            expanded = true;
+                            continue;
+                        }
+                    }
+                    // If it's a leaf, just leave it as a Ref
+                    offset += 1;
+                }
+                SparseTreeNode::Node(node) => {
+                    if node.is_branch() {
+                        if let Ok(refs) = node.references() {
+                            // Convert references to SparseTreeNode::Ref
+                            let children: Vec<SparseTreeNode<F, H, Key, Value, Hash>> = refs
+                                .iter()
+                                .map(|r| SparseTreeNode::Ref(r.clone()))
+                                .collect();
+
+                            let num_children = children.len();
+                            // Replace the branch node with its child references
+                            self.nodes.splice(offset..offset + 1, children);
+                            offset += num_children; // Skip past the children we just added
+                            expanded = true;
+                            continue;
+                        }
+                    }
+                    offset += 1;
+                }
+            }
+        }
+
+        Ok(expanded)
+    }
+
+    /// Removes nodes that are **shared** between this range (`self`) and another (`other`),
+    /// keeping only nodes that differ between the two.
+    ///
+    /// # Behavior
+    ///
+    /// Both `self` and `other` are assumed to contain sorted sequences of [`Node`]s ordered by
+    /// their [`upper_bound`](Node::upper_bound) key. Two nodes are considered *shared* if:
+    ///
+    /// - Their `upper_bound` keys are equal **and**
+    /// - Their content hashes (`hash()`) are equal.
+    ///
+    /// When a shared node is detected, it is removed from **both** ranges.
+    ///
+    /// After this operation:
+    ///
+    /// - Each range remains sorted by `upper_bound`.
+    /// - The relative order of all remaining nodes is preserved (stable compaction).
+    /// - No heap allocations or clones are performed—everything happens fully in-place.
+    ///
+    /// # Algorithm
+    ///
+    /// This uses a **two-pointer merge-like traversal** over the sorted node lists.
+    /// - `at_left` and `at_right` are *read heads* advancing through the current elements.
+    /// - `to_left` and `to_right` are *write heads* marking the next position to keep.
+    ///
+    /// The traversal compares nodes’ `upper_bound()` values:
+    ///
+    /// * `left < right`:
+    ///   The left node has a smaller key, so it can’t exist in the right list.
+    ///   → Keep it in-place (swap into position if needed).
+    ///
+    /// * `left > right`:
+    ///   The right node has a smaller key.
+    ///   → Keep it in-place on the right side.
+    ///
+    /// * `left == right`:
+    ///   Same key range — possible shared node.
+    ///   - If the hashes differ → keep both (content changed).
+    ///   - If the hashes match → remove both (shared, identical content).
+    ///
+    /// After the loop, any remaining elements from either side are moved forward intact.
+    /// Finally, both vectors are truncated to their new compacted lengths.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // (Pseudocode – assumes appropriate Node types exist)
+    /// let mut before = Range::from(vec![A, B, C]);
+    /// let mut after  = Range::from(vec![A, C, D]);
+    ///
+    /// before.discard_shared(&mut after);
+    ///
+    /// // Result:
+    /// // before = [B]
+    /// // after  = [D]
+    /// ```
+    pub fn prune(&mut self, other: &mut Self) {
+        use std::cmp::Ordering;
+        let left = &mut self.nodes;
+        let right = &mut other.nodes;
+
+        // Read indices
+        let mut at_left = 0;
+        let mut at_right = 0;
+
+        // Write indices — next position to place a node we're keeping
+        let mut to_left = 0;
+        let mut to_right = 0;
+
+        // Traverse both sorted lists in lockstep
+        while at_left < left.len() && at_right < right.len() {
+            let left_node = &left[at_left];
+            let right_node = &right[at_right];
+
+            match left_node.upper_bound().cmp(right_node.upper_bound()) {
+                Ordering::Less => {
+                    // left node is unique → keep it
+                    if to_left != at_left {
+                        left.swap(to_left, at_left);
+                    }
+                    to_left += 1;
+                    at_left += 1;
+                }
+                Ordering::Greater => {
+                    // right node is unique → keep it
+                    if to_right != at_right {
+                        right.swap(to_right, at_right);
+                    }
+                    to_right += 1;
+                    at_right += 1;
+                }
+                Ordering::Equal => {
+                    // Same key range — possible shared content
+                    if left_node.hash() != right_node.hash() {
+                        // Different content → keep both
+                        if to_left != at_left {
+                            left.swap(to_left, at_left);
+                        }
+                        if to_right != at_right {
+                            right.swap(to_right, at_right);
+                        }
+                        to_left += 1;
+                        to_right += 1;
+                    }
+                    // else identical (shared) → skip both
+                    at_left += 1;
+                    at_right += 1;
+                }
+            }
+        }
+
+        // Move any remaining nodes from `left` (if right side exhausted)
+        if at_left < left.len() && to_left != at_left {
+            let remaining = left.len() - at_left;
+            for offset in 0..remaining {
+                left.swap(to_left + offset, at_left + offset);
+            }
+            to_left += remaining;
+        } else if at_left == left.len() {
+            // all done
+        } else {
+            to_left = left.len();
+        }
+
+        // Move any remaining nodes from `right` (if left side exhausted)
+        if at_right < right.len() && to_right != at_right {
+            let remaining = right.len() - at_right;
+            for offset in 0..remaining {
+                right.swap(to_right + offset, at_right + offset);
+            }
+            to_right += remaining;
+        } else if at_right == right.len() {
+            // all done
+        } else {
+            to_right = right.len();
+        }
+
+        // Drop the unused tail of each vector
+        left.truncate(to_left);
+        right.truncate(to_right);
+    }
+
+    /// Returns an async stream over all entries in this sparse tree.
+    pub fn stream(
+        &self,
+    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogProllyTreeError>> + '_ {
+        try_stream! {
+            for sparse_node in &self.nodes {
+                // Load the node if it's a reference
+                let node = sparse_node.clone().load(self.storage).await?;
+
+                let range = node.get_range(.., self.storage);
+                for await entry in range {
+                    match entry {
+                        Ok(e) => yield e,
+                        Err(err) => yield Err(err)?,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Convenient way to not have to repeat complex type twice
+type Pair<T> = (T, T);
+
+/// Represents a differential computation between two trees (source, target).
+///
+/// Delta contains sparse representations of both trees and provides methods to
+/// efficiently compute the changes needed to transform the source tree into the target tree.
+///
+/// The tuple structure is `(source_sparse_tree, target_sparse_tree)`.
+pub(crate) struct Delta<'a, const F: u32, const H: usize, Key, Value, Hash, Storage>(
+    SparseTree<'a, F, H, Key, Value, Hash, Storage>,
+    SparseTree<'a, F, H, Key, Value, Hash, Storage>,
+)
+where
+    Key: KeyType + 'static,
+    Value: ValueType,
+    Hash: HashType<H>,
+    Storage: ContentAddressedStorage<H, Hash = Hash>;
+
+impl<'a, const F: u32, const H: usize, Key, Value, Hash, Storage>
+    Delta<'a, F, H, Key, Value, Hash, Storage>
+where
+    Key: KeyType + 'static,
+    Value: ValueType + PartialEq,
+    Hash: HashType<H>,
+    Storage: ContentAddressedStorage<H, Hash = Hash>,
+{
+    /// Creates a new Delta from a pair of trees `(source, target)`.
+    ///
+    /// The resulting Delta contains sparse representations of both trees that can be
+    /// expanded to compute the changes needed to transform `source` into `target`.
+    ///
+    /// # Parameters
+    /// - `(left, right)`: A tuple of tree references where `left` is the source tree
+    ///   and `right` is the target tree
+    ///
+    /// # Example
+    /// ```ignore
+    /// let delta = Delta::from((old_tree, new_tree));
+    /// // This delta can produce changes to transform old_tree → new_tree
+    /// ```
+    pub fn from<Distription: crate::Distribution<F, H, Key, Hash>>(
+        (left, right): Pair<&'a Tree<F, H, Distription, Key, Value, Hash, Storage>>,
+    ) -> Self {
+        Self(
+            SparseTree {
+                storage: left.storage(),
+                nodes: left
+                    .root()
+                    .map(|root| vec![SparseTreeNode::Node(root.clone())])
+                    .unwrap_or(vec![]),
+            },
+            SparseTree {
+                storage: right.storage(),
+                nodes: right
+                    .root()
+                    .map(|root| vec![SparseTreeNode::Node(root.clone())])
+                    .unwrap_or(vec![]),
+            },
+        )
+    }
+
+    /// Expands the difference by intelligently expanding only the nodes that need
+    /// exploration based on boundary comparisons.
+    ///
+    /// ## Algorithm Strategy
+    ///
+    /// The key insight is that if two trees share nodes, they will share boundaries
+    /// for those nodes. By comparing boundaries at each level, we can determine:
+    ///
+    /// 1. **Same boundary, same hash** → Nodes are identical, prune both
+    /// 2. **Same boundary, different hash** → Nodes differ in structure below, expand both
+    /// 3. **Different boundaries** → Nodes cover disjoint ranges, no need to expand
+    ///
+    /// At each level, ranges grow larger (parent covers more than children). If one
+    /// node's boundary is greater than another's, it means that node covers a larger
+    /// range and might need expansion to reveal boundaries that match the other side's
+    /// granularity.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// Tree A:                Tree B:
+    /// [          ..z]       [         ..z]
+    /// [..f, ..m, ..z]       [    ..m, ..z]
+    /// ```
+    ///
+    /// Both roots have boundary 'z' and different hashes → expand both.
+    /// After expansion, A has boundaries {f, m, z} while B has {m, z}.
+    /// Now we compare:
+    /// - 'f' only in A → A covers [MIN..f], B starts after 'f' → disjoint
+    /// - 'm' in both → compare, if hashes differ expand both
+    /// - 'z' in both → compare, if hashes differ expand both
+    ///
+    /// This avoids expanding B's subtrees unnecessarily when looking for 'f'.
+    pub async fn expand(&mut self) -> Result<(), DialogProllyTreeError> {
+        use std::cmp::Ordering;
+
+        let Self(source, target) = self;
+
+        loop {
+            // First, prune any nodes with matching boundaries and hashes
+            source.prune(target);
+
+            // Compare boundaries and expand strategically
+            // Use two-finger walk to compare sorted node lists
+            let mut expanded = false;
+            let mut source_idx = 0;
+            let mut target_idx = 0;
+
+            while source_idx < source.nodes.len() && target_idx < target.nodes.len() {
+                let source_bound = source.nodes[source_idx].upper_bound().clone();
+                let target_bound = target.nodes[target_idx].upper_bound().clone();
+
+                match source_bound.cmp(&target_bound) {
+                    Ordering::Less => {
+                        // Source node has smaller boundary
+                        // Expand ONLY the TARGET node (larger boundary) to see if it contains
+                        // something matching the source node
+                        // Use exact range to expand only this specific node
+                        if target
+                            .expand(target_bound.clone()..=target_bound.clone())
+                            .await?
+                        {
+                            expanded = true;
+                            break; // Restart comparison after expansion
+                        }
+                        // Target couldn't be expanded, so source node is unique
+                        source_idx += 1;
+                    }
+                    Ordering::Greater => {
+                        // Target node has smaller boundary
+                        // Expand ONLY the SOURCE node (larger boundary) to see if it contains
+                        // something matching the target node
+                        // Use exact range to expand only this specific node
+                        if source
+                            .expand(source_bound.clone()..=source_bound.clone())
+                            .await?
+                        {
+                            expanded = true;
+                            break; // Restart comparison after expansion
+                        }
+                        // Source couldn't be expanded, so target node is unique
+                        target_idx += 1;
+                    }
+                    Ordering::Equal => {
+                        // Same boundary - check if hashes differ
+                        if source.nodes[source_idx].hash() != target.nodes[target_idx].hash() {
+                            // Different hashes - need to expand both to find the difference
+                            // Use exact ranges to expand only these specific nodes
+                            if source
+                                .expand(source_bound.clone()..=source_bound.clone())
+                                .await?
+                            {
+                                expanded = true;
+                            }
+                            if target
+                                .expand(target_bound.clone()..=target_bound.clone())
+                                .await?
+                            {
+                                expanded = true;
+                            }
+                            // Don't increment - need to recompare after expansion
+                            if expanded {
+                                break;
+                            }
+                        }
+                        // If hashes match, prune will remove them (already done above)
+                        source_idx += 1;
+                        target_idx += 1;
+                    }
+                }
+            }
+
+            // Don't expand remaining nodes - they are pure adds/removes that don't need expansion
+            // The comparison loop has already expanded everything that needs comparing
+
+            // If nothing was expanded, we've reached a fixed point
+            if !expanded {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns a stream of changes between the two trees.
+    ///
+    /// This performs a two-cursor walk over the entry streams from both sparse trees,
+    /// yielding Add and Remove changes as appropriate.
+    pub fn stream(&'a self) -> impl Differential<Key, Value> + 'a {
+        let Self(source, target) = self;
+        let source_stream = source.stream();
+        let target_stream = target.stream();
+
+        try_stream! {
+            futures_util::pin_mut!(source_stream);
+            futures_util::pin_mut!(target_stream);
+
+            use futures_util::StreamExt;
+
+            let mut source_next = source_stream.next().await;
+            let mut target_next = target_stream.next().await;
+
+            loop {
+                match (&source_next, &target_next) {
+                    (None, None) => break,
+                    (Some(Ok(source_entry)), None) => {
+                        // Remaining source entries are removals
+                        yield Change::Remove(source_entry.clone());
+                        source_next = source_stream.next().await;
+                    }
+                    (None, Some(Ok(target_entry))) => {
+                        // Remaining target entries are additions
+                        yield Change::Add(target_entry.clone());
+                        target_next = target_stream.next().await;
+                    }
+                    (Some(Err(_)), _) => {
+                        // Propagate error from source stream
+                        if let Some(Err(err)) = source_next.take() {
+                            Err(err)?;
+                        }
+                    }
+                    (_, Some(Err(_))) => {
+                        // Propagate error from target stream
+                        if let Some(Err(err)) = target_next.take() {
+                            Err(err)?;
+                        }
+                    }
+                    (Some(Ok(source_entry)), Some(Ok(target_entry))) => {
+                        use std::cmp::Ordering;
+                        match source_entry.key.cmp(&target_entry.key) {
+                            Ordering::Less => {
+                                // Source key is smaller - it was removed
+                                yield Change::Remove(source_entry.clone());
+                                source_next = source_stream.next().await;
+                            }
+                            Ordering::Greater => {
+                                // Target key is smaller - it was added
+                                yield Change::Add(target_entry.clone());
+                                target_next = target_stream.next().await;
+                            }
+                            Ordering::Equal => {
+                                // Same key - check values
+                                if source_entry.value != target_entry.value {
+                                    // Value changed
+                                    yield Change::Remove(source_entry.clone());
+                                    yield Change::Add(target_entry.clone());
+                                }
+                                // If values are equal, skip (no change)
+                                source_next = source_stream.next().await;
+                                target_next = target_stream.next().await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{GeometricDistribution, Tree};
+    use anyhow::Result;
+    use dialog_storage::{
+        Blake3Hash, CborEncoder, JournaledStorage, MemoryStorageBackend, Storage,
+    };
+    use futures_util::{StreamExt, pin_mut};
+
+    type TestTree = Tree<
+        32,
+        32,
+        GeometricDistribution,
+        Vec<u8>,
+        Vec<u8>,
+        Blake3Hash,
+        Storage<32, CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+    >;
+
+    #[tokio::test]
+    async fn test_differentiate_identical_trees() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree1 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut tree2 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        tree1.set(vec![1], vec![10]).await.unwrap();
+        tree1.set(vec![2], vec![20]).await.unwrap();
+        tree2.set(vec![1], vec![10]).await.unwrap();
+        tree2.set(vec![2], vec![20]).await.unwrap();
+
+        let changes = tree1.differentiate(&tree2);
+        pin_mut!(changes);
+        let mut count = 0;
+        while let Some(_) = changes.next().await {
+            count += 1;
+        }
+
+        assert_eq!(count, 0, "Identical trees should have no changes");
+    }
+
+    #[tokio::test]
+    async fn test_differentiate_added_entry() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree1 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut tree2 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        tree1.set(vec![1], vec![10]).await.unwrap();
+        tree1.set(vec![2], vec![20]).await.unwrap();
+        tree2.set(vec![1], vec![10]).await.unwrap();
+
+        let changes = tree1.differentiate(&tree2);
+        pin_mut!(changes);
+        let mut adds = Vec::new();
+        let mut removes = Vec::new();
+
+        while let Some(result) = changes.next().await {
+            match result.unwrap() {
+                Change::Add(entry) => adds.push(entry),
+                Change::Remove(entry) => removes.push(entry),
+            }
+        }
+
+        assert_eq!(adds.len(), 1);
+        assert_eq!(adds[0].key, vec![2]);
+        assert_eq!(adds[0].value, vec![20]);
+        assert_eq!(removes.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_differentiate_removed_entry() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree1 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut tree2 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        tree1.set(vec![1], vec![10]).await.unwrap();
+        tree2.set(vec![1], vec![10]).await.unwrap();
+        tree2.set(vec![2], vec![20]).await.unwrap();
+
+        let changes = tree1.differentiate(&tree2);
+        pin_mut!(changes);
+        let mut adds = Vec::new();
+        let mut removes = Vec::new();
+
+        while let Some(result) = changes.next().await {
+            match result.unwrap() {
+                Change::Add(entry) => adds.push(entry),
+                Change::Remove(entry) => removes.push(entry),
+            }
+        }
+
+        assert_eq!(adds.len(), 0);
+        assert_eq!(removes.len(), 1);
+        assert_eq!(removes[0].key, vec![2]);
+        assert_eq!(removes[0].value, vec![20]);
+    }
+
+    #[tokio::test]
+    async fn test_differentiate_modified_entry() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree1 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut tree2 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        tree1.set(vec![1], vec![10]).await.unwrap();
+        tree1.set(vec![2], vec![30]).await.unwrap();
+        tree2.set(vec![1], vec![10]).await.unwrap();
+        tree2.set(vec![2], vec![20]).await.unwrap();
+
+        let changes = tree1.differentiate(&tree2);
+        pin_mut!(changes);
+        let mut adds = Vec::new();
+        let mut removes = Vec::new();
+
+        while let Some(result) = changes.next().await {
+            match result.unwrap() {
+                Change::Add(entry) => adds.push(entry),
+                Change::Remove(entry) => removes.push(entry),
+            }
+        }
+
+        assert_eq!(adds.len(), 1);
+        assert_eq!(adds[0].key, vec![2]);
+        assert_eq!(adds[0].value, vec![30]);
+        assert_eq!(removes.len(), 1);
+        assert_eq!(removes[0].key, vec![2]);
+        assert_eq!(removes[0].value, vec![20]);
+    }
+
+    #[tokio::test]
+    async fn test_differentiate_empty_to_populated() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree1 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let tree2 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        tree1.set(vec![1], vec![10]).await.unwrap();
+        tree1.set(vec![2], vec![20]).await.unwrap();
+
+        let changes = tree1.differentiate(&tree2);
+        pin_mut!(changes);
+        let mut adds = Vec::new();
+
+        while let Some(result) = changes.next().await {
+            match result.unwrap() {
+                Change::Add(entry) => adds.push(entry),
+                Change::Remove(_) => panic!("Should not have removes"),
+            }
+        }
+
+        assert_eq!(adds.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_differentiate_populated_to_empty() {
+        let backend = MemoryStorageBackend::default();
+        let tree1 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut tree2 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        tree2.set(vec![1], vec![10]).await.unwrap();
+        tree2.set(vec![2], vec![20]).await.unwrap();
+
+        let changes = tree1.differentiate(&tree2);
+        pin_mut!(changes);
+        let mut removes = Vec::new();
+
+        while let Some(result) = changes.next().await {
+            match result.unwrap() {
+                Change::Add(_) => panic!("Should not have adds"),
+                Change::Remove(entry) => removes.push(entry),
+            }
+        }
+
+        assert_eq!(removes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_differentiate_large_tree() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree1 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut tree2 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Create a larger tree to test branch handling
+        for i in 0..100u8 {
+            tree1.set(vec![i], vec![i * 2]).await.unwrap();
+            if i != 50 {
+                // Skip one entry in tree2
+                tree2.set(vec![i], vec![i * 2]).await.unwrap();
+            }
+        }
+
+        let changes = tree1.differentiate(&tree2);
+        pin_mut!(changes);
+        let mut adds = Vec::new();
+        let mut removes = Vec::new();
+
+        while let Some(result) = changes.next().await {
+            match result.unwrap() {
+                Change::Add(entry) => adds.push(entry),
+                Change::Remove(entry) => removes.push(entry),
+            }
+        }
+
+        assert_eq!(adds.len(), 1);
+        assert_eq!(adds[0].key, vec![50]);
+        assert_eq!(removes.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_integrate_add_new_entry() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        tree.set(vec![1], vec![10]).await.unwrap();
+
+        let changes = vec![Change::Add(Entry {
+            key: vec![2],
+            value: vec![20],
+        })];
+
+        tree.integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(vec![10]));
+        assert_eq!(tree.get(&vec![2]).await.unwrap(), Some(vec![20]));
+    }
+
+    #[tokio::test]
+    async fn test_integrate_add_idempotent() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        tree.set(vec![1], vec![10]).await.unwrap();
+
+        // Add same entry - should be no-op
+        let changes = vec![Change::Add(Entry {
+            key: vec![1],
+            value: vec![10],
+        })];
+
+        tree.integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(vec![10]));
+    }
+
+    #[tokio::test]
+    async fn test_integrate_add_conflict_resolution() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Set initial value
+        tree.set(vec![1], vec![10]).await.unwrap();
+
+        // Try to add different value - conflict resolution by hash comparison
+        let new_value = vec![20];
+        let existing_value = vec![10];
+
+        let changes = vec![Change::Add(Entry {
+            key: vec![1],
+            value: new_value.clone(),
+        })];
+
+        tree.integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        // Check which value won based on hash
+        use crate::ValueType;
+        let existing_hash = existing_value.hash();
+        let new_hash = new_value.hash();
+
+        if new_hash > existing_hash {
+            assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(new_value));
+        } else {
+            assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(existing_value));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_integrate_remove_existing() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        tree.set(vec![1], vec![10]).await.unwrap();
+        tree.set(vec![2], vec![20]).await.unwrap();
+
+        let changes = vec![Change::Remove(Entry {
+            key: vec![1],
+            value: vec![10],
+        })];
+
+        tree.integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        assert_eq!(tree.get(&vec![1]).await.unwrap(), None);
+        assert_eq!(tree.get(&vec![2]).await.unwrap(), Some(vec![20]));
+    }
+
+    #[tokio::test]
+    async fn test_integrate_remove_nonexistent() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        tree.set(vec![1], vec![10]).await.unwrap();
+
+        // Remove non-existent entry - should be no-op
+        let changes = vec![Change::Remove(Entry {
+            key: vec![2],
+            value: vec![20],
+        })];
+
+        tree.integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(vec![10]));
+        assert_eq!(tree.get(&vec![2]).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_integrate_remove_wrong_value() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        tree.set(vec![1], vec![10]).await.unwrap();
+
+        // Try to remove with wrong value - should be no-op (concurrent update)
+        let changes = vec![Change::Remove(Entry {
+            key: vec![1],
+            value: vec![20], // Wrong value
+        })];
+
+        tree.integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        // Entry should still exist with original value
+        assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(vec![10]));
+    }
+
+    #[tokio::test]
+    async fn test_integrate_concurrent_updates() {
+        let backend = MemoryStorageBackend::default();
+
+        // Initial state - both replicas start with same value
+        let mut tree_a = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut tree_b = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        tree_a.set(vec![1], vec![10]).await.unwrap();
+        tree_b.set(vec![1], vec![10]).await.unwrap();
+
+        // Replica A updates to value_a
+        tree_a.set(vec![1], vec![20]).await.unwrap();
+
+        // Replica B updates to value_b
+        tree_b.set(vec![1], vec![30]).await.unwrap();
+
+        // Both replicas exchange their changes
+        let empty_tree = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        let host_a = tree_a.clone();
+        let changes_a = host_a.differentiate(&empty_tree);
+        let host_b = tree_b.clone();
+        let changes_b = host_b.differentiate(&empty_tree);
+
+        // Integrate changes
+        tree_a.integrate(changes_b).await.unwrap();
+        tree_b.integrate(changes_a).await.unwrap();
+
+        // Both should converge to the same value (deterministic by hash)
+        let final_a = tree_a.get(&vec![1]).await.unwrap();
+        let final_b = tree_b.get(&vec![1]).await.unwrap();
+
+        assert_eq!(final_a, final_b, "Trees should converge to same value");
+
+        // Verify the winner is determined by hash
+        use crate::ValueType;
+        let hash_20 = vec![20].hash();
+        let hash_30 = vec![30].hash();
+
+        if hash_20 > hash_30 {
+            assert_eq!(final_a, Some(vec![20]));
+        } else {
+            assert_eq!(final_a, Some(vec![30]));
+        }
+    }
+
+    // ========================================================================
+    // Roundtrip tests: Verify differentiate + integrate produces original tree
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_roundtrip_empty_to_populated() {
+        let backend = MemoryStorageBackend::default();
+        let mut target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut start = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Target has entries, start is empty
+        target.set(vec![1], vec![10]).await.unwrap();
+        target.set(vec![2], vec![20]).await.unwrap();
+        target.set(vec![3], vec![30]).await.unwrap();
+
+        // Compute diff and integrate
+        // Need to collect changes to avoid borrow checker issues
+        // (diff holds immutable ref to start, but integrate needs mutable ref)
+        let changes = {
+            let diff = target.differentiate(&start);
+            pin_mut!(diff);
+            let mut changes = Vec::new();
+            while let Some(result) = diff.next().await {
+                changes.push(result.unwrap());
+            }
+            changes
+        };
+        start
+            .integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        // Verify start now matches target
+        assert_eq!(start.get(&vec![1]).await.unwrap(), Some(vec![10]));
+        assert_eq!(start.get(&vec![2]).await.unwrap(), Some(vec![20]));
+        assert_eq!(start.get(&vec![3]).await.unwrap(), Some(vec![30]));
+    }
+
+    #[tokio::test]
+    async fn test_roundtrip_populated_to_empty() {
+        let backend = MemoryStorageBackend::default();
+        let target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut start = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Start has entries, target is empty
+        start.set(vec![1], vec![10]).await.unwrap();
+        start.set(vec![2], vec![20]).await.unwrap();
+        start.set(vec![3], vec![30]).await.unwrap();
+
+        // Compute diff and integrate
+        // Need to collect changes to avoid borrow checker issues
+        // (diff holds immutable ref to start, but integrate needs mutable ref)
+        let changes = {
+            let diff = target.differentiate(&start);
+            pin_mut!(diff);
+            let mut changes = Vec::new();
+            while let Some(result) = diff.next().await {
+                changes.push(result.unwrap());
+            }
+            changes
+        };
+        start
+            .integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        // Verify start is now empty
+        assert_eq!(start.get(&vec![1]).await.unwrap(), None);
+        assert_eq!(start.get(&vec![2]).await.unwrap(), None);
+        assert_eq!(start.get(&vec![3]).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_roundtrip_mixed_changes() {
+        let backend = MemoryStorageBackend::default();
+        let mut target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut start = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Start state: keys 1, 2, 3
+        start.set(vec![1], vec![10]).await.unwrap();
+        start.set(vec![2], vec![20]).await.unwrap();
+        start.set(vec![3], vec![30]).await.unwrap();
+
+        // Target state: keys 2 (modified), 3, 4
+        target.set(vec![2], vec![22]).await.unwrap(); // Modified
+        target.set(vec![3], vec![30]).await.unwrap(); // Same
+        target.set(vec![4], vec![40]).await.unwrap(); // Added
+        // Key 1 removed
+
+        // Compute diff and integrate
+        // Need to collect changes to avoid borrow checker issues
+        // (diff holds immutable ref to start, but integrate needs mutable ref)
+        let changes = {
+            let diff = target.differentiate(&start);
+            pin_mut!(diff);
+            let mut changes = Vec::new();
+            while let Some(result) = diff.next().await {
+                changes.push(result.unwrap());
+            }
+            changes
+        };
+        start
+            .integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        // Verify start now matches target
+        assert_eq!(start.get(&vec![1]).await.unwrap(), None);
+        assert_eq!(start.get(&vec![2]).await.unwrap(), Some(vec![22]));
+        assert_eq!(start.get(&vec![3]).await.unwrap(), Some(vec![30]));
+        assert_eq!(start.get(&vec![4]).await.unwrap(), Some(vec![40]));
+    }
+
+    #[tokio::test]
+    async fn test_roundtrip_large_tree() {
+        let backend = MemoryStorageBackend::default();
+        let mut target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut start = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Create large trees with many entries
+        for i in 0u16..100 {
+            start
+                .set(vec![i as u8], vec![(i * 10) as u8])
+                .await
+                .unwrap();
+        }
+
+        for i in 50u16..150 {
+            target
+                .set(vec![i as u8], vec![(i * 20) as u8])
+                .await
+                .unwrap();
+        }
+
+        // Compute diff and integrate
+        // Need to collect changes to avoid borrow checker issues
+        // (diff holds immutable ref to start, but integrate needs mutable ref)
+        let changes = {
+            let diff = target.differentiate(&start);
+            pin_mut!(diff);
+            let mut changes = Vec::new();
+            while let Some(result) = diff.next().await {
+                changes.push(result.unwrap());
+            }
+            changes
+        };
+        start
+            .integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        // Verify start now matches target
+        for i in 0u16..50 {
+            assert_eq!(start.get(&vec![i as u8]).await.unwrap(), None);
+        }
+        for i in 50u16..150 {
+            assert_eq!(
+                start.get(&vec![i as u8]).await.unwrap(),
+                Some(vec![(i * 20) as u8])
+            );
+        }
+    }
+
+    // ========================================================================
+    // Edge case tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_differentiate_both_empty() {
+        let backend = MemoryStorageBackend::default();
+        let tree1 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let tree2 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        let changes = tree1.differentiate(&tree2);
+        pin_mut!(changes);
+        let mut count = 0;
+        while let Some(_) = changes.next().await {
+            count += 1;
+        }
+
+        assert_eq!(count, 0, "Both empty trees should have no changes");
+    }
+
+    #[tokio::test]
+    async fn test_differentiate_single_entry_trees() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree1 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut tree2 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        tree1.set(vec![1], vec![10]).await.unwrap();
+        tree2.set(vec![1], vec![20]).await.unwrap();
+
+        let changes = tree1.differentiate(&tree2);
+        pin_mut!(changes);
+        let mut adds = Vec::new();
+        let mut removes = Vec::new();
+
+        while let Some(result) = changes.next().await {
+            match result.unwrap() {
+                Change::Add(entry) => adds.push(entry),
+                Change::Remove(entry) => removes.push(entry),
+            }
+        }
+
+        // Should have one remove (old value) and one add (new value)
+        assert_eq!(removes.len(), 1);
+        assert_eq!(removes[0].value, vec![20]);
+        assert_eq!(adds.len(), 1);
+        assert_eq!(adds[0].value, vec![10]);
+    }
+
+    #[tokio::test]
+    async fn test_differentiate_disjoint_trees() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree1 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut tree2 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Completely disjoint key sets
+        tree1.set(vec![1], vec![10]).await.unwrap();
+        tree1.set(vec![3], vec![30]).await.unwrap();
+        tree1.set(vec![5], vec![50]).await.unwrap();
+
+        tree2.set(vec![2], vec![20]).await.unwrap();
+        tree2.set(vec![4], vec![40]).await.unwrap();
+        tree2.set(vec![6], vec![60]).await.unwrap();
+
+        let changes = tree1.differentiate(&tree2);
+        pin_mut!(changes);
+        let mut adds = Vec::new();
+        let mut removes = Vec::new();
+
+        while let Some(result) = changes.next().await {
+            match result.unwrap() {
+                Change::Add(entry) => adds.push(entry),
+                Change::Remove(entry) => removes.push(entry),
+            }
+        }
+
+        // All of tree2's entries should be removed, all of tree1's added
+        assert_eq!(removes.len(), 3);
+        assert_eq!(adds.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_differentiate_subset_superset() {
+        let backend = MemoryStorageBackend::default();
+        let mut superset = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut subset = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Subset: keys 2, 3
+        subset.set(vec![2], vec![20]).await.unwrap();
+        subset.set(vec![3], vec![30]).await.unwrap();
+
+        // Superset: keys 1, 2, 3, 4
+        superset.set(vec![1], vec![10]).await.unwrap();
+        superset.set(vec![2], vec![20]).await.unwrap();
+        superset.set(vec![3], vec![30]).await.unwrap();
+        superset.set(vec![4], vec![40]).await.unwrap();
+
+        let changes = superset.differentiate(&subset);
+        pin_mut!(changes);
+        let mut adds = Vec::new();
+        let mut removes = Vec::new();
+
+        while let Some(result) = changes.next().await {
+            match result.unwrap() {
+                Change::Add(entry) => adds.push(entry),
+                Change::Remove(entry) => removes.push(entry),
+            }
+        }
+
+        // Should add keys 1 and 4
+        assert_eq!(adds.len(), 2);
+        assert_eq!(removes.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_differentiate_all_modified() {
+        let backend = MemoryStorageBackend::default();
+        let mut tree1 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut tree2 = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Same keys, all different values (except i=0 where both are [0])
+        for i in 0u8..10 {
+            tree1.set(vec![i], vec![i * 2]).await.unwrap();
+            tree2.set(vec![i], vec![i]).await.unwrap();
+        }
+
+        let changes = tree1.differentiate(&tree2);
+        pin_mut!(changes);
+        let mut count = 0;
+
+        while let Some(result) = changes.next().await {
+            result.unwrap();
+            count += 1;
+        }
+
+        // 9 keys modified (i=0 has same value in both) = 9 * 2 = 18 changes total
+        assert_eq!(count, 18);
+    }
+
+    #[tokio::test]
+    async fn test_roundtrip_preserves_hash() {
+        let backend = MemoryStorageBackend::default();
+        let mut target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut start = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Set up target state
+        for i in 0..20 {
+            target.set(vec![i], vec![i * 3]).await.unwrap();
+        }
+        let target_hash = target.hash().unwrap().clone();
+
+        // Set up different start state
+        for i in 10..30 {
+            start.set(vec![i], vec![i * 5]).await.unwrap();
+        }
+
+        // Compute diff and integrate
+        // Need to collect changes to avoid borrow checker issues
+        // (diff holds immutable ref to start, but integrate needs mutable ref)
+        let changes = {
+            let diff = target.differentiate(&start);
+            pin_mut!(diff);
+            let mut changes = Vec::new();
+            while let Some(result) = diff.next().await {
+                changes.push(result.unwrap());
+            }
+            changes
+        };
+        start
+            .integrate(VecDifferential::from(changes))
+            .await
+            .unwrap();
+
+        // Hash should match after integration
+        assert_eq!(start.hash().unwrap(), &target_hash);
+    }
+
+    // ========================================================================
+    // Performance tests using JournaledStorage
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_diff_shared_left_subtree() -> Result<()> {
+        use crate::tree_spec;
+
+        let backend = MemoryStorageBackend::default();
+
+        let storage_a = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        let storage_b = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Define tree structures using tree_spec! macro with read/prune expectations
+        // () indicates nodes that should be pruned (not read)
+        let spec_a = tree_spec![
+            [                  ..l]
+            [(..e), (f..i),    ..l]
+        ]
+        .build(storage_a.clone())
+        .await
+        .unwrap();
+
+        let spec_b = tree_spec![
+            [                  ..s]
+            [(..e), (f..i), ..m, ..s]
+            // [..b, ..e, (f..i), ..m,      ..s]
+        ]
+        .build(storage_b.clone())
+        .await
+        .unwrap();
+
+        // Run differentiate (journal is automatically enabled after build)
+        let host_b = spec_b.tree().clone();
+        let diff = host_b.differentiate(spec_a.tree());
+        // consume so we actually perform reads
+        let _: Vec<_> = diff.collect().await;
+
+        spec_a.assert();
+        spec_b.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_diff_fully_disjoint_trees() -> Result<()> {
+        use crate::tree_spec;
+
+        let backend = JournaledStorage::new(MemoryStorageBackend::default());
+        let storage = Storage {
+            encoder: CborEncoder,
+            backend,
+        };
+
+        // Scenario: Trees have completely different key ranges - NO shared segments
+        // Tree A has keys a-i, Tree B has keys p-x (completely disjoint)
+        // All segments from both trees must be read since nothing is shared
+        let spec_a = tree_spec![
+            [                         ..i]
+            [..a, ..d, ..e, ..f, ..g, ..i]
+        ]
+        .build(storage.clone())
+        .await
+        .unwrap();
+
+        let spec_b = tree_spec![
+            [                         ..x]
+            [..p, ..s, ..t, ..u, ..v, ..x]
+        ]
+        .build(storage.clone())
+        .await
+        .unwrap();
+
+        let host_b = spec_b.tree().clone();
+        let diff = host_b.differentiate(spec_a.tree());
+        let _: Vec<_> = diff.collect().await;
+
+        spec_a.assert();
+        spec_b.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_diff_subset_superset() -> Result<()> {
+        use crate::tree_spec;
+
+        let backend = MemoryStorageBackend::default();
+
+        let storage_a = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        let storage_b = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Scenario: Tree B extends Tree A with additional segment
+        // Tree A is the host tree, so its nodes are in memory (not read from storage)
+        // Tree B has an additional segment 's' that needs to be read
+        // The shared 'n' subtree in Tree B is pruned, so its children (e, n) are not read
+        // Only Tree B's additional segment 's' should be read
+        let spec_a = tree_spec![
+            [         ..n]
+            [(..e), (..n)]
+        ]
+        .build(storage_a.clone())
+        .await
+        .unwrap();
+
+        let spec_b = tree_spec![
+            [(       ..n), ..s]
+            [(..e), (..n), ..s]
+        ]
+        .build(storage_b.clone())
+        .await
+        .unwrap();
+
+        let host_a = spec_a.tree().clone();
+        let diff = host_a.differentiate(spec_b.tree());
+        let _: Vec<_> = diff.collect().await;
+
+        spec_a.assert();
+        spec_b.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_diff_single_key_change() -> Result<()> {
+        use crate::tree_spec;
+
+        let backend = MemoryStorageBackend::default();
+
+        let storage_a = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        let storage_b = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Scenario: Two trees with only one differing segment
+        // Tree A has segments ending at 'a', 'e'
+        // Tree B has segments ending at 'a', 'f', 'k', 'p', 's' with different 'k' segment
+        // Segment 'a' is shared (same boundary, same hash) so should not be read
+        // Only the changed segments should be read from both trees
+        let spec_a = tree_spec![
+            [          ..e]
+            [(..a),    ..e]
+        ]
+        .build(storage_a.clone())
+        .await
+        .unwrap();
+
+        // Tree B: has more segments, with 'a' shared but different keys in 'k' segment
+        let spec_b = tree_spec![
+            [                       ..s]
+            [(..a), ..f, j..k, ..p, ..s]
+        ]
+        .build(storage_b.clone())
+        .await
+        .unwrap();
+
+        let host_b = spec_b.tree().clone();
+        let diff = host_b.differentiate(spec_a.tree());
+        let _: Vec<_> = diff.collect().await;
+
+        spec_a.assert();
+        spec_b.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_diff_different_heights() -> Result<()> {
+        use crate::tree_spec;
+
+        let backend = MemoryStorageBackend::default();
+
+        let storage_a = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        let storage_b = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Scenario: Trees of different heights
+        // Tree A is shallow (height 1), Tree B is taller (height 2)
+        // This tests how differential handles height mismatches
+        let spec_a = tree_spec![
+            [       ..e]
+            [(..a), ..e]
+        ]
+        .build(storage_a.clone())
+        .await
+        .unwrap();
+
+        let spec_b = tree_spec![
+            [                                ..z]
+            [            ..f,        ..p,    ..z]
+            [(..a), ..c, ..f, ..k, ..p, ..t, ..z]
+        ]
+        .build(storage_b.clone())
+        .await
+        .unwrap();
+
+        let host_a = spec_a.tree().clone();
+        let diff = host_a.differentiate(spec_b.tree());
+        let _: Vec<_> = diff.collect().await;
+
+        spec_a.assert();
+        spec_b.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_diff_different_heights_reverse() -> Result<()> {
+        use crate::tree_spec;
+
+        let backend = MemoryStorageBackend::default();
+
+        let storage_a = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        let storage_b = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Scenario: Reverse of test_diff_different_heights
+        // Tree B is tall (height 2), Tree A is shallow (height 1)
+        // When B.differentiate(A), we still need to read all branches to discover removes
+        let spec_a = tree_spec![
+            [                                ..z]
+            [            ..f,      ..p,      ..z]
+            [(..a), ..c, ..f, ..k, ..p, ..t, ..z]
+        ]
+        .build(storage_b.clone())
+        .await
+        .unwrap();
+
+        let spec_b = tree_spec![
+            [       ..e]
+            [(..a), ..e]
+        ]
+        .build(storage_a.clone())
+        .await
+        .unwrap();
+
+        // Differentiate B -> A (taller tree to shallow tree)
+        // Still need to read all branches to discover remove changes
+        let host_a = spec_a.tree().clone();
+        let diff = host_a.differentiate(spec_b.tree());
+        let _: Vec<_> = diff.collect().await;
+
+        spec_b.assert();
+        spec_a.assert();
+
+        Ok(())
+    }
+}

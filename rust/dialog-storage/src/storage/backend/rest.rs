@@ -1541,6 +1541,7 @@ mod tests {
 
 /// Local S3 server tests using s3s for end-to-end testing
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(unused_imports, unused_variables, unused_mut, dead_code)]
 mod local_s3_tests {
     use super::*;
     use hyper::server::conn::http1;
@@ -1896,6 +1897,7 @@ mod local_s3_tests {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(unused_imports, unused_variables, unused_mut, dead_code)]
 mod s3 {
     use async_trait::async_trait;
     use hyper::server::conn::http1;

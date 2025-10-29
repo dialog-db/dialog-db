@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::KeyType;
 
 /// A serializable reference to a [`Node`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reference<const HASH_SIZE: usize, Key, Hash> {
     upper_bound: Key,
     hash: Hash,

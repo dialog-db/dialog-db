@@ -135,6 +135,11 @@ where
         &self.reference
     }
 
+    /// Returns the upper bound key of this node.
+    pub fn upper_bound(&self) -> &Key {
+        self.reference.upper_bound()
+    }
+
     /// Returns the [`Hash`] for this [`Node`] used to retrieve from
     /// [`ContentAddressedStorage`].
     pub fn hash(&self) -> &Hash {
@@ -152,6 +157,15 @@ where
         }
 
         self.block.into_entries()
+    }
+
+    /// Get children data as  [`Reference`]s.
+    ///
+    /// The result is an error if this [`Node`] is a segment.
+    pub fn references(
+        &self,
+    ) -> Result<&NonEmpty<Reference<HASH_SIZE, Key, Hash>>, DialogProllyTreeError> {
+        self.block.references()
     }
 
     /// Load all the child references of this [`Node`] from storage as [`Node`]s
