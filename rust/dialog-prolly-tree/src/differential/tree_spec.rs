@@ -5,7 +5,10 @@
 
 use crate::Distribution;
 use dialog_storage::HashType;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Debug,
+};
 
 /// A distribution that reads ranks directly from keys.
 /// Keys are encoded as: [actual_key_bytes, 0x00, rank_byte]
@@ -61,15 +64,15 @@ fn next_alpha_key(key: &[u8]) -> Vec<u8> {
 pub fn build_rank_map(levels: &[Vec<Vec<u8>>]) -> HashMap<Vec<u8>, u32> {
     let mut rank_map = HashMap::new();
 
-    // Process from top to bottom (highest height first)
-    // This way, when a key appears at multiple heights, we assign it the highest rank
-    for (level_idx, boundaries) in levels.iter().enumerate() {
-        let height = levels.len() - 1 - level_idx;
-        let rank = (2 + height * 2) as u32; // Height 0 -> rank 2, height 1 -> rank 4, height 2 -> rank 6, etc.
+    // Process from bottom to top, so higher levels overwrite lower levels
+    // This ensures keys appearing at multiple heights get the HIGHEST rank
+    for (level_idx, boundaries) in levels.iter().enumerate().rev() {
+        let height = levels.len() - level_idx - 1;
+        let rank = (height + 2) as u32;
 
         for boundary in boundaries {
-            // Only insert if not already present (higher rank already assigned)
-            rank_map.entry(boundary.clone()).or_insert(rank);
+            // Insert or overwrite - higher heights (processed later in reverse) will overwrite
+            rank_map.insert(boundary.clone(), rank);
         }
     }
 
@@ -78,13 +81,14 @@ pub fn build_rank_map(levels: &[Vec<Vec<u8>>]) -> HashMap<Vec<u8>, u32> {
 
 /// Expected operation on a node during differentiation
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NodeOp {
+pub enum Expect {
     /// Node should be read during differentiation
     Read,
     /// Node is in memory and doesn't need to be read (e.g., root nodes)
     Skip,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeDescriptor {
     // corresponds to a..b
     Range(String, String),
@@ -96,6 +100,7 @@ pub enum NodeDescriptor {
     SkipOpenRange(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeDescriptor(pub Vec<Vec<NodeDescriptor>>);
 
 impl TreeDescriptor {
@@ -181,7 +186,7 @@ impl TreeDescriptor {
         let mut all_segments = Vec::new();
         let mut boundaries_per_level = Vec::new();
         // Track expected operations for each boundary
-        let mut expected_ops: HashMap<(Vec<u8>, usize), NodeOp> = HashMap::new();
+        let mut expected_ops: HashMap<(Vec<u8>, usize), Expect> = HashMap::new();
 
         for (level_idx, level_descriptors) in self.0.iter().enumerate() {
             let mut level_segment_specs = Vec::new();
@@ -203,9 +208,9 @@ impl TreeDescriptor {
 
                 let boundary = upper_bound.as_bytes().to_vec();
                 let expected_op = if is_skipped {
-                    NodeOp::Skip
+                    Expect::Skip
                 } else {
-                    NodeOp::Read
+                    Expect::Read
                 };
 
                 expected_ops.insert((boundary.clone(), height), expected_op);
@@ -256,8 +261,7 @@ impl TreeDescriptor {
             None
         };
 
-        // Enable journaling before loading tree from hash
-        // Root reads will be journaled but marked as Skip since Tree holds root in memory
+        // Enable journaling to track root read
         storage.backend.enable_journal();
 
         // Load tree from hash so root is freshly loaded (not from temp_tree)
@@ -268,6 +272,7 @@ impl TreeDescriptor {
         };
 
         Ok(TreeSpec {
+            descriptor: self,
             spec,
             tree,
             storage,
@@ -313,7 +318,7 @@ impl TreeDescriptor {
             >,
         >,
         height: usize,
-        expected_ops: &HashMap<(Vec<u8>, usize), NodeOp>,
+        expected_ops: &HashMap<(Vec<u8>, usize), Expect>,
     ) {
         let decoded_boundary = decode_key(node.upper_bound());
         let hash = *node.hash();
@@ -322,7 +327,7 @@ impl TreeDescriptor {
         let expected_op = expected_ops
             .get(&(decoded_boundary.clone(), height))
             .cloned()
-            .unwrap_or(NodeOp::Read);
+            .unwrap_or(Expect::Read);
 
         // Create and add the NodeSpec
         let level_idx = spec.len() - 1 - height;
@@ -351,22 +356,33 @@ impl TreeDescriptor {
 }
 
 /// Specification for a single node in the tree
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NodeSpec {
     pub boundary: Vec<u8>,
     pub height: usize,
     pub hash: [u8; 32],
-    pub expected_op: NodeOp,
+    pub expect: Expect,
 }
 
 impl NodeSpec {
-    pub fn new(boundary: Vec<u8>, height: usize, hash: [u8; 32], expected_op: NodeOp) -> Self {
+    pub fn new(boundary: Vec<u8>, height: usize, hash: [u8; 32], expected_op: Expect) -> Self {
         Self {
             boundary,
             height,
             hash,
-            expected_op,
+            expect: expected_op,
         }
+    }
+}
+
+impl Debug for NodeSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeSpec")
+            .field("boundary", &String::from_utf8_lossy(&self.boundary))
+            .field("height", &self.height)
+            .field("hash", &HashType::<32>::display(&self.hash))
+            .field("expect", &self.expect)
+            .finish()
     }
 }
 
@@ -381,6 +397,7 @@ fn decode_key(encoded: &[u8]) -> Vec<u8> {
 
 /// Compiled TreeSpec with tree built and hashes populated
 pub struct TreeSpec {
+    pub descriptor: TreeDescriptor,
     pub spec: Vec<Vec<NodeSpec>>, // Node specs with hashes populated
     tree: crate::Tree<
         4,
@@ -426,78 +443,75 @@ impl TreeSpec {
         &self.tree
     }
 
-    /// Print detailed tree structure with boundaries and hashes
-    pub async fn print_structure(&self) {
-        eprintln!("\n=== Tree Structure ===");
+    /// Visualize the full tree structure by loading all nodes
+    /// Temporarily disables journaling during visualization to avoid polluting read tracking
+    pub async fn visualize(&self) -> String {
+        // Disable journaling during visualization
+        self.storage.backend.disable_journal();
+
+        let mut output = String::new();
 
         if let Some(root) = self.tree.root() {
-            Self::print_node(root, "", true, &self.storage).await;
+            Self::visualize_node(&mut output, root, &self.storage, "", true).await;
         } else {
-            eprintln!("(empty tree)");
+            output.push_str("(empty tree)\n");
         }
+
+        // Re-enable journaling after visualization
+        self.storage.backend.enable_journal();
+
+        output
     }
 
-    fn print_node<'a>(
+    fn visualize_node<'a>(
+        output: &'a mut String,
         node: &'a crate::Node<4, 32, Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
-        prefix: &'a str,
-        is_last: bool,
         storage: &'a dialog_storage::Storage<
             32,
             dialog_storage::CborEncoder,
-            dialog_storage::JournaledStorage<dialog_storage::MemoryStorageBackend<[u8; 32], Vec<u8>>>,
+            dialog_storage::JournaledStorage<
+                dialog_storage::MemoryStorageBackend<[u8; 32], Vec<u8>>,
+            >,
         >,
+        prefix: &'a str,
+        is_last: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
         Box::pin(async move {
-            let boundary_str = String::from_utf8_lossy(node.upper_bound());
+            let branch = if is_last { "└── " } else { "├── " };
+            let boundary = node.upper_bound();
+            let key_str = String::from_utf8_lossy(boundary).to_string();
 
-            // Extract rank from the encoded boundary
-            let upper_bound = node.upper_bound();
-            let rank = if upper_bound.len() >= 2 && upper_bound[upper_bound.len() - 2] == 0x00 {
-                upper_bound[upper_bound.len() - 1]
+            // Extract rank from encoded boundary
+            let rank = if boundary.len() >= 2 && boundary[boundary.len() - 2] == 0x00 {
+                boundary[boundary.len() - 1]
             } else {
                 1
             };
 
             let hash = node.hash();
-            let hash_short = format!("{:02x}{:02x}{:02x}{:02x}", hash[0], hash[1], hash[2], hash[3]);
+            let hash_str = format!(
+                "{:02x}{:02x}{:02x}{:02x}",
+                hash[0], hash[1], hash[2], hash[3]
+            );
 
             if prefix.is_empty() {
-                // Root node - no connector
-                eprintln!("{}[{}]@{}", boundary_str, rank, hash_short);
+                output.push_str(&format!("{} [{}]@{}\n", key_str, rank, hash_str));
             } else {
-                let connector = if is_last { "└── " } else { "├── " };
-                eprintln!("{}{}{}[{}]@{}", prefix, connector, boundary_str, rank, hash_short);
+                output.push_str(&format!(
+                    "{}{}{} [{}]@{}\n",
+                    prefix, branch, key_str, rank, hash_str
+                ));
             }
 
             if node.is_branch() {
-                if let Ok(refs) = node.references() {
-                    let child_prefix = format!("{}{}",  prefix, if is_last { "    " } else { "│   " });
-
-                    for (i, child_ref) in refs.iter().enumerate() {
-                        let is_last_child = i == refs.len() - 1;
-
-                        // Try to load the child node
-                        match crate::Node::from_reference(child_ref.clone(), storage).await {
-                            Ok(child_node) => {
-                                // Successfully loaded - recurse
-                                Self::print_node(&child_node, &child_prefix, is_last_child, storage).await;
-                            }
-                            Err(_) => {
-                                // Failed to load - just show the reference
-                                let boundary_str = String::from_utf8_lossy(child_ref.upper_bound());
-                                let upper_bound = child_ref.upper_bound();
-                                let rank = if upper_bound.len() >= 2 && upper_bound[upper_bound.len() - 2] == 0x00 {
-                                    upper_bound[upper_bound.len() - 1]
-                                } else {
-                                    1
-                                };
-                                let hash = child_ref.hash();
-                                let hash_short = format!("{:02x}{:02x}{:02x}{:02x}", hash[0], hash[1], hash[2], hash[3]);
-
-                                let connector = if is_last_child { "└── " } else { "├── " };
-                                eprintln!("{}{}{}[{}]@{} (ref)", child_prefix, connector, boundary_str, rank, hash_short);
-                            }
-                        }
+                // Load children and recurse
+                if let Ok(children) = node.load_children(storage).await {
+                    let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+                    let child_count = children.len();
+                    for (i, child) in children.iter().enumerate() {
+                        let is_last_child = i == child_count - 1;
+                        Self::visualize_node(output, child, storage, &new_prefix, is_last_child)
+                            .await;
                     }
                 }
             }
@@ -506,6 +520,11 @@ impl TreeSpec {
 
     pub fn assert(&self) {
         let reads = self.storage.backend.get_reads();
+
+        eprintln!("\nJournal reads: {} nodes", reads.len());
+        for (i, hash) in reads.iter().enumerate() {
+            eprintln!("  Read[{}]: {:?}", i, &hash[..4]);
+        }
 
         // Build a set of hashes that were read
         let reads_set: HashSet<[u8; 32]> = reads.iter().copied().collect();
@@ -521,11 +540,11 @@ impl TreeSpec {
                 let hash = node.hash;
                 let key = (node.boundary.clone(), node.height);
 
-                match node.expected_op {
-                    NodeOp::Read => {
+                match node.expect {
+                    Expect::Read => {
                         expected_reads.insert(key.clone());
                     }
-                    NodeOp::Skip => {
+                    Expect::Skip => {
                         unexpected_reads.insert(key.clone());
                     }
                 }
@@ -575,9 +594,9 @@ impl TreeSpec {
             output.push_str("  [");
             for (i, node) in level.iter().enumerate() {
                 let boundary_str = String::from_utf8_lossy(&node.boundary);
-                let content = match node.expected_op {
-                    NodeOp::Skip => format!("(..{})", boundary_str),
-                    NodeOp::Read => format!("..{}", boundary_str),
+                let content = match node.expect {
+                    Expect::Skip => format!("(..{})", boundary_str),
+                    Expect::Read => format!("..{}", boundary_str),
                 };
                 if i > 0 {
                     output.push_str(", ");
@@ -596,15 +615,15 @@ impl TreeSpec {
                 let boundary_str = String::from_utf8_lossy(&node.boundary);
                 let was_read = actual_reads.contains(&key);
 
-                let (content, color_len) = match node.expected_op {
-                    NodeOp::Skip => {
+                let (content, color_len) = match node.expect {
+                    Expect::Skip => {
                         if was_read {
                             (format!("{}(..{}){}", RED, boundary_str, RESET), 9)
                         } else {
                             (format!("(..{})", boundary_str), 0)
                         }
                     }
-                    NodeOp::Read => {
+                    Expect::Read => {
                         if was_read {
                             (format!("{}..{}{}", GREEN, boundary_str, RESET), 9)
                         } else {
@@ -656,10 +675,82 @@ impl TreeSpec {
 
 impl std::fmt::Debug for TreeSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Use the current runtime
-        tokio::runtime::Handle::current().block_on(async {
-            self.print_structure().await;
-        });
-        write!(f, "")
+        if let Some(root) = self.tree.root() {
+            Self::fmt_node(f, root, "", true)
+        } else {
+            write!(f, "(empty tree)")
+        }
+    }
+}
+
+impl TreeSpec {
+    fn fmt_node(
+        f: &mut std::fmt::Formatter<'_>,
+        node: &crate::Node<4, 32, Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
+        prefix: &str,
+        is_last: bool,
+    ) -> std::fmt::Result {
+        let branch = if is_last { "└── " } else { "├── " };
+        let boundary = node.upper_bound();
+        let key_str = String::from_utf8_lossy(boundary).to_string();
+
+        // Extract rank from encoded boundary
+        let rank = if boundary.len() >= 2 && boundary[boundary.len() - 2] == 0x00 {
+            boundary[boundary.len() - 1]
+        } else {
+            1
+        };
+
+        let hash = node.hash();
+        let hash_str = format!(
+            "{:02x}{:02x}{:02x}{:02x}",
+            hash[0], hash[1], hash[2], hash[3]
+        );
+
+        if prefix.is_empty() {
+            writeln!(f, "{} [{}]@{}", key_str, rank, hash_str)?;
+        } else {
+            writeln!(f, "{}{}{} [{}]@{}", prefix, branch, key_str, rank, hash_str)?;
+        }
+
+        if node.is_branch() {
+            if let Ok(refs) = node.references() {
+                let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+                let ref_count = refs.len();
+                for (i, reference) in refs.iter().enumerate() {
+                    let is_last_child = i == ref_count - 1;
+                    let child_branch = if is_last_child {
+                        "└── "
+                    } else {
+                        "├── "
+                    };
+
+                    let ref_boundary = reference.upper_bound();
+                    let ref_key_str = String::from_utf8_lossy(ref_boundary).to_string();
+
+                    let ref_rank = if ref_boundary.len() >= 2
+                        && ref_boundary[ref_boundary.len() - 2] == 0x00
+                    {
+                        ref_boundary[ref_boundary.len() - 1]
+                    } else {
+                        1
+                    };
+
+                    let ref_hash = reference.hash();
+                    let ref_hash_str = format!(
+                        "{:02x}{:02x}{:02x}{:02x}",
+                        ref_hash[0], ref_hash[1], ref_hash[2], ref_hash[3]
+                    );
+
+                    writeln!(
+                        f,
+                        "{}{}{} [{}]@{} (ref)",
+                        new_prefix, child_branch, ref_key_str, ref_rank, ref_hash_str
+                    )?;
+                }
+            }
+        }
+
+        Ok(())
     }
 }
