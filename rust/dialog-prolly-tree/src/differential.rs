@@ -159,8 +159,8 @@ where
     nodes: Vec<SparseTreeNode<F, H, Key, Value, Hash>>,
 }
 
-impl<'a, const F: u32, const H: usize, Key, Value, Hash, Storage>
-    SparseTree<'a, F, H, Key, Value, Hash, Storage>
+impl<const F: u32, const H: usize, Key, Value, Hash, Storage>
+    SparseTree<'_, F, H, Key, Value, Hash, Storage>
 where
     Key: KeyType + 'static,
     Value: ValueType,
@@ -436,8 +436,15 @@ where
     }
 }
 
-/// Represents a difference between two trees as a pair of sparse trees.
-/// Provides methods to expand the difference and stream changes.
+/// Convenient way to not have to repeat complex type twice
+type Pair<T> = (T, T);
+
+/// Represents a differential computation between two trees (source, target).
+///
+/// Delta contains sparse representations of both trees and provides methods to
+/// efficiently compute the changes needed to transform the source tree into the target tree.
+///
+/// The tuple structure is `(source_sparse_tree, target_sparse_tree)`.
 pub(crate) struct Delta<'a, const F: u32, const H: usize, Key, Value, Hash, Storage>(
     SparseTree<'a, F, H, Key, Value, Hash, Storage>,
     SparseTree<'a, F, H, Key, Value, Hash, Storage>,
@@ -456,11 +463,22 @@ where
     Hash: HashType<H>,
     Storage: ContentAddressedStorage<H, Hash = Hash>,
 {
+    /// Creates a new Delta from a pair of trees `(source, target)`.
+    ///
+    /// The resulting Delta contains sparse representations of both trees that can be
+    /// expanded to compute the changes needed to transform `source` into `target`.
+    ///
+    /// # Parameters
+    /// - `(left, right)`: A tuple of tree references where `left` is the source tree
+    ///   and `right` is the target tree
+    ///
+    /// # Example
+    /// ```ignore
+    /// let delta = Delta::from((old_tree, new_tree));
+    /// // This delta can produce changes to transform old_tree → new_tree
+    /// ```
     pub fn from<Distription: crate::Distribution<F, H, Key, Hash>>(
-        (left, right): (
-            &'a Tree<F, H, Distription, Key, Value, Hash, Storage>,
-            &'a Tree<F, H, Distription, Key, Value, Hash, Storage>,
-        ),
+        (left, right): Pair<&'a Tree<F, H, Distription, Key, Value, Hash, Storage>>,
     ) -> Self {
         Self(
             SparseTree {
@@ -476,24 +494,6 @@ where
                     .root()
                     .map(|root| vec![SparseTreeNode::Node(root.clone())])
                     .unwrap_or(vec![]),
-            },
-        )
-    }
-
-    /// Creates a new Delta from two nodes.
-    pub fn new(
-        before: Node<F, H, Key, Value, Hash>,
-        after: Node<F, H, Key, Value, Hash>,
-        storage: &'a Storage,
-    ) -> Self {
-        Self(
-            SparseTree {
-                storage,
-                nodes: vec![SparseTreeNode::Node(before)],
-            },
-            SparseTree {
-                storage,
-                nodes: vec![SparseTreeNode::Node(after)],
             },
         )
     }
@@ -655,13 +655,13 @@ where
                     }
                     (Some(Err(_)), _) => {
                         // Propagate error from source stream
-                        if let Some(Err(err)) = std::mem::replace(&mut source_next, None) {
+                        if let Some(Err(err)) = source_next.take() {
                             Err(err)?;
                         }
                     }
                     (_, Some(Err(_))) => {
                         // Propagate error from target stream
-                        if let Some(Err(err)) = std::mem::replace(&mut target_next, None) {
+                        if let Some(Err(err)) = target_next.take() {
                             Err(err)?;
                         }
                     }
@@ -703,11 +703,9 @@ mod tests {
     use crate::{GeometricDistribution, Tree};
     use anyhow::Result;
     use dialog_storage::{
-        Blake3Hash, CborEncoder, JournaledStorage, MeasuredStorage, MemoryStorageBackend, Storage,
+        Blake3Hash, CborEncoder, JournaledStorage, MemoryStorageBackend, Storage,
     };
     use futures_util::{StreamExt, pin_mut};
-    use std::collections::{HashMap, HashSet};
-    use std::ops::Deref;
 
     type TestTree = Tree<
         32,
@@ -1559,26 +1557,6 @@ mod tests {
     // ========================================================================
     // Performance tests using JournaledStorage
     // ========================================================================
-
-    use crate::Distribution;
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
-
-    // Type alias for the journaled storage backend used in tests
-    type TestJournaledStorage =
-        JournaledStorage<MeasuredStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
-
-    // Use smaller branching factor for easier testing of tall trees
-    type JournaledTree = Tree<
-        4, // Small branching factor
-        32,
-        GeometricDistribution,
-        Vec<u8>,
-        Vec<u8>,
-        Blake3Hash,
-        Arc<Mutex<Storage<32, CborEncoder, TestJournaledStorage>>>,
-    >;
 
     #[tokio::test]
     async fn test_diff_shared_left_subtree() -> Result<()> {

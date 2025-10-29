@@ -34,7 +34,7 @@ impl Default for NodeReference {
 impl From<NodeReference> for Blake3Hash {
     fn from(value: NodeReference) -> Self {
         let NodeReference(hash) = value;
-        hash.clone()
+        hash
     }
 }
 
@@ -176,7 +176,7 @@ impl<'a, P: Platform> BranchView<'a, P> {
                     Ok(revision)
                 }
                 Origin::Remote(remote) => {
-                    let address = remote.address();
+                    let _address = remote.address();
                     let id = remote.id();
 
                     let revision = self
@@ -300,18 +300,23 @@ pub trait Platform {
         + 'static;
 
     /// Get a reference-counted pointer to the internal search tree index
+    #[allow(clippy::mut_from_ref)]
     fn archive(&self) -> &mut Archive<Self::Storage>;
 
     /// Gets a reference to revision store.
+    #[allow(clippy::mut_from_ref)]
     fn revisions(&self) -> &mut Self::Revisions;
 
     /// Gets a reference to release store.
+    #[allow(clippy::mut_from_ref)]
     fn releases(&self) -> &mut Self::Releases;
 
     /// Gets a reference to forks store.
+    #[allow(clippy::mut_from_ref)]
     fn forks(&self) -> &mut Self::Forks;
 
     /// Gets a reference to remotes store.
+    #[allow(clippy::mut_from_ref)]
     fn remotes(&self) -> &mut Self::Remotes;
 }
 
@@ -345,29 +350,46 @@ impl<'a, P: Platform> Replica<'a, P> {
 /// The common error type used by this crate
 #[derive(Error, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplicaError {
+    /// Branch with the given ID was not found
     #[error("Branch {id} not found")]
-    BranchNotFound { id: BranchId },
+    BranchNotFound {
+        /// The ID of the branch that was not found
+        id: BranchId,
+    },
 
+    /// A storage operation failed
     #[error("Capability {capability} failed cause {cause}")]
     StorageError {
+        /// The capability that was being exercised when the error occurred
         capability: Capability,
+        /// The underlying storage error
         cause: DialogStorageError,
     },
 
+    /// Branch has no configured upstream
     #[error("Branch {id} has no upstream")]
-    BranchHasNoUpstream { id: BranchId },
+    BranchHasNoUpstream {
+        /// The ID of the branch that has no upstream
+        id: BranchId,
+    },
 }
 
 impl ReplicaError {
+    /// Create a new storage error
     pub fn storage_error(capability: Capability, cause: DialogStorageError) -> Self {
         ReplicaError::StorageError { capability, cause }
     }
 }
 
+/// Identifies which operation failed when a storage error occurs.
+/// Used in [`ReplicaError::StorageError`] to provide context about where the failure happened.
 #[derive(Error, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Capability {
+    /// Failed while resolving a branch by ID
     ResolveBranch,
+    /// Failed while resolving a revision
     ResolveRevision,
+    /// Failed while updating a revision
     UpdateRevision,
 }
 impl Display for Capability {

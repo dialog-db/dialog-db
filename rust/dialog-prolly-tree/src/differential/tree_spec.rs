@@ -275,7 +275,6 @@ impl TreeDescriptor {
         };
 
         Ok(TreeSpec {
-            descriptor: self,
             spec,
             tree,
             storage,
@@ -400,7 +399,6 @@ fn decode_key(encoded: &[u8]) -> Vec<u8> {
 
 /// Compiled TreeSpec with tree built and hashes populated
 pub struct TreeSpec {
-    pub descriptor: TreeDescriptor,
     pub spec: Vec<Vec<NodeSpec>>, // Node specs with hashes populated
     tree: crate::Tree<
         4,
@@ -448,6 +446,7 @@ impl TreeSpec {
 
     /// Visualize the full tree structure by loading all nodes
     /// Temporarily disables journaling during visualization to avoid polluting read tracking
+    #[allow(dead_code)]
     pub async fn visualize(&self) -> String {
         // Disable journaling during visualization
         self.storage.backend.disable_journal();
@@ -466,6 +465,7 @@ impl TreeSpec {
         output
     }
 
+    #[allow(dead_code)]
     fn visualize_node<'a>(
         output: &'a mut String,
         node: &'a crate::Node<4, 32, Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,

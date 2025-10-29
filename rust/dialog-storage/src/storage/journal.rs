@@ -59,10 +59,10 @@ where
 
         match entry.operation {
             Operation::Read => {
-                self.read_index.entry(key).or_insert_with(Vec::new).push(offset);
+                self.read_index.entry(key).or_default().push(offset);
             }
             Operation::Write => {
-                self.write_index.entry(key).or_insert_with(Vec::new).push(offset);
+                self.write_index.entry(key).or_default().push(offset);
             }
         }
 
@@ -391,8 +391,14 @@ mod tests {
         let mut storage = JournaledStorage::new(backend);
 
         // Perform some operations
-        storage.set("key1".to_string(), "value1".to_string()).await.unwrap();
-        storage.set("key2".to_string(), "value2".to_string()).await.unwrap();
+        storage
+            .set("key1".to_string(), "value1".to_string())
+            .await
+            .unwrap();
+        storage
+            .set("key2".to_string(), "value2".to_string())
+            .await
+            .unwrap();
         storage.get(&"key1".to_string()).await.unwrap();
         storage.get(&"key2".to_string()).await.unwrap();
         storage.get(&"key1".to_string()).await.unwrap();
@@ -439,7 +445,10 @@ mod tests {
         let backend = MemoryStorageBackend::<String, String>::default();
         let mut storage = JournaledStorage::new(backend);
 
-        storage.set("key1".to_string(), "value1".to_string()).await.unwrap();
+        storage
+            .set("key1".to_string(), "value1".to_string())
+            .await
+            .unwrap();
         storage.get(&"key1".to_string()).await.unwrap();
 
         assert_eq!(storage.journal_len(), 2);
@@ -458,12 +467,21 @@ mod tests {
         let mut storage = JournaledStorage::new(backend);
 
         // Perform operations on multiple keys
-        storage.set("key1".to_string(), "value1".to_string()).await.unwrap();
-        storage.set("key2".to_string(), "value2".to_string()).await.unwrap();
+        storage
+            .set("key1".to_string(), "value1".to_string())
+            .await
+            .unwrap();
+        storage
+            .set("key2".to_string(), "value2".to_string())
+            .await
+            .unwrap();
         storage.get(&"key1".to_string()).await.unwrap();
         storage.get(&"key2".to_string()).await.unwrap();
         storage.get(&"key1".to_string()).await.unwrap();
-        storage.set("key1".to_string(), "value1b".to_string()).await.unwrap();
+        storage
+            .set("key1".to_string(), "value1b".to_string())
+            .await
+            .unwrap();
 
         // Test get_reads_for_key
         let key1_reads = storage.get_reads_for_key(&"key1".to_string());
@@ -503,8 +521,14 @@ mod tests {
         let backend = MemoryStorageBackend::<String, String>::default();
         let mut storage = JournaledStorage::new(backend);
 
-        storage.set("key1".to_string(), "value1".to_string()).await.unwrap();
-        storage.set("key2".to_string(), "value2".to_string()).await.unwrap();
+        storage
+            .set("key1".to_string(), "value1".to_string())
+            .await
+            .unwrap();
+        storage
+            .set("key2".to_string(), "value2".to_string())
+            .await
+            .unwrap();
         storage.get(&"key1".to_string()).await.unwrap();
         storage.get(&"key3".to_string()).await.unwrap(); // Read non-existent key
 
@@ -533,7 +557,10 @@ mod tests {
         // Create many operations
         for i in 0..100 {
             let key = format!("key{}", i % 10); // 10 unique keys, 10 ops each
-            storage.set(key.clone(), format!("value{}", i)).await.unwrap();
+            storage
+                .set(key.clone(), format!("value{}", i))
+                .await
+                .unwrap();
         }
 
         for i in 0..100 {
@@ -569,11 +596,17 @@ mod tests {
         let mut storage = JournaledStorage::new(backend);
 
         // Interleave reads and writes for the same key
-        storage.set("key1".to_string(), "v1".to_string()).await.unwrap();   // offset 0
-        storage.get(&"key1".to_string()).await.unwrap();                     // offset 1
-        storage.set("key1".to_string(), "v2".to_string()).await.unwrap();   // offset 2
-        storage.get(&"key1".to_string()).await.unwrap();                     // offset 3
-        storage.get(&"key1".to_string()).await.unwrap();                     // offset 4
+        storage
+            .set("key1".to_string(), "v1".to_string())
+            .await
+            .unwrap(); // offset 0
+        storage.get(&"key1".to_string()).await.unwrap(); // offset 1
+        storage
+            .set("key1".to_string(), "v2".to_string())
+            .await
+            .unwrap(); // offset 2
+        storage.get(&"key1".to_string()).await.unwrap(); // offset 3
+        storage.get(&"key1".to_string()).await.unwrap(); // offset 4
 
         let ops = storage.get_operations_for_key(&"key1".to_string());
         assert_eq!(ops.len(), 5);

@@ -1,5 +1,3 @@
-use std::hash::Hash;
-
 use base58::ToBase58;
 use dialog_common::ConditionalSync;
 use serde::{Serialize, de::DeserializeOwned};

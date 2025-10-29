@@ -37,18 +37,18 @@
 ///
 /// ## Key Inference
 ///
-/// The macro infers which keys exist in the tree based on segment specifications:
+/// The macro infers which keys exist in the tree based on specified ranges:
 ///
 /// ```ignore
 /// [..a, c..e, ..f, ..g, ..l]
 /// ```
 ///
 /// This creates:
-/// - Segment `..a`: contains key 'a' only
-/// - Segment `c..e`: contains keys c, d, e (first key explicit)
-/// - Segment `..f`: contains key 'f' only (next after 'e')
-/// - Segment `..g`: contains key 'g' only (next after 'f')
-/// - Segment `..l`: contains keys h, i, j, k, l (starts after 'g')
+/// - Range `..a`: contains key 'a' only
+/// - Range `c..e`: contains keys c, d, e (first key explicit)
+/// - Range `..f`: contains key 'f' only (next after 'e')
+/// - Range `..g`: contains key 'g' only (next after 'f')
+/// - Range `..l`: contains keys h, i, j, k, l (starts after 'g')
 /// - Note: 'b' is NOT in the tree (gap between 'a' and 'c')
 ///
 /// ## Structure Validation
@@ -69,7 +69,7 @@
 /// ];
 ///
 /// assert!(spec.has_boundary("d", 1));  // Index node at height 1
-/// assert!(spec.has_boundary("a", 0));  // Segment at height 0
+/// assert!(spec.has_boundary("a", 0));  // Range at height 0
 /// assert!(!spec.has_boundary("a", 1)); // 'a' doesn't exist at height 1
 /// ```
 ///
@@ -77,21 +77,22 @@
 ///
 /// ```ignore
 /// let spec_a = tree_spec![
-///     [..l]
+///     [                         ..l]
 ///     [..a, ..d, ..e, ..f, ..g, ..l]
 /// ];
 ///
 /// let spec_b = tree_spec![
-///     [..s]
+///     [             ..s]
 ///     [f..f, g..g, h..s]
 /// ];
 ///
 /// // Build trees
-/// let tree_a = spec_a.build_tree(storage.clone()).await?;
-/// let tree_b = spec_b.build_tree(storage.clone()).await?;
+/// let spec_a = spec_a.build(storage.clone()).await?;
+/// let spec_b = spec_b.build(storage.clone()).await?;
 ///
 /// // Test differential
-/// let diff = tree_b.differentiate(&tree_a, storage.clone()).await;
+/// let tree = spec_a.tree().clone();
+/// let delta = tree.differentiate(spec_b.tree());
 /// ```
 ///
 /// In this example:
@@ -113,22 +114,6 @@
 /// - **Visual**: Easy to see the tree shape at a glance
 /// - **Testable**: Reference specific nodes in test assertions
 /// - **Clear**: Documentation and test spec are the same thing
-
-/// Parse a segment specification using range syntax
-/// `..a` = segment ending at 'a' (first key inferred)
-/// `c..e` = segment from 'c' to 'e' (explicit first key)
-#[doc(hidden)]
-#[macro_export]
-macro_rules! parse_segment {
-    // Pattern: first..last (e.g., c..e)
-    ($first:ident .. $last:ident) => {{
-        (Some(stringify!($first)), stringify!($last))
-    }};
-    // Pattern: ..last (e.g., ..a)
-    (.. $last:ident) => {{
-        (None, stringify!($last))
-    }};
-}
 
 /// The `tree_spec!` macro - see module documentation for usage
 #[macro_export]
