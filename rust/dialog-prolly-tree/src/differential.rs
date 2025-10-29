@@ -191,7 +191,6 @@ where
             // So we should expand it if it's >= the range start (it might overlap)
             let is_branch = matches!(node, SparseTreeNode::Node(n) if n.is_branch());
 
-
             let in_range = if is_branch {
                 // For branches: expand if the node might contain children in the range
                 // This means: node.upper_bound() >= range.start (node might have children in range)
@@ -334,7 +333,6 @@ where
         use std::cmp::Ordering;
         let left = &mut self.nodes;
         let right = &mut other.nodes;
-
 
         // Read indices
         let mut at_left = 0;
@@ -621,7 +619,6 @@ where
             }
         }
 
-        // Final pruning: remove non-overlapping nodes from both trees
         Ok(())
     }
 
@@ -1618,7 +1615,6 @@ mod tests {
         .await
         .unwrap();
 
-
         // Run differentiate (journal is automatically enabled after build)
         let host_b = spec_b.tree().clone();
         let diff = host_b.differentiate(spec_a.tree());
@@ -1794,7 +1790,7 @@ mod tests {
 
         let spec_b = tree_spec![
             [                                ..z]
-            [            ..f,      ..p,      ..z]
+            [            ..f,        ..p,    ..z]
             [(..a), ..c, ..f, ..k, ..p, ..t, ..z]
         ]
         .build(storage_b.clone())
@@ -1804,9 +1800,6 @@ mod tests {
         let host_a = spec_a.tree().clone();
         let diff = host_a.differentiate(spec_b.tree());
         let _: Vec<_> = diff.collect().await;
-
-        println!("A {}", spec_a.visualize().await);
-        println!("B {}", spec_b.visualize().await);
 
         spec_a.assert();
         spec_b.assert();
@@ -1832,17 +1825,17 @@ mod tests {
 
         // Scenario: Reverse of test_diff_different_heights
         // Tree B is tall (height 2), Tree A is shallow (height 1)
-        // When B.differentiate(A), we should NOT read branches beyond A's range
-        let spec_b = tree_spec![
-            [                                      ..z]
-            [            ..f,        (..p),      (..z)]
-            [(..a), ..c, ..f, (..k), (..p), (..t), (..z)]
+        // When B.differentiate(A), we still need to read all branches to discover removes
+        let spec_a = tree_spec![
+            [                                ..z]
+            [            ..f,      ..p,      ..z]
+            [(..a), ..c, ..f, ..k, ..p, ..t, ..z]
         ]
         .build(storage_b.clone())
         .await
         .unwrap();
 
-        let spec_a = tree_spec![
+        let spec_b = tree_spec![
             [       ..e]
             [(..a), ..e]
         ]
@@ -1851,13 +1844,10 @@ mod tests {
         .unwrap();
 
         // Differentiate B -> A (taller tree to shallow tree)
-        // Should NOT need to read ..p and ..z branches since they're beyond ..e
-        let host_b = spec_b.tree().clone();
-        let diff = host_b.differentiate(spec_a.tree());
+        // Still need to read all branches to discover remove changes
+        let host_a = spec_a.tree().clone();
+        let diff = host_a.differentiate(spec_b.tree());
         let _: Vec<_> = diff.collect().await;
-
-        println!("B {}", spec_b.visualize().await);
-        println!("A {}", spec_a.visualize().await);
 
         spec_b.assert();
         spec_a.assert();

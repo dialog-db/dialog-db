@@ -524,11 +524,6 @@ impl TreeSpec {
     pub fn assert(&self) {
         let reads = self.storage.backend.get_reads();
 
-        eprintln!("\nJournal reads: {} nodes", reads.len());
-        for (i, hash) in reads.iter().enumerate() {
-            eprintln!("  Read[{}]: {:?}", i, &hash[..4]);
-        }
-
         // Build a set of hashes that were read
         let reads_set: HashSet<[u8; 32]> = reads.iter().copied().collect();
 
