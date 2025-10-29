@@ -1578,7 +1578,7 @@ mod tests {
         // () indicates nodes that should be pruned (not read)
         let spec_a = tree_spec![
             [                  ..l]
-            [(..e), (f..i),      ..l]
+            [(..e), (f..i),    ..l]
         ]
         .build(storage_a.clone())
         .await

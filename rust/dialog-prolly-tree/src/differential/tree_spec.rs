@@ -521,6 +521,10 @@ impl TreeSpec {
         })
     }
 
+    /// Assert that the expected read pattern matches the actual reads.
+    ///
+    /// Panics with a detailed diff if the pattern doesn't match.
+    #[track_caller]
     pub fn assert(&self) {
         let reads = self.storage.backend.get_reads();
 
