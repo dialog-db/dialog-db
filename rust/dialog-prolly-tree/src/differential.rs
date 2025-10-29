@@ -191,21 +191,6 @@ where
             // So we should expand it if it's >= the range start (it might overlap)
             let is_branch = matches!(node, SparseTreeNode::Node(n) if n.is_branch());
 
-            eprintln!(
-                "  expand check: node={:?}, is_branch={}, range={:?}..={:?}",
-                String::from_utf8_lossy(node.upper_bound().bytes()),
-                is_branch,
-                match range.start_bound() {
-                    Bound::Included(k) => format!("{:?}", String::from_utf8_lossy(k.bytes())),
-                    Bound::Excluded(k) => format!(">{:?}", String::from_utf8_lossy(k.bytes())),
-                    Bound::Unbounded => "unbounded".to_string(),
-                },
-                match range.end_bound() {
-                    Bound::Included(k) => format!("{:?}", String::from_utf8_lossy(k.bytes())),
-                    Bound::Excluded(k) => format!("<{:?}", String::from_utf8_lossy(k.bytes())),
-                    Bound::Unbounded => "unbounded".to_string(),
-                }
-            );
 
             let in_range = if is_branch {
                 // For branches: expand if the node might contain children in the range
@@ -247,21 +232,10 @@ where
                     // If it's a branch, expand it
                     if node.is_branch() {
                         if let Ok(refs) = node.references() {
-                            eprintln!(
-                                "EXPAND: boundary={:?} into {} children",
-                                String::from_utf8_lossy(node.upper_bound().bytes()),
-                                refs.len()
-                            );
                             // Convert references to SparseTreeNode::Ref
                             let children: Vec<SparseTreeNode<F, H, Key, Value, Hash>> = refs
                                 .iter()
-                                .map(|r| {
-                                    eprintln!(
-                                        "  -> child boundary={:?}",
-                                        String::from_utf8_lossy(r.upper_bound().bytes())
-                                    );
-                                    SparseTreeNode::Ref(r.clone())
-                                })
+                                .map(|r| SparseTreeNode::Ref(r.clone()))
                                 .collect();
 
                             let num_children = children.len();
@@ -278,21 +252,10 @@ where
                 SparseTreeNode::Node(node) => {
                     if node.is_branch() {
                         if let Ok(refs) = node.references() {
-                            eprintln!(
-                                "EXPAND: boundary={:?} into {} children",
-                                String::from_utf8_lossy(node.upper_bound().bytes()),
-                                refs.len()
-                            );
                             // Convert references to SparseTreeNode::Ref
                             let children: Vec<SparseTreeNode<F, H, Key, Value, Hash>> = refs
                                 .iter()
-                                .map(|r| {
-                                    eprintln!(
-                                        "  -> child boundary={:?}",
-                                        String::from_utf8_lossy(r.upper_bound().bytes())
-                                    );
-                                    SparseTreeNode::Ref(r.clone())
-                                })
+                                .map(|r| SparseTreeNode::Ref(r.clone()))
                                 .collect();
 
                             let num_children = children.len();
@@ -372,29 +335,6 @@ where
         let left = &mut self.nodes;
         let right = &mut other.nodes;
 
-        eprintln!(
-            "PRUNE: left={} nodes, right={} nodes",
-            left.len(),
-            right.len()
-        );
-        for (i, node) in left.iter().enumerate() {
-            let hash_bytes = node.hash().bytes();
-            eprintln!(
-                "  Left[{}]: boundary={:?}, hash=[{:?}]",
-                i,
-                String::from_utf8_lossy(node.upper_bound().bytes()),
-                &hash_bytes[..4]
-            );
-        }
-        for (i, node) in right.iter().enumerate() {
-            let hash_bytes = node.hash().bytes();
-            eprintln!(
-                "  Right[{}]: boundary={:?}, hash=[{:?}]",
-                i,
-                String::from_utf8_lossy(node.upper_bound().bytes()),
-                &hash_bytes[..4]
-            );
-        }
 
         // Read indices
         let mut at_left = 0;
@@ -409,16 +349,9 @@ where
             let left_node = &left[at_left];
             let right_node = &right[at_right];
 
-            let left_boundary = String::from_utf8_lossy(left_node.upper_bound().bytes());
-            let right_boundary = String::from_utf8_lossy(right_node.upper_bound().bytes());
-
             match left_node.upper_bound().cmp(right_node.upper_bound()) {
                 Ordering::Less => {
                     // left node is unique → keep it
-                    eprintln!(
-                        "  Compare: {:?} < {:?} - keeping left",
-                        left_boundary, right_boundary
-                    );
                     if to_left != at_left {
                         left.swap(to_left, at_left);
                     }
@@ -427,10 +360,6 @@ where
                 }
                 Ordering::Greater => {
                     // right node is unique → keep it
-                    eprintln!(
-                        "  Compare: {:?} > {:?} - keeping right",
-                        left_boundary, right_boundary
-                    );
                     if to_right != at_right {
                         right.swap(to_right, at_right);
                     }
@@ -441,10 +370,6 @@ where
                     // Same key range — possible shared content
                     if left_node.hash() != right_node.hash() {
                         // Different content → keep both
-                        eprintln!(
-                            "  Compare: {:?} - different hashes - keeping both",
-                            left_boundary
-                        );
                         if to_left != at_left {
                             left.swap(to_left, at_left);
                         }
@@ -453,8 +378,6 @@ where
                         }
                         to_left += 1;
                         to_right += 1;
-                    } else {
-                        eprintln!("  Compare: {:?} - SAME hash - PRUNING both", left_boundary);
                     }
                     // else identical (shared) → skip both
                     at_left += 1;
@@ -634,12 +557,11 @@ where
                         // Source node has smaller boundary
                         // Expand ONLY the TARGET node (larger boundary) to see if it contains
                         // something matching the source node
-                        eprintln!(
-                            "  COMPARE: source={:?} < target={:?} → expanding target",
-                            String::from_utf8_lossy(source_bound.bytes()),
-                            String::from_utf8_lossy(target_bound.bytes())
-                        );
-                        if target.expand(..=target_bound.clone()).await? {
+                        // Use exact range to expand only this specific node
+                        if target
+                            .expand(target_bound.clone()..=target_bound.clone())
+                            .await?
+                        {
                             expanded = true;
                             break; // Restart comparison after expansion
                         }
@@ -650,12 +572,11 @@ where
                         // Target node has smaller boundary
                         // Expand ONLY the SOURCE node (larger boundary) to see if it contains
                         // something matching the target node
-                        eprintln!(
-                            "  COMPARE: source={:?} > target={:?} → expanding source",
-                            String::from_utf8_lossy(source_bound.bytes()),
-                            String::from_utf8_lossy(target_bound.bytes())
-                        );
-                        if source.expand(..=source_bound.clone()).await? {
+                        // Use exact range to expand only this specific node
+                        if source
+                            .expand(source_bound.clone()..=source_bound.clone())
+                            .await?
+                        {
                             expanded = true;
                             break; // Restart comparison after expansion
                         }
@@ -666,10 +587,17 @@ where
                         // Same boundary - check if hashes differ
                         if source.nodes[source_idx].hash() != target.nodes[target_idx].hash() {
                             // Different hashes - need to expand both to find the difference
-                            if source.expand(..=source_bound.clone()).await? {
+                            // Use exact ranges to expand only these specific nodes
+                            if source
+                                .expand(source_bound.clone()..=source_bound.clone())
+                                .await?
+                            {
                                 expanded = true;
                             }
-                            if target.expand(..=target_bound.clone()).await? {
+                            if target
+                                .expand(target_bound.clone()..=target_bound.clone())
+                                .await?
+                            {
                                 expanded = true;
                             }
                             // Don't increment - need to recompare after expansion
@@ -693,6 +621,7 @@ where
             }
         }
 
+        // Final pruning: remove non-overlapping nodes from both trees
         Ok(())
     }
 
@@ -1689,10 +1618,6 @@ mod tests {
         .await
         .unwrap();
 
-        eprintln!("\n========== TREE A ==========");
-        eprintln!("{}", spec_a.visualize().await);
-        eprintln!("\n========== TREE B ==========");
-        eprintln!("{}", spec_b.visualize().await);
 
         // Run differentiate (journal is automatically enabled after build)
         let host_b = spec_b.tree().clone();
@@ -1868,9 +1793,9 @@ mod tests {
         .unwrap();
 
         let spec_b = tree_spec![
-            [                                        ..z]
-            [            ..f,        (..p),        (..z)]
-            [(..a), ..c, ..f, (..k), (..p), (..t), (..z)]
+            [                                ..z]
+            [            ..f,      ..p,      ..z]
+            [(..a), ..c, ..f, ..k, ..p, ..t, ..z]
         ]
         .build(storage_b.clone())
         .await
@@ -1885,6 +1810,57 @@ mod tests {
 
         spec_a.assert();
         spec_b.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_diff_different_heights_reverse() -> Result<()> {
+        use crate::tree_spec;
+
+        let backend = MemoryStorageBackend::default();
+
+        let storage_a = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        let storage_b = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Scenario: Reverse of test_diff_different_heights
+        // Tree B is tall (height 2), Tree A is shallow (height 1)
+        // When B.differentiate(A), we should NOT read branches beyond A's range
+        let spec_b = tree_spec![
+            [                                      ..z]
+            [            ..f,        (..p),      (..z)]
+            [(..a), ..c, ..f, (..k), (..p), (..t), (..z)]
+        ]
+        .build(storage_b.clone())
+        .await
+        .unwrap();
+
+        let spec_a = tree_spec![
+            [       ..e]
+            [(..a), ..e]
+        ]
+        .build(storage_a.clone())
+        .await
+        .unwrap();
+
+        // Differentiate B -> A (taller tree to shallow tree)
+        // Should NOT need to read ..p and ..z branches since they're beyond ..e
+        let host_b = spec_b.tree().clone();
+        let diff = host_b.differentiate(spec_a.tree());
+        let _: Vec<_> = diff.collect().await;
+
+        println!("B {}", spec_b.visualize().await);
+        println!("A {}", spec_a.visualize().await);
+
+        spec_b.assert();
+        spec_a.assert();
 
         Ok(())
     }
