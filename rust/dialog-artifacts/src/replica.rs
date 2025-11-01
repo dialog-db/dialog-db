@@ -10,8 +10,11 @@ use dialog_storage::{
     StorageBackend,
 };
 
+use futures_util::stream::ForEachConcurrent;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::collections::HashSet;
 use std::fmt::{Display, Formatter, format};
+use std::hash::Hash;
 use std::marker::PhantomData;
 use thiserror::Error;
 
@@ -44,56 +47,100 @@ impl From<NodeReference> for Blake3Hash {
 /// Site identifier used to reference remotes.
 pub type Site = String;
 
+/// Logical timestamp used to denote dialog transactions. It takes inspiration
+/// from automerge which tags lamport timestamps with origin information. It
+/// takes inspiration from [Hybrid Logical Clocks (HLC)](https://sergeiturukin.com/2017/06/26/hybrid-logical-clocks.html)
+/// and splits timestamp into two components `period` representing coordinated
+/// component of the time and `moment` representing an uncoordinated local
+/// time component. This construction allows us to capture synchronization
+/// points allowing us to prioritize replicas that are actively collaborating
+/// over those that are not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Occurence {
+    /// Site of this occurence.
+    site: Principal,
+
+    /// Logical coordinated time component denoting a last synchronization
+    /// cycle.
+    period: usize,
+
+    /// Local uncoordinated time component denoting a moment within a
+    /// period at which occurrence happened.
+    moment: usize,
+}
+
 /// A [`Revision`] represents a concrete state of the dialog instance. It is
 /// kind of like git commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Revision {
-    /// Reference for the source tree at the beginning of the epoch.
-    source: NodeReference,
-
-    /// Reference for the root of the search tree.
-    tree: NodeReference,
-
-    /// Epoch when changes have being made
-    epoch: usize,
-
-    /// Issuer of this revision.
+    /// Site where this revision was created.It as expected to be a signing
+    /// principal representing a tool acting on author's behalf. In the future
+    /// I expect we'll have signed delegation chain from user to this site.
     issuer: Principal,
 
-    /// Number of transactions made by this issuer since the beginning of
-    /// this epoch
-    since: usize,
+    /// Reference the root of the search tree.
+    tree: NodeReference,
 
-    /// Previous revision this replaced.
-    cause: Option<Edition<Revision>>,
+    /// Set of revisions this is based of. It can be an empty set if this is
+    /// a first revision, but more commonly it will point to a previous revision
+    /// it is based on. If branch tracks multiple concurrent upstreams it will
+    /// contain a set of revisions.
+    ///
+    /// It is effectively equivalent of of `parents` in git commit objects.
+    cause: HashSet<Edition<Revision>>,
+
+    /// Period indicating when this revision was created. This MUST be derived
+    /// from the `cause`al revisions and it must be greater by one than the
+    /// maximum period of the `cause`al revisions that have different `by` from
+    /// this revision. More simply we create a new period whenever we
+    /// synchronize.
+    period: usize,
+
+    /// Moment at which this revision was created. It represents a number of
+    /// transactions that have being made in this period. If `cause`al revisions
+    /// have a revision from same `by` this MUST be value greater by one,
+    /// otherwise it should be `0`. This implies that when we sync we increment
+    /// `period` and reset `moment` to `0`. And when we create a transaction we
+    /// increment `moment` by one and keep the same `period`.
+    moment: usize,
 }
 
 impl Revision {
+    /// Issuer of this revision.
+    pub fn issuer(&self) -> &Principal {
+        &self.issuer
+    }
+
     /// The component of the [`Revision`] that corresponds to the root of the
     /// search index.
     pub fn tree(&self) -> &NodeReference {
         &self.tree
     }
 
-    /// Epoch when changes have being made
-    pub fn epoch(&self) -> &usize {
-        &self.epoch
-    }
-
-    /// Issuer of this revision.
-    pub fn issuer(&self) -> &Principal {
-        &self.issuer
+    /// Period when changes have being made
+    pub fn period(&self) -> &usize {
+        &self.period
     }
 
     /// Number of transactions made by this issuer since the beginning of
     /// this epoch
-    pub fn since(&self) -> &usize {
-        &self.since
+    pub fn moment(&self) -> &usize {
+        &self.moment
     }
 
     /// Previous revision this replaced.
-    pub fn cause(&self) -> &Option<Edition<Revision>> {
+    pub fn cause(&self) -> &HashSet<Edition<Revision>> {
         &self.cause
+    }
+}
+
+impl From<Revision> for Occurence {
+    fn from(revision: Revision) -> Self {
+        Occurence {
+            site: revision.issuer,
+            period: revision.period,
+            moment: revision.moment,
+        }
     }
 }
 
@@ -125,18 +172,35 @@ impl Record for RemoteBranchState {
 
 /// Unique name for the branch
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct RemoteBranchId {
-    site: Site,
-    branch: BranchId,
-}
+pub struct RemoteBranchId(String);
 impl RemoteBranchId {
-    pub fn id(&self) -> String {
-        format!("{}@{}", self.branch, self.site)
+    pub fn new(site: Site, BranchId(name): BranchId) -> Self {
+        Self(format!("{}@{}", name, site))
+    }
+
+    pub fn id(&self) -> &str {
+        &self.0
+    }
+
+    pub fn site(&self) -> Site {
+        // Parse and return the site part after '@'
+        self.0
+            .split_once('@')
+            .map(|(_, site)| site.to_string())
+            .expect("RemoteBranchId must contain '@'")
+    }
+
+    pub fn branch(&self) -> BranchId {
+        // Parse and return the branch part before '@'
+        self.0
+            .split_once('@')
+            .map(|(branch, _)| BranchId(branch.to_string()))
+            .expect("RemoteBranchId must contain '@'")
     }
 }
 impl KeyType for RemoteBranchId {
     fn bytes(&self) -> &[u8] {
-        self.id().as_bytes()
+        self.0.as_bytes()
     }
 }
 impl TryFrom<Vec<u8>> for RemoteBranchId {
@@ -144,18 +208,17 @@ impl TryFrom<Vec<u8>> for RemoteBranchId {
 
     fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
         let id = String::from_utf8(bytes)?;
-        let (site, branch) = match id.split("/").collect::<Vec<&str>>().as_slice() {
-            [site, id] => (site.to_string(), BranchId(id.to_string())),
-            [site, path @ ..] => (site.to_string(), BranchId(path.join("/"))),
-            _ => panic!("must have two components"),
+        let (site, branch) = match id.split("@").collect::<Vec<&str>>().as_slice() {
+            [branch_str, site] => (site.to_string(), BranchId(branch_str.to_string())),
+            _ => panic!("must have format: branch@site"),
         };
 
-        Ok(RemoteBranchId { site, branch })
+        Ok(RemoteBranchId::new(site, branch))
     }
 }
 impl Display for RemoteBranchId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}@{}", self.branch, self.site)
+        write!(f, "{}", self.0)
     }
 }
 
@@ -169,15 +232,18 @@ pub struct BranchState {
     /// Free-form human-readable description of this fork.
     description: String,
 
-    /// Local revision of this branch.
+    /// Current revision associated with this branch.
     revision: Revision,
 
-    /// An upstream through which updates get propagated if this fork
-    /// has one.
+    /// Root of the search tree our this revision is based off.
+    base: NodeReference,
+
+    /// An upstream through which updates get propagated. Branch may
+    /// not have an upstream.
     upstream: Option<Upstream>,
 
     /// Previous state of this branch.
-    cause: Option<Edition<BranchState>>,
+    prior: Option<Edition<BranchState>>,
 }
 
 /// Unique name for the branch
@@ -214,17 +280,19 @@ impl Record for BranchState {
         Ok((Edition::new(out), bytes))
     }
     fn cause(&self) -> Option<&Self::Edition> {
-        self.cause.as_ref()
+        self.prior.as_ref()
     }
 }
 
 impl BranchState {
     /// Create a new fork from the given revision.
     pub fn new(id: BranchId, description: Option<String>) -> Self {
+        let revision = Revision::default();
         Self {
             description: description.unwrap_or_else(|| id.0.clone()),
-            revision: Revision::default(),
-            cause: None,
+            base: revision.tree.clone(),
+            revision,
+            prior: None,
             upstream: None,
             id,
         }
@@ -251,16 +319,25 @@ impl BranchState {
 
     /// Cause of this branch.
     pub fn cause(&self) -> Option<&Edition<BranchState>> {
-        self.cause.as_ref()
+        self.prior.as_ref()
     }
 }
 
 /// Represents an open fork that can be operated on.
 pub struct Branch<'a, P: Platform> {
     state: BranchState,
+    issuer: Principal,
     platform: &'a P,
 }
 impl<'a, P: Platform> Branch<'a, P> {
+    pub fn new(state: BranchState, platform: &'a P) -> Self {
+        Self {
+            issuer: blake3::hash(state.id().bytes()).into(),
+            state,
+            platform,
+        }
+    }
+
     /// Loads a branch with a given id or creates one if it does not exist.
     pub async fn open(id: &BranchId, platform: &'a P) -> Result<Self, ReplicaError> {
         let state = platform
@@ -270,7 +347,7 @@ impl<'a, P: Platform> Branch<'a, P> {
             .map_err(|e| ReplicaError::storage_error(Capability::ResolveBranch, e))?
             .unwrap_or_else(|| BranchState::new(id.clone(), None));
 
-        Ok(Self { state, platform })
+        Ok(Self::new(state, platform))
     }
 
     /// Loads a branch from the the the underlaying replica, if branch with a
@@ -282,7 +359,7 @@ impl<'a, P: Platform> Branch<'a, P> {
             .await
             .map_err(|e| ReplicaError::storage_error(Capability::ResolveBranch, e))?
         {
-            Ok(Self { state, platform })
+            Ok(Self::new(state, platform))
         } else {
             Err(ReplicaError::BranchNotFound { id })
         }
@@ -291,6 +368,40 @@ impl<'a, P: Platform> Branch<'a, P> {
     /// Returns unique identifier of this fork.
     pub fn id(&self) -> &BranchId {
         &self.state.id
+    }
+
+    /// Resets this branch to a given revision and a base tree.
+    pub async fn reset(
+        &mut self,
+        revision: Revision,
+        base: NodeReference,
+    ) -> Result<&mut Self, ReplicaError> {
+        // derive edition from the current state.
+        let (current, _) = self
+            .state
+            .encode()
+            .await
+            .map_err(|e| ReplicaError::StorageError {
+                capability: Capability::ArchiveError,
+                cause: e,
+            })?;
+
+        // create new edition from the prior state.
+        let state = BranchState {
+            revision,
+            prior: Some(current),
+            id: self.state.id.clone(),
+            description: self.state.description.clone(),
+            upstream: self.state.upstream.clone(),
+            base,
+        };
+
+        self.platform.branches().write(state.clone()).await;
+
+        // If we were able to write a new state update
+        self.state = state;
+
+        Ok(self)
     }
 
     /// Fetches remote reference of this fork. If this branch has no upstream
@@ -309,7 +420,6 @@ impl<'a, P: Platform> Branch<'a, P> {
                         .map_err(|e| ReplicaError::storage_error(Capability::ResolveBranch, e))?;
 
                     if let Some(state) = state {
-                        // TODO: Revision does not fit a desired structure
                         Ok(Some(state.revision().clone()))
                     } else {
                         Err(ReplicaError::BranchNotFound {
@@ -318,32 +428,55 @@ impl<'a, P: Platform> Branch<'a, P> {
                     }
                 }
                 Origin::Remote(remote) => {
-                    let _address = remote.address();
-
-                    let revision = self
+                    // Read revision from the remote site.
+                    let upstream = self
                         .platform
-                        .revisions()
-                        .get(&(self.id().clone(), Some(remote.id().into())))
+                        .announcements()
+                        .read(&(remote.id.clone(), self.id().clone()))
                         .await
                         .map_err(|error| ReplicaError::StorageError {
                             capability: Capability::ResolveRevision,
                             cause: error,
                         })?;
 
-                    if let Some(revision) = &revision {
-                        // update revision based on what we have fetched.
-                        self.platform
-                            .revisions()
-                            .set(
-                                (self.id().clone(), Some(remote.id().into())),
-                                revision.clone(),
-                            )
-                            .await
-                            .map_err(|error| ReplicaError::StorageError {
-                                capability: Capability::UpdateRevision,
-                                cause: error,
-                            })?;
-                    }
+                    let local = self
+                        .platform
+                        .revisions()
+                        .read(&(remote.id.clone(), self.id().clone()))
+                        .await
+                        .map_err(|error| ReplicaError::StorageError {
+                            capability: Capability::ResolveBranch,
+                            cause: error,
+                        })?;
+
+                    let revision = match (upstream, local) {
+                        (Some(current), Some(prior)) => {
+                            self.platform
+                                .revisions()
+                                .replace(prior, current.clone())
+                                .await
+                                .map_err(|error| ReplicaError::StorageError {
+                                    capability: Capability::UpdateRevision,
+                                    cause: error,
+                                })?;
+
+                            Some(current)
+                        }
+                        (Some(current), None) => {
+                            self.platform
+                                .revisions()
+                                .write(current.clone())
+                                .await
+                                .map_err(|error| ReplicaError::StorageError {
+                                    capability: Capability::UpdateRevision,
+                                    cause: error,
+                                })?;
+
+                            Some(current)
+                        }
+                        (None, Some(prior)) => Some(prior),
+                        (None, None) => None,
+                    };
 
                     Ok(revision)
                 }
@@ -355,6 +488,118 @@ impl<'a, P: Platform> Branch<'a, P> {
         }
     }
 
+    pub async fn pull(&mut self) -> Result<Option<&Revision>, ReplicaError> {
+        if self.state.upstream.is_some() {
+            if let Some(base) = self.fetch().await? {
+                // If revision has changed since our last pull
+                // we got to rebase our changes
+                if self.state.base != base.tree {
+                    let archive = self.platform.archive();
+                    // load upstream tree into memory
+                    let mut tree: Index<Key, Datum, P::Storage> =
+                        Tree::from_hash(base.tree.hash(), archive.clone())
+                            .await
+                            .map_err(|error| ReplicaError::StorageError {
+                                capability: Capability::ResolveBranch,
+                                cause: error.into(),
+                            })?;
+
+                    // Integrate local changes into an upstream tree.
+                    tree.integrate(self.differentiate()).await;
+
+                    // Compute a new revision and replace the local one
+                    let (period, moment) = if base.issuer == self.issuer {
+                        (base.period, base.moment + 1)
+                    } else {
+                        (base.period + 1, 0)
+                    };
+
+                    self.reset(
+                        Revision {
+                            issuer: self.issuer,
+                            tree: NodeReference(tree.hash().expect("should have hash").clone()),
+                            cause: HashSet::from([Edition::<Revision>::new(
+                                base.tree.hash().clone(),
+                            )]),
+                            period,
+                            moment,
+                        },
+                        base.tree.clone(),
+                    )
+                    .await;
+
+                    Ok(Some(&self.state.revision))
+                }
+                // if base is the same as our last revision there
+                // is nothing to do.
+                else {
+                    Ok(None)
+                }
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn push(&mut self) -> Result<&mut Self, ReplicaError> {
+        if let Some(upstream) = &self.state.upstream {
+            let revision = self.state.revision.clone();
+            match &upstream.origin {
+                Origin::Local => {
+                    if upstream.id() != self.id() {
+                        // Load target branch that we will update.
+                        let mut target = Branch::load(upstream.id().clone(), self.platform).await?;
+                        // And reset it's revision to the current branch's revision
+                        target.reset(revision, target.state.base.clone()).await?;
+                    }
+                    return Ok(self);
+                }
+                Origin::Remote(remote) => {
+                    // announce new revision to the collaborators
+                    self.platform
+                        .announcements()
+                        .write(revision.clone())
+                        .await
+                        .map_err(|e| ReplicaError::PushFailed { cause: e })?;
+                    // if we were able to publish the revision we need to
+                    // update local state
+                    self.platform
+                        .revisions()
+                        .write(revision)
+                        .await
+                        .map_err(|cause| ReplicaError::StorageError {
+                            capability: Capability::ArchiveError,
+                            cause,
+                        })?;
+                }
+            };
+        }
+        return Ok(self);
+    }
+
+    pub async fn sync(&mut self) -> Result<&mut Self, ReplicaError> {
+        // try pushing 10 times if all fail due to concurrency we
+        // propagate error otherwise keep retrying.
+        for attempt in 0..10 {
+            match self.push().await {
+                Ok(_) => {
+                    return Ok(self);
+                }
+                Err(ReplicaError::PushFailed { cause }) => {
+                    self.pull().await?;
+                    if attempt == 9 {
+                        return Err(ReplicaError::PushFailed { cause })?;
+                    }
+                }
+                Err(reason) => return Err(reason),
+            };
+        }
+
+        return Ok(self);
+    }
+
     /// Computes all the changes that have occured on this branch since last
     /// pull. It assumes that current revision is based of the base revision
     /// and that subtrees that were updated are available locally, which would
@@ -362,7 +607,7 @@ impl<'a, P: Platform> Branch<'a, P> {
     pub fn differentiate(&self) -> impl Differential<Key, State<Datum>> {
         let archive = self.platform.archive();
         stream! {
-            let before:Index<Key, Datum, P::Storage> = Tree::from_hash(self.state.revision().source.hash(), archive.clone()).await?;
+            let before:Index<Key, Datum, P::Storage> = Tree::from_hash(self.state.base.hash(), archive.clone()).await?;
             let after:Index<Key, Datum, P::Storage> = Tree::from_hash(self.state.revision().tree.hash(), archive.clone()).await?;
 
             let diff = before.differentiate(&after);
@@ -403,6 +648,12 @@ pub struct Upstream {
     origin: Origin,
 }
 
+impl Upstream {
+    pub fn id(&self) -> &BranchId {
+        &self.id
+    }
+}
+
 /// Describes origin of the replica that is either local or a remote.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Origin {
@@ -433,6 +684,13 @@ impl<T> std::fmt::Debug for Edition<T> {
         f.debug_tuple("Edition").field(&self.0).finish()
     }
 }
+
+impl<T> Hash for Edition<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
 impl<T> PartialEq for Edition<T> {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
@@ -485,6 +743,15 @@ trait TransactionalMemory: ConditionalSync + 'static {
     /// record has a hash corresponding to the current record. If assumed record
     /// does not match existing record error should be returned.
     async fn write(&mut self, record: Self::Record) -> Result<(), Self::Error>;
+
+    /// Performs an optimistic overwrite of a record expecting that the currently
+    /// record has a hash corresponding to the current record. If assumed record
+    /// does not match existing record error should be returned.
+    async fn replace(
+        &mut self,
+        last: Self::Record,
+        current: Self::Record,
+    ) -> Result<(), Self::Error>;
 }
 
 trait Record:
@@ -514,22 +781,19 @@ pub trait Platform {
         + ConditionalSync
         + 'static;
 
-    /// Revision information for both local and remote replicas.
-    type Revisions: StorageBackend<Key = (BranchId, Option<Site>), Value = Revision, Error = DialogStorageError>;
+    /// Revisions for the remote branches, roughly equivalent to .git/refs/remotes/*
+    type RemoteBranches: TransactionalMemory<Key = (Site, BranchId), Record = Revision, Error = DialogStorageError>;
 
-    /// Revisions represents a storage for tracking mutable references across
-    /// local and remote replicas.
-    type Releases: AtomicStorageBackend<
-            Key = (BranchId, Option<Site>),
-            Value = Revision,
-            Error = DialogStorageError,
-        >;
+    /// Revisions for local branches, and their configuration. It is roughly
+    /// equivalent to .git/refs/heads/* combined with .git/config
+    type LocalBranches: TransactionalMemory<Key = BranchId, Record = BranchState, Error = DialogStorageError>;
 
-    /// Persisted information about branches.
-    type Branches: TransactionalMemory<Key = BranchId, Record = BranchState, Error = DialogStorageError>;
+    /// Abstraction for communicating with remotes allowing us to read remote
+    /// revisions and write them.
+    type Announcements: TransactionalMemory<Key = (Site, BranchId), Record = Revision, Error = DialogStorageError>;
 
-    /// State tracking all the remotes
-    type Remotes: StorageBackend<Key = Site, Value = Remote, Error = DialogStorageError>
+    /// State tracking all the remote info
+    type Remotes: TransactionalMemory<Key = Site, Record = Remote, Error = DialogStorageError>
         + ConditionalSync
         + 'static;
 
@@ -539,15 +803,15 @@ pub trait Platform {
 
     /// Gets a reference to revision store.
     #[allow(clippy::mut_from_ref)]
-    fn revisions(&self) -> &mut Self::Revisions;
+    fn announcements(&self) -> &mut Self::Announcements;
 
     /// Gets a reference to release store.
     #[allow(clippy::mut_from_ref)]
-    fn releases(&self) -> &mut Self::Releases;
+    fn revisions(&self) -> &mut Self::RemoteBranches;
 
     /// Gets a reference to forks store.
     #[allow(clippy::mut_from_ref)]
-    fn branches(&self) -> &mut Self::Branches;
+    fn branches(&self) -> &mut Self::LocalBranches;
 
     /// Gets a reference to remotes store.
     #[allow(clippy::mut_from_ref)]
@@ -594,6 +858,13 @@ pub enum ReplicaError {
         /// The ID of the branch that has no upstream
         id: BranchId,
     },
+
+    /// Pushing a revision failed
+    #[error("Pushing revision failed cause {cause}")]
+    PushFailed {
+        /// The underlying error
+        cause: DialogStorageError,
+    },
 }
 
 impl ReplicaError {
@@ -613,6 +884,8 @@ pub enum Capability {
     ResolveRevision,
     /// Failed while updating a revision
     UpdateRevision,
+
+    ArchiveError,
 }
 impl Display for Capability {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -620,6 +893,7 @@ impl Display for Capability {
             Capability::ResolveBranch => write!(f, "ResolveBranch"),
             Capability::ResolveRevision => write!(f, "ResolveRevision"),
             Capability::UpdateRevision => write!(f, "UpdateRevision"),
+            Capability::ArchiveError => write!(f, "ArchiveError"),
         }
     }
 }

@@ -180,7 +180,6 @@ where
     ) -> Result<(), DialogProllyTreeError>
     where
         Changes: crate::differential::Differential<Key, Value>,
-        Value: AsRef<[u8]>,
     {
         use futures_util::StreamExt;
 
@@ -204,6 +203,7 @@ where
                                     // Same value - no-op (idempotent)
                                 } else {
                                     // Different values - resolve conflict by comparing hashes
+
                                     let existing_hash = existing_value.hash();
                                     let new_hash = entry.value.hash();
 

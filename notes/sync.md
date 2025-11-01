@@ -342,36 +342,34 @@ impl<B: Backend> Replica<B> {
         if let Some(upstream) = self.branch.upstream {
             let revisions = self.backend.revisions();
             loop {
-                match self {
-                    // capture because current branch can change while
-                    // we're pushing
-                    let revision = self.current.branch.clone();
-                    let origin = if self.origin.isEmpty() {
-                        None
-                    } else {
-                        Some(self.origin.clone())
-                    };
+                // capture because current branch can change while
+                // we're pushing
+                let revision = self.current.branch.clone();
+                let origin = if self.origin.isEmpty() {
+                    None
+                } else {
+                    Some(self.origin.clone())
+                };
 
-                    let upgrade = revisions.swap(
-                        upstream.clone(),
-                        revision.clone(),
-                        origin
-                    );
+                let upgrade = revisions.swap(
+                    upstream.clone(),
+                    revision.clone(),
+                    origin
+                );
 
-                    match upgrade {
-                        // if swapped successfully we've converged
-                        Ok(_) => {
-                            self.branch.origin = revision;
-                        }
-                        // if revision has shanged upstream we need
-                        // to rebase our changes on top.
-                        Err(Swap::RevisionMismatch { actual, .. }) => {
-                            self.rebase(actual);
-                        }
-                        // Other errors propagate.
-                        Err(err) => {
-                            return Err(err);
-                        }
+                match upgrade {
+                    // if swapped successfully we've converged
+                    Ok(_) => {
+                        self.branch.origin = revision;
+                    }
+                    // if revision has shanged upstream we need
+                    // to rebase our changes on top.
+                    Err(Swap::RevisionMismatch { actual, .. }) => {
+                        self.rebase(actual);
+                    }
+                    // Other errors propagate.
+                    Err(err) => {
+                        return Err(err);
                     }
                 }
             }
