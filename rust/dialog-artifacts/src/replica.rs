@@ -12,7 +12,7 @@ use dialog_storage::{
 
 use futures_util::stream::ForEachConcurrent;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter, format};
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -151,7 +151,7 @@ impl From<Revision> for Occurence {
 pub struct RemoteBranchState {
     id: RemoteBranchId,
     revision: Revision,
-    cause: Option<Edition<RemoteBranchState>>,
+    prior: Option<Edition<RemoteBranchState>>,
 }
 impl Record for RemoteBranchState {
     type Key = RemoteBranchId;
@@ -166,41 +166,37 @@ impl Record for RemoteBranchState {
         Ok((Edition::new(out), bytes))
     }
     fn cause(&self) -> Option<&Self::Edition> {
-        self.cause.as_ref()
+        self.prior.as_ref()
     }
 }
 
 /// Unique name for the branch
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct RemoteBranchId(String);
+pub struct RemoteBranchId {
+    site: Site,
+    branch: BranchId,
+    id: String,
+}
 impl RemoteBranchId {
-    pub fn new(site: Site, BranchId(name): BranchId) -> Self {
-        Self(format!("{}@{}", name, site))
+    /// Create a new RemoteBranchId
+    pub fn new(site: Site, branch: BranchId) -> Self {
+        let id = format!("{}@{}", branch.0, site);
+        Self { site, branch, id }
     }
 
-    pub fn id(&self) -> &str {
-        &self.0
+    /// Site of this RemoteBranchId
+    pub fn site(&self) -> &Site {
+        &self.site
     }
 
-    pub fn site(&self) -> Site {
-        // Parse and return the site part after '@'
-        self.0
-            .split_once('@')
-            .map(|(_, site)| site.to_string())
-            .expect("RemoteBranchId must contain '@'")
-    }
-
-    pub fn branch(&self) -> BranchId {
-        // Parse and return the branch part before '@'
-        self.0
-            .split_once('@')
-            .map(|(branch, _)| BranchId(branch.to_string()))
-            .expect("RemoteBranchId must contain '@'")
+    /// Branch of this RemoteBranchId
+    pub fn branch(&self) -> &BranchId {
+        &self.branch
     }
 }
 impl KeyType for RemoteBranchId {
     fn bytes(&self) -> &[u8] {
-        self.0.as_bytes()
+        self.id.as_bytes()
     }
 }
 impl TryFrom<Vec<u8>> for RemoteBranchId {
@@ -208,8 +204,8 @@ impl TryFrom<Vec<u8>> for RemoteBranchId {
 
     fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
         let id = String::from_utf8(bytes)?;
-        let (site, branch) = match id.split("@").collect::<Vec<&str>>().as_slice() {
-            [branch_str, site] => (site.to_string(), BranchId(branch_str.to_string())),
+        let (branch, site) = match id.split("@").collect::<Vec<&str>>().as_slice() {
+            [branch_str, site_str] => (BranchId(branch_str.to_string()), site_str.to_string()),
             _ => panic!("must have format: branch@site"),
         };
 
@@ -218,7 +214,7 @@ impl TryFrom<Vec<u8>> for RemoteBranchId {
 }
 impl Display for RemoteBranchId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.id)
     }
 }
 
@@ -248,7 +244,7 @@ pub struct BranchState {
 
 /// Unique name for the branch
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-struct BranchId(String);
+pub struct BranchId(String);
 impl KeyType for BranchId {
     fn bytes(&self) -> &[u8] {
         self.0.as_bytes()
@@ -449,34 +445,45 @@ impl<'a, P: Platform> Branch<'a, P> {
                             cause: error,
                         })?;
 
-                    let revision = match (upstream, local) {
-                        (Some(current), Some(prior)) => {
-                            self.platform
-                                .revisions()
-                                .replace(prior, current.clone())
-                                .await
-                                .map_err(|error| ReplicaError::StorageError {
-                                    capability: Capability::UpdateRevision,
-                                    cause: error,
+                    let revision =
+                        match (upstream, local) {
+                            (Some(current), Some(local)) => {
+                                let (prior, _) = local.encode().await.map_err(|e| {
+                                    ReplicaError::StorageError {
+                                        capability: Capability::EncodeError,
+                                        cause: e,
+                                    }
                                 })?;
+                                self.platform
+                                    .revisions()
+                                    .write(RemoteBranchState {
+                                        id: current.id,
+                                        revision: current.revision,
+                                        prior: Some(prior),
+                                    })
+                                    .await
+                                    .map_err(|error| ReplicaError::StorageError {
+                                        capability: Capability::UpdateRevision,
+                                        cause: error,
+                                    })?;
 
-                            Some(current)
-                        }
-                        (Some(current), None) => {
-                            self.platform
-                                .revisions()
-                                .write(current.clone())
-                                .await
-                                .map_err(|error| ReplicaError::StorageError {
-                                    capability: Capability::UpdateRevision,
-                                    cause: error,
-                                })?;
+                                Some(current)
+                            }
+                            (Some(current), None) => {
+                                self.platform
+                                    .revisions()
+                                    .write(current.clone())
+                                    .await
+                                    .map_err(|error| ReplicaError::StorageError {
+                                        capability: Capability::UpdateRevision,
+                                        cause: error,
+                                    })?;
 
-                            Some(current)
-                        }
-                        (None, Some(prior)) => Some(prior),
-                        (None, None) => None,
-                    };
+                                Some(current)
+                            }
+                            (None, Some(prior)) => Some(prior),
+                            (None, None) => None,
+                        };
 
                     Ok(revision)
                 }
@@ -641,6 +648,51 @@ impl Remote {
     }
 }
 
+pub struct RemoteConnection<Backend: AtomicStorageBackend<Key = String, Value = Vec<u8>>> {
+    remote: Backend,
+    local: Backend,
+}
+impl<Backend: AtomicStorageBackend<Key = String, Value = Vec<u8>>> RemoteConnection<Backend> {
+    /// Resolves revision for the given branch from the local cache of this remote.
+    /// It will not fetch the revision from the remote, if fetch is desired call `fetch`.
+    /// instead.
+    pub async fn resolve(&self, key: &BranchId) -> Result<Option<Revision>, Backend::Error> {
+        if let Some(bytes) = self.local.resolve(&key.0).await? {
+            let revision: Revision = CborEncoder.decode(&bytes).await?;
+            Ok(Some(revision))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Fetch a revision for the given branch from the remote.
+    pub async fn fetch(&self, key: &BranchId) -> Result<Option<Revision>, Backend::Error> {
+        if let Some(bytes) = self.remote.resolve(&key.0).await? {
+            let revision: Revision = CborEncoder.decode(&bytes).await?;
+            // Update local cache
+            self.local
+                .swap(key.0.clone(), bytes, self.local.resolve(&key.0).await?)
+                .await?;
+
+            Ok(Some(revision))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Publish revision to the remote branch.
+    pub async fn push(&self, key: &BranchId, revision: &Revision) -> Result<(), Backend::Error> {
+        let prior = self.local.resolve(&key.0).await?;
+        let (_, bytes) = CborEncoder.encode(revision).await?;
+        self.remote
+            .swap(key.0.clone(), bytes.clone(), prior.clone())
+            .await;
+        self.local.swap(key.0.clone(), bytes, prior).await;
+
+        Ok(())
+    }
+}
+
 /// Upstream represents some branch being tracked
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Upstream {
@@ -782,7 +834,11 @@ pub trait Platform {
         + 'static;
 
     /// Revisions for the remote branches, roughly equivalent to .git/refs/remotes/*
-    type RemoteBranches: TransactionalMemory<Key = (Site, BranchId), Record = Revision, Error = DialogStorageError>;
+    type RemoteBranches: TransactionalMemory<
+            Key = (Site, BranchId),
+            Record = RemoteBranchState,
+            Error = DialogStorageError,
+        >;
 
     /// Revisions for local branches, and their configuration. It is roughly
     /// equivalent to .git/refs/heads/* combined with .git/config
@@ -790,7 +846,11 @@ pub trait Platform {
 
     /// Abstraction for communicating with remotes allowing us to read remote
     /// revisions and write them.
-    type Announcements: TransactionalMemory<Key = (Site, BranchId), Record = Revision, Error = DialogStorageError>;
+    type Announcements: TransactionalMemory<
+            Key = (Site, BranchId),
+            Record = RemoteBranchState,
+            Error = DialogStorageError,
+        >;
 
     /// State tracking all the remote info
     type Remotes: TransactionalMemory<Key = Site, Record = Remote, Error = DialogStorageError>
@@ -886,6 +946,8 @@ pub enum Capability {
     UpdateRevision,
 
     ArchiveError,
+
+    EncodeError,
 }
 impl Display for Capability {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

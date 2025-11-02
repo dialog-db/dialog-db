@@ -48,6 +48,9 @@ pub use artifacts::*;
 /// Replica abstraction for dialog
 pub mod replica;
 
+mod platform;
+pub use platform::*;
+
 mod reference;
 pub use reference::*;
 
