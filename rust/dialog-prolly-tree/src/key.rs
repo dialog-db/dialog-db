@@ -26,18 +26,6 @@ impl KeyType for Vec<u8> {
 pub trait ValueType:
     std::fmt::Debug + ConditionalSync + Clone + PartialEq + Serialize + DeserializeOwned
 {
-    /// Get the raw bytes for this [`ValueType`]
-    fn bytes(&self) -> &[u8];
-
-    /// Compute a deterministic hash of this value for conflict resolution.
-    /// Default implementation uses BLAKE3.
-    fn hash(&self) -> [u8; 32] {
-        blake3::hash(self.bytes()).into()
-    }
 }
 
-impl ValueType for Vec<u8> {
-    fn bytes(&self) -> &[u8] {
-        self.as_ref()
-    }
-}
+impl ValueType for Vec<u8> {}

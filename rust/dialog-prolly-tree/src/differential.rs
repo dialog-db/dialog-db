@@ -1015,12 +1015,13 @@ mod tests {
             .await
             .unwrap();
 
-        // Check which value won based on hash
-        use crate::ValueType;
-        let existing_hash = existing_value.hash();
-        let new_hash = new_value.hash();
+        // Check which value won based on hash comparison
+        use dialog_storage::Encoder;
+        let storage = tree.storage();
+        let (existing_hash, _) = storage.encode(&existing_value).await.unwrap();
+        let (new_hash, _) = storage.encode(&new_value).await.unwrap();
 
-        if new_hash > existing_hash {
+        if new_hash.as_ref() > existing_hash.as_ref() {
             assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(new_value));
         } else {
             assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(existing_value));
@@ -1144,11 +1145,12 @@ mod tests {
         assert_eq!(final_a, final_b, "Trees should converge to same value");
 
         // Verify the winner is determined by hash
-        use crate::ValueType;
-        let hash_20 = vec![20].hash();
-        let hash_30 = vec![30].hash();
+        use dialog_storage::Encoder;
+        let storage = tree_a.storage();
+        let (hash_20, _) = storage.encode(&vec![20]).await.unwrap();
+        let (hash_30, _) = storage.encode(&vec![30]).await.unwrap();
 
-        if hash_20 > hash_30 {
+        if hash_20.as_ref() > hash_30.as_ref() {
             assert_eq!(final_a, Some(vec![20]));
         } else {
             assert_eq!(final_a, Some(vec![30]));

@@ -7,7 +7,7 @@ use std::{
 use super::differential::Change;
 use crate::{Adopter, Delta, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
 use async_stream::try_stream;
-use dialog_storage::{ContentAddressedStorage, HashType};
+use dialog_storage::{ContentAddressedStorage, Encoder, HashType};
 use futures_core::Stream;
 use nonempty::NonEmpty;
 
@@ -163,88 +163,6 @@ where
         }
     }
 
-    /// Integrates changes into this tree with deterministic conflict resolution.
-    ///
-    /// Applies a differential (stream of changes) with Last-Write-Wins conflict resolution
-    /// based on value hashes. This ensures eventual consistency across replicas.
-    ///
-    /// # Conflict Resolution
-    ///
-    /// - **Add**: If key exists with different value, compare hashes - higher hash wins
-    /// - **Remove**: Only removes if the exact entry (key+value) exists
-    ///
-    /// The operation is atomic - if any change fails, the entire integration is rolled back.
-    pub async fn integrate<Changes>(
-        &mut self,
-        changes: Changes,
-    ) -> Result<(), DialogProllyTreeError>
-    where
-        Changes: crate::differential::Differential<Key, Value>,
-    {
-        use futures_util::StreamExt;
-
-        // Copy root here in case we fail integration and need to revert
-        let root = self.root.clone();
-
-        let result: Result<(), DialogProllyTreeError> = {
-            futures_util::pin_mut!(changes);
-            while let Some(change_result) = changes.next().await {
-                let change = change_result?;
-                match change {
-                    Change::Add(entry) => {
-                        // Check if key already exists
-                        match self.get(&entry.key).await? {
-                            None => {
-                                // Key doesn't exist - insert it
-                                self.set(entry.key, entry.value).await?;
-                            }
-                            Some(existing_value) => {
-                                if existing_value == entry.value {
-                                    // Same value - no-op (idempotent)
-                                } else {
-                                    // Different values - resolve conflict by comparing hashes
-
-                                    let existing_hash = existing_value.hash();
-                                    let new_hash = entry.value.hash();
-
-                                    if new_hash > existing_hash {
-                                        // New value wins - update
-                                        self.set(entry.key, entry.value).await?;
-                                    }
-                                    // Else: existing wins, no-op
-                                }
-                            }
-                        }
-                    }
-                    Change::Remove(entry) => {
-                        // Check if key exists
-                        match self.get(&entry.key).await? {
-                            None => {
-                                // Key doesn't exist - no-op (already removed)
-                            }
-                            Some(existing_value) => {
-                                if existing_value == entry.value {
-                                    // Same value - remove it
-                                    self.delete(&entry.key).await?;
-                                }
-                                // Else: different value - no-op (concurrent update)
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(())
-        };
-
-        // If integration fails we set the root back to the original
-        // as this operation must be atomic.
-        if result.is_err() {
-            self.root = root;
-        }
-
-        result
-    }
-
     /// Returns an async stream over all entries.
     pub fn stream(
         &self,
@@ -327,5 +245,106 @@ where
             value_type: PhantomData,
             hash_type: PhantomData,
         })
+    }
+}
+
+// Impl block for methods that require Encoder
+impl<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Distribution, Key, Value, Hash, Storage>
+    Tree<BRANCH_FACTOR, HASH_SIZE, Distribution, Key, Value, Hash, Storage>
+where
+    Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash>,
+    Key: KeyType,
+    Value: ValueType,
+    Hash: HashType<HASH_SIZE>,
+    Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash> + Encoder<HASH_SIZE>,
+{
+    /// Integrates changes into this tree with deterministic conflict resolution.
+    ///
+    /// Applies a differential (stream of changes) with Last-Write-Wins conflict resolution
+    /// based on value hashes. This ensures eventual consistency across replicas.
+    ///
+    /// # Conflict Resolution
+    ///
+    /// - **Add**: If key exists with different value, compare hashes - higher hash wins
+    /// - **Remove**: Only removes if the exact entry (key+value) exists
+    ///
+    /// The operation is atomic - if any change fails, the entire integration is rolled back.
+    pub async fn integrate<Changes>(
+        &mut self,
+        changes: Changes,
+    ) -> Result<(), DialogProllyTreeError>
+    where
+        Changes: crate::differential::Differential<Key, Value>,
+    {
+        use futures_util::StreamExt;
+
+        // Copy root here in case we fail integration and need to revert
+        let root = self.root.clone();
+
+        let result: Result<(), DialogProllyTreeError> = {
+            futures_util::pin_mut!(changes);
+            while let Some(change_result) = changes.next().await {
+                let change = change_result?;
+                match change {
+                    Change::Add(entry) => {
+                        // Check if key already exists
+                        match self.get(&entry.key).await? {
+                            None => {
+                                // Key doesn't exist - insert it
+                                self.set(entry.key, entry.value).await?;
+                            }
+                            Some(existing_value) => {
+                                if existing_value == entry.value {
+                                    // Same value - no-op (idempotent)
+                                } else {
+                                    // Different values - resolve conflict by comparing hashes
+
+                                    let (existing_hash, _) = self
+                                        .storage()
+                                        .encode(&existing_value)
+                                        .await
+                                        .map_err(|e| e.into())?;
+                                    let (new_hash, _) = self
+                                        .storage()
+                                        .encode(&entry.value)
+                                        .await
+                                        .map_err(|e| e.into())?;
+
+                                    if new_hash.as_ref() > existing_hash.as_ref() {
+                                        // New value wins - update
+                                        self.set(entry.key, entry.value).await?;
+                                    }
+                                    // Else: existing wins, no-op
+                                }
+                            }
+                        }
+                    }
+                    Change::Remove(entry) => {
+                        // Check if key exists
+                        match self.get(&entry.key).await? {
+                            None => {
+                                // Key doesn't exist - no-op (already removed)
+                            }
+                            Some(existing_value) => {
+                                if existing_value == entry.value {
+                                    // Same value - remove it
+                                    self.delete(&entry.key).await?;
+                                }
+                                // Else: different value - no-op (concurrent update)
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        };
+
+        // If integration fails we set the root back to the original
+        // as this operation must be atomic.
+        if result.is_err() {
+            self.root = root;
+        }
+
+        result
     }
 }
