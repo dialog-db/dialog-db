@@ -18,7 +18,7 @@ pub struct Attribution {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Attribute<T: Scalar> {
+pub struct AttributeSchema<T: Scalar> {
     pub namespace: &'static str,
     pub name: &'static str,
     pub description: &'static str,
@@ -27,7 +27,7 @@ pub struct Attribute<T: Scalar> {
     pub marker: PhantomData<T>,
 }
 
-impl<T: Scalar> Attribute<T> {
+impl<T: Scalar> AttributeSchema<T> {
     pub fn new(
         namespace: &'static str,
         name: &'static str,
@@ -175,7 +175,7 @@ impl<T: Scalar> Attribute<T> {
     }
 }
 
-impl<T: Scalar> Serialize for Attribute<T> {
+impl<T: Scalar> Serialize for AttributeSchema<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -190,7 +190,7 @@ impl<T: Scalar> Serialize for Attribute<T> {
     }
 }
 
-impl<'de, T: Scalar> Deserialize<'de> for Attribute<T> {
+impl<'de, T: Scalar> Deserialize<'de> for AttributeSchema<T> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -211,13 +211,13 @@ impl<'de, T: Scalar> Deserialize<'de> for Attribute<T> {
         struct AttributeVisitor<T>(PhantomData<T>);
 
         impl<'de, T: Scalar> Visitor<'de> for AttributeVisitor<T> {
-            type Value = Attribute<T>;
+            type Value = AttributeSchema<T>;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("struct Attribute")
             }
 
-            fn visit_map<V>(self, mut map: V) -> Result<Attribute<T>, V::Error>
+            fn visit_map<V>(self, mut map: V) -> Result<AttributeSchema<T>, V::Error>
             where
                 V: MapAccess<'de>,
             {
@@ -267,7 +267,7 @@ impl<'de, T: Scalar> Deserialize<'de> for Attribute<T> {
                 let name: &'static str = Box::leak(name.into_boxed_str());
                 let description: &'static str = Box::leak(description.into_boxed_str());
 
-                Ok(Attribute {
+                Ok(AttributeSchema {
                     namespace,
                     name,
                     description,
@@ -288,7 +288,7 @@ impl<'de, T: Scalar> Deserialize<'de> for Attribute<T> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Match<T: Scalar> {
-    pub attribute: Attribute<T>,
+    pub attribute: AttributeSchema<T>,
     pub of: Term<Entity>,
 }
 
@@ -301,7 +301,7 @@ impl<T: Scalar> Match<T> {
         of: Term<Entity>,
     ) -> Self {
         Self {
-            attribute: Attribute::new(namespace, name, description, content_type),
+            attribute: AttributeSchema::new(namespace, name, description, content_type),
             of,
         }
     }
@@ -322,5 +322,162 @@ impl<T: Scalar> Match<T> {
     }
     pub fn not<Is: Into<Term<T>>>(self, term: Is) -> Premise {
         Application::Fact(self.is(term)).not()
+    }
+}
+
+pub trait Attribute {
+    type Type: Scalar;
+
+    fn namespace() -> &'static str;
+    fn description() -> &'static str;
+    fn name() -> &'static str;
+    fn cardinality() -> &'static Cardinality;
+
+    fn value(&self) -> &Self::Type;
+    fn selector() -> crate::artifact::Attribute {
+        format!("{}/{}", Self::namespace(), Self::name())
+            .parse()
+            .expect("Failed to parse attribute")
+    }
+}
+
+/// Macro to generate Quarriable and Claim implementations for attribute tuples
+macro_rules! impl_attribute_tuples {
+    // Base case: (Entity, T1, T2, ...)
+    ($(($($T:ident),+)),*) => {
+        $(
+            impl_attribute_tuples!(@quarriable $($T),+);
+            impl_attribute_tuples!(@claim $($T),+);
+        )*
+    };
+
+    // Generate Quarriable for (Entity, T1, T2, ...)
+    (@quarriable $($T:ident),+) => {
+        impl<$($T: Attribute),+> crate::dsl::Quarriable for (Entity, $($T),+) {
+            type Query = (Term<Entity>, $(Term<$T::Type>),+);
+        }
+    };
+
+    // Generate Claim for (Entity, T1, T2, ...)
+    (@claim $T1:ident $(, $T:ident)*) => {
+        #[allow(non_snake_case)]
+        impl<$T1: Attribute $(, $T: Attribute)*> crate::claim::Claim for (Entity, $T1 $(, $T)*) {
+            fn assert(self, transaction: &mut crate::Transaction) {
+                let (entity, $T1 $(, $T)*) = self;
+
+                transaction.associate(crate::Relation {
+                    the: $T1::selector(),
+                    of: entity.clone(),
+                    is: $T1.value().as_value(),
+                });
+
+                $(
+                    transaction.associate(crate::Relation {
+                        the: $T::selector(),
+                        of: entity.clone(),
+                        is: $T.value().as_value(),
+                    });
+                )*
+            }
+
+            fn retract(self, transaction: &mut crate::Transaction) {
+                let (entity, $T1 $(, $T)*) = self;
+
+                transaction.dissociate(crate::Relation {
+                    the: $T1::selector(),
+                    of: entity.clone(),
+                    is: $T1.value().as_value(),
+                });
+
+                $(
+                    transaction.dissociate(crate::Relation {
+                        the: $T::selector(),
+                        of: entity.clone(),
+                        is: $T.value().as_value(),
+                    });
+                )*
+            }
+        }
+    };
+}
+
+// Generate implementations for tuples of size 1-15 (matching Bevy's tuple limits)
+impl_attribute_tuples!(
+    (T1),
+    (T1, T2),
+    (T1, T2, T3),
+    (T1, T2, T3, T4),
+    (T1, T2, T3, T4, T5),
+    (T1, T2, T3, T4, T5, T6),
+    (T1, T2, T3, T4, T5, T6, T7),
+    (T1, T2, T3, T4, T5, T6, T7, T8),
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9),
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10),
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11),
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12),
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13),
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14),
+    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15)
+);
+
+#[cfg(test)]
+mod tests {
+    use crate::attribute::Attribute;
+    use crate::Cardinality;
+
+    mod person {
+        use crate::attribute::Attribute;
+        use crate::Cardinality;
+
+        pub struct Name(pub String);
+
+        impl Attribute for Name {
+            type Type = String;
+
+            fn namespace() -> &'static str {
+                "person"
+            }
+            fn description() -> &'static str {
+                "The name of the person"
+            }
+            fn name() -> &'static str {
+                "name"
+            }
+            fn cardinality() -> &'static Cardinality {
+                &Cardinality::One
+            }
+            fn value(&self) -> &Self::Type {
+                &self.0
+            }
+        }
+
+        pub struct Birthday(pub u32);
+        impl Attribute for Birthday {
+            type Type = u32;
+
+            fn namespace() -> &'static str {
+                "person"
+            }
+            fn description() -> &'static str {
+                "The birthday of the person"
+            }
+            fn name() -> &'static str {
+                "birthday"
+            }
+            fn cardinality() -> &'static Cardinality {
+                &Cardinality::One
+            }
+            fn value(&self) -> &Self::Type {
+                &self.0
+            }
+        }
+    }
+
+    #[test]
+    fn test_person_name() {
+        let _name = person::Name("hello".into());
+        // Basic test that Attribute trait is implemented
+        assert_eq!(person::Name::namespace(), "person");
+        assert_eq!(person::Name::name(), "name");
     }
 }

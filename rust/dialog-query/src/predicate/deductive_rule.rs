@@ -141,11 +141,11 @@ fn test_rule_compiles_with_valid_premises() {
         attributes: vec![
             (
                 "name",
-                crate::attribute::Attribute::new("person", "name", "", Type::String),
+                crate::attribute::AttributeSchema::new("person", "name", "", Type::String),
             ),
             (
                 "age",
-                crate::attribute::Attribute::new("person", "age", "", Type::UnsignedInt),
+                crate::attribute::AttributeSchema::new("person", "age", "", Type::UnsignedInt),
             ),
         ]
         .into(),
@@ -182,11 +182,11 @@ fn test_rule_fails_with_unconstrained_fact() {
         attributes: vec![
             (
                 "key",
-                crate::attribute::Attribute::new("person", "key", "", Type::String),
+                crate::attribute::AttributeSchema::new("person", "key", "", Type::String),
             ),
             (
                 "value",
-                crate::attribute::Attribute::new("person", "value", "", Type::String),
+                crate::attribute::AttributeSchema::new("person", "value", "", Type::String),
             ),
         ]
         .into(),
@@ -211,11 +211,11 @@ fn test_rule_fails_with_unused_parameter() {
         attributes: vec![
             (
                 "name",
-                crate::attribute::Attribute::new("person", "name", "", Type::String),
+                crate::attribute::AttributeSchema::new("person", "name", "", Type::String),
             ),
             (
                 "age",
-                crate::attribute::Attribute::new("person", "age", "", Type::UnsignedInt),
+                crate::attribute::AttributeSchema::new("person", "age", "", Type::UnsignedInt),
             ),
         ]
         .into(),
@@ -244,11 +244,11 @@ fn test_rule_fails_with_no_premises() {
         attributes: vec![
             (
                 "name",
-                crate::attribute::Attribute::new("person", "name", "", Type::String),
+                crate::attribute::AttributeSchema::new("person", "name", "", Type::String),
             ),
             (
                 "age",
-                crate::attribute::Attribute::new("person", "age", "", Type::UnsignedInt),
+                crate::attribute::AttributeSchema::new("person", "age", "", Type::UnsignedInt),
             ),
         ]
         .into(),
@@ -266,11 +266,11 @@ fn test_rule_compiles_with_chained_dependencies() {
         attributes: vec![
             (
                 "key",
-                crate::attribute::Attribute::new("result", "key", "", Type::String),
+                crate::attribute::AttributeSchema::new("result", "key", "", Type::String),
             ),
             (
                 "value",
-                crate::attribute::Attribute::new("result", "value", "", Type::String),
+                crate::attribute::AttributeSchema::new("result", "value", "", Type::String),
             ),
         ]
         .into(),
@@ -309,7 +309,7 @@ fn test_rule_parameter_name_vs_variable_name() {
         operator: "result".to_string(),
         attributes: vec![(
             "key",
-            crate::attribute::Attribute::new("result", "key", "", Type::String),
+            crate::attribute::AttributeSchema::new("result", "key", "", Type::String),
         )]
         .into(),
     };

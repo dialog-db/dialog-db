@@ -963,7 +963,7 @@ mod cost_model_tests {
             operator: "user".to_string(),
             attributes: [(
                 "name",
-                crate::Attribute::new("user", "name", "User name", crate::Type::String),
+                crate::AttributeSchema::new("user", "name", "User name", crate::Type::String),
             )]
             .into(),
         };
@@ -1016,7 +1016,7 @@ mod cost_model_tests {
             operator: "user".to_string(),
             attributes: [(
                 "name",
-                crate::Attribute::new("user", "name", "User name", crate::Type::String),
+                crate::AttributeSchema::new("user", "name", "User name", crate::Type::String),
             )]
             .into(),
         };
@@ -1062,7 +1062,7 @@ mod cost_model_tests {
             operator: "user".to_string(),
             attributes: [(
                 "name",
-                crate::Attribute::new("user", "name", "User name", crate::Type::String),
+                crate::AttributeSchema::new("user", "name", "User name", crate::Type::String),
             )]
             .into(),
         };
@@ -1105,7 +1105,7 @@ mod cost_model_tests {
 
         // Create a ConceptApplication with single Cardinality::Many attribute
         let mut concept_attr =
-            crate::Attribute::new("user", "tags", "User tags", crate::Type::String);
+            crate::AttributeSchema::new("user", "tags", "User tags", crate::Type::String);
         concept_attr.cardinality = crate::Cardinality::Many;
 
         let concept = Concept::Dynamic {
@@ -1150,7 +1150,7 @@ mod cost_model_tests {
 
         // Create a ConceptApplication with single Cardinality::Many attribute
         let mut concept_attr =
-            crate::Attribute::new("user", "tags", "User tags", crate::Type::String);
+            crate::AttributeSchema::new("user", "tags", "User tags", crate::Type::String);
         concept_attr.cardinality = crate::Cardinality::Many;
 
         let concept = Concept::Dynamic {

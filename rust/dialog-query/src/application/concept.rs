@@ -1,12 +1,11 @@
 use super::fact::CONCEPT_OVERHEAD;
+use crate::attribute::AttributeSchema;
 use crate::context::new_context;
 use crate::planner::{Fork, Join};
 use crate::predicate::Concept;
 use crate::selection::{Answer, Evidence};
 use crate::DeductiveRule;
-use crate::{
-    try_stream, Attribute, Environment, EvaluationContext, Parameters, Schema, Source, Term, Value,
-};
+use crate::{try_stream, Environment, EvaluationContext, Parameters, Schema, Source, Term, Value};
 use std::fmt::Display;
 
 /// Extract an Answer with parameter names from an Answer with user variable names
@@ -130,10 +129,10 @@ impl ConceptApplication {
             Some(total)
         } else {
             // Entity is not bound - categorize attributes to find best execution strategy
-            let mut bound_one: Option<&Attribute<Value>> = None;
-            let mut bound_many: Option<&Attribute<Value>> = None;
-            let mut unbound_one: Option<&Attribute<Value>> = None;
-            let mut unbound_many: Option<&Attribute<Value>> = None;
+            let mut bound_one: Option<&AttributeSchema<Value>> = None;
+            let mut bound_many: Option<&AttributeSchema<Value>> = None;
+            let mut unbound_one: Option<&AttributeSchema<Value>> = None;
+            let mut unbound_many: Option<&AttributeSchema<Value>> = None;
 
             for (name, attribute) in self.concept.attributes().iter() {
                 if let Some(term) = self.terms.get(name) {
@@ -286,7 +285,7 @@ impl Display for ConceptApplication {
 mod tests {
     use super::*;
     use crate::predicate::Concept;
-    use crate::{Attribute, Parameters, Term, Type, Value};
+    use crate::{AttributeSchema, Parameters, Term, Type, Value};
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
     // with deeply nested async streams. The functionality is tested indirectly through integration
@@ -335,10 +334,13 @@ mod tests {
         let concept = Concept::Dynamic {
             operator: "person".to_string(),
             attributes: vec![
-                ("name", Attribute::new("person", "name", "", Type::String)),
+                (
+                    "name",
+                    AttributeSchema::new("person", "name", "", Type::String),
+                ),
                 (
                     "age",
-                    Attribute::new("person", "age", "", Type::UnsignedInt),
+                    AttributeSchema::new("person", "age", "", Type::UnsignedInt),
                 ),
             ]
             .into(),
@@ -420,10 +422,13 @@ mod tests {
         let concept = Concept::Dynamic {
             operator: "person".to_string(),
             attributes: vec![
-                ("name", Attribute::new("person", "name", "", Type::String)),
+                (
+                    "name",
+                    AttributeSchema::new("person", "name", "", Type::String),
+                ),
                 (
                     "age",
-                    Attribute::new("person", "age", "", Type::UnsignedInt),
+                    AttributeSchema::new("person", "age", "", Type::UnsignedInt),
                 ),
             ]
             .into(),
@@ -491,7 +496,12 @@ async fn test_concept_application_respects_constant_entity_parameter() -> anyhow
         operator: "person".to_string(),
         attributes: vec![(
             "name",
-            crate::attribute::Attribute::new("person", "name", "Person name", crate::Type::String),
+            crate::attribute::AttributeSchema::new(
+                "person",
+                "name",
+                "Person name",
+                crate::Type::String,
+            ),
         )]
         .into(),
     };
@@ -565,7 +575,7 @@ async fn test_concept_application_respects_constant_attribute_parameter() -> any
         attributes: vec![
             (
                 "name",
-                crate::attribute::Attribute::new(
+                crate::attribute::AttributeSchema::new(
                     "person",
                     "name",
                     "Person name",
@@ -574,7 +584,7 @@ async fn test_concept_application_respects_constant_attribute_parameter() -> any
             ),
             (
                 "age",
-                crate::attribute::Attribute::new(
+                crate::attribute::AttributeSchema::new(
                     "person",
                     "age",
                     "Person age",
@@ -655,7 +665,7 @@ async fn test_concept_application_respects_multiple_constant_parameters() -> any
         attributes: vec![
             (
                 "name",
-                crate::attribute::Attribute::new(
+                crate::attribute::AttributeSchema::new(
                     "person",
                     "name",
                     "Person name",
@@ -664,7 +674,7 @@ async fn test_concept_application_respects_multiple_constant_parameters() -> any
             ),
             (
                 "age",
-                crate::attribute::Attribute::new(
+                crate::attribute::AttributeSchema::new(
                     "person",
                     "age",
                     "Person age",

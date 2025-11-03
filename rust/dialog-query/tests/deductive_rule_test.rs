@@ -1,6 +1,6 @@
 use dialog_query::application::ConceptApplication;
 use dialog_query::artifact::Type;
-use dialog_query::attribute::Attribute;
+use dialog_query::attribute::AttributeSchema;
 use dialog_query::error::{AnalyzerError, PlanError, QueryError};
 use dialog_query::predicate::concept::Attributes;
 use dialog_query::predicate::fact::Fact;
@@ -17,11 +17,11 @@ fn test_concept_as_conclusion_operations() {
         attributes: Attributes::from(vec![
             (
                 "name",
-                Attribute::<Value>::new("person", "name", "Person name", Type::String),
+                AttributeSchema::<Value>::new("person", "name", "Person name", Type::String),
             ),
             (
                 "age",
-                Attribute::<Value>::new("person", "age", "Person age", Type::UnsignedInt),
+                AttributeSchema::<Value>::new("person", "age", "Person age", Type::UnsignedInt),
             ),
         ]),
     };
@@ -40,7 +40,7 @@ fn test_concept_creation() {
         operator: "person".to_string(),
         attributes: Attributes::from(vec![(
             "name".to_string(),
-            Attribute::<Value>::new("person", "name", "Person name", Type::String),
+            AttributeSchema::<Value>::new("person", "name", "Person name", Type::String),
         )]),
     };
 
@@ -56,11 +56,11 @@ fn test_concept_application_analysis() {
         attributes: Attributes::from(vec![
             (
                 "name".to_string(),
-                Attribute::<Value>::new("person", "name", "Person name", Type::String),
+                AttributeSchema::<Value>::new("person", "name", "Person name", Type::String),
             ),
             (
                 "age".to_string(),
-                Attribute::<Value>::new("person", "age", "Person age", Type::UnsignedInt),
+                AttributeSchema::<Value>::new("person", "age", "Person age", Type::UnsignedInt),
             ),
         ]),
     };
@@ -91,11 +91,11 @@ fn test_deductive_rule_parameters() {
             attributes: [
                 (
                     "name".to_string(),
-                    Attribute::new("person", "name", "Person name", Type::String),
+                    AttributeSchema::new("person", "name", "Person name", Type::String),
                 ),
                 (
                     "age".to_string(),
-                    Attribute::new("person", "age", "Person age", Type::UnsignedInt),
+                    AttributeSchema::new("person", "age", "Person age", Type::UnsignedInt),
                 ),
             ]
             .into(),

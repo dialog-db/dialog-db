@@ -325,7 +325,7 @@ mod tests {
 
     use crate::{
         predicate::{self, concept::Attributes, Fact},
-        Attribute, Parameters, Relation, Type,
+        AttributeSchema, Parameters, Relation, Type,
     };
 
     use super::*;
@@ -378,11 +378,16 @@ mod tests {
             attributes: [
                 (
                     "name",
-                    Attribute::<Value>::new(&"person", &"name", &"person name", Type::String),
+                    AttributeSchema::<Value>::new(&"person", &"name", &"person name", Type::String),
                 ),
                 (
                     "age",
-                    Attribute::<Value>::new(&"person", &"age", &"person age", Type::UnsignedInt),
+                    AttributeSchema::<Value>::new(
+                        &"person",
+                        &"age",
+                        &"person age",
+                        Type::UnsignedInt,
+                    ),
                 ),
             ]
             .into(),
@@ -484,11 +489,11 @@ mod tests {
         //     attributes: [
         //         (
         //             "name",
-        //             Attribute::new(&"person", &"name", &"person name", Type::String),
+        //             AttributeSchema::new(&"person", &"name", &"person name", Type::String),
         //         ),
         //         (
         //             "age",
-        //             Attribute::new(&"person", &"age", &"person age", Type::UnsignedInt),
+        //             AttributeSchema::new(&"person", &"age", &"person age", Type::UnsignedInt),
         //         ),
         //     ]
         //     .into(),
@@ -538,11 +543,11 @@ mod tests {
         let mut attributes = HashMap::new();
         attributes.insert(
             "name".into(),
-            Attribute::new(&"person", &"name", &"person name", Type::String),
+            AttributeSchema::new(&"person", &"name", &"person name", Type::String),
         );
         attributes.insert(
             "age".into(),
-            Attribute::new(&"person", &"age", &"person age", Type::UnsignedInt),
+            AttributeSchema::new(&"person", &"age", &"person age", Type::UnsignedInt),
         );
 
         let person = predicate::Concept::Dynamic {
@@ -575,11 +580,11 @@ mod tests {
             attributes: [
                 (
                     "name",
-                    Attribute::new(&"person", &"name", &"person name", Type::String),
+                    AttributeSchema::new(&"person", &"name", &"person name", Type::String),
                 ),
                 (
                     "age",
-                    Attribute::new(&"person", &"age", &"person age", Type::UnsignedInt),
+                    AttributeSchema::new(&"person", &"age", &"person age", Type::UnsignedInt),
                 ),
             ]
             .into(),

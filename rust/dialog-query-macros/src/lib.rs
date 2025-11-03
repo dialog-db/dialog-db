@@ -195,7 +195,7 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
         let data_type_value = type_to_value_data_type(field_type);
         typed_attributes.push(quote! {
             /// Static attribute definition for #field_name
-            pub static #prefixed_field_name: dialog_query::attribute::Attribute<#field_type> = dialog_query::attribute::Attribute {
+            pub static #prefixed_field_name: dialog_query::attribute::AttributeSchema<#field_type> = dialog_query::attribute::AttributeSchema {
                 namespace: #namespace_lit,
                 name: #field_name_lit,
                 description: #doc_comment_lit,
@@ -207,7 +207,7 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 
         // Generate Attribute<Value> for the attributes() method
         value_attributes.push(quote! {
-            dialog_query::attribute::Attribute {
+            dialog_query::attribute::AttributeSchema {
                 namespace: #namespace_lit,
                 name: #field_name_lit,
                 description: #doc_comment_lit,
@@ -246,7 +246,7 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 
         // Generate attribute tuples for Attributes implementation
         attributes_tuples.push(quote! {
-            (#field_name_lit, dialog_query::attribute::Attribute {
+            (#field_name_lit, dialog_query::attribute::AttributeSchema {
                 namespace: #namespace_lit,
                 name: #field_name_lit,
                 description: #doc_comment_lit,
@@ -349,12 +349,12 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
         #(#typed_attributes)*
 
         /// All attributes as Attribute<Value> for the attributes() method
-        pub static #attributes_array_name: &[dialog_query::attribute::Attribute<dialog_query::artifact::Value>] = &[
+        pub static #attributes_array_name: &[dialog_query::attribute::AttributeSchema<dialog_query::artifact::Value>] = &[
             #(#value_attributes),*
         ];
 
         /// Attribute tuples for the Attributes trait implementation
-        pub static #attribute_tuples_name: &[(&str, dialog_query::attribute::Attribute<dialog_query::artifact::Value>)] = &[
+        pub static #attribute_tuples_name: &[(&str, dialog_query::attribute::AttributeSchema<dialog_query::artifact::Value>)] = &[
             #(#attributes_tuples),*
         ];
 
@@ -929,4 +929,222 @@ fn parse_derived_attribute(attrs: &[Attribute]) -> Option<usize> {
         }
     }
     None
+}
+
+/// Derive macro for the Attribute trait
+///
+/// Generates an implementation of the `dialog_query::attribute::Attribute` trait
+/// for tuple structs that wrap a single Scalar value.
+///
+/// # Example
+///
+/// ```ignore
+/// mod employee {
+///     use dialog_query::attribute::Attribute;
+///
+///     /// Name of the employee
+///     #[derive(Attribute)]
+///     pub struct Name(String);
+///
+///     /// Employees managed by this entity
+///     #[derive(Attribute)]
+///     #[cardinality(many)]
+///     pub struct Manages(Entity);
+/// }
+/// ```
+///
+/// # Attributes
+///
+/// - `#[cardinality(many)]` - Marks the attribute as having many values (defaults to One)
+/// - `#[namespace = "custom"]` - Override the default namespace (defaults to lowercase struct name)
+///
+/// # Generated Implementation
+///
+/// The macro generates:
+/// - `namespace()` - Returns the namespace (defaults to lowercase struct name)
+/// - `name()` - Returns the attribute name (lowercase struct name)
+/// - `description()` - Returns doc comment text
+/// - `cardinality()` - Returns cardinality (One or Many)
+/// - `value()` - Returns reference to the wrapped value
+/// - `selector()` - Returns the full attribute selector (namespace/name)
+#[proc_macro_derive(Attribute, attributes(cardinality, namespace))]
+pub fn derive_attribute(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+
+    let struct_name = &input.ident;
+
+    // Parse tuple struct with single field
+    let wrapped_type = match &input.data {
+        Data::Struct(data_struct) => match &data_struct.fields {
+            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                &fields.unnamed.first().unwrap().ty
+            }
+            Fields::Unnamed(_) => {
+                return syn::Error::new_spanned(
+                    &input,
+                    "Attribute can only be derived for tuple structs with exactly one field",
+                )
+                .to_compile_error()
+                .into();
+            }
+            _ => {
+                return syn::Error::new_spanned(
+                    &input,
+                    "Attribute can only be derived for tuple structs (e.g., struct Name(String))",
+                )
+                .to_compile_error()
+                .into();
+            }
+        },
+        _ => {
+            return syn::Error::new_spanned(
+                &input,
+                "Attribute can only be derived for tuple structs",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    // Check if namespace is explicitly specified
+    let explicit_namespace = parse_namespace_attribute(&input.attrs);
+
+    // Extract attribute name (lowercase struct name)
+    let attr_name = struct_name.to_string().to_lowercase();
+    let attr_name_lit = syn::LitStr::new(&attr_name, proc_macro2::Span::call_site());
+
+    // Extract doc comments
+    let description = extract_doc_comments(&input.attrs);
+    let description_lit = syn::LitStr::new(&description, proc_macro2::Span::call_site());
+
+    // Parse cardinality
+    let cardinality = parse_cardinality_attribute(&input.attrs);
+
+    // Generate namespace() implementation
+    let namespace_impl = if let Some(ns) = explicit_namespace {
+        let namespace_lit = syn::LitStr::new(&ns, proc_macro2::Span::call_site());
+        quote! {
+            fn namespace() -> &'static str {
+                #namespace_lit
+            }
+        }
+    } else {
+        quote! {
+            fn namespace() -> &'static str {
+                // Extract the last component from module path at compile time
+                const fn extract_last_segment(path: &str) -> &str {
+                    let bytes = path.as_bytes();
+                    let len = bytes.len();
+
+                    // Search backwards for the last occurrence of "::"
+                    let mut i = len;
+                    while i >= 2 {
+                        i -= 1;
+                        // Check if we have "::" at positions [i-1, i]
+                        let curr = bytes[i];
+                        let prev = bytes[i - 1];
+
+                        if curr == b':' && prev == b':' {
+                            // Found "::", return everything after it
+                            // SAFETY: module_path!() always returns valid UTF-8
+                            let remaining = unsafe {
+                                core::str::from_utf8_unchecked(
+                                    core::slice::from_raw_parts(
+                                        bytes.as_ptr().add(i + 1),
+                                        len - i - 1
+                                    )
+                                )
+                            };
+                            return remaining;
+                        }
+                    }
+
+                    // No "::" found, return the whole path
+                    path
+                }
+
+                const NS: &str = extract_last_segment(module_path!());
+                NS
+            }
+        }
+    };
+
+    let expanded = quote! {
+        impl dialog_query::attribute::Attribute for #struct_name {
+            type Type = #wrapped_type;
+
+            #namespace_impl
+
+            fn description() -> &'static str {
+                #description_lit
+            }
+
+            fn name() -> &'static str {
+                #attr_name_lit
+            }
+
+            fn cardinality() -> &'static dialog_query::attribute::Cardinality {
+                #cardinality
+            }
+
+            fn value(&self) -> &Self::Type {
+                &self.0
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Parse the #[namespace = "..."] attribute
+/// Returns Some(namespace) if specified, None to use default
+fn parse_namespace_attribute(attrs: &[Attribute]) -> Option<String> {
+    for attr in attrs {
+        if attr.path().is_ident("namespace") {
+            if let Meta::NameValue(nv) = &attr.meta {
+                if let Expr::Lit(expr_lit) = &nv.value {
+                    if let Lit::Str(lit) = &expr_lit.lit {
+                        return Some(lit.value());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parse the #[cardinality(many)] attribute
+/// Returns the appropriate Cardinality reference
+fn parse_cardinality_attribute(attrs: &[Attribute]) -> proc_macro2::TokenStream {
+    for attr in attrs {
+        if attr.path().is_ident("cardinality") {
+            let result = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("many") {
+                    Ok(())
+                } else if meta.path.is_ident("one") {
+                    Ok(())
+                } else {
+                    Err(meta.error("cardinality must be 'one' or 'many'"))
+                }
+            });
+
+            match result {
+                Ok(()) => {
+                    // Check which one it was
+                    if let Meta::List(list) = &attr.meta {
+                        let tokens_str = list.tokens.to_string();
+                        if tokens_str.contains("many") {
+                            return quote! { &dialog_query::attribute::Cardinality::Many };
+                        }
+                    }
+                }
+                Err(e) => {
+                    panic!("Error parsing cardinality attribute: {}", e);
+                }
+            }
+        }
+    }
+
+    // Default to One
+    quote! { &dialog_query::attribute::Cardinality::One }
 }

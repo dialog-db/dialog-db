@@ -167,13 +167,13 @@ mod tests {
 
         const CONCEPT: predicate::concept::Concept = {
             use crate::artifact::{Type, Value};
-            use crate::attribute::{Attribute, Cardinality};
+            use crate::attribute::{AttributeSchema, Cardinality};
             use std::marker::PhantomData;
 
-            const ATTRIBUTE_TUPLES: &[(&str, Attribute<Value>)] = &[
+            const ATTRIBUTE_TUPLES: &[(&str, AttributeSchema<Value>)] = &[
                 (
                     "name",
-                    Attribute {
+                    AttributeSchema {
                         namespace: "person",
                         name: "name",
                         description: "Name of the person",
@@ -184,7 +184,7 @@ mod tests {
                 ),
                 (
                     "age",
-                    Attribute {
+                    AttributeSchema {
                         namespace: "person",
                         name: "age",
                         description: "Age of the person",
