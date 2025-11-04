@@ -450,73 +450,76 @@ mod tests {
                 .await
                 .unwrap();
 
-        let mut backend = backend;
         let key = b"test_key".to_vec();
         let value = b"test_value".to_vec();
 
-        // Create new entry (when = None means "must not exist")
-        let result = backend.swap(key.clone(), Some(value.clone()), None).await;
+        // Open resource for non-existent key
+        let mut resource = backend.open(&key).await.unwrap();
+        assert_eq!(resource.content(), &None, "Resource should start with None");
+
+        // Create new entry
+        let result = resource.replace(Some(value.clone())).await;
         assert!(result.is_ok(), "Should create new entry");
 
         // Verify it was stored
-        let stored = backend.resolve(&key).await.unwrap();
-        assert_eq!(stored, Some(value));
+        let stored = backend.open(&key).await.unwrap();
+        assert_eq!(stored.content(), &Some(value));
     }
 
     #[wasm_bindgen_test]
     async fn test_indexeddb_swap_update() {
-        let backend =
+        let mut backend =
             IndexedDbStorageBackend::<Vec<u8>, Vec<u8>>::new("test_db_update", "test_store")
                 .await
                 .unwrap();
 
-        let mut backend = backend;
         let key = b"test_key".to_vec();
         let value1 = b"value1".to_vec();
         let value2 = b"value2".to_vec();
 
         // Create initial value
-        backend
-            .swap(key.clone(), Some(value1.clone()), None)
-            .await
-            .unwrap();
+        backend.set(key.clone(), value1.clone()).await.unwrap();
 
-        // Update with CAS condition
-        let result = backend
-            .swap(key.clone(), Some(value2.clone()), Some(value1.clone()))
-            .await;
+        // Open resource with existing value
+        let mut resource = backend.open(&key).await.unwrap();
+        assert_eq!(
+            resource.content(),
+            &Some(value1.clone()),
+            "Resource should have value1"
+        );
+
+        // Update with CAS condition (resource already has value1 loaded)
+        let result = resource.replace(Some(value2.clone())).await;
         assert!(result.is_ok(), "Should update with correct CAS condition");
 
         // Verify updated value
-        let stored = backend.resolve(&key).await.unwrap();
-        assert_eq!(stored, Some(value2));
+        let stored = backend.open(&key).await.unwrap();
+        assert_eq!(stored.content(), &Some(value2));
     }
 
     #[wasm_bindgen_test]
     async fn test_indexeddb_swap_cas_failure_value_mismatch() {
-        let backend = IndexedDbStorageBackend::<Vec<u8>, Vec<u8>>::new(
-            "test_db_cas_fail",
-            "test_store",
-        )
-        .await
-        .unwrap();
+        let mut backend =
+            IndexedDbStorageBackend::<Vec<u8>, Vec<u8>>::new("test_db_cas_fail", "test_store")
+                .await
+                .unwrap();
 
-        let mut backend = backend;
         let key = b"test_key".to_vec();
         let value1 = b"value1".to_vec();
         let value2 = b"value2".to_vec();
-        let wrong_value = b"wrong".to_vec();
 
         // Create initial value
-        backend
-            .swap(key.clone(), Some(value1.clone()), None)
-            .await
-            .unwrap();
+        backend.set(key.clone(), value1.clone()).await.unwrap();
 
-        // Try to update with wrong CAS condition
-        let result = backend
-            .swap(key.clone(), Some(value2.clone()), Some(wrong_value))
-            .await;
+        // Open resource (captures value1)
+        let mut resource = backend.open(&key).await.unwrap();
+
+        // Simulate concurrent modification: backend gets updated
+        let wrong_value = b"wrong".to_vec();
+        backend.set(key.clone(), wrong_value.clone()).await.unwrap();
+
+        // Try to update based on stale value1 (should fail)
+        let result = resource.replace(Some(value2.clone())).await;
         assert!(result.is_err(), "Should fail with wrong CAS condition");
         assert!(
             result
@@ -526,64 +529,75 @@ mod tests {
             "Error should mention CAS failure"
         );
 
-        // Verify value unchanged
-        let stored = backend.resolve(&key).await.unwrap();
-        assert_eq!(stored, Some(value1));
+        // Verify value is the concurrent modification
+        let stored = backend.open(&key).await.unwrap();
+        assert_eq!(stored.content(), &Some(wrong_value));
     }
 
     #[wasm_bindgen_test]
     async fn test_indexeddb_swap_cas_failure_key_not_exist() {
-        let backend = IndexedDbStorageBackend::<Vec<u8>, Vec<u8>>::new(
-            "test_db_no_key",
-            "test_store",
-        )
-        .await
-        .unwrap();
+        let mut backend =
+            IndexedDbStorageBackend::<Vec<u8>, Vec<u8>>::new("test_db_no_key", "test_store")
+                .await
+                .unwrap();
 
-        let mut backend = backend;
-        let key = b"nonexistent".to_vec();
+        let key = b"test_key".to_vec();
         let value = b"new_value".to_vec();
         let expected_old = b"old_value".to_vec();
 
-        // Try to update a non-existent key with CAS condition
-        let result = backend
-            .swap(key.clone(), Some(value), Some(expected_old))
-            .await;
+        // Create initial value
+        backend
+            .set(key.clone(), expected_old.clone())
+            .await
+            .unwrap();
+
+        // Open resource (captures expected_old)
+        let mut resource = backend.open(&key).await.unwrap();
+
+        // Simulate concurrent deletion by directly accessing the database
+        let tx = backend
+            .db
+            .transaction(&[&backend.store_name], TransactionMode::ReadWrite)
+            .unwrap();
+        let store = tx.store(&backend.store_name).unwrap();
+        let key_array = bytes_to_typed_array(key.as_ref());
+        store.delete(key_array).await.unwrap();
+        tx.commit().await.unwrap();
+
+        // Try to update - should fail because key was deleted
+        let result = resource.replace(Some(value)).await;
         assert!(
             result.is_err(),
-            "Should fail when key doesn't exist but CAS expects a value"
+            "Should fail when key was concurrently deleted"
         );
         assert!(
             result
                 .unwrap_err()
                 .to_string()
-                .contains("key does not exist"),
-            "Error should mention key doesn't exist"
+                .contains("CAS condition failed"),
+            "Error should mention CAS failure"
         );
     }
 
     #[wasm_bindgen_test]
     async fn test_indexeddb_swap_cas_failure_key_exists() {
-        let backend = IndexedDbStorageBackend::<Vec<u8>, Vec<u8>>::new(
-            "test_db_exists",
-            "test_store",
-        )
-        .await
-        .unwrap();
+        let mut backend =
+            IndexedDbStorageBackend::<Vec<u8>, Vec<u8>>::new("test_db_exists", "test_store")
+                .await
+                .unwrap();
 
-        let mut backend = backend;
         let key = b"existing_key".to_vec();
         let value1 = b"value1".to_vec();
         let value2 = b"value2".to_vec();
 
-        // Create initial value
-        backend
-            .swap(key.clone(), Some(value1.clone()), None)
-            .await
-            .unwrap();
+        // Open resource for non-existent key (captures None)
+        let mut resource = backend.open(&key).await.unwrap();
 
-        // Try to create again with CAS condition "must not exist" (when = None)
-        let result = backend.swap(key.clone(), Some(value2), None).await;
+        // Simulate concurrent creation: someone else creates the key
+        backend.set(key.clone(), value1.clone()).await.unwrap();
+
+        // Try to create with CAS condition "must not exist" (should fail because key now exists)
+        let result = resource.replace(Some(value2)).await;
         assert!(
             result.is_err(),
             "Should fail when key exists but CAS expects it not to"
@@ -592,39 +606,42 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("key already exists"),
-            "Error should mention key already exists"
+                .contains("CAS condition failed"),
+            "Error should mention CAS failure"
         );
 
         // Verify value unchanged
-        let stored = backend.resolve(&key).await.unwrap();
-        assert_eq!(stored, Some(value1));
+        let stored = backend.open(&key).await.unwrap();
+        assert_eq!(stored.content(), &Some(value1));
     }
 
     #[wasm_bindgen_test]
     async fn test_indexeddb_swap_delete() {
-        let backend =
+        let mut backend =
             IndexedDbStorageBackend::<Vec<u8>, Vec<u8>>::new("test_db_delete", "test_store")
                 .await
                 .unwrap();
 
-        let mut backend = backend;
         let key = b"test_key".to_vec();
         let value = b"test_value".to_vec();
 
         // Create entry
-        backend
-            .swap(key.clone(), Some(value.clone()), None)
-            .await
-            .unwrap();
+        backend.set(key.clone(), value.clone()).await.unwrap();
 
-        // Delete with CAS condition
-        let result = backend.swap(key.clone(), None, Some(value)).await;
+        // Open resource and delete with CAS condition
+        let mut resource = backend.open(&key).await.unwrap();
+        assert_eq!(
+            resource.content(),
+            &Some(value),
+            "Resource should have value"
+        );
+
+        let result = resource.replace(None).await;
         assert!(result.is_ok(), "Should delete with correct CAS condition");
 
         // Verify deleted
-        let stored = backend.resolve(&key).await.unwrap();
-        assert_eq!(stored, None);
+        let stored = backend.open(&key).await.unwrap();
+        assert_eq!(stored.content(), &None);
     }
 
     #[wasm_bindgen_test]
@@ -635,7 +652,11 @@ mod tests {
                 .unwrap();
 
         let key = b"nonexistent".to_vec();
-        let result = backend.resolve(&key).await.unwrap();
-        assert_eq!(result, None, "Should return None for non-existent key");
+        let result = backend.open(&key).await.unwrap();
+        assert_eq!(
+            result.content(),
+            &None,
+            "Should return None for non-existent key"
+        );
     }
 }

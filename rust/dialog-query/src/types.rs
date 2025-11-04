@@ -29,14 +29,11 @@ pub use crate::artifact::{Attribute, Cause, Entity, Type, Value};
 /// # Usage
 /// ```rust
 /// use dialog_query::types::IntoType;
-/// use dialog_query::artifact::{Value, Type};
+/// use dialog_query::artifact::Type;
 ///
-/// // For concrete types
-/// assert_eq!(String::TYPE, Some(Type::String));
-/// assert_eq!(u32::TYPE, Some(Type::UnsignedInt));
-///
-/// // For the dynamic Value type
-/// assert_eq!(Value::TYPE, None); // Can hold any type
+/// // For concrete types, bring IntoType trait into scope
+/// assert_eq!(<String as IntoType>::TYPE, Some(Type::String));
+/// assert_eq!(<u32 as IntoType>::TYPE, Some(Type::UnsignedInt));
 /// ```
 pub trait IntoType {
     const TYPE: Option<Type>;

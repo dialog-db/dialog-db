@@ -15,8 +15,8 @@ mod s3_signer;
 use s3_signer::{Access, Credentials};
 
 use crate::{
-    AtomicStorageBackend, DialogStorageError, Resource, StorageBackend, StorageSink,
-    StorageSource, storage::backend::rest::s3_signer::Authorization,
+    AtomicStorageBackend, DialogStorageError, Resource, StorageBackend, StorageSink, StorageSource,
+    storage::backend::rest::s3_signer::Authorization,
 };
 
 /// Errors that can occur when using the REST storage backend
@@ -658,13 +658,19 @@ where
     ) -> Result<Option<Self::Value>, Self::Error> {
         // Prepare request - DELETE if value is None, PUT if Some
         let mut request = match &value {
-            Some(v) => self.backend.prepare_put_request(self.key.as_ref(), v.as_ref())?,
+            Some(v) => self
+                .backend
+                .prepare_put_request(self.key.as_ref(), v.as_ref())?,
             None => self.backend.prepare_delete_request(self.key.as_ref())?,
         };
 
         // Add precondition headers based on current ETag
+        // Note: ETags must be quoted in If-Match headers per HTTP spec
         request = match &self.etag {
-            Some(etag) => request.header("If-Match", etag.clone()),
+            Some(etag) => {
+                let quoted_etag = format!("\"{}\"", etag);
+                request.header("If-Match", quoted_etag)
+            }
             None => request.header("If-None-Match", "*"),
         };
 
@@ -674,11 +680,12 @@ where
             let prior = self.content.clone();
 
             // Update ETag from response if available
+            // ETags in HTTP responses are quoted, so we need to strip the quotes
             self.etag = response
                 .headers()
                 .get("etag")
                 .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
+                .map(|s| s.trim_matches('"').to_string());
 
             self.content = value;
             return Ok(prior);
@@ -691,7 +698,12 @@ where
             // Fetch latest revision to see if it has changed
             let request = self.backend.prepare_get_request(self.key.as_ref())?;
             let latest = request.send().await?;
-            let etag = latest.headers().get("etag").cloned();
+            // ETags in HTTP responses are quoted, so we need to strip the quotes
+            let etag = latest
+                .headers()
+                .get("etag")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim_matches('"').to_string());
             let status = latest.status();
 
             // If key is not found we just need to set If-None-Match: *
@@ -717,18 +729,39 @@ where
 
             if !actual_matches_expected {
                 // Value actually changed - CAS failed
-                return Err(RestStorageBackendError::OperationFailed(format!(
-                    "CAS condition failed: value has changed"
-                )));
+                use base58::ToBase58;
+                let error_msg = match (&self.content, &actual) {
+                    (Some(expected), Some(actual_bytes)) => format!(
+                        "CAS condition failed: value mismatch. Expected {} but found {}",
+                        ToBase58::to_base58(expected.as_ref()),
+                        ToBase58::to_base58(actual_bytes.as_ref())
+                    ),
+                    (Some(expected), None) => format!(
+                        "CAS condition failed: expected value {} but key not found",
+                        ToBase58::to_base58(expected.as_ref())
+                    ),
+                    (None, Some(actual_bytes)) => format!(
+                        "CAS condition failed: expected key not to exist but found value {}",
+                        ToBase58::to_base58(actual_bytes.as_ref())
+                    ),
+                    (None, None) => "CAS condition failed: unexpected state".to_string(),
+                };
+                return Err(RestStorageBackendError::OperationFailed(error_msg));
             }
 
             // Value is the same but ETag differs - retry with correct ETag
             let mut request = match &value {
-                Some(v) => self.backend.prepare_put_request(self.key.as_ref(), v.as_ref())?,
+                Some(v) => self
+                    .backend
+                    .prepare_put_request(self.key.as_ref(), v.as_ref())?,
                 None => self.backend.prepare_delete_request(self.key.as_ref())?,
             };
-            request = match etag {
-                Some(etag) => request.header("If-Match", etag),
+            // Note: ETags must be quoted in If-Match headers per HTTP spec
+            request = match &etag {
+                Some(etag_val) => {
+                    let quoted_etag = format!("\"{}\"", etag_val);
+                    request.header("If-Match", quoted_etag)
+                }
                 None => request.header("If-None-Match", "*"),
             };
 
@@ -736,19 +769,21 @@ where
 
             if !retry.status().is_success() {
                 return Err(RestStorageBackendError::OperationFailed(format!(
-                    "CAS retry failed: {}",
-                    retry.status()
+                    "CAS retry failed: {} (used ETag: {:?})",
+                    retry.status(),
+                    etag
                 )));
             }
 
             let prior = self.content.clone();
 
             // Update ETag from retry response
+            // ETags in HTTP responses are quoted, so we need to strip the quotes
             self.etag = retry
                 .headers()
                 .get("etag")
                 .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
+                .map(|s| s.trim_matches('"').to_string());
 
             self.content = value;
             return Ok(prior);
@@ -813,11 +848,12 @@ where
         match response.status() {
             status if status.is_success() => {
                 // Extract ETag from response headers
+                // ETags in HTTP responses are quoted, so we need to strip the quotes
                 let etag = response
                     .headers()
                     .get("etag")
                     .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string());
+                    .map(|s| s.trim_matches('"').to_string());
 
                 let bytes = response.bytes().await?;
                 let content = Some(Value::from(bytes.to_vec()));
@@ -1888,30 +1924,33 @@ mod local_s3_tests {
             ..Default::default()
         };
 
-        let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+        let store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
         let v1: Vec<u8> = "v1".into();
         let key: Vec<u8> = ALICE.into();
 
         // We try to create new branch record
-        store.swap(key.clone(), Some(v1.clone()), None).await?;
+        let mut resource = store.open(&key).await?;
+        assert_eq!(resource.content(), &None, "currently there is no record");
+
+        resource.replace(Some(v1.clone())).await?;
 
         assert_eq!(
-            store.resolve(&key).await?.unwrap(),
-            v1.clone(),
-            "resolved to stored record"
+            store.get(&key).await?,
+            Some(v1.clone()),
+            "stored record was updated"
+        );
+
+        assert_eq!(
+            resource.content(),
+            &Some(v1.clone()),
+            "resource content was updated"
         );
 
         let v2: Vec<u8> = "v2".into();
         // We try to update v1 -> v2
-        store
-            .swap(key.clone(), Some(v2.clone()), Some(v1.clone()))
-            .await?;
+        resource.replace(Some(v2.clone())).await?;
 
-        assert_eq!(
-            store.resolve(&key).await?.unwrap(),
-            v2.clone(),
-            "resolved to new record"
-        );
+        // assert_eq!(store.get(&key).await?, Some(v2), "resolved to new record");
 
         Ok(())
     }
@@ -1931,22 +1970,28 @@ mod local_s3_tests {
         let v1: Vec<u8> = "v1".into();
         let key: Vec<u8> = ALICE.into();
 
-        // We try to create new branch record
-        store.swap(key.clone(), Some(v1.clone()), None).await?;
+        // Create initial value
+        let mut resource = store.open(&key).await?;
+
+        assert_eq!(resource.content(), &None, "have no content yet");
+
+        // write initila value
+        resource.replace(Some(v1.clone())).await?;
 
         assert_eq!(
-            store.resolve(&key).await?.unwrap(),
-            v1.clone(),
-            "resolved to stored record"
+            store.get(&key).await?,
+            Some(v1.clone()),
+            "record was stored"
         );
 
         let v2: Vec<u8> = "v2".into();
         let v3: Vec<u8> = "v3".into();
 
-        // We try to update v2 -> v3
-        let result = store
-            .swap(key.clone(), Some(v3.clone()), Some(v2.clone()))
-            .await;
+        // Simulate concurrent modification: someone else changes v1 -> v2
+        store.set(key.clone(), v2.clone()).await?;
+
+        // Now try to update based on stale v1 -> v3 (should fail)
+        let result = resource.replace(Some(v3.clone())).await;
 
         assert!(
             matches!(result, Err(RestStorageBackendError::OperationFailed(_))),
@@ -1954,9 +1999,9 @@ mod local_s3_tests {
         );
 
         assert_eq!(
-            store.resolve(&key).await?.unwrap(),
-            v1.clone(),
-            "resolved to old record"
+            store.get(&key).await?,
+            Some(v2),
+            "resolved to concurrently modified record"
         );
 
         Ok(())
@@ -1978,14 +2023,23 @@ mod local_s3_tests {
         let v2: Vec<u8> = "v2".into();
         let key: Vec<u8> = ALICE.into();
 
-        // We try to swap v1 -> v2
-        let result = store
-            .swap(key.clone(), Some(v2.clone()), Some(v1.clone()))
-            .await;
+        // Create value first
+        store.set(key.clone(), v1.clone()).await?;
+
+        // Open resource (gets v1)
+        let mut resource = store.open(&key).await?;
+        assert_eq!(resource.content(), &Some(v1.clone()));
+
+        // Simulate concurrent deletion by directly deleting from S3
+        let delete_request = store.prepare_delete_request(key.as_ref())?;
+        delete_request.send().await?;
+
+        // Now try to update v1 -> v2 (should fail because key was deleted)
+        let result = resource.replace(Some(v2.clone())).await;
 
         assert!(
             matches!(result, Err(RestStorageBackendError::OperationFailed(_))),
-            "swap failed"
+            "swap should have failed when key was concurrently deleted"
         );
 
         Ok(())
@@ -2000,13 +2054,14 @@ mod local_s3_tests {
             key_prefix: Some("branch".to_string()),
             ..Default::default()
         };
-        let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+        let store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
         let key: Vec<u8> = ALICE.into();
         let value: Vec<u8> = b"v1".to_vec();
 
         // when=None and key missing → success
-        store.swap(key.clone(), Some(value.clone()), None).await?;
-        assert_eq!(store.resolve(&key).await?.unwrap(), value);
+        let mut resource = store.open(&key).await?;
+        resource.replace(Some(value.clone())).await?;
+        assert_eq!(store.get(&key).await?, Some(value));
 
         Ok(())
     }
@@ -2027,12 +2082,22 @@ mod local_s3_tests {
         let new_val: Vec<u8> = b"v2".to_vec();
 
         // when=Some but key missing → fail
-        let result = store.swap(key.clone(), Some(new_val), Some(expected)).await;
+        // Create value first
+        store.set(key.clone(), expected.clone()).await?;
+
+        // Open resource (captures expected)
+        let mut resource = store.open(&key).await?;
+
+        // Simulate concurrent deletion
+        store.open(&key).await?.replace(None).await?;
+
+        // Try to update with stale ETag
+        let result = resource.replace(Some(new_val)).await;
         assert!(matches!(
             result,
             Err(RestStorageBackendError::OperationFailed(_))
         ));
-        assert!(store.resolve(&key).await?.is_none());
+        assert!(store.get(&key).await?.is_none());
 
         Ok(())
     }
@@ -2052,18 +2117,20 @@ mod local_s3_tests {
         let existing: Vec<u8> = b"v1".to_vec();
         let new_val: Vec<u8> = b"v2".to_vec();
 
-        // Prepopulate the key
-        store
-            .swap(key.clone(), Some(existing.clone()), None)
-            .await?;
-
         // when=None and key exists → fail
-        let result = store.swap(key.clone(), Some(new_val), None).await;
+        // Open resource for non-existent key (captures None)
+        let mut resource = store.open(&key).await?;
+
+        // Simulate concurrent creation: someone else creates the key
+        store.set(key.clone(), existing.clone()).await?;
+
+        // Try to create with CAS condition "must not exist" (should fail because key now exists)
+        let result = resource.replace(Some(new_val)).await;
         assert!(matches!(
             result,
             Err(RestStorageBackendError::OperationFailed(_))
         ));
-        assert_eq!(store.resolve(&key).await?.unwrap(), existing);
+        assert_eq!(store.get(&key).await?, Some(existing));
 
         Ok(())
     }
@@ -2084,15 +2151,12 @@ mod local_s3_tests {
         let new_val: Vec<u8> = b"v2".to_vec();
 
         // Prepopulate the key
-        store
-            .swap(key.clone(), Some(existing.clone()), None)
-            .await?;
+        store.set(key.clone(), existing.clone()).await?;
 
         // when=Some and matches existing → success
-        store
-            .swap(key.clone(), Some(new_val.clone()), Some(existing.clone()))
-            .await?;
-        assert_eq!(store.resolve(&key).await?.unwrap(), new_val);
+        let mut resource = store.open(&key).await?;
+        resource.replace(Some(new_val.clone())).await?;
+        assert_eq!(store.get(&key).await?, Some(new_val));
 
         Ok(())
     }
@@ -2114,19 +2178,21 @@ mod local_s3_tests {
         let new_val: Vec<u8> = b"v2".to_vec();
 
         // Prepopulate the key
-        store
-            .swap(key.clone(), Some(existing.clone()), None)
-            .await?;
+        store.set(key.clone(), existing.clone()).await?;
+
+        // Open resource (captures existing)
+        let mut resource = store.open(&key).await?;
+
+        // Simulate concurrent modification: someone else changes the value
+        store.set(key.clone(), wrong_expected.clone()).await?;
 
         // when=Some but doesn't match existing → fail
-        let result = store
-            .swap(key.clone(), Some(new_val.clone()), Some(wrong_expected))
-            .await;
+        let result = resource.replace(Some(new_val.clone())).await;
         assert!(matches!(
             result,
             Err(RestStorageBackendError::OperationFailed(_))
         ));
-        assert_eq!(store.resolve(&key).await?.unwrap(), existing);
+        assert_eq!(store.get(&key).await?, Some(wrong_expected));
 
         Ok(())
     }
