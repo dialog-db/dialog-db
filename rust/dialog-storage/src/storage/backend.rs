@@ -71,13 +71,21 @@ pub trait AtomicStorageBackend: Clone {
     async fn resolve(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error>;
 }
 
+/// Abstraction for software transactional memory
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait TransactionalMemory: Sized {
+    /// Address of the resources in this memory space
     type Address: ConditionalSend + Clone;
+    /// Value stored in this memory space
     type Value: ConditionalSend + Clone;
+    /// Error type for this memory space
     type Error: ConditionalSend;
 
     /// Resolves memory cell from the given address
     async fn get(&self, address: &Self::Address) -> Result<Resource<Self>, Self::Error>;
+    /// Stores a value (if any) against the given address. Update uses compare
+    /// and swap semantics.
     async fn put(
         &self,
         address: Self::Address,
@@ -86,23 +94,61 @@ pub trait TransactionalMemory: Sized {
     ) -> Result<(), Self::Error>;
 }
 
+/// Represents a resource stored in a transactional memory backend.
 pub struct Resource<Memory: TransactionalMemory> {
     content: Option<Memory::Value>,
     address: Memory::Address,
     memory: Memory,
 }
 impl<Memory: TransactionalMemory> Resource<Memory> {
-    pub async fn refresh(&mut self) -> Result<(), Memory::Error> {
-        let latest = self.memory.get(&self.address).await?;
+    /// Reloads content of the resource's from it's source and returns the old content.
+    pub async fn reload(&mut self) -> Result<Option<Memory::Value>, Memory::Error> {
+        let prior = self.content.to_owned();
+        let latest: Self = self.memory.get(&self.address).await?;
         self.content = latest.content;
-        Ok(())
+        Ok(prior)
     }
-    pub async fn swap(&mut self, content: Option<Memory::Value>) -> Result<(), Memory::Error> {
+
+    /// Replaces the contained value with value, and returns the old contained
+    /// value. Operation fails if the resource was updated and content of this
+    /// resource is out of date.
+    pub async fn replace(
+        &mut self,
+        content: Option<Memory::Value>,
+    ) -> Result<Option<Memory::Value>, Memory::Error> {
+        let prior = self.content.to_owned();
         self.memory
             .put(self.address.clone(), content.clone(), self.content.clone())
             .await?;
         self.content = content;
-        Ok(())
+        Ok(prior)
+    }
+
+    /// Performs opportunistic update the content of the resource with the
+    /// returned value of the `update` function. If content of the resource
+    /// is out of date, resource is reloaded and update is retried up to 10
+    /// times if update still fails operation is aborted with an error.
+    pub async fn swap(
+        &mut self,
+        update: fn(&Option<Memory::Value>) -> Option<Memory::Value>,
+    ) -> Result<Option<Memory::Value>, Memory::Error> {
+        for _ in 0..10 {
+            let before = self.content.to_owned();
+            let after = update(&self.content);
+            let result = self
+                .memory
+                .put(self.address.clone(), after.clone(), before.clone())
+                .await;
+
+            if result.is_ok() {
+                self.content = after;
+                return Ok(before);
+            } else {
+                self.reload().await?;
+            }
+        }
+
+        panic!("failed to swap resource")
     }
 }
 

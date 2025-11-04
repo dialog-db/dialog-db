@@ -23,7 +23,7 @@ const MAXIMUM_TREE_DEPTH: usize = 4096;
 /// collection of children references as [`References`], and segments (leaf
 /// nodes) store their key-value [`Entry`] inline.
 #[derive(Clone, Debug)]
-pub struct Node<const BRANCH_FACTOR: u32, Key, Value, Hash>
+pub struct Node<Key, Value, Hash>
 where
     Key: KeyType + 'static,
     Value: ValueType,
@@ -34,8 +34,8 @@ where
     reference: Reference<Key, Hash>,
 }
 
-impl<const BRANCH_FACTOR: u32, Key, Value, Hash>
-    Node<BRANCH_FACTOR, Key, Value, Hash>
+impl<Key, Value, Hash>
+    Node<Key, Value, Hash>
 where
     Key: KeyType,
     Value: ValueType,
@@ -239,7 +239,7 @@ where
         storage: &mut Storage,
     ) -> Result<Option<Self>, DialogProllyTreeError>
     where
-        Distribution: crate::Distribution<BRANCH_FACTOR, Key, Hash>,
+        Distribution: crate::Distribution< Key, Hash>,
         Storage: ContentAddressedStorage< Hash = Hash>,
     {
         let key_clone = key.to_owned();
@@ -333,7 +333,7 @@ where
         storage: &mut Storage,
     ) -> Result<Self, DialogProllyTreeError>
     where
-        Distribution: crate::Distribution<BRANCH_FACTOR, Key, Hash>,
+        Distribution: crate::Distribution< Key, Hash>,
         Storage: ContentAddressedStorage< Hash = Hash>,
     {
         let key = new_entry.key.to_owned();
@@ -543,10 +543,10 @@ where
         storage: &mut Storage,
     ) -> Result<NonEmpty<(Self, Rank)>, DialogProllyTreeError>
     where
-        Adopter: crate::Adopter<BRANCH_FACTOR, Key, Value, Hash>,
+        Adopter: crate::Adopter< Key, Value, Hash>,
         Storage: ContentAddressedStorage< Hash = Hash>,
     {
-        let mut output: Vec<(Node<BRANCH_FACTOR, Key, Value, Hash>, u32)> = vec![];
+        let mut output: Vec<(Node< Key, Value, Hash>, u32)> = vec![];
         let mut pending = vec![];
         for (node, rank) in nodes {
             pending.push(node);
@@ -627,12 +627,12 @@ where
 
     async fn rejoin<Distribution, Storage>(
         &self,
-        mut nodes: NonEmpty<(Node<BRANCH_FACTOR, Key, Value, Hash>, u32)>,
+        mut nodes: NonEmpty<(Node< Key, Value, Hash>, u32)>,
         mut branch_stack: BranchStack< Key, Hash>,
         storage: &mut Storage,
     ) -> Result<Self, DialogProllyTreeError>
     where
-        Distribution: crate::Distribution<BRANCH_FACTOR, Key, Hash>,
+        Distribution: crate::Distribution< Key, Hash>,
         Storage: ContentAddressedStorage< Hash = Hash>,
     {
         let mut minimum_rank = 2;
@@ -684,13 +684,13 @@ where
     }
 }
 
-struct TreeLocation<const BRANCH_FACTOR: u32, Key, Value, Hash>
+struct TreeLocation<Key, Value, Hash>
 where
     Key: KeyType + 'static,
     Value: ValueType,
     Hash: HashType,
 {
-    pub node: Node<BRANCH_FACTOR, Key, Value, Hash>,
+    pub node: Node<Key, Value, Hash>,
     pub index: Option<usize>,
 }
 

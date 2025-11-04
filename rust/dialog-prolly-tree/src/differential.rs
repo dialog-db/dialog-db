@@ -97,23 +97,23 @@ where
 /// Represents either a loaded node or an unloaded reference.
 /// This allows us to defer loading nodes from storage until we actually need them.
 #[derive(Debug, Clone)]
-pub(crate) enum SparseTreeNode<const F: u32, const H: usize, Key, Value, Hash>
+pub(crate) enum SparseTreeNode<Key, Value, Hash>
 where
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<H>,
+    Hash: HashType,
 {
     /// A fully loaded node (already read from storage or held in memory)
-    Node(Node<F, H, Key, Value, Hash>),
+    Node(Node<Key, Value, Hash>),
     /// An unloaded reference (hash + boundary, can be loaded on demand)
-    Ref(Reference<H, Key, Hash>),
+    Ref(Reference<Key, Hash>),
 }
 
-impl<const F: u32, const H: usize, Key, Value, Hash> SparseTreeNode<F, H, Key, Value, Hash>
+impl<Key, Value, Hash> SparseTreeNode<Key, Value, Hash>
 where
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<H>,
+    Hash: HashType,
 {
     /// Get the upper bound of this node or reference
     fn upper_bound(&self) -> &Key {
@@ -135,9 +135,9 @@ where
     async fn load<Storage>(
         self,
         storage: &Storage,
-    ) -> Result<Node<F, H, Key, Value, Hash>, DialogProllyTreeError>
+    ) -> Result<Node<Key, Value, Hash>, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage<H, Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         match self {
             SparseTreeNode::Node(node) => Ok(node),
@@ -148,24 +148,23 @@ where
 
 /// A sparse view of a tree containing only the nodes that differ between two trees.
 #[derive(Debug, Clone)]
-pub(crate) struct SparseTree<'a, const F: u32, const H: usize, Key, Value, Hash, Storage>
+pub(crate) struct SparseTree<'a, Key, Value, Hash, Storage>
 where
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<H>,
-    Storage: ContentAddressedStorage<H, Hash = Hash>,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash>,
 {
     storage: &'a Storage,
-    nodes: Vec<SparseTreeNode<F, H, Key, Value, Hash>>,
+    nodes: Vec<SparseTreeNode<Key, Value, Hash>>,
 }
 
-impl<const F: u32, const H: usize, Key, Value, Hash, Storage>
-    SparseTree<'_, F, H, Key, Value, Hash, Storage>
+impl<Key, Value, Hash, Storage> SparseTree<'_, Key, Value, Hash, Storage>
 where
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<H>,
-    Storage: ContentAddressedStorage<H, Hash = Hash>,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash>,
 {
     /// Expands loaded branch nodes and Refs whose upper bound falls within the given range.
     ///
@@ -225,14 +224,14 @@ where
             match &self.nodes[offset] {
                 SparseTreeNode::Ref(reference) => {
                     // Load the Ref from storage
-                    let node: Node<F, H, Key, Value, Hash> =
+                    let node: Node<Key, Value, Hash> =
                         Node::from_hash(reference.hash().clone(), self.storage).await?;
 
                     // If it's a branch, expand it
                     if node.is_branch() {
                         if let Ok(refs) = node.references() {
                             // Convert references to SparseTreeNode::Ref
-                            let children: Vec<SparseTreeNode<F, H, Key, Value, Hash>> = refs
+                            let children: Vec<SparseTreeNode<Key, Value, Hash>> = refs
                                 .iter()
                                 .map(|r| SparseTreeNode::Ref(r.clone()))
                                 .collect();
@@ -252,7 +251,7 @@ where
                     if node.is_branch() {
                         if let Ok(refs) = node.references() {
                             // Convert references to SparseTreeNode::Ref
-                            let children: Vec<SparseTreeNode<F, H, Key, Value, Hash>> = refs
+                            let children: Vec<SparseTreeNode<Key, Value, Hash>> = refs
                                 .iter()
                                 .map(|r| SparseTreeNode::Ref(r.clone()))
                                 .collect();
@@ -445,23 +444,22 @@ type Pair<T> = (T, T);
 /// efficiently compute the changes needed to transform the source tree into the target tree.
 ///
 /// The tuple structure is `(source_sparse_tree, target_sparse_tree)`.
-pub(crate) struct Delta<'a, const F: u32, const H: usize, Key, Value, Hash, Storage>(
-    SparseTree<'a, F, H, Key, Value, Hash, Storage>,
-    SparseTree<'a, F, H, Key, Value, Hash, Storage>,
+pub(crate) struct Delta<'a, Key, Value, Hash, Storage>(
+    SparseTree<'a, Key, Value, Hash, Storage>,
+    SparseTree<'a, Key, Value, Hash, Storage>,
 )
 where
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<H>,
-    Storage: ContentAddressedStorage<H, Hash = Hash>;
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash>;
 
-impl<'a, const F: u32, const H: usize, Key, Value, Hash, Storage>
-    Delta<'a, F, H, Key, Value, Hash, Storage>
+impl<'a, Key, Value, Hash, Storage> Delta<'a, Key, Value, Hash, Storage>
 where
     Key: KeyType + 'static,
     Value: ValueType + PartialEq,
-    Hash: HashType<H>,
-    Storage: ContentAddressedStorage<H, Hash = Hash>,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash>,
 {
     /// Creates a new Delta from a pair of trees `(source, target)`.
     ///
@@ -477,8 +475,8 @@ where
     /// let delta = Delta::from((old_tree, new_tree));
     /// // This delta can produce changes to transform old_tree → new_tree
     /// ```
-    pub fn from<Distription: crate::Distribution<F, H, Key, Hash>>(
-        (left, right): Pair<&'a Tree<F, H, Distription, Key, Value, Hash, Storage>>,
+    pub fn from<Distription: crate::Distribution<Key, Hash>>(
+        (left, right): Pair<&'a Tree<Distription, Key, Value, Hash, Storage>>,
     ) -> Self {
         Self(
             SparseTree {
@@ -708,13 +706,11 @@ mod tests {
     use futures_util::{StreamExt, pin_mut};
 
     type TestTree = Tree<
-        32,
-        32,
         GeometricDistribution,
         Vec<u8>,
         Vec<u8>,
         Blake3Hash,
-        Storage<32, CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+        Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
     >;
 
     #[tokio::test]

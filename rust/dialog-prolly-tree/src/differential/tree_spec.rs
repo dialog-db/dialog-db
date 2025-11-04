@@ -16,11 +16,13 @@ use std::{
 #[derive(Clone)]
 pub struct DistributionSimulator;
 
-impl<const BRANCH_FACTOR: u32, Hash>
-    Distribution<BRANCH_FACTOR, Vec<u8>, Hash> for DistributionSimulator
+impl<Hash>
+    Distribution<Vec<u8>, Hash> for DistributionSimulator
 where
     Hash: HashType,
 {
+    const BRANCH_FACTOR: u32 = 4;
+
     fn rank(key: &Vec<u8>) -> u32 {
         // Keys are encoded as [key_bytes, 0x00, rank_byte]
         // Just read the last byte as the rank
@@ -310,7 +312,7 @@ impl TreeDescriptor {
     /// Recursively build NodeSpecs from the tree structure
     async fn build_spec_from_node(
         spec: &mut [Vec<NodeSpec>],
-        node: &crate::Node<4, Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
+        node: &crate::Node< Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
         storage: &dialog_storage::Storage<
             dialog_storage::CborEncoder,
             dialog_storage::JournaledStorage<
@@ -399,7 +401,6 @@ fn decode_key(encoded: &[u8]) -> Vec<u8> {
 pub struct TreeSpec {
     pub spec: Vec<Vec<NodeSpec>>, // Node specs with hashes populated
     tree: crate::Tree<
-        4,
         DistributionSimulator,
         Vec<u8>,
         Vec<u8>,
@@ -422,7 +423,6 @@ impl TreeSpec {
     pub fn tree(
         &self,
     ) -> &crate::Tree<
-        4,
         DistributionSimulator,
         Vec<u8>,
         Vec<u8>,
@@ -461,7 +461,7 @@ impl TreeSpec {
     #[allow(dead_code)]
     fn visualize_node<'a>(
         output: &'a mut String,
-        node: &'a crate::Node<4, Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
+        node: &'a crate::Node< Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
         storage: &'a dialog_storage::Storage<
             dialog_storage::CborEncoder,
             dialog_storage::JournaledStorage<
@@ -680,7 +680,7 @@ impl std::fmt::Debug for TreeSpec {
 impl TreeSpec {
     fn fmt_node(
         f: &mut std::fmt::Formatter<'_>,
-        node: &crate::Node<4, Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
+        node: &crate::Node< Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
         prefix: &str,
         is_last: bool,
     ) -> std::fmt::Result {

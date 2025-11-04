@@ -199,10 +199,10 @@ impl<B, E> TransactionalStorage<B, E> {
     }
 
     /// Creates a namespaced store at the given path
-    pub fn at<const HASH_SIZE: usize>(&self, path: &str) -> TransactionalStore<B, E>
+    pub fn at(&self, path: &str) -> TransactionalStore<B, E>
     where
         B: Clone,
-        E: Clone + dialog_storage::Encoder<HASH_SIZE>,
+        E: Clone + dialog_storage::Encoder,
     {
         TransactionalStore {
             backend: self.backend.clone(),
@@ -228,11 +228,11 @@ where
     Backend::Error: std::fmt::Display,
 {
     /// Creates a nested namespace under this store
-    pub fn at<const HASH_SIZE: usize>(&self, path: &str) -> TransactionalStore<Backend, E>
+    pub fn at(&self, path: &str) -> TransactionalStore<Backend, E>
     where
         Backend: Clone,
-        E: Clone + dialog_storage::Encoder<HASH_SIZE>,
-        <E as dialog_storage::Encoder<HASH_SIZE>>::Error: std::fmt::Display,
+        E: Clone + dialog_storage::Encoder,
+        <E as dialog_storage::Encoder>::Error: std::fmt::Display,
     {
         TransactionalStore {
             backend: self.backend.clone(),
@@ -242,15 +242,12 @@ where
     }
 
     /// Resolves a value for the given key from storage
-    pub async fn resolve<const HASH_SIZE: usize, K, V>(
-        &self,
-        key: &K,
-    ) -> Result<Option<V>, TransactionalStoreError>
+    pub async fn resolve<K, V>(&self, key: &K) -> Result<Option<V>, TransactionalStoreError>
     where
         K: KeyType,
         V: DeserializeOwned + ConditionalSync,
-        E: dialog_storage::Encoder<HASH_SIZE>,
-        <E as dialog_storage::Encoder<HASH_SIZE>>::Error: std::fmt::Display,
+        E: dialog_storage::Encoder,
+        <E as dialog_storage::Encoder>::Error: std::fmt::Display,
     {
         // Use KeyType::bytes() for key encoding
         let key_bytes = self.prefix_key(key.bytes());
@@ -274,7 +271,7 @@ where
     }
 
     /// Performs a compare-and-swap operation
-    pub async fn swap<const HASH_SIZE: usize, K, V>(
+    pub async fn swap<K, V>(
         &mut self,
         key: K,
         value: Option<V>,
@@ -283,8 +280,8 @@ where
     where
         K: KeyType,
         V: Serialize + DeserializeOwned + ConditionalSync + std::fmt::Debug,
-        E: dialog_storage::Encoder<HASH_SIZE>,
-        <E as dialog_storage::Encoder<HASH_SIZE>>::Error: std::fmt::Display,
+        E: dialog_storage::Encoder,
+        <E as dialog_storage::Encoder>::Error: std::fmt::Display,
     {
         // Encode key using KeyType::bytes()
         let key_bytes = self.prefix_key(key.bytes());
@@ -334,13 +331,12 @@ where
 // Implement Encoder for TransactionalStore to delegate to internal encoder
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<const HASH_SIZE: usize, Backend, E> dialog_storage::Encoder<HASH_SIZE>
-    for TransactionalStore<Backend, E>
+impl<Backend, E> dialog_storage::Encoder for TransactionalStore<Backend, E>
 where
     Backend: AtomicStorageBackend + Clone + ConditionalSync,
     Backend::Key: From<Vec<u8>>,
     Backend::Value: From<Vec<u8>> + AsRef<[u8]>,
-    E: dialog_storage::Encoder<HASH_SIZE> + Clone + ConditionalSync,
+    E: dialog_storage::Encoder + Clone + ConditionalSync,
 {
     type Bytes = E::Bytes;
     type Hash = E::Hash;
@@ -469,17 +465,17 @@ pub trait TransactionalMemory: ConditionalSync + 'static {
 /// # Example
 /// ```ignore
 /// let storage = Storage { encoder: CborEncoder, backend: atomic_backend };
-/// let memory = Memory::<32, MyRecord, _>::new(storage);
+/// let memory = Memory::<MyRecord, _>::new(storage);
 ///
 /// let record = memory.read(&address).await?;
 /// let hash = memory.merge(new_record).await?;
 /// ```
-pub struct Memory<const HASH_SIZE: usize, Record, Backend> {
+pub struct Memory<Record, Backend> {
     backend: Backend,
     _record: std::marker::PhantomData<Record>,
 }
 
-impl<const HASH_SIZE: usize, Backend, Record> Memory<HASH_SIZE, Record, Backend> {
+impl<Backend, Record> Memory<Record, Backend> {
     pub fn new(backend: Backend) -> Self {
         Self {
             backend,
@@ -493,7 +489,7 @@ impl<const HASH_SIZE: usize, Backend, Record> Memory<HASH_SIZE, Record, Backend>
     }
 }
 
-impl<const HASH_SIZE: usize, Record, Backend> Clone for Memory<HASH_SIZE, Record, Backend>
+impl<Record, Backend> Clone for Memory<Record, Backend>
 where
     Backend: Clone,
 {
@@ -520,17 +516,13 @@ pub enum TransactionalMemoryError {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<const HASH_SIZE: usize, Backend, Record> TransactionalMemory
-    for Memory<HASH_SIZE, Record, Backend>
+impl<Backend, Record> TransactionalMemory for Memory<Record, Backend>
 where
-    Backend: Encoder<HASH_SIZE>
-        + AtomicStorageBackend<Value = Backend::Bytes>
-        + ConditionalSync
-        + 'static,
+    Backend: Encoder + AtomicStorageBackend<Value = Backend::Bytes> + ConditionalSync + 'static,
     Backend::Hash: AsRef<[u8]> + ConditionalSync,
     Backend::Bytes: AsRef<[u8]> + ConditionalSync + 'static,
     Backend::Key: ConditionalSync + From<Backend::Bytes>,
-    <Backend as Encoder<HASH_SIZE>>::Error: std::fmt::Display,
+    <Backend as Encoder>::Error: std::fmt::Display,
     <Backend as AtomicStorageBackend>::Error: std::fmt::Display,
     Record: MemoryRecord + ConditionalSync + std::fmt::Debug + 'static,
     Record::Address: std::fmt::Debug + ConditionalSync,
@@ -642,7 +634,7 @@ mod tests {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = TransactionalStorage::new(backend, CborEncoder);
 
-        let _store = storage.at::<32>("test");
+        let _store = storage.at("test");
         // If we get here, storage and store were created successfully
     }
 
@@ -651,10 +643,10 @@ mod tests {
     async fn test_transactional_store_resolve_nonexistent() {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = TransactionalStorage::new(backend, CborEncoder);
-        let store = storage.at::<32>("test");
+        let store = storage.at("test");
 
         let key = b"key1".to_vec();
-        let result: Option<TestRecord> = store.resolve::<32, _, _>(&key).await.unwrap();
+        let result: Option<TestRecord> = store.resolve::<_, _>(&key).await.unwrap();
         assert_eq!(result, None);
     }
 
@@ -663,7 +655,7 @@ mod tests {
     async fn test_transactional_store_swap_create() {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = TransactionalStorage::new(backend, CborEncoder);
-        let mut store = storage.at::<32>("test");
+        let mut store = storage.at("test");
 
         let key = b"key1".to_vec();
         let record = TestRecord {
@@ -673,12 +665,12 @@ mod tests {
 
         // Create new record (when = None)
         store
-            .swap::<32, _, _>(key.clone(), Some(record.clone()), None)
+            .swap::<_, _>(key.clone(), Some(record.clone()), None)
             .await
             .unwrap();
 
         // Verify it was stored
-        let result: Option<TestRecord> = store.resolve::<32, _, _>(&key).await.unwrap();
+        let result: Option<TestRecord> = store.resolve::<_, _>(&key).await.unwrap();
         assert_eq!(result, Some(record));
     }
 
@@ -687,7 +679,7 @@ mod tests {
     async fn test_transactional_store_swap_update() {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = TransactionalStorage::new(backend, CborEncoder);
-        let mut store = storage.at::<32>("test");
+        let mut store = storage.at("test");
 
         let key = b"key1".to_vec();
         let record1 = TestRecord {
@@ -701,18 +693,18 @@ mod tests {
 
         // Create
         store
-            .swap::<32, _, _>(key.clone(), Some(record1.clone()), None)
+            .swap::<_, _>(key.clone(), Some(record1.clone()), None)
             .await
             .unwrap();
 
         // Update with CAS
         store
-            .swap::<32, _, _>(key.clone(), Some(record2.clone()), Some(record1))
+            .swap::<_, _>(key.clone(), Some(record2.clone()), Some(record1))
             .await
             .unwrap();
 
         // Verify update
-        let result: Option<TestRecord> = store.resolve::<32, _, _>(&key).await.unwrap();
+        let result: Option<TestRecord> = store.resolve::<_, _>(&key).await.unwrap();
         assert_eq!(result, Some(record2));
     }
 
@@ -721,7 +713,7 @@ mod tests {
     async fn test_transactional_store_swap_delete() {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = TransactionalStorage::new(backend, CborEncoder);
-        let mut store = storage.at::<32>("test");
+        let mut store = storage.at("test");
 
         let key = b"key1".to_vec();
         let record = TestRecord {
@@ -731,18 +723,18 @@ mod tests {
 
         // Create
         store
-            .swap::<32, _, _>(key.clone(), Some(record.clone()), None)
+            .swap::<_, _>(key.clone(), Some(record.clone()), None)
             .await
             .unwrap();
 
         // Delete with CAS
         store
-            .swap::<32, Vec<u8>, TestRecord>(key.clone(), None, Some(record))
+            .swap::<Vec<u8>, TestRecord>(key.clone(), None, Some(record))
             .await
             .unwrap();
 
         // Verify deletion
-        let result: Option<TestRecord> = store.resolve::<32, _, _>(&key).await.unwrap();
+        let result: Option<TestRecord> = store.resolve::<_, _>(&key).await.unwrap();
         assert_eq!(result, None);
     }
 
@@ -752,8 +744,8 @@ mod tests {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = TransactionalStorage::new(backend, CborEncoder);
 
-        let mut store1 = storage.at::<32>("namespace1");
-        let mut store2 = storage.at::<32>("namespace1").at::<32>("nested");
+        let mut store1 = storage.at("namespace1");
+        let mut store2 = storage.at("namespace1").at("nested");
 
         let key = b"key1".to_vec();
         let record1 = TestRecord {
@@ -767,17 +759,17 @@ mod tests {
 
         // Store same key in different namespaces
         store1
-            .swap::<32, _, _>(key.clone(), Some(record1.clone()), None)
+            .swap::<_, _>(key.clone(), Some(record1.clone()), None)
             .await
             .unwrap();
         store2
-            .swap::<32, _, _>(key.clone(), Some(record2.clone()), None)
+            .swap::<_, _>(key.clone(), Some(record2.clone()), None)
             .await
             .unwrap();
 
         // Verify they're isolated
-        let result1: Option<TestRecord> = store1.resolve::<32, _, _>(&key).await.unwrap();
-        let result2: Option<TestRecord> = store2.resolve::<32, _, _>(&key).await.unwrap();
+        let result1: Option<TestRecord> = store1.resolve::<_, _>(&key).await.unwrap();
+        let result2: Option<TestRecord> = store2.resolve::<_, _>(&key).await.unwrap();
 
         assert_eq!(result1, Some(record1));
         assert_eq!(result2, Some(record2));
@@ -788,9 +780,9 @@ mod tests {
     async fn test_memory_with_transactional_store() {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = TransactionalStorage::new(backend, CborEncoder);
-        let store = storage.at::<32>("records");
+        let store = storage.at("records");
 
-        let mut memory = Memory::<32, TestRecord, _>::open(store);
+        let mut memory = Memory::<TestRecord, _>::open(store);
 
         let record = TestRecord {
             name: "test".to_string(),

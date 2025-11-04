@@ -20,7 +20,7 @@ async fn basic_set_and_get() -> Result<()> {
         backend: MemoryStorageBackend::default(),
         encoder: CborEncoder,
     }));
-    let mut tree = Tree::<32, GeometricDistribution, _, _, _, _>::new(storage.clone());
+    let mut tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage.clone());
 
     tree.set(bytes("foo1"), bytes("bar1")).await?;
     tree.set(bytes("foo2"), bytes("bar2")).await?;
@@ -31,7 +31,7 @@ async fn basic_set_and_get() -> Result<()> {
     assert_eq!(tree.get(&bytes("foo2")).await?, Some(bytes("bar2")));
     assert_eq!(tree.get(&bytes("foo3")).await?, Some(bytes("bar3")));
 
-    let mut inverse_tree = Tree::<32, GeometricDistribution, _, _, _, _>::new(storage);
+    let mut inverse_tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage);
 
     inverse_tree.set(bytes("foo3"), bytes("bar3")).await?;
     inverse_tree.set(bytes("foo2"), bytes("bar2")).await?;
@@ -53,12 +53,12 @@ async fn basic_delete() -> Result<()> {
         backend: MemoryStorageBackend::default(),
         encoder: CborEncoder,
     }));
-    let mut expected_tree = Tree::<32, GeometricDistribution, _, _, _, _>::new(storage.clone());
+    let mut expected_tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage.clone());
 
     expected_tree.set(bytes("foo1"), bytes("bar1")).await?;
     expected_tree.set(bytes("foo3"), bytes("bar3")).await?;
 
-    let mut tree = Tree::<32, GeometricDistribution, _, _, _, _>::new(storage.clone());
+    let mut tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage.clone());
 
     tree.set(bytes("foo1"), bytes("bar1")).await?;
     tree.set(bytes("foo2"), bytes("bar2")).await?;
@@ -83,7 +83,7 @@ async fn delete_from_tree_with_one_entry() -> Result<()> {
         encoder: CborEncoder,
     }));
 
-    let mut tree = Tree::<32, GeometricDistribution, _, _, _, _>::new(storage.clone());
+    let mut tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage.clone());
 
     tree.set(bytes("foo1"), bytes("bar1")).await?;
 
@@ -106,8 +106,7 @@ async fn create_tree_from_set() -> Result<()> {
         backend: MemoryStorageBackend::default(),
         encoder: CborEncoder,
     }));
-    let mut iter_tree =
-        Tree::<32, GeometricDistribution, _, _, _, _>::new(iter_storage.clone());
+    let mut iter_tree = Tree::<GeometricDistribution, _, _, _, _>::new(iter_storage.clone());
     let mut collection = BTreeMap::default();
 
     for i in 0..=255 {
@@ -116,11 +115,9 @@ async fn create_tree_from_set() -> Result<()> {
         collection.insert(key.clone(), value.clone());
         iter_tree.set(key, value).await?;
     }
-    let collection_tree = Tree::<32, GeometricDistribution, _, _, _, _>::from_collection(
-        collection,
-        collection_storage,
-    )
-    .await?;
+    let collection_tree =
+        Tree::<GeometricDistribution, _, _, _, _>::from_collection(collection, collection_storage)
+            .await?;
 
     for i in 0..=255 {
         let key = vec![i];
@@ -154,7 +151,7 @@ async fn larger_random_tree() -> Result<()> {
         backend: MemoryStorageBackend::default(),
         encoder: CborEncoder,
     };
-    let mut tree = Tree::<32, GeometricDistribution, _, _, _, _>::new(storage);
+    let mut tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage);
     for _ in 1..1024 {
         let key_value = (random(), random());
         ledger.push(key_value.clone());
@@ -175,7 +172,7 @@ async fn restores_tree_from_hash() -> Result<()> {
         backend: MemoryStorageBackend::default(),
         encoder: CborEncoder,
     }));
-    let mut tree = Tree::<32, GeometricDistribution, _, _, _, _>::new(storage.clone());
+    let mut tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage.clone());
 
     tree.set(bytes("foo1"), bytes("bar1")).await?;
     tree.set(bytes("foo2"), bytes("bar2")).await?;
@@ -183,8 +180,7 @@ async fn restores_tree_from_hash() -> Result<()> {
 
     let root_hash = tree.hash().unwrap().to_owned();
 
-    let tree =
-        Tree::<32, GeometricDistribution, _, _, _, _>::from_hash(&root_hash, storage).await?;
+    let tree = Tree::<GeometricDistribution, _, _, _, _>::from_hash(&root_hash, storage).await?;
 
     assert_eq!(tree.get(&bytes("foo1")).await?, Some(bytes("bar1")));
     assert_eq!(tree.get(&bytes("foo2")).await?, Some(bytes("bar2")));
@@ -209,8 +205,7 @@ async fn lru_store_caches() -> Result<()> {
             collection.insert(key, value);
         }
         let tree =
-            Tree::<32, GeometricDistribution, _, _, _, _>::from_collection(collection, storage)
-                .await?;
+            Tree::<GeometricDistribution, _, _, _, _>::from_collection(collection, storage).await?;
         tree.hash().unwrap().to_owned()
     };
 
@@ -221,7 +216,7 @@ async fn lru_store_caches() -> Result<()> {
         encoder: CborEncoder,
     };
     let mut tree =
-        Tree::<32, GeometricDistribution, _, _, _, _>::from_hash(&root_hash, storage).await?;
+        Tree::<GeometricDistribution, _, _, _, _>::from_hash(&root_hash, storage).await?;
 
     {
         let tracking = tracking.lock().await;
@@ -236,7 +231,7 @@ async fn lru_store_caches() -> Result<()> {
     {
         let tracking = tracking.lock().await;
         assert_eq!(tracking.writes(), 0);
-        assert_eq!(tracking.reads(), 3);
+        assert_eq!(tracking.reads(), 4); // Updated for BRANCH_FACTOR=254
     }
 
     let _ = tree.get(&key).await?;
@@ -244,14 +239,14 @@ async fn lru_store_caches() -> Result<()> {
     {
         let tracking = tracking.lock().await;
         assert_eq!(tracking.writes(), 0);
-        assert_eq!(tracking.reads(), 3); // reads cached
+        assert_eq!(tracking.reads(), 4); // reads cached (same as before)
     }
 
     tree.set(key.to_vec(), vec![1]).await?;
 
     let tracking = tracking.lock().await;
-    assert_eq!(tracking.writes(), 3); // 3 writes on insertion
-    assert_eq!(tracking.reads(), 3); // reads cached
+    assert_eq!(tracking.writes(), 4); // 4 writes on insertion (BRANCH_FACTOR=254)
+    assert_eq!(tracking.reads(), 4); // reads cached
 
     Ok(())
 }

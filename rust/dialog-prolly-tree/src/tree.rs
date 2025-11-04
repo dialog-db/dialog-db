@@ -15,21 +15,20 @@ use nonempty::NonEmpty;
 /// encoding and rank distribution.
 #[derive(Clone)]
 pub struct Tree<
-    const BRANCH_FACTOR: u32,
     Distribution,
     Key,
     Value,
     Hash,
     Storage,
 > where
-    Distribution: crate::Distribution<BRANCH_FACTOR, Key, Hash>,
+    Distribution: crate::Distribution<Key, Hash>,
     Key: KeyType + 'static,
     Value: ValueType,
     Hash: HashType,
     Storage: ContentAddressedStorage< Hash = Hash>,
 {
     storage: Storage,
-    root: Option<Node<BRANCH_FACTOR, Key, Value, Hash>>,
+    root: Option<Node<Key, Value, Hash>>,
 
     distribution_type: PhantomData<Distribution>,
     key_type: PhantomData<Key>,
@@ -37,10 +36,10 @@ pub struct Tree<
     hash_type: PhantomData<Hash>,
 }
 
-impl<const BRANCH_FACTOR: u32, Distribution, Key, Value, Hash, Storage>
-    Tree<BRANCH_FACTOR, Distribution, Key, Value, Hash, Storage>
+impl<Distribution, Key, Value, Hash, Storage>
+    Tree< Distribution, Key, Value, Hash, Storage>
 where
-    Distribution: crate::Distribution<BRANCH_FACTOR, Key, Hash>,
+    Distribution: crate::Distribution< Key, Hash>,
     Key: KeyType,
     Value: ValueType,
     Hash: HashType,
@@ -81,7 +80,7 @@ where
     /// Returns the [`Node`] representing the root of this tree.
     ///
     /// Returns `None` if the tree is empty.
-    pub fn root(&self) -> Option<&Node<BRANCH_FACTOR, Key, Value, Hash>> {
+    pub fn root(&self) -> Option<&Node<Key, Value, Hash>> {
         self.root.as_ref()
     }
 
@@ -248,10 +247,10 @@ where
 }
 
 // Impl block for methods that require Encoder
-impl<const BRANCH_FACTOR: u32, Distribution, Key, Value, Hash, Storage>
-    Tree<BRANCH_FACTOR, Distribution, Key, Value, Hash, Storage>
+impl<Distribution, Key, Value, Hash, Storage>
+    Tree< Distribution, Key, Value, Hash, Storage>
 where
-    Distribution: crate::Distribution<BRANCH_FACTOR, Key, Hash>,
+    Distribution: crate::Distribution< Key, Hash>,
     Key: KeyType,
     Value: ValueType,
     Hash: HashType,

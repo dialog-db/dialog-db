@@ -9,11 +9,10 @@ use wasm_bindgen_test::wasm_bindgen_test;
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-async fn create_test_tree<const BRANCH_FACTOR: u32>(
+async fn create_test_tree(
     size: u32,
 ) -> Result<
     Tree<
-        BRANCH_FACTOR,
         GeometricDistribution,
         Vec<u8>,
         Vec<u8>,
@@ -37,7 +36,7 @@ async fn create_test_tree<const BRANCH_FACTOR: u32>(
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn gets_full_range() -> Result<()> {
-    let tree = create_test_tree::<32>(1024).await?;
+    let tree = create_test_tree(1024).await?;
     let stream = tree.stream();
     tokio::pin!(stream);
     let mut i = 0u32;
@@ -56,7 +55,7 @@ async fn stream_range_on_empty_trees() -> Result<()> {
         backend: MemoryStorageBackend::default(),
     };
 
-    let empty = Tree::<32, GeometricDistribution, Vec<u8>, Vec<u8>, _, _>::new(storage);
+    let empty = Tree::< GeometricDistribution, Vec<u8>, Vec<u8>, _, _>::new(storage);
 
     let stream = empty.stream_range(..);
     tokio::pin!(stream);
@@ -72,7 +71,7 @@ async fn stream_range_on_empty_trees() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn gets_range() -> Result<()> {
-    let tree = create_test_tree::<32>(1024).await?;
+    let tree = create_test_tree(1024).await?;
 
     const OFFSET: u32 = 2;
     const MAX: u32 = 10;
@@ -97,7 +96,7 @@ async fn gets_range() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn request_out_of_range() -> Result<()> {
-    let tree = create_test_tree::<32>(1024).await?;
+    let tree = create_test_tree(1024).await?;
     let start = 1_000_000u32.to_be_bytes().to_vec();
     let stream = tree.stream_range(start..);
     tokio::pin!(stream);
@@ -110,7 +109,7 @@ async fn request_out_of_range() -> Result<()> {
         encoder: CborEncoder,
         backend: MemoryStorageBackend::default(),
     };
-    let mut tree = Tree::<32, GeometricDistribution, _, _, _, _>::new(storage);
+    let mut tree = Tree::< GeometricDistribution, _, _, _, _>::new(storage);
     tree.set(10u32.to_be_bytes().to_vec(), vec![1]).await?;
     let start = 0u32.to_be_bytes().to_vec();
     let end = 5u32.to_be_bytes().to_vec();

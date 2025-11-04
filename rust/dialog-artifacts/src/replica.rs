@@ -1,12 +1,11 @@
 pub use super::uri::Uri;
 use crate::artifacts::NULL_REVISION_HASH as EMPTY_INDEX;
-use crate::constants::HASH_SIZE;
 use crate::{Datum, Index, Key, State};
 use async_stream::stream;
 use dialog_common::ConditionalSync;
 use dialog_prolly_tree::{Differential, KeyType, Tree, ValueType};
 use dialog_storage::{
-    AtomicStorageBackend, Blake3Hash, CborEncoder, DialogStorageError, Encoder, Storage,
+    AtomicStorageBackend, Blake3Hash, CborEncoder, DialogStorageError, Encoder, HashType, Storage,
     StorageBackend,
 };
 
@@ -769,7 +768,7 @@ pub enum Origin {
     Remote(Remote),
 }
 
-type Archive<Backend> = Storage<HASH_SIZE, CborEncoder, Backend>;
+type Archive<Backend> = Storage<CborEncoder, Backend>;
 
 /// Blake3 hash of the branch state.
 #[derive(Serialize, Deserialize)]
@@ -826,7 +825,7 @@ impl<T> TryFrom<Vec<u8>> for Edition<T> {
             value.try_into().map_err(|value: Vec<u8>| {
                 crate::DialogArtifactsError::InvalidReference(format!(
                     "Incorrect length (expected {}, got {})",
-                    crate::HASH_SIZE,
+                    dialog_storage::Blake3Hash::SIZE,
                     value.len()
                 ))
             })?,

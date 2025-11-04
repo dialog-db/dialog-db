@@ -53,7 +53,7 @@ use futures_util::TryStreamExt;
 use async_stream::stream;
 
 use crate::{
-    AttributeKey, BRANCH_FACTOR, DialogArtifactsError, EntityKey, FromKey, Key, KeyView,
+    AttributeKey, DialogArtifactsError, EntityKey, FromKey, Key, KeyView,
     KeyViewConstruct, KeyViewMut, State, ValueKey, artifacts::selector::Constrained,
     make_reference,
 };
@@ -61,7 +61,6 @@ use crate::{
 /// An alias type that describes the [`Tree`]-based prolly tree that is
 /// used for each index in [`Artifacts`]
 pub type Index<Key, Value, Backend> = Tree<
-    BRANCH_FACTOR,
     GeometricDistribution,
     Key,
     State<Value>,

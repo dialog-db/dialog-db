@@ -19,8 +19,8 @@
 //!     backend: MemoryStorageBackend::default()
 //! };
 //!
-//! // Create a tree with branch factor 32, geometric distribution, and Blake3 hashes
-//! let mut tree = Tree::<32, GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash, _>::new(storage);
+//! // Create a tree with geometric distribution (branch factor 254) and Blake3 hashes
+//! let mut tree = Tree::<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash, _>::new(storage);
 //!
 //! // Store a key-value pair
 //! tree.set(vec![1, 2, 3], vec![4, 5, 6]).await?;
