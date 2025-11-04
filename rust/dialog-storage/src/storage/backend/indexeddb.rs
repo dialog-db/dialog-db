@@ -7,7 +7,7 @@ use wasm_bindgen::{JsCast, JsValue};
 
 use crate::{DialogStorageError, StorageSink};
 
-use super::{AtomicStorageBackend, StorageBackend};
+use super::{AtomicStorageBackend, Resource, StorageBackend};
 
 const INDEXEDDB_STORAGE_VERSION: u32 = 1;
 
@@ -47,14 +47,144 @@ where
     }
 }
 
-#[async_trait(?Send)]
-impl<Key, Value> StorageBackend for IndexedDbStorageBackend<Key, Value>
+/// A resource handle for a specific entry in [IndexedDbStorageBackend]
+pub struct IndexedDbResource<Key, Value>
 where
     Key: AsRef<[u8]> + Clone,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone,
 {
+    backend: IndexedDbStorageBackend<Key, Value>,
+    key: Key,
+    content: Option<Value>,
+}
+
+#[async_trait(?Send)]
+impl<Key, Value> Resource for IndexedDbResource<Key, Value>
+where
+    Key: AsRef<[u8]> + Clone,
+    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + PartialEq,
+{
+    type Value = Value;
+    type Error = DialogStorageError;
+
+    fn content(&self) -> &Option<Self::Value> {
+        &self.content
+    }
+
+    fn into_content(self) -> Option<Self::Value> {
+        self.content
+    }
+
+    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
+        let prior = self.content.clone();
+
+        let tx = self
+            .backend
+            .db
+            .transaction(&[&self.backend.store_name], TransactionMode::ReadOnly)
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+        let store = tx
+            .store(&self.backend.store_name)
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+        let key_array = bytes_to_typed_array(self.key.as_ref());
+        let result = store
+            .get(key_array)
+            .await
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+        self.content = result
+            .map(|value| {
+                value
+                    .dyn_into::<Uint8Array>()
+                    .map(|arr| Value::from(arr.to_vec()))
+                    .map_err(|_| {
+                        DialogStorageError::StorageBackend("Failed to downcast value".to_string())
+                    })
+            })
+            .transpose()?;
+
+        Ok(prior)
+    }
+
+    async fn replace(
+        &mut self,
+        value: Option<Self::Value>,
+    ) -> Result<Option<Self::Value>, Self::Error> {
+        // Use a transaction for atomic read-check-write
+        let tx = self
+            .backend
+            .db
+            .transaction(&[&self.backend.store_name], TransactionMode::ReadWrite)
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+        let store = tx
+            .store(&self.backend.store_name)
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+        let key_array = bytes_to_typed_array(self.key.as_ref());
+
+        // Read current value in transaction
+        let current = store
+            .get(key_array.clone())
+            .await
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+        let current_value = current
+            .map(|value| {
+                value
+                    .dyn_into::<Uint8Array>()
+                    .map(|arr| Value::from(arr.to_vec()))
+                    .map_err(|_| {
+                        DialogStorageError::StorageBackend("Failed to downcast value".to_string())
+                    })
+            })
+            .transpose()?;
+
+        // Check CAS condition - current must match what we expect
+        if current_value != self.content {
+            return Err(DialogStorageError::StorageBackend(
+                "CAS condition failed: value has changed".to_string(),
+            ));
+        }
+
+        let prior = self.content.clone();
+
+        // Perform the write or delete
+        match &value {
+            Some(new_value) => {
+                let value_array = bytes_to_typed_array(new_value.as_ref());
+                store
+                    .put(&value_array, Some(&key_array))
+                    .await
+                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            }
+            None => {
+                store
+                    .delete(key_array)
+                    .await
+                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            }
+        }
+
+        // Commit transaction
+        tx.done()
+            .await
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+        self.content = value;
+        Ok(prior)
+    }
+}
+
+#[async_trait(?Send)]
+impl<Key, Value> StorageBackend for IndexedDbStorageBackend<Key, Value>
+where
+    Key: AsRef<[u8]> + Clone,
+    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + PartialEq,
+{
     type Key = Key;
     type Value = Value;
+    type Resource = IndexedDbResource<Key, Value>;
     type Error = DialogStorageError;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -114,13 +244,46 @@ where
 
         Ok(Some(Value::from(out)))
     }
+
+    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
+        let tx = self
+            .db
+            .transaction(&[&self.store_name], TransactionMode::ReadOnly)
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+        let store = tx
+            .store(&self.store_name)
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+        let key_array = bytes_to_typed_array(key.as_ref());
+
+        let result = store
+            .get(key_array)
+            .await
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+        let content = result
+            .map(|value| {
+                value
+                    .dyn_into::<Uint8Array>()
+                    .map(|arr| Value::from(arr.to_vec()))
+                    .map_err(|_| {
+                        DialogStorageError::StorageBackend("Failed to downcast value".to_string())
+                    })
+            })
+            .transpose()?;
+
+        Ok(IndexedDbResource {
+            backend: self.clone(),
+            key: key.clone(),
+            content,
+        })
+    }
 }
 
 #[async_trait(?Send)]
 impl<Key, Value> StorageSink for IndexedDbStorageBackend<Key, Value>
 where
     Key: AsRef<[u8]> + Clone,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone,
+    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + PartialEq,
 {
     async fn write<EntryStream>(
         &mut self,

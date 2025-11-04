@@ -3,7 +3,7 @@ use crate::artifacts::NULL_REVISION_HASH as EMPTY_INDEX;
 use crate::{Datum, Index, Key, State};
 use async_stream::stream;
 use dialog_common::ConditionalSync;
-use dialog_prolly_tree::{Differential, KeyType, Tree, ValueType};
+use dialog_prolly_tree::{Differential, KeyType, Tree};
 use dialog_storage::{
     AtomicStorageBackend, Blake3Hash, CborEncoder, DialogStorageError, Encoder, HashType, Storage,
     StorageBackend,

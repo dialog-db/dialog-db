@@ -32,7 +32,7 @@ use std::{pin::Pin, str::FromStr, sync::Arc};
 
 use base58::{FromBase58, ToBase58};
 use dialog_storage::{
-    Blake3Hash, IndexedDbStorageBackend, StorageCache, web::ObjectSafeStorageBackend,
+    Blake3Hash, HashType, IndexedDbStorageBackend, StorageCache, web::ObjectSafeStorageBackend,
 };
 use futures_util::{Stream, StreamExt};
 use rand::{Rng, distributions::Alphanumeric};
@@ -442,7 +442,7 @@ impl From<Entity> for JsValue {
 
 impl From<Cause> for JsValue {
     fn from(value: Cause) -> Self {
-        let result = Uint8Array::new_with_length(Blake3Hash::SIZE as u32);
+        let result = Uint8Array::new_with_length(<Blake3Hash as HashType>::SIZE as u32);
         result.copy_from(value.as_ref());
         JsValue::from(result)
     }

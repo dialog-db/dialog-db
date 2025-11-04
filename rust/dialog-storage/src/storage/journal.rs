@@ -3,7 +3,7 @@ use dialog_common::ConditionalSync;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use super::StorageBackend;
+use super::{Resource, StorageBackend};
 
 /// The type of storage operation that was journaled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,15 +346,72 @@ where
     }
 }
 
+/// A resource wrapper that journals reload and replace operations
+pub struct JournaledResource<Key, R>
+where
+    Key: Clone + ConditionalSync + std::hash::Hash + Eq,
+    R: Resource,
+{
+    key: Key,
+    inner: R,
+    journal: Arc<RwLock<JournalState<Key>>>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Key, R> Resource for JournaledResource<Key, R>
+where
+    Key: Clone + ConditionalSync + std::hash::Hash + Eq,
+    R: Resource + ConditionalSync,
+    R::Value: ConditionalSync,
+    R::Error: ConditionalSync,
+{
+    type Value = R::Value;
+    type Error = R::Error;
+
+    fn content(&self) -> &Option<Self::Value> {
+        self.inner.content()
+    }
+
+    fn into_content(self) -> Option<Self::Value> {
+        self.inner.into_content()
+    }
+
+    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
+        // Record the read operation
+        self.journal.write().unwrap().push(JournalEntry {
+            operation: Operation::Read,
+            key: self.key.clone(),
+        });
+        self.inner.reload().await
+    }
+
+    async fn replace(
+        &mut self,
+        value: Option<Self::Value>,
+    ) -> Result<Option<Self::Value>, Self::Error> {
+        // Record the write operation
+        self.journal.write().unwrap().push(JournalEntry {
+            operation: Operation::Write,
+            key: self.key.clone(),
+        });
+        self.inner.replace(value).await
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Backend> StorageBackend for JournaledStorage<Backend>
 where
     Backend: StorageBackend + ConditionalSync,
     Backend::Key: Clone + ConditionalSync + std::hash::Hash + Eq,
+    Backend::Value: ConditionalSync,
+    Backend::Resource: ConditionalSync,
+    Backend::Error: ConditionalSync,
 {
     type Key = Backend::Key;
     type Value = Backend::Value;
+    type Resource = JournaledResource<Backend::Key, Backend::Resource>;
     type Error = Backend::Error;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -373,6 +430,15 @@ where
             key: key.clone(),
         });
         self.backend.get(key).await
+    }
+
+    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
+        let inner = self.backend.open(key).await?;
+        Ok(JournaledResource {
+            key: key.clone(),
+            inner,
+            journal: self.state.clone(),
+        })
     }
 }
 

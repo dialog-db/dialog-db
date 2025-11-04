@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 
 use crate::{DialogStorageError, StorageSource};
 
-use super::{AtomicStorageBackend, StorageBackend};
+use super::{AtomicStorageBackend, Resource, StorageBackend};
 
 /// A trivial implementation of [StorageBackend] - backed by a [HashMap] - where
 /// all values are kept in memory and never persisted.
@@ -21,15 +21,85 @@ where
     entries: Arc<RwLock<HashMap<Key, Value>>>,
 }
 
+/// A resource handle for a specific entry in [MemoryStorageBackend]
+pub struct MemoryResource<Key, Value>
+where
+    Key: Eq + std::hash::Hash + Clone,
+    Value: Clone,
+{
+    entries: Arc<RwLock<HashMap<Key, Value>>>,
+    key: Key,
+    content: Option<Value>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Key, Value> Resource for MemoryResource<Key, Value>
+where
+    Key: Clone + Eq + std::hash::Hash + ConditionalSync,
+    Value: Clone + ConditionalSync + PartialEq,
+{
+    type Value = Value;
+    type Error = DialogStorageError;
+
+    fn content(&self) -> &Option<Self::Value> {
+        &self.content
+    }
+
+    fn into_content(self) -> Option<Self::Value> {
+        self.content
+    }
+
+    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
+        let entries = self.entries.read().await;
+        let prior = self.content.clone();
+        self.content = entries.get(&self.key).cloned();
+        Ok(prior)
+    }
+
+    async fn replace(
+        &mut self,
+        value: Option<Self::Value>,
+    ) -> Result<Option<Self::Value>, Self::Error> {
+        let mut entries = self.entries.write().await;
+
+        // Get current value from storage
+        let current = entries.get(&self.key).cloned();
+
+        // Check CAS condition - current must match what we think it is
+        if current != self.content {
+            return Err(DialogStorageError::StorageBackend(
+                "CAS condition failed: value has changed".to_string(),
+            ));
+        }
+
+        let prior = self.content.clone();
+
+        // Perform the operation
+        match &value {
+            Some(new_value) => {
+                entries.insert(self.key.clone(), new_value.clone());
+            }
+            None => {
+                entries.remove(&self.key);
+            }
+        }
+
+        self.content = value;
+        Ok(prior)
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Key, Value> StorageBackend for MemoryStorageBackend<Key, Value>
 where
     Key: Clone + Eq + std::hash::Hash + ConditionalSync,
-    Value: Clone + ConditionalSync,
+    Value: Clone + ConditionalSync + PartialEq,
 {
     type Key = Key;
     type Value = Value;
+    type Resource = MemoryResource<Key, Value>;
     type Error = DialogStorageError;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -37,16 +107,27 @@ where
         entries.insert(key, value);
         Ok(())
     }
+
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         let entries = self.entries.read().await;
         Ok(entries.get(key).cloned())
+    }
+
+    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
+        let entries = self.entries.read().await;
+        let content = entries.get(key).cloned();
+        Ok(MemoryResource {
+            entries: self.entries.clone(),
+            key: key.clone(),
+            content,
+        })
     }
 }
 
 impl<Key, Value> StorageSource for MemoryStorageBackend<Key, Value>
 where
     Key: Clone + Eq + std::hash::Hash + ConditionalSync,
-    Value: Clone + ConditionalSync,
+    Value: Clone + ConditionalSync + PartialEq,
 {
     fn read(
         &self,

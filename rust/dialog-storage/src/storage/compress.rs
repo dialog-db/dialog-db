@@ -6,7 +6,7 @@ use dialog_common::ConditionalSync;
 
 use crate::DialogStorageError;
 
-use super::StorageBackend;
+use super::{Resource, StorageBackend};
 
 const BUFFER_SIZE: usize = 4096;
 
@@ -25,6 +25,45 @@ impl<const COMPRESSION_LEVEL: u32, Backend> CompressedStorage<COMPRESSION_LEVEL,
     }
 }
 
+/// A wrapper resource that converts backend errors to DialogStorageError
+pub struct CompressedResource<R>
+where
+    R: Resource,
+    R::Error: Into<DialogStorageError>,
+{
+    inner: R,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<R> Resource for CompressedResource<R>
+where
+    R: Resource + ConditionalSync,
+    R::Error: Into<DialogStorageError>,
+{
+    type Value = R::Value;
+    type Error = DialogStorageError;
+
+    fn content(&self) -> &Option<Self::Value> {
+        self.inner.content()
+    }
+
+    fn into_content(self) -> Option<Self::Value> {
+        self.inner.into_content()
+    }
+
+    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
+        self.inner.reload().await.map_err(|e| e.into())
+    }
+
+    async fn replace(
+        &mut self,
+        value: Option<Self::Value>,
+    ) -> Result<Option<Self::Value>, Self::Error> {
+        self.inner.replace(value).await.map_err(|e| e.into())
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<const COMPRESSION_LEVEL: u32, Backend> StorageBackend
@@ -32,9 +71,12 @@ impl<const COMPRESSION_LEVEL: u32, Backend> StorageBackend
 where
     Backend: StorageBackend + ConditionalSync,
     Backend::Value: From<Vec<u8>> + AsRef<[u8]>,
+    Backend::Error: Into<DialogStorageError>,
+    Backend::Resource: ConditionalSync,
 {
     type Key = Backend::Key;
     type Value = Backend::Value;
+    type Resource = CompressedResource<Backend::Resource>;
     type Error = DialogStorageError;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -71,5 +113,10 @@ where
         } else {
             Ok(None)
         }
+    }
+
+    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
+        let inner = self.backend.open(key).await.map_err(|error| error.into())?;
+        Ok(CompressedResource { inner })
     }
 }

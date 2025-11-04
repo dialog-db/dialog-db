@@ -34,6 +34,9 @@ pub trait StorageBackend: Clone {
     type Key: ConditionalSync;
     /// The value type able to be stored by this [StorageBackend]
     type Value: ConditionalSend;
+    /// Resource for a specific entry in this [StorageBackend] that can be used
+    /// to read / write value at a given key.
+    type Resource: Resource<Value = Self::Value, Error = Self::Error>;
     /// The error type produced by this [StorageBackend]
     type Error: Into<DialogStorageError>;
 
@@ -41,6 +44,59 @@ pub trait StorageBackend: Clone {
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error>;
     /// Retrieve a value (if any) stored against the given key
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error>;
+
+    /// Opens a resource under the given key that can be used to read and write
+    /// corresponding value.
+    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error>;
+}
+
+/// A [Resource] is a cursor for some entry in the underlying [StorageBackend]
+/// that can be used to read / write values with a compare and swap semantics.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait Resource {
+    type Value: ConditionalSend;
+    type Error: Into<DialogStorageError> + ConditionalSend;
+
+    /// Returns a reference to the content of this resource.
+    fn content(&self) -> &Option<Self::Value>;
+
+    /// Consumes the resource and returning content from the most recent load.
+    fn into_content(self) -> Option<Self::Value>;
+
+    /// Reloads the content of this resource and returns last content it had
+    /// before the reload.
+    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error>;
+
+    /// Replaces the content of this resource, returning the old content.
+    /// Operation fails if the content of the resource has changed since the
+    /// resource was open or reloaded.
+    async fn replace(
+        &mut self,
+        value: Option<Self::Value>,
+    ) -> Result<Option<Self::Value>, Self::Error>;
+
+    /// Replaces the content of the resource with a new one computed from `f`,
+    /// returning the old content. Given `f` may be called multiple times, first
+    /// optimistic replace is attempted but if content has changed resource
+    /// content is reloaded and `f` is called again on the new content to retry
+    /// replacement. Implementation chooses a retry strategy as in how many
+    /// times it will retry before failing.
+    async fn replace_with<F>(&mut self, f: F) -> Result<Option<Self::Value>, Self::Error>
+    where
+        F: Fn(&Option<Self::Value>) -> Option<Self::Value> + ConditionalSend,
+    {
+        // perform optimistic update first
+        match self.replace(f(self.content())).await {
+            Ok(prior) => Ok(prior),
+            Err(_) => {
+                // if optimistic update failed, reload and retry
+                let content = self.reload().await?;
+                self.replace(f(self.content())).await?;
+                Ok(content)
+            }
+        }
+    }
 }
 
 /// An [AtomicStorageBackend] is a facade over some generalized storage
@@ -83,7 +139,7 @@ pub trait TransactionalMemory: Sized {
     type Error: ConditionalSend;
 
     /// Resolves memory cell from the given address
-    async fn get(&self, address: &Self::Address) -> Result<Resource<Self>, Self::Error>;
+    async fn get(&self, address: &Self::Address) -> Result<MemoryCell<Self>, Self::Error>;
     /// Stores a value (if any) against the given address. Update uses compare
     /// and swap semantics.
     async fn put(
@@ -95,12 +151,12 @@ pub trait TransactionalMemory: Sized {
 }
 
 /// Represents a resource stored in a transactional memory backend.
-pub struct Resource<Memory: TransactionalMemory> {
+pub struct MemoryCell<Memory: TransactionalMemory> {
     content: Option<Memory::Value>,
     address: Memory::Address,
     memory: Memory,
 }
-impl<Memory: TransactionalMemory> Resource<Memory> {
+impl<Memory: TransactionalMemory> MemoryCell<Memory> {
     /// Reloads content of the resource's from it's source and returns the old content.
     pub async fn reload(&mut self) -> Result<Option<Memory::Value>, Memory::Error> {
         let prior = self.content.to_owned();
@@ -153,7 +209,7 @@ impl<Memory: TransactionalMemory> Resource<Memory> {
 }
 
 // Implement the Deref trait for MyBox
-impl<Memory: TransactionalMemory> std::ops::Deref for Resource<Memory> {
+impl<Memory: TransactionalMemory> std::ops::Deref for MemoryCell<Memory> {
     type Target = Option<Memory::Value>; // The type we are dereferencing to
 
     fn deref(&self) -> &Self::Target {
@@ -169,6 +225,7 @@ where
 {
     type Key = T::Key;
     type Value = T::Value;
+    type Resource = T::Resource;
     type Error = T::Error;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -177,6 +234,10 @@ where
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         (*self).get(key).await
+    }
+
+    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
+        (**self).open(key).await
     }
 }
 
@@ -188,6 +249,7 @@ where
 {
     type Key = T::Key;
     type Value = T::Value;
+    type Resource = T::Resource;
     type Error = T::Error;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -198,6 +260,11 @@ where
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         let inner = self.lock().await;
         inner.get(key).await
+    }
+
+    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
+        let inner = self.lock().await;
+        inner.open(key).await
     }
 }
 

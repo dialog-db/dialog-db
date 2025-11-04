@@ -78,6 +78,7 @@ where
 {
     type Key = Backend::Key;
     type Value = Backend::Value;
+    type Resource = Backend::Resource;
     type Error = Backend::Error;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -86,6 +87,10 @@ where
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         self.backend.get(key).await
+    }
+
+    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
+        self.backend.open(key).await
     }
 }
 
