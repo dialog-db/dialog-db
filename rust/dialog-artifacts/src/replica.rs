@@ -10,7 +10,6 @@ use dialog_storage::{
     StorageBackend,
 };
 
-use futures_util::stream::ForEachConcurrent;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter, format};
@@ -245,6 +244,17 @@ pub struct BranchState {
 /// Unique name for the branch
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BranchId(String);
+
+impl BranchId {
+    pub fn new(id: String) -> Self {
+        BranchId(id)
+    }
+
+    pub fn id(&self) -> &String {
+        &self.0
+    }
+}
+
 impl KeyType for BranchId {
     fn bytes(&self) -> &[u8] {
         self.0.as_bytes()
@@ -457,8 +467,8 @@ impl<'a, P: Platform> Branch<'a, P> {
                                 self.platform
                                     .revisions()
                                     .write(RemoteBranchState {
-                                        id: current.id,
-                                        revision: current.revision,
+                                        id: current.id.clone(),
+                                        revision: current.revision.clone(),
                                         prior: Some(prior),
                                     })
                                     .await
@@ -467,7 +477,7 @@ impl<'a, P: Platform> Branch<'a, P> {
                                         cause: error,
                                     })?;
 
-                                Some(current)
+                                Some(current.revision)
                             }
                             (Some(current), None) => {
                                 self.platform
@@ -479,9 +489,9 @@ impl<'a, P: Platform> Branch<'a, P> {
                                         cause: error,
                                     })?;
 
-                                Some(current)
+                                Some(current.revision)
                             }
-                            (None, Some(prior)) => Some(prior),
+                            (None, Some(prior)) => Some(prior.revision),
                             (None, None) => None,
                         };
 
@@ -564,17 +574,48 @@ impl<'a, P: Platform> Branch<'a, P> {
                     return Ok(self);
                 }
                 Origin::Remote(remote) => {
+                    let key = (remote.id.clone(), self.id().clone());
+
+                    // Get the current state to use as prior
+                    let current = self
+                        .platform
+                        .revisions()
+                        .read(&key)
+                        .await
+                        .map_err(|cause| ReplicaError::StorageError {
+                            capability: Capability::ResolveBranch,
+                            cause,
+                        })?;
+
+                    let prior = if let Some(current) = current {
+                        let (edition, _) = current.encode().await.map_err(|e| {
+                            ReplicaError::StorageError {
+                                capability: Capability::EncodeError,
+                                cause: e,
+                            }
+                        })?;
+                        Some(edition)
+                    } else {
+                        None
+                    };
+
+                    let state = RemoteBranchState {
+                        id: RemoteBranchId::new(remote.id.clone(), self.id().clone()),
+                        revision: revision.clone(),
+                        prior,
+                    };
+
                     // announce new revision to the collaborators
                     self.platform
                         .announcements()
-                        .write(revision.clone())
+                        .write(state.clone())
                         .await
                         .map_err(|e| ReplicaError::PushFailed { cause: e })?;
                     // if we were able to publish the revision we need to
                     // update local state
                     self.platform
                         .revisions()
-                        .write(revision)
+                        .write(state)
                         .await
                         .map_err(|cause| ReplicaError::StorageError {
                             capability: Capability::ArchiveError,
@@ -658,7 +699,10 @@ impl<Backend: AtomicStorageBackend<Key = String, Value = Vec<u8>>> RemoteConnect
     /// instead.
     pub async fn resolve(&self, key: &BranchId) -> Result<Option<Revision>, Backend::Error> {
         if let Some(bytes) = self.local.resolve(&key.0).await? {
-            let revision: Revision = CborEncoder.decode(&bytes).await?;
+            let revision: Revision = CborEncoder
+                .decode(&bytes)
+                .await
+                .map_err(|e| panic!("Failed to decode revision: {}", e))?;
             Ok(Some(revision))
         } else {
             Ok(None)
@@ -666,12 +710,19 @@ impl<Backend: AtomicStorageBackend<Key = String, Value = Vec<u8>>> RemoteConnect
     }
 
     /// Fetch a revision for the given branch from the remote.
-    pub async fn fetch(&self, key: &BranchId) -> Result<Option<Revision>, Backend::Error> {
+    pub async fn fetch(&mut self, key: &BranchId) -> Result<Option<Revision>, Backend::Error> {
         if let Some(bytes) = self.remote.resolve(&key.0).await? {
-            let revision: Revision = CborEncoder.decode(&bytes).await?;
+            let revision: Revision = CborEncoder
+                .decode(&bytes)
+                .await
+                .map_err(|e| panic!("Failed to decode revision: {}", e))?;
             // Update local cache
             self.local
-                .swap(key.0.clone(), bytes, self.local.resolve(&key.0).await?)
+                .swap(
+                    key.0.clone(),
+                    Some(bytes),
+                    self.local.resolve(&key.0).await?,
+                )
                 .await?;
 
             Ok(Some(revision))
@@ -681,13 +732,16 @@ impl<Backend: AtomicStorageBackend<Key = String, Value = Vec<u8>>> RemoteConnect
     }
 
     /// Publish revision to the remote branch.
-    pub async fn push(&self, key: &BranchId, revision: &Revision) -> Result<(), Backend::Error> {
+    pub async fn push(&mut self, key: &BranchId, revision: &Revision) -> Result<(), Backend::Error> {
         let prior = self.local.resolve(&key.0).await?;
-        let (_, bytes) = CborEncoder.encode(revision).await?;
+        let (_, bytes) = CborEncoder
+            .encode(revision)
+            .await
+            .map_err(|e| panic!("Failed to encode revision: {}", e))?;
         self.remote
-            .swap(key.0.clone(), bytes.clone(), prior.clone())
+            .swap(key.0.clone(), Some(bytes.clone()), prior.clone())
             .await;
-        self.local.swap(key.0.clone(), bytes, prior).await;
+        self.local.swap(key.0.clone(), Some(bytes), prior).await;
 
         Ok(())
     }
@@ -719,7 +773,7 @@ type Archive<Backend> = Storage<HASH_SIZE, CborEncoder, Backend>;
 
 /// Blake3 hash of the branch state.
 #[derive(Serialize, Deserialize)]
-struct Edition<T>([u8; 32], PhantomData<fn() -> T>);
+pub struct Edition<T>([u8; 32], PhantomData<fn() -> T>);
 impl<T> Edition<T> {
     pub fn new(hash: [u8; 32]) -> Self {
         Self(hash, PhantomData)
@@ -956,6 +1010,7 @@ impl Display for Capability {
             Capability::ResolveRevision => write!(f, "ResolveRevision"),
             Capability::UpdateRevision => write!(f, "UpdateRevision"),
             Capability::ArchiveError => write!(f, "ArchiveError"),
+            Capability::EncodeError => write!(f, "EncodeError"),
         }
     }
 }

@@ -6,6 +6,7 @@ use base58::ToBase58;
 use base64::Engine;
 use dialog_common::ConditionalSync;
 use futures_util::Stream;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
@@ -129,7 +130,7 @@ impl Authority {
 }
 
 /// AWS S3/R2 credentials configuration
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct S3Authority {
     /// AWS Access Key ID
     pub access_key_id: String,
@@ -164,7 +165,7 @@ impl Default for S3Authority {
 }
 
 /// Authentication methods for REST storage backend
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AuthMethod {
     /// No authentication
     None,
@@ -285,7 +286,7 @@ impl Request<'_> {
 // }
 
 /// Configuration for the REST storage backend
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RestStorageConfig {
     /// Base URL for the REST API
     pub endpoint: String,
@@ -1735,7 +1736,9 @@ mod local_s3_tests {
         let v3: Vec<u8> = "v3".into();
 
         // We try to update v2 -> v3
-        let result = store.swap(key.clone(), Some(v3.clone()), Some(v2.clone())).await;
+        let result = store
+            .swap(key.clone(), Some(v3.clone()), Some(v2.clone()))
+            .await;
 
         assert!(
             matches!(result, Err(RestStorageBackendError::OperationFailed(_))),
@@ -1768,7 +1771,9 @@ mod local_s3_tests {
         let key: Vec<u8> = ALICE.into();
 
         // We try to swap v1 -> v2
-        let result = store.swap(key.clone(), Some(v2.clone()), Some(v1.clone())).await;
+        let result = store
+            .swap(key.clone(), Some(v2.clone()), Some(v1.clone()))
+            .await;
 
         assert!(
             matches!(result, Err(RestStorageBackendError::OperationFailed(_))),
@@ -1840,7 +1845,9 @@ mod local_s3_tests {
         let new_val: Vec<u8> = b"v2".to_vec();
 
         // Prepopulate the key
-        store.swap(key.clone(), Some(existing.clone()), None).await?;
+        store
+            .swap(key.clone(), Some(existing.clone()), None)
+            .await?;
 
         // when=None and key exists → fail
         let result = store.swap(key.clone(), Some(new_val), None).await;
@@ -1869,7 +1876,9 @@ mod local_s3_tests {
         let new_val: Vec<u8> = b"v2".to_vec();
 
         // Prepopulate the key
-        store.swap(key.clone(), Some(existing.clone()), None).await?;
+        store
+            .swap(key.clone(), Some(existing.clone()), None)
+            .await?;
 
         // when=Some and matches existing → success
         store
@@ -1897,7 +1906,9 @@ mod local_s3_tests {
         let new_val: Vec<u8> = b"v2".to_vec();
 
         // Prepopulate the key
-        store.swap(key.clone(), Some(existing.clone()), None).await?;
+        store
+            .swap(key.clone(), Some(existing.clone()), None)
+            .await?;
 
         // when=Some but doesn't match existing → fail
         let result = store
