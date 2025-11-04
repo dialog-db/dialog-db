@@ -579,6 +579,14 @@ where
         let url = self.build_url(key, "GET")?;
         Ok(self.prepare_request(self.client.get(url), None))
     }
+
+    fn prepare_delete_request(
+        &self,
+        key: &[u8],
+    ) -> Result<reqwest::RequestBuilder, RestStorageBackendError> {
+        let url = self.build_url(key, "DELETE")?;
+        Ok(self.prepare_request(self.client.delete(url), None))
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -639,10 +647,14 @@ where
     async fn swap(
         &mut self,
         key: Self::Key,
-        value: Self::Value,
+        value: Option<Self::Value>,
         when: Option<Self::Value>,
     ) -> Result<(), Self::Error> {
-        let mut request = self.prepare_put_request(key.as_ref(), value.as_ref())?;
+        // Prepare request - DELETE if value is None, PUT if Some
+        let mut request = match &value {
+            Some(v) => self.prepare_put_request(key.as_ref(), v.as_ref())?,
+            None => self.prepare_delete_request(key.as_ref())?,
+        };
 
         // Add precondition headers to enforce CAS semantics.
         request = match &when {
@@ -708,7 +720,11 @@ where
                 ))),
             }?;
 
-            let mut request = self.prepare_put_request(key.as_ref(), value.as_ref())?;
+            // Retry the operation with corrected precondition
+            let mut request = match &value {
+                Some(v) => self.prepare_put_request(key.as_ref(), v.as_ref())?,
+                None => self.prepare_delete_request(key.as_ref())?,
+            };
             request = match precondition {
                 Some(etag) => request.header("If-Match", etag),
                 None => request.header("If-None-Match", "*"),
@@ -720,7 +736,8 @@ where
                 return Ok(());
             } else {
                 return Err(RestStorageBackendError::OperationFailed(format!(
-                    "Retry PUT failed: {}",
+                    "Retry {} failed: {}",
+                    if value.is_some() { "PUT" } else { "DELETE" },
                     retry.status()
                 )));
             }
@@ -1667,7 +1684,7 @@ mod local_s3_tests {
         let key: Vec<u8> = ALICE.into();
 
         // We try to create new branch record
-        store.swap(key.clone(), v1.clone(), None).await?;
+        store.swap(key.clone(), Some(v1.clone()), None).await?;
 
         assert_eq!(
             store.resolve(&key).await?.unwrap(),
@@ -1678,7 +1695,7 @@ mod local_s3_tests {
         let v2: Vec<u8> = "v2".into();
         // We try to update v1 -> v2
         store
-            .swap(key.clone(), v2.clone(), Some(v1.clone()))
+            .swap(key.clone(), Some(v2.clone()), Some(v1.clone()))
             .await?;
 
         assert_eq!(
@@ -1706,7 +1723,7 @@ mod local_s3_tests {
         let key: Vec<u8> = ALICE.into();
 
         // We try to create new branch record
-        store.swap(key.clone(), v1.clone(), None).await?;
+        store.swap(key.clone(), Some(v1.clone()), None).await?;
 
         assert_eq!(
             store.resolve(&key).await?.unwrap(),
@@ -1718,7 +1735,7 @@ mod local_s3_tests {
         let v3: Vec<u8> = "v3".into();
 
         // We try to update v2 -> v3
-        let result = store.swap(key.clone(), v3.clone(), Some(v2.clone())).await;
+        let result = store.swap(key.clone(), Some(v3.clone()), Some(v2.clone())).await;
 
         assert!(
             matches!(result, Err(RestStorageBackendError::OperationFailed(_))),
@@ -1751,7 +1768,7 @@ mod local_s3_tests {
         let key: Vec<u8> = ALICE.into();
 
         // We try to swap v1 -> v2
-        let result = store.swap(key.clone(), v2.clone(), Some(v1.clone())).await;
+        let result = store.swap(key.clone(), Some(v2.clone()), Some(v1.clone())).await;
 
         assert!(
             matches!(result, Err(RestStorageBackendError::OperationFailed(_))),
@@ -1775,7 +1792,7 @@ mod local_s3_tests {
         let value: Vec<u8> = b"v1".to_vec();
 
         // when=None and key missing → success
-        store.swap(key.clone(), value.clone(), None).await?;
+        store.swap(key.clone(), Some(value.clone()), None).await?;
         assert_eq!(store.resolve(&key).await?.unwrap(), value);
 
         Ok(())
@@ -1797,7 +1814,7 @@ mod local_s3_tests {
         let new_val: Vec<u8> = b"v2".to_vec();
 
         // when=Some but key missing → fail
-        let result = store.swap(key.clone(), new_val, Some(expected)).await;
+        let result = store.swap(key.clone(), Some(new_val), Some(expected)).await;
         assert!(matches!(
             result,
             Err(RestStorageBackendError::OperationFailed(_))
@@ -1823,10 +1840,10 @@ mod local_s3_tests {
         let new_val: Vec<u8> = b"v2".to_vec();
 
         // Prepopulate the key
-        store.swap(key.clone(), existing.clone(), None).await?;
+        store.swap(key.clone(), Some(existing.clone()), None).await?;
 
         // when=None and key exists → fail
-        let result = store.swap(key.clone(), new_val, None).await;
+        let result = store.swap(key.clone(), Some(new_val), None).await;
         assert!(matches!(
             result,
             Err(RestStorageBackendError::OperationFailed(_))
@@ -1852,11 +1869,11 @@ mod local_s3_tests {
         let new_val: Vec<u8> = b"v2".to_vec();
 
         // Prepopulate the key
-        store.swap(key.clone(), existing.clone(), None).await?;
+        store.swap(key.clone(), Some(existing.clone()), None).await?;
 
         // when=Some and matches existing → success
         store
-            .swap(key.clone(), new_val.clone(), Some(existing.clone()))
+            .swap(key.clone(), Some(new_val.clone()), Some(existing.clone()))
             .await?;
         assert_eq!(store.resolve(&key).await?.unwrap(), new_val);
 
@@ -1880,11 +1897,11 @@ mod local_s3_tests {
         let new_val: Vec<u8> = b"v2".to_vec();
 
         // Prepopulate the key
-        store.swap(key.clone(), existing.clone(), None).await?;
+        store.swap(key.clone(), Some(existing.clone()), None).await?;
 
         // when=Some but doesn't match existing → fail
         let result = store
-            .swap(key.clone(), new_val.clone(), Some(wrong_expected))
+            .swap(key.clone(), Some(new_val.clone()), Some(wrong_expected))
             .await;
         assert!(matches!(
             result,

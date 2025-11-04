@@ -63,7 +63,7 @@ pub trait AtomicStorageBackend: Clone {
     async fn swap(
         &mut self,
         key: Self::Key,
-        value: Self::Value,
+        value: Option<Self::Value>,
         when: Option<Self::Value>,
     ) -> Result<(), Self::Error>;
 
