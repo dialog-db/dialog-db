@@ -91,6 +91,73 @@ where
     }
 }
 
+#[derive(Clone)]
+pub struct AtomicStorage<const HASH_SIZE: usize, Encoder, Backend>
+where
+    Encoder: crate::Encoder<HASH_SIZE>,
+    Backend: AtomicStorageBackend,
+{
+    /// The [Encoder] used by the [Storage]
+    pub encoder: Encoder,
+    /// The [StorageBackend] used by the [Storage]
+    pub backend: Backend,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<const HASH_SIZE: usize, Encoder, Backend> crate::Encoder<HASH_SIZE>
+    for AtomicStorage<HASH_SIZE, Encoder, Backend>
+where
+    Encoder: crate::Encoder<HASH_SIZE>,
+    Backend: AtomicStorageBackend,
+    Self: ConditionalSync,
+{
+    type Bytes = Encoder::Bytes;
+    type Hash = Encoder::Hash;
+    type Error = Encoder::Error;
+
+    async fn encode<T>(&self, block: &T) -> Result<(Self::Hash, Self::Bytes), Self::Error>
+    where
+        T: Serialize + ConditionalSync + std::fmt::Debug,
+    {
+        self.encoder.encode(block).await
+    }
+
+    async fn decode<T>(&self, bytes: &[u8]) -> Result<T, Self::Error>
+    where
+        T: DeserializeOwned + ConditionalSync,
+    {
+        self.encoder.decode(bytes).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<const HASH_SIZE: usize, Encoder, Backend> AtomicStorageBackend
+    for AtomicStorage<HASH_SIZE, Encoder, Backend>
+where
+    Encoder: crate::Encoder<HASH_SIZE>,
+    Backend: AtomicStorageBackend,
+    Self: ConditionalSync,
+{
+    type Key = Backend::Key;
+    type Value = Backend::Value;
+    type Error = Backend::Error;
+
+    async fn swap(
+        &mut self,
+        key: Self::Key,
+        value: Option<Self::Value>,
+        when: Option<Self::Value>,
+    ) -> Result<(), Self::Error> {
+        self.backend.swap(key, value, when).await
+    }
+
+    async fn resolve(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        self.backend.resolve(key).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::DialogStorageError;

@@ -71,6 +71,50 @@ pub trait AtomicStorageBackend: Clone {
     async fn resolve(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error>;
 }
 
+pub trait TransactionalMemory: Sized {
+    type Address: ConditionalSend + Clone;
+    type Value: ConditionalSend + Clone;
+    type Error: ConditionalSend;
+
+    /// Resolves memory cell from the given address
+    async fn get(&self, address: &Self::Address) -> Result<Resource<Self>, Self::Error>;
+    async fn put(
+        &self,
+        address: Self::Address,
+        value: Option<Self::Value>,
+        expect: Option<Self::Value>,
+    ) -> Result<(), Self::Error>;
+}
+
+pub struct Resource<Memory: TransactionalMemory> {
+    content: Option<Memory::Value>,
+    address: Memory::Address,
+    memory: Memory,
+}
+impl<Memory: TransactionalMemory> Resource<Memory> {
+    pub async fn refresh(&mut self) -> Result<(), Memory::Error> {
+        let latest = self.memory.get(&self.address).await?;
+        self.content = latest.content;
+        Ok(())
+    }
+    pub async fn swap(&mut self, content: Option<Memory::Value>) -> Result<(), Memory::Error> {
+        self.memory
+            .put(self.address.clone(), content.clone(), self.content.clone())
+            .await?;
+        self.content = content;
+        Ok(())
+    }
+}
+
+// Implement the Deref trait for MyBox
+impl<Memory: TransactionalMemory> std::ops::Deref for Resource<Memory> {
+    type Target = Option<Memory::Value>; // The type we are dereferencing to
+
+    fn deref(&self) -> &Self::Target {
+        &self.content // Return a reference to the inner value
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<T> StorageBackend for Box<T>
