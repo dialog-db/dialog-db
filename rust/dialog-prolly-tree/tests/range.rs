@@ -14,12 +14,11 @@ async fn create_test_tree<const BRANCH_FACTOR: u32>(
 ) -> Result<
     Tree<
         BRANCH_FACTOR,
-        32,
         GeometricDistribution,
         Vec<u8>,
         Vec<u8>,
         [u8; 32],
-        Storage<32, CborEncoder, MemoryStorageBackend<[u8; 32], Vec<u8>>>,
+        Storage<CborEncoder, MemoryStorageBackend<[u8; 32], Vec<u8>>>,
     >,
 > {
     let storage = Storage {
@@ -57,7 +56,7 @@ async fn stream_range_on_empty_trees() -> Result<()> {
         backend: MemoryStorageBackend::default(),
     };
 
-    let empty = Tree::<32, 32, GeometricDistribution, Vec<u8>, Vec<u8>, _, _>::new(storage);
+    let empty = Tree::<32, GeometricDistribution, Vec<u8>, Vec<u8>, _, _>::new(storage);
 
     let stream = empty.stream_range(..);
     tokio::pin!(stream);
@@ -111,7 +110,7 @@ async fn request_out_of_range() -> Result<()> {
         encoder: CborEncoder,
         backend: MemoryStorageBackend::default(),
     };
-    let mut tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage);
+    let mut tree = Tree::<32, GeometricDistribution, _, _, _, _>::new(storage);
     tree.set(10u32.to_be_bytes().to_vec(), vec![1]).await?;
     let start = 0u32.to_be_bytes().to_vec();
     let end = 5u32.to_be_bytes().to_vec();

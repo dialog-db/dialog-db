@@ -11,7 +11,7 @@ pub struct CborEncoder;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Encoder<32> for CborEncoder {
+impl Encoder for CborEncoder {
     type Bytes = Vec<u8>;
     type Hash = [u8; 32];
     type Error = DialogStorageError;

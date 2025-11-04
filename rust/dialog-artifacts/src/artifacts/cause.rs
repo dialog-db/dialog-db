@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{make_reference, reference_type};
 
-use super::{Artifact, Blake3Hash, TypeError, Value, ValueDataType};
+use super::{Artifact, Blake3Hash, HashType, TypeError, Value, ValueDataType};
 
 /// A [`Cause`] is a reference to an [`Artifact`] that preceded a more recent
 /// version of the same [`Artifact`] (where same implies same [`Entity`] and

@@ -16,21 +16,20 @@ use nonempty::NonEmpty;
 #[derive(Clone)]
 pub struct Tree<
     const BRANCH_FACTOR: u32,
-    const HASH_SIZE: usize,
     Distribution,
     Key,
     Value,
     Hash,
     Storage,
 > where
-    Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash>,
+    Distribution: crate::Distribution<BRANCH_FACTOR, Key, Hash>,
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<HASH_SIZE>,
-    Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+    Hash: HashType,
+    Storage: ContentAddressedStorage< Hash = Hash>,
 {
     storage: Storage,
-    root: Option<Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>>,
+    root: Option<Node<BRANCH_FACTOR, Key, Value, Hash>>,
 
     distribution_type: PhantomData<Distribution>,
     key_type: PhantomData<Key>,
@@ -38,14 +37,14 @@ pub struct Tree<
     hash_type: PhantomData<Hash>,
 }
 
-impl<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Distribution, Key, Value, Hash, Storage>
-    Tree<BRANCH_FACTOR, HASH_SIZE, Distribution, Key, Value, Hash, Storage>
+impl<const BRANCH_FACTOR: u32, Distribution, Key, Value, Hash, Storage>
+    Tree<BRANCH_FACTOR, Distribution, Key, Value, Hash, Storage>
 where
-    Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash>,
+    Distribution: crate::Distribution<BRANCH_FACTOR, Key, Hash>,
     Key: KeyType,
     Value: ValueType,
-    Hash: HashType<HASH_SIZE>,
-    Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+    Hash: HashType,
+    Storage: ContentAddressedStorage< Hash = Hash>,
 {
     /// Creates a new [`Tree`] with provided [`ContentAddressedStorage`].
     pub fn new(storage: Storage) -> Self {
@@ -82,7 +81,7 @@ where
     /// Returns the [`Node`] representing the root of this tree.
     ///
     /// Returns `None` if the tree is empty.
-    pub fn root(&self) -> Option<&Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>> {
+    pub fn root(&self) -> Option<&Node<BRANCH_FACTOR, Key, Value, Hash>> {
         self.root.as_ref()
     }
 
@@ -249,14 +248,14 @@ where
 }
 
 // Impl block for methods that require Encoder
-impl<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Distribution, Key, Value, Hash, Storage>
-    Tree<BRANCH_FACTOR, HASH_SIZE, Distribution, Key, Value, Hash, Storage>
+impl<const BRANCH_FACTOR: u32, Distribution, Key, Value, Hash, Storage>
+    Tree<BRANCH_FACTOR, Distribution, Key, Value, Hash, Storage>
 where
-    Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash>,
+    Distribution: crate::Distribution<BRANCH_FACTOR, Key, Hash>,
     Key: KeyType,
     Value: ValueType,
-    Hash: HashType<HASH_SIZE>,
-    Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash> + Encoder<HASH_SIZE>,
+    Hash: HashType,
+    Storage: ContentAddressedStorage< Hash = Hash> + Encoder,
 {
     /// Integrates changes into this tree with deterministic conflict resolution.
     ///

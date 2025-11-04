@@ -1,4 +1,4 @@
-use dialog_storage::Blake3Hash;
+use dialog_storage::{Blake3Hash, HashType};
 
 /// Produces a [Reference], which is a type-alias for a 32-byte array; in practice, these
 /// bytes are the BLAKE3 hash of the inputs to this function
@@ -39,7 +39,7 @@ macro_rules! reference_type {
                 Ok(Self(value.try_into().map_err(|value: Vec<u8>| {
                     crate::DialogArtifactsError::InvalidReference(format!(
                         "Incorrect length (expected {}, got {})",
-                        crate::HASH_SIZE,
+                        Blake3Hash::SIZE,
                         value.len()
                     ))
                 })?))

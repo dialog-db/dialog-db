@@ -12,11 +12,11 @@ use super::{Distribution, Rank};
 #[derive(Clone)]
 pub struct GeometricDistribution;
 
-impl<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Hash>
-    Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash> for GeometricDistribution
+impl<const BRANCH_FACTOR: u32, Key, Hash>
+    Distribution<BRANCH_FACTOR, Key, Hash> for GeometricDistribution
 where
     Key: KeyType,
-    Hash: HashType<HASH_SIZE>,
+    Hash: HashType,
 {
     fn rank(key: &Key) -> Rank {
         let key_hash = blake3::hash(key.bytes());
@@ -24,8 +24,8 @@ where
     }
 }
 
-pub(crate) fn compute_geometric_rank<const HASH_SIZE: usize>(
-    bytes: &[u8; HASH_SIZE],
+pub(crate) fn compute_geometric_rank(
+    bytes: &[u8],
     m: u32,
 ) -> Rank {
     // Convert the series of fair trials into a series with desired probability

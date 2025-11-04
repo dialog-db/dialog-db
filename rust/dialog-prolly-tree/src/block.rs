@@ -8,21 +8,21 @@ use crate::{DialogProllyTreeError, Entry, KeyType, Reference, ValueType};
 /// A [`Block`] is what is stored in a [`BlockStore`],
 /// used to hydrate and store nodes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum Block<const HASH_SIZE: usize, Key, Value, Hash> {
+pub enum Block<Key, Value, Hash> {
     /// A block representing a Branch.
-    Branch(NonEmpty<Reference<HASH_SIZE, Key, Hash>>),
+    Branch(NonEmpty<Reference<Key, Hash>>),
     /// A block representing a Segment.
     Segment(NonEmpty<Entry<Key, Value>>),
 }
 
-impl<const HASH_SIZE: usize, Key, Value, Hash> Block<HASH_SIZE, Key, Value, Hash>
+impl<Key, Value, Hash> Block<Key, Value, Hash>
 where
     Key: KeyType,
     Value: ValueType,
-    Hash: HashType<HASH_SIZE>,
+    Hash: HashType,
 {
     /// Create a new branch-type block.
-    pub fn branch(data: NonEmpty<Reference<HASH_SIZE, Key, Hash>>) -> Self {
+    pub fn branch(data: NonEmpty<Reference<Key, Hash>>) -> Self {
         Block::Branch(data)
     }
 
@@ -54,7 +54,7 @@ where
     /// The result is an error if this [`Node`] is a segment.
     pub fn references(
         &self,
-    ) -> Result<&NonEmpty<Reference<HASH_SIZE, Key, Hash>>, DialogProllyTreeError> {
+    ) -> Result<&NonEmpty<Reference<Key, Hash>>, DialogProllyTreeError> {
         match self {
             Block::Branch(data) => Ok(data),
             Block::Segment(_) => Err(DialogProllyTreeError::IncorrectTreeAccess(
@@ -68,7 +68,7 @@ where
     /// The result is an error if this [`Node`] is a segment.
     pub fn into_references(
         self,
-    ) -> Result<NonEmpty<Reference<HASH_SIZE, Key, Hash>>, DialogProllyTreeError> {
+    ) -> Result<NonEmpty<Reference<Key, Hash>>, DialogProllyTreeError> {
         match self {
             Block::Branch(data) => Ok(data),
             Block::Segment(_) => Err(DialogProllyTreeError::IncorrectTreeAccess(
@@ -113,14 +113,14 @@ pub enum BlockType {
     Segment = 1,
 }
 
-impl<const HASH_SIZE: usize, Key, Value, Hash> From<&Block<HASH_SIZE, Key, Value, Hash>>
+impl<Key, Value, Hash> From<&Block<Key, Value, Hash>>
     for BlockType
 where
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<HASH_SIZE>,
+    Hash: HashType,
 {
-    fn from(value: &Block<HASH_SIZE, Key, Value, Hash>) -> Self {
+    fn from(value: &Block<Key, Value, Hash>) -> Self {
         match value {
             Block::Branch(_) => BlockType::Branch,
             Block::Segment(_) => BlockType::Segment,

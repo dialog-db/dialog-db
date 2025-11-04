@@ -10,32 +10,21 @@ pub type Blake3Hash = [u8; 32];
 /// A trait that can be implemented for types that represent a hash. A blanket
 /// "unchecked" implementation is provided for any type that matches
 /// `AsRef<[u8]>` (this might be an antipattern; more investigation required).
-pub trait HashType<const SIZE: usize>:
+pub trait HashType:
     Clone + AsRef<[u8]> + ConditionalSync + Serialize + DeserializeOwned + std::fmt::Debug + PartialEq
 {
-    /// Get the raw bytes of the hash
-    fn bytes(&self) -> [u8; SIZE];
+    /// The size of this hash type in bytes
+    const SIZE: usize;
 
     /// Format the hash as a display string
     fn display(&self) -> String {
-        format!("#{}...", self.bytes()[0..6].to_base58())
+        let bytes = self.as_ref();
+        let prefix_len = 6.min(bytes.len());
+        format!("#{}...", &bytes[..prefix_len].to_base58())
     }
 }
 
-impl<const SIZE: usize, T> HashType<SIZE> for T
-where
-    T: Clone
-        + AsRef<[u8]>
-        + ConditionalSync
-        + Serialize
-        + DeserializeOwned
-        + std::fmt::Debug
-        + PartialEq
-        + Eq,
-{
-    fn bytes(&self) -> [u8; SIZE] {
-        let mut bytes = [0u8; SIZE];
-        bytes.copy_from_slice(&self.as_ref()[..SIZE.min(self.as_ref().len())]);
-        bytes
-    }
+// Implement HashType for common fixed-size arrays
+impl HashType for [u8; 32] {
+    const SIZE: usize = 32;
 }
