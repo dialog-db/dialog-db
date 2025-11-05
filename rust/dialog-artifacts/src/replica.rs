@@ -115,7 +115,7 @@ impl Issuer {
     }
 }
 
-pub struct Replica<Backend>
+pub struct Replica<Backend: PlatformBackend>
 where
     Backend: PlatformBackend,
     Backend::Error: ConditionalSync,
@@ -127,12 +127,7 @@ where
     branches: Branches<Backend>,
 }
 
-impl<Backend> Replica<Backend>
-where
-    Backend: PlatformBackend + 'static,
-    Backend::Error: ConditionalSync,
-    Backend::Resource: ConditionalSync + ConditionalSend,
-{
+impl<Backend: PlatformBackend + 'static> Replica<Backend> {
     pub fn new(backend: Backend) -> Result<Self, ReplicaError> {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
@@ -160,21 +155,13 @@ where
     }
 }
 
-pub struct Branches<Backend>
-where
-    Backend: PlatformBackend,
-{
+pub struct Branches<Backend: PlatformBackend> {
     storage: PlatformStorage<Backend>,
     archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
     store: TypedStore<BranchState, Backend>,
 }
 
-impl<Backend> Branches<Backend>
-where
-    Backend: PlatformBackend + 'static,
-    Backend::Error: ConditionalSync,
-    Backend::Resource: ConditionalSync + ConditionalSend,
-{
+impl<Backend: PlatformBackend + 'static> Branches<Backend> {
     /// Creates a new instance for the given backend
     pub fn new(
         backend: Backend,
@@ -191,7 +178,7 @@ where
 
     /// Loads a branch with given identifier, produces an error if it does not
     /// exists.
-    pub async fn load(&self, id: BranchId) -> Result<Branch<Backend>, ReplicaError> {
+    pub async fn load(&self, id: &BranchId) -> Result<Branch<Backend>, ReplicaError> {
         Branch::load(id, self.storage.clone(), self.archive.clone()).await
     }
 
@@ -249,7 +236,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// Loads a branch from the the the underlaying replica, if branch with a
     /// given id does not exists it produces an error.
     pub async fn load(
-        id: BranchId,
+        id: &BranchId,
         storage: PlatformStorage<Backend>,
         archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
     ) -> Result<Branch<Backend>, ReplicaError> {
@@ -266,7 +253,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                 memory,
             })
         } else {
-            Err(ReplicaError::BranchNotFound { id })
+            Err(ReplicaError::BranchNotFound { id: id.clone() })
         }
     }
 
@@ -305,13 +292,10 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             match &upstream.origin {
                 // Fetch from a local branch is a no-op.
                 Origin::Local => {
-                    let revision = Branch::load(
-                        upstream.id.clone(),
-                        self.storage.clone(),
-                        self.archive.clone(),
-                    )
-                    .await?
-                    .revision();
+                    let revision =
+                        Branch::load(upstream.id(), self.storage.clone(), self.archive.clone())
+                            .await?
+                            .revision();
                     Ok(Some(revision))
                 }
                 Origin::Remote(origin) => {
@@ -366,12 +350,9 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                 Origin::Local => {
                     if upstream.id() != self.id() {
                         // Load target branch that we will update
-                        let mut target = Branch::load(
-                            upstream.id().clone(),
-                            self.storage.clone(),
-                            self.archive.clone(),
-                        )
-                        .await?;
+                        let mut target =
+                            Branch::load(upstream.id(), self.storage.clone(), self.archive.clone())
+                                .await?;
                         // Reset it to the current branch's revision
                         target.reset(revision, target.state.base.clone()).await?;
                     }
@@ -1617,7 +1598,7 @@ mod tests {
         feature_branch.push().await.expect("Push failed");
 
         // Verify main branch was updated
-        let updated_main = Branch::load(main_id, storage, archive)
+        let updated_main = Branch::load(&main_id, storage, archive)
             .await
             .expect("Failed to load main branch");
 
