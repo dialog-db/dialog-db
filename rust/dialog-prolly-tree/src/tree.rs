@@ -14,18 +14,13 @@ use nonempty::NonEmpty;
 /// A key-value store backed by a Ranked Prolly Tree with configurable storage,
 /// encoding and rank distribution.
 #[derive(Clone)]
-pub struct Tree<
-    Distribution,
-    Key,
-    Value,
-    Hash,
-    Storage,
-> where
+pub struct Tree<Distribution, Key, Value, Hash, Storage>
+where
     Distribution: crate::Distribution<Key, Hash>,
     Key: KeyType + 'static,
     Value: ValueType,
     Hash: HashType,
-    Storage: ContentAddressedStorage< Hash = Hash>,
+    Storage: ContentAddressedStorage<Hash = Hash>,
 {
     storage: Storage,
     root: Option<Node<Key, Value, Hash>>,
@@ -36,14 +31,13 @@ pub struct Tree<
     hash_type: PhantomData<Hash>,
 }
 
-impl<Distribution, Key, Value, Hash, Storage>
-    Tree< Distribution, Key, Value, Hash, Storage>
+impl<Distribution, Key, Value, Hash, Storage> Tree<Distribution, Key, Value, Hash, Storage>
 where
-    Distribution: crate::Distribution< Key, Hash>,
+    Distribution: crate::Distribution<Key, Hash>,
     Key: KeyType,
     Value: ValueType,
     Hash: HashType,
-    Storage: ContentAddressedStorage< Hash = Hash>,
+    Storage: ContentAddressedStorage<Hash = Hash>,
 {
     /// Creates a new [`Tree`] with provided [`ContentAddressedStorage`].
     pub fn new(storage: Storage) -> Self {
@@ -247,14 +241,13 @@ where
 }
 
 // Impl block for methods that require Encoder
-impl<Distribution, Key, Value, Hash, Storage>
-    Tree< Distribution, Key, Value, Hash, Storage>
+impl<Distribution, Key, Value, Hash, Storage> Tree<Distribution, Key, Value, Hash, Storage>
 where
-    Distribution: crate::Distribution< Key, Hash>,
+    Distribution: crate::Distribution<Key, Hash>,
     Key: KeyType,
     Value: ValueType,
     Hash: HashType,
-    Storage: ContentAddressedStorage< Hash = Hash> + Encoder,
+    Storage: ContentAddressedStorage<Hash = Hash> + Encoder,
 {
     /// Integrates changes into this tree with deterministic conflict resolution.
     ///

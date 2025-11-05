@@ -34,11 +34,11 @@ pub trait StorageBackend: Clone {
     type Key: ConditionalSync;
     /// The value type able to be stored by this [StorageBackend]
     type Value: ConditionalSend;
+    /// The error type produced by this [StorageBackend]
+    type Error: Into<DialogStorageError>;
     /// Resource for a specific entry in this [StorageBackend] that can be used
     /// to read / write value at a given key.
     type Resource: Resource<Value = Self::Value, Error = Self::Error>;
-    /// The error type produced by this [StorageBackend]
-    type Error: Into<DialogStorageError>;
 
     /// Store the given value against the given key
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error>;
@@ -54,9 +54,9 @@ pub trait StorageBackend: Clone {
 /// that can be used to read / write values with a compare and swap semantics.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait Resource {
+pub trait Resource: ConditionalSend + ConditionalSync {
     type Value: ConditionalSend;
-    type Error: Into<DialogStorageError> + ConditionalSend;
+    type Error: ConditionalSend;
 
     /// Returns a reference to the content of this resource.
     fn content(&self) -> &Option<Self::Value>;
