@@ -15,7 +15,7 @@ mod s3_signer;
 use s3_signer::{Access, Credentials};
 
 use crate::{
-    AtomicStorageBackend, DialogStorageError, Resource, StorageBackend, StorageSink, StorageSource,
+    DialogStorageError, Resource, StorageBackend, StorageSink, StorageSource,
     storage::backend::rest::s3_signer::Authorization,
 };
 
@@ -875,127 +875,6 @@ where
                 "Failed to open resource. Status: {status}"
             ))),
         }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Key, Value> AtomicStorageBackend for RestStorageBackend<Key, Value>
-where
-    Key: AsRef<[u8]> + Clone + ConditionalSync,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-{
-    type Key = Key;
-    type Value = Value;
-    type Error = RestStorageBackendError;
-
-    async fn swap(
-        &mut self,
-        key: Self::Key,
-        value: Option<Self::Value>,
-        when: Option<Self::Value>,
-    ) -> Result<(), Self::Error> {
-        // Prepare request - DELETE if value is None, PUT if Some
-        let mut request = match &value {
-            Some(v) => self.prepare_put_request(key.as_ref(), v.as_ref())?,
-            None => self.prepare_delete_request(key.as_ref())?,
-        };
-
-        // Add precondition headers to enforce CAS semantics.
-        request = match &when {
-            Some(value) => request.header("If-Match", format!("\"{:x}\"", md5::compute(value))),
-            None => request.header("If-None-Match", "*"),
-        };
-
-        let response = request.send().await?;
-
-        if response.status().is_success() {
-            return Ok(());
-        }
-
-        // If precondition failed, we should fetch the latest version so we can
-        // report actual value if it is different or retry with a different
-        // etag if same, which may happen if multipart upload was used, which
-        // should not happen, but it still good to handle such case gracefully.
-        if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
-            // Fetch latest revision to see if we it has changed
-            let request = self.prepare_get_request(key.as_ref())?;
-            let latest = request.send().await?;
-            let etag = latest.headers().get("etag").cloned();
-            let status = latest.status();
-
-            // If key is not found we just need to set If-None-Match: *
-            let actual = if status == reqwest::StatusCode::NOT_FOUND {
-                None
-            }
-            // If fetching latest was successful, we read etag from its headers
-            else if status.is_success() {
-                Some(latest.bytes().await?)
-            } else {
-                Err(RestStorageBackendError::RequestFailed(format!(
-                    "Failed to fetch object after put with precondition was rejected: {}",
-                    response.status()
-                )))?
-            };
-
-            // figure out what etag should we retry put with
-            let precondition = match (when, actual) {
-                (None, None) => Ok(etag),
-                (Some(expected), Some(actual)) => {
-                    if expected.as_ref() != actual.as_ref() {
-                        Err(RestStorageBackendError::OperationFailed(format!(
-                            "Precondition failed, expected key {} to have value {} instead of {}",
-                            ToBase58::to_base58(key.as_ref()),
-                            ToBase58::to_base58(expected.as_ref()),
-                            ToBase58::to_base58(actual.as_ref())
-                        )))
-                    } else {
-                        Ok(etag)
-                    }
-                }
-                (Some(expected), None) => Err(RestStorageBackendError::OperationFailed(format!(
-                    "Precondition failed, expected key {} to have value {} but it was not found",
-                    ToBase58::to_base58(key.as_ref()),
-                    ToBase58::to_base58(expected.as_ref())
-                ))),
-                (None, Some(actual)) => Err(RestStorageBackendError::OperationFailed(format!(
-                    "Precondition failed, expected key {} to not exist but it was found with value {}",
-                    ToBase58::to_base58(key.as_ref()),
-                    ToBase58::to_base58(actual.as_ref())
-                ))),
-            }?;
-
-            // Retry the operation with corrected precondition
-            let mut request = match &value {
-                Some(v) => self.prepare_put_request(key.as_ref(), v.as_ref())?,
-                None => self.prepare_delete_request(key.as_ref())?,
-            };
-            request = match precondition {
-                Some(etag) => request.header("If-Match", etag),
-                None => request.header("If-None-Match", "*"),
-            };
-
-            let retry = request.send().await?;
-
-            if retry.status().is_success() {
-                return Ok(());
-            } else {
-                return Err(RestStorageBackendError::OperationFailed(format!(
-                    "Retry {} failed: {}",
-                    if value.is_some() { "PUT" } else { "DELETE" },
-                    retry.status()
-                )));
-            }
-        } else {
-            Err(RestStorageBackendError::OperationFailed(format!(
-                "swap failed: {}",
-                response.status()
-            )))
-        }
-    }
-
-    async fn resolve(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        StorageBackend::get(self, key).await
     }
 }
 

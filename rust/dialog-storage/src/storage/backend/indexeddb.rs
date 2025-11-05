@@ -7,7 +7,7 @@ use wasm_bindgen::{JsCast, JsValue};
 
 use crate::{DialogStorageError, StorageSink};
 
-use super::{AtomicStorageBackend, Resource, StorageBackend};
+use super::{Resource, StorageBackend};
 
 const INDEXEDDB_STORAGE_VERSION: u32 = 1;
 
@@ -336,104 +336,6 @@ fn bytes_to_typed_array(bytes: &[u8]) -> JsValue {
     let array = Uint8Array::new_with_length(bytes.len() as u32);
     array.copy_from(bytes);
     JsValue::from(array)
-}
-
-#[async_trait(?Send)]
-impl<Key, Value> AtomicStorageBackend for IndexedDbStorageBackend<Key, Value>
-where
-    Key: AsRef<[u8]> + Clone,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + PartialEq,
-{
-    type Key = Key;
-    type Value = Value;
-    type Error = DialogStorageError;
-
-    async fn swap(
-        &mut self,
-        key: Self::Key,
-        value: Option<Self::Value>,
-        when: Option<Self::Value>,
-    ) -> Result<(), Self::Error> {
-        let tx = self
-            .db
-            .transaction(&[&self.store_name], TransactionMode::ReadWrite)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-        let store = tx
-            .store(&self.store_name)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-        let key_array = bytes_to_typed_array(key.as_ref());
-
-        // Read current value
-        let current = store
-            .get(key_array.clone())
-            .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-        let current_value = current
-            .map(|value| {
-                value
-                    .dyn_into::<Uint8Array>()
-                    .map(|arr| Value::from(arr.to_vec()))
-                    .map_err(|_| {
-                        DialogStorageError::StorageBackend("Failed to downcast value".to_string())
-                    })
-            })
-            .transpose()?;
-
-        // Check CAS condition
-        match (when, current_value) {
-            (Some(expected), Some(ref actual)) if expected != *actual => {
-                // CAS failed - current value doesn't match expected
-                return Err(DialogStorageError::StorageBackend(
-                    "CAS condition failed: value mismatch".to_string(),
-                ));
-            }
-            (Some(_expected), None) => {
-                // CAS failed - expected a value but key doesn't exist
-                return Err(DialogStorageError::StorageBackend(
-                    "CAS condition failed: key does not exist".to_string(),
-                ));
-            }
-            (None, Some(_)) => {
-                // CAS failed - expected no value but key exists
-                return Err(DialogStorageError::StorageBackend(
-                    "CAS condition failed: key already exists".to_string(),
-                ));
-            }
-            _ => {
-                // CAS condition satisfied, proceed with write
-            }
-        }
-
-        // Perform the write or delete
-        match value {
-            Some(new_value) => {
-                let value_array = bytes_to_typed_array(new_value.as_ref());
-                store
-                    .put(&value_array, Some(&key_array))
-                    .await
-                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-            }
-            None => {
-                store
-                    .delete(key_array)
-                    .await
-                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-            }
-        }
-
-        tx.done()
-            .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-        Ok(())
-    }
-
-    async fn resolve(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        // resolve is the same as get for IndexedDB
-        self.get(key).await
-    }
 }
 
 #[cfg(all(test, target_arch = "wasm32"))]

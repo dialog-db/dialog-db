@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 
 use crate::{DialogStorageError, StorageSource};
 
-use super::{AtomicStorageBackend, Resource, StorageBackend};
+use super::{Resource, StorageBackend};
 
 /// A trivial implementation of [StorageBackend] - backed by a [HashMap] - where
 /// all values are kept in memory and never persisted.
@@ -166,72 +166,6 @@ where
                 yield (key, value);
             }
         }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Key, Value> AtomicStorageBackend for MemoryStorageBackend<Key, Value>
-where
-    Key: Clone + Eq + std::hash::Hash + ConditionalSync,
-    Value: Clone + ConditionalSync + PartialEq,
-{
-    type Key = Key;
-    type Value = Value;
-    type Error = DialogStorageError;
-
-    async fn swap(
-        &mut self,
-        key: Self::Key,
-        value: Option<Self::Value>,
-        when: Option<Self::Value>,
-    ) -> Result<(), Self::Error> {
-        let mut entries = self.entries.write().await;
-
-        // Get current value
-        let current = entries.get(&key).cloned();
-
-        // Check CAS condition
-        match (when, current) {
-            (Some(expected), Some(ref actual)) if expected != *actual => {
-                // CAS failed - value doesn't match
-                return Err(DialogStorageError::StorageBackend(
-                    "CAS condition failed: value mismatch".to_string(),
-                ));
-            }
-            (Some(_), None) => {
-                // CAS failed - expected a value but key doesn't exist
-                return Err(DialogStorageError::StorageBackend(
-                    "CAS condition failed: key does not exist".to_string(),
-                ));
-            }
-            (None, Some(_)) => {
-                // CAS failed - expected no value but key exists
-                return Err(DialogStorageError::StorageBackend(
-                    "CAS condition failed: key already exists".to_string(),
-                ));
-            }
-            _ => {
-                // CAS condition satisfied
-            }
-        }
-
-        // Perform the operation
-        match value {
-            Some(new_value) => {
-                entries.insert(key, new_value);
-            }
-            None => {
-                entries.remove(&key);
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn resolve(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        let entries = self.entries.read().await;
-        Ok(entries.get(key).cloned())
     }
 }
 

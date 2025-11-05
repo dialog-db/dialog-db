@@ -102,6 +102,10 @@ pub trait Resource {
 /// An [AtomicStorageBackend] is a facade over some generalized storage
 /// substrate that is capable of storing values with compare and swap (CAS)
 /// semantics and retrieving values by some key.
+///
+/// **Deprecated**: Use `StorageBackend` with `Resource` instead for better CAS semantics
+/// with version tracking (ETags).
+#[deprecated(since = "0.1.0", note = "Use StorageBackend with Resource instead")]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait AtomicStorageBackend: Clone {
