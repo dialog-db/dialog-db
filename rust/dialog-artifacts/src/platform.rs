@@ -2,7 +2,8 @@ use crate::replica::{BranchId, BranchState, Revision, Site};
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_storage::{
-    CborEncoder, DialogStorageError, Encoder, Resource, RestStorageConfig, StorageBackend,
+    Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, Resource,
+    RestStorageConfig, StorageBackend,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -642,6 +643,80 @@ where
 
 /// Error type for typed store operations
 pub type TypedStoreError = DialogStorageError;
+
+/// Adapter that converts Blake3Hash keys to/from Vec<u8> for the underlying backend.
+/// This allows using a Vec<u8>-keyed backend as a Blake3Hash-keyed backend.
+#[derive(Clone)]
+pub struct Blake3KeyBackend<B> {
+    inner: B,
+}
+
+impl<B> Blake3KeyBackend<B> {
+    pub fn new(inner: B) -> Self {
+        Self { inner }
+    }
+}
+
+/// Resource wrapper that handles Blake3Hash key conversion
+pub struct Blake3KeyResource<R> {
+    inner: R,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<B> StorageBackend for Blake3KeyBackend<B>
+where
+    B: StorageBackend<Key = Vec<u8>, Value = Vec<u8>> + ConditionalSync,
+    B::Error: ConditionalSync,
+    B::Resource: ConditionalSync,
+{
+    type Key = Blake3Hash;
+    type Value = Vec<u8>;
+    type Error = B::Error;
+    type Resource = Blake3KeyResource<B::Resource>;
+
+    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        self.inner.set(key.to_vec(), value).await
+    }
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        self.inner.get(&key.to_vec()).await
+    }
+
+    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
+        let inner = self.inner.open(&key.to_vec()).await?;
+        Ok(Blake3KeyResource { inner })
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<R> Resource for Blake3KeyResource<R>
+where
+    R: Resource<Value = Vec<u8>> + ConditionalSync + ConditionalSend,
+{
+    type Value = Vec<u8>;
+    type Error = R::Error;
+
+    fn content(&self) -> &Option<Self::Value> {
+        self.inner.content()
+    }
+
+    fn into_content(self) -> Option<Self::Value> {
+        self.inner.into_content()
+    }
+
+    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
+        self.inner.reload().await
+    }
+
+    async fn replace(
+        &mut self,
+        value: Option<Self::Value>,
+    ) -> Result<Option<Self::Value>, Self::Error> {
+        self.inner.replace(value).await
+    }
+}
 
 #[cfg(test)]
 mod tests {
