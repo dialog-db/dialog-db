@@ -734,6 +734,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde-big-array",
+ "serde_ipld_dagcbor",
  "serde_json",
  "static_assertions",
  "tempfile",

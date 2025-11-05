@@ -8,6 +8,7 @@ use dialog_storage::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
+
 #[derive(Error, Debug)]
 pub enum JournalError {
     /// Resolving a branch failed
@@ -144,40 +145,29 @@ pub struct Remotes<Backend: StorageBackend> {
     backend: Backend,
 }
 
+/// Address trait for keys that can be used with storage
+/// Both Vec<u8> and Blake3Hash implement this, though they're used in different contexts
+pub trait Address: ConditionalSync + Clone + AsRef<[u8]> + std::fmt::Debug {}
+
+// Blanket implementation - any type satisfying the bounds automatically implements Address
+impl<T: ConditionalSync + Clone + AsRef<[u8]> + std::fmt::Debug> Address for T {}
+
 /// A storage backend with all the necessary bounds for platform operations.
 ///
-/// This trait combines `StorageBackend + ConditionalSync` with common associated type bounds.
-/// While Rust doesn't propagate these bounds automatically (you'll still need to specify them
-/// in where clauses), using `PlatformBackend` as a base trait is cleaner than repeating
-/// `StorageBackend + ConditionalSync` everywhere.
-///
-/// **Before:**
-/// ```ignore
-/// impl<Backend> Foo<Backend>
-/// where
-///     Backend: StorageBackend + ConditionalSync,
-///     Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
-///     // ...
-/// ```
-///
-/// **After:**
-/// ```ignore
-/// impl<Backend: PlatformBackend> Foo<Backend>
-/// where
-///     Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
-///     // ...
-/// ```
+/// This is a convenience trait for backends that use Vec<u8> keys (the common case
+/// for platform storage like branches and remotes). TypedStore and Storage are more
+/// flexible - they work with any key type implementing `From<Vec<u8>> + AsRef<[u8]>`.
 pub trait PlatformBackend:
     StorageBackend<Key = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError> + ConditionalSync + Clone
 {
 }
 
 // Blanket implementation - any StorageBackend that satisfies the bounds is a PlatformBackend
-impl<
+impl<B> PlatformBackend for B
+where
     B: StorageBackend<Key = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSync
         + Clone,
-> PlatformBackend for B
 {
 }
 
@@ -426,7 +416,8 @@ pub struct TypedStore<T, Backend: StorageBackend, Codec: Encoder = CborEncoder> 
 /// Resource wrapper that transparently handles encoding/decoding for TypedStore
 pub struct TypedStoreResource<T, Backend, Codec = CborEncoder>
 where
-    Backend: PlatformBackend,
+    Backend: StorageBackend<Value = Vec<u8>, Error = DialogStorageError> + ConditionalSync,
+    Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
     Backend::Error: ConditionalSync,
     Codec: Encoder,
 {
@@ -441,7 +432,8 @@ where
 impl<T, Backend, Codec> Resource for TypedStoreResource<T, Backend, Codec>
 where
     T: Serialize + DeserializeOwned + ConditionalSync + std::fmt::Debug + Clone,
-    Backend: PlatformBackend,
+    Backend: StorageBackend<Value = Vec<u8>, Error = DialogStorageError> + ConditionalSync,
+    Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
     Backend::Error: ConditionalSync,
     Backend::Resource: ConditionalSync + ConditionalSend,
     Codec: Encoder + ConditionalSync,
@@ -537,7 +529,8 @@ where
 impl<T, Backend, Codec> StorageBackend for TypedStore<T, Backend, Codec>
 where
     T: Serialize + DeserializeOwned + ConditionalSync + std::fmt::Debug + Clone,
-    Backend: PlatformBackend,
+    Backend: StorageBackend<Value = Vec<u8>, Error = DialogStorageError> + ConditionalSync,
+    Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
     Backend::Error: ConditionalSync,
     Backend::Resource: ConditionalSync + ConditionalSend,
     Codec: Encoder + ConditionalSync,
@@ -559,13 +552,13 @@ where
         let encoded_value: Backend::Value = bytes.as_ref().to_vec();
 
         // Prefix key and set
-        let prefixed_key = self.prefix_key(key.as_ref());
+        let prefixed_key = self.prefix_key(key.as_ref()).into();
         self.backend.set(prefixed_key, encoded_value).await
     }
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         // Prefix key and get
-        let prefixed_key = self.prefix_key(key.as_ref());
+        let prefixed_key = self.prefix_key(key.as_ref()).into();
         let bytes = self.backend.get(&prefixed_key).await?;
 
         // Decode if present
@@ -591,7 +584,8 @@ where
 impl<T, Backend, Codec> TypedStore<T, Backend, Codec>
 where
     T: Serialize + DeserializeOwned + ConditionalSync + std::fmt::Debug + Clone,
-    Backend: PlatformBackend,
+    Backend: StorageBackend<Value = Vec<u8>, Error = DialogStorageError> + ConditionalSync,
+    Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
     Backend::Error: ConditionalSync,
     Backend::Resource: ConditionalSync + ConditionalSend,
     Codec: Encoder + ConditionalSync,
@@ -604,7 +598,7 @@ where
         key: &Backend::Key,
     ) -> Result<TypedStoreResource<T, Backend, Codec>, TypedStoreError> {
         // Prefix key and open backend resource
-        let prefixed_key = self.prefix_key(key.as_ref());
+        let prefixed_key = self.prefix_key(key.as_ref()).into();
         let inner = self.backend.open(&prefixed_key).await?;
 
         // Decode current content if present
@@ -666,7 +660,8 @@ pub struct Blake3KeyResource<R> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<B> StorageBackend for Blake3KeyBackend<B>
 where
-    B: StorageBackend<Key = Vec<u8>, Value = Vec<u8>> + ConditionalSync,
+    B: StorageBackend<Value = Vec<u8>> + ConditionalSync,
+    B::Key: Address + From<Vec<u8>>,
     B::Error: ConditionalSync,
     B::Resource: ConditionalSync,
 {
@@ -676,15 +671,18 @@ where
     type Resource = Blake3KeyResource<B::Resource>;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.inner.set(key.to_vec(), value).await
+        let backend_key = key.as_ref().to_vec().into();
+        self.inner.set(backend_key, value).await
     }
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        self.inner.get(&key.to_vec()).await
+        let backend_key: B::Key = key.as_ref().to_vec().into();
+        self.inner.get(&backend_key).await
     }
 
     async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-        let inner = self.inner.open(&key.to_vec()).await?;
+        let backend_key: B::Key = key.as_ref().to_vec().into();
+        let inner = self.inner.open(&backend_key).await?;
         Ok(Blake3KeyResource { inner })
     }
 }

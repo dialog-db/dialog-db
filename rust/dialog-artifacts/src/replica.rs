@@ -3,12 +3,21 @@ use super::platform::{
     Blake3KeyBackend, ErrorMappingBackend, PlatformBackend, TypedStore, TypedStoreResource,
 };
 pub use super::uri::Uri;
-use crate::artifacts::{Datum, NULL_REVISION_HASH as EMPTY_INDEX};
-use crate::{Key, State};
+use crate::artifacts::selector::Constrained;
+use crate::artifacts::{
+    Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMut, Datum, Instruction, MatchCandidate,
+};
+use crate::{
+    AttributeKey, DialogArtifactsError, EntityKey, FromKey, Key, KeyView, KeyViewConstruct,
+    KeyViewMut, State, ValueKey,
+};
+use async_stream::try_stream;
+use async_trait::async_trait;
 use base58::ToBase58;
 use blake3;
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_prolly_tree::{GeometricDistribution, KeyType, Tree};
+use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Tree};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, Resource,
@@ -21,7 +30,10 @@ use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use std::marker::PhantomData;
+use std::ops::Range;
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::RwLock;
 
 /// Cryptographic identifier like Ed25519 public key representing
 /// an principal that produced a change. We may
@@ -49,7 +61,7 @@ impl NodeReference {
 impl Default for NodeReference {
     /// By default, a [`NodeReference`] is created to empty search tree.
     fn default() -> Self {
-        Self(EMPTY_INDEX)
+        Self(EMPT_TREE_HASH)
     }
 }
 
@@ -184,11 +196,12 @@ impl<Backend: PlatformBackend + 'static> Branches<Backend> {
     }
 }
 
-pub struct Branch<Backend: PlatformBackend> {
+pub struct Branch<Backend: PlatformBackend + 'static> {
     state: BranchState,
     storage: PlatformStorage<Backend>,
     archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
     memory: TypedStoreResource<BranchState, Backend>,
+    tree: Arc<RwLock<Index<Backend>>>,
 }
 
 impl<Backend: PlatformBackend + 'static> Branch<Backend> {
@@ -207,11 +220,17 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
         if let Some(state) = memory.content() {
+            // Load the tree from the revision's tree hash
+            let tree = Tree::from_hash(state.revision.tree().hash(), archive.clone())
+                .await
+                .map_err(|e| ReplicaError::StorageError(format!("Failed to load tree: {:?}", e)))?;
+
             Ok(Branch {
                 state: state.clone(),
                 storage,
                 archive,
                 memory,
+                tree: Arc::new(RwLock::new(tree)),
             })
         } else {
             let state = BranchState::new(id.clone(), None);
@@ -219,11 +238,16 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                 .replace(Some(state.clone()))
                 .await
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+
+            // New branch starts with empty tree
+            let tree = Tree::new(archive.clone());
+
             Ok(Branch {
                 state,
                 memory,
                 storage,
                 archive,
+                tree: Arc::new(RwLock::new(tree)),
             })
         }
     }
@@ -241,11 +265,17 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
         if let Some(state) = memory.content() {
+            // Load the tree from the revision's tree hash
+            let tree = Tree::from_hash(state.revision.tree().hash(), archive.clone())
+                .await
+                .map_err(|e| ReplicaError::StorageError(format!("Failed to load tree: {:?}", e)))?;
+
             Ok(Branch {
                 state: state.clone(),
                 storage,
                 archive,
                 memory,
+                tree: Arc::new(RwLock::new(tree)),
             })
         } else {
             Err(ReplicaError::BranchNotFound { id: id.clone() })
@@ -260,7 +290,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     ) -> Result<&mut Self, ReplicaError> {
         // create new edition from the prior state.
         let state = BranchState {
-            revision,
+            revision: revision.clone(),
             id: self.state.id.clone(),
             description: self.state.description.clone(),
             upstream: self.state.upstream.clone(),
@@ -271,6 +301,12 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             .replace_with(|_| Some(state.clone()))
             .await
             .map_err(|_| ReplicaError::StorageError("Updating branch failed".into()))?;
+
+        // Reload the tree from the new revision
+        let tree = Tree::from_hash(revision.tree().hash(), self.archive.clone())
+            .await
+            .map_err(|e| ReplicaError::StorageError(format!("Failed to load tree: {:?}", e)))?;
+        *self.tree.write().await = tree;
 
         // If we were able to write a new state update
         self.state = state;
@@ -463,7 +499,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                     };
 
                     // Get the hash of the integrated tree
-                    let tree_hash = upstream_tree.hash().cloned().unwrap_or(EMPTY_INDEX);
+                    let tree_hash = upstream_tree.hash().cloned().unwrap_or(EMPT_TREE_HASH);
 
                     // Create new revision with integrated changes
                     let new_revision = Revision {
@@ -492,6 +528,256 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         } else {
             // No upstream configured
             Ok(None)
+        }
+    }
+}
+
+// Implement ArtifactStore for Branch
+impl<Backend: PlatformBackend + 'static> ArtifactStore for Branch<Backend> {
+    fn select(
+        &self,
+        selector: ArtifactSelector<Constrained>,
+    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
+    {
+        let tree = self.tree.clone();
+
+        try_stream! {
+            // Clone the tree to "pin" it at a version for the lifetime of the stream
+            let tree = tree.read().await.clone();
+
+            if selector.entity().is_some() {
+                let start = <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
+                let end = <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
+
+                let stream = tree.stream_range(Range { start, end });
+
+                tokio::pin!(stream);
+
+                for await item in stream {
+                    let entry = item?;
+
+                    if entry.matches_selector(&selector) {
+                        if let Entry { value: State::Added(datum), .. } = entry {
+                            yield Artifact::try_from(datum)?;
+                        }
+                    }
+                }
+            } else if selector.value().is_some() {
+                let start = <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
+                let end = <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
+
+                let stream = tree.stream_range(Range { start, end });
+
+                tokio::pin!(stream);
+
+                for await item in stream {
+                    let entry = item?;
+
+                    if entry.matches_selector(&selector) {
+                        if let Entry { value: State::Added(datum), .. } = entry {
+                            yield Artifact::try_from(datum)?;
+                        }
+                    }
+                }
+            } else if selector.attribute().is_some() {
+                let start = <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
+                let end = <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
+
+                let stream = tree.stream_range(Range { start, end });
+
+                tokio::pin!(stream);
+
+                for await item in stream {
+                    let entry = item?;
+
+                    if entry.matches_selector(&selector) {
+                        if let Entry { value: State::Added(datum), .. } = entry {
+                            yield Artifact::try_from(datum)?;
+                        }
+                    }
+                }
+            } else {
+                unreachable!("ArtifactSelector will always have at least one field specified")
+            };
+        }
+    }
+}
+
+// Implement ArtifactStoreMut for Branch
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
+    async fn commit<Instructions>(
+        &mut self,
+        instructions: Instructions,
+    ) -> Result<Blake3Hash, DialogArtifactsError>
+    where
+        Instructions: Stream<Item = Instruction> + ConditionalSend,
+    {
+        let base_revision = self.revision();
+
+        let transaction_result = async {
+            let mut tree = self.tree.write().await;
+
+            tokio::pin!(instructions);
+
+            while let Some(instruction) = instructions.next().await {
+                match instruction {
+                    Instruction::Assert(artifact) => {
+                        let entity_key = EntityKey::from(&artifact);
+                        let value_key = ValueKey::from_key(&entity_key);
+                        let attribute_key = AttributeKey::from_key(&entity_key);
+
+                        let datum = Datum::from(artifact);
+
+                        if let Some(cause) = &datum.cause {
+                            let ancestor_key = {
+                                let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
+                                    .set_entity(entity_key.entity())
+                                    .set_attribute(entity_key.attribute())
+                                    .into_key();
+                                let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
+                                    .set_entity(entity_key.entity())
+                                    .set_attribute(entity_key.attribute())
+                                    .into_key();
+
+                                let search_stream = tree.stream_range(search_start..search_end);
+
+                                let mut ancestor_key = None;
+
+                                tokio::pin!(search_stream);
+
+                                while let Some(candidate) = search_stream.try_next().await? {
+                                    if let State::Added(current_element) = candidate.value {
+                                        let current_artifact = Artifact::try_from(current_element)?;
+                                        let current_artifact_reference =
+                                            crate::artifacts::Cause::from(&current_artifact);
+
+                                        if cause == &current_artifact_reference {
+                                            ancestor_key = Some(candidate.key);
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                ancestor_key
+                            };
+
+                            if let Some(key) = ancestor_key {
+                                // Prune the old entry from the indexes
+                                let entity_key = EntityKey(key);
+                                let value_key: ValueKey<Key> = ValueKey::from_key(&entity_key);
+                                let attribute_key: AttributeKey<Key> =
+                                    AttributeKey::from_key(&entity_key);
+
+                                // TODO: Make it concurrent / parallel
+                                tree.delete(&entity_key.into_key()).await?;
+                                tree.delete(&value_key.into_key()).await?;
+                                tree.delete(&attribute_key.into_key()).await?;
+                            }
+                        }
+
+                        // TODO: Make it concurrent / parallel
+                        tree.set(entity_key.into_key(), State::Added(datum.clone()))
+                            .await?;
+                        tree.set(attribute_key.into_key(), State::Added(datum.clone()))
+                            .await?;
+                        tree.set(value_key.into_key(), State::Added(datum)).await?;
+                    }
+                    Instruction::Retract(fact) => {
+                        let entity_key = EntityKey::from(&fact);
+                        let value_key = ValueKey::from_key(&entity_key);
+                        let attribute_key = AttributeKey::from_key(&entity_key);
+
+                        // TODO: Make it concurrent / parallel
+                        tree.set(entity_key.into_key(), State::Removed).await?;
+                        tree.set(attribute_key.into_key(), State::Removed).await?;
+                        tree.set(value_key.into_key(), State::Removed).await?;
+                    }
+                }
+            }
+
+            // Get the tree hash and create a new revision
+            let tree_hash = tree
+                .hash()
+                .ok_or_else(|| {
+                    DialogArtifactsError::Storage("Failed to get tree hash".to_string())
+                })?
+                .clone();
+
+            // Create the new revision
+            let tree_reference = NodeReference(tree_hash.clone());
+
+            // Calculate the new period and moment based on the base revision
+            let (period, moment) = {
+                let base_period = *base_revision.period();
+                let base_moment = *base_revision.moment();
+                let base_issuer = *base_revision.issuer();
+                let current_issuer: Principal =
+                    *blake3::hash(self.state.id.0.as_bytes()).as_bytes();
+
+                if base_issuer == current_issuer {
+                    // Same issuer - increment moment
+                    (base_period, base_moment + 1)
+                } else {
+                    // Different issuer - increment period, reset moment
+                    (base_period + 1, 0)
+                }
+            };
+
+            // Hash the base revision to create an Edition
+            let base_revision_bytes = serde_ipld_dagcbor::to_vec(&base_revision).map_err(|e| {
+                DialogArtifactsError::Storage(format!("Failed to serialize revision: {}", e))
+            })?;
+            let base_revision_hash: [u8; 32] = *blake3::hash(&base_revision_bytes).as_bytes();
+
+            let new_revision = Revision {
+                issuer: *blake3::hash(self.state.id.0.as_bytes()).as_bytes(),
+                tree: tree_reference.clone(),
+                cause: {
+                    let mut set = HashSet::new();
+                    set.insert(Edition::new(base_revision_hash));
+                    set
+                },
+                period,
+                moment,
+            };
+
+            // Update the branch state with the new revision
+            let new_state = BranchState {
+                id: self.state.id.clone(),
+                description: self.state.description.clone(),
+                revision: new_revision.clone(),
+                base: tree_reference.clone(),
+                upstream: self.state.upstream.clone(),
+            };
+
+            // Save the new state
+            self.memory
+                .replace(Some(new_state.clone()))
+                .await
+                .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
+
+            self.state = new_state;
+
+            Ok(tree_hash)
+        }
+        .await;
+
+        match transaction_result {
+            Ok(hash) => Ok(hash),
+            Err(error) => {
+                // Rollback: reload tree from base revision
+                let rollback_tree =
+                    Tree::from_hash(base_revision.tree().hash(), self.archive.clone())
+                        .await
+                        .map_err(|e| {
+                            DialogArtifactsError::Storage(format!("Rollback failed: {:?}", e))
+                        })?;
+
+                *self.tree.write().await = rollback_tree;
+                Err(error)
+            }
         }
     }
 }
@@ -1554,13 +1840,13 @@ mod tests {
         // Create a revision for main
         let main_revision = Revision {
             issuer: test_issuer(),
-            tree: NodeReference(EMPTY_INDEX),
+            tree: NodeReference(EMPT_TREE_HASH),
             cause: HashSet::new(),
             period: 0,
             moment: 0,
         };
         main_branch
-            .reset(main_revision.clone(), NodeReference(EMPTY_INDEX))
+            .reset(main_revision.clone(), NodeReference(EMPT_TREE_HASH))
             .await
             .expect("Failed to reset main branch");
 
@@ -1579,13 +1865,13 @@ mod tests {
         // Create a new revision on feature branch
         let feature_revision = Revision {
             issuer: test_issuer(),
-            tree: NodeReference(EMPTY_INDEX),
-            cause: HashSet::from([Edition::new(EMPTY_INDEX)]),
+            tree: NodeReference(EMPT_TREE_HASH),
+            cause: HashSet::from([Edition::new(EMPT_TREE_HASH)]),
             period: 0,
             moment: 1,
         };
         feature_branch
-            .reset(feature_revision.clone(), NodeReference(EMPTY_INDEX))
+            .reset(feature_revision.clone(), NodeReference(EMPT_TREE_HASH))
             .await
             .expect("Failed to reset feature branch");
 
@@ -1681,13 +1967,13 @@ mod tests {
 
         let main_revision = Revision {
             issuer: test_issuer(),
-            tree: NodeReference(EMPTY_INDEX),
+            tree: NodeReference(EMPT_TREE_HASH),
             cause: HashSet::new(),
             period: 0,
             moment: 0,
         };
         main_branch
-            .reset(main_revision.clone(), NodeReference(EMPTY_INDEX))
+            .reset(main_revision.clone(), NodeReference(EMPT_TREE_HASH))
             .await
             .expect("Failed to reset main");
 
@@ -1698,7 +1984,7 @@ mod tests {
                 .expect("Failed to create feature branch");
 
         feature_branch
-            .reset(main_revision.clone(), NodeReference(EMPTY_INDEX))
+            .reset(main_revision.clone(), NodeReference(EMPT_TREE_HASH))
             .await
             .expect("Failed to reset feature");
 

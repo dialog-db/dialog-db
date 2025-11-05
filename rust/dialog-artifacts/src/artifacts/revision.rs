@@ -1,4 +1,4 @@
-use super::Blake3Hash;
+use super::{Blake3Hash, EMPT_TREE_HASH};
 use crate::DialogArtifactsError;
 use base58::ToBase58;
 use dialog_storage::{CborEncoder, Encoder};
@@ -7,7 +7,7 @@ use std::fmt::{Display, Formatter};
 
 /// A hash representing a null [`Revision`] that represents an empty (perhaps
 /// newly created) [`Artifacts`].
-pub static NULL_REVISION_HASH: Blake3Hash = [0; 32];
+pub static NULL_REVISION_HASH: Blake3Hash = EMPT_TREE_HASH;
 
 /// A [`Revision`] represents the root of [`Artifacts`] for a given set of data.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

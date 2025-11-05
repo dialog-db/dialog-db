@@ -7,9 +7,12 @@ use std::{
 use super::differential::Change;
 use crate::{Adopter, Delta, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
 use async_stream::try_stream;
-use dialog_storage::{ContentAddressedStorage, Encoder, HashType};
+use dialog_storage::{Blake3Hash, ContentAddressedStorage, Encoder, HashType};
 use futures_core::Stream;
 use nonempty::NonEmpty;
+
+// A hash representing an empty (usually newly created) `Tree`.
+pub static EMPT_TREE_HASH: [u8; 32] = [0; 32];
 
 /// A key-value store backed by a Ranked Prolly Tree with configurable storage,
 /// encoding and rank distribution.
@@ -54,11 +57,15 @@ where
 
     /// Hydrate a new [`Tree`] from a [`HashType`] that references a [`Node`].
     pub async fn from_hash(hash: &Hash, storage: Storage) -> Result<Self, DialogProllyTreeError> {
-        let root = Node::from_hash(hash.clone(), &storage).await?;
+        let root = if hash.as_ref() == EMPT_TREE_HASH {
+            None
+        } else {
+            Some(Node::from_hash(hash.clone(), &storage).await?)
+        };
+
         Ok(Self {
             storage,
-            root: Some(root),
-
+            root,
             distribution_type: PhantomData,
             key_type: PhantomData,
             value_type: PhantomData,
