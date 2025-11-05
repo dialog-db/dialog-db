@@ -58,7 +58,9 @@ where
     }
 }
 
-trait Measurable {
+/// Trait for types that can report their byte length.
+pub trait Measurable {
+    /// Returns the byte length of this value.
     fn byte_len(&self) -> usize;
 }
 

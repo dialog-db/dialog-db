@@ -82,10 +82,8 @@ where
         // Prefer overlay content, fall back to backend
         self.content = if let Some(overlay_value) = self.overlay_resource.content() {
             Some(overlay_value.clone())
-        } else if let Some(backend_value) = self.backend_resource.content() {
-            Some(backend_value.clone())
         } else {
-            None
+            self.backend_resource.content().clone()
         };
 
         Ok(prior)
@@ -144,10 +142,8 @@ where
         // Determine initial content: prefer overlay, fall back to backend
         let content = if let Some(overlay_value) = overlay_resource.content() {
             Some(overlay_value.clone())
-        } else if let Some(backend_value) = backend_resource.content() {
-            Some(backend_value.clone())
         } else {
-            None
+            backend_resource.content().clone()
         };
 
         Ok(OverlayResource {

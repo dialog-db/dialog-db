@@ -7,11 +7,11 @@ use std::{
 use super::differential::Change;
 use crate::{Adopter, Delta, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
 use async_stream::try_stream;
-use dialog_storage::{Blake3Hash, ContentAddressedStorage, Encoder, HashType};
+use dialog_storage::{ContentAddressedStorage, Encoder, HashType};
 use futures_core::Stream;
 use nonempty::NonEmpty;
 
-// A hash representing an empty (usually newly created) `Tree`.
+/// A hash representing an empty (usually newly created) `Tree`.
 pub static EMPT_TREE_HASH: [u8; 32] = [0; 32];
 
 /// A key-value store backed by a Ranked Prolly Tree with configurable storage,

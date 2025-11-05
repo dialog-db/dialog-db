@@ -1,13 +1,16 @@
-use crate::replica::{BranchId, BranchState, Revision, Site};
+#![allow(missing_docs)]
+
+use crate::replica::{BranchId, Revision, Site};
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_storage::{
-    Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, Resource,
-    RestStorageConfig, StorageBackend,
+    Blake3Hash, CborEncoder, DialogStorageError, Encoder, Resource,
+    StorageBackend,
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
+/// Errors that can occur when working with journal storage.
 #[derive(Error, Debug)]
 pub enum JournalError {
     /// Resolving a branch failed
@@ -18,6 +21,7 @@ pub enum JournalError {
     EncodeError(String),
 }
 
+/// Errors that can occur when working with remote repositories.
 #[derive(Error, Debug)]
 pub enum RemoteError {
     #[error("Remote \"{remote}\" not found")]
@@ -44,6 +48,8 @@ pub enum FetchError {
     NetworkError { branch: BranchId, cause: String },
 }
 
+/// A journal manages revision history for a branch across canonical and cached storage.
+#[allow(dead_code)]
 pub struct Journal<Canonical: Resource<Value = Vec<u8>>, Cache: Resource<Value = Vec<u8>>> {
     branch: BranchId,
     canonical: Canonical,
@@ -56,6 +62,7 @@ impl<
 > Journal<Canonical, Cache>
 {
     /// resolves current known revision for this branch
+    #[allow(dead_code)]
     async fn resolve(&self) -> Result<Option<Revision>, JournalError> {
         if let Some(content) = self.cache.content() {
             let revision = CborEncoder.decode(content).await.map_err(|_| {
@@ -69,6 +76,7 @@ impl<
         }
     }
 
+    #[allow(dead_code)]
     async fn fetch(&mut self) -> Result<Option<Revision>, JournalError> {
         self.canonical.reload().await?;
         let (revision, content) = if let Some(content) = self.canonical.content() {
@@ -91,6 +99,7 @@ impl<
         Ok(revision)
     }
 
+    #[allow(dead_code)]
     async fn publish(&mut self, _branch: BranchId, revision: Revision) -> Result<(), JournalError> {
         let (_, after) = CborEncoder
             .encode(&revision)
@@ -106,6 +115,8 @@ impl<
     }
 }
 
+/// A store for managing multiple journal instances.
+#[allow(dead_code)]
 pub struct JournalStore<
     Backend: StorageBackend<Key = String, Value = Vec<u8>>,
     Cache: StorageBackend<Key = String, Value = Vec<u8>>,
@@ -119,10 +130,12 @@ impl<
     Cache: StorageBackend<Key = String, Value = Vec<u8>, Error = JournalError> + ConditionalSync,
 > JournalStore<Backend, Cache>
 {
+    #[allow(dead_code)]
     async fn new(remote: Backend, cache: Cache) -> Self {
         Self { remote, cache }
     }
 
+    #[allow(dead_code)]
     async fn mount(
         &mut self,
         branch: BranchId,
@@ -140,6 +153,8 @@ impl<
     }
 }
 
+/// Manages remote repository connections (unused, for future use).
+#[allow(dead_code)]
 pub struct Remotes<Backend: StorageBackend> {
     backend: Backend,
 }
@@ -208,6 +223,7 @@ where
     }
 }
 
+/// A resource wrapper that maps storage errors to platform-specific errors.
 pub struct ErrorMappingResource<R> {
     inner: R,
 }

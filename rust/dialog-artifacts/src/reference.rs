@@ -1,4 +1,4 @@
-use dialog_storage::{Blake3Hash, HashType};
+use dialog_storage::Blake3Hash;
 
 /// Produces a [Reference], which is a type-alias for a 32-byte array; in practice, these
 /// bytes are the BLAKE3 hash of the inputs to this function

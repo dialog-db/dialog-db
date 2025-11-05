@@ -2,7 +2,6 @@ use std::marker::PhantomData;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
-use base58::ToBase58;
 use base64::Engine;
 use dialog_common::ConditionalSync;
 use futures_util::Stream;

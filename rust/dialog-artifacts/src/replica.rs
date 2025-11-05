@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use super::platform::Storage as PlatformStorage;
 use super::platform::{
     Blake3KeyBackend, ErrorMappingBackend, PlatformBackend, TypedStore, TypedStoreResource,
@@ -15,12 +17,14 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use base58::ToBase58;
 use blake3;
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_common::ConditionalSend;
+#[cfg(test)]
+use dialog_common::ConditionalSync;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Tree};
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use dialog_storage::{
-    Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, Resource,
+    Blake3Hash, CborEncoder, DialogStorageError, Resource,
     RestStorageBackend, RestStorageConfig, StorageBackend,
 };
 use ed25519_dalek::ed25519::signature::SignerMut;
@@ -84,13 +88,16 @@ pub struct Issuer {
 }
 
 impl Issuer {
+    /// Creates a new issuer from a passphrase by hashing it to derive a signing key.
     pub fn from_passphrase(passphrase: &str) -> Self {
         let bytes = passphrase.as_bytes();
         Self::from_secret(blake3::hash(bytes).as_bytes())
     }
+    /// Creates a new issuer from a secret key.
     pub fn from_secret(secret: &[u8; SECRET_KEY_LENGTH]) -> Self {
         Issuer::new(SigningKey::from_bytes(secret))
     }
+    /// Creates a new issuer from a signing key.
     pub fn new(signing_key: SigningKey) -> Self {
         let verifying_key = signing_key.verifying_key();
         const PREFIX: &str = "z6Mk";
@@ -111,23 +118,29 @@ impl Issuer {
             verifying_key,
         }
     }
+    /// Generates a new issuer with a random signing key.
     pub fn generate() -> Result<Self, ReplicaError> {
         Ok(Self::new(SigningKey::generate(&mut rand::thread_rng())))
     }
 
+    /// Signs a payload with this issuer's signing key.
     pub fn sign(&mut self, payload: &[u8]) -> Signature {
         self.signing_key.sign(payload)
     }
 
+    /// Returns the DID (Decentralized Identifier) for this issuer.
     pub fn did(&self) -> &str {
         &self.id
     }
 
+    /// Returns the principal (public key bytes) for this issuer.
     pub fn principal(&self) -> &Principal {
         self.verifying_key.as_bytes()
     }
 }
 
+/// A replica represents a local instance of a distributed database.
+#[allow(dead_code)]
 pub struct Replica<Backend: PlatformBackend> {
     issuer: Issuer,
     storage: PlatformStorage<Backend>,
@@ -137,6 +150,7 @@ pub struct Replica<Backend: PlatformBackend> {
 }
 
 impl<Backend: PlatformBackend + 'static> Replica<Backend> {
+    /// Creates a new replica with the given issuer and storage backend.
     pub fn new(issuer: Issuer, backend: Backend) -> Result<Self, ReplicaError> {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
@@ -161,10 +175,12 @@ impl<Backend: PlatformBackend + 'static> Replica<Backend> {
 
     /// Opens or creates a new named branch
     pub async fn open(&self, id: BranchId) -> Result<Branch<Backend>, ReplicaError> {
-        Ok(self.branches.open(&id).await?)
+        self.branches.open(&id).await
     }
 }
 
+/// Manages multiple branches within a replica.
+#[allow(dead_code)]
 pub struct Branches<Backend: PlatformBackend> {
     issuer: Issuer,
     storage: PlatformStorage<Backend>,
@@ -214,6 +230,7 @@ impl<Backend: PlatformBackend + 'static> Branches<Backend> {
     }
 }
 
+/// A branch represents a named line of development within a replica.
 pub struct Branch<Backend: PlatformBackend + 'static> {
     issuer: Issuer,
     state: BranchState,
@@ -224,6 +241,7 @@ pub struct Branch<Backend: PlatformBackend + 'static> {
 }
 
 impl<Backend: PlatformBackend + 'static> Branch<Backend> {
+    /// Mounts a typed store for branch state at the appropriate storage location.
     pub fn mount(storage: &PlatformStorage<Backend>) -> TypedStore<BranchState, Backend> {
         storage.at("branch").at("local").mount()
     }
@@ -389,12 +407,15 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     fn state(&self) -> BranchState {
         self.memory.content().clone().unwrap_or(self.state.clone())
     }
+    /// Returns the branch identifier.
     pub fn id(&self) -> &BranchId {
         self.state.id()
     }
+    /// Returns the current revision of this branch.
     pub fn revision(&self) -> Revision {
         self.state().revision().to_owned()
     }
+    /// Returns a description of this branch.
     pub fn description(&self) -> String {
         self.state().description().into()
     }
@@ -728,15 +749,14 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
             }
 
             // Get the tree hash and create a new revision
-            let tree_hash = tree
+            let tree_hash = *tree
                 .hash()
                 .ok_or_else(|| {
                     DialogArtifactsError::Storage("Failed to get tree hash".to_string())
-                })?
-                .clone();
+                })?;
 
             // Create the new revision
-            let tree_reference = NodeReference(tree_hash.clone());
+            let tree_reference = NodeReference(tree_hash);
 
             // Calculate the new period and moment based on the base revision
             let (period, moment) = {
@@ -808,18 +828,22 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
     }
 }
 
+/// Manages remote repositories for synchronization.
+#[allow(dead_code)]
 pub struct Remotes<Backend: PlatformBackend> {
     storage: PlatformStorage<Backend>,
     store: TypedStore<RemoteState, Backend>,
 }
 
 impl<Backend: PlatformBackend> Remotes<Backend> {
+    /// Creates a new remotes manager for the given backend.
     pub fn new(backend: Backend) -> Self {
         let storage = PlatformStorage::new(backend, CborEncoder);
         let store = storage.at("connection").mount();
         Self { storage, store }
     }
 
+    /// Adds a new remote repository with the given name and address.
     pub async fn add(
         &self,
         name: &str,
@@ -827,20 +851,25 @@ impl<Backend: PlatformBackend> Remotes<Backend> {
     ) -> Result<RepositoryRemote<Backend>, ReplicaError> {
         RepositoryRemote::add(name, address, self.storage.clone()).await
     }
+    /// Loads an existing remote repository by name.
     pub async fn load(&self, name: &str) -> Result<RepositoryRemote<Backend>, ReplicaError> {
         RepositoryRemote::load(name, self.storage.clone()).await
     }
 }
 
+/// Represents a connection to a remote repository.
+#[allow(dead_code)]
 pub struct RepositoryRemote<Backend: PlatformBackend> {
     state: RemoteState,
     storage: PlatformStorage<Backend>,
     memory: TypedStoreResource<RemoteState, Backend>,
 }
 impl<Backend: PlatformBackend> RepositoryRemote<Backend> {
+    /// Mounts a typed store for remote state.
     pub fn mount(storage: PlatformStorage<Backend>) -> TypedStore<RemoteState, Backend> {
         storage.at("address").mount()
     }
+    /// Loads a remote repository configuration by name.
     pub async fn load(
         name: &str,
         storage: PlatformStorage<Backend>,
@@ -863,6 +892,7 @@ impl<Backend: PlatformBackend> RepositoryRemote<Backend> {
         }
     }
 
+    /// Adds a new remote repository with the given configuration.
     pub async fn add(
         name: &str,
         address: RestStorageConfig,
@@ -895,6 +925,7 @@ impl<Backend: PlatformBackend> RepositoryRemote<Backend> {
         }
     }
 
+    /// Resolves the current revision for a branch on this remote.
     pub async fn resolve(&self, id: &BranchId) -> Result<Option<Revision>, ReplicaError> {
         let backend: RestStorageBackend<Vec<u8>, Vec<u8>> =
             RestStorageBackend::new(self.state.address.clone()).map_err(|_| {
@@ -917,15 +948,19 @@ impl<Backend: PlatformBackend> RepositoryRemote<Backend> {
     }
 }
 
+/// Represents a branch on a remote repository.
+#[allow(dead_code)]
 pub struct RemoteBranch<Backend: PlatformBackend> {
     state: RemoteBranchState,
     memory: TypedStoreResource<RemoteBranchState, Backend>,
 }
 
 impl<Backend: PlatformBackend> RemoteBranch<Backend> {
+    /// Mounts a typed store for remote branch state.
     pub fn mount(storage: &PlatformStorage<Backend>) -> TypedStore<RemoteBranchState, Backend> {
         storage.at("remote").mount()
     }
+    /// Loads a remote branch by name.
     pub async fn load(
         name: &str,
         storage: PlatformStorage<Backend>,
@@ -944,12 +979,13 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         }
     }
 
+    /// Sets the state for a remote branch.
     pub async fn set(
         name: &str,
         state: RemoteBranchState,
         storage: &mut PlatformStorage<Backend>,
     ) -> Result<RemoteBranch<Backend>, ReplicaError> {
-        let mut memory = Self::mount(&storage)
+        let mut memory = Self::mount(storage)
             .open(&name.as_bytes().to_vec())
             .await
             .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
@@ -964,6 +1000,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// State information for a remote repository connection.
 pub struct RemoteState {
     /// Name for this remote.
     id: Site,
