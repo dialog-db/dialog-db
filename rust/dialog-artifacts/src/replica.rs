@@ -24,8 +24,8 @@ use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, 
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use dialog_storage::{
-    Blake3Hash, CborEncoder, DialogStorageError, Resource,
-    RestStorageBackend, RestStorageConfig, StorageBackend,
+    Blake3Hash, CborEncoder, DialogStorageError, Resource, RestStorageBackend, RestStorageConfig,
+    StorageBackend,
 };
 use ed25519_dalek::ed25519::signature::SignerMut;
 use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, SigningKey, VerifyingKey};
@@ -749,11 +749,9 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
             }
 
             // Get the tree hash and create a new revision
-            let tree_hash = *tree
-                .hash()
-                .ok_or_else(|| {
-                    DialogArtifactsError::Storage("Failed to get tree hash".to_string())
-                })?;
+            let tree_hash = *tree.hash().ok_or_else(|| {
+                DialogArtifactsError::Storage("Failed to get tree hash".to_string())
+            })?;
 
             // Create the new revision
             let tree_reference = NodeReference(tree_hash);

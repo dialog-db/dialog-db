@@ -4,8 +4,7 @@ use crate::replica::{BranchId, Revision, Site};
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_storage::{
-    Blake3Hash, CborEncoder, DialogStorageError, Encoder, Resource,
-    StorageBackend,
+    Blake3Hash, CborEncoder, DialogStorageError, Encoder, Resource, StorageBackend,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
