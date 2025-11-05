@@ -115,12 +115,7 @@ impl Issuer {
     }
 }
 
-pub struct Replica<Backend: PlatformBackend>
-where
-    Backend: PlatformBackend,
-    Backend::Error: ConditionalSync,
-    Backend::Resource: ConditionalSync + ConditionalSend,
-{
+pub struct Replica<Backend: PlatformBackend> {
     storage: PlatformStorage<Backend>,
     archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
     remotes: Remotes<Backend>,
