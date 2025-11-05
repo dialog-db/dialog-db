@@ -76,6 +76,7 @@ impl From<NodeReference> for Blake3Hash {
 pub type Site = String;
 
 /// Represents a principal operating a replica.
+#[derive(Clone)]
 pub struct Issuer {
     id: String,
     signing_key: SigningKey,
@@ -128,6 +129,7 @@ impl Issuer {
 }
 
 pub struct Replica<Backend: PlatformBackend> {
+    issuer: Issuer,
     storage: PlatformStorage<Backend>,
     archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
     remotes: Remotes<Backend>,
@@ -135,7 +137,7 @@ pub struct Replica<Backend: PlatformBackend> {
 }
 
 impl<Backend: PlatformBackend + 'static> Replica<Backend> {
-    pub fn new(backend: Backend) -> Result<Self, ReplicaError> {
+    pub fn new(issuer: Issuer, backend: Backend) -> Result<Self, ReplicaError> {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         // Create archive storage with Blake3Hash keys for content-addressed tree storage
@@ -146,9 +148,10 @@ impl<Backend: PlatformBackend + 'static> Replica<Backend> {
             backend: archive_backend,
         };
 
-        let branches = Branches::new(backend.clone(), archive.clone());
+        let branches = Branches::new(issuer.clone(), backend.clone(), archive.clone());
         let remotes = Remotes::new(backend.clone());
         Ok(Replica {
+            issuer,
             storage,
             archive,
             remotes,
@@ -163,6 +166,7 @@ impl<Backend: PlatformBackend + 'static> Replica<Backend> {
 }
 
 pub struct Branches<Backend: PlatformBackend> {
+    issuer: Issuer,
     storage: PlatformStorage<Backend>,
     archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
     store: TypedStore<BranchState, Backend>,
@@ -171,12 +175,14 @@ pub struct Branches<Backend: PlatformBackend> {
 impl<Backend: PlatformBackend + 'static> Branches<Backend> {
     /// Creates a new instance for the given backend
     pub fn new(
+        issuer: Issuer,
         backend: Backend,
         archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
     ) -> Self {
         let storage = PlatformStorage::new(backend, CborEncoder);
         let store = storage.at("revisions").at("local").mount();
         Self {
+            issuer,
             storage,
             archive,
             store,
@@ -186,17 +192,30 @@ impl<Backend: PlatformBackend + 'static> Branches<Backend> {
     /// Loads a branch with given identifier, produces an error if it does not
     /// exists.
     pub async fn load(&self, id: &BranchId) -> Result<Branch<Backend>, ReplicaError> {
-        Branch::load(id, self.storage.clone(), self.archive.clone()).await
+        Branch::load(
+            id,
+            self.issuer.clone(),
+            self.storage.clone(),
+            self.archive.clone(),
+        )
+        .await
     }
 
     /// Loads a branch with the given identifier or creates a new one if
     /// it does not already exist.
     pub async fn open(&self, id: &BranchId) -> Result<Branch<Backend>, ReplicaError> {
-        Branch::open(id, self.storage.clone(), self.archive.clone()).await
+        Branch::open(
+            id,
+            self.issuer.clone(),
+            self.storage.clone(),
+            self.archive.clone(),
+        )
+        .await
     }
 }
 
 pub struct Branch<Backend: PlatformBackend + 'static> {
+    issuer: Issuer,
     state: BranchState,
     storage: PlatformStorage<Backend>,
     archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
@@ -211,6 +230,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// Loads a branch with a given id or creates one if it does not exist.
     pub async fn open(
         id: &BranchId,
+        issuer: Issuer,
         storage: PlatformStorage<Backend>,
         archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
     ) -> Result<Branch<Backend>, ReplicaError> {
@@ -226,6 +246,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                 .map_err(|e| ReplicaError::StorageError(format!("Failed to load tree: {:?}", e)))?;
 
             Ok(Branch {
+                issuer,
                 state: state.clone(),
                 storage,
                 archive,
@@ -243,6 +264,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             let tree = Tree::new(archive.clone());
 
             Ok(Branch {
+                issuer,
                 state,
                 memory,
                 storage,
@@ -256,6 +278,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// given id does not exists it produces an error.
     pub async fn load(
         id: &BranchId,
+        issuer: Issuer,
         storage: PlatformStorage<Backend>,
         archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
     ) -> Result<Branch<Backend>, ReplicaError> {
@@ -271,6 +294,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                 .map_err(|e| ReplicaError::StorageError(format!("Failed to load tree: {:?}", e)))?;
 
             Ok(Branch {
+                issuer,
                 state: state.clone(),
                 storage,
                 archive,
@@ -323,10 +347,14 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             match &upstream.origin {
                 // Fetch from a local branch is a no-op.
                 Origin::Local => {
-                    let revision =
-                        Branch::load(upstream.id(), self.storage.clone(), self.archive.clone())
-                            .await?
-                            .revision();
+                    let revision = Branch::load(
+                        upstream.id(),
+                        self.issuer.clone(),
+                        self.storage.clone(),
+                        self.archive.clone(),
+                    )
+                    .await?
+                    .revision();
                     Ok(Some(revision))
                 }
                 Origin::Remote(origin) => {
@@ -381,9 +409,13 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                 Origin::Local => {
                     if upstream.id() != self.id() {
                         // Load target branch that we will update
-                        let mut target =
-                            Branch::load(upstream.id(), self.storage.clone(), self.archive.clone())
-                                .await?;
+                        let mut target = Branch::load(
+                            upstream.id(),
+                            self.issuer.clone(),
+                            self.storage.clone(),
+                            self.archive.clone(),
+                        )
+                        .await?;
                         // Reset it to the current branch's revision
                         target.reset(revision, target.state.base.clone()).await?;
                     }
@@ -443,7 +475,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// 2. Computes local changes since last pull using differentiate()
     /// 3. Integrates local changes into upstream tree
     /// 4. Creates a new revision with proper period/moment
-    pub async fn pull(&mut self, issuer: &Principal) -> Result<Option<Revision>, ReplicaError> {
+    pub async fn pull(&mut self) -> Result<Option<Revision>, ReplicaError> {
         if self.state.upstream.is_some() {
             if let Some(upstream_revision) = self.fetch().await? {
                 // Check if the upstream has changed since our last pull
@@ -490,7 +522,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                     })?;
 
                     // Compute new period and moment based on issuer
-                    let (period, moment) = if upstream_revision.issuer == *issuer {
+                    let (period, moment) = if upstream_revision.issuer == *self.issuer.principal() {
                         // Same issuer: increment moment, keep period
                         (upstream_revision.period, upstream_revision.moment + 1)
                     } else {
@@ -503,11 +535,9 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
                     // Create new revision with integrated changes
                     let new_revision = Revision {
-                        issuer: *issuer,
+                        issuer: *self.issuer.principal(),
                         tree: NodeReference(tree_hash),
-                        cause: HashSet::from([Edition::<Revision>::new(
-                            *upstream_revision.tree.hash(),
-                        )]),
+                        cause: HashSet::from([upstream_revision.edition()?]),
                         period,
                         moment,
                     };
@@ -725,18 +755,14 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
                 }
             };
 
-            // Hash the base revision to create an Edition
-            let base_revision_bytes = serde_ipld_dagcbor::to_vec(&base_revision).map_err(|e| {
-                DialogArtifactsError::Storage(format!("Failed to serialize revision: {}", e))
-            })?;
-            let base_revision_hash: [u8; 32] = *blake3::hash(&base_revision_bytes).as_bytes();
-
             let new_revision = Revision {
-                issuer: *blake3::hash(self.state.id.0.as_bytes()).as_bytes(),
+                issuer: *self.issuer.principal(),
                 tree: tree_reference.clone(),
                 cause: {
                     let mut set = HashSet::new();
-                    set.insert(Edition::new(base_revision_hash));
+                    set.insert(base_revision.edition().map_err(|e| {
+                        DialogArtifactsError::Storage(format!("Failed to create edition: {}", e))
+                    })?);
                     set
                 },
                 period,
@@ -1030,6 +1056,17 @@ impl Revision {
     /// Previous revision this replaced.
     pub fn cause(&self) -> &HashSet<Edition<Revision>> {
         &self.cause
+    }
+
+    /// Creates an [`Edition`] of this revision by hashing it.
+    ///
+    /// This is used to reference this revision as a causal ancestor in subsequent revisions.
+    pub fn edition(&self) -> Result<Edition<Revision>, ReplicaError> {
+        let revision_bytes = serde_ipld_dagcbor::to_vec(self).map_err(|e| {
+            ReplicaError::StorageError(format!("Failed to serialize revision: {}", e))
+        })?;
+        let revision_hash: [u8; 32] = *blake3::hash(&revision_bytes).as_bytes();
+        Ok(Edition::new(revision_hash))
     }
 }
 
@@ -1799,7 +1836,8 @@ mod tests {
         let branch_id = BranchId::new(id.to_string());
         let upstream_branch_id = BranchId::new(upstream_id.to_string());
 
-        let mut branch = Branch::open(&branch_id, storage.clone(), archive.clone()).await?;
+        let issuer = Issuer::from_secret(&test_issuer());
+        let mut branch = Branch::open(&branch_id, issuer, storage.clone(), archive.clone()).await?;
 
         // Set up upstream
         branch.state.upstream = Some(Upstream {
@@ -1833,9 +1871,11 @@ mod tests {
 
         // Create main branch
         let main_id = BranchId::new("main".to_string());
-        let mut main_branch = Branch::open(&main_id, storage.clone(), archive.clone())
-            .await
-            .expect("Failed to create main branch");
+        let issuer = Issuer::from_secret(&test_issuer());
+        let mut main_branch =
+            Branch::open(&main_id, issuer.clone(), storage.clone(), archive.clone())
+                .await
+                .expect("Failed to create main branch");
 
         // Create a revision for main
         let main_revision = Revision {
@@ -1862,11 +1902,11 @@ mod tests {
         .await
         .expect("Failed to create feature branch");
 
-        // Create a new revision on feature branch
+        // Create a new revision on feature branch with main_revision as cause
         let feature_revision = Revision {
             issuer: test_issuer(),
             tree: NodeReference(EMPT_TREE_HASH),
-            cause: HashSet::from([Edition::new(EMPT_TREE_HASH)]),
+            cause: HashSet::from([main_revision.edition().expect("Failed to create edition")]),
             period: 0,
             moment: 1,
         };
@@ -1879,7 +1919,7 @@ mod tests {
         feature_branch.push().await.expect("Push failed");
 
         // Verify main branch was updated
-        let updated_main = Branch::load(&main_id, storage, archive)
+        let updated_main = Branch::load(&main_id, issuer, storage, archive)
             .await
             .expect("Failed to load main branch");
 
@@ -1931,7 +1971,8 @@ mod tests {
         };
 
         let branch_id = BranchId::new("no-upstream".to_string());
-        let mut branch = Branch::open(&branch_id, storage, archive)
+        let issuer = Issuer::from_secret(&test_issuer());
+        let mut branch = Branch::open(&branch_id, issuer, storage, archive)
             .await
             .expect("Failed to create branch");
 
@@ -1961,7 +2002,8 @@ mod tests {
 
         // Create main and feature branches
         let main_id = BranchId::new("main".to_string());
-        let mut main_branch = Branch::open(&main_id, storage.clone(), archive.clone())
+        let issuer = Issuer::from_secret(&test_issuer());
+        let mut main_branch = Branch::open(&main_id, issuer, storage.clone(), archive.clone())
             .await
             .expect("Failed to create main branch");
 
@@ -1989,7 +2031,7 @@ mod tests {
             .expect("Failed to reset feature");
 
         // Pull should return None (no changes)
-        let result = feature_branch.pull(&test_issuer()).await;
+        let result = feature_branch.pull().await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
     }
@@ -2007,12 +2049,13 @@ mod tests {
         };
 
         let branch_id = BranchId::new("no-upstream".to_string());
-        let mut branch = Branch::open(&branch_id, storage, archive)
+        let issuer = Issuer::from_secret(&test_issuer());
+        let mut branch = Branch::open(&branch_id, issuer, storage, archive)
             .await
             .expect("Failed to create branch");
 
         // Pull without upstream should return None
-        let result = branch.pull(&test_issuer()).await;
+        let result = branch.pull().await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
     }

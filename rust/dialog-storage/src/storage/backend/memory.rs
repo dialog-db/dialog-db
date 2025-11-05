@@ -209,7 +209,11 @@ mod tests {
 
         // Open resource with existing value
         let mut resource = backend.open(&key).await.unwrap();
-        assert_eq!(resource.content(), &Some(value1.clone()), "Resource should have value1");
+        assert_eq!(
+            resource.content(),
+            &Some(value1.clone()),
+            "Resource should have value1"
+        );
 
         // Update with CAS condition (resource already has value1 loaded)
         let result = resource.replace(Some(value2.clone())).await;
@@ -263,13 +267,19 @@ mod tests {
         let expected_old = b"old_value".to_vec();
 
         // Create initial value
-        backend.set(key.clone(), expected_old.clone()).await.unwrap();
+        backend
+            .set(key.clone(), expected_old.clone())
+            .await
+            .unwrap();
 
         // Open resource (captures expected_old)
         let mut resource = backend.open(&key).await.unwrap();
 
         // Simulate concurrent deletion
-        backend.set(key.clone(), expected_old.clone()).await.unwrap(); // Reset to force entry removal on next line
+        backend
+            .set(key.clone(), expected_old.clone())
+            .await
+            .unwrap(); // Reset to force entry removal on next line
         let mut entries = backend.entries.write().await;
         entries.remove(&key);
         drop(entries);
@@ -334,7 +344,11 @@ mod tests {
 
         // Open resource and delete with CAS condition
         let mut resource = backend.open(&key).await.unwrap();
-        assert_eq!(resource.content(), &Some(value), "Resource should have value");
+        assert_eq!(
+            resource.content(),
+            &Some(value),
+            "Resource should have value"
+        );
 
         let result = resource.replace(None).await;
         assert!(result.is_ok(), "Should delete with correct CAS condition");
@@ -350,6 +364,10 @@ mod tests {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let key = b"nonexistent".to_vec();
         let result = backend.open(&key).await.unwrap();
-        assert_eq!(result.content(), &None, "Should return None for non-existent key");
+        assert_eq!(
+            result.content(),
+            &None,
+            "Should return None for non-existent key"
+        );
     }
 }

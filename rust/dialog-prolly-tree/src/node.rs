@@ -8,7 +8,7 @@ use nonempty::NonEmpty;
 
 use crate::{Block, DialogProllyTreeError, Entry, KeyType, Rank, Reference, ValueType};
 
-type BranchStack< Key, Hash> = Vec<(
+type BranchStack<Key, Hash> = Vec<(
     Option<NonEmpty<Reference<Key, Hash>>>,
     Option<NonEmpty<Reference<Key, Hash>>>,
 )>;
@@ -34,8 +34,7 @@ where
     reference: Reference<Key, Hash>,
 }
 
-impl<Key, Value, Hash>
-    Node<Key, Value, Hash>
+impl<Key, Value, Hash> Node<Key, Value, Hash>
 where
     Key: KeyType,
     Value: ValueType,
@@ -58,7 +57,7 @@ where
         storage: &mut Storage,
     ) -> Result<Self, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage< Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let block = Block::branch(children);
         let bound = block.upper_bound().clone();
@@ -75,7 +74,7 @@ where
         storage: &mut Storage,
     ) -> Result<Self, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage< Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let block = Block::segment(children);
         let bound = block.upper_bound().clone();
@@ -91,7 +90,7 @@ where
         storage: &Storage,
     ) -> Result<Self, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage< Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let Some(block) = storage
             .read(reference.hash())
@@ -113,7 +112,7 @@ where
         storage: &Storage,
     ) -> Result<Self, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage< Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let Some(block) = storage
             .read::<Block<Key, Value, Hash>>(&hash)
@@ -162,9 +161,7 @@ where
     /// Get children data as  [`Reference`]s.
     ///
     /// The result is an error if this [`Node`] is a segment.
-    pub fn references(
-        &self,
-    ) -> Result<&NonEmpty<Reference<Key, Hash>>, DialogProllyTreeError> {
+    pub fn references(&self) -> Result<&NonEmpty<Reference<Key, Hash>>, DialogProllyTreeError> {
         self.block.references()
     }
 
@@ -175,7 +172,7 @@ where
         storage: &Storage,
     ) -> Result<NonEmpty<Self>, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage< Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         if !self.is_branch() {
             return Err(DialogProllyTreeError::IncorrectTreeAccess(
@@ -210,7 +207,7 @@ where
         storage: &Storage,
     ) -> Result<Option<Entry<Key, Value>>, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage< Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let mut current_node_holder: Option<Self>;
         let mut current_node = self;
@@ -239,8 +236,8 @@ where
         storage: &mut Storage,
     ) -> Result<Option<Self>, DialogProllyTreeError>
     where
-        Distribution: crate::Distribution< Key, Hash>,
-        Storage: ContentAddressedStorage< Hash = Hash>,
+        Distribution: crate::Distribution<Key, Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let key_clone = key.to_owned();
         let (node, mut branch_stack) = self.bisect(&key_clone, storage).await?;
@@ -333,8 +330,8 @@ where
         storage: &mut Storage,
     ) -> Result<Self, DialogProllyTreeError>
     where
-        Distribution: crate::Distribution< Key, Hash>,
-        Storage: ContentAddressedStorage< Hash = Hash>,
+        Distribution: crate::Distribution<Key, Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let key = new_entry.key.to_owned();
         let (node, branch_stack) = self.bisect(&key, storage).await?;
@@ -378,7 +375,7 @@ where
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogProllyTreeError>> + 'a
     where
         R: RangeBounds<Key> + 'a,
-        Storage: ContentAddressedStorage< Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let get_child_index_by_key =
             async |node: &Self,
@@ -501,7 +498,7 @@ where
         storage: &Storage,
     ) -> Result<Option<Self>, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage< Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         if !self.is_branch() {
             return Err(DialogProllyTreeError::IncorrectTreeAccess(
@@ -543,10 +540,10 @@ where
         storage: &mut Storage,
     ) -> Result<NonEmpty<(Self, Rank)>, DialogProllyTreeError>
     where
-        Adopter: crate::Adopter< Key, Value, Hash>,
-        Storage: ContentAddressedStorage< Hash = Hash>,
+        Adopter: crate::Adopter<Key, Value, Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
-        let mut output: Vec<(Node< Key, Value, Hash>, u32)> = vec![];
+        let mut output: Vec<(Node<Key, Value, Hash>, u32)> = vec![];
         let mut pending = vec![];
         for (node, rank) in nodes {
             pending.push(node);
@@ -577,9 +574,9 @@ where
         &self,
         key: &Key,
         storage: &Storage,
-    ) -> Result<(Self, BranchStack< Key, Hash>), DialogProllyTreeError>
+    ) -> Result<(Self, BranchStack<Key, Hash>), DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage< Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let mut node = self.to_owned();
         let mut branch_stack = vec![];
@@ -627,13 +624,13 @@ where
 
     async fn rejoin<Distribution, Storage>(
         &self,
-        mut nodes: NonEmpty<(Node< Key, Value, Hash>, u32)>,
-        mut branch_stack: BranchStack< Key, Hash>,
+        mut nodes: NonEmpty<(Node<Key, Value, Hash>, u32)>,
+        mut branch_stack: BranchStack<Key, Hash>,
         storage: &mut Storage,
     ) -> Result<Self, DialogProllyTreeError>
     where
-        Distribution: crate::Distribution< Key, Hash>,
-        Storage: ContentAddressedStorage< Hash = Hash>,
+        Distribution: crate::Distribution<Key, Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let mut minimum_rank = 2;
 

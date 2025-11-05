@@ -52,9 +52,7 @@ where
     /// Get children data as [`Reference`]s.
     ///
     /// The result is an error if this [`Node`] is a segment.
-    pub fn references(
-        &self,
-    ) -> Result<&NonEmpty<Reference<Key, Hash>>, DialogProllyTreeError> {
+    pub fn references(&self) -> Result<&NonEmpty<Reference<Key, Hash>>, DialogProllyTreeError> {
         match self {
             Block::Branch(data) => Ok(data),
             Block::Segment(_) => Err(DialogProllyTreeError::IncorrectTreeAccess(
@@ -66,9 +64,7 @@ where
     /// Takes children data as [`Reference`]s.
     ///
     /// The result is an error if this [`Node`] is a segment.
-    pub fn into_references(
-        self,
-    ) -> Result<NonEmpty<Reference<Key, Hash>>, DialogProllyTreeError> {
+    pub fn into_references(self) -> Result<NonEmpty<Reference<Key, Hash>>, DialogProllyTreeError> {
         match self {
             Block::Branch(data) => Ok(data),
             Block::Segment(_) => Err(DialogProllyTreeError::IncorrectTreeAccess(
@@ -113,8 +109,7 @@ pub enum BlockType {
     Segment = 1,
 }
 
-impl<Key, Value, Hash> From<&Block<Key, Value, Hash>>
-    for BlockType
+impl<Key, Value, Hash> From<&Block<Key, Value, Hash>> for BlockType
 where
     Key: KeyType + 'static,
     Value: ValueType,

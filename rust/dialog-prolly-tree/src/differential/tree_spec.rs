@@ -16,8 +16,7 @@ use std::{
 #[derive(Clone)]
 pub struct DistributionSimulator;
 
-impl<Hash>
-    Distribution<Vec<u8>, Hash> for DistributionSimulator
+impl<Hash> Distribution<Vec<u8>, Hash> for DistributionSimulator
 where
     Hash: HashType,
 {
@@ -312,7 +311,7 @@ impl TreeDescriptor {
     /// Recursively build NodeSpecs from the tree structure
     async fn build_spec_from_node(
         spec: &mut [Vec<NodeSpec>],
-        node: &crate::Node< Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
+        node: &crate::Node<Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
         storage: &dialog_storage::Storage<
             dialog_storage::CborEncoder,
             dialog_storage::JournaledStorage<
@@ -461,7 +460,7 @@ impl TreeSpec {
     #[allow(dead_code)]
     fn visualize_node<'a>(
         output: &'a mut String,
-        node: &'a crate::Node< Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
+        node: &'a crate::Node<Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
         storage: &'a dialog_storage::Storage<
             dialog_storage::CborEncoder,
             dialog_storage::JournaledStorage<
@@ -680,7 +679,7 @@ impl std::fmt::Debug for TreeSpec {
 impl TreeSpec {
     fn fmt_node(
         f: &mut std::fmt::Formatter<'_>,
-        node: &crate::Node< Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
+        node: &crate::Node<Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
         prefix: &str,
         is_last: bool,
     ) -> std::fmt::Result {

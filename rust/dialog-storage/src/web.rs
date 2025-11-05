@@ -68,7 +68,10 @@ pub trait ObjectSafeStorageBackend {
     /// Store the given value against the given key
     async fn set(&mut self, key: Blake3Hash, value: Vec<u8>) -> Result<(), DialogStorageError>;
     /// Open a resource for the given key
-    async fn open(&self, key: &Blake3Hash) -> Result<Box<dyn ObjectSafeResource>, DialogStorageError>;
+    async fn open(
+        &self,
+        key: &Blake3Hash,
+    ) -> Result<Box<dyn ObjectSafeResource>, DialogStorageError>;
 }
 
 #[async_trait(?Send)]
@@ -85,7 +88,10 @@ where
         T::set(self, key, value).await.map_err(|error| error.into())
     }
 
-    async fn open(&self, key: &Blake3Hash) -> Result<Box<dyn ObjectSafeResource>, DialogStorageError> {
+    async fn open(
+        &self,
+        key: &Blake3Hash,
+    ) -> Result<Box<dyn ObjectSafeResource>, DialogStorageError> {
         let resource = T::open(self, key).await.map_err(|error| error.into())?;
         Ok(Box::new(resource))
     }

@@ -8,7 +8,6 @@ use dialog_storage::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
-
 #[derive(Error, Debug)]
 pub enum JournalError {
     /// Resolving a branch failed
@@ -163,11 +162,10 @@ pub trait PlatformBackend:
 }
 
 // Blanket implementation - any StorageBackend that satisfies the bounds is a PlatformBackend
-impl<B> PlatformBackend for B
-where
+impl<B> PlatformBackend for B where
     B: StorageBackend<Key = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSync
-        + Clone,
+        + Clone
 {
 }
 

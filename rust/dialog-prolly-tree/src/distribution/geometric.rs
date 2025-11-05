@@ -21,7 +21,10 @@ where
 
     fn rank(key: &Key) -> Rank {
         let key_hash = blake3::hash(key.bytes());
-        compute_geometric_rank(key_hash.as_bytes(), <GeometricDistribution as Distribution<Key, Hash>>::BRANCH_FACTOR)
+        compute_geometric_rank(
+            key_hash.as_bytes(),
+            <GeometricDistribution as Distribution<Key, Hash>>::BRANCH_FACTOR,
+        )
     }
 }
 
