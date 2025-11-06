@@ -22,6 +22,7 @@ where
 }
 
 /// A resource handle for a specific entry in [MemoryStorageBackend]
+#[derive(Debug, Clone)]
 pub struct MemoryResource<Key, Value>
 where
     Key: Eq + std::hash::Hash + Clone,

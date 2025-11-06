@@ -83,6 +83,7 @@ impl<const SIZE: usize> Measurable for [u8; SIZE] {
 }
 
 /// A resource wrapper that measures reload and replace operations
+#[derive(Debug, Clone)]
 pub struct MeasuredResource<V, R>
 where
     V: Measurable,
@@ -99,7 +100,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<V, R> Resource for MeasuredResource<V, R>
 where
-    V: Measurable + ConditionalSync,
+    V: Measurable + ConditionalSync + Clone,
     R: Resource<Value = V> + ConditionalSync,
     R::Error: ConditionalSync,
 {
@@ -154,7 +155,7 @@ impl<Backend> StorageBackend for MeasuredStorage<Backend>
 where
     Backend: StorageBackend + ConditionalSync,
     Backend::Key: Measurable + ConditionalSync,
-    Backend::Value: Measurable + ConditionalSync,
+    Backend::Value: Measurable + ConditionalSync + Clone,
     Backend::Resource: ConditionalSync,
     Backend::Error: ConditionalSync,
 {

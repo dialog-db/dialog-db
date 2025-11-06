@@ -348,6 +348,7 @@ where
 }
 
 /// A resource wrapper that journals reload and replace operations
+#[derive(Debug, Clone)]
 pub struct JournaledResource<Key, R>
 where
     Key: Clone + ConditionalSync + std::hash::Hash + Eq,

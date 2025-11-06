@@ -26,6 +26,7 @@ impl<const COMPRESSION_LEVEL: u32, Backend> CompressedStorage<COMPRESSION_LEVEL,
 }
 
 /// A wrapper resource that converts backend errors to DialogStorageError
+#[derive(Debug, Clone)]
 pub struct CompressedResource<R>
 where
     R: Resource,

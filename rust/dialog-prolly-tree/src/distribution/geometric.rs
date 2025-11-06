@@ -9,7 +9,7 @@ use super::{Distribution, Rank};
 /// to 256 independent trials.
 ///
 /// https://textile.notion.site/Flipping-bits-and-coins-with-hashes-205770b56418498fba4fef8cb037412d
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GeometricDistribution;
 
 impl<Key, Hash> Distribution<Key, Hash> for GeometricDistribution

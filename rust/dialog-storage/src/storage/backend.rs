@@ -58,7 +58,7 @@ pub trait StorageBackend: Clone {
 /// that can be used to read / write values with a compare and swap semantics.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait Resource: ConditionalSend + ConditionalSync {
+pub trait Resource: ConditionalSend + ConditionalSync + Clone {
     /// The type of value stored in this resource.
     type Value: ConditionalSend;
     /// The type of error that can occur when working with this resource.

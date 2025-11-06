@@ -40,6 +40,7 @@ where
 
 /// A resource that combines overlay and backend Resources, preferring overlay
 /// content but writing to overlay only.
+#[derive(Debug, Clone)]
 pub struct OverlayResource<Backend, Overlay>
 where
     Backend: StorageBackend,

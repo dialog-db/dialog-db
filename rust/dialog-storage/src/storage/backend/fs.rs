@@ -56,6 +56,7 @@ where
 }
 
 /// A resource handle for a specific file entry in [FileSystemStorageBackend]
+#[derive(Debug, Clone)]
 pub struct FileSystemResource<Value>
 where
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone,

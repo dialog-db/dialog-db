@@ -6,7 +6,7 @@ use dialog_common::ConditionalSync;
 use serde::{Serialize, de::DeserializeOwned};
 
 /// A basic [`Encoder`] implementation that encodes data as IPLD-compatible CBOR
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct CborEncoder;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

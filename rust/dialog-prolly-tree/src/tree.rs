@@ -16,7 +16,7 @@ pub static EMPT_TREE_HASH: [u8; 32] = [0; 32];
 
 /// A key-value store backed by a Ranked Prolly Tree with configurable storage,
 /// encoding and rank distribution.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Tree<Distribution, Key, Value, Hash, Storage>
 where
     Distribution: crate::Distribution<Key, Hash>,

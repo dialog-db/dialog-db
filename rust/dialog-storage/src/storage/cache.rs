@@ -48,6 +48,7 @@ where
 }
 
 /// A cached resource that wraps a backend Resource and uses the cache for reads/writes
+#[derive(Clone)]
 pub struct CachedResource<Key, Value, R>
 where
     Key: Eq + Clone + Hash + ConditionalSync,
@@ -57,6 +58,21 @@ where
     key: Key,
     resource: R,
     cache: Arc<Mutex<SieveCache<Key, Value>>>,
+}
+
+impl<Key, Value, R> std::fmt::Debug for CachedResource<Key, Value, R>
+where
+    Key: Eq + Clone + Hash + ConditionalSync + std::fmt::Debug,
+    Value: Clone + ConditionalSync,
+    R: Resource<Value = Value> + ConditionalSync + std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedResource")
+            .field("key", &self.key)
+            .field("resource", &self.resource)
+            .field("cache", &"<SieveCache>")
+            .finish()
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

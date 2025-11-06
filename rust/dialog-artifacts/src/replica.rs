@@ -77,7 +77,7 @@ impl From<NodeReference> for Blake3Hash {
 pub type Site = String;
 
 /// Represents a principal operating a replica.
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Issuer {
     id: String,
     signing_key: SigningKey,
@@ -191,7 +191,7 @@ impl<Backend: PlatformBackend + 'static> Branches<Backend> {
 /// Archive represents content addressed storage where search tree
 /// nodes are stored. It supports optional remote fallback for on
 /// demand replication. Uses Arc to share remote state across clones.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Archive<Backend: PlatformBackend> {
     local: PlatformStorage<Backend>,
     remote: Arc<RwLock<Option<PlatformStorage<RemoteBackend>>>>,
@@ -308,6 +308,7 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::Encoder for Archive<Bac
 }
 
 /// A branch represents a named line of development within a replica.
+#[derive(Clone, Debug)]
 pub struct Branch<Backend: PlatformBackend + 'static> {
     issuer: Issuer,
     state: BranchState,
@@ -1098,7 +1099,7 @@ impl<Backend: PlatformBackend> Remote<Backend> {
 }
 
 /// Represents a branch on a remote repository.
-#[allow(dead_code)]
+#[derive(Debug, Clone)]
 pub struct RemoteBranch<Backend: PlatformBackend> {
     site: Site,
     id: BranchId,
@@ -1478,6 +1479,7 @@ impl BranchState {
 
 /// Upstream branch that is used to push & pull changes
 /// to / from. It can be local or remote.
+#[derive(Debug, Clone)]
 pub enum Upstream<Backend: PlatformBackend + 'static> {
     Local(Branch<Backend>),
     Remote(RemoteBranch<Backend>),

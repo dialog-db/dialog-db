@@ -1,11 +1,11 @@
 #![allow(missing_docs)]
 
+use std::fmt::Debug;
+
 use crate::replica::{BranchId, Revision, Site};
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_storage::{
-    Blake3Hash, CborEncoder, DialogStorageError, Encoder, Resource, StorageBackend,
-};
+use dialog_storage::{CborEncoder, DialogStorageError, Encoder, Resource, StorageBackend};
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
@@ -184,7 +184,7 @@ impl<B> PlatformBackend for B where
 }
 
 /// Adapter that maps a backend's error type to DialogStorageError
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ErrorMappingBackend<B> {
     inner: B,
 }
@@ -223,6 +223,7 @@ where
 }
 
 /// A resource wrapper that maps storage errors to platform-specific errors.
+#[derive(Debug, Clone)]
 pub struct ErrorMappingResource<R> {
     inner: R,
 }
@@ -269,11 +270,24 @@ impl<'a> From<&'a str> for Path<'a> {
 
 /// A transactional storage wraps a backend and encoder, providing
 /// a foundation for creating typed stores with namespacing.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Storage<Backend: StorageBackend, Codec: Encoder = CborEncoder> {
     backend: Backend,
     codec: Codec,
     path: Option<String>,
+}
+
+impl<Backend: StorageBackend, Codec: Encoder> std::fmt::Debug for Storage<Backend, Codec>
+where
+    Codec: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Storage")
+            .field("backend", &"<Backend>")
+            .field("codec", &self.codec)
+            .field("path", &self.path)
+            .finish()
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -303,6 +317,7 @@ where
 }
 
 /// Resource wrapper for Storage that handles key prefixing
+#[derive(Debug, Clone)]
 pub struct StorageResource<R: Resource> {
     inner: R,
 }
@@ -427,6 +442,7 @@ pub struct TypedStore<T, Backend: StorageBackend, Codec: Encoder = CborEncoder> 
 }
 
 /// Resource wrapper that transparently handles encoding/decoding for TypedStore
+#[derive(PartialEq, Eq)]
 pub struct TypedStoreResource<T, Backend, Codec = CborEncoder>
 where
     Backend: StorageBackend<Value = Vec<u8>, Error = DialogStorageError> + ConditionalSync,
@@ -438,6 +454,42 @@ where
     codec: Codec,
     decoded: Option<T>,
     _phantom: std::marker::PhantomData<(T, Backend)>,
+}
+
+impl<T, Backend, Codec> std::fmt::Debug for TypedStoreResource<T, Backend, Codec>
+where
+    T: std::fmt::Debug,
+    Backend: StorageBackend<Value = Vec<u8>, Error = DialogStorageError> + ConditionalSync,
+    Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
+    Backend::Error: ConditionalSync,
+    Codec: Encoder + std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TypedStoreResource")
+            .field("inner", &"<Backend::Resource>")
+            .field("codec", &self.codec)
+            .field("decoded", &self.decoded)
+            .finish()
+    }
+}
+
+impl<T, Backend, Codec> Clone for TypedStoreResource<T, Backend, Codec>
+where
+    T: Clone,
+    Backend: StorageBackend<Value = Vec<u8>, Error = DialogStorageError> + ConditionalSync,
+    Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
+    Backend::Error: ConditionalSync,
+    Backend::Resource: Clone,
+    Codec: Encoder + Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            codec: self.codec.clone(),
+            decoded: self.decoded.clone(),
+            _phantom: std::marker::PhantomData,
+        }
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -650,84 +702,6 @@ where
 
 /// Error type for typed store operations
 pub type TypedStoreError = DialogStorageError;
-
-/// Adapter that converts Blake3Hash keys to/from Vec<u8> for the underlying backend.
-/// This allows using a Vec<u8>-keyed backend as a Blake3Hash-keyed backend.
-#[derive(Clone)]
-pub struct Blake3KeyBackend<B> {
-    inner: B,
-}
-
-impl<B> Blake3KeyBackend<B> {
-    pub fn new(inner: B) -> Self {
-        Self { inner }
-    }
-}
-
-/// Resource wrapper that handles Blake3Hash key conversion
-pub struct Blake3KeyResource<R> {
-    inner: R,
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<B> StorageBackend for Blake3KeyBackend<B>
-where
-    B: StorageBackend<Value = Vec<u8>> + ConditionalSync,
-    B::Key: Address + From<Vec<u8>>,
-    B::Error: ConditionalSync,
-    B::Resource: ConditionalSync,
-{
-    type Key = Blake3Hash;
-    type Value = Vec<u8>;
-    type Error = B::Error;
-    type Resource = Blake3KeyResource<B::Resource>;
-
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        let backend_key = key.as_ref().to_vec().into();
-        self.inner.set(backend_key, value).await
-    }
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        let backend_key: B::Key = key.as_ref().to_vec().into();
-        self.inner.get(&backend_key).await
-    }
-
-    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-        let backend_key: B::Key = key.as_ref().to_vec().into();
-        let inner = self.inner.open(&backend_key).await?;
-        Ok(Blake3KeyResource { inner })
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<R> Resource for Blake3KeyResource<R>
-where
-    R: Resource<Value = Vec<u8>> + ConditionalSync + ConditionalSend,
-{
-    type Value = Vec<u8>;
-    type Error = R::Error;
-
-    fn content(&self) -> &Option<Self::Value> {
-        self.inner.content()
-    }
-
-    fn into_content(self) -> Option<Self::Value> {
-        self.inner.into_content()
-    }
-
-    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
-        self.inner.reload().await
-    }
-
-    async fn replace(
-        &mut self,
-        value: Option<Self::Value>,
-    ) -> Result<Option<Self::Value>, Self::Error> {
-        self.inner.replace(value).await
-    }
-}
 
 #[cfg(test)]
 mod tests {

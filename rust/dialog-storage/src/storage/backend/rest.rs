@@ -399,7 +399,7 @@ impl Default for RestStorageConfig {
 }
 
 /// A storage backend implementation that uses a REST API for S3/R2-like services
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RestStorageBackend<Key, Value>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
@@ -671,6 +671,7 @@ where
 }
 
 /// A resource handle for a specific entry in [RestStorageBackend]
+#[derive(Debug, Clone)]
 pub struct RestResource<Key, Value>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
