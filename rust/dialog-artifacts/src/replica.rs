@@ -2049,6 +2049,24 @@ mod tests {
             tree_hash
         );
 
+        // Verify that tree nodes were also written to the S3 remote storage
+        // The key in S3 uses base64url encoding
+        let s3_storage = s3_service.storage();
+        let s3_keys = s3_storage.list_keys("test-bucket").await;
+
+        // Tree nodes should be written under the test/ prefix with base64url encoded hashes
+        let tree_nodes_in_s3 = s3_keys
+            .iter()
+            .filter(|key| key.starts_with("test/") && key.len() > 5)
+            .count();
+
+        assert!(
+            tree_nodes_in_s3 > 0,
+            "Tree nodes should be written to S3 remote storage during commit. Found {} keys in S3: {:?}",
+            s3_keys.len(),
+            s3_keys
+        );
+
         // Step 9: Push changes to the main branch
         // Should create records for the local branch and corresponding remote branch
         // in the in-memory backend
@@ -2082,7 +2100,7 @@ mod tests {
             .as_bytes()
             .to_vec();
 
-        // Check that the key was written (this is the important verification for this test)
+        // Check that the key was written to local storage
         let all_written_keys = journaled_backend.get_writes();
         let was_written = all_written_keys.iter().any(|k| k == &remote_branch_key);
         assert!(
@@ -2093,6 +2111,16 @@ mod tests {
                 .iter()
                 .map(|k| String::from_utf8_lossy(k).to_string())
                 .collect::<Vec<_>>()
+        );
+
+        // Verify that after push, we have the same number of tree nodes in S3
+        // (no new tree nodes are written during push, only local branch state is updated)
+        let s3_keys_after_push = s3_storage.list_keys("test-bucket").await;
+        assert_eq!(
+            s3_keys.len(),
+            s3_keys_after_push.len(),
+            "Push updates local state but doesn't write new tree nodes to S3. Keys after push: {:?}",
+            s3_keys_after_push
         );
 
         // Reload the main branch and verify the changes persisted

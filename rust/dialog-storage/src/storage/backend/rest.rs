@@ -2126,6 +2126,24 @@ pub mod s3 {
     }
 
     impl InMemoryS3 {
+        /// Get a value from a specific bucket (useful for test verification)
+        pub async fn get_value(&self, bucket: &str, key: &str) -> Option<Vec<u8>> {
+            let buckets = self.buckets.read().await;
+            buckets
+                .get(bucket)
+                .and_then(|bucket_contents| bucket_contents.get(key))
+                .map(|obj| obj.data.clone())
+        }
+
+        /// Get all keys in a bucket (useful for test verification)
+        pub async fn list_keys(&self, bucket: &str) -> Vec<String> {
+            let buckets = self.buckets.read().await;
+            buckets
+                .get(bucket)
+                .map(|bucket_contents| bucket_contents.keys().cloned().collect())
+                .unwrap_or_default()
+        }
+
         pub async fn start() -> anyhow::Result<Service> {
             Self::serve(Self::default()).await
         }
@@ -2172,6 +2190,7 @@ pub mod s3 {
             use s3s::service::S3ServiceBuilder;
             use tokio::net::TcpListener;
 
+            let storage = self.clone();
             let s3_handler = S3ServiceBuilder::new(self).build();
             let listener = TcpListener::bind("127.0.0.1:0").await?;
             let addr = listener.local_addr()?;
@@ -2201,6 +2220,7 @@ pub mod s3 {
             Ok(Service {
                 endpoint,
                 shutdown_tx,
+                storage,
             })
         }
     }
