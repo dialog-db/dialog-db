@@ -19,7 +19,11 @@ use dialog_common::ConditionalSend;
 #[cfg(test)]
 use dialog_common::ConditionalSync;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Tree};
-use futures_util::{Stream, StreamExt, TryStreamExt, future::BoxFuture};
+use futures_util::{Stream, StreamExt, TryStreamExt};
+#[cfg(not(target_arch = "wasm32"))]
+use futures_util::future::BoxFuture;
+#[cfg(target_arch = "wasm32")]
+use futures_util::future::LocalBoxFuture;
 
 use dialog_storage::{
     Blake3Hash, CborEncoder, DialogStorageError, Encoder, Resource, RestStorageBackend,
@@ -1458,11 +1462,33 @@ pub enum Upstream<Backend: PlatformBackend + 'static> {
 
 impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
     /// Loads an upstream from its state descriptor
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load(
         state: &UpstreamState,
         issuer: Issuer,
         storage: PlatformStorage<Backend>,
     ) -> BoxFuture<'_, Result<Self, ReplicaError>> {
+        Box::pin(async move {
+            match state {
+                UpstreamState::Local { branch } => {
+                    let branch = Branch::load(branch, issuer, storage).await?;
+                    Ok(Upstream::Local(branch))
+                }
+                UpstreamState::Remote { site, branch } => {
+                    let remote_branch = RemoteBranch::load(site, branch, storage).await?;
+                    Ok(Upstream::Remote(remote_branch))
+                }
+            }
+        })
+    }
+
+    /// Loads an upstream from its state descriptor (wasm32 version without Send)
+    #[cfg(target_arch = "wasm32")]
+    pub fn load(
+        state: &UpstreamState,
+        issuer: Issuer,
+        storage: PlatformStorage<Backend>,
+    ) -> LocalBoxFuture<'_, Result<Self, ReplicaError>> {
         Box::pin(async move {
             match state {
                 UpstreamState::Local { branch } => {
