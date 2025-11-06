@@ -460,12 +460,15 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         }
     }
 
-    /// Resets this branch to a given revision and a base tree.
-    pub async fn reset(
-        &mut self,
-        revision: Revision,
-        base: NodeReference,
-    ) -> Result<&mut Self, ReplicaError> {
+    /// Resets the branch to a specific revision.
+    ///
+    /// The base tree is set to the revision's tree, representing that the branch
+    /// is now "in sync" at this revision (no divergence from the synced state).
+    pub async fn reset(&mut self, revision: Revision) -> Result<&mut Self, ReplicaError> {
+        // Base is always set to the revision's tree since reset means
+        // we're establishing this revision as the new synchronized state
+        let base = revision.tree.clone();
+
         // create new edition from the prior state.
         let state = BranchState {
             revision: revision.clone(),
@@ -646,20 +649,20 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                     if tree_hash == *upstream_revision.tree.hash() {
                         // No local changes were integrated - tree unchanged
                         // Just adopt the upstream revision directly without creating a new one
-                        self.reset(upstream_revision.clone(), upstream_revision.tree.clone())
-                            .await?;
+                        self.reset(upstream_revision.clone()).await?;
 
                         Ok(Some(upstream_revision))
                     } else {
                         // Integration produced a new tree - create a merged revision
                         // Compute new period and moment based on issuer
-                        let (period, moment) = if upstream_revision.issuer == *self.issuer.principal() {
-                            // Same issuer: increment moment, keep period
-                            (upstream_revision.period, upstream_revision.moment + 1)
-                        } else {
-                            // Different issuer: new period (sync point), reset moment
-                            (upstream_revision.period + 1, 0)
-                        };
+                        let (period, moment) =
+                            if upstream_revision.issuer == *self.issuer.principal() {
+                                // Same issuer: increment moment, keep period
+                                (upstream_revision.period, upstream_revision.moment + 1)
+                            } else {
+                                // Different issuer: new period (sync point), reset moment
+                                (upstream_revision.period + 1, 0)
+                            };
 
                         // Create new revision with integrated changes
                         let new_revision = Revision {
@@ -671,10 +674,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                         };
 
                         // Reset branch to the new revision
-                        // Base should be the merged tree (new_revision.tree), which represents
-                        // the last synced state after integrating local and upstream changes
-                        self.reset(new_revision.clone(), new_revision.tree.clone())
-                            .await?;
+                        self.reset(new_revision.clone()).await?;
 
                         Ok(Some(new_revision))
                     }
@@ -1560,7 +1560,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
         match self {
             Upstream::Local(branch) => {
                 let before = branch.revision();
-                branch.reset(revision, branch.state.base.clone()).await?;
+                branch.reset(revision).await?;
                 Ok(Some(before))
             }
             Upstream::Remote(remote) => remote.publish(revision).await,
@@ -1812,7 +1812,7 @@ mod tests {
             moment: 0,
         };
         main_branch
-            .reset(main_revision.clone(), NodeReference(EMPT_TREE_HASH))
+            .reset(main_revision.clone())
             .await
             .expect("Failed to reset main branch");
 
@@ -1830,7 +1830,7 @@ mod tests {
             moment: 1,
         };
         feature_branch
-            .reset(feature_revision.clone(), NodeReference(EMPT_TREE_HASH))
+            .reset(feature_revision.clone())
             .await
             .expect("Failed to reset feature branch");
 
@@ -1905,7 +1905,7 @@ mod tests {
             moment: 0,
         };
         main_branch
-            .reset(main_revision.clone(), NodeReference(EMPT_TREE_HASH))
+            .reset(main_revision.clone())
             .await
             .expect("Failed to reset main");
 
@@ -1915,7 +1915,7 @@ mod tests {
             .expect("Failed to create feature branch");
 
         feature_branch
-            .reset(main_revision.clone(), NodeReference(EMPT_TREE_HASH))
+            .reset(main_revision.clone())
             .await
             .expect("Failed to reset feature");
 
@@ -2702,10 +2702,7 @@ mod tests {
 
         // Bob has no local changes, just pulls
         let bob_pull_result = bob_main.pull().await.expect("Bob's pull failed");
-        assert!(
-            bob_pull_result.is_some(),
-            "Pull should return a revision"
-        );
+        assert!(bob_pull_result.is_some(), "Pull should return a revision");
 
         let bob_revision_after_pull = bob_main.revision();
         let bob_edition = bob_revision_after_pull.edition()?;
@@ -2752,11 +2749,7 @@ mod tests {
             .try_collect()
             .await
             .expect("Failed to query facts from Bob");
-        assert_eq!(
-            bob_facts.len(),
-            1,
-            "Bob should have Alice's artifact"
-        );
+        assert_eq!(bob_facts.len(), 1, "Bob should have Alice's artifact");
 
         println!("✓ Pull without local changes correctly adopted upstream revision");
 
