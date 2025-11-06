@@ -141,8 +141,8 @@ impl Issuer {
 pub struct Replica<Backend: PlatformBackend> {
     issuer: Issuer,
     storage: PlatformStorage<Backend>,
-    remotes: Remotes<Backend>,
-    branches: Branches<Backend>,
+    pub remotes: Remotes<Backend>,
+    pub branches: Branches<Backend>,
 }
 
 impl<Backend: PlatformBackend + 'static> Replica<Backend> {
