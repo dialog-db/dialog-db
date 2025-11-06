@@ -21,7 +21,6 @@ use dialog_common::ConditionalSend;
 #[cfg(test)]
 use dialog_common::ConditionalSync;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Tree};
-use futures_util::task::UnsafeFutureObj;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use dialog_storage::{
@@ -984,9 +983,9 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         &self.revision
     }
 
-    pub async fn connect<'a>(
-        &'a mut self,
-    ) -> Result<&'a TypedStoreResource<Revision, RemoteBackend>, ReplicaError> {
+    pub async fn connect(
+        &mut self,
+    ) -> Result<&TypedStoreResource<Revision, RemoteBackend>, ReplicaError> {
         if self.canonical.is_none() {
             // Load a remote for this branch
             let remote = Remote::load(&self.site, self.storage.clone()).await?;
@@ -1016,7 +1015,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         if let Some(after) = canonical.content() {
             if after != &before {
                 // update local record for the revision.
-                self.cache.replace_with(|_| Some(after.clone())).await;
+                let _ = self.cache.replace_with(|_| Some(after.clone())).await;
                 self.revision = after.clone();
             }
         }
@@ -1298,7 +1297,6 @@ impl Display for BranchId {
 impl BranchState {
     /// Create a new fork from the given revision.
     pub fn new(id: BranchId, revision: Revision, description: Option<String>) -> Self {
-        let revision = Revision::default();
         Self {
             description: description.unwrap_or_else(|| id.0.clone()),
             base: revision.tree.clone(),
@@ -1676,6 +1674,7 @@ impl<'a, P: Platform> Branch<'a, P> {
 }
 */
 
+#[allow(dead_code)]
 pub struct Upstream<Backend: PlatformBackend> {
     state: UpstreamState,
     storage: PlatformStorage<Backend>,
