@@ -1,9 +1,7 @@
 #![allow(missing_docs)]
 
 use super::platform::Storage as PlatformStorage;
-use super::platform::{
-    Blake3KeyBackend, ErrorMappingBackend, PlatformBackend, TypedStore, TypedStoreResource,
-};
+use super::platform::{ErrorMappingBackend, PlatformBackend, TypedStore, TypedStoreResource};
 pub use super::uri::Uri;
 use crate::artifacts::selector::Constrained;
 use crate::artifacts::{
@@ -24,8 +22,8 @@ use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, 
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use dialog_storage::{
-    Blake3Hash, CborEncoder, DialogStorageError, Resource, RestStorageBackend, RestStorageConfig,
-    StorageBackend,
+    Blake3Hash, CborEncoder, DialogStorageError, Encoder, Resource, RestStorageBackend,
+    RestStorageConfig, StorageBackend,
 };
 use ed25519_dalek::ed25519::signature::SignerMut;
 use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, SigningKey, VerifyingKey};
@@ -46,13 +44,8 @@ pub type Principal = [u8; 32];
 /// Type alias for the prolly tree index used to store artifacts
 /// Uses dialog_storage::Storage directly (not platform::Storage) because content-addressed
 /// storage doesn't need key prefixing/namespacing
-pub type Index<Backend> = Tree<
-    GeometricDistribution,
-    Key,
-    State<Datum>,
-    Blake3Hash,
-    dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
->;
+pub type Index<Backend> =
+    Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash, Archive<Backend>>;
 
 /// We reference a tree by the root hash.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -144,7 +137,7 @@ impl Issuer {
 pub struct Replica<Backend: PlatformBackend> {
     issuer: Issuer,
     storage: PlatformStorage<Backend>,
-    archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
+    archive: Archive<Backend>,
     remotes: Remotes<Backend>,
     branches: Branches<Backend>,
 }
@@ -155,12 +148,7 @@ impl<Backend: PlatformBackend + 'static> Replica<Backend> {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         // Create archive storage with Blake3Hash keys for content-addressed tree storage
-        // Uses dialog_storage::Storage directly since content-addressed storage doesn't need key prefixing
-        let archive_backend = Blake3KeyBackend::new(backend.clone());
-        let archive = dialog_storage::Storage {
-            encoder: CborEncoder,
-            backend: archive_backend,
-        };
+        let archive = Archive::new(backend.clone());
 
         let branches = Branches::new(issuer.clone(), backend.clone(), archive.clone());
         let remotes = Remotes::new(backend.clone());
@@ -184,24 +172,17 @@ impl<Backend: PlatformBackend + 'static> Replica<Backend> {
 pub struct Branches<Backend: PlatformBackend> {
     issuer: Issuer,
     storage: PlatformStorage<Backend>,
-    archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
-    store: TypedStore<BranchState, Backend>,
+    archive: Archive<Backend>,
 }
 
 impl<Backend: PlatformBackend + 'static> Branches<Backend> {
     /// Creates a new instance for the given backend
-    pub fn new(
-        issuer: Issuer,
-        backend: Backend,
-        archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
-    ) -> Self {
+    pub fn new(issuer: Issuer, backend: Backend, archive: Archive<Backend>) -> Self {
         let storage = PlatformStorage::new(backend, CborEncoder);
-        let store = storage.at("revisions").at("local").mount();
         Self {
             issuer,
             storage,
             archive,
-            store,
         }
     }
 
@@ -230,9 +211,124 @@ impl<Backend: PlatformBackend + 'static> Branches<Backend> {
     }
 }
 
-/// Archive representens content addressed storage where search tree
-/// nodes are stored.
-pub type Archive<Backend> = dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>;
+/// Archive represents content addressed storage where search tree
+/// nodes are stored. It supports optional remote fallback for on
+/// demand replication. Uses Arc to share remote state across clones.
+#[derive(Clone)]
+pub struct Archive<Backend: PlatformBackend> {
+    local: PlatformStorage<Backend>,
+    remote: Arc<RwLock<Option<PlatformStorage<RemoteBackend>>>>,
+}
+
+impl<Backend: PlatformBackend> Archive<Backend> {
+    /// Creates a new Archive with the given backend
+    pub fn new(backend: Backend) -> Self {
+        Self {
+            local: PlatformStorage::new(backend, CborEncoder),
+            remote: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Sets the remote storage for fallback reads and replicated writes
+    pub async fn set_remote(&self, remote: PlatformStorage<RemoteBackend>) {
+        *self.remote.write().await = Some(remote);
+    }
+
+    /// Clears the remote storage
+    pub async fn clear_remote(&self) {
+        *self.remote.write().await = None;
+    }
+
+    /// Checks if a remote storage is configured
+    pub async fn has_remote(&self) -> bool {
+        self.remote.read().await.is_some()
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
+    for Archive<Backend>
+{
+    type Hash = [u8; 32];
+    type Error = dialog_storage::DialogStorageError;
+
+    async fn read<T>(&self, hash: &Self::Hash) -> Result<Option<T>, Self::Error>
+    where
+        T: serde::de::DeserializeOwned + dialog_common::ConditionalSync,
+    {
+        // Convert hash to key
+        let key = hash.to_vec();
+
+        // Try local first
+        if let Some(bytes) =
+            self.local.get(&key).await.map_err(|e| {
+                dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
+            })?
+        {
+            return self.local.decode(&bytes).await.map(Some);
+        }
+
+        // Fall back to remote if available
+        let remote_guard = self.remote.read().await;
+        if let Some(remote) = remote_guard.as_ref() {
+            if let Some(bytes) = remote.get(&key).await.map_err(|e| {
+                dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
+            })? {
+                return remote.decode(&bytes).await.map(Some);
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn write<T>(&mut self, block: &T) -> Result<Self::Hash, Self::Error>
+    where
+        T: serde::Serialize + dialog_common::ConditionalSync + std::fmt::Debug,
+    {
+        // Encode and hash the block
+        let (hash, bytes) = self.local.encode(block).await?;
+        let key = hash.to_vec();
+
+        // Write to local always
+        self.local
+            .set(key.clone(), bytes.clone())
+            .await
+            .map_err(|e| dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e)))?;
+
+        // Write to remote if available
+        let mut remote_guard = self.remote.write().await;
+        if let Some(remote) = remote_guard.as_mut() {
+            remote.set(key, bytes).await.map_err(|e| {
+                dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
+            })?;
+        }
+
+        Ok(hash)
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Backend: PlatformBackend + 'static> dialog_storage::Encoder for Archive<Backend> {
+    type Bytes = Vec<u8>;
+    type Hash = [u8; 32];
+    type Error = dialog_storage::DialogStorageError;
+
+    async fn encode<T>(&self, block: &T) -> Result<(Self::Hash, Self::Bytes), Self::Error>
+    where
+        T: serde::Serialize + dialog_common::ConditionalSync + std::fmt::Debug,
+    {
+        self.local.encode(block).await
+    }
+
+    async fn decode<T>(&self, bytes: &[u8]) -> Result<T, Self::Error>
+    where
+        T: serde::de::DeserializeOwned + dialog_common::ConditionalSync,
+    {
+        self.local.decode(bytes).await
+    }
+}
 
 /// A branch represents a named line of development within a replica.
 pub struct Branch<Backend: PlatformBackend + 'static> {
@@ -242,19 +338,20 @@ pub struct Branch<Backend: PlatformBackend + 'static> {
     archive: Archive<Backend>,
     memory: TypedStoreResource<BranchState, Backend>,
     tree: Arc<RwLock<Index<Backend>>>,
+    upstream: Option<Box<Upstream<Backend>>>,
 }
 
 impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// Mounts a typed store for branch state at the appropriate storage location.
     pub fn mount(storage: &PlatformStorage<Backend>) -> TypedStore<BranchState, Backend> {
-        storage.at("branch").at("local").mount()
+        storage.at("local").mount()
     }
     /// Loads a branch with a given id or creates one if it does not exist.
     pub async fn open(
         id: &BranchId,
         issuer: Issuer,
         storage: PlatformStorage<Backend>,
-        archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
+        archive: Archive<Backend>,
     ) -> Result<Branch<Backend>, ReplicaError> {
         let mut memory = Self::mount(&storage)
             .open(&id.to_string().into())
@@ -274,6 +371,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                 archive,
                 memory,
                 tree: Arc::new(RwLock::new(tree)),
+                upstream: None,
             })
         } else {
             // create a new branch with a new revision
@@ -297,6 +395,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                 storage,
                 archive,
                 tree: Arc::new(RwLock::new(tree)),
+                upstream: None,
             })
         }
     }
@@ -307,7 +406,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         id: &BranchId,
         issuer: Issuer,
         storage: PlatformStorage<Backend>,
-        archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
+        archive: Archive<Backend>,
     ) -> Result<Branch<Backend>, ReplicaError> {
         let memory = Self::mount(&storage)
             .open(&id.to_string().into())
@@ -327,6 +426,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                 archive,
                 memory,
                 tree: Arc::new(RwLock::new(tree)),
+                upstream: None,
             })
         } else {
             Err(ReplicaError::BranchNotFound { id: id.clone() })
@@ -365,34 +465,35 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         Ok(self)
     }
 
+    /// Lazily initializes and returns a mutable reference to the upstream.
+    /// Returns None if no upstream is configured.
+    async fn upstream(&mut self) -> Result<Option<&mut Box<Upstream<Backend>>>, ReplicaError> {
+        if self.state.upstream.is_none() {
+            return Ok(None);
+        }
+
+        if self.upstream.is_none() {
+            if let Some(upstream_state) = &self.state.upstream {
+                let upstream = Upstream::load(
+                    upstream_state,
+                    self.issuer.clone(),
+                    self.storage.clone(),
+                    self.archive.clone(),
+                )
+                .await?;
+                self.upstream = Some(Box::new(upstream));
+            }
+        }
+        Ok(self.upstream.as_mut())
+    }
+
     /// Fetches remote reference of this branch. If this branch has no upstream
     /// setup it will produce an error. If upstream branch is a local one this
     /// operation is a no-op. If it has a remote upsteram it tries to fetch
     /// a revision and update corresponding branch record locally
     pub async fn fetch(&mut self) -> Result<Option<Revision>, ReplicaError> {
-        if let Some(upstream) = &self.state.upstream {
-            match &upstream.origin {
-                // Fetch from a local branch is a no-op.
-                Origin::Local => {
-                    let revision = Branch::load(
-                        upstream.id(),
-                        self.issuer.clone(),
-                        self.storage.clone(),
-                        self.archive.clone(),
-                    )
-                    .await?
-                    .revision();
-                    Ok(Some(revision))
-                }
-                Origin::Remote(site) => {
-                    let revision = RemoteBranch::load(site, upstream.id(), self.storage.clone())
-                        .await?
-                        .fetch()
-                        .await?;
-
-                    Ok(revision)
-                }
-            }
+        if let Some(upstream) = self.upstream().await? {
+            upstream.fetch().await
         } else {
             Err(ReplicaError::BranchNotFound {
                 id: self.id().clone(),
@@ -419,65 +520,43 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// Pushes the current revision to the upstream branch.
     /// If upstream is local, it updates that branch directly.
     /// If upstream is remote, it publishes to the remote and updates local cache.
+    /// Returns None if no upstream is configured or if pushing to self.
     pub async fn push(&mut self) -> Result<Option<Revision>, ReplicaError> {
-        if let Some(upstream) = &self.state.upstream {
-            let after = self.state.revision.clone();
-            // publish new revision to the upstream branch
-            let before = match &upstream.origin {
-                Origin::Local => {
-                    if upstream.id() != self.id() {
-                        // Load target branch that we will update
-                        let mut target = Branch::load(
-                            upstream.id(),
-                            self.issuer.clone(),
-                            self.storage.clone(),
-                            self.archive.clone(),
-                        )
-                        .await?;
-
-                        let before = target.revision().clone();
-
-                        // Reset it to the current branch's revision
-                        target
-                            .reset(after.clone(), target.state.base.clone())
-                            .await?;
-
-                        Some(before)
-                    } else {
-                        None
-                    }
-                }
-                Origin::Remote(site) => {
-                    let mut target =
-                        RemoteBranch::load(site, upstream.id(), self.storage.clone()).await?;
-
-                    target.publish(after.clone()).await?
-                }
-            };
-
-            // create new branch state with published revision
-            let state = BranchState {
-                revision: after.clone(),
-                // reset a base to published tree
-                base: after.tree.clone(),
-                ..self.state.clone()
-            };
-
-            // update a memory with the latest branch state
-            self.memory
-                .replace_with(|_| Some(state.clone()))
-                .await
-                .map_err(|e| ReplicaError::StorageError(format!("Branch update failed {}", e)))?;
-
-            // and update state with latest branch state
-            self.state = state;
-
-            Ok(before)
-        } else {
-            Err(ReplicaError::BranchHasNoUpstream {
-                id: self.id().clone(),
-            })
+        // Check if pushing to self
+        if let Some(upstream_state) = &self.state.upstream {
+            if upstream_state.id() == self.id() {
+                return Ok(None);
+            }
         }
+
+        let after = self.state.revision.clone();
+
+        // Lazily load and push to upstream
+        let before = if let Some(upstream) = self.upstream().await? {
+            upstream.publish(after.clone()).await?
+        } else {
+            // No upstream configured
+            return Ok(None);
+        };
+
+        // create new branch state with published revision
+        let state = BranchState {
+            revision: after.clone(),
+            // reset a base to published tree
+            base: after.tree.clone(),
+            ..self.state.clone()
+        };
+
+        // update a memory with the latest branch state
+        self.memory
+            .replace_with(|_| Some(state.clone()))
+            .await
+            .map_err(|e| ReplicaError::StorageError(format!("Branch update failed {}", e)))?;
+
+        // and update state with latest branch state
+        self.state = state;
+
+        Ok(before)
     }
 
     /// Pulls changes from the upstream branch.
@@ -572,6 +651,43 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             // No upstream configured
             Ok(None)
         }
+    }
+
+    /// Sets the upstream for this branch and persists the change.
+    /// Accepts either a Branch or RemoteBranch via Into<Upstream>.
+    pub async fn set_upstream<U: Into<Upstream<Backend>>>(
+        &mut self,
+        upstream: U,
+    ) -> Result<(), ReplicaError> {
+        let mut upstream = upstream.into();
+
+        // Get the state descriptor from the upstream
+        let upstream_state = upstream.to_state();
+
+        // Configure remote archive if upstream is remote
+        match &mut upstream {
+            Upstream::Remote(remote) => {
+                let remote_storage = remote.remote_storage().await?;
+                self.archive.set_remote(remote_storage).await;
+            }
+            Upstream::Local(_) => {
+                self.archive.clear_remote().await;
+            }
+        }
+
+        // Set the cached upstream
+        self.upstream = Some(Box::new(upstream));
+
+        // Update the state with the new upstream state
+        self.state.upstream = Some(upstream_state);
+
+        // Persist the updated state to memory
+        self.memory
+            .replace(Some(self.state.clone()))
+            .await
+            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+
+        Ok(())
     }
 }
 
@@ -822,28 +938,23 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
 #[allow(dead_code)]
 pub struct Remotes<Backend: PlatformBackend> {
     storage: PlatformStorage<Backend>,
-    store: TypedStore<RemoteState, Backend>,
 }
 
 impl<Backend: PlatformBackend> Remotes<Backend> {
     /// Creates a new remotes manager for the given backend.
     pub fn new(backend: Backend) -> Self {
         let storage = PlatformStorage::new(backend, CborEncoder);
-        let store = storage.at("connection").mount();
-        Self { storage, store }
+        Self { storage }
+    }
+
+    /// Loads an existing remote repository by name.
+    pub async fn load(&self, site: &Site) -> Result<Remote<Backend>, ReplicaError> {
+        Remote::setup(site, self.storage.clone()).await
     }
 
     /// Adds a new remote repository with the given name and address.
-    pub async fn add(
-        &self,
-        site: &Site,
-        address: RestStorageConfig,
-    ) -> Result<Remote<Backend>, ReplicaError> {
-        Remote::add(site, address, self.storage.clone()).await
-    }
-    /// Loads an existing remote repository by name.
-    pub async fn load(&self, site: &Site) -> Result<Remote<Backend>, ReplicaError> {
-        Remote::load(site, self.storage.clone()).await
+    pub async fn add(&mut self, state: RemoteState) -> Result<Remote<Backend>, ReplicaError> {
+        Remote::add(state, self.storage.clone()).await
     }
 }
 
@@ -863,7 +974,7 @@ impl<Backend: PlatformBackend> Remote<Backend> {
         storage.at("site").mount()
     }
     /// Loads a remote repository by the site name.
-    pub async fn load(
+    pub async fn setup(
         site: &Site,
         storage: PlatformStorage<Backend>,
     ) -> Result<Remote<Backend>, ReplicaError> {
@@ -887,23 +998,22 @@ impl<Backend: PlatformBackend> Remote<Backend> {
 
     /// Adds a new remote repository with the given configuration.
     pub async fn add(
-        site: &Site,
-        address: RestStorageConfig,
+        state: RemoteState,
         storage: PlatformStorage<Backend>,
     ) -> Result<Remote<Backend>, ReplicaError> {
         let mut memory = Self::mount(storage.clone())
-            .open(&site.as_bytes().to_vec())
+            .open(&state.site.as_bytes().to_vec())
             .await
             .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
         if memory.content().is_some() {
             Err(ReplicaError::RemoteAlreadyExists {
-                remote: site.to_string(),
+                remote: state.site.to_string(),
             })
         } else {
             let state = RemoteState {
-                id: site.to_string(),
-                address,
+                site: state.site.to_string(),
+                address: state.address,
             };
             memory
                 .replace(Some(state.clone()))
@@ -922,7 +1032,7 @@ impl<Backend: PlatformBackend> Remote<Backend> {
         let backend: RestStorageBackend<Vec<u8>, Vec<u8>> =
             RestStorageBackend::new(self.state.address.clone()).map_err(|_| {
                 ReplicaError::RemoteConnectionError {
-                    remote: self.state.id.clone(),
+                    remote: self.state.site.clone(),
                 }
             })?;
 
@@ -930,6 +1040,16 @@ impl<Backend: PlatformBackend> Remote<Backend> {
             ErrorMappingBackend::new(backend),
             CborEncoder,
         ))
+    }
+
+    /// Opens a branch at this remote
+    pub async fn open(_id: &BranchId) -> Result<RemoteBranch<Backend>, ReplicaError> {
+        unimplemented!()
+    }
+
+    /// Loads a branch at this remote
+    pub async fn load(_id: &BranchId) -> Result<RemoteBranch<Backend>, ReplicaError> {
+        unimplemented!()
     }
 }
 
@@ -979,8 +1099,25 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         }
     }
 
+    /// Returns the site for this remote branch
+    pub fn site(&self) -> &Site {
+        &self.site
+    }
+
+    /// Returns the branch id
+    pub fn id(&self) -> &BranchId {
+        &self.id
+    }
+
+    /// Returns the current revision
     pub fn revision(&self) -> &Revision {
         &self.revision
+    }
+
+    /// Returns the remote storage for this branch
+    pub async fn remote_storage(&self) -> Result<PlatformStorage<RemoteBackend>, ReplicaError> {
+        let remote = Remote::setup(&self.site, self.storage.clone()).await?;
+        remote.connect()
     }
 
     pub async fn connect(
@@ -988,7 +1125,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
     ) -> Result<&TypedStoreResource<Revision, RemoteBackend>, ReplicaError> {
         if self.canonical.is_none() {
             // Load a remote for this branch
-            let remote = Remote::load(&self.site, self.storage.clone()).await?;
+            let remote = Remote::setup(&self.site, self.storage.clone()).await?;
 
             let canonical = Self::mount(&remote.connect()?)
                 .open(&self.id.to_string().into_bytes().to_vec())
@@ -1059,7 +1196,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
 /// State information for a remote repository connection.
 pub struct RemoteState {
     /// Name for this remote.
-    id: Site,
+    site: Site,
 
     /// Address used to configure this remote
     address: RestStorageConfig,
@@ -1184,63 +1321,6 @@ impl From<Revision> for Occurence {
     }
 }
 
-/// Record used to keep track of the remote branch. It is different from the
-/// local branch record and is only a wrapper around `Revision` to hold
-/// information about the branch and a target site.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RemoteBranchState {
-    id: BranchId,
-    revision: Revision,
-}
-
-/// Unique name for the branch
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct RemoteBranchId {
-    site: Site,
-    branch: BranchId,
-    id: String,
-}
-impl RemoteBranchId {
-    /// Create a new RemoteBranchId
-    pub fn new(site: Site, branch: BranchId) -> Self {
-        let id = format!("{}@{}", branch.0, site);
-        Self { site, branch, id }
-    }
-
-    /// Site of this RemoteBranchId
-    pub fn site(&self) -> &Site {
-        &self.site
-    }
-
-    /// Branch of this RemoteBranchId
-    pub fn branch(&self) -> &BranchId {
-        &self.branch
-    }
-}
-impl KeyType for RemoteBranchId {
-    fn bytes(&self) -> &[u8] {
-        self.id.as_bytes()
-    }
-}
-impl TryFrom<Vec<u8>> for RemoteBranchId {
-    type Error = std::string::FromUtf8Error;
-
-    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
-        let id = String::from_utf8(bytes)?;
-        let (branch, site) = match id.split("@").collect::<Vec<&str>>().as_slice() {
-            [branch_str, site_str] => (BranchId(branch_str.to_string()), site_str.to_string()),
-            _ => panic!("must have format: branch@site"),
-        };
-
-        Ok(RemoteBranchId::new(site, branch))
-    }
-}
-impl Display for RemoteBranchId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.id)
-    }
-}
-
 /// Branch is similar to a git branch and represents a named state of
 /// the work that is either diverged or converged from other workstream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1331,376 +1411,115 @@ impl BranchState {
     }
 }
 
-// Branch struct and implementation moved to platform.rs
-// The complex git-like operations (fetch, pull, push, sync) will be reimplemented
-// using the new Resource-based API
-
-/* Commented out - needs migration to Resource-based API
-pub struct Branch<'a, P: Platform> {
-    state: BranchState,
-    issuer: Principal,
-    platform: &'a P,
+/// Upstream branch that is used to push & pull changes
+/// to / from. It can be local or remote.
+pub enum Upstream<Backend: PlatformBackend + 'static> {
+    Local(Branch<Backend>),
+    Remote(RemoteBranch<Backend>),
 }
-impl<'a, P: Platform> Branch<'a, P> {
-    pub fn new(state: BranchState, platform: &'a P) -> Self {
-        Self {
-            issuer: blake3::hash(state.id().bytes()).into(),
-            state,
-            platform,
+
+impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
+    /// Loads an upstream from its state descriptor
+    pub async fn load(
+        state: &UpstreamState,
+        issuer: Issuer,
+        storage: PlatformStorage<Backend>,
+        archive: Archive<Backend>,
+    ) -> Result<Self, ReplicaError> {
+        match state {
+            UpstreamState::Local { branch } => {
+                let branch = Branch::load(branch, issuer, storage, archive).await?;
+                Ok(Upstream::Local(branch))
+            }
+            UpstreamState::Remote { site, branch } => {
+                let remote_branch = RemoteBranch::load(site, branch, storage).await?;
+                Ok(Upstream::Remote(remote_branch))
+            }
         }
     }
 
-    /// Loads a branch with a given id or creates one if it does not exist.
-    pub async fn open(id: &BranchId, platform: &'a P) -> Result<Self, ReplicaError> {
-        let state = platform
-            .branches()
-            .read(&id)
-            .await
-            .map_err(|e| ReplicaError::storage_error(Capability::ResolveBranch, e))?
-            .unwrap_or_else(|| BranchState::new(id.clone(), None));
-
-        Ok(Self::new(state, platform))
-    }
-
-    /// Loads a branch from the the the underlaying replica, if branch with a
-    /// given id does not exists it produces an error.
-    pub async fn load(id: BranchId, platform: &'a P) -> Result<Self, ReplicaError> {
-        if let Some(state) = platform
-            .branches()
-            .read(&id)
-            .await
-            .map_err(|e| ReplicaError::storage_error(Capability::ResolveBranch, e))?
-        {
-            Ok(Self::new(state, platform))
-        } else {
-            Err(ReplicaError::BranchNotFound { id })
-        }
-    }
-
-    /// Returns unique identifier of this fork.
+    /// Returns the branch id of this upstream
     pub fn id(&self) -> &BranchId {
-        &self.state.id
+        match self {
+            Upstream::Local(branch) => branch.id(),
+            Upstream::Remote(remote) => remote.id(),
+        }
     }
 
-    /// Resets this branch to a given revision and a base tree.
-    pub async fn reset(
-        &mut self,
-        revision: Revision,
-        base: NodeReference,
-    ) -> Result<&mut Self, ReplicaError> {
-        // derive edition from the current state.
-        let (current, _) = self
-            .state
-            .encode()
-            .await
-            .map_err(|e| ReplicaError::StorageError {
-                capability: Capability::ArchiveError,
-                cause: e,
-            })?;
-
-        // create new edition from the prior state.
-        let state = BranchState {
-            revision,
-            id: self.state.id.clone(),
-            description: self.state.description.clone(),
-            upstream: self.state.upstream.clone(),
-            base,
-        };
-
-        self.platform.branches().write(state.clone()).await;
-
-        // If we were able to write a new state update
-        self.state = state;
-
-        Ok(self)
+    /// Converts this upstream to its state descriptor
+    pub fn to_state(&self) -> UpstreamState {
+        match self {
+            Upstream::Local(branch) => UpstreamState::Local {
+                branch: branch.id().clone(),
+            },
+            Upstream::Remote(remote) => UpstreamState::Remote {
+                site: remote.site().clone(),
+                branch: remote.id().clone(),
+            },
+        }
     }
 
-    /// Fetches remote reference of this fork. If this branch has no upstream
-    /// setup it will produce an error. If upstream branch is a local one this
-    /// operation is a no-op.
-    pub async fn fetch(&self) -> Result<Option<Revision>, ReplicaError> {
-        if let Some(upstream) = &self.state.upstream {
-            match &upstream.origin {
-                // Fetch from a local branch is a no-op.
-                Origin::Local => {
-                    let state = self
-                        .platform
-                        .branches()
-                        .read(&upstream.id)
-                        .await
-                        .map_err(|e| ReplicaError::storage_error(Capability::ResolveBranch, e))?;
+    /// Fetches the current revision from the upstream
+    pub async fn fetch(&mut self) -> Result<Option<Revision>, ReplicaError> {
+        match self {
+            Upstream::Local(branch) => Ok(Some(branch.revision())),
+            Upstream::Remote(remote) => remote.fetch().await,
+        }
+    }
 
-                    if let Some(state) = state {
-                        Ok(Some(state.revision().clone()))
-                    } else {
-                        Err(ReplicaError::BranchNotFound {
-                            id: upstream.id.clone(),
-                        })
-                    }
-                }
-                Origin::Remote(remote) => {
-                    // Read revision from the remote site.
-                    let upstream = self
-                        .platform
-                        .announcements()
-                        .read(&(remote.id.clone(), self.id().clone()))
-                        .await
-                        .map_err(|error| ReplicaError::StorageError {
-                            capability: Capability::ResolveRevision,
-                            cause: error,
-                        })?;
-
-                    let local = self
-                        .platform
-                        .revisions()
-                        .read(&(remote.id.clone(), self.id().clone()))
-                        .await
-                        .map_err(|error| ReplicaError::StorageError {
-                            capability: Capability::ResolveBranch,
-                            cause: error,
-                        })?;
-
-                    let revision =
-                        match (upstream, local) {
-                            (Some(current), Some(local)) => {
-                                let (prior, _) = local.encode().await.map_err(|e| {
-                                    ReplicaError::StorageError {
-                                        capability: Capability::EncodeError,
-                                        cause: e,
-                                    }
-                                })?;
-                                self.platform
-                                    .revisions()
-                                    .write(RemoteBranchState {
-                                        id: current.id.clone(),
-                                        revision: current.revision.clone(),
-                                        prior: Some(prior),
-                                    })
-                                    .await
-                                    .map_err(|error| ReplicaError::StorageError {
-                                        capability: Capability::UpdateRevision,
-                                        cause: error,
-                                    })?;
-
-                                Some(current.revision)
-                            }
-                            (Some(current), None) => {
-                                self.platform
-                                    .revisions()
-                                    .write(current.clone())
-                                    .await
-                                    .map_err(|error| ReplicaError::StorageError {
-                                        capability: Capability::UpdateRevision,
-                                        cause: error,
-                                    })?;
-
-                                Some(current.revision)
-                            }
-                            (None, Some(prior)) => Some(prior.revision),
-                            (None, None) => None,
-                        };
-
-                    Ok(revision)
-                }
+    /// Pushes a revision to the upstream, returning the previous revision if any
+    pub async fn publish(&mut self, revision: Revision) -> Result<Option<Revision>, ReplicaError> {
+        match self {
+            Upstream::Local(branch) => {
+                let before = branch.revision();
+                branch.reset(revision, branch.state.base.clone()).await?;
+                Ok(Some(before))
             }
-        } else {
-            Err(ReplicaError::BranchNotFound {
-                id: self.id().clone(),
-            })
-        }
-    }
-
-    pub async fn pull(&mut self) -> Result<Option<&Revision>, ReplicaError> {
-        if self.state.upstream.is_some() {
-            if let Some(base) = self.fetch().await? {
-                // If revision has changed since our last pull
-                // we got to rebase our changes
-                if self.state.base != base.tree {
-                    let archive = self.platform.archive();
-                    // load upstream tree into memory
-                    let mut tree: Index<Key, Datum, P::Storage> =
-                        Tree::from_hash(base.tree.hash(), archive.clone())
-                            .await
-                            .map_err(|error| ReplicaError::StorageError {
-                                capability: Capability::ResolveBranch,
-                                cause: error.into(),
-                            })?;
-
-                    // Integrate local changes into an upstream tree.
-                    tree.integrate(self.differentiate()).await;
-
-                    // Compute a new revision and replace the local one
-                    let (period, moment) = if base.issuer == self.issuer {
-                        (base.period, base.moment + 1)
-                    } else {
-                        (base.period + 1, 0)
-                    };
-
-                    self.reset(
-                        Revision {
-                            issuer: self.issuer,
-                            tree: NodeReference(tree.hash().expect("should have hash").clone()),
-                            cause: HashSet::from([Edition::<Revision>::new(
-                                base.tree.hash().clone(),
-                            )]),
-                            period,
-                            moment,
-                        },
-                        base.tree.clone(),
-                    )
-                    .await;
-
-                    Ok(Some(&self.state.revision))
-                }
-                // if base is the same as our last revision there
-                // is nothing to do.
-                else {
-                    Ok(None)
-                }
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub async fn push(&mut self) -> Result<&mut Self, ReplicaError> {
-        if let Some(upstream) = &self.state.upstream {
-            let revision = self.state.revision.clone();
-            match &upstream.origin {
-                Origin::Local => {
-                    if upstream.id() != self.id() {
-                        // Load target branch that we will update.
-                        let mut target = Branch::load(upstream.id().clone(), self.platform).await?;
-                        // And reset it's revision to the current branch's revision
-                        target.reset(revision, target.state.base.clone()).await?;
-                    }
-                    return Ok(self);
-                }
-                Origin::Remote(remote) => {
-                    let key = (remote.id.clone(), self.id().clone());
-
-                    // Get the current state to use as prior
-                    let current = self
-                        .platform
-                        .revisions()
-                        .read(&key)
-                        .await
-                        .map_err(|cause| ReplicaError::StorageError {
-                            capability: Capability::ResolveBranch,
-                            cause,
-                        })?;
-
-                    let prior = if let Some(current) = current {
-                        let (edition, _) =
-                            current
-                                .encode()
-                                .await
-                                .map_err(|e| ReplicaError::StorageError {
-                                    capability: Capability::EncodeError,
-                                    cause: e,
-                                })?;
-                        Some(edition)
-                    } else {
-                        None
-                    };
-
-                    let state = RemoteBranchState {
-                        id: RemoteBranchId::new(remote.id.clone(), self.id().clone()),
-                        revision: revision.clone(),
-                        prior,
-                    };
-
-                    // announce new revision to the collaborators
-                    self.platform
-                        .announcements()
-                        .write(state.clone())
-                        .await
-                        .map_err(|e| ReplicaError::PushFailed { cause: e })?;
-                    // if we were able to publish the revision we need to
-                    // update local state
-                    self.platform
-                        .revisions()
-                        .write(state)
-                        .await
-                        .map_err(|cause| ReplicaError::StorageError {
-                            capability: Capability::ArchiveError,
-                            cause,
-                        })?;
-                }
-            };
-        }
-        return Ok(self);
-    }
-
-    pub async fn sync(&mut self) -> Result<&mut Self, ReplicaError> {
-        // try pushing 10 times if all fail due to concurrency we
-        // propagate error otherwise keep retrying.
-        for attempt in 0..10 {
-            match self.push().await {
-                Ok(_) => {
-                    return Ok(self);
-                }
-                Err(ReplicaError::PushFailed { cause }) => {
-                    self.pull().await?;
-                    if attempt == 9 {
-                        return Err(ReplicaError::PushFailed { cause })?;
-                    }
-                }
-                Err(reason) => return Err(reason),
-            };
-        }
-
-        return Ok(self);
-    }
-
-    /// Computes all the changes that have occured on this branch since last
-    /// pull. It assumes that current revision is based of the base revision
-    /// and that subtrees that were updated are available locally, which would
-    /// have been fetched in order to produce an update.
-    pub fn differentiate(&self) -> impl Differential<Key, State<Datum>> {
-        let archive = self.platform.archive();
-        stream! {
-            let before:Index<Key, Datum, P::Storage> = Tree::from_hash(self.state.base.hash(), archive.clone()).await?;
-            let after:Index<Key, Datum, P::Storage> = Tree::from_hash(self.state.revision().tree.hash(), archive.clone()).await?;
-
-            let diff = before.differentiate(&after);
-            for await change in diff {
-                yield change;
-            }
+            Upstream::Remote(remote) => remote.publish(revision).await,
         }
     }
 }
-*/
 
-#[allow(dead_code)]
-pub struct Upstream<Backend: PlatformBackend> {
-    state: UpstreamState,
-    storage: PlatformStorage<Backend>,
+impl<Backend: PlatformBackend + 'static> From<Branch<Backend>> for Upstream<Backend> {
+    fn from(branch: Branch<Backend>) -> Self {
+        Self::Local(branch)
+    }
 }
-impl<Backend: PlatformBackend> Upstream<Backend> {}
+
+impl<Backend: PlatformBackend + 'static> From<RemoteBranch<Backend>> for Upstream<Backend> {
+    fn from(branch: RemoteBranch<Backend>) -> Self {
+        Self::Remote(branch)
+    }
+}
+
+impl<Backend: PlatformBackend> From<Upstream<Backend>> for UpstreamState {
+    fn from(upstream: Upstream<Backend>) -> Self {
+        match upstream {
+            Upstream::Local(branch) => UpstreamState::Local {
+                branch: branch.id().clone(),
+            },
+            Upstream::Remote(branch) => UpstreamState::Remote {
+                site: branch.site.clone(),
+                branch: branch.id().clone(),
+            },
+        }
+    }
+}
 
 /// Upstream represents some branch being tracked
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct UpstreamState {
-    id: BranchId,
-    origin: Origin,
+pub enum UpstreamState {
+    Local { branch: BranchId },
+    Remote { site: Site, branch: BranchId },
 }
 
 impl UpstreamState {
     pub fn id(&self) -> &BranchId {
-        &self.id
+        match self {
+            Self::Local { branch } => branch,
+            Self::Remote { branch, .. } => branch,
+        }
     }
-}
-
-/// Describes origin of the replica that is either local or a remote.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Origin {
-    /// Implies local replica
-    Local,
-    /// Reference to a remote replica
-    Remote(Site),
 }
 
 /// Blake3 hash of the branch state.
@@ -1853,10 +1672,9 @@ mod tests {
     /// Helper to create a test branch with upstream
     async fn create_branch_with_upstream<Backend>(
         storage: PlatformStorage<Backend>,
-        archive: dialog_storage::Storage<CborEncoder, Blake3KeyBackend<Backend>>,
+        archive: Archive<Backend>,
         id: &str,
         upstream_id: &str,
-        origin: Origin,
     ) -> Result<Branch<Backend>, ReplicaError>
     where
         Backend: PlatformBackend + 'static,
@@ -1869,10 +1687,9 @@ mod tests {
         let issuer = Issuer::from_secret(&test_issuer());
         let mut branch = Branch::open(&branch_id, issuer, storage.clone(), archive.clone()).await?;
 
-        // Set up upstream
-        branch.state.upstream = Some(UpstreamState {
-            id: upstream_branch_id,
-            origin,
+        // Set up upstream as a local branch
+        branch.state.upstream = Some(UpstreamState::Local {
+            branch: upstream_branch_id,
         });
 
         // Save the updated state
@@ -1893,11 +1710,7 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         // Create archive storage with Blake3Hash keys
-        let archive_backend = Blake3KeyBackend::new(backend);
-        let archive = dialog_storage::Storage {
-            encoder: CborEncoder,
-            backend: archive_backend,
-        };
+        let archive = Archive::new(backend);
 
         // Create main branch
         let main_id = BranchId::new("main".to_string());
@@ -1921,16 +1734,10 @@ mod tests {
             .expect("Failed to reset main branch");
 
         // Create feature branch with main as upstream
-        let feature_id = BranchId::new("feature".to_string());
-        let mut feature_branch = create_branch_with_upstream(
-            storage.clone(),
-            archive.clone(),
-            "feature",
-            "main",
-            Origin::Local,
-        )
-        .await
-        .expect("Failed to create feature branch");
+        let mut feature_branch =
+            create_branch_with_upstream(storage.clone(), archive.clone(), "feature", "main")
+                .await
+                .expect("Failed to create feature branch");
 
         // Create a new revision on feature branch with main_revision as cause
         let feature_revision = Revision {
@@ -1962,22 +1769,13 @@ mod tests {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
-        let archive_backend = Blake3KeyBackend::new(backend);
-        let archive = dialog_storage::Storage {
-            encoder: CborEncoder,
-            backend: archive_backend,
-        };
+        let archive = Archive::new(backend);
 
         // Create a branch with itself as upstream
-        let mut branch = create_branch_with_upstream(
-            storage.clone(),
-            archive,
-            "self-tracking",
-            "self-tracking",
-            Origin::Local,
-        )
-        .await
-        .expect("Failed to create branch");
+        let mut branch =
+            create_branch_with_upstream(storage.clone(), archive, "self-tracking", "self-tracking")
+                .await
+                .expect("Failed to create branch");
 
         let original_revision = branch.revision();
 
@@ -1994,11 +1792,7 @@ mod tests {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
-        let archive_backend = Blake3KeyBackend::new(backend);
-        let archive = dialog_storage::Storage {
-            encoder: CborEncoder,
-            backend: archive_backend,
-        };
+        let archive = Archive::new(backend);
 
         let branch_id = BranchId::new("no-upstream".to_string());
         let issuer = Issuer::from_secret(&test_issuer());
@@ -2006,16 +1800,10 @@ mod tests {
             .await
             .expect("Failed to create branch");
 
-        // Push should fail without upstream
+        // Push should return None without upstream
         let result = branch.push().await;
-        assert!(result.is_err());
-
-        match result {
-            Err(ReplicaError::BranchHasNoUpstream { id }) => {
-                assert_eq!(id, branch_id);
-            }
-            _ => panic!("Expected BranchHasNoUpstream error"),
-        }
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -2024,11 +1812,7 @@ mod tests {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
-        let archive_backend = Blake3KeyBackend::new(backend);
-        let archive = dialog_storage::Storage {
-            encoder: CborEncoder,
-            backend: archive_backend,
-        };
+        let archive = Archive::new(backend);
 
         // Create main and feature branches
         let main_id = BranchId::new("main".to_string());
@@ -2050,10 +1834,9 @@ mod tests {
             .expect("Failed to reset main");
 
         // Create feature with main as upstream, based on same revision
-        let mut feature_branch =
-            create_branch_with_upstream(storage, archive, "feature", "main", Origin::Local)
-                .await
-                .expect("Failed to create feature branch");
+        let mut feature_branch = create_branch_with_upstream(storage, archive, "feature", "main")
+            .await
+            .expect("Failed to create feature branch");
 
         feature_branch
             .reset(main_revision.clone(), NodeReference(EMPT_TREE_HASH))
@@ -2072,11 +1855,7 @@ mod tests {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
-        let archive_backend = Blake3KeyBackend::new(backend);
-        let archive = dialog_storage::Storage {
-            encoder: CborEncoder,
-            backend: archive_backend,
-        };
+        let archive = Archive::new(backend);
 
         let branch_id = BranchId::new("no-upstream".to_string());
         let issuer = Issuer::from_secret(&test_issuer());
