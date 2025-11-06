@@ -19,11 +19,11 @@ use dialog_common::ConditionalSend;
 #[cfg(test)]
 use dialog_common::ConditionalSync;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Tree};
-use futures_util::{Stream, StreamExt, TryStreamExt};
 #[cfg(not(target_arch = "wasm32"))]
 use futures_util::future::BoxFuture;
 #[cfg(target_arch = "wasm32")]
 use futures_util::future::LocalBoxFuture;
+use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use dialog_storage::{
     Blake3Hash, CborEncoder, DialogStorageError, Encoder, Resource, RestStorageBackend,
