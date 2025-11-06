@@ -635,7 +635,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
                     // Compute local changes: what operations transform base into current
                     // This gives us the changes we made locally
-                    let local_changes = current_tree.differentiate(&base_tree);
+                    let local_changes = base_tree.differentiate(&current_tree);
 
                     // Integrate local changes into upstream tree
                     upstream_tree.integrate(local_changes).await.map_err(|e| {

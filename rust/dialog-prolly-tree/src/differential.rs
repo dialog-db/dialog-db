@@ -730,7 +730,7 @@ mod tests {
         tree2.set(vec![1], vec![10]).await.unwrap();
         tree2.set(vec![2], vec![20]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut count = 0;
         while let Some(_) = changes.next().await {
@@ -756,7 +756,7 @@ mod tests {
         tree1.set(vec![2], vec![20]).await.unwrap();
         tree2.set(vec![1], vec![10]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -790,7 +790,7 @@ mod tests {
         tree2.set(vec![1], vec![10]).await.unwrap();
         tree2.set(vec![2], vec![20]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -825,7 +825,7 @@ mod tests {
         tree2.set(vec![1], vec![10]).await.unwrap();
         tree2.set(vec![2], vec![20]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -860,7 +860,7 @@ mod tests {
         tree1.set(vec![1], vec![10]).await.unwrap();
         tree1.set(vec![2], vec![20]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut adds = Vec::new();
 
@@ -889,7 +889,7 @@ mod tests {
         tree2.set(vec![1], vec![10]).await.unwrap();
         tree2.set(vec![2], vec![20]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut removes = Vec::new();
 
@@ -924,7 +924,7 @@ mod tests {
             }
         }
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -1126,9 +1126,9 @@ mod tests {
         });
 
         let host_a = tree_a.clone();
-        let changes_a = host_a.differentiate(&empty_tree);
+        let changes_a = empty_tree.differentiate(&host_a);
         let host_b = tree_b.clone();
-        let changes_b = host_b.differentiate(&empty_tree);
+        let changes_b = empty_tree.differentiate(&host_b);
 
         // Integrate changes
         tree_a.integrate(changes_b).await.unwrap();
@@ -1178,7 +1178,7 @@ mod tests {
         // Need to collect changes to avoid borrow checker issues
         // (diff holds immutable ref to start, but integrate needs mutable ref)
         let changes = {
-            let diff = target.differentiate(&start);
+            let diff = start.differentiate(&target);
             pin_mut!(diff);
             let mut changes = Vec::new();
             while let Some(result) = diff.next().await {
@@ -1218,7 +1218,7 @@ mod tests {
         // Need to collect changes to avoid borrow checker issues
         // (diff holds immutable ref to start, but integrate needs mutable ref)
         let changes = {
-            let diff = target.differentiate(&start);
+            let diff = start.differentiate(&target);
             pin_mut!(diff);
             let mut changes = Vec::new();
             while let Some(result) = diff.next().await {
@@ -1264,7 +1264,7 @@ mod tests {
         // Need to collect changes to avoid borrow checker issues
         // (diff holds immutable ref to start, but integrate needs mutable ref)
         let changes = {
-            let diff = target.differentiate(&start);
+            let diff = start.differentiate(&target);
             pin_mut!(diff);
             let mut changes = Vec::new();
             while let Some(result) = diff.next().await {
@@ -1315,7 +1315,7 @@ mod tests {
         // Need to collect changes to avoid borrow checker issues
         // (diff holds immutable ref to start, but integrate needs mutable ref)
         let changes = {
-            let diff = target.differentiate(&start);
+            let diff = start.differentiate(&target);
             pin_mut!(diff);
             let mut changes = Vec::new();
             while let Some(result) = diff.next().await {
@@ -1356,7 +1356,7 @@ mod tests {
             backend: backend.clone(),
         });
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut count = 0;
         while let Some(_) = changes.next().await {
@@ -1381,7 +1381,7 @@ mod tests {
         tree1.set(vec![1], vec![10]).await.unwrap();
         tree2.set(vec![1], vec![20]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -1421,7 +1421,7 @@ mod tests {
         tree2.set(vec![4], vec![40]).await.unwrap();
         tree2.set(vec![6], vec![60]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -1460,7 +1460,7 @@ mod tests {
         superset.set(vec![3], vec![30]).await.unwrap();
         superset.set(vec![4], vec![40]).await.unwrap();
 
-        let changes = superset.differentiate(&subset);
+        let changes = subset.differentiate(&superset);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -1495,7 +1495,7 @@ mod tests {
             tree2.set(vec![i], vec![i]).await.unwrap();
         }
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut count = 0;
 
@@ -1535,7 +1535,7 @@ mod tests {
         // Need to collect changes to avoid borrow checker issues
         // (diff holds immutable ref to start, but integrate needs mutable ref)
         let changes = {
-            let diff = target.differentiate(&start);
+            let diff = start.differentiate(&target);
             pin_mut!(diff);
             let mut changes = Vec::new();
             while let Some(result) = diff.next().await {

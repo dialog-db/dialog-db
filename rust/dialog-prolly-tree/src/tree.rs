@@ -145,15 +145,14 @@ where
         }
     }
 
-    /// Returns a difference between this tree and the other tree.
+    /// Returns a differential that produces changes to transform `self` into `other`.
     ///
-    /// Applying the returned differential onto `other` will transform it to match `self`.
-    /// In other words: `other.integrate(self.differentiate(other))` will make `other == self`.
+    /// Usage: `self.integrate(self.differentiate(other))` will result in `other`.
     pub fn differentiate<'a>(
         &'a self,
         other: &'a Self,
     ) -> impl crate::differential::Differential<Key, Value> + 'a {
-        let mut delta = Delta::from((other, self));
+        let mut delta = Delta::from((self, other));
         try_stream! {
             delta.expand().await?;
             for await change in delta.stream() {
