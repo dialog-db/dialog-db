@@ -632,7 +632,6 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
                     // Compute local changes: what operations transform base into current
                     // This gives us the changes we made locally
-                    // differentiate semantics: A.differentiate(&B) = changes to transform B into A
                     let local_changes = current_tree.differentiate(&base_tree);
 
                     // Integrate local changes into upstream tree
@@ -640,34 +639,45 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                         ReplicaError::StorageError(format!("Failed to integrate changes: {:?}", e))
                     })?;
 
-                    // Compute new period and moment based on issuer
-                    let (period, moment) = if upstream_revision.issuer == *self.issuer.principal() {
-                        // Same issuer: increment moment, keep period
-                        (upstream_revision.period, upstream_revision.moment + 1)
-                    } else {
-                        // Different issuer: new period (sync point), reset moment
-                        (upstream_revision.period + 1, 0)
-                    };
-
                     // Get the hash of the integrated tree
                     let tree_hash = upstream_tree.hash().cloned().unwrap_or(EMPT_TREE_HASH);
 
-                    // Create new revision with integrated changes
-                    let new_revision = Revision {
-                        issuer: *self.issuer.principal(),
-                        tree: NodeReference(tree_hash),
-                        cause: HashSet::from([upstream_revision.edition()?]),
-                        period,
-                        moment,
-                    };
+                    // Check if integration actually changed the tree
+                    if tree_hash == *upstream_revision.tree.hash() {
+                        // No local changes were integrated - tree unchanged
+                        // Just adopt the upstream revision directly without creating a new one
+                        self.reset(upstream_revision.clone(), upstream_revision.tree.clone())
+                            .await?;
 
-                    // Reset branch to the new revision
-                    // Base should be the merged tree (new_revision.tree), which represents
-                    // the last synced state after integrating local and upstream changes
-                    self.reset(new_revision.clone(), new_revision.tree.clone())
-                        .await?;
+                        Ok(Some(upstream_revision))
+                    } else {
+                        // Integration produced a new tree - create a merged revision
+                        // Compute new period and moment based on issuer
+                        let (period, moment) = if upstream_revision.issuer == *self.issuer.principal() {
+                            // Same issuer: increment moment, keep period
+                            (upstream_revision.period, upstream_revision.moment + 1)
+                        } else {
+                            // Different issuer: new period (sync point), reset moment
+                            (upstream_revision.period + 1, 0)
+                        };
 
-                    Ok(Some(new_revision))
+                        // Create new revision with integrated changes
+                        let new_revision = Revision {
+                            issuer: *self.issuer.principal(),
+                            tree: NodeReference(tree_hash),
+                            cause: HashSet::from([upstream_revision.edition()?]),
+                            period,
+                            moment,
+                        };
+
+                        // Reset branch to the new revision
+                        // Base should be the merged tree (new_revision.tree), which represents
+                        // the last synced state after integrating local and upstream changes
+                        self.reset(new_revision.clone(), new_revision.tree.clone())
+                            .await?;
+
+                        Ok(Some(new_revision))
+                    }
                 } else {
                     // Base hasn't changed, nothing to pull
                     Ok(None)
@@ -2575,6 +2585,180 @@ mod tests {
         println!("  - Alice and Bob both contributed changes");
         println!("  - Changes were merged via pull");
         println!("  - Both replicas synchronized to same final state");
+
+        Ok(())
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn test_pull_without_local_changes_adopts_upstream_revision() -> anyhow::Result<()> {
+        // This test verifies that when pulling with no local changes,
+        // we adopt the upstream revision directly without creating a new one
+        use dialog_storage::{AuthMethod, JournaledStorage, RestStorageConfig};
+        use futures_util::stream;
+
+        // Start a shared S3-compatible test server
+        let s3_service = dialog_storage::s3_test_server::start().await?;
+
+        // Create Alice's replica
+        let alice_issuer = Issuer::from_passphrase("alice");
+        let alice_backend = MemoryStorageBackend::default();
+        let alice_journaled = JournaledStorage::new(alice_backend);
+        let mut alice_replica = Replica::open(alice_issuer.clone(), alice_journaled.clone())
+            .expect("Failed to create Alice's replica");
+
+        // Create Bob's replica
+        let bob_issuer = Issuer::from_passphrase("bob");
+        let bob_backend = MemoryStorageBackend::default();
+        let bob_journaled = JournaledStorage::new(bob_backend);
+        let mut bob_replica = Replica::open(bob_issuer.clone(), bob_journaled.clone())
+            .expect("Failed to create Bob's replica");
+
+        // Both create a "main" branch
+        let main_id = BranchId::new("main".to_string());
+        let mut alice_main = alice_replica
+            .branches
+            .open(&main_id)
+            .await
+            .expect("Failed to create Alice's main branch");
+
+        let mut bob_main = bob_replica
+            .branches
+            .open(&main_id)
+            .await
+            .expect("Failed to create Bob's main branch");
+
+        // Configure shared remote
+        let remote_config = RestStorageConfig {
+            endpoint: s3_service.endpoint().to_string(),
+            auth_method: AuthMethod::None,
+            bucket: Some("shared-repo".to_string()),
+            key_prefix: Some("noop-pull".to_string()),
+            headers: vec![],
+            timeout_seconds: Some(30),
+        };
+
+        // Alice adds and configures remote
+        let alice_remote_state = RemoteState {
+            site: "origin".to_string(),
+            address: remote_config.clone(),
+        };
+        let alice_remote = alice_replica
+            .remotes
+            .add(alice_remote_state)
+            .await
+            .expect("Failed to add remote for Alice");
+
+        let alice_remote_branch = alice_remote
+            .open(&main_id)
+            .await
+            .expect("Failed to open Alice's remote branch");
+
+        alice_main
+            .set_upstream(alice_remote_branch)
+            .await
+            .expect("Failed to set Alice's upstream");
+
+        // Alice commits a change
+        let alice_artifact = Artifact {
+            the: "user/name".parse().expect("Invalid attribute"),
+            of: "user:alice".parse().expect("Invalid entity"),
+            is: crate::Value::String("Alice".to_string()),
+            cause: None,
+        };
+
+        let alice_instructions = vec![Instruction::Assert(alice_artifact.clone())];
+        alice_main
+            .commit(stream::iter(alice_instructions))
+            .await
+            .expect("Alice's commit failed");
+
+        // Alice pushes
+        alice_main.push().await.expect("Alice's push failed");
+
+        let alice_revision_after_push = alice_main.revision();
+        let alice_edition = alice_revision_after_push.edition()?;
+
+        // Bob adds the same remote
+        let bob_remote_state = RemoteState {
+            site: "origin".to_string(),
+            address: remote_config,
+        };
+        let bob_remote = bob_replica
+            .remotes
+            .add(bob_remote_state)
+            .await
+            .expect("Failed to add remote for Bob");
+
+        let bob_remote_branch = bob_remote
+            .open(&main_id)
+            .await
+            .expect("Failed to open Bob's remote branch");
+
+        bob_main
+            .set_upstream(bob_remote_branch)
+            .await
+            .expect("Failed to set Bob's upstream");
+
+        // Bob has no local changes, just pulls
+        let bob_pull_result = bob_main.pull().await.expect("Bob's pull failed");
+        assert!(
+            bob_pull_result.is_some(),
+            "Pull should return a revision"
+        );
+
+        let bob_revision_after_pull = bob_main.revision();
+        let bob_edition = bob_revision_after_pull.edition()?;
+
+        // Verify that Bob adopted Alice's revision directly (same edition)
+        assert_eq!(
+            alice_edition, bob_edition,
+            "Bob should have adopted Alice's revision exactly (same edition)"
+        );
+
+        // Verify they have the same tree hash
+        assert_eq!(
+            alice_revision_after_push.tree().hash(),
+            bob_revision_after_pull.tree().hash(),
+            "Tree hashes should be identical"
+        );
+
+        // Verify they have the same issuer (Alice's issuer, not Bob's)
+        assert_eq!(
+            alice_revision_after_push.issuer(),
+            bob_revision_after_pull.issuer(),
+            "Bob should have adopted Alice's issuer (no new revision created)"
+        );
+
+        // Verify they have the same period and moment
+        assert_eq!(
+            alice_revision_after_push.period(),
+            bob_revision_after_pull.period(),
+            "Period should be identical"
+        );
+        assert_eq!(
+            alice_revision_after_push.moment(),
+            bob_revision_after_pull.moment(),
+            "Moment should be identical"
+        );
+
+        // Verify Bob can query Alice's artifact
+        use crate::artifacts::ArtifactStore;
+        let alice_selector = ArtifactSelector::new()
+            .the("user/name".parse().unwrap())
+            .of("user:alice".parse().unwrap());
+        let bob_facts: Vec<_> = bob_main
+            .select(alice_selector)
+            .try_collect()
+            .await
+            .expect("Failed to query facts from Bob");
+        assert_eq!(
+            bob_facts.len(),
+            1,
+            "Bob should have Alice's artifact"
+        );
+
+        println!("✓ Pull without local changes correctly adopted upstream revision");
 
         Ok(())
     }
