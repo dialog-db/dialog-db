@@ -2757,4 +2757,302 @@ mod tests {
 
         Ok(())
     }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn test_branch_load_vs_open() -> anyhow::Result<()> {
+        // Test the difference between load (expects existing) and open (creates if missing)
+        let backend = MemoryStorageBackend::default();
+        let storage = PlatformStorage::new(backend.clone(), CborEncoder);
+        let issuer = Issuer::from_passphrase("test-user");
+
+        let branch_id = BranchId::new("test-branch".to_string());
+
+        // load() should fail when branch doesn't exist
+        let load_result = Branch::load(&branch_id, issuer.clone(), storage.clone()).await;
+        assert!(
+            load_result.is_err(),
+            "load() should fail for non-existent branch"
+        );
+
+        // open() should succeed and create the branch
+        let branch = Branch::open(&branch_id, issuer.clone(), storage.clone()).await?;
+        assert_eq!(branch.id(), &branch_id);
+
+        // Now load() should succeed
+        let loaded = Branch::load(&branch_id, issuer.clone(), storage.clone()).await?;
+        assert_eq!(loaded.id(), &branch_id);
+
+        Ok(())
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn test_fetch_without_pull() -> anyhow::Result<()> {
+        // Test that fetch() retrieves upstream state without merging
+        use dialog_storage::{AuthMethod, JournaledStorage, RestStorageConfig};
+        use futures_util::stream;
+
+        let s3_service = dialog_storage::s3_test_server::start().await?;
+
+        // Create Alice's replica
+        let alice_issuer = Issuer::from_passphrase("alice");
+        let alice_backend = MemoryStorageBackend::default();
+        let alice_journaled = JournaledStorage::new(alice_backend);
+        let mut alice_replica = Replica::open(alice_issuer.clone(), alice_journaled.clone())?;
+
+        let main_id = BranchId::new("main".to_string());
+        let mut alice_main = alice_replica.branches.open(&main_id).await?;
+
+        // Configure remote
+        let remote_config = RestStorageConfig {
+            endpoint: s3_service.endpoint().to_string(),
+            auth_method: AuthMethod::None,
+            bucket: Some("fetch-test".to_string()),
+            key_prefix: Some("fetch".to_string()),
+            headers: vec![],
+            timeout_seconds: Some(30),
+        };
+
+        let alice_remote_state = RemoteState {
+            site: "origin".to_string(),
+            address: remote_config.clone(),
+        };
+        let alice_remote = alice_replica.remotes.add(alice_remote_state).await?;
+        let alice_remote_branch = alice_remote.open(&main_id).await?;
+        alice_main.set_upstream(alice_remote_branch).await?;
+
+        // Alice commits and pushes
+        let artifact = Artifact {
+            the: "data/value".parse()?,
+            of: "entity:1".parse()?,
+            is: crate::Value::String("test".to_string()),
+            cause: None,
+        };
+        alice_main
+            .commit(stream::iter(vec![Instruction::Assert(artifact)]))
+            .await?;
+        alice_main.push().await?;
+
+        let alice_revision_after_push = alice_main.revision();
+
+        // Create Bob's replica
+        let bob_issuer = Issuer::from_passphrase("bob");
+        let bob_backend = MemoryStorageBackend::default();
+        let bob_journaled = JournaledStorage::new(bob_backend);
+        let mut bob_replica = Replica::open(bob_issuer.clone(), bob_journaled.clone())?;
+
+        let mut bob_main = bob_replica.branches.open(&main_id).await?;
+
+        let bob_remote_state = RemoteState {
+            site: "origin".to_string(),
+            address: remote_config,
+        };
+        let bob_remote = bob_replica.remotes.add(bob_remote_state).await?;
+        let bob_remote_branch = bob_remote.open(&main_id).await?;
+        bob_main.set_upstream(bob_remote_branch).await?;
+
+        let bob_revision_before_fetch = bob_main.revision();
+
+        // Bob fetches (but doesn't pull/merge)
+        let fetched = bob_main.fetch().await?;
+        assert!(fetched.is_some(), "Fetch should return upstream revision");
+
+        let bob_revision_after_fetch = bob_main.revision();
+
+        // Bob's local revision should be UNCHANGED after fetch
+        assert_eq!(
+            bob_revision_before_fetch.edition()?,
+            bob_revision_after_fetch.edition()?,
+            "fetch() should not change local revision"
+        );
+
+        // But the fetched revision should match Alice's
+        assert_eq!(
+            fetched.unwrap().edition()?,
+            alice_revision_after_push.edition()?,
+            "Fetched revision should match upstream"
+        );
+
+        // Now Bob pulls to actually merge
+        bob_main.pull().await?;
+        let bob_revision_after_pull = bob_main.revision();
+
+        // After pull, Bob's revision should be updated
+        assert_ne!(
+            bob_revision_before_fetch.edition()?,
+            bob_revision_after_pull.edition()?,
+            "pull() should update local revision"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn test_multiple_remotes() -> anyhow::Result<()> {
+        // Test managing multiple remote upstreams
+        use dialog_storage::{AuthMethod, JournaledStorage, RestStorageConfig};
+
+        let s3_service = dialog_storage::s3_test_server::start().await?;
+
+        let issuer = Issuer::from_passphrase("multi-remote-user");
+        let backend = MemoryStorageBackend::default();
+        let journaled = JournaledStorage::new(backend);
+        let mut replica = Replica::open(issuer.clone(), journaled.clone())?;
+
+        // Add first remote (origin)
+        let origin_config = RestStorageConfig {
+            endpoint: s3_service.endpoint().to_string(),
+            auth_method: AuthMethod::None,
+            bucket: Some("origin-repo".to_string()),
+            key_prefix: Some("origin".to_string()),
+            headers: vec![],
+            timeout_seconds: Some(30),
+        };
+
+        let origin_state = RemoteState {
+            site: "origin".to_string(),
+            address: origin_config,
+        };
+        let origin = replica.remotes.add(origin_state.clone()).await?;
+        assert_eq!(origin.site(), "origin");
+
+        // Add second remote (backup)
+        let backup_config = RestStorageConfig {
+            endpoint: s3_service.endpoint().to_string(),
+            auth_method: AuthMethod::None,
+            bucket: Some("backup-repo".to_string()),
+            key_prefix: Some("backup".to_string()),
+            headers: vec![],
+            timeout_seconds: Some(30),
+        };
+
+        let backup_state = RemoteState {
+            site: "backup".to_string(),
+            address: backup_config,
+        };
+        let backup = replica.remotes.add(backup_state.clone()).await?;
+        assert_eq!(backup.site(), "backup");
+
+        // Load remotes back
+        let loaded_origin = replica.remotes.load(&"origin".to_string()).await?;
+        assert_eq!(loaded_origin.site(), "origin");
+
+        let loaded_backup = replica.remotes.load(&"backup".to_string()).await?;
+        assert_eq!(loaded_backup.site(), "backup");
+
+        println!("✓ Multiple remotes work correctly");
+
+        Ok(())
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn test_branch_description() -> anyhow::Result<()> {
+        // Test branch description getting and setting
+        let backend = MemoryStorageBackend::default();
+        let storage = PlatformStorage::new(backend.clone(), CborEncoder);
+        let issuer = Issuer::from_passphrase("test-user");
+
+        let branch_id = BranchId::new("feature-x".to_string());
+
+        // Create branch with description
+        let branch = Branch::open(&branch_id, issuer.clone(), storage.clone()).await?;
+
+        // Default description should be branch id
+        assert_eq!(branch.description(), "feature-x");
+
+        // Load and verify description persists
+        let loaded = Branch::load(&branch_id, issuer.clone(), storage.clone()).await?;
+        assert_eq!(loaded.description(), "feature-x");
+
+        Ok(())
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn test_issuer_generate() -> anyhow::Result<()> {
+        // Test generating random issuer keys
+        let issuer1 = Issuer::generate()?;
+        let issuer2 = Issuer::generate()?;
+
+        // Each generated issuer should be unique
+        assert_ne!(issuer1.did(), issuer2.did());
+        assert_ne!(issuer1.principal(), issuer2.principal());
+
+        // DIDs should be valid format
+        assert!(issuer1.did().starts_with("did:key:"));
+        assert!(issuer2.did().starts_with("did:key:"));
+
+        Ok(())
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn test_remote_branch_load_vs_open() -> anyhow::Result<()> {
+        // Test RemoteBranch load() vs open() semantics
+        use dialog_storage::{AuthMethod, JournaledStorage, RestStorageConfig};
+        use futures_util::stream;
+
+        let s3_service = dialog_storage::s3_test_server::start().await?;
+
+        let issuer = Issuer::from_passphrase("test-user");
+        let backend = MemoryStorageBackend::default();
+        let journaled = JournaledStorage::new(backend);
+        let mut replica = Replica::open(issuer.clone(), journaled.clone())?;
+
+        let remote_config = RestStorageConfig {
+            endpoint: s3_service.endpoint().to_string(),
+            auth_method: AuthMethod::None,
+            bucket: Some("remote-test".to_string()),
+            key_prefix: Some("test".to_string()),
+            headers: vec![],
+            timeout_seconds: Some(30),
+        };
+
+        let remote_state = RemoteState {
+            site: "origin".to_string(),
+            address: remote_config,
+        };
+        let remote = replica.remotes.add(remote_state).await?;
+
+        let branch_id = BranchId::new("test-branch".to_string());
+
+        // load() should fail when remote branch doesn't exist
+        let load_result = remote.load(&branch_id).await;
+        assert!(
+            load_result.is_err(),
+            "load() should fail for non-existent remote branch"
+        );
+
+        // open() should succeed
+        let remote_branch = remote.open(&branch_id).await?;
+        assert_eq!(remote_branch.id(), &branch_id);
+
+        // Create local branch and push to create remote branch
+        let mut local_branch = replica.branches.open(&branch_id).await?;
+        local_branch.set_upstream(remote_branch).await?;
+
+        let artifact = Artifact {
+            the: "test/data".parse()?,
+            of: "entity:1".parse()?,
+            is: crate::Value::String("value".to_string()),
+            cause: None,
+        };
+        local_branch
+            .commit(stream::iter(vec![Instruction::Assert(artifact)]))
+            .await?;
+        local_branch.push().await?;
+
+        // Now load() should succeed
+        let loaded = remote.load(&branch_id).await?;
+        assert_eq!(loaded.id(), &branch_id);
+        assert!(
+            loaded.revision().is_some(),
+            "Loaded remote branch should have revision"
+        );
+
+        Ok(())
+    }
 }
