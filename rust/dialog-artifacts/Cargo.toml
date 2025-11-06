@@ -42,7 +42,7 @@ tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
 url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
-dialog-storage = { workspace = true, features = ["helpers"] }
+dialog-storage = { workspace = true, features = ["helpers", "test-utils"] }
 anyhow = { workspace = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

@@ -143,7 +143,7 @@ pub struct Replica<Backend: PlatformBackend> {
 
 impl<Backend: PlatformBackend + 'static> Replica<Backend> {
     /// Creates a new replica with the given issuer and storage backend.
-    pub fn new(issuer: Issuer, backend: Backend) -> Result<Self, ReplicaError> {
+    pub fn open(issuer: Issuer, backend: Backend) -> Result<Self, ReplicaError> {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branches = Branches::new(issuer.clone(), backend.clone());
@@ -154,11 +154,6 @@ impl<Backend: PlatformBackend + 'static> Replica<Backend> {
             remotes,
             branches,
         })
-    }
-
-    /// Opens or creates a new named branch
-    pub async fn open(&self, id: BranchId) -> Result<Branch<Backend>, ReplicaError> {
-        self.branches.open(&id).await
     }
 }
 
@@ -1897,5 +1892,218 @@ mod tests {
         let result = branch.pull().await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn test_end_to_end_remote_upstream() -> anyhow::Result<()> {
+        use dialog_storage::{AuthMethod, JournaledStorage, RestStorageConfig};
+        use futures_util::stream;
+
+        // Start a local S3-compatible test server
+        let s3_service = dialog_storage::s3_test_server::start().await?;
+
+        // Step 1: Generate issuer
+        let issuer = Issuer::from_passphrase("test_end_to_end_remote_upstream");
+
+        // Step 2: Create a replica with that issuer and journaled in-memory backend
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let journaled_backend = JournaledStorage::new(backend);
+        let mut replica = Replica::open(issuer.clone(), journaled_backend.clone())
+            .expect("Failed to create replica");
+
+        // Step 3: Create a branch e.g. main
+        let main_id = BranchId::new("main".to_string());
+        let mut main_branch = replica
+            .branches
+            .open(&main_id)
+            .await
+            .expect("Failed to create main branch");
+
+        // Verify that opening the branch created a record at local/main
+        let branch_key = b"local/main".to_vec();
+        let branch_value = journaled_backend
+            .get(&branch_key)
+            .await
+            .expect("Failed to get branch state");
+        assert!(
+            branch_value.is_some(),
+            "Branch 'main' should be stored at local/main key"
+        );
+
+        // Decode and verify the branch state
+        use serde_ipld_dagcbor;
+        let branch_state: BranchState = serde_ipld_dagcbor::from_slice(&branch_value.unwrap())
+            .expect("Failed to decode branch state");
+        assert_eq!(
+            branch_state.id.to_string(),
+            "main",
+            "Branch state should contain branch name 'main'"
+        );
+
+        // Step 4: Add a remote to the replica
+        let remote_state = RemoteState {
+            site: "origin".to_string(),
+            address: RestStorageConfig {
+                endpoint: s3_service.endpoint().to_string(),
+                auth_method: AuthMethod::None,
+                bucket: Some("test-bucket".to_string()),
+                key_prefix: Some("test".to_string()),
+                headers: vec![],
+                timeout_seconds: Some(30),
+            },
+        };
+        let remote = replica
+            .remotes
+            .add(remote_state)
+            .await
+            .expect("Failed to add remote");
+
+        // Verify that the remote was stored at site/origin
+        let remote_key = b"site/origin".to_vec();
+        let remote_value = journaled_backend
+            .get(&remote_key)
+            .await
+            .expect("Failed to get remote state");
+        assert!(
+            remote_value.is_some(),
+            "Remote 'origin' should be stored at site/origin key"
+        );
+
+        // Decode and verify the remote state
+        let decoded_remote_state: RemoteState =
+            serde_ipld_dagcbor::from_slice(&remote_value.unwrap())
+                .expect("Failed to decode remote state");
+        assert_eq!(
+            decoded_remote_state.site, "origin",
+            "Remote state should contain site name 'origin'"
+        );
+        assert_eq!(
+            decoded_remote_state.address.endpoint,
+            s3_service.endpoint(),
+            "Remote state should contain correct endpoint"
+        );
+
+        // Step 5: Create a remote branch for the main
+        let remote_branch = remote
+            .open(&main_id)
+            .await
+            .expect("Failed to create remote branch");
+
+        // Note: Opening a remote branch doesn't write to storage yet.
+        // The remote/main record will be created when we push to it.
+
+        // Step 6: Add remote branch as an upstream of the local `main` branch
+        main_branch
+            .set_upstream(remote_branch)
+            .await
+            .expect("Failed to set upstream");
+
+        // Verify upstream is configured
+        assert!(main_branch.state.upstream.is_some());
+        assert!(main_branch.upstream.is_some());
+
+        // Verify the archive's remote storage is configured
+        let has_remote = {
+            let archive_remote = main_branch.archive.remote.read().await;
+            archive_remote.is_some()
+        };
+        assert!(has_remote, "Archive should have remote storage configured");
+
+        // Step 7: Pull on main branch (should end up reading from remote store)
+        // Note: This will return None if remote has no revisions, which is expected for a new remote
+        let pull_result = main_branch.pull().await;
+        assert!(pull_result.is_ok());
+
+        // Step 8: Commit some changes to the main branch
+        // Tree nodes should be written to the remote and to in-memory backend
+        let test_artifact = Artifact {
+            the: "user/name".parse().expect("Invalid attribute"),
+            of: "user:123".parse().expect("Invalid entity"),
+            is: crate::Value::String("Alice".to_string()),
+            cause: None,
+        };
+
+        let instructions = vec![Instruction::Assert(test_artifact.clone())];
+        let instruction_stream = stream::iter(instructions);
+
+        let commit_result = main_branch.commit(instruction_stream).await;
+        assert!(
+            commit_result.is_ok(),
+            "Commit failed: {:?}",
+            commit_result.err()
+        );
+
+        let tree_hash = commit_result.unwrap();
+        assert_ne!(tree_hash, EMPT_TREE_HASH);
+
+        // Verify that tree nodes were written to storage by checking if we can read them
+        // The tree hash should be a key in the storage
+        let tree_node_value = journaled_backend
+            .get(&tree_hash.to_vec())
+            .await
+            .expect("Failed to get tree node");
+        assert!(
+            tree_node_value.is_some(),
+            "Tree node with hash {:?} should be written to storage",
+            tree_hash
+        );
+
+        // Step 9: Push changes to the main branch
+        // Should create records for the local branch and corresponding remote branch
+        // in the in-memory backend
+        // Record should be written for the branch in the remote store
+        let push_result = main_branch.push().await;
+        assert!(push_result.is_ok(), "Push failed: {:?}", push_result.err());
+
+        // The push result might be None if the upstream is already up to date
+        // In our case, this is expected since we're pushing to a newly created remote branch
+        let last_revision = push_result.unwrap();
+        assert_eq!(last_revision, None);
+
+        // Verify local branch state was updated with the new tree hash
+        let updated_branch_value = journaled_backend
+            .get(&branch_key)
+            .await
+            .expect("Failed to get updated branch state");
+        assert!(updated_branch_value.is_some());
+        let updated_branch_state: BranchState =
+            serde_ipld_dagcbor::from_slice(&updated_branch_value.unwrap())
+                .expect("Failed to decode updated branch state");
+        assert_eq!(
+            updated_branch_state.revision.tree().hash(),
+            &tree_hash,
+            "Branch state should contain the new tree hash after push"
+        );
+
+        // Verify remote branch record was created with a cached revision
+        // The key uses the branch ID as bytes
+        let remote_branch_key = format!("remote/{}", main_id.to_string())
+            .as_bytes()
+            .to_vec();
+
+        // Check that the key was written (this is the important verification for this test)
+        let all_written_keys = journaled_backend.get_writes();
+        let was_written = all_written_keys.iter().any(|k| k == &remote_branch_key);
+        assert!(
+            was_written,
+            "Remote branch key 'remote/{}' should have been written during push. All keys: {:?}",
+            main_id.to_string(),
+            all_written_keys
+                .iter()
+                .map(|k| String::from_utf8_lossy(k).to_string())
+                .collect::<Vec<_>>()
+        );
+
+        // Reload the main branch and verify the changes persisted
+        let reloaded_main = replica
+            .branches
+            .load(&main_id)
+            .await
+            .expect("Failed to reload main branch");
+
+        assert_eq!(reloaded_main.revision().tree().hash(), &tree_hash);
+
+        Ok(())
     }
 }

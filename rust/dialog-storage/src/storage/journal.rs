@@ -24,6 +24,7 @@ pub struct JournalEntry<Key> {
 }
 
 /// Internal state for the journal including the log and indices.
+#[derive(Debug, Clone)]
 struct JournalState<Key> {
     /// Sequential log of all operations in order.
     log: Vec<JournalEntry<Key>>,
@@ -105,7 +106,7 @@ where
 /// let keys_read = journaled.keys_read();
 /// let keys_written = journaled.keys_written();
 /// ```
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct JournaledStorage<Backend>
 where
     Backend: StorageBackend,

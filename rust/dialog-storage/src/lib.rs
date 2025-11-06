@@ -46,3 +46,9 @@ pub use hash::*;
 mod helpers;
 #[cfg(any(test, feature = "helpers"))]
 pub use helpers::*;
+
+/// S3 test server for integration testing
+#[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
+pub mod s3_test_server {
+    pub use crate::s3::{start, Service};
+}

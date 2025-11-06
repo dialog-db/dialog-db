@@ -2076,9 +2076,9 @@ mod local_s3_tests {
     }
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
 #[allow(unused_imports, unused_variables, unused_mut, dead_code)]
-mod s3 {
+pub mod s3 {
     use async_trait::async_trait;
     use hyper::server::conn::http1;
     use hyper_util::rt::TokioIo;
@@ -2104,6 +2104,7 @@ mod s3 {
     pub struct Service {
         pub endpoint: String,
         shutdown_tx: tokio::sync::oneshot::Sender<()>,
+        storage: InMemoryS3,
     }
     impl Service {
         pub fn stop(self) -> Result<(), ()> {
@@ -2112,6 +2113,11 @@ mod s3 {
 
         pub fn endpoint(&self) -> &str {
             &self.endpoint
+        }
+
+        /// Returns the underlying storage for inspection (useful in tests)
+        pub fn storage(&self) -> &InMemoryS3 {
+            &self.storage
         }
     }
 
@@ -2125,7 +2131,8 @@ mod s3 {
         }
 
         pub async fn start2() -> anyhow::Result<Service> {
-            let s3_handler = S3ServiceBuilder::new(Self::default()).build();
+            let storage = Self::default();
+            let s3_handler = S3ServiceBuilder::new(storage.clone()).build();
 
             // Bind to a random available port
             let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -2155,6 +2162,7 @@ mod s3 {
             Ok(Service {
                 endpoint,
                 shutdown_tx,
+                storage,
             })
         }
 

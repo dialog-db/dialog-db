@@ -12,7 +12,7 @@ use super::{Resource, StorageBackend};
 
 /// A trivial implementation of [StorageBackend] - backed by a [HashMap] - where
 /// all values are kept in memory and never persisted.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct MemoryStorageBackend<Key, Value>
 where
     Key: Eq + std::hash::Hash,
