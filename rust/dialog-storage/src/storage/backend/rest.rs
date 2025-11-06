@@ -18,6 +18,85 @@ use crate::{
     storage::backend::rest::s3_signer::Authorization,
 };
 
+/// S3-safe key encoding that preserves path structure.
+///
+/// Keys are treated as `/`-delimited paths. Each path component is checked:
+/// - If it contains only safe characters (alphanumeric, `-`, `_`, `.`), it's kept as-is
+/// - Otherwise, it's base58-encoded and prefixed with `!`
+///
+/// The `!` character is used as a prefix marker because it's in AWS S3's
+/// "safe for use" list and unlikely to appear at the start of path components.
+///
+/// Examples:
+/// - `remote/main` → `remote/main` (all components safe)
+/// - `remote/user@example` → `remote/!<base58>` (@ is unsafe, encode component)
+/// - `foo/bar/baz` → `foo/bar/baz` (all safe)
+pub fn encode_s3_key(bytes: &[u8]) -> String {
+    use base58::ToBase58;
+
+    let key_str = String::from_utf8_lossy(bytes);
+    let components: Vec<&str> = key_str.split('/').collect();
+
+    let encoded_components: Vec<String> = components
+        .iter()
+        .map(|component| {
+            // Check if component contains only safe characters
+            let is_safe = component.bytes().all(|b| {
+                matches!(b,
+                    b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.'
+                )
+            });
+
+            if is_safe && !component.is_empty() {
+                component.to_string()
+            } else {
+                // Base58 encode and prefix with !
+                format!("!{}", component.as_bytes().to_base58())
+            }
+        })
+        .collect();
+
+    encoded_components.join("/")
+}
+
+/// Decode an S3-encoded key back to bytes.
+///
+/// Path components starting with `!` are base58-decoded.
+/// Other components are used as-is.
+pub fn decode_s3_key(encoded: &str) -> Result<Vec<u8>, RestStorageBackendError> {
+    use base58::FromBase58;
+
+    let components: Vec<&str> = encoded.split('/').collect();
+    let mut decoded_components: Vec<Vec<u8>> = Vec::new();
+
+    for component in components {
+        if let Some(encoded_part) = component.strip_prefix('!') {
+            // Base58 decode
+            let decoded = encoded_part.from_base58().map_err(|e| {
+                RestStorageBackendError::SerializationFailed(format!(
+                    "Invalid base58 encoding in component '{}': {:?}",
+                    component, e
+                ))
+            })?;
+            decoded_components.push(decoded);
+        } else {
+            // Use as-is
+            decoded_components.push(component.as_bytes().to_vec());
+        }
+    }
+
+    // Join with /
+    let mut result = Vec::new();
+    for (i, component) in decoded_components.iter().enumerate() {
+        if i > 0 {
+            result.push(b'/');
+        }
+        result.extend_from_slice(component);
+    }
+
+    Ok(result)
+}
+
 /// Errors that can occur when using the REST storage backend
 #[derive(Error, Debug)]
 pub enum RestStorageBackendError {
@@ -371,7 +450,8 @@ where
 
     /// Build the URL for a given key
     fn build_url(&self, key: &[u8], method: &str) -> Result<Url, RestStorageBackendError> {
-        let key_str = base64::engine::general_purpose::STANDARD.encode(key);
+        // Use S3-safe encoding that preserves path delimiters
+        let key_str = encode_s3_key(key);
 
         // For S3/R2 signed URLs
         if let AuthMethod::S3(authority) = &self.config.auth_method {
@@ -465,7 +545,8 @@ where
             };
 
             // Build the object key with optional prefix
-            let key_str = base64::engine::general_purpose::STANDARD.encode(key);
+            // Use S3-safe encoding that preserves path delimiters
+            let key_str = encode_s3_key(key);
             let object_key = if let Some(prefix) = &self.config.key_prefix {
                 format!("{}/{}", prefix, key_str)
             } else {
@@ -966,7 +1047,8 @@ where
             })?;
 
             for encoded_key in keys {
-                let key_bytes = match base64::engine::general_purpose::STANDARD.decode(&encoded_key) {
+                // Decode S3-encoded key
+                let key_bytes = match decode_s3_key(&encoded_key) {
                     Ok(k) => k,
                     Err(e) => {
                         Err(RestStorageBackendError::SerializationFailed(
@@ -1055,12 +1137,12 @@ mod unit_tests {
         };
 
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
-        let key = vec![1, 2, 3]; // Base64: AQID
+        let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
 
         assert_eq!(
             url.as_str(),
-            "https://example.com/test-bucket/test-prefix/AQID"
+            "https://example.com/test-bucket/test-prefix/!Ldp"
         );
     }
 
@@ -1075,10 +1157,10 @@ mod unit_tests {
         };
 
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
-        let key = vec![1, 2, 3]; // Base64: AQID
+        let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
 
-        assert_eq!(url.as_str(), "https://example.com/test-bucket/AQID");
+        assert_eq!(url.as_str(), "https://example.com/test-bucket/!Ldp");
     }
 
     #[test]
@@ -1092,10 +1174,10 @@ mod unit_tests {
         };
 
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
-        let key = vec![1, 2, 3]; // Base64: AQID
+        let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
 
-        assert_eq!(url.as_str(), "https://example.com/test-prefix/AQID");
+        assert_eq!(url.as_str(), "https://example.com/test-prefix/!Ldp");
     }
 
     #[test]
@@ -1109,10 +1191,10 @@ mod unit_tests {
         };
 
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
-        let key = vec![1, 2, 3]; // Base64: AQID
+        let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
 
-        assert_eq!(url.as_str(), "https://example.com/AQID");
+        assert_eq!(url.as_str(), "https://example.com/!Ldp");
     }
 
     #[test]
@@ -1126,10 +1208,10 @@ mod unit_tests {
         };
 
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
-        let key = vec![1, 2, 3]; // Base64: AQID
+        let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
 
-        assert_eq!(url.as_str(), "https://example.com/AQID");
+        assert_eq!(url.as_str(), "https://example.com/!Ldp");
     }
 
     #[test]
@@ -1201,7 +1283,7 @@ mod unit_tests {
         };
 
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
-        let key = vec![1, 2, 3]; // Base64: AQID
+        let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
 
         // Generate a signed URL
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
@@ -1228,7 +1310,7 @@ mod unit_tests {
         assert_eq!(url.host_str().unwrap(), "test-bucket.example.com");
 
         // Path should be the key
-        assert_eq!(url.path(), "/AQID");
+        assert_eq!(url.path(), "/!Ldp");
     }
 
     #[test]
@@ -1248,7 +1330,7 @@ mod unit_tests {
         };
 
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
-        let key = vec![1, 2, 3]; // Base64: AQID
+        let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let value = b"hello world";
 
         // Generate a signed URL for PUT with checksum
@@ -1276,7 +1358,7 @@ mod unit_tests {
         assert!(query_params.contains_key("X-Amz-Signature"));
 
         // Method should be PUT
-        assert_eq!(url.path(), "/AQID");
+        assert_eq!(url.path(), "/!Ldp");
     }
 
     #[test]
@@ -1357,20 +1439,20 @@ mod tests {
     async fn it_writes_and_reads_a_value() -> Result<()> {
         let (mut backend, mut server) = create_test_backend().await;
 
-        // Key as base64: AQID
+        // Key encodes to: !Ldp
         let key = vec![1, 2, 3];
         let value = vec![4, 5, 6];
 
         // Mock PUT request for set operation
         let put_mock = server
-            .mock("PUT", "/AQID")
+            .mock("PUT", "/!Ldp")
             .with_status(200)
             .with_body("")
             .create();
 
         // Mock GET request for successful retrieval
         let get_mock = server
-            .mock("GET", "/AQID")
+            .mock("GET", "/!Ldp")
             .with_status(200)
             .with_body(&[4, 5, 6])
             .create();
@@ -1393,12 +1475,12 @@ mod tests {
     async fn it_returns_none_for_missing_values() -> Result<()> {
         let (backend, mut server) = create_test_backend().await;
 
-        let key = vec![10, 11, 12]; // Different key, base64: CgsMw==
+        let key = vec![10, 11, 12]; // Encodes to: !<base58> (binary data with ! prefix)
 
         // Mock GET request for missing value (404 response)
-        // Use Matcher::Any since the path will be URL-encoded
+        // Match any path starting with ! (encoded binary keys)
         let mock = server
-            .mock("GET", mockito::Matcher::Regex(r"^/Cgs.*".to_string()))
+            .mock("GET", mockito::Matcher::Regex(r"^/!.*".to_string()))
             .with_status(404)
             .with_body("")
             .create();
@@ -1416,12 +1498,12 @@ mod tests {
     async fn it_handles_error_responses() -> Result<()> {
         let (backend, mut server) = create_test_backend().await;
 
-        let key = vec![20, 21, 22]; // base64: FBUWe==
+        let key = vec![20, 21, 22]; // Encodes to: !7kEh (base58-encoded with ! prefix)
 
         // Mock GET request for server error
         // Use regex matcher for URL-encoded paths
         let mock = server
-            .mock("GET", mockito::Matcher::Regex(r"^/FBUW.*".to_string()))
+            .mock("GET", mockito::Matcher::Regex(r"^/!7kEh.*".to_string()))
             .with_status(500)
             .with_body("Internal Server Error")
             .create();
@@ -1449,7 +1531,7 @@ mod tests {
 
         // Mock PUT request expecting specific headers
         let mock = server
-            .mock("PUT", "/AQID")
+            .mock("PUT", "/!Ldp")
             .match_header("Authorization", "Bearer test-api-key")
             .match_header("X-Custom-Header", "custom-value")
             .with_status(200)
@@ -1477,7 +1559,7 @@ mod tests {
 
         // Mock PUT request with bucket and prefix in path
         let mock = server
-            .mock("PUT", "/test-bucket/test-prefix/AQID")
+            .mock("PUT", "/test-bucket/test-prefix/!Ldp")
             .with_status(200)
             .create();
 
@@ -1497,19 +1579,19 @@ mod tests {
             .mock("GET", "/_list")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"["AQID", "BAUGBw=="]"#)
+            .with_body(r#"["!Ldp", "!6xdze"]"#)
             .create();
 
         // Mock the GET for first key
         let get_mock1 = server
-            .mock("GET", "/AQID")
+            .mock("GET", "/!Ldp")
             .with_status(200)
             .with_body(&[4, 5, 6])
             .create();
 
         // Mock the GET for second key
         let get_mock2 = server
-            .mock("GET", "/BAUGBw==")
+            .mock("GET", "/!6xdze")
             .with_status(200)
             .with_body(&[8, 9, 10])
             .create();
@@ -1545,7 +1627,7 @@ mod tests {
             .mock("GET", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"["AQID", "BAUGBw=="]"#)
+            .with_body(r#"["!Ldp", "!6xdze"]"#)
             .create();
 
         // Mock the GET for first key
@@ -1588,9 +1670,9 @@ mod tests {
         let (mut backend, mut server) = create_test_backend().await;
 
         // Create mocks for two PUT operations
-        let put_mock1 = server.mock("PUT", "/AQID").with_status(200).create();
+        let put_mock1 = server.mock("PUT", "/!Ldp").with_status(200).create();
 
-        let put_mock2 = server.mock("PUT", "/BAUGBw==").with_status(200).create();
+        let put_mock2 = server.mock("PUT", "/!6xdze").with_status(200).create();
 
         // Create a source stream with two items
         use async_stream::try_stream;
@@ -1658,9 +1740,9 @@ mod tests {
         memory_backend.set(vec![4, 5, 6, 7], vec![8, 9, 10]).await?;
 
         // Create mocks for two PUT operations that will happen during transfer
-        let put_mock1 = server.mock("PUT", "/AQID").with_status(200).create();
+        let put_mock1 = server.mock("PUT", "/!Ldp").with_status(200).create();
 
-        let put_mock2 = server.mock("PUT", "/BAUGBw==").with_status(200).create();
+        let put_mock2 = server.mock("PUT", "/!6xdze").with_status(200).create();
 
         // Create a stream with the memory backend data
         use async_stream::try_stream;
@@ -1818,14 +1900,20 @@ mod local_s3_tests {
             inner: B,
         }
 
-        impl<B> Clone for ErrorMappingBackend<B> where B: Clone {
+        impl<B> Clone for ErrorMappingBackend<B>
+        where
+            B: Clone,
+        {
             fn clone(&self) -> Self {
-                Self { inner: self.inner.clone() }
+                Self {
+                    inner: self.inner.clone(),
+                }
             }
         }
 
         #[async_trait::async_trait]
-        impl<B: StorageBackend<Key=Vec<u8>, Value=Vec<u8>> + Send + Sync> StorageBackend for ErrorMappingBackend<B>
+        impl<B: StorageBackend<Key = Vec<u8>, Value = Vec<u8>> + Send + Sync> StorageBackend
+            for ErrorMappingBackend<B>
         where
             B::Resource: Send,
             B::Error: Send,

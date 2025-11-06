@@ -42,6 +42,22 @@ pub use storage::*;
 mod hash;
 pub use hash::*;
 
+/// S3-safe key encoding functions.
+///
+/// Keys are treated as `/`-delimited paths. Each path component is checked:
+/// - If it contains only safe characters (alphanumeric, `-`, `_`, `.`), it's kept as-is
+/// - Otherwise, it's base58-encoded and prefixed with `!`
+///
+/// The `!` character is used as a prefix because it's in AWS S3's "safe for use" list.
+///
+/// Examples:
+/// - `"remote/main"` → `"remote/main"` (all components safe)
+/// - `"remote/user@example"` → `"remote/!<base58>"` (@ is unsafe)
+/// - `"foo/bar/baz"` → `"foo/bar/baz"` (all safe)
+pub mod key_encoding {
+    pub use crate::{decode_s3_key as decode, encode_s3_key as encode};
+}
+
 #[cfg(any(test, feature = "helpers"))]
 mod helpers;
 #[cfg(any(test, feature = "helpers"))]
