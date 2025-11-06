@@ -630,7 +630,9 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                                 ))
                             })?;
 
-                    // Compute local changes: diff between base and current
+                    // Compute local changes: what operations transform base into current
+                    // This gives us the changes we made locally
+                    // differentiate semantics: A.differentiate(&B) = changes to transform B into A
                     let local_changes = current_tree.differentiate(&base_tree);
 
                     // Integrate local changes into upstream tree
@@ -660,7 +662,9 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                     };
 
                     // Reset branch to the new revision
-                    self.reset(new_revision.clone(), upstream_revision.tree.clone())
+                    // Base should be the merged tree (new_revision.tree), which represents
+                    // the last synced state after integrating local and upstream changes
+                    self.reset(new_revision.clone(), new_revision.tree.clone())
                         .await?;
 
                     Ok(Some(new_revision))
@@ -921,11 +925,13 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
             };
 
             // Update the branch state with the new revision
+            // IMPORTANT: Keep the base tree unchanged - it represents the last synced state,
+            // not the current local state. Base should only update during pull/push operations.
             let new_state = BranchState {
                 id: self.state.id.clone(),
                 description: self.state.description.clone(),
                 revision: new_revision.clone(),
-                base: tree_reference.clone(),
+                base: self.state.base.clone(),
                 upstream: self.state.upstream.clone(),
             };
 
@@ -1196,7 +1202,12 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
     pub async fn fetch(&mut self) -> Result<&Option<Revision>, ReplicaError> {
         self.connect().await?;
         let canonical = self.canonical.as_mut().expect("connected");
+
+        // Force reload from storage to ensure we get fresh data
+        let _ = canonical.reload().await;
+
         let revision = canonical.content().clone();
+
         // update local record for the revision.
         let _ = self.cache.replace_with(|_| revision.clone()).await;
         self.revision = revision;
@@ -2306,7 +2317,6 @@ mod tests {
 
     #[cfg(all(test, not(target_arch = "wasm32")))]
     #[tokio::test]
-    #[ignore = "Pull/merge logic not yet implemented - Bob's local changes are lost during pull"]
     async fn test_collaborative_workflow_alice_and_bob() -> anyhow::Result<()> {
         use dialog_storage::{AuthMethod, JournaledStorage, RestStorageConfig};
         use futures_util::stream;
