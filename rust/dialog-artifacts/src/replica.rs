@@ -545,9 +545,9 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// If upstream is remote, it publishes to the remote and updates local cache.
     /// Returns None if no upstream is configured or if pushing to self.
     pub async fn push(&mut self) -> Result<Option<Revision>, ReplicaError> {
-        // Check if pushing to self
+        // Check if pushing to self (only relevant for local upstreams)
         if let Some(upstream_state) = &self.state.upstream {
-            if upstream_state.id() == self.id() {
+            if matches!(upstream_state, UpstreamState::Local { .. }) && upstream_state.id() == self.id() {
                 return Ok(None);
             }
         }
@@ -1933,7 +1933,7 @@ mod tests {
         let issuer = Issuer::from_passphrase("test_end_to_end_remote_upstream");
 
         // Step 2: Create a replica with that issuer and journaled in-memory backend
-        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let backend = MemoryStorageBackend::default();
         let journaled_backend = JournaledStorage::new(backend);
         let mut replica = Replica::open(issuer.clone(), journaled_backend.clone())
             .expect("Failed to create replica");
@@ -2157,6 +2157,489 @@ mod tests {
             .expect("Failed to reload main branch");
 
         assert_eq!(reloaded_main.revision().tree().hash(), &tree_hash);
+
+        Ok(())
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn test_push_and_pull_simple() -> anyhow::Result<()> {
+        use dialog_storage::{AuthMethod, RestStorageConfig};
+        use futures_util::stream;
+
+        // Start S3 server
+        let s3_service = dialog_storage::s3_test_server::start().await?;
+
+        // Create Alice's replica
+        let alice_issuer = Issuer::from_passphrase("alice");
+        let alice_backend = MemoryStorageBackend::default();
+        let mut alice_replica = Replica::open(alice_issuer.clone(), alice_backend)
+            .expect("Failed to create Alice's replica");
+
+        // Create Bob's replica
+        let bob_issuer = Issuer::from_passphrase("bob");
+        let bob_backend = MemoryStorageBackend::default();
+        let mut bob_replica = Replica::open(bob_issuer.clone(), bob_backend)
+            .expect("Failed to create Bob's replica");
+
+        // Both create main branches
+        let main_id = BranchId::new("main".to_string());
+        let mut alice_main = alice_replica.branches.open(&main_id).await.expect("Failed to create Alice's branch");
+        let mut bob_main = bob_replica.branches.open(&main_id).await.expect("Failed to create Bob's branch");
+
+        // Configure shared remote
+        let remote_config = RestStorageConfig {
+            endpoint: s3_service.endpoint().to_string(),
+            auth_method: AuthMethod::None,
+            bucket: Some("shared-repo".to_string()),
+            key_prefix: Some("collab".to_string()),
+            headers: vec![],
+            timeout_seconds: Some(30),
+        };
+
+        // Alice adds remote and sets upstream
+        let alice_remote_state = RemoteState {
+            site: "origin".to_string(),
+            address: remote_config.clone(),
+        };
+        let alice_remote = alice_replica.remotes.add(alice_remote_state).await.expect("Failed to add remote");
+        let alice_remote_branch = alice_remote.open(&main_id).await.expect("Failed to create remote branch");
+        alice_main.set_upstream(alice_remote_branch).await.expect("Failed to set upstream");
+
+        // Alice commits and pushes
+        let alice_artifact = Artifact {
+            the: "user/name".parse().expect("Invalid attribute"),
+            of: "user:alice".parse().expect("Invalid entity"),
+            is: crate::Value::String("Alice".to_string()),
+            cause: None,
+        };
+        alice_main
+            .commit(stream::iter(vec![Instruction::Assert(alice_artifact.clone())]))
+            .await
+            .expect("Alice's commit failed");
+
+        alice_main.push().await.expect("Alice's push failed");
+
+        // Verify branch state was written to S3
+        let s3_keys = s3_service.storage().list_keys("shared-repo").await;
+        let expected_key = "collab/cmVtb3RlL21haW4="; // base64 of "remote/main"
+        assert!(
+            s3_keys.contains(&expected_key.to_string()),
+            "Branch state should exist in S3"
+        );
+
+        // Bob adds same remote and sets upstream
+        let bob_remote_state = RemoteState {
+            site: "origin".to_string(),
+            address: remote_config,
+        };
+        let bob_remote = bob_replica.remotes.add(bob_remote_state).await.expect("Failed to add remote");
+        let bob_remote_branch = bob_remote.open(&main_id).await.expect("Failed to create remote branch");
+        bob_main.set_upstream(bob_remote_branch).await.expect("Failed to set upstream");
+
+        // Bob pulls Alice's changes
+        let bob_pull_result = bob_main.pull().await.expect("Bob's pull failed");
+        assert!(bob_pull_result.is_some(), "Pull should return a revision");
+
+        // Verify Bob got Alice's artifact
+        use crate::artifacts::ArtifactStore;
+        let selector = ArtifactSelector::new()
+            .the("user/name".parse().unwrap())
+            .of("user:alice".parse().unwrap());
+
+        let facts: Vec<_> = bob_main
+            .select(selector)
+            .try_collect()
+            .await
+            .expect("Failed to query artifacts");
+
+        assert_eq!(facts.len(), 1, "Bob should have Alice's artifact after pull");
+
+        Ok(())
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn test_push_to_remote_branch() -> anyhow::Result<()> {
+        use dialog_storage::{AuthMethod, RestStorageConfig};
+        use futures_util::stream;
+
+        // Start S3 server
+        let s3_service = dialog_storage::s3_test_server::start().await?;
+
+        // Create a replica
+        let issuer = Issuer::from_passphrase("test_push");
+        let backend = MemoryStorageBackend::default();
+        let mut replica = Replica::open(issuer.clone(), backend).expect("Failed to create replica");
+
+        // Create a branch
+        let main_id = BranchId::new("main".to_string());
+        let mut main_branch = replica.branches.open(&main_id).await.expect("Failed to create branch");
+
+        // Add remote and set upstream
+        let remote_config = RestStorageConfig {
+            endpoint: s3_service.endpoint().to_string(),
+            auth_method: AuthMethod::None,
+            bucket: Some("test-bucket".to_string()),
+            key_prefix: Some("test".to_string()),
+            headers: vec![],
+            timeout_seconds: Some(30),
+        };
+
+        let remote_state = RemoteState {
+            site: "origin".to_string(),
+            address: remote_config,
+        };
+        let remote = replica.remotes.add(remote_state).await.expect("Failed to add remote");
+        let remote_branch = remote.open(&main_id).await.expect("Failed to create remote branch");
+
+        main_branch.set_upstream(remote_branch).await.expect("Failed to set upstream");
+
+        // Commit a change
+        let artifact = Artifact {
+            the: "test/key".parse().expect("Invalid attribute"),
+            of: "test:entity".parse().expect("Invalid entity"),
+            is: crate::Value::String("test-value".to_string()),
+            cause: None,
+        };
+
+        main_branch
+            .commit(stream::iter(vec![Instruction::Assert(artifact)]))
+            .await
+            .expect("Commit failed");
+
+        // Push to remote
+        main_branch.push().await.expect("Push failed");
+
+        // Verify the branch state was written to S3
+        let s3_keys = s3_service.storage().list_keys("test-bucket").await;
+        let expected_key = "test/cmVtb3RlL21haW4="; // base64 of "remote/main"
+        assert!(
+            s3_keys.contains(&expected_key.to_string()),
+            "Branch state should be written to S3"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn test_remote_branch_write_minimal() -> anyhow::Result<()> {
+        use dialog_storage::{AuthMethod, CborEncoder, RestStorageConfig};
+
+        // Start S3 server
+        let s3_service = dialog_storage::s3_test_server::start().await?;
+
+        // Create a minimal typed store like RemoteBranch does
+        let config = RestStorageConfig {
+            endpoint: s3_service.endpoint().to_string(),
+            auth_method: AuthMethod::None,
+            bucket: Some("test-bucket".to_string()),
+            key_prefix: Some("test-prefix".to_string()),
+            headers: vec![],
+            timeout_seconds: Some(30),
+        };
+
+        let backend = dialog_storage::RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+        let wrapped_backend = ErrorMappingBackend::new(backend);
+        let storage = PlatformStorage::new(wrapped_backend, CborEncoder);
+        let typed_store: TypedStore<Revision, _> = storage.at("remote").mount();
+
+        // Try to write a revision
+        let issuer = Issuer::from_passphrase("test");
+        let revision = Revision {
+            issuer: issuer.verifying_key.as_bytes().to_vec().try_into().unwrap(),
+            tree: NodeReference([1u8; 32]),
+            cause: Default::default(),
+            period: 1,
+            moment: 0,
+        };
+
+        let mut resource = typed_store.open(&b"test-key".to_vec()).await?;
+        assert_eq!(resource.content(), &None);
+
+        resource.replace(Some(revision.clone())).await?;
+
+        // Check if it was written to S3
+        let s3_keys = s3_service.storage().list_keys("test-bucket").await;
+        println!("Keys in S3: {:?}", s3_keys);
+
+        // The key should be: test-prefix/base64(b"remote/test-key")
+        let expected_key_bytes = b"remote/test-key";
+        // Keys are base64-encoded by the REST backend
+        // For now, just check that SOME key exists with the test-prefix
+        let has_any_key = s3_keys.iter().any(|k| k.starts_with("test-prefix/"));
+        let expected_key = "test-prefix/<base64_key>";
+        println!("Expected key: {}", expected_key);
+
+        assert!(
+            has_any_key,
+            "S3 should contain a key with prefix 'test-prefix/'. Keys: {:?}",
+            s3_keys
+        );
+
+        Ok(())
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[tokio::test]
+    #[ignore = "Pull/merge logic not yet implemented - Bob's local changes are lost during pull"]
+    async fn test_collaborative_workflow_alice_and_bob() -> anyhow::Result<()> {
+        use dialog_storage::{AuthMethod, JournaledStorage, RestStorageConfig};
+        use futures_util::stream;
+
+        // Start a shared S3-compatible test server for collaboration
+        let s3_service = dialog_storage::s3_test_server::start().await?;
+
+        // Step 1: Create Alice's replica with her own issuer and backend
+        let alice_issuer = Issuer::from_passphrase("alice");
+        let alice_backend = MemoryStorageBackend::default();
+        let alice_journaled = JournaledStorage::new(alice_backend);
+        let mut alice_replica = Replica::open(alice_issuer.clone(), alice_journaled.clone())
+            .expect("Failed to create Alice's replica");
+
+        // Step 2: Create Bob's replica with his own issuer and backend
+        let bob_issuer = Issuer::from_passphrase("bob");
+        let bob_backend = MemoryStorageBackend::default();
+        let bob_journaled = JournaledStorage::new(bob_backend);
+        let mut bob_replica = Replica::open(bob_issuer.clone(), bob_journaled.clone())
+            .expect("Failed to create Bob's replica");
+
+        // Step 3: Both create a "main" branch
+        let main_id = BranchId::new("main".to_string());
+        let mut alice_main = alice_replica
+            .branches
+            .open(&main_id)
+            .await
+            .expect("Failed to create Alice's main branch");
+
+        let mut bob_main = bob_replica
+            .branches
+            .open(&main_id)
+            .await
+            .expect("Failed to create Bob's main branch");
+
+        // Step 4: Configure shared remote for both replicas
+        // Use AuthMethod::None for testing since InMemoryS3 handles REST requests
+        let remote_config = RestStorageConfig {
+            endpoint: s3_service.endpoint().to_string(),
+            auth_method: AuthMethod::None,
+            bucket: Some("shared-repo".to_string()),
+            key_prefix: Some("collab".to_string()),
+            headers: vec![],
+            timeout_seconds: Some(30),
+        };
+
+        // Alice adds the remote
+        let alice_remote_state = RemoteState {
+            site: "origin".to_string(),
+            address: remote_config.clone(),
+        };
+        let alice_remote = alice_replica
+            .remotes
+            .add(alice_remote_state)
+            .await
+            .expect("Failed to add remote for Alice");
+
+        let alice_remote_branch = alice_remote
+            .open(&main_id)
+            .await
+            .expect("Failed to create Alice's remote branch");
+
+        alice_main
+            .set_upstream(alice_remote_branch)
+            .await
+            .expect("Failed to set Alice's upstream");
+
+        // Step 5: Alice makes changes and pushes
+        let alice_artifact = Artifact {
+            the: "user/name".parse().expect("Invalid attribute"),
+            of: "user:alice".parse().expect("Invalid entity"),
+            is: crate::Value::String("Alice".to_string()),
+            cause: None,
+        };
+
+        let alice_instructions = vec![Instruction::Assert(alice_artifact.clone())];
+        alice_main
+            .commit(stream::iter(alice_instructions))
+            .await
+            .expect("Alice's commit failed");
+
+        let alice_tree_after_commit = alice_main.revision().tree().hash().clone();
+        assert_ne!(alice_tree_after_commit, EMPT_TREE_HASH);
+
+        // Alice pushes her changes
+        alice_main.push().await.expect("Alice's push failed");
+
+        // Verify Alice's changes are in S3
+        let s3_storage = s3_service.storage();
+        let s3_keys_after_alice = s3_storage.list_keys("shared-repo").await;
+
+        assert!(
+            !s3_keys_after_alice.is_empty(),
+            "Alice's changes should be in S3"
+        );
+
+        // Check for the expected branch state key
+        let expected_key = "collab/cmVtb3RlL21haW4="; // base64 of "remote/main"
+        assert!(
+            s3_keys_after_alice.contains(&expected_key.to_string()),
+            "Branch state key should exist in S3 at: {}",
+            expected_key
+        );
+
+        // Step 6: Bob adds the remote and sets upstream (after Alice has pushed)
+        let bob_remote_state = RemoteState {
+            site: "origin".to_string(),
+            address: remote_config,
+        };
+        let bob_remote = bob_replica
+            .remotes
+            .add(bob_remote_state)
+            .await
+            .expect("Failed to add remote for Bob");
+
+        let bob_remote_branch = bob_remote
+            .open(&main_id)
+            .await
+            .expect("Failed to create Bob's remote branch");
+
+        bob_main
+            .set_upstream(bob_remote_branch)
+            .await
+            .expect("Failed to set Bob's upstream");
+
+        // Step 7: Bob makes his own changes locally (without pulling first)
+        let bob_artifact = Artifact {
+            the: "user/email".parse().expect("Invalid attribute"),
+            of: "user:bob".parse().expect("Invalid entity"),
+            is: crate::Value::String("bob@example.com".to_string()),
+            cause: None,
+        };
+
+        let bob_instructions = vec![Instruction::Assert(bob_artifact.clone())];
+        bob_main
+            .commit(stream::iter(bob_instructions))
+            .await
+            .expect("Bob's commit failed");
+
+        let bob_tree_after_commit = bob_main.revision().tree().hash().clone();
+        assert_ne!(bob_tree_after_commit, EMPT_TREE_HASH);
+        assert_ne!(
+            bob_tree_after_commit, alice_tree_after_commit,
+            "Bob and Alice should have different trees before merge"
+        );
+
+        // Step 8: Bob pulls Alice's changes (should merge)
+        let bob_pull_result = bob_main.pull().await.expect("Bob's pull failed");
+        assert!(
+            bob_pull_result.is_some(),
+            "Pull should return a revision after merging"
+        );
+
+        let bob_tree_after_pull = bob_main.revision().tree().hash().clone();
+        assert_ne!(
+            bob_tree_after_pull, bob_tree_after_commit,
+            "Bob's tree should change after pull"
+        );
+        assert_ne!(
+            bob_tree_after_pull, alice_tree_after_commit,
+            "Bob's tree should be different from Alice's (it includes both changes)"
+        );
+
+        // Step 9: Verify Bob has both Alice's and his own changes
+        use crate::artifacts::ArtifactStore;
+
+        // Check for Alice's artifact
+        let alice_selector = ArtifactSelector::new()
+            .the("user/name".parse().unwrap())
+            .of("user:alice".parse().unwrap());
+        let alice_facts: Vec<_> = bob_main
+            .select(alice_selector.clone())
+            .try_collect()
+            .await
+            .expect("Failed to query Alice's facts");
+        assert_eq!(
+            alice_facts.len(),
+            1,
+            "Bob should have Alice's artifact after pull"
+        );
+
+        // Check for Bob's artifact
+        let bob_selector = ArtifactSelector::new()
+            .the("user/email".parse().unwrap())
+            .of("user:bob".parse().unwrap());
+        let bob_facts: Vec<_> = bob_main
+            .select(bob_selector.clone())
+            .try_collect()
+            .await
+            .expect("Failed to query Bob's facts");
+        assert_eq!(
+            bob_facts.len(),
+            1,
+            "Bob should have his own artifact after pull"
+        );
+
+        // Step 10: Bob pushes the merged state
+        bob_main.push().await.expect("Bob's push failed");
+
+        let s3_keys_after_bob_push = s3_storage.list_keys("shared-repo").await;
+        assert!(
+            s3_keys_after_bob_push.len() >= s3_keys_after_alice.len(),
+            "More tree nodes should be in S3 after Bob's push"
+        );
+
+        // Step 11: Alice pulls Bob's changes
+        let alice_pull_result = alice_main.pull().await.expect("Alice's pull failed");
+        assert!(
+            alice_pull_result.is_some(),
+            "Alice should receive updates from Bob's push"
+        );
+
+        let alice_tree_after_pull = alice_main.revision().tree().hash().clone();
+
+        // Step 12: Verify both Alice and Bob have the same final revision
+        assert_eq!(
+            alice_tree_after_pull, bob_tree_after_pull,
+            "Alice and Bob should have identical trees after sync"
+        );
+
+        // Step 13: Verify Alice has both her own and Bob's changes
+        let alice_facts_check: Vec<_> = alice_main
+            .select(alice_selector)
+            .try_collect()
+            .await
+            .expect("Failed to query Alice's facts");
+        assert_eq!(
+            alice_facts_check.len(),
+            1,
+            "Alice should still have her own artifact"
+        );
+
+        let bob_facts_check: Vec<_> = alice_main
+            .select(bob_selector)
+            .try_collect()
+            .await
+            .expect("Failed to query Bob's facts");
+        assert_eq!(
+            bob_facts_check.len(),
+            1,
+            "Alice should have Bob's artifact after pull"
+        );
+
+        // Final verification: Both replicas are in sync
+        let alice_final_revision = alice_main.revision();
+        let bob_final_revision = bob_main.revision();
+        assert_eq!(
+            alice_final_revision.tree().hash(),
+            bob_final_revision.tree().hash(),
+            "Final revisions should be identical"
+        );
+
+        println!("✓ Collaborative workflow complete:");
+        println!("  - Alice and Bob both contributed changes");
+        println!("  - Changes were merged via pull");
+        println!("  - Both replicas synchronized to same final state");
 
         Ok(())
     }

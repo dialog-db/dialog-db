@@ -1791,6 +1791,82 @@ mod local_s3_tests {
     const ALICE: &str = "did:key:z6Mkk89bC3JrVqKie71YEcc5M1SMVxuCgNx6zLZ8SYJsxALi";
 
     #[tokio::test]
+    async fn test_local_s3_typed_store_with_path() -> anyhow::Result<()> {
+        use crate::CborEncoder;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        struct TestData {
+            value: String,
+        }
+
+        let service = s3::start().await?;
+
+        let config = RestStorageConfig {
+            endpoint: service.endpoint().into(),
+            auth_method: AuthMethod::None,
+            bucket: Some("test-bucket".to_string()),
+            key_prefix: Some("test-prefix".to_string()),
+            ..Default::default()
+        };
+
+        // Create a typed store with path (like RemoteBranch does)
+        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+
+        // Wrap in layers like platform.rs does
+        struct ErrorMappingBackend<B> {
+            inner: B,
+        }
+
+        impl<B> Clone for ErrorMappingBackend<B> where B: Clone {
+            fn clone(&self) -> Self {
+                Self { inner: self.inner.clone() }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl<B: StorageBackend<Key=Vec<u8>, Value=Vec<u8>> + Send + Sync> StorageBackend for ErrorMappingBackend<B>
+        where
+            B::Resource: Send,
+            B::Error: Send,
+        {
+            type Key = Vec<u8>;
+            type Value = Vec<u8>;
+            type Resource = B::Resource;
+            type Error = B::Error;
+
+            async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+                self.inner.set(key, value).await
+            }
+
+            async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+                self.inner.get(key).await
+            }
+
+            async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
+                self.inner.open(key).await
+            }
+        }
+
+        let wrapped = ErrorMappingBackend { inner: backend };
+
+        // TODO: Add Storage layer with path and TypedStore
+        // For now just test that basic Resource works
+
+        let mut resource = wrapped.open(&b"test-key".to_vec()).await?;
+        assert_eq!(resource.content(), &None);
+
+        let value = b"test-value".to_vec();
+        resource.replace(Some(value.clone())).await?;
+
+        // Check it was written
+        let keys = service.storage().list_keys("test-bucket").await;
+        assert!(!keys.is_empty(), "Should have written to S3");
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_local_s3_atomic_swap_ok() -> anyhow::Result<()> {
         let service = s3::start().await?;
 
