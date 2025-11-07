@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 
 use crate::{DialogStorageError, StorageSource};
 
-use super::{Resource, StorageBackend, TransactionalMemoryBackend};
+use super::{StorageBackend, TransactionalMemoryBackend};
 
 /// A trivial implementation of [StorageBackend] - backed by a [HashMap] - where
 /// all values are kept in memory and never persisted.
@@ -22,79 +22,6 @@ where
 }
 
 /// A resource handle for a specific entry in [MemoryStorageBackend]
-#[derive(Debug, Clone)]
-pub struct MemoryResource<Key, Value>
-where
-    Key: Eq + std::hash::Hash + Clone,
-    Value: Clone,
-{
-    entries: Arc<RwLock<HashMap<Key, Value>>>,
-    key: Key,
-    content: Option<Value>,
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Key, Value> Resource for MemoryResource<Key, Value>
-where
-    Key: Clone + Eq + std::hash::Hash + ConditionalSync,
-    Value: Clone + ConditionalSync + PartialEq,
-{
-    type Value = Value;
-    type Error = DialogStorageError;
-
-    fn content(&self) -> &Option<Self::Value> {
-        &self.content
-    }
-
-    fn into_content(self) -> Option<Self::Value> {
-        self.content
-    }
-
-    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
-        let entries = self.entries.read().await;
-        let prior = self.content.clone();
-        if let Some(value) = entries.get(&self.key) {
-            self.content = Some(value.clone());
-        } else {
-            self.content = None;
-        }
-        Ok(prior)
-    }
-
-    async fn replace(
-        &mut self,
-        value: Option<Self::Value>,
-    ) -> Result<Option<Self::Value>, Self::Error> {
-        let mut entries = self.entries.write().await;
-
-        // Get current value from storage
-        let current_value = entries.get(&self.key).cloned();
-
-        // Check CAS condition - value must match what we loaded
-        if current_value != self.content {
-            return Err(DialogStorageError::StorageBackend(
-                "CAS condition failed: value has changed".to_string(),
-            ));
-        }
-
-        let prior = self.content.clone();
-
-        // Perform the operation
-        match value {
-            Some(new_value) => {
-                entries.insert(self.key.clone(), new_value.clone());
-                self.content = Some(new_value);
-            }
-            None => {
-                entries.remove(&self.key);
-                self.content = None;
-            }
-        }
-
-        Ok(prior)
-    }
-}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -105,7 +32,6 @@ where
 {
     type Key = Key;
     type Value = Value;
-    type Resource = MemoryResource<Key, Value>;
     type Error = DialogStorageError;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -117,16 +43,6 @@ where
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         let entries = self.entries.read().await;
         Ok(entries.get(key).cloned())
-    }
-
-    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-        let entries = self.entries.read().await;
-        let content = entries.get(key).cloned();
-        Ok(MemoryResource {
-            entries: self.entries.clone(),
-            key: key.clone(),
-            content,
-        })
     }
 }
 
@@ -246,7 +162,7 @@ mod tests {
         let value = b"test_value".to_vec();
 
         // Open TransactionalMemory for non-existent key
-        let memory = TransactionalMemory::open(key.clone(), &backend)
+        let mut memory = TransactionalMemory::open(key.clone(), &backend)
             .await
             .unwrap();
         assert_eq!(memory.read(), None, "Memory should start with None");
@@ -272,7 +188,7 @@ mod tests {
         backend.set(key.clone(), value1.clone()).await.unwrap();
 
         // Open TransactionalMemory with existing value
-        let memory = TransactionalMemory::open(key.clone(), &backend)
+        let mut memory = TransactionalMemory::open(key.clone(), &backend)
             .await
             .unwrap();
         assert_eq!(
@@ -302,7 +218,7 @@ mod tests {
         backend.set(key.clone(), value1.clone()).await.unwrap();
 
         // Open TransactionalMemory (captures value1)
-        let memory = TransactionalMemory::open(key.clone(), &backend)
+        let mut memory = TransactionalMemory::open(key.clone(), &backend)
             .await
             .unwrap();
 
@@ -341,7 +257,7 @@ mod tests {
             .unwrap();
 
         // Open TransactionalMemory (captures expected_old)
-        let memory = TransactionalMemory::open(key.clone(), &backend)
+        let mut memory = TransactionalMemory::open(key.clone(), &backend)
             .await
             .unwrap();
 
@@ -378,7 +294,7 @@ mod tests {
         let value2 = b"value2".to_vec();
 
         // Open TransactionalMemory for non-existent key (captures None)
-        let memory = TransactionalMemory::open(key.clone(), &backend)
+        let mut memory = TransactionalMemory::open(key.clone(), &backend)
             .await
             .unwrap();
 
@@ -415,7 +331,7 @@ mod tests {
         backend.set(key.clone(), value.clone()).await.unwrap();
 
         // Open TransactionalMemory and delete with CAS condition
-        let memory = TransactionalMemory::open(key.clone(), &backend)
+        let mut memory = TransactionalMemory::open(key.clone(), &backend)
             .await
             .unwrap();
         assert_eq!(memory.read(), Some(value), "Memory should have value");
@@ -453,7 +369,7 @@ mod tests {
         backend.set(key.clone(), value1.clone()).await.unwrap();
 
         // Open first TransactionalMemory
-        let memory1 = TransactionalMemory::open(key.clone(), &backend)
+        let mut memory1 = TransactionalMemory::open(key.clone(), &backend)
             .await
             .unwrap();
         assert_eq!(
@@ -463,7 +379,7 @@ mod tests {
         );
 
         // Clone to create memory2 - shares the same state
-        let memory2 = memory1.clone();
+        let mut memory2 = memory1.clone();
         assert_eq!(
             memory2.read(),
             Some(value1.clone()),

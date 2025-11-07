@@ -40,18 +40,11 @@ pub trait StorageBackend: Clone {
     type Value: ConditionalSend;
     /// The error type produced by this [StorageBackend]
     type Error: Into<DialogStorageError>;
-    /// Resource for a specific entry in this [StorageBackend] that can be used
-    /// to read / write value at a given key.
-    type Resource: Resource<Value = Self::Value, Error = Self::Error>;
 
     /// Store the given value against the given key
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error>;
     /// Retrieve a value (if any) stored against the given key
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error>;
-
-    /// Opens a resource under the given key that can be used to read and write
-    /// corresponding value.
-    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error>;
 }
 
 /// A [TransactionalMemoryBackend] provides compare-and-swap (CAS) semantics
@@ -89,57 +82,6 @@ pub trait TransactionalMemoryBackend: Clone {
         edition: Option<&Self::Edition>,
         content: Option<Self::Value>,
     ) -> Result<Option<Self::Edition>, Self::Error>;
-}
-
-/// A [Resource] is a cursor for some entry in the underlying [StorageBackend]
-/// that can be used to read / write values with a compare and swap semantics.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait Resource: ConditionalSend + ConditionalSync + Clone {
-    /// The type of value stored in this resource.
-    type Value: ConditionalSend;
-    /// The type of error that can occur when working with this resource.
-    type Error: ConditionalSend;
-
-    /// Returns a reference to the content of this resource.
-    fn content(&self) -> &Option<Self::Value>;
-
-    /// Consumes the resource and returning content from the most recent load.
-    fn into_content(self) -> Option<Self::Value>;
-
-    /// Reloads the content of this resource and returns last content it had
-    /// before the reload.
-    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error>;
-
-    /// Replaces the content of this resource, returning the old content.
-    /// Operation fails if the content of the resource has changed since the
-    /// resource was open or reloaded.
-    async fn replace(
-        &mut self,
-        value: Option<Self::Value>,
-    ) -> Result<Option<Self::Value>, Self::Error>;
-
-    /// Replaces the content of the resource with a new one computed from `f`,
-    /// returning the old content. Given `f` may be called multiple times, first
-    /// optimistic replace is attempted but if content has changed resource
-    /// content is reloaded and `f` is called again on the new content to retry
-    /// replacement. Implementation chooses a retry strategy as in how many
-    /// times it will retry before failing.
-    async fn replace_with<F>(&mut self, f: F) -> Result<Option<Self::Value>, Self::Error>
-    where
-        F: Fn(&Option<Self::Value>) -> Option<Self::Value> + ConditionalSend,
-    {
-        // perform optimistic update first
-        match self.replace(f(self.content())).await {
-            Ok(prior) => Ok(prior),
-            Err(_) => {
-                // if optimistic update failed, reload and retry
-                let content = self.reload().await?;
-                self.replace(f(self.content())).await?;
-                Ok(content)
-            }
-        }
-    }
 }
 
 /// An [AtomicStorageBackend] is a facade over some generalized storage
@@ -182,7 +124,6 @@ where
 {
     type Key = T::Key;
     type Value = T::Value;
-    type Resource = T::Resource;
     type Error = T::Error;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -191,10 +132,6 @@ where
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         (*self).get(key).await
-    }
-
-    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-        (**self).open(key).await
     }
 }
 
@@ -209,11 +146,11 @@ where
     type Error = T::Error;
     type Edition = T::Edition;
 
-    async fn acquire(
+    async fn resolve(
         &self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
-        (**self).acquire(address).await
+        (**self).resolve(address).await
     }
 
     async fn replace(
@@ -234,7 +171,6 @@ where
 {
     type Key = T::Key;
     type Value = T::Value;
-    type Resource = T::Resource;
     type Error = T::Error;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -245,11 +181,6 @@ where
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         let inner = self.lock().await;
         inner.get(key).await
-    }
-
-    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-        let inner = self.lock().await;
-        inner.open(key).await
     }
 }
 
@@ -264,12 +195,12 @@ where
     type Error = T::Error;
     type Edition = T::Edition;
 
-    async fn acquire(
+    async fn resolve(
         &self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
         let inner = self.lock().await;
-        inner.acquire(address).await
+        inner.resolve(address).await
     }
 
     async fn replace(

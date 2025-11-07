@@ -14,8 +14,8 @@ mod s3_signer;
 use s3_signer::{Access, Credentials};
 
 use crate::{
-    DialogStorageError, Resource, StorageBackend, StorageSink, StorageSource,
-    TransactionalMemoryBackend, storage::backend::rest::s3_signer::Authorization,
+    DialogStorageError, StorageBackend, StorageSink, StorageSource, TransactionalMemoryBackend,
+    storage::backend::rest::s3_signer::Authorization,
 };
 
 /// S3-safe key encoding that preserves path structure.
@@ -671,212 +671,6 @@ where
 }
 
 /// A resource handle for a specific entry in [RestStorageBackend]
-#[derive(Debug, Clone)]
-pub struct RestResource<Key, Value>
-where
-    Key: AsRef<[u8]> + Clone + ConditionalSync,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-{
-    backend: RestStorageBackend<Key, Value>,
-    key: Key,
-    content: Option<Value>,
-    etag: Option<String>,
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Key, Value> Resource for RestResource<Key, Value>
-where
-    Key: AsRef<[u8]> + Clone + ConditionalSync,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-{
-    type Value = Value;
-    type Error = RestStorageBackendError;
-
-    fn content(&self) -> &Option<Self::Value> {
-        &self.content
-    }
-
-    fn into_content(self) -> Option<Self::Value> {
-        self.content
-    }
-
-    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
-        let prior = self.content.clone();
-
-        let request = self.backend.prepare_get_request(self.key.as_ref())?;
-        let response = request.send().await?;
-
-        match response.status() {
-            status if status.is_success() => {
-                // Extract ETag from response headers
-                self.etag = response
-                    .headers()
-                    .get("etag")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string());
-
-                let bytes = response.bytes().await?;
-                self.content = Some(Value::from(bytes.to_vec()));
-            }
-            reqwest::StatusCode::NOT_FOUND => {
-                self.content = None;
-                self.etag = None;
-            }
-            status => {
-                return Err(RestStorageBackendError::OperationFailed(format!(
-                    "Failed to reload value. Status: {status}"
-                )));
-            }
-        }
-
-        Ok(prior)
-    }
-
-    async fn replace(
-        &mut self,
-        value: Option<Self::Value>,
-    ) -> Result<Option<Self::Value>, Self::Error> {
-        // Prepare request - DELETE if value is None, PUT if Some
-        let mut request = match &value {
-            Some(v) => self
-                .backend
-                .prepare_put_request(self.key.as_ref(), v.as_ref())?,
-            None => self.backend.prepare_delete_request(self.key.as_ref())?,
-        };
-
-        // Add precondition headers based on current ETag
-        // Note: ETags must be quoted in If-Match headers per HTTP spec
-        request = match &self.etag {
-            Some(etag) => {
-                let quoted_etag = format!("\"{}\"", etag);
-                request.header("If-Match", quoted_etag)
-            }
-            None => request.header("If-None-Match", "*"),
-        };
-
-        let response = request.send().await?;
-
-        if response.status().is_success() {
-            let prior = self.content.clone();
-
-            // Update ETag from response if available
-            // ETags in HTTP responses are quoted, so we need to strip the quotes
-            self.etag = response
-                .headers()
-                .get("etag")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim_matches('"').to_string());
-
-            self.content = value;
-            return Ok(prior);
-        }
-
-        // If precondition failed, we should fetch the latest version so we can
-        // report actual value if it is different or retry with a different
-        // etag if same, which may happen if multipart upload was used.
-        if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
-            // Fetch latest revision to see if it has changed
-            let request = self.backend.prepare_get_request(self.key.as_ref())?;
-            let latest = request.send().await?;
-            // ETags in HTTP responses are quoted, so we need to strip the quotes
-            let etag = latest
-                .headers()
-                .get("etag")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim_matches('"').to_string());
-            let status = latest.status();
-
-            // If key is not found we just need to set If-None-Match: *
-            let actual = if status == reqwest::StatusCode::NOT_FOUND {
-                None
-            }
-            // If fetching latest was successful, read the value
-            else if status.is_success() {
-                Some(latest.bytes().await?)
-            } else {
-                return Err(RestStorageBackendError::RequestFailed(format!(
-                    "Failed to fetch object after put with precondition was rejected: {}",
-                    response.status()
-                )));
-            };
-
-            // Check if value actually changed or just ETag differs (multipart upload edge case)
-            let actual_matches_expected = match (&self.content, &actual) {
-                (Some(expected), Some(actual_bytes)) => expected.as_ref() == actual_bytes.as_ref(),
-                (None, None) => true,
-                _ => false,
-            };
-
-            if !actual_matches_expected {
-                // Value actually changed - CAS failed
-                use base58::ToBase58;
-                let error_msg = match (&self.content, &actual) {
-                    (Some(expected), Some(actual_bytes)) => format!(
-                        "CAS condition failed: value mismatch. Expected {} but found {}",
-                        ToBase58::to_base58(expected.as_ref()),
-                        ToBase58::to_base58(actual_bytes.as_ref())
-                    ),
-                    (Some(expected), None) => format!(
-                        "CAS condition failed: expected value {} but key not found",
-                        ToBase58::to_base58(expected.as_ref())
-                    ),
-                    (None, Some(actual_bytes)) => format!(
-                        "CAS condition failed: expected key not to exist but found value {}",
-                        ToBase58::to_base58(actual_bytes.as_ref())
-                    ),
-                    (None, None) => "CAS condition failed: unexpected state".to_string(),
-                };
-                return Err(RestStorageBackendError::OperationFailed(error_msg));
-            }
-
-            // Value is the same but ETag differs - retry with correct ETag
-            let mut request = match &value {
-                Some(v) => self
-                    .backend
-                    .prepare_put_request(self.key.as_ref(), v.as_ref())?,
-                None => self.backend.prepare_delete_request(self.key.as_ref())?,
-            };
-            // Note: ETags must be quoted in If-Match headers per HTTP spec
-            request = match &etag {
-                Some(etag_val) => {
-                    let quoted_etag = format!("\"{}\"", etag_val);
-                    request.header("If-Match", quoted_etag)
-                }
-                None => request.header("If-None-Match", "*"),
-            };
-
-            let retry = request.send().await?;
-
-            if !retry.status().is_success() {
-                return Err(RestStorageBackendError::OperationFailed(format!(
-                    "CAS retry failed: {} (used ETag: {:?})",
-                    retry.status(),
-                    etag
-                )));
-            }
-
-            let prior = self.content.clone();
-
-            // Update ETag from retry response
-            // ETags in HTTP responses are quoted, so we need to strip the quotes
-            self.etag = retry
-                .headers()
-                .get("etag")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim_matches('"').to_string());
-
-            self.content = value;
-            return Ok(prior);
-        }
-
-        // Other error
-        Err(RestStorageBackendError::OperationFailed(format!(
-            "Replace operation failed: {}",
-            response.status()
-        )))
-    }
-}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -887,7 +681,6 @@ where
 {
     type Key = Key;
     type Value = Value;
-    type Resource = RestResource<Key, Value>;
     type Error = RestStorageBackendError;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -918,42 +711,6 @@ where
             reqwest::StatusCode::NOT_FOUND => Ok(None),
             status => Err(RestStorageBackendError::OperationFailed(format!(
                 "Failed to get value. Status: {status}"
-            ))),
-        }
-    }
-
-    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-        let request = self.prepare_get_request(key.as_ref())?;
-        let response = request.send().await?;
-
-        match response.status() {
-            status if status.is_success() => {
-                // Extract ETag from response headers
-                // ETags in HTTP responses are quoted, so we need to strip the quotes
-                let etag = response
-                    .headers()
-                    .get("etag")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.trim_matches('"').to_string());
-
-                let bytes = response.bytes().await?;
-                let content = Some(Value::from(bytes.to_vec()));
-
-                Ok(RestResource {
-                    backend: self.clone(),
-                    key: key.clone(),
-                    content,
-                    etag,
-                })
-            }
-            reqwest::StatusCode::NOT_FOUND => Ok(RestResource {
-                backend: self.clone(),
-                key: key.clone(),
-                content: None,
-                etag: None,
-            }),
-            status => Err(RestStorageBackendError::OperationFailed(format!(
-                "Failed to open resource. Status: {status}"
             ))),
         }
     }
@@ -2036,12 +1793,10 @@ mod local_s3_tests {
         impl<B: StorageBackend<Key = Vec<u8>, Value = Vec<u8>> + Send + Sync> StorageBackend
             for ErrorMappingBackend<B>
         where
-            B::Resource: Send,
             B::Error: Send,
         {
             type Key = Vec<u8>;
             type Value = Vec<u8>;
-            type Resource = B::Resource;
             type Error = B::Error;
 
             async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -2050,10 +1805,6 @@ mod local_s3_tests {
 
             async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
                 self.inner.get(key).await
-            }
-
-            async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-                self.inner.open(key).await
             }
         }
 
@@ -2087,14 +1838,15 @@ mod local_s3_tests {
 
         let wrapped = ErrorMappingBackend { inner: backend };
 
-        // TODO: Add Storage layer with path and TypedStore
-        // For now just test that basic Resource works
-
-        let mut resource = wrapped.open(&b"test-key".to_vec()).await?;
-        assert_eq!(resource.content(), &None);
+        // Test TransactionalMemory with wrapped backend
+        let key = b"test-key".to_vec();
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &wrapped)
+                .await?;
+        assert_eq!(memory.read(), None);
 
         let value = b"test-value".to_vec();
-        resource.replace(Some(value.clone())).await?;
+        memory.replace(Some(value.clone()), &wrapped).await?;
 
         // Check it was written
         let keys = service.storage().list_keys("test-bucket").await;
@@ -2120,10 +1872,12 @@ mod local_s3_tests {
         let key: Vec<u8> = ALICE.into();
 
         // We try to create new branch record
-        let mut resource = store.open(&key).await?;
-        assert_eq!(resource.content(), &None, "currently there is no record");
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+                .await?;
+        assert_eq!(memory.read(), None, "currently there is no record");
 
-        resource.replace(Some(v1.clone())).await?;
+        memory.replace(Some(v1.clone()), &store).await?;
 
         assert_eq!(
             store.get(&key).await?,
@@ -2132,14 +1886,14 @@ mod local_s3_tests {
         );
 
         assert_eq!(
-            resource.content(),
-            &Some(v1.clone()),
+            memory.read(),
+            Some(v1.clone()),
             "resource content was updated"
         );
 
         let v2: Vec<u8> = "v2".into();
         // We try to update v1 -> v2
-        resource.replace(Some(v2.clone())).await?;
+        memory.replace(Some(v2.clone()), &store).await?;
 
         // assert_eq!(store.get(&key).await?, Some(v2), "resolved to new record");
 
@@ -2162,12 +1916,14 @@ mod local_s3_tests {
         let key: Vec<u8> = ALICE.into();
 
         // Create initial value
-        let mut resource = store.open(&key).await?;
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+                .await?;
 
-        assert_eq!(resource.content(), &None, "have no content yet");
+        assert_eq!(memory.read(), None, "have no content yet");
 
         // write initila value
-        resource.replace(Some(v1.clone())).await?;
+        memory.replace(Some(v1.clone()), &store).await?;
 
         assert_eq!(
             store.get(&key).await?,
@@ -2182,7 +1938,7 @@ mod local_s3_tests {
         store.set(key.clone(), v2.clone()).await?;
 
         // Now try to update based on stale v1 -> v3 (should fail)
-        let result = resource.replace(Some(v3.clone())).await;
+        let result = memory.replace(Some(v3.clone()), &store).await;
 
         assert!(
             matches!(result, Err(RestStorageBackendError::OperationFailed(_))),
@@ -2217,16 +1973,18 @@ mod local_s3_tests {
         // Create value first
         store.set(key.clone(), v1.clone()).await?;
 
-        // Open resource (gets v1)
-        let mut resource = store.open(&key).await?;
-        assert_eq!(resource.content(), &Some(v1.clone()));
+        // Open TransactionalMemory (gets v1)
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+                .await?;
+        assert_eq!(memory.read(), Some(v1.clone()));
 
         // Simulate concurrent deletion by directly deleting from S3
         let delete_request = store.prepare_delete_request(key.as_ref())?;
         delete_request.send().await?;
 
         // Now try to update v1 -> v2 (should fail because key was deleted)
-        let result = resource.replace(Some(v2.clone())).await;
+        let result = memory.replace(Some(v2.clone()), &store).await;
 
         assert!(
             matches!(result, Err(RestStorageBackendError::OperationFailed(_))),
@@ -2250,8 +2008,10 @@ mod local_s3_tests {
         let value: Vec<u8> = b"v1".to_vec();
 
         // when=None and key missing → success
-        let mut resource = store.open(&key).await?;
-        resource.replace(Some(value.clone())).await?;
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+                .await?;
+        memory.replace(Some(value.clone()), &store).await?;
         assert_eq!(store.get(&key).await?, Some(value));
 
         Ok(())
@@ -2277,13 +2037,18 @@ mod local_s3_tests {
         store.set(key.clone(), expected.clone()).await?;
 
         // Open resource (captures expected)
-        let mut resource = store.open(&key).await?;
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+                .await?;
 
         // Simulate concurrent deletion
-        store.open(&key).await?.replace(None).await?;
+        crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+            .await?
+            .replace(None, &store)
+            .await?;
 
         // Try to update with stale ETag
-        let result = resource.replace(Some(new_val)).await;
+        let result = memory.replace(Some(new_val), &store).await;
         assert!(matches!(
             result,
             Err(RestStorageBackendError::OperationFailed(_))
@@ -2310,13 +2075,15 @@ mod local_s3_tests {
 
         // when=None and key exists → fail
         // Open resource for non-existent key (captures None)
-        let mut resource = store.open(&key).await?;
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+                .await?;
 
         // Simulate concurrent creation: someone else creates the key
         store.set(key.clone(), existing.clone()).await?;
 
         // Try to create with CAS condition "must not exist" (should fail because key now exists)
-        let result = resource.replace(Some(new_val)).await;
+        let result = memory.replace(Some(new_val), &store).await;
         assert!(matches!(
             result,
             Err(RestStorageBackendError::OperationFailed(_))
@@ -2345,8 +2112,10 @@ mod local_s3_tests {
         store.set(key.clone(), existing.clone()).await?;
 
         // when=Some and matches existing → success
-        let mut resource = store.open(&key).await?;
-        resource.replace(Some(new_val.clone())).await?;
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+                .await?;
+        memory.replace(Some(new_val.clone()), &store).await?;
         assert_eq!(store.get(&key).await?, Some(new_val));
 
         Ok(())
@@ -2372,13 +2141,15 @@ mod local_s3_tests {
         store.set(key.clone(), existing.clone()).await?;
 
         // Open resource (captures existing)
-        let mut resource = store.open(&key).await?;
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+                .await?;
 
         // Simulate concurrent modification: someone else changes the value
         store.set(key.clone(), wrong_expected.clone()).await?;
 
         // when=Some but doesn't match existing → fail
-        let result = resource.replace(Some(new_val.clone())).await;
+        let result = memory.replace(Some(new_val.clone()), &store).await;
         assert!(matches!(
             result,
             Err(RestStorageBackendError::OperationFailed(_))

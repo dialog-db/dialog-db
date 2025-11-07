@@ -1,6 +1,6 @@
 use crate::DialogStorageError;
 
-use super::{Resource, StorageBackend};
+use super::{StorageBackend};
 use async_trait::async_trait;
 use dialog_common::ConditionalSync;
 use tokio::sync::Mutex;
@@ -47,89 +47,6 @@ where
     }
 }
 
-/// A cached resource that wraps a backend Resource and uses the cache for reads/writes
-#[derive(Clone)]
-pub struct CachedResource<Key, Value, R>
-where
-    Key: Eq + Clone + Hash + ConditionalSync,
-    Value: Clone + ConditionalSync,
-    R: Resource<Value = Value> + ConditionalSync,
-{
-    key: Key,
-    resource: R,
-    cache: Arc<Mutex<SieveCache<Key, Value>>>,
-}
-
-impl<Key, Value, R> std::fmt::Debug for CachedResource<Key, Value, R>
-where
-    Key: Eq + Clone + Hash + ConditionalSync + std::fmt::Debug,
-    Value: Clone + ConditionalSync,
-    R: Resource<Value = Value> + ConditionalSync + std::fmt::Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CachedResource")
-            .field("key", &self.key)
-            .field("resource", &self.resource)
-            .field("cache", &"<SieveCache>")
-            .finish()
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Key, Value, R> Resource for CachedResource<Key, Value, R>
-where
-    Key: Eq + Clone + Hash + ConditionalSync,
-    Value: Clone + ConditionalSync,
-    R: Resource<Value = Value> + ConditionalSync,
-{
-    type Value = Value;
-    type Error = R::Error;
-
-    fn content(&self) -> &Option<Self::Value> {
-        // Delegate to underlying resource for content
-        self.resource.content()
-    }
-
-    fn into_content(self) -> Option<Self::Value> {
-        self.resource.into_content()
-    }
-
-    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
-        // Reload from backend through the wrapped resource
-        let prior = self.resource.reload().await?;
-
-        // Update cache with new content
-        if let Some(value) = self.resource.content() {
-            self.cache
-                .lock()
-                .await
-                .insert(self.key.clone(), value.clone());
-        }
-
-        Ok(prior)
-    }
-
-    async fn replace(
-        &mut self,
-        value: Option<Self::Value>,
-    ) -> Result<Option<Self::Value>, Self::Error> {
-        // Perform the replace on the underlying resource (includes CAS check)
-        let prior = self.resource.replace(value.clone()).await?;
-
-        // Update cache with new value
-        match &value {
-            Some(v) => {
-                self.cache.lock().await.insert(self.key.clone(), v.clone());
-            }
-            None => {
-                // Value was deleted, could remove from cache but SieveCache will handle eviction
-            }
-        }
-
-        Ok(prior)
-    }
-}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -138,11 +55,9 @@ where
     Backend: StorageBackend + ConditionalSync,
     Backend::Key: Eq + Clone + Hash + ConditionalSync,
     Backend::Value: Clone + ConditionalSync,
-    Backend::Resource: ConditionalSync,
 {
     type Key = Backend::Key;
     type Value = Backend::Value;
-    type Resource = CachedResource<Backend::Key, Backend::Value, Backend::Resource>;
     type Error = Backend::Error;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -163,19 +78,4 @@ where
         Ok(None)
     }
 
-    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-        // Open the backend resource and wrap it with caching
-        let resource = self.backend.open(key).await?;
-
-        // Populate cache with current content if available
-        if let Some(value) = resource.content() {
-            self.cache.lock().await.insert(key.clone(), value.clone());
-        }
-
-        Ok(CachedResource {
-            key: key.clone(),
-            resource,
-            cache: self.cache.clone(),
-        })
-    }
 }

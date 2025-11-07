@@ -81,7 +81,6 @@ where
 {
     type Key = Backend::Key;
     type Value = Backend::Value;
-    type Resource = Backend::Resource;
     type Error = Backend::Error;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -91,10 +90,6 @@ where
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         self.backend.get(key).await
     }
-
-    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-        self.backend.open(key).await
-    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -102,7 +97,12 @@ where
 impl<Encoder, Backend> TransactionalMemoryBackend for Storage<Encoder, Backend>
 where
     Encoder: crate::Encoder,
-    Backend: StorageBackend + TransactionalMemoryBackend<Address = <Backend as StorageBackend>::Key, Value = <Backend as StorageBackend>::Value, Error = <Backend as StorageBackend>::Error>,
+    Backend: StorageBackend
+        + TransactionalMemoryBackend<
+            Address = <Backend as StorageBackend>::Key,
+            Value = <Backend as StorageBackend>::Value,
+            Error = <Backend as StorageBackend>::Error,
+        >,
     Self: ConditionalSync,
 {
     type Address = <Backend as StorageBackend>::Key;

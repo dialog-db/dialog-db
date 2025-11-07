@@ -3,7 +3,7 @@ use dialog_common::ConditionalSync;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use super::{Resource, StorageBackend};
+use super::{StorageBackend, TransactionalMemoryBackend};
 
 /// The type of storage operation that was journaled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,60 +347,6 @@ where
     }
 }
 
-/// A resource wrapper that journals reload and replace operations
-#[derive(Debug, Clone)]
-pub struct JournaledResource<Key, R>
-where
-    Key: Clone + ConditionalSync + std::hash::Hash + Eq,
-    R: Resource,
-{
-    key: Key,
-    inner: R,
-    journal: Arc<RwLock<JournalState<Key>>>,
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Key, R> Resource for JournaledResource<Key, R>
-where
-    Key: Clone + ConditionalSync + std::hash::Hash + Eq,
-    R: Resource + ConditionalSync,
-    R::Value: ConditionalSync,
-    R::Error: ConditionalSync,
-{
-    type Value = R::Value;
-    type Error = R::Error;
-
-    fn content(&self) -> &Option<Self::Value> {
-        self.inner.content()
-    }
-
-    fn into_content(self) -> Option<Self::Value> {
-        self.inner.into_content()
-    }
-
-    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
-        // Record the read operation
-        self.journal.write().unwrap().push(JournalEntry {
-            operation: Operation::Read,
-            key: self.key.clone(),
-        });
-        self.inner.reload().await
-    }
-
-    async fn replace(
-        &mut self,
-        value: Option<Self::Value>,
-    ) -> Result<Option<Self::Value>, Self::Error> {
-        // Record the write operation
-        self.journal.write().unwrap().push(JournalEntry {
-            operation: Operation::Write,
-            key: self.key.clone(),
-        });
-        self.inner.replace(value).await
-    }
-}
-
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Backend> StorageBackend for JournaledStorage<Backend>
@@ -408,12 +354,10 @@ where
     Backend: StorageBackend + ConditionalSync,
     Backend::Key: Clone + ConditionalSync + std::hash::Hash + Eq,
     Backend::Value: ConditionalSync,
-    Backend::Resource: ConditionalSync,
     Backend::Error: ConditionalSync,
 {
     type Key = Backend::Key;
     type Value = Backend::Value;
-    type Resource = JournaledResource<Backend::Key, Backend::Resource>;
     type Error = Backend::Error;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -433,14 +377,47 @@ where
         });
         self.backend.get(key).await
     }
+}
 
-    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-        let inner = self.backend.open(key).await?;
-        Ok(JournaledResource {
-            key: key.clone(),
-            inner,
-            journal: self.state.clone(),
-        })
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Backend> TransactionalMemoryBackend for JournaledStorage<Backend>
+where
+    Backend: StorageBackend + TransactionalMemoryBackend<Address = <Backend as StorageBackend>::Key> + ConditionalSync,
+    Backend::Key: Clone + ConditionalSync + std::hash::Hash + Eq,
+    <Backend as TransactionalMemoryBackend>::Value: ConditionalSync,
+    <Backend as TransactionalMemoryBackend>::Edition: ConditionalSync,
+    <Backend as TransactionalMemoryBackend>::Error: ConditionalSync,
+{
+    type Address = Backend::Address;
+    type Value = <Backend as TransactionalMemoryBackend>::Value;
+    type Edition = <Backend as TransactionalMemoryBackend>::Edition;
+    type Error = <Backend as TransactionalMemoryBackend>::Error;
+
+    async fn resolve(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        // Record the read operation
+        self.state.write().unwrap().push(JournalEntry {
+            operation: Operation::Read,
+            key: address.clone(),
+        });
+        self.backend.resolve(address).await
+    }
+
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        // Record the write operation
+        self.state.write().unwrap().push(JournalEntry {
+            operation: Operation::Write,
+            key: address.clone(),
+        });
+        self.backend.replace(address, edition, content).await
     }
 }
 

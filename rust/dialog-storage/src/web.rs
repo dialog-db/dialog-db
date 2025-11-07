@@ -6,57 +6,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::{Blake3Hash, DialogStorageError, Resource, StorageBackend};
-
-/// An "object safe" / dyn-compatible trait that approximates the
-/// [`Resource`] API but for a fixed value type (`Vec<u8>`), and without using
-/// any associated types (which would make the trait dyn-incompatible).
-#[async_trait(?Send)]
-pub trait ObjectSafeResource {
-    /// Returns a reference to the content of this resource.
-    fn content(&self) -> &Option<Vec<u8>>;
-    /// Consumes the resource and returns the content.
-    fn into_content(self: Box<Self>) -> Option<Vec<u8>>;
-    /// Reloads the content of this resource and returns the last content.
-    async fn reload(&mut self) -> Result<Option<Vec<u8>>, DialogStorageError>;
-    /// Replaces the content of this resource, returning the old content.
-    async fn replace(
-        &mut self,
-        value: Option<Vec<u8>>,
-    ) -> Result<Option<Vec<u8>>, DialogStorageError>;
-    /// Clones this resource into a boxed trait object
-    fn clone_box(&self) -> Box<dyn ObjectSafeResource>;
-}
-
-#[async_trait(?Send)]
-impl<R> ObjectSafeResource for R
-where
-    R: Resource<Value = Vec<u8>> + Clone + 'static,
-    R::Error: Into<DialogStorageError>,
-{
-    fn content(&self) -> &Option<Vec<u8>> {
-        Resource::content(self)
-    }
-
-    fn into_content(self: Box<Self>) -> Option<Vec<u8>> {
-        Resource::into_content(*self)
-    }
-
-    async fn reload(&mut self) -> Result<Option<Vec<u8>>, DialogStorageError> {
-        Resource::reload(self).await.map_err(|e| e.into())
-    }
-
-    async fn replace(
-        &mut self,
-        value: Option<Vec<u8>>,
-    ) -> Result<Option<Vec<u8>>, DialogStorageError> {
-        Resource::replace(self, value).await.map_err(|e| e.into())
-    }
-
-    fn clone_box(&self) -> Box<dyn ObjectSafeResource> {
-        Box::new(self.clone())
-    }
-}
+use crate::{Blake3Hash, DialogStorageError, StorageBackend};
 
 /// An "object safe" / dyn-compatible trait that approximates the
 /// [`StorageBackend`] API but for a fixed key and value type ([`Blake3Hash`]
@@ -73,18 +23,12 @@ pub trait ObjectSafeStorageBackend {
     async fn get(&self, key: &Blake3Hash) -> Result<Option<Vec<u8>>, DialogStorageError>;
     /// Store the given value against the given key
     async fn set(&mut self, key: Blake3Hash, value: Vec<u8>) -> Result<(), DialogStorageError>;
-    /// Open a resource for the given key
-    async fn open(
-        &self,
-        key: &Blake3Hash,
-    ) -> Result<Box<dyn ObjectSafeResource>, DialogStorageError>;
 }
 
 #[async_trait(?Send)]
 impl<T> ObjectSafeStorageBackend for T
 where
     T: StorageBackend<Key = Blake3Hash, Value = Vec<u8>>,
-    T::Resource: 'static,
 {
     async fn get(&self, key: &Blake3Hash) -> Result<Option<Vec<u8>>, DialogStorageError> {
         T::get(self, key).await.map_err(|error| error.into())
@@ -93,59 +37,12 @@ where
     async fn set(&mut self, key: Blake3Hash, value: Vec<u8>) -> Result<(), DialogStorageError> {
         T::set(self, key, value).await.map_err(|error| error.into())
     }
-
-    async fn open(
-        &self,
-        key: &Blake3Hash,
-    ) -> Result<Box<dyn ObjectSafeResource>, DialogStorageError> {
-        let resource = T::open(self, key).await.map_err(|error| error.into())?;
-        Ok(Box::new(resource))
-    }
-}
-
-/// A Resource wrapper for the type-erased ObjectSafeResource
-pub struct ObjectSafeResourceWrapper {
-    inner: Box<dyn ObjectSafeResource>,
-}
-
-impl Clone for ObjectSafeResourceWrapper {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone_box(),
-        }
-    }
-}
-
-#[async_trait(?Send)]
-impl Resource for ObjectSafeResourceWrapper {
-    type Value = Vec<u8>;
-    type Error = DialogStorageError;
-
-    fn content(&self) -> &Option<Self::Value> {
-        self.inner.content()
-    }
-
-    fn into_content(self) -> Option<Self::Value> {
-        self.inner.into_content()
-    }
-
-    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
-        self.inner.reload().await
-    }
-
-    async fn replace(
-        &mut self,
-        value: Option<Self::Value>,
-    ) -> Result<Option<Self::Value>, Self::Error> {
-        self.inner.replace(value).await
-    }
 }
 
 #[async_trait(?Send)]
 impl StorageBackend for Arc<Mutex<dyn ObjectSafeStorageBackend>> {
     type Key = Blake3Hash;
     type Value = Vec<u8>;
-    type Resource = ObjectSafeResourceWrapper;
     type Error = DialogStorageError;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -156,11 +53,5 @@ impl StorageBackend for Arc<Mutex<dyn ObjectSafeStorageBackend>> {
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         let inner = self.lock().await;
         inner.get(key).await
-    }
-
-    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-        let inner = self.lock().await;
-        let resource = inner.open(key).await?;
-        Ok(ObjectSafeResourceWrapper { inner: resource })
     }
 }

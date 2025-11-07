@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
 use super::platform::Storage as PlatformStorage;
-use super::platform::{ErrorMappingBackend, PlatformBackend, TypedStore, TypedStoreResource};
+use super::platform::{ErrorMappingBackend, PlatformBackend, TypedStoreResource};
 pub use super::uri::Uri;
 use crate::artifacts::selector::Constrained;
 use crate::artifacts::{
@@ -16,8 +16,6 @@ use async_trait::async_trait;
 use base58::ToBase58;
 use blake3;
 use dialog_common::ConditionalSend;
-#[cfg(test)]
-use dialog_common::ConditionalSync;
 use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Tree};
 #[cfg(not(target_arch = "wasm32"))]
 use futures_util::future::BoxFuture;
@@ -26,8 +24,8 @@ use futures_util::future::LocalBoxFuture;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
 use dialog_storage::{
-    Blake3Hash, CborEncoder, DialogStorageError, Encoder, Resource, RestStorageBackend,
-    RestStorageConfig, StorageBackend,
+    Blake3Hash, CborEncoder, DialogStorageError, Encoder, RestStorageBackend, RestStorageConfig,
+    StorageBackend,
 };
 use ed25519_dalek::ed25519::signature::SignerMut;
 use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, SigningKey, VerifyingKey};
@@ -320,20 +318,25 @@ pub struct Branch<Backend: PlatformBackend + 'static> {
 }
 
 impl<Backend: PlatformBackend + 'static> Branch<Backend> {
-    /// Mounts a typed store for branch state at the appropriate storage location.
-    pub fn mount(storage: &PlatformStorage<Backend>) -> TypedStore<BranchState, Backend> {
-        storage.at("local").mount()
+    async fn mount(
+        id: &BranchId,
+        storage: &PlatformStorage<Backend>,
+    ) -> Result<TypedStoreResource<BranchState, Backend>, ReplicaError> {
+        let key = format!("local/{}", id.to_string());
+        let memory = storage
+            .open::<BranchState>(&key.into())
+            .await
+            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+        Ok(memory)
     }
+    /// Mounts a typed store for branch state at the appropriate storage location.
     /// Loads a branch with a given id or creates one if it does not exist.
     pub async fn open(
         id: &BranchId,
         issuer: Issuer,
         storage: PlatformStorage<Backend>,
     ) -> Result<Branch<Backend>, ReplicaError> {
-        let mut memory = Self::mount(&storage)
-            .open(&id.to_string().into())
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+        let mut memory = Self::mount(id, &storage).await?;
 
         let archive = Archive::new(storage.clone());
 
@@ -353,9 +356,9 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                     Ok(upstream) => {
                         // Configure archive remote if upstream is remote
                         if let Upstream::Remote(ref remote_branch) = upstream {
-                            if let Ok(remote_storage) = remote_branch.remote_storage().await {
-                                archive.set_remote(remote_storage).await;
-                            }
+                            archive
+                                .set_remote(remote_branch.remote_storage.clone())
+                                .await;
                         }
                         Some(Box::new(upstream))
                     }
@@ -384,7 +387,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                 None,
             );
             memory
-                .replace(Some(state.clone()))
+                .replace(Some(state.clone()), &storage)
                 .await
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
@@ -410,11 +413,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         issuer: Issuer,
         storage: PlatformStorage<Backend>,
     ) -> Result<Branch<Backend>, ReplicaError> {
-        let memory = Self::mount(&storage)
-            .open(&id.to_string().into())
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-
+        let memory = Self::mount(id, &storage).await?;
         let archive = Archive::new(storage.clone());
 
         if let Some(state) = memory.content() {
@@ -433,9 +432,9 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                     Ok(upstream) => {
                         // Configure archive remote if upstream is remote
                         if let Upstream::Remote(ref remote_branch) = upstream {
-                            if let Ok(remote_storage) = remote_branch.remote_storage().await {
-                                archive.set_remote(remote_storage).await;
-                            }
+                            archive
+                                .set_remote(remote_branch.remote_storage.clone())
+                                .await;
                         }
                         Some(Box::new(upstream))
                     }
@@ -480,7 +479,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         };
 
         self.memory
-            .replace_with(|_| Some(state.clone()))
+            .replace_with(|_| Some(state.clone()), 5, &self.storage)
             .await
             .map_err(|_| ReplicaError::StorageError("Updating branch failed".into()))?;
 
@@ -529,7 +528,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     }
 
     fn state(&self) -> BranchState {
-        self.memory.content().clone().unwrap_or(self.state.clone())
+        self.memory.content().unwrap_or_else(|| self.state.clone())
     }
     /// Returns the branch identifier.
     pub fn id(&self) -> &BranchId {
@@ -578,7 +577,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
         // update a memory with the latest branch state
         self.memory
-            .replace_with(|_| Some(state.clone()))
+            .replace_with(|_| Some(state.clone()), 5, &self.storage)
             .await
             .map_err(|e| ReplicaError::StorageError(format!("Branch update failed {}", e)))?;
 
@@ -707,8 +706,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         // Configure remote archive if upstream is remote
         match &mut upstream {
             Upstream::Remote(remote) => {
-                let remote_storage = remote.remote_storage().await?;
-                self.archive.set_remote(remote_storage).await;
+                self.archive.set_remote(remote.remote_storage.clone()).await;
             }
             Upstream::Local(_) => {
                 self.archive.clear_remote().await;
@@ -723,7 +721,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
         // Persist the updated state to memory
         self.memory
-            .replace(Some(self.state.clone()))
+            .replace(Some(self.state.clone()), &self.storage)
             .await
             .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
@@ -948,7 +946,7 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
 
             // Save the new state
             self.memory
-                .replace(Some(new_state.clone()))
+                .replace(Some(new_state.clone()), &self.storage)
                 .await
                 .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
 
@@ -1004,32 +1002,38 @@ impl<Backend: PlatformBackend> Remotes<Backend> {
 pub type RemoteBackend = ErrorMappingBackend<RestStorageBackend<Vec<u8>, Vec<u8>>>;
 
 /// Represents a connection to a remote repository.
-#[allow(dead_code)]
 pub struct Remote<Backend: PlatformBackend> {
     state: RemoteState,
     storage: PlatformStorage<Backend>,
     memory: TypedStoreResource<RemoteState, Backend>,
+    connection: PlatformStorage<RemoteBackend>,
 }
 impl<Backend: PlatformBackend> Remote<Backend> {
     pub fn site(&self) -> &Site {
         &self.state.site
     }
-    /// Mounts a typed store for remote state.
-    pub fn mount(storage: PlatformStorage<Backend>) -> TypedStore<RemoteState, Backend> {
-        storage.at("site").mount()
+
+    pub async fn mount(
+        site: &Site,
+        storage: &PlatformStorage<Backend>,
+    ) -> Result<TypedStoreResource<RemoteState, Backend>, ReplicaError> {
+        let address = format!("site/{}", site);
+        let memory = storage
+            .open::<RemoteState>(&address.into_bytes())
+            .await
+            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+
+        Ok(memory)
     }
     /// Loads a remote repository by the site name.
     pub async fn setup(
         site: &Site,
         storage: PlatformStorage<Backend>,
     ) -> Result<Remote<Backend>, ReplicaError> {
-        let memory = Self::mount(storage.clone())
-            .open(&site.to_string().into_bytes().to_vec())
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-
+        let memory = Self::mount(site, &storage).await?;
         if let Some(state) = memory.content().clone() {
             Ok(Remote {
+                connection: state.connect()?,
                 state,
                 memory,
                 storage,
@@ -1046,10 +1050,7 @@ impl<Backend: PlatformBackend> Remote<Backend> {
         state: RemoteState,
         storage: PlatformStorage<Backend>,
     ) -> Result<Remote<Backend>, ReplicaError> {
-        let mut memory = Self::mount(storage.clone())
-            .open(&state.site.as_bytes().to_vec())
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+        let mut memory = Self::mount(&state.site, &storage).await?;
 
         if memory.content().is_some() {
             Err(ReplicaError::RemoteAlreadyExists {
@@ -1061,30 +1062,17 @@ impl<Backend: PlatformBackend> Remote<Backend> {
                 address: state.address,
             };
             memory
-                .replace(Some(state.clone()))
+                .replace(Some(state.clone()), &storage)
                 .await
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
             Ok(Remote {
+                connection: state.connect()?,
                 state,
                 memory,
                 storage,
             })
         }
-    }
-
-    pub fn connect(&self) -> Result<PlatformStorage<RemoteBackend>, ReplicaError> {
-        let backend: RestStorageBackend<Vec<u8>, Vec<u8>> =
-            RestStorageBackend::new(self.state.address.clone()).map_err(|_| {
-                ReplicaError::RemoteConnectionError {
-                    remote: self.state.site.clone(),
-                }
-            })?;
-
-        Ok(PlatformStorage::new(
-            ErrorMappingBackend::new(backend),
-            CborEncoder,
-        ))
     }
 
     /// Opens a branch at this remote
@@ -1104,7 +1092,11 @@ pub struct RemoteBranch<Backend: PlatformBackend> {
     site: Site,
     id: BranchId,
     revision: Option<Revision>,
+
     storage: PlatformStorage<Backend>,
+    /// Remote storage for canonical operations
+    remote_storage: PlatformStorage<RemoteBackend>,
+
     /// Local cache for the revision currently branch has
     cache: TypedStoreResource<Revision, Backend>,
     /// Canonical revision, which is created lazily on fetch.
@@ -1112,22 +1104,29 @@ pub struct RemoteBranch<Backend: PlatformBackend> {
 }
 
 impl<Backend: PlatformBackend> RemoteBranch<Backend> {
-    /// Mounts a typed store for remote branch state.
-    pub fn mount<B: StorageBackend>(storage: &PlatformStorage<B>) -> TypedStore<Revision, B> {
-        storage.at("remote").mount()
+    pub async fn mount(
+        site: &Site,
+        id: &BranchId,
+        storage: &PlatformStorage<Backend>,
+    ) -> Result<TypedStoreResource<Revision, Backend>, ReplicaError> {
+        // Open a localy stored revision for this branch
+        let address = format!("remote/{}/{}", site, id.to_string());
+        let memory = storage
+            .open::<Revision>(&address.into_bytes())
+            .await
+            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+
+        Ok(memory)
     }
+
     /// Loads a remote branch by name.
     pub async fn load(
         site: &Site,
         id: &BranchId,
         storage: PlatformStorage<Backend>,
     ) -> Result<RemoteBranch<Backend>, ReplicaError> {
-        // Open a localy stored revision for this branch
-        let memory = Self::mount(&storage)
-            .open(&id.to_string().into_bytes().to_vec())
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-
+        let memory = Self::mount(site, id, &storage).await?;
+        let remote = Remote::setup(site, storage.clone()).await?;
         if let Some(revision) = memory.content().clone() {
             Ok(Self {
                 site: site.clone(),
@@ -1136,6 +1135,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
                 revision: Some(revision),
                 cache: memory,
                 canonical: None,
+                remote_storage: remote.connection,
             })
         } else {
             Err(ReplicaError::RemoteNotFound {
@@ -1150,10 +1150,8 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         storage: PlatformStorage<Backend>,
     ) -> Result<RemoteBranch<Backend>, ReplicaError> {
         // Open a localy stored revision for this branch
-        let memory = Self::mount(&storage)
-            .open(&id.to_string().into_bytes().to_vec())
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+        let memory = Self::mount(site, id, &storage).await?;
+        let remote = Remote::setup(site, storage.clone()).await?;
 
         Ok(Self {
             site: site.clone(),
@@ -1162,6 +1160,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
             revision: memory.content().clone(),
             cache: memory,
             canonical: None,
+            remote_storage: remote.connection,
         })
     }
 
@@ -1180,21 +1179,16 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         &self.revision
     }
 
-    /// Returns the remote storage for this branch
-    pub async fn remote_storage(&self) -> Result<PlatformStorage<RemoteBackend>, ReplicaError> {
-        let remote = Remote::setup(&self.site, self.storage.clone()).await?;
-        remote.connect()
-    }
-
     pub async fn connect(
         &mut self,
     ) -> Result<&TypedStoreResource<Revision, RemoteBackend>, ReplicaError> {
         if self.canonical.is_none() {
             // Load a remote for this branch
-            let remote = Remote::setup(&self.site, self.storage.clone()).await?;
 
-            let canonical = Self::mount(&remote.connect()?)
-                .open(&self.id.to_string().into_bytes().to_vec())
+            let address = format!("local/{}", self.id);
+            let canonical = self
+                .remote_storage
+                .open::<Revision>(&address.into_bytes())
                 .await
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
@@ -1215,12 +1209,15 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         let canonical = self.canonical.as_mut().expect("connected");
 
         // Force reload from storage to ensure we get fresh data
-        let _ = canonical.reload().await;
+        let _ = canonical.reload(&mut self.remote_storage).await;
 
         let revision = canonical.content().clone();
 
         // update local record for the revision.
-        let _ = self.cache.replace_with(|_| revision.clone()).await;
+        let _ = self
+            .cache
+            .replace_with(|_| revision.clone(), 5, &self.storage)
+            .await;
         self.revision = revision;
 
         Ok(self.revision())
@@ -1237,7 +1234,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         // if revision is different we update
         if canonical.content().as_ref() != Some(&revision) {
             canonical
-                .replace(Some(revision.clone()))
+                .replace(Some(revision.clone()), &mut self.remote_storage)
                 .await
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
         }
@@ -1245,7 +1242,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         // if local state is different we update it also
         if before.as_ref() != Some(&revision) {
             self.cache
-                .replace_with(|_| Some(revision.clone()))
+                .replace_with(|_| Some(revision.clone()), 5, &self.storage)
                 .await
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
@@ -1266,6 +1263,21 @@ pub struct RemoteState {
 
     /// Address used to configure this remote
     address: RestStorageConfig,
+}
+
+impl RemoteState {
+    pub fn connect(&self) -> Result<PlatformStorage<RemoteBackend>, ReplicaError> {
+        let backend = RestStorageBackend::new(self.address.clone()).map_err(|_| {
+            ReplicaError::RemoteConnectionError {
+                remote: self.site.clone(),
+            }
+        })?;
+
+        Ok(PlatformStorage::new(
+            ErrorMappingBackend::new(backend),
+            CborEncoder,
+        ))
+    }
 }
 
 /// Logical timestamp used to denote dialog transactions. It takes inspiration
@@ -1767,8 +1779,6 @@ mod tests {
     ) -> Result<Branch<Backend>, ReplicaError>
     where
         Backend: PlatformBackend + 'static,
-        Backend::Error: ConditionalSync,
-        Backend::Resource: ConditionalSync + ConditionalSend,
     {
         let branch_id = BranchId::new(id.to_string());
         let upstream_branch_id = BranchId::new(upstream_id.to_string());
@@ -1784,7 +1794,7 @@ mod tests {
         // Save the updated state
         branch
             .memory
-            .replace(Some(branch.state.clone()))
+            .replace(Some(branch.state.clone()), &storage)
             .await
             .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
@@ -2147,7 +2157,7 @@ mod tests {
 
         // Verify remote branch record was created with a cached revision
         // The key uses the branch ID as bytes
-        let remote_branch_key = format!("remote/{}", main_id.to_string())
+        let remote_branch_key = format!("remote/{}/{}", remote.site(), main_id.to_string())
             .as_bytes()
             .to_vec();
 
@@ -2156,7 +2166,8 @@ mod tests {
         let was_written = all_written_keys.iter().any(|k| k == &remote_branch_key);
         assert!(
             was_written,
-            "Remote branch key 'remote/{}' should have been written during push. All keys: {:?}",
+            "Remote branch key 'remote/{}/{}' should have been written during push. All keys: {:?}",
+            remote.site(),
             main_id.to_string(),
             all_written_keys
                 .iter()
@@ -2173,10 +2184,7 @@ mod tests {
             s3_keys_after_push
         );
 
-        // Verify the branch state key exists in S3
-        // The key is: key_prefix + "/" + "remote/main"
-        // Since "/" is a safe character, "remote/main" remains as-is
-        let expected_branch_key = "test/remote/main".to_string();
+        let expected_branch_key = "test/local/main".to_string();
         assert!(
             s3_keys_after_push.contains(&expected_branch_key),
             "Branch state key should exist in S3 after push"
@@ -2275,9 +2283,7 @@ mod tests {
 
         // Verify branch state was written to S3
         let s3_keys = s3_service.storage().list_keys("shared-repo").await;
-        // The key is: key_prefix + "/" + "remote/main"
-        // Since "/" is a safe character, "remote/main" remains as-is
-        let expected_key = "collab/remote/main".to_string();
+        let expected_key = "collab/local/main".to_string();
         assert!(
             s3_keys.contains(&expected_key),
             "Branch state should exist in S3"
@@ -2428,7 +2434,7 @@ mod tests {
         // Check for the expected branch state key
         // The key is: key_prefix + "/" + "remote/main"
         // Since "/" is a safe character, "remote/main" remains as-is
-        let expected_key = "collab/remote/main".to_string();
+        let expected_key = "collab/local/main".to_string();
         assert!(
             s3_keys_after_alice.contains(&expected_key),
             "Branch state key should exist in S3 at: {}",

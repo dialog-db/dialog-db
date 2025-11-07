@@ -7,7 +7,7 @@ use wasm_bindgen::{JsCast, JsValue};
 
 use crate::{DialogStorageError, StorageSink};
 
-use super::{Resource, StorageBackend};
+use super::{StorageBackend, TransactionalMemoryBackend};
 
 const INDEXEDDB_STORAGE_VERSION: u32 = 1;
 
@@ -47,124 +47,6 @@ where
     }
 }
 
-/// A resource handle for a specific entry in [IndexedDbStorageBackend]
-#[derive(Clone)]
-pub struct IndexedDbResource<Key, Value>
-where
-    Key: AsRef<[u8]> + Clone,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone,
-{
-    backend: IndexedDbStorageBackend<Key, Value>,
-    key: Key,
-    content: Option<Value>,
-}
-
-#[async_trait(?Send)]
-impl<Key, Value> Resource for IndexedDbResource<Key, Value>
-where
-    Key: AsRef<[u8]> + Clone,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + PartialEq,
-{
-    type Value = Value;
-    type Error = DialogStorageError;
-
-    fn content(&self) -> &Option<Self::Value> {
-        &self.content
-    }
-
-    fn into_content(self) -> Option<Self::Value> {
-        self.content
-    }
-
-    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
-        let prior = self.content.clone();
-
-        let tx = self
-            .backend
-            .db
-            .transaction(&[&self.backend.store_name], TransactionMode::ReadOnly)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-        let store = tx
-            .store(&self.backend.store_name)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-        let key_array = bytes_to_typed_array(self.key.as_ref());
-        let result = store
-            .get(key_array)
-            .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-        self.content = result.map(|js_val| parse_value_only(js_val)).transpose()?;
-
-        Ok(prior)
-    }
-
-    async fn replace(
-        &mut self,
-        value: Option<Self::Value>,
-    ) -> Result<Option<Self::Value>, Self::Error> {
-        // Use a transaction for atomic read-check-write
-        let tx = self
-            .backend
-            .db
-            .transaction(&[&self.backend.store_name], TransactionMode::ReadWrite)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-        let store = tx
-            .store(&self.backend.store_name)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-        let key_array = bytes_to_typed_array(self.key.as_ref());
-
-        // Read current value and version in transaction
-        let current_js = store
-            .get(key_array.clone())
-            .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-        let (current_value, current_version) = if let Some(js_val) = current_js {
-            let (val, ver) = parse_versioned_value(js_val)?;
-            (Some(val), ver)
-        } else {
-            (None, 0)
-        };
-
-        // Check CAS condition - current must match what we expect
-        if current_value != self.content {
-            return Err(DialogStorageError::StorageBackend(
-                "CAS condition failed: value has changed".to_string(),
-            ));
-        }
-
-        let prior = self.content.clone();
-
-        // Perform the write or delete
-        match &value {
-            Some(new_value) => {
-                let new_version = current_version + 1;
-                let versioned_value = create_versioned_value(new_value.as_ref(), new_version)?;
-                store
-                    .put(&versioned_value, Some(&key_array))
-                    .await
-                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-            }
-            None => {
-                store
-                    .delete(key_array)
-                    .await
-                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-            }
-        }
-
-        // Commit transaction
-        tx.done()
-            .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-        self.content = value;
-        Ok(prior)
-    }
-}
-
 #[async_trait(?Send)]
 impl<Key, Value> StorageBackend for IndexedDbStorageBackend<Key, Value>
 where
@@ -173,7 +55,6 @@ where
 {
     type Key = Key;
     type Value = Value;
-    type Resource = IndexedDbResource<Key, Value>;
     type Error = DialogStorageError;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -241,30 +122,6 @@ where
 
         Ok(Some(value))
     }
-
-    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-        let tx = self
-            .db
-            .transaction(&[&self.store_name], TransactionMode::ReadOnly)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-        let store = tx
-            .store(&self.store_name)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-        let key_array = bytes_to_typed_array(key.as_ref());
-
-        let result = store
-            .get(key_array)
-            .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-        let content = result.map(|js_val| parse_value_only(js_val)).transpose()?;
-
-        Ok(IndexedDbResource {
-            backend: self.clone(),
-            key: key.clone(),
-            content,
-        })
-    }
 }
 
 #[async_trait(?Send)]
@@ -278,7 +135,7 @@ where
     type Error = DialogStorageError;
     type Edition = u64;
 
-    async fn acquire(
+    async fn resolve(
         &self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
@@ -534,7 +391,9 @@ mod tests {
         let value = b"test_value".to_vec();
 
         // Open TransactionalMemory for non-existent key
-        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
+        let mut memory = TransactionalMemory::open(key.clone(), &backend)
+            .await
+            .unwrap();
         assert_eq!(memory.read(), None, "Memory should start with None");
 
         // Create new entry
@@ -561,7 +420,9 @@ mod tests {
         backend.set(key.clone(), value1.clone()).await.unwrap();
 
         // Open TransactionalMemory with existing value
-        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
+        let mut memory = TransactionalMemory::open(key.clone(), &backend)
+            .await
+            .unwrap();
         assert_eq!(
             memory.read(),
             Some(value1.clone()),
@@ -573,7 +434,7 @@ mod tests {
         assert!(result.is_ok(), "Should update with correct CAS condition");
 
         // Verify updated value
-        let stored = TransactionalMemory::open(key, &backend).await.unwrap();
+        let mut stored = TransactionalMemory::open(key, &backend).await.unwrap();
         assert_eq!(stored.read(), Some(value2));
     }
 
@@ -592,7 +453,9 @@ mod tests {
         backend.set(key.clone(), value1.clone()).await.unwrap();
 
         // Open TransactionalMemory (captures value1)
-        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
+        let mut memory = TransactionalMemory::open(key.clone(), &backend)
+            .await
+            .unwrap();
 
         // Simulate concurrent modification: backend gets updated
         let wrong_value = b"wrong".to_vec();
@@ -610,7 +473,7 @@ mod tests {
         );
 
         // Verify value is the concurrent modification
-        let stored = TransactionalMemory::open(key, &backend).await.unwrap();
+        let mut stored = TransactionalMemory::open(key, &backend).await.unwrap();
         assert_eq!(stored.read(), Some(wrong_value));
     }
 
@@ -632,7 +495,9 @@ mod tests {
             .unwrap();
 
         // Open TransactionalMemory (captures expected_old)
-        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
+        let mut memory = TransactionalMemory::open(key.clone(), &backend)
+            .await
+            .unwrap();
 
         // Simulate concurrent deletion by directly accessing the database
         let tx = backend
@@ -645,7 +510,7 @@ mod tests {
         tx.commit().await.unwrap();
 
         // Try to update - should fail because key was deleted
-        let result = memory.replace(Some(value), &backend).await;
+        let mut result = memory.replace(Some(value), &backend).await;
         assert!(
             result.is_err(),
             "Should fail when key was concurrently deleted"
@@ -671,7 +536,9 @@ mod tests {
         let value2 = b"value2".to_vec();
 
         // Open TransactionalMemory for non-existent key (captures None)
-        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
+        let mut memory = TransactionalMemory::open(key.clone(), &backend)
+            .await
+            .unwrap();
 
         // Simulate concurrent creation: someone else creates the key
         backend.set(key.clone(), value1.clone()).await.unwrap();
@@ -709,12 +576,10 @@ mod tests {
         backend.set(key.clone(), value.clone()).await.unwrap();
 
         // Open TransactionalMemory and delete with CAS condition
-        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
-        assert_eq!(
-            memory.read(),
-            Some(value),
-            "Memory should have value"
-        );
+        let mut memory = TransactionalMemory::open(key.clone(), &backend)
+            .await
+            .unwrap();
+        assert_eq!(memory.read(), Some(value), "Memory should have value");
 
         let result = memory.replace(None, &backend).await;
         assert!(result.is_ok(), "Should delete with correct CAS condition");
@@ -755,26 +620,58 @@ mod tests {
         backend.set(key.clone(), value1.clone()).await.unwrap();
 
         // Open first TransactionalMemory
-        let memory1 = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
-        assert_eq!(memory1.read(), Some(value1.clone()), "memory1 should have value1");
+        let mut memory1 = TransactionalMemory::open(key.clone(), &backend)
+            .await
+            .unwrap();
+        assert_eq!(
+            memory1.read(),
+            Some(value1.clone()),
+            "memory1 should have value1"
+        );
 
         // Clone to create memory2 - shares the same state
-        let memory2 = memory1.clone();
-        assert_eq!(memory2.read(), Some(value1.clone()), "memory2 should have value1");
+        let mut memory2 = memory1.clone();
+        assert_eq!(
+            memory2.read(),
+            Some(value1.clone()),
+            "memory2 should have value1"
+        );
 
         // Update through memory1
-        memory1.replace(Some(value2.clone()), &backend).await.unwrap();
+        memory1
+            .replace(Some(value2.clone()), &backend)
+            .await
+            .unwrap();
 
         // Verify both memory1 and memory2 see the update
-        assert_eq!(memory1.read(), Some(value2.clone()), "memory1 should see value2");
-        assert_eq!(memory2.read(), Some(value2.clone()), "memory2 should see value2 (shared state)");
+        assert_eq!(
+            memory1.read(),
+            Some(value2.clone()),
+            "memory1 should see value2"
+        );
+        assert_eq!(
+            memory2.read(),
+            Some(value2.clone()),
+            "memory2 should see value2 (shared state)"
+        );
 
         // Update through memory2
         let value3 = b"value3".to_vec();
-        memory2.replace(Some(value3.clone()), &backend).await.unwrap();
+        memory2
+            .replace(Some(value3.clone()), &backend)
+            .await
+            .unwrap();
 
         // Verify both see the update
-        assert_eq!(memory1.read(), Some(value3.clone()), "memory1 should see value3 (shared state)");
-        assert_eq!(memory2.read(), Some(value3.clone()), "memory2 should see value3");
+        assert_eq!(
+            memory1.read(),
+            Some(value3.clone()),
+            "memory1 should see value3 (shared state)"
+        );
+        assert_eq!(
+            memory2.read(),
+            Some(value3.clone()),
+            "memory2 should see value3"
+        );
     }
 }

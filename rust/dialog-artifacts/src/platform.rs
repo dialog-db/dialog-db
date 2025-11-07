@@ -1,11 +1,15 @@
 #![allow(missing_docs)]
 
 use std::fmt::Debug;
+use std::sync::Arc;
 
 use crate::replica::{BranchId, Revision, Site};
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_storage::{CborEncoder, DialogStorageError, Encoder, Resource, StorageBackend};
+use dialog_storage::{
+    CborEncoder, DialogStorageError, Encoder, State, StorageBackend, TransactionalMemoryBackend,
+    TypedState, TypedTransactionalMemory,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
@@ -47,117 +51,6 @@ pub enum FetchError {
     NetworkError { branch: BranchId, cause: String },
 }
 
-/// A journal manages revision history for a branch across canonical and cached storage.
-#[allow(dead_code)]
-pub struct Journal<Canonical: Resource<Value = Vec<u8>>, Cache: Resource<Value = Vec<u8>>> {
-    branch: BranchId,
-    canonical: Canonical,
-    cache: Cache,
-}
-
-impl<
-    Canonical: Resource<Value = Vec<u8>, Error = JournalError> + ConditionalSync,
-    Cache: Resource<Value = Vec<u8>, Error = JournalError> + ConditionalSync,
-> Journal<Canonical, Cache>
-{
-    /// resolves current known revision for this branch
-    #[allow(dead_code)]
-    async fn resolve(&self) -> Result<Option<Revision>, JournalError> {
-        if let Some(content) = self.cache.content() {
-            let revision = CborEncoder.decode(content).await.map_err(|_| {
-                JournalError::ResolveError(ResolveError::DecodeError {
-                    branch: self.branch.clone(),
-                })
-            })?;
-            Ok(Some(revision))
-        } else {
-            Ok(None)
-        }
-    }
-
-    #[allow(dead_code)]
-    async fn fetch(&mut self) -> Result<Option<Revision>, JournalError> {
-        self.canonical.reload().await?;
-        let (revision, content) = if let Some(content) = self.canonical.content() {
-            // we're making sure we can decode a revision
-            let revision: Revision = CborEncoder.decode(content).await.map_err(|_| {
-                JournalError::ResolveError(ResolveError::DecodeError {
-                    branch: self.branch.clone(),
-                })
-            })?;
-
-            (Some(revision), Some(content.clone()))
-        } else {
-            (None, None)
-        };
-
-        // update local cache so that next time we resolve we get the
-        // latest revision we fetched.
-        self.cache.replace_with(|_| content.clone()).await?;
-
-        Ok(revision)
-    }
-
-    #[allow(dead_code)]
-    async fn publish(&mut self, _branch: BranchId, revision: Revision) -> Result<(), JournalError> {
-        let (_, after) = CborEncoder
-            .encode(&revision)
-            .await
-            .map_err(|e| JournalError::EncodeError(e.to_string()))?;
-
-        // Attempt to update canonical record
-        self.canonical.replace(Some(after.clone())).await?;
-        // If canonical was updated update local cache also
-        self.cache.replace_with(|_| Some(after.clone())).await?;
-
-        Ok(())
-    }
-}
-
-/// A store for managing multiple journal instances.
-#[allow(dead_code)]
-pub struct JournalStore<
-    Backend: StorageBackend<Key = String, Value = Vec<u8>>,
-    Cache: StorageBackend<Key = String, Value = Vec<u8>>,
-> {
-    remote: Backend,
-    cache: Cache,
-}
-
-impl<
-    Backend: StorageBackend<Key = String, Value = Vec<u8>, Error = JournalError> + ConditionalSync,
-    Cache: StorageBackend<Key = String, Value = Vec<u8>, Error = JournalError> + ConditionalSync,
-> JournalStore<Backend, Cache>
-{
-    #[allow(dead_code)]
-    async fn new(remote: Backend, cache: Cache) -> Self {
-        Self { remote, cache }
-    }
-
-    #[allow(dead_code)]
-    async fn mount(
-        &mut self,
-        branch: BranchId,
-    ) -> Result<Journal<Backend::Resource, Cache::Resource>, JournalError> {
-        let key = branch.to_string();
-        let canonical = self.remote.open(&key).await?;
-        let mut cache = self.cache.open(&key).await?;
-        cache.replace(canonical.content().clone()).await?;
-
-        Ok(Journal {
-            branch,
-            canonical,
-            cache,
-        })
-    }
-}
-
-/// Manages remote repository connections (unused, for future use).
-#[allow(dead_code)]
-pub struct Remotes<Backend: StorageBackend> {
-    backend: Backend,
-}
-
 /// Address trait for keys that can be used with storage
 /// Both Vec<u8> and Blake3Hash implement this, though they're used in different contexts
 pub trait Address: ConditionalSync + Clone + AsRef<[u8]> + std::fmt::Debug {}
@@ -171,13 +64,17 @@ impl<T: ConditionalSync + Clone + AsRef<[u8]> + std::fmt::Debug> Address for T {
 /// for platform storage like branches and remotes). TypedStore and Storage are more
 /// flexible - they work with any key type implementing `From<Vec<u8>> + AsRef<[u8]>`.
 pub trait PlatformBackend:
-    StorageBackend<Key = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError> + ConditionalSync + Clone
+    StorageBackend<Key = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
+    + TransactionalMemoryBackend<Address = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
+    + ConditionalSync
+    + Clone
 {
 }
 
-// Blanket implementation - any StorageBackend that satisfies the bounds is a PlatformBackend
+// Blanket implementation - any backend that satisfies the bounds is a PlatformBackend
 impl<B> PlatformBackend for B where
     B: StorageBackend<Key = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
+        + TransactionalMemoryBackend<Address = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSync
         + Clone
 {
@@ -201,12 +98,10 @@ impl<B> StorageBackend for ErrorMappingBackend<B>
 where
     B: StorageBackend<Key = Vec<u8>, Value = Vec<u8>> + ConditionalSync,
     B::Error: Into<DialogStorageError> + ConditionalSync,
-    B::Resource: ConditionalSync + ConditionalSend,
 {
     type Key = Vec<u8>;
     type Value = Vec<u8>;
     type Error = DialogStorageError;
-    type Resource = ErrorMappingResource<B::Resource>;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.inner.set(key, value).await.map_err(|e| e.into())
@@ -215,10 +110,38 @@ where
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         self.inner.get(key).await.map_err(|e| e.into())
     }
+}
 
-    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-        let inner = self.inner.open(key).await.map_err(|e| e.into())?;
-        Ok(ErrorMappingResource { inner })
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<B> TransactionalMemoryBackend for ErrorMappingBackend<B>
+where
+    B: TransactionalMemoryBackend<Address = Vec<u8>, Value = Vec<u8>> + ConditionalSync,
+    B::Error: Into<DialogStorageError> + ConditionalSync,
+    B::Edition: ConditionalSend + ConditionalSync + Clone,
+{
+    type Address = Vec<u8>;
+    type Value = Vec<u8>;
+    type Error = DialogStorageError;
+    type Edition = B::Edition;
+
+    async fn resolve(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        self.inner.resolve(address).await.map_err(|e| e.into())
+    }
+
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        self.inner
+            .replace(address, edition, content)
+            .await
+            .map_err(|e| e.into())
     }
 }
 
@@ -226,36 +149,6 @@ where
 #[derive(Debug, Clone)]
 pub struct ErrorMappingResource<R> {
     inner: R,
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<R> Resource for ErrorMappingResource<R>
-where
-    R: Resource<Value = Vec<u8>> + ConditionalSync + ConditionalSend,
-    R::Error: Into<DialogStorageError>,
-{
-    type Value = Vec<u8>;
-    type Error = DialogStorageError;
-
-    fn content(&self) -> &Option<Self::Value> {
-        self.inner.content()
-    }
-
-    fn into_content(self) -> Option<Self::Value> {
-        self.inner.into_content()
-    }
-
-    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
-        self.inner.reload().await.map_err(|e| e.into())
-    }
-
-    async fn replace(
-        &mut self,
-        value: Option<Self::Value>,
-    ) -> Result<Option<Self::Value>, Self::Error> {
-        self.inner.replace(value).await.map_err(|e| e.into())
-    }
 }
 
 /// Transparent wrapper for path strings used in storage namespacing
@@ -271,14 +164,30 @@ impl<'a> From<&'a str> for Path<'a> {
 /// A transactional storage wraps a backend and encoder, providing
 /// a foundation for creating typed stores with namespacing.
 #[derive(Clone)]
-pub struct Storage<Backend: StorageBackend, Codec: Encoder = CborEncoder> {
+pub struct Storage<Backend: StorageBackend, Codec: Encoder = CborEncoder>
+where
+    Backend: TransactionalMemoryBackend,
+    Backend::Address: Clone + Eq + std::hash::Hash,
+{
     backend: Backend,
     codec: Codec,
     path: Option<String>,
+    /// Cache of open TransactionalMemory instances, keyed by address.
+    /// Uses Weak references so entries are automatically cleaned up when all strong refs are dropped.
+    cache: Arc<
+        dialog_common::SharedCell<
+            std::collections::HashMap<
+                Backend::Address,
+                std::sync::Weak<dialog_common::SharedCell<dialog_storage::State<Backend>>>,
+            >,
+        >,
+    >,
 }
 
 impl<Backend: StorageBackend, Codec: Encoder> std::fmt::Debug for Storage<Backend, Codec>
 where
+    Backend: TransactionalMemoryBackend,
+    Backend::Address: Clone + Eq + std::hash::Hash,
     Codec: std::fmt::Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -286,6 +195,7 @@ where
             .field("backend", &"<Backend>")
             .field("codec", &self.codec)
             .field("path", &self.path)
+            .field("cache", &"<Cache>")
             .finish()
     }
 }
@@ -294,7 +204,9 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Backend: StorageBackend, Codec: Encoder> Encoder for Storage<Backend, Codec>
 where
-    Backend: ConditionalSync,
+    Backend: TransactionalMemoryBackend + ConditionalSync,
+    Backend::Address: Clone + Eq + std::hash::Hash,
+    <Backend as TransactionalMemoryBackend>::Value: Sync,
     Codec: ConditionalSync,
 {
     type Bytes = Codec::Bytes;
@@ -316,56 +228,21 @@ where
     }
 }
 
-/// Resource wrapper for Storage that handles key prefixing
-#[derive(Debug, Clone)]
-pub struct StorageResource<R: Resource> {
-    inner: R,
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<R> Resource for StorageResource<R>
-where
-    R: Resource + ConditionalSync,
-{
-    type Value = R::Value;
-    type Error = R::Error;
-
-    fn content(&self) -> &Option<Self::Value> {
-        self.inner.content()
-    }
-
-    fn into_content(self) -> Option<Self::Value> {
-        self.inner.into_content()
-    }
-
-    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
-        self.inner.reload().await
-    }
-
-    async fn replace(
-        &mut self,
-        value: Option<Self::Value>,
-    ) -> Result<Option<Self::Value>, Self::Error> {
-        self.inner.replace(value).await
-    }
-}
-
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Backend: StorageBackend, Codec: Encoder> StorageBackend for Storage<Backend, Codec>
 where
-    Backend: ConditionalSync,
+    Backend: TransactionalMemoryBackend + ConditionalSync,
     Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
-    Backend::Value: ConditionalSync,
-    Backend::Error: ConditionalSync,
-    Backend::Resource: ConditionalSync,
+    <Backend as TransactionalMemoryBackend>::Address: Clone + Eq + std::hash::Hash,
+    <Backend as TransactionalMemoryBackend>::Value: Sync,
+    <Backend as StorageBackend>::Value: ConditionalSync,
+    <Backend as StorageBackend>::Error: ConditionalSync,
     Codec: ConditionalSync,
 {
     type Key = Backend::Key;
-    type Value = Backend::Value;
-    type Resource = StorageResource<Backend::Resource>;
-    type Error = Backend::Error;
+    type Value = <Backend as StorageBackend>::Value;
+    type Error = <Backend as StorageBackend>::Error;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         let prefixed_key = self.prefix_key(key.as_ref()).into();
@@ -376,21 +253,22 @@ where
         let prefixed_key = self.prefix_key(key.as_ref()).into();
         self.backend.get(&prefixed_key).await
     }
-
-    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-        let prefixed_key = self.prefix_key(key.as_ref()).into();
-        let inner = self.backend.open(&prefixed_key).await?;
-        Ok(StorageResource { inner })
-    }
 }
 
-impl<Backend: StorageBackend, Codec: Encoder> Storage<Backend, Codec> {
+impl<Backend: StorageBackend, Codec: Encoder> Storage<Backend, Codec>
+where
+    Backend: TransactionalMemoryBackend,
+    Backend::Address: Clone + Eq + std::hash::Hash,
+{
     /// Creates a new transactional storage with the given backend and encoder
     pub fn new(backend: Backend, codec: Codec) -> Self {
         Self {
             backend,
             codec,
             path: None,
+            cache: Arc::new(dialog_common::SharedCell::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 
@@ -404,6 +282,7 @@ impl<Backend: StorageBackend, Codec: Encoder> Storage<Backend, Codec> {
             backend: self.backend.clone(),
             codec: self.codec.clone(),
             path: Some(new_path),
+            cache: self.cache.clone(),
         }
     }
 
@@ -413,8 +292,32 @@ impl<Backend: StorageBackend, Codec: Encoder> Storage<Backend, Codec> {
             backend: self.backend.clone(),
             codec: self.codec.clone(),
             path: self.path.clone(),
+            cache: Arc::new(dialog_common::SharedCell::new(
+                std::collections::HashMap::new(),
+            )),
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Opens a typed transactional memory at the given key.
+    /// This provides encoding/decoding and caches the decoded value.
+    pub async fn open<T>(
+        &self,
+        key: &Backend::Address,
+    ) -> Result<TypedTransactionalMemory<T, Self, Codec>, DialogStorageError>
+    where
+        T: Serialize + DeserializeOwned + ConditionalSync + std::fmt::Debug + Clone,
+        Backend: TransactionalMemoryBackend<Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+        Backend::Address: Clone + AsRef<[u8]> + From<Vec<u8>>,
+        Backend::Edition: Clone,
+        Codec: ConditionalSync + Clone,
+        Codec::Bytes: AsRef<[u8]>,
+        Codec::Error: std::fmt::Display,
+        Self: Clone,
+    {
+        let prefixed_key = self.prefix_key(key.as_ref()).into();
+        TypedTransactionalMemory::open(prefixed_key, self, self.codec.clone()).await
     }
 
     /// Prefixes the key bytes with the path (if any) and separator
@@ -431,135 +334,64 @@ impl<Backend: StorageBackend, Codec: Encoder> Storage<Backend, Codec> {
     }
 }
 
-/// A typed store that provides transparent encoding/decoding of values.
-/// Values are stored as encoded bytes in the backend, but appear as type T to the user.
-#[derive(Clone)]
-pub struct TypedStore<T, Backend: StorageBackend, Codec: Encoder = CborEncoder> {
-    backend: Backend,
-    codec: Codec,
-    path: Option<String>,
-    _phantom: std::marker::PhantomData<T>,
-}
-
-/// Resource wrapper that transparently handles encoding/decoding for TypedStore
-#[derive(PartialEq, Eq)]
-pub struct TypedStoreResource<T, Backend, Codec = CborEncoder>
-where
-    Backend: StorageBackend<Value = Vec<u8>, Error = DialogStorageError> + ConditionalSync,
-    Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
-    Backend::Error: ConditionalSync,
-    Codec: Encoder,
-{
-    inner: Backend::Resource,
-    codec: Codec,
-    decoded: Option<T>,
-    _phantom: std::marker::PhantomData<(T, Backend)>,
-}
-
-impl<T, Backend, Codec> std::fmt::Debug for TypedStoreResource<T, Backend, Codec>
-where
-    T: std::fmt::Debug,
-    Backend: StorageBackend<Value = Vec<u8>, Error = DialogStorageError> + ConditionalSync,
-    Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
-    Backend::Error: ConditionalSync,
-    Codec: Encoder + std::fmt::Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TypedStoreResource")
-            .field("inner", &"<Backend::Resource>")
-            .field("codec", &self.codec)
-            .field("decoded", &self.decoded)
-            .finish()
-    }
-}
-
-impl<T, Backend, Codec> Clone for TypedStoreResource<T, Backend, Codec>
-where
-    T: Clone,
-    Backend: StorageBackend<Value = Vec<u8>, Error = DialogStorageError> + ConditionalSync,
-    Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
-    Backend::Error: ConditionalSync,
-    Backend::Resource: Clone,
-    Codec: Encoder + Clone,
-{
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            codec: self.codec.clone(),
-            decoded: self.decoded.clone(),
-            _phantom: std::marker::PhantomData,
-        }
-    }
-}
-
+// Implement TransactionalMemoryBackend for Storage so it can be passed directly to replace/reload
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<T, Backend, Codec> Resource for TypedStoreResource<T, Backend, Codec>
+impl<Backend: StorageBackend, Codec: Encoder> TransactionalMemoryBackend for Storage<Backend, Codec>
 where
-    T: Serialize + DeserializeOwned + ConditionalSync + std::fmt::Debug + Clone,
-    Backend: StorageBackend<Value = Vec<u8>, Error = DialogStorageError> + ConditionalSync,
-    Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
-    Backend::Error: ConditionalSync,
-    Backend::Resource: ConditionalSync + ConditionalSend,
-    Codec: Encoder + ConditionalSync,
-    Codec::Bytes: AsRef<[u8]>,
-    Codec::Error: std::fmt::Display,
+    Backend: TransactionalMemoryBackend + ConditionalSync,
+    Backend::Address: Clone + Eq + std::hash::Hash + AsRef<[u8]> + From<Vec<u8>> + ConditionalSync,
+    <Backend as TransactionalMemoryBackend>::Value: ConditionalSync + Sync,
+    <Backend as TransactionalMemoryBackend>::Edition: ConditionalSync,
+    <Backend as TransactionalMemoryBackend>::Error: ConditionalSync,
+    Codec: ConditionalSync,
 {
-    type Value = T;
-    type Error = TypedStoreError;
+    type Address = Backend::Address;
+    type Value = <Backend as TransactionalMemoryBackend>::Value;
+    type Edition = <Backend as TransactionalMemoryBackend>::Edition;
+    type Error = <Backend as TransactionalMemoryBackend>::Error;
 
-    fn content(&self) -> &Option<Self::Value> {
-        &self.decoded
-    }
-
-    fn into_content(self) -> Option<Self::Value> {
-        self.decoded
-    }
-
-    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
-        let old_decoded = self.decoded.take();
-
-        // Reload underlying resource
-        self.inner.reload().await?;
-
-        // Decode new content if present
-        if let Some(bytes) = self.inner.content() {
-            self.decoded = Some(
-                self.codec
-                    .decode(bytes.as_ref())
-                    .await
-                    .map_err(|e| DialogStorageError::EncodeFailed(e.to_string()))?,
-            );
-        }
-
-        Ok(old_decoded)
+    async fn resolve(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        let prefixed_address = self.prefix_key(address.as_ref()).into();
+        self.backend.resolve(&prefixed_address).await
     }
 
     async fn replace(
-        &mut self,
-        value: Option<Self::Value>,
-    ) -> Result<Option<Self::Value>, Self::Error> {
-        // Encode the new value if present
-        let encoded_value = if let Some(ref v) = value {
-            let (_, bytes) = self
-                .codec
-                .encode(v)
-                .await
-                .map_err(|e| DialogStorageError::EncodeFailed(e.to_string()))?;
-            Some(bytes.as_ref().to_vec())
-        } else {
-            None
-        };
-
-        // Replace in underlying resource
-        self.inner.replace(encoded_value).await?;
-
-        // Update decoded cache and return old value
-        let old_decoded = self.decoded.take();
-        self.decoded = value;
-
-        Ok(old_decoded)
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        let prefixed_address = self.prefix_key(address.as_ref()).into();
+        self.backend
+            .replace(&prefixed_address, edition, content)
+            .await
     }
+}
+
+/// A typed store that provides transparent encoding/decoding of values.
+/// Values are stored as encoded bytes in the backend, but appear as type T to the user.
+#[derive(Clone)]
+pub struct TypedStore<T, Backend: StorageBackend, Codec: Encoder = CborEncoder>
+where
+    Backend: TransactionalMemoryBackend,
+    Backend::Address: Clone + Eq + std::hash::Hash,
+{
+    backend: Backend,
+    codec: Codec,
+    path: Option<String>,
+    cache: Arc<
+        dialog_common::SharedCell<
+            std::collections::HashMap<
+                Backend::Address,
+                std::sync::Weak<dialog_common::SharedCell<TypedState<T, Backend::Edition>>>,
+            >,
+        >,
+    >,
+    _phantom: std::marker::PhantomData<T>,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -567,7 +399,8 @@ where
 impl<T, Backend, Codec> Encoder for TypedStore<T, Backend, Codec>
 where
     T: Clone + Send + Sync,
-    Backend: StorageBackend + ConditionalSync,
+    Backend: StorageBackend + TransactionalMemoryBackend + ConditionalSync,
+    Backend::Address: Clone + Eq + std::hash::Hash,
     Codec: Encoder + ConditionalSync,
 {
     type Bytes = Codec::Bytes;
@@ -594,17 +427,15 @@ where
 impl<T, Backend, Codec> StorageBackend for TypedStore<T, Backend, Codec>
 where
     T: Serialize + DeserializeOwned + ConditionalSync + std::fmt::Debug + Clone,
-    Backend: StorageBackend<Value = Vec<u8>, Error = DialogStorageError> + ConditionalSync,
-    Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
-    Backend::Error: ConditionalSync,
-    Backend::Resource: ConditionalSync + ConditionalSend,
+    Backend: StorageBackend<Key = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
+        + TransactionalMemoryBackend<Address = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
     Codec: Encoder + ConditionalSync,
     Codec::Bytes: AsRef<[u8]>,
     Codec::Error: std::fmt::Display,
 {
     type Key = Backend::Key;
     type Value = T;
-    type Resource = TypedStoreResource<T, Backend, Codec>;
     type Error = TypedStoreError;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -614,7 +445,7 @@ where
             .encode(&value)
             .await
             .map_err(|e| DialogStorageError::EncodeFailed(e.to_string()))?;
-        let encoded_value: Backend::Value = bytes.as_ref().to_vec();
+        let encoded_value: <Backend as StorageBackend>::Value = bytes.as_ref().to_vec();
 
         // Prefix key and set
         let prefixed_key = self.prefix_key(key.as_ref()).into();
@@ -639,51 +470,121 @@ where
             None => Ok(None),
         }
     }
+}
 
-    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-        // Delegate to the inherent method
-        self.open(key).await
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<T, Backend, Codec> TransactionalMemoryBackend for TypedStore<T, Backend, Codec>
+where
+    T: Serialize + DeserializeOwned + ConditionalSync + std::fmt::Debug + Clone,
+    Backend: StorageBackend<Key = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
+        + TransactionalMemoryBackend<Address = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+    Backend::Edition: ConditionalSend + ConditionalSync + Clone,
+    Codec: Encoder + ConditionalSync,
+    Codec::Bytes: AsRef<[u8]>,
+    Codec::Error: std::fmt::Display,
+{
+    type Address = Backend::Address;
+    type Value = T;
+    type Error = TypedStoreError;
+    type Edition = Backend::Edition;
+
+    async fn resolve(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        // Prefix key and resolve from backend
+        let prefixed_key = self.prefix_key(address.as_ref()).into();
+        let result = self.backend.resolve(&prefixed_key).await?;
+
+        // Decode if present
+        match result {
+            Some((bytes, edition)) => {
+                let decoded = self
+                    .codec
+                    .decode(bytes.as_ref())
+                    .await
+                    .map_err(|e| DialogStorageError::EncodeFailed(e.to_string()))?;
+                Ok(Some((decoded, edition)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        // Prefix key
+        let prefixed_key = self.prefix_key(address.as_ref()).into();
+
+        // Encode content if present
+        let encoded_content = match content {
+            Some(value) => {
+                let (_, bytes) = self
+                    .codec
+                    .encode(&value)
+                    .await
+                    .map_err(|e| DialogStorageError::EncodeFailed(e.to_string()))?;
+                Some(bytes.as_ref().to_vec())
+            }
+            None => None,
+        };
+
+        // Perform replace on backend
+        self.backend
+            .replace(&prefixed_key, edition, encoded_content)
+            .await
     }
 }
 
 impl<T, Backend, Codec> TypedStore<T, Backend, Codec>
 where
     T: Serialize + DeserializeOwned + ConditionalSync + std::fmt::Debug + Clone,
-    Backend: StorageBackend<Value = Vec<u8>, Error = DialogStorageError> + ConditionalSync,
-    Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
-    Backend::Error: ConditionalSync,
-    Backend::Resource: ConditionalSync + ConditionalSend,
+    Backend: StorageBackend<Key = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
+        + TransactionalMemoryBackend<Address = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+    Backend::Edition: ConditionalSend + ConditionalSync + Clone,
+    Backend::Address: Eq + std::hash::Hash + Clone,
     Codec: Encoder + ConditionalSync,
     Codec::Bytes: AsRef<[u8]>,
     Codec::Error: std::fmt::Display,
 {
-    /// Opens a resource at the given key, providing CAS semantics
+    /// Opens a TypedTransactionalMemory for the given key, using the cache to return existing instances.
+    /// If multiple callers open the same key, they will share the same TypedTransactionalMemory instance.
     pub async fn open(
         &self,
-        key: &Backend::Key,
-    ) -> Result<TypedStoreResource<T, Backend, Codec>, TypedStoreError> {
-        // Prefix key and open backend resource
+        key: &Backend::Address,
+    ) -> Result<TypedTransactionalMemory<T, Backend, Codec>, TypedStoreError> {
         let prefixed_key = self.prefix_key(key.as_ref()).into();
-        let inner = self.backend.open(&prefixed_key).await?;
 
-        // Decode current content if present
-        let decoded = if let Some(bytes) = inner.content() {
-            Some(
-                self.codec
-                    .decode(bytes.as_ref())
-                    .await
-                    .map_err(|e| DialogStorageError::EncodeFailed(e.to_string()))?,
-            )
-        } else {
-            None
-        };
+        // Clean up dead weak references and check if we have a live one
+        let mut cache = self.cache.write();
+        cache.retain(|_, weak| weak.strong_count() > 0);
 
-        Ok(TypedStoreResource {
-            inner,
-            codec: self.codec.clone(),
-            decoded,
-            _phantom: std::marker::PhantomData,
-        })
+        if let Some(weak) = cache.get(&prefixed_key) {
+            if let Some(state) = weak.upgrade() {
+                // Return a clone using the existing state
+                return Ok(TypedTransactionalMemory {
+                    address: prefixed_key,
+                    state,
+                    codec: self.codec.clone(),
+                });
+            }
+        }
+
+        // Create new TypedTransactionalMemory
+        let memory =
+            TypedTransactionalMemory::open(prefixed_key.clone(), &self.backend, self.codec.clone())
+                .await?;
+
+        // Store weak reference in cache
+        cache.insert(prefixed_key, Arc::downgrade(&memory.state));
+
+        Ok(memory)
     }
 
     /// Prefixes the key bytes with the path (if any) and separator
@@ -702,6 +603,14 @@ where
 
 /// Error type for typed store operations
 pub type TypedStoreError = DialogStorageError;
+
+/// Type alias for TypedTransactionalMemory with CborEncoder (the common case).
+/// Type alias for backwards compatibility with old TypedStoreResource API.
+/// Now uses TypedTransactionalMemory from dialog_storage with a codec.
+/// The Backend type parameter is Storage<Backend, CborEncoder> so that replace/reload
+/// can accept &Storage directly.
+pub type TypedStoreResource<T, Backend> =
+    TypedTransactionalMemory<T, Storage<Backend, CborEncoder>, CborEncoder>;
 
 #[cfg(test)]
 mod tests {

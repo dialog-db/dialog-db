@@ -5,7 +5,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use super::{Resource, StorageBackend};
+use super::{StorageBackend};
 
 /// A [MeasuredStorageBackend] acts as a proxy over a [StorageBackend]
 /// implementation that measures reads and writes.
@@ -83,71 +83,6 @@ impl<const SIZE: usize> Measurable for [u8; SIZE] {
 }
 
 /// A resource wrapper that measures reload and replace operations
-#[derive(Debug, Clone)]
-pub struct MeasuredResource<V, R>
-where
-    V: Measurable,
-    R: Resource<Value = V>,
-{
-    inner: R,
-    reads: Arc<AtomicUsize>,
-    read_bytes: Arc<AtomicUsize>,
-    writes: Arc<AtomicUsize>,
-    write_bytes: Arc<AtomicUsize>,
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<V, R> Resource for MeasuredResource<V, R>
-where
-    V: Measurable + ConditionalSync + Clone,
-    R: Resource<Value = V> + ConditionalSync,
-    R::Error: ConditionalSync,
-{
-    type Value = V;
-    type Error = R::Error;
-
-    fn content(&self) -> &Option<Self::Value> {
-        self.inner.content()
-    }
-
-    fn into_content(self) -> Option<Self::Value> {
-        self.inner.into_content()
-    }
-
-    async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
-        self.reads.fetch_add(1, Ordering::Relaxed);
-
-        let result = self.inner.reload().await?;
-
-        // Measure the bytes read (from the new content after reload)
-        self.read_bytes.fetch_add(
-            self.inner
-                .content()
-                .as_ref()
-                .map(|v| v.byte_len())
-                .unwrap_or_default(),
-            Ordering::Relaxed,
-        );
-
-        Ok(result)
-    }
-
-    async fn replace(
-        &mut self,
-        value: Option<Self::Value>,
-    ) -> Result<Option<Self::Value>, Self::Error> {
-        self.writes.fetch_add(1, Ordering::Relaxed);
-
-        // Measure the bytes being written
-        self.write_bytes.fetch_add(
-            value.as_ref().map(|v| v.byte_len()).unwrap_or_default(),
-            Ordering::Relaxed,
-        );
-
-        self.inner.replace(value).await
-    }
-}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -156,12 +91,10 @@ where
     Backend: StorageBackend + ConditionalSync,
     Backend::Key: Measurable + ConditionalSync,
     Backend::Value: Measurable + ConditionalSync + Clone,
-    Backend::Resource: ConditionalSync,
     Backend::Error: ConditionalSync,
 {
     type Key = Backend::Key;
     type Value = Backend::Value;
-    type Resource = MeasuredResource<Backend::Value, Backend::Resource>;
     type Error = Backend::Error;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -187,14 +120,4 @@ where
         Ok(value)
     }
 
-    async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
-        let inner = self.backend.open(key).await?;
-        Ok(MeasuredResource {
-            inner,
-            reads: self.reads.clone(),
-            read_bytes: self.read_bytes.clone(),
-            writes: self.writes.clone(),
-            write_bytes: self.write_bytes.clone(),
-        })
-    }
 }
