@@ -861,10 +861,10 @@ mod tests {
     #[tokio::test]
     async fn test_implicit_attribute() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Entity};
-        use crate::formulas::string;
         use crate::query::Output;
         use crate::rule::When;
-        use crate::{Concept, Match, Negation, Premise, Term};
+        use crate::strings;
+        use crate::{Application, Concept, Match, Negation, Premise, Term};
         use dialog_storage::MemoryStorageBackend;
 
         #[derive(Clone, Debug, PartialEq, Concept)]
@@ -907,7 +907,7 @@ mod tests {
             // The premises check for stuff/name and stuff/role matching employee/name and employee/job
             (
                 Premise::Apply(Application::Formula(
-                    Match::<string::Is> {
+                    Match::<strings::Is> {
                         of: Term::Constant("employee".into()),
                         is: employee.role,
                     }
