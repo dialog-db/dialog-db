@@ -229,7 +229,7 @@ where
     type Error = DialogStorageError;
     type Edition = std::time::SystemTime;
 
-    async fn acquire(
+    async fn resolve(
         &self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {

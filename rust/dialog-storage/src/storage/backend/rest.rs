@@ -14,8 +14,8 @@ mod s3_signer;
 use s3_signer::{Access, Credentials};
 
 use crate::{
-    DialogStorageError, Resource, StorageBackend, StorageSink, StorageSource, TransactionalMemoryBackend,
-    storage::backend::rest::s3_signer::Authorization,
+    DialogStorageError, Resource, StorageBackend, StorageSink, StorageSource,
+    TransactionalMemoryBackend, storage::backend::rest::s3_signer::Authorization,
 };
 
 /// S3-safe key encoding that preserves path structure.
@@ -971,7 +971,7 @@ where
     type Error = RestStorageBackendError;
     type Edition = String;
 
-    async fn acquire(
+    async fn resolve(
         &self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
@@ -2068,11 +2068,11 @@ mod local_s3_tests {
             type Error = B::Error;
             type Edition = B::Edition;
 
-            async fn acquire(
+            async fn resolve(
                 &self,
                 address: &Self::Address,
             ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
-                self.inner.acquire(address).await
+                self.inner.resolve(address).await
             }
 
             async fn replace(

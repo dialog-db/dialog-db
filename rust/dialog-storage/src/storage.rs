@@ -110,11 +110,11 @@ where
     type Error = <Backend as StorageBackend>::Error;
     type Edition = <Backend as TransactionalMemoryBackend>::Edition;
 
-    async fn acquire(
+    async fn resolve(
         &self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
-        self.backend.acquire(address).await
+        self.backend.resolve(address).await
     }
 
     async fn replace(

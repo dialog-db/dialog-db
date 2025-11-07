@@ -142,12 +142,14 @@ where
     type Error = DialogStorageError;
     type Edition = Value;
 
-    async fn acquire(
+    async fn resolve(
         &self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
         let entries = self.entries.read().await;
-        Ok(entries.get(address).map(|value| (value.clone(), value.clone())))
+        Ok(entries
+            .get(address)
+            .map(|value| (value.clone(), value.clone())))
     }
 
     async fn replace(
@@ -244,7 +246,9 @@ mod tests {
         let value = b"test_value".to_vec();
 
         // Open TransactionalMemory for non-existent key
-        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
+        let memory = TransactionalMemory::open(key.clone(), &backend)
+            .await
+            .unwrap();
         assert_eq!(memory.read(), None, "Memory should start with None");
 
         // Create new entry
@@ -268,7 +272,9 @@ mod tests {
         backend.set(key.clone(), value1.clone()).await.unwrap();
 
         // Open TransactionalMemory with existing value
-        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
+        let memory = TransactionalMemory::open(key.clone(), &backend)
+            .await
+            .unwrap();
         assert_eq!(
             memory.read(),
             Some(value1.clone()),
@@ -296,7 +302,9 @@ mod tests {
         backend.set(key.clone(), value1.clone()).await.unwrap();
 
         // Open TransactionalMemory (captures value1)
-        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
+        let memory = TransactionalMemory::open(key.clone(), &backend)
+            .await
+            .unwrap();
 
         // Simulate concurrent modification: backend gets updated
         let wrong_value = b"wrong".to_vec();
@@ -333,7 +341,9 @@ mod tests {
             .unwrap();
 
         // Open TransactionalMemory (captures expected_old)
-        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
+        let memory = TransactionalMemory::open(key.clone(), &backend)
+            .await
+            .unwrap();
 
         // Simulate concurrent deletion
         backend
@@ -368,7 +378,9 @@ mod tests {
         let value2 = b"value2".to_vec();
 
         // Open TransactionalMemory for non-existent key (captures None)
-        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
+        let memory = TransactionalMemory::open(key.clone(), &backend)
+            .await
+            .unwrap();
 
         // Simulate concurrent creation: someone else creates the key
         backend.set(key.clone(), value1.clone()).await.unwrap();
@@ -403,12 +415,10 @@ mod tests {
         backend.set(key.clone(), value.clone()).await.unwrap();
 
         // Open TransactionalMemory and delete with CAS condition
-        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
-        assert_eq!(
-            memory.read(),
-            Some(value),
-            "Memory should have value"
-        );
+        let memory = TransactionalMemory::open(key.clone(), &backend)
+            .await
+            .unwrap();
+        assert_eq!(memory.read(), Some(value), "Memory should have value");
 
         let result = memory.replace(None, &backend).await;
         assert!(result.is_ok(), "Should delete with correct CAS condition");
@@ -443,26 +453,58 @@ mod tests {
         backend.set(key.clone(), value1.clone()).await.unwrap();
 
         // Open first TransactionalMemory
-        let memory1 = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
-        assert_eq!(memory1.read(), Some(value1.clone()), "memory1 should have value1");
+        let memory1 = TransactionalMemory::open(key.clone(), &backend)
+            .await
+            .unwrap();
+        assert_eq!(
+            memory1.read(),
+            Some(value1.clone()),
+            "memory1 should have value1"
+        );
 
         // Clone to create memory2 - shares the same state
         let memory2 = memory1.clone();
-        assert_eq!(memory2.read(), Some(value1.clone()), "memory2 should have value1");
+        assert_eq!(
+            memory2.read(),
+            Some(value1.clone()),
+            "memory2 should have value1"
+        );
 
         // Update through memory1
-        memory1.replace(Some(value2.clone()), &backend).await.unwrap();
+        memory1
+            .replace(Some(value2.clone()), &backend)
+            .await
+            .unwrap();
 
         // Verify both memory1 and memory2 see the update
-        assert_eq!(memory1.read(), Some(value2.clone()), "memory1 should see value2");
-        assert_eq!(memory2.read(), Some(value2.clone()), "memory2 should see value2 (shared state)");
+        assert_eq!(
+            memory1.read(),
+            Some(value2.clone()),
+            "memory1 should see value2"
+        );
+        assert_eq!(
+            memory2.read(),
+            Some(value2.clone()),
+            "memory2 should see value2 (shared state)"
+        );
 
         // Update through memory2
         let value3 = b"value3".to_vec();
-        memory2.replace(Some(value3.clone()), &backend).await.unwrap();
+        memory2
+            .replace(Some(value3.clone()), &backend)
+            .await
+            .unwrap();
 
         // Verify both see the update
-        assert_eq!(memory1.read(), Some(value3.clone()), "memory1 should see value3 (shared state)");
-        assert_eq!(memory2.read(), Some(value3.clone()), "memory2 should see value3");
+        assert_eq!(
+            memory1.read(),
+            Some(value3.clone()),
+            "memory1 should see value3 (shared state)"
+        );
+        assert_eq!(
+            memory2.read(),
+            Some(value3.clone()),
+            "memory2 should see value3"
+        );
     }
 }

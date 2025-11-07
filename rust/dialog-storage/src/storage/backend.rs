@@ -71,7 +71,7 @@ pub trait TransactionalMemoryBackend: Clone {
 
     /// Loads content and its current edition from storage.
     /// Returns None if the key doesn't exist.
-    async fn acquire(
+    async fn resolve(
         &self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error>;
