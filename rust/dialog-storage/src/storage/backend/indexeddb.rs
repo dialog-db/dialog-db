@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use blake3::Hash as Blake3Hash;
 use futures_util::{Stream, TryStreamExt};
 use js_sys::Uint8Array;
 use rexie::{ObjectStore, Rexie, RexieBuilder, TransactionMode};
@@ -48,6 +49,7 @@ where
 }
 
 /// A resource handle for a specific entry in [IndexedDbStorageBackend]
+#[derive(Clone)]
 pub struct IndexedDbResource<Key, Value>
 where
     Key: AsRef<[u8]> + Clone,
@@ -276,6 +278,104 @@ where
             key: key.clone(),
             content,
         })
+    }
+}
+
+#[async_trait(?Send)]
+impl<Key, Value> super::TransactionalMemoryBackend for IndexedDbStorageBackend<Key, Value>
+where
+    Key: AsRef<[u8]> + Clone,
+    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + PartialEq,
+{
+    type Address = Key;
+    type Value = Value;
+    type Error = DialogStorageError;
+    type Edition = Blake3Hash;
+
+    async fn acquire(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        // Get the current value
+        let value = self.get(address).await?;
+
+        // Compute Blake3 hash as edition
+        Ok(value.as_ref().map(|v| {
+            let hash = blake3::hash(v.as_ref());
+            (v.clone(), hash)
+        }))
+    }
+
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        let tx = self
+            .db
+            .transaction(&[&self.store_name], TransactionMode::ReadWrite)
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+        let store = tx
+            .store(&self.store_name)
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+        let key_array = bytes_to_typed_array(address.as_ref());
+
+        // Check CAS condition - get current value and compute its hash
+        let current_value = store
+            .get(key_array.clone())
+            .await
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?
+            .map(|value| {
+                value
+                    .dyn_into::<Uint8Array>()
+                    .map(|arr| Value::from(arr.to_vec()))
+                    .map_err(|_| {
+                        DialogStorageError::StorageBackend("Failed to downcast value".to_string())
+                    })
+            })
+            .transpose()?;
+
+        // Compute hash of current value and verify edition matches
+        let current_hash = current_value.as_ref().map(|v| blake3::hash(v.as_ref()));
+        if current_hash.as_ref() != edition {
+            return Err(DialogStorageError::StorageBackend(
+                "CAS condition failed: edition mismatch".to_string(),
+            ));
+        }
+
+        // Perform the operation
+        match content {
+            Some(new_value) => {
+                let value_array = bytes_to_typed_array(new_value.as_ref());
+                store
+                    .put(&value_array, Some(&key_array))
+                    .await
+                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+                tx.done()
+                    .await
+                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+                // Return hash of new value as the new edition
+                let new_hash = blake3::hash(new_value.as_ref());
+                Ok(Some(new_hash))
+            }
+            None => {
+                // Delete operation
+                store
+                    .delete(key_array)
+                    .await
+                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+                tx.done()
+                    .await
+                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+                Ok(None)
+            }
+        }
     }
 }
 

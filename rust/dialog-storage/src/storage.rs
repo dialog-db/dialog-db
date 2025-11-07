@@ -26,6 +26,9 @@ pub use transfer::*;
 mod content_addressed;
 pub use content_addressed::*;
 
+mod transactional_memory;
+pub use transactional_memory::*;
+
 /// A universal envelope for all compatible combinations of [Encoder] and
 /// [StorageBackend] implementations. See the crate documentation for
 /// a practical example of usage.
@@ -91,6 +94,36 @@ where
 
     async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
         self.backend.open(key).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Encoder, Backend> TransactionalMemoryBackend for Storage<Encoder, Backend>
+where
+    Encoder: crate::Encoder,
+    Backend: StorageBackend + TransactionalMemoryBackend<Address = <Backend as StorageBackend>::Key, Value = <Backend as StorageBackend>::Value, Error = <Backend as StorageBackend>::Error>,
+    Self: ConditionalSync,
+{
+    type Address = <Backend as StorageBackend>::Key;
+    type Value = <Backend as StorageBackend>::Value;
+    type Error = <Backend as StorageBackend>::Error;
+    type Edition = <Backend as TransactionalMemoryBackend>::Edition;
+
+    async fn acquire(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        self.backend.acquire(address).await
+    }
+
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        self.backend.replace(address, edition, content).await
     }
 }
 

@@ -54,6 +54,43 @@ pub trait StorageBackend: Clone {
     async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error>;
 }
 
+/// A [TransactionalMemoryBackend] provides compare-and-swap (CAS) semantics
+/// for storage operations. Unlike StorageBackend which provides basic get/set,
+/// this trait enables optimistic concurrency control through edition tracking.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait TransactionalMemoryBackend: Clone {
+    /// The address/key type used by this backend
+    type Address: ConditionalSync;
+    /// The value type able to be stored
+    type Value: ConditionalSend;
+    /// The error type produced by this backend
+    type Error: Into<DialogStorageError>;
+    /// The edition/version type used for CAS operations
+    type Edition: ConditionalSend + ConditionalSync + Clone;
+
+    /// Loads content and its current edition from storage.
+    /// Returns None if the key doesn't exist.
+    async fn acquire(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error>;
+
+    /// Updates content with CAS semantics.
+    ///
+    /// - `address`: The key to update
+    /// - `edition`: Expected edition (None means create, Some means update only if matches)
+    /// - `content`: New content (None means delete)
+    ///
+    /// Returns the new edition on success, or error if CAS check fails.
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error>;
+}
+
 /// A [Resource] is a cursor for some entry in the underlying [StorageBackend]
 /// that can be used to read / write values with a compare and swap semantics.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -137,96 +174,6 @@ pub trait AtomicStorageBackend: Clone {
     async fn resolve(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error>;
 }
 
-/// Abstraction for software transactional memory
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait TransactionalMemory: Sized {
-    /// Address of the resources in this memory space
-    type Address: ConditionalSend + Clone;
-    /// Value stored in this memory space
-    type Value: ConditionalSend + Clone;
-    /// Error type for this memory space
-    type Error: ConditionalSend;
-
-    /// Resolves memory cell from the given address
-    async fn get(&self, address: &Self::Address) -> Result<MemoryCell<Self>, Self::Error>;
-    /// Stores a value (if any) against the given address. Update uses compare
-    /// and swap semantics.
-    async fn put(
-        &self,
-        address: Self::Address,
-        value: Option<Self::Value>,
-        expect: Option<Self::Value>,
-    ) -> Result<(), Self::Error>;
-}
-
-/// Represents a resource stored in a transactional memory backend.
-pub struct MemoryCell<Memory: TransactionalMemory> {
-    content: Option<Memory::Value>,
-    address: Memory::Address,
-    memory: Memory,
-}
-impl<Memory: TransactionalMemory> MemoryCell<Memory> {
-    /// Reloads content of the resource's from it's source and returns the old content.
-    pub async fn reload(&mut self) -> Result<Option<Memory::Value>, Memory::Error> {
-        let prior = self.content.to_owned();
-        let latest: Self = self.memory.get(&self.address).await?;
-        self.content = latest.content;
-        Ok(prior)
-    }
-
-    /// Replaces the contained value with value, and returns the old contained
-    /// value. Operation fails if the resource was updated and content of this
-    /// resource is out of date.
-    pub async fn replace(
-        &mut self,
-        content: Option<Memory::Value>,
-    ) -> Result<Option<Memory::Value>, Memory::Error> {
-        let prior = self.content.to_owned();
-        self.memory
-            .put(self.address.clone(), content.clone(), self.content.clone())
-            .await?;
-        self.content = content;
-        Ok(prior)
-    }
-
-    /// Performs opportunistic update the content of the resource with the
-    /// returned value of the `update` function. If content of the resource
-    /// is out of date, resource is reloaded and update is retried up to 10
-    /// times if update still fails operation is aborted with an error.
-    pub async fn swap(
-        &mut self,
-        update: fn(&Option<Memory::Value>) -> Option<Memory::Value>,
-    ) -> Result<Option<Memory::Value>, Memory::Error> {
-        for _ in 0..10 {
-            let before = self.content.to_owned();
-            let after = update(&self.content);
-            let result = self
-                .memory
-                .put(self.address.clone(), after.clone(), before.clone())
-                .await;
-
-            if result.is_ok() {
-                self.content = after;
-                return Ok(before);
-            } else {
-                self.reload().await?;
-            }
-        }
-
-        panic!("failed to swap resource")
-    }
-}
-
-// Implement the Deref trait for MyBox
-impl<Memory: TransactionalMemory> std::ops::Deref for MemoryCell<Memory> {
-    type Target = Option<Memory::Value>; // The type we are dereferencing to
-
-    fn deref(&self) -> &Self::Target {
-        &self.content // Return a reference to the inner value
-    }
-}
-
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<T> StorageBackend for Box<T>
@@ -248,6 +195,34 @@ where
 
     async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
         (**self).open(key).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<T> TransactionalMemoryBackend for Box<T>
+where
+    T: TransactionalMemoryBackend + ConditionalSync,
+{
+    type Address = T::Address;
+    type Value = T::Value;
+    type Error = T::Error;
+    type Edition = T::Edition;
+
+    async fn acquire(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        (**self).acquire(address).await
+    }
+
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        (**self).replace(address, edition, content).await
     }
 }
 
@@ -275,6 +250,36 @@ where
     async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
         let inner = self.lock().await;
         inner.open(key).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<T> TransactionalMemoryBackend for Arc<Mutex<T>>
+where
+    T: TransactionalMemoryBackend + ConditionalSend,
+{
+    type Address = T::Address;
+    type Value = T::Value;
+    type Error = T::Error;
+    type Edition = T::Edition;
+
+    async fn acquire(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        let inner = self.lock().await;
+        inner.acquire(address).await
+    }
+
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        let inner = self.lock().await;
+        inner.replace(address, edition, content).await
     }
 }
 
@@ -386,10 +391,13 @@ mod tests {
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_can_wrap_backends_in_an_overlay() -> Result<()> {
-        let (storage_backend, _tempdir) = make_target_storage().await?;
-        let mut storage_backend = Arc::new(Mutex::new(storage_backend));
+        // Use MemoryStorageBackend for both backend and overlay to ensure Edition types match
+        let storage_backend = Arc::new(Mutex::new(MemoryStorageBackend::default()));
+        let mut storage_backend_mut = storage_backend.clone();
 
-        storage_backend.set(vec![1, 2, 3], vec![4, 5, 6]).await?;
+        storage_backend_mut
+            .set(vec![1, 2, 3], vec![4, 5, 6])
+            .await?;
 
         let overlay_backend = Arc::new(Mutex::new(MemoryStorageBackend::default()));
 

@@ -3,6 +3,15 @@ use async_trait::async_trait;
 use dialog_common::ConditionalSync;
 use std::hash::Hash;
 
+/// Tagged edition that tracks which backend an edition came from
+#[derive(Debug, Clone, PartialEq)]
+pub enum OverlayEdition<B, O> {
+    /// Edition from the base backend
+    Backend(B),
+    /// Edition from the overlay backend
+    Overlay(O),
+}
+
 /// A [`StorageOverlay`] is a conjunction of two [`StorageBackend`]s: a "true"
 /// backend, and (you guessed it) an overlay backend. All writes to storage are
 /// written to the overlay. All reads first check the overlay, and then fall

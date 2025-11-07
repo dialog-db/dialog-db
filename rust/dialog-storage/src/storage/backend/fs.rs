@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{Resource, StorageBackend};
+use super::{Resource, StorageBackend, TransactionalMemoryBackend};
 use std::time::SystemTime;
 
 /// A basic file-system-based [StorageBackend] implementation. All values are
@@ -217,11 +217,106 @@ where
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Key, Value> TransactionalMemoryBackend for FileSystemStorageBackend<Key, Value>
+where
+    Key: AsRef<[u8]> + Clone + ConditionalSync,
+    Value: AsRef<[u8]> + Clone + From<Vec<u8>> + ConditionalSync,
+{
+    type Address = Key;
+    type Value = Value;
+    type Error = DialogStorageError;
+    type Edition = std::time::SystemTime;
+
+    async fn acquire(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        let path = self.make_path(address)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let metadata = tokio::fs::metadata(&path)
+            .await
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+        let mtime = metadata
+            .modified()
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+        let value = tokio::fs::read(path)
+            .await
+            .map(Value::from)
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+        Ok(Some((value, mtime)))
+    }
+
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        let path = self.make_path(address)?;
+
+        // Check CAS condition - verify mtime matches
+        let current_mtime = if path.exists() {
+            let metadata = tokio::fs::metadata(&path)
+                .await
+                .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            Some(
+                metadata
+                    .modified()
+                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?,
+            )
+        } else {
+            None
+        };
+
+        // Verify edition matches
+        if current_mtime.as_ref() != edition {
+            return Err(DialogStorageError::StorageBackend(
+                "CAS condition failed: edition mismatch".to_string(),
+            ));
+        }
+
+        // Perform the operation
+        match content {
+            Some(new_value) => {
+                tokio::fs::write(&path, &new_value)
+                    .await
+                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+                // Get new mtime
+                let metadata = tokio::fs::metadata(&path)
+                    .await
+                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+                let new_mtime = metadata
+                    .modified()
+                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+                Ok(Some(new_mtime))
+            }
+            None => {
+                if path.exists() {
+                    tokio::fs::remove_file(&path)
+                        .await
+                        .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+                }
+                Ok(None)
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl<Key, Value> StorageSink for FileSystemStorageBackend<Key, Value>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
-    Value: AsRef<[u8]> + Clone + From<Vec<u8>> + ConditionalSync,
+    Value: AsRef<[u8]> + Clone + From<Vec<u8>> + ConditionalSync + PartialEq,
 {
     async fn write<EntryStream>(
         &mut self,

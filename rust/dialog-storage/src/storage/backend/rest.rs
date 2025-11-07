@@ -14,7 +14,7 @@ mod s3_signer;
 use s3_signer::{Access, Credentials};
 
 use crate::{
-    DialogStorageError, Resource, StorageBackend, StorageSink, StorageSource,
+    DialogStorageError, Resource, StorageBackend, StorageSink, StorageSource, TransactionalMemoryBackend,
     storage::backend::rest::s3_signer::Authorization,
 };
 
@@ -955,6 +955,126 @@ where
             status => Err(RestStorageBackendError::OperationFailed(format!(
                 "Failed to open resource. Status: {status}"
             ))),
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Key, Value> TransactionalMemoryBackend for RestStorageBackend<Key, Value>
+where
+    Key: AsRef<[u8]> + Clone + ConditionalSync,
+    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
+{
+    type Address = Key;
+    type Value = Value;
+    type Error = RestStorageBackendError;
+    type Edition = String;
+
+    async fn acquire(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        let request = self.prepare_get_request(address.as_ref())?;
+        let response = request.send().await?;
+
+        match response.status() {
+            status if status.is_success() => {
+                // Extract ETag from response headers
+                let etag = response
+                    .headers()
+                    .get("etag")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.trim_matches('"').to_string())
+                    .ok_or_else(|| {
+                        RestStorageBackendError::OperationFailed(
+                            "Response missing ETag header".to_string(),
+                        )
+                    })?;
+
+                let bytes = response.bytes().await?;
+                let value = Value::from(bytes.to_vec());
+
+                Ok(Some((value, etag)))
+            }
+            reqwest::StatusCode::NOT_FOUND => Ok(None),
+            status => Err(RestStorageBackendError::OperationFailed(format!(
+                "Failed to acquire value. Status: {status}"
+            ))),
+        }
+    }
+
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        match content {
+            Some(new_value) => {
+                // PUT with If-Match header for CAS
+                let mut request = self.prepare_put_request(address.as_ref(), new_value.as_ref())?;
+
+                // Add If-Match header if edition is provided
+                if let Some(etag) = edition {
+                    request = request.header("If-Match", format!("\"{}\"", etag));
+                } else {
+                    // If no edition, use If-None-Match: * to ensure creation only
+                    request = request.header("If-None-Match", "*");
+                }
+
+                let response = request.send().await?;
+
+                match response.status() {
+                    status if status.is_success() => {
+                        // Extract new ETag from response
+                        let new_etag = response
+                            .headers()
+                            .get("etag")
+                            .and_then(|v| v.to_str().ok())
+                            .map(|s| s.trim_matches('"').to_string())
+                            .ok_or_else(|| {
+                                RestStorageBackendError::OperationFailed(
+                                    "Response missing ETag header".to_string(),
+                                )
+                            })?;
+                        Ok(Some(new_etag))
+                    }
+                    reqwest::StatusCode::PRECONDITION_FAILED => {
+                        Err(RestStorageBackendError::OperationFailed(
+                            "CAS condition failed: edition mismatch".to_string(),
+                        ))
+                    }
+                    status => Err(RestStorageBackendError::OperationFailed(format!(
+                        "Failed to replace value. Status: {status}"
+                    ))),
+                }
+            }
+            None => {
+                // DELETE with If-Match header for CAS
+                let mut request = self.prepare_delete_request(address.as_ref())?;
+
+                // Add If-Match header if edition is provided
+                if let Some(etag) = edition {
+                    request = request.header("If-Match", format!("\"{}\"", etag));
+                }
+
+                let response = request.send().await?;
+
+                match response.status() {
+                    status if status.is_success() || status == reqwest::StatusCode::NOT_FOUND => {
+                        Ok(None)
+                    }
+                    reqwest::StatusCode::PRECONDITION_FAILED => {
+                        Err(RestStorageBackendError::OperationFailed(
+                            "CAS condition failed: edition mismatch".to_string(),
+                        ))
+                    }
+                    status => Err(RestStorageBackendError::OperationFailed(format!(
+                        "Failed to delete value. Status: {status}"
+                    ))),
+                }
+            }
         }
     }
 }
@@ -1934,6 +2054,34 @@ mod local_s3_tests {
 
             async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
                 self.inner.open(key).await
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl<B> super::TransactionalMemoryBackend for ErrorMappingBackend<B>
+        where
+            B: super::TransactionalMemoryBackend<Address = Vec<u8>, Value = Vec<u8>> + Send + Sync,
+            B::Error: Send,
+        {
+            type Address = Vec<u8>;
+            type Value = Vec<u8>;
+            type Error = B::Error;
+            type Edition = B::Edition;
+
+            async fn acquire(
+                &self,
+                address: &Self::Address,
+            ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+                self.inner.acquire(address).await
+            }
+
+            async fn replace(
+                &self,
+                address: &Self::Address,
+                edition: Option<&Self::Edition>,
+                content: Option<Self::Value>,
+            ) -> Result<Option<Self::Edition>, Self::Error> {
+                self.inner.replace(address, edition, content).await
             }
         }
 

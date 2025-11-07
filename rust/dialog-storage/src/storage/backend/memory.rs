@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 
 use crate::{DialogStorageError, StorageSource};
 
-use super::{Resource, StorageBackend};
+use super::{Resource, StorageBackend, TransactionalMemoryBackend};
 
 /// A trivial implementation of [StorageBackend] - backed by a [HashMap] - where
 /// all values are kept in memory and never persisted.
@@ -54,7 +54,11 @@ where
     async fn reload(&mut self) -> Result<Option<Self::Value>, Self::Error> {
         let entries = self.entries.read().await;
         let prior = self.content.clone();
-        self.content = entries.get(&self.key).cloned();
+        if let Some(value) = entries.get(&self.key) {
+            self.content = Some(value.clone());
+        } else {
+            self.content = None;
+        }
         Ok(prior)
     }
 
@@ -65,10 +69,10 @@ where
         let mut entries = self.entries.write().await;
 
         // Get current value from storage
-        let current = entries.get(&self.key).cloned();
+        let current_value = entries.get(&self.key).cloned();
 
-        // Check CAS condition - current must match what we think it is
-        if current != self.content {
+        // Check CAS condition - value must match what we loaded
+        if current_value != self.content {
             return Err(DialogStorageError::StorageBackend(
                 "CAS condition failed: value has changed".to_string(),
             ));
@@ -77,16 +81,17 @@ where
         let prior = self.content.clone();
 
         // Perform the operation
-        match &value {
+        match value {
             Some(new_value) => {
                 entries.insert(self.key.clone(), new_value.clone());
+                self.content = Some(new_value);
             }
             None => {
                 entries.remove(&self.key);
+                self.content = None;
             }
         }
 
-        self.content = value;
         Ok(prior)
     }
 }
@@ -122,6 +127,59 @@ where
             key: key.clone(),
             content,
         })
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Key, Value> TransactionalMemoryBackend for MemoryStorageBackend<Key, Value>
+where
+    Key: Clone + Eq + std::hash::Hash + ConditionalSync,
+    Value: Clone + ConditionalSync + PartialEq,
+{
+    type Address = Key;
+    type Value = Value;
+    type Error = DialogStorageError;
+    type Edition = Value;
+
+    async fn acquire(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        let entries = self.entries.read().await;
+        Ok(entries.get(address).map(|value| (value.clone(), value.clone())))
+    }
+
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        let mut entries = self.entries.write().await;
+
+        // Get current value from storage
+        let current_value = entries.get(address);
+
+        // Check CAS condition - value must match expected edition
+        if current_value != edition {
+            return Err(DialogStorageError::StorageBackend(
+                "CAS condition failed: edition mismatch".to_string(),
+            ));
+        }
+
+        // Perform the operation
+        match content {
+            Some(new_value) => {
+                entries.insert(address.clone(), new_value.clone());
+                Ok(Some(new_value))
+            }
+            None => {
+                // Delete operation
+                entries.remove(address);
+                Ok(None)
+            }
+        }
     }
 }
 

@@ -24,12 +24,14 @@ pub trait ObjectSafeResource {
         &mut self,
         value: Option<Vec<u8>>,
     ) -> Result<Option<Vec<u8>>, DialogStorageError>;
+    /// Clones this resource into a boxed trait object
+    fn clone_box(&self) -> Box<dyn ObjectSafeResource>;
 }
 
 #[async_trait(?Send)]
 impl<R> ObjectSafeResource for R
 where
-    R: Resource<Value = Vec<u8>>,
+    R: Resource<Value = Vec<u8>> + Clone + 'static,
     R::Error: Into<DialogStorageError>,
 {
     fn content(&self) -> &Option<Vec<u8>> {
@@ -49,6 +51,10 @@ where
         value: Option<Vec<u8>>,
     ) -> Result<Option<Vec<u8>>, DialogStorageError> {
         Resource::replace(self, value).await.map_err(|e| e.into())
+    }
+
+    fn clone_box(&self) -> Box<dyn ObjectSafeResource> {
+        Box::new(self.clone())
     }
 }
 
@@ -100,6 +106,14 @@ where
 /// A Resource wrapper for the type-erased ObjectSafeResource
 pub struct ObjectSafeResourceWrapper {
     inner: Box<dyn ObjectSafeResource>,
+}
+
+impl Clone for ObjectSafeResourceWrapper {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone_box(),
+        }
+    }
 }
 
 #[async_trait(?Send)]
