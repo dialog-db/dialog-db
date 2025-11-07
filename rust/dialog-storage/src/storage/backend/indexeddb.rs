@@ -518,6 +518,7 @@ where
 #[cfg(all(test, target_arch = "wasm32"))]
 mod tests {
     use super::*;
+    use crate::storage::transactional_memory::TransactionalMemory;
     use wasm_bindgen_test::*;
 
     wasm_bindgen_test_configure!(run_in_browser);
@@ -532,17 +533,17 @@ mod tests {
         let key = b"test_key".to_vec();
         let value = b"test_value".to_vec();
 
-        // Open resource for non-existent key
-        let mut resource = backend.open(&key).await.unwrap();
-        assert_eq!(resource.content(), &None, "Resource should start with None");
+        // Open TransactionalMemory for non-existent key
+        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
+        assert_eq!(memory.read(), None, "Memory should start with None");
 
         // Create new entry
-        let result = resource.replace(Some(value.clone())).await;
+        let result = memory.replace(Some(value.clone()), &backend).await;
         assert!(result.is_ok(), "Should create new entry");
 
         // Verify it was stored
-        let stored = backend.open(&key).await.unwrap();
-        assert_eq!(stored.content(), &Some(value));
+        let stored = TransactionalMemory::open(key, &backend).await.unwrap();
+        assert_eq!(stored.read(), Some(value));
     }
 
     #[wasm_bindgen_test]
@@ -559,21 +560,21 @@ mod tests {
         // Create initial value
         backend.set(key.clone(), value1.clone()).await.unwrap();
 
-        // Open resource with existing value
-        let mut resource = backend.open(&key).await.unwrap();
+        // Open TransactionalMemory with existing value
+        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
         assert_eq!(
-            resource.content(),
-            &Some(value1.clone()),
-            "Resource should have value1"
+            memory.read(),
+            Some(value1.clone()),
+            "Memory should have value1"
         );
 
-        // Update with CAS condition (resource already has value1 loaded)
-        let result = resource.replace(Some(value2.clone())).await;
+        // Update with CAS condition (memory already has value1 loaded)
+        let result = memory.replace(Some(value2.clone()), &backend).await;
         assert!(result.is_ok(), "Should update with correct CAS condition");
 
         // Verify updated value
-        let stored = backend.open(&key).await.unwrap();
-        assert_eq!(stored.content(), &Some(value2));
+        let stored = TransactionalMemory::open(key, &backend).await.unwrap();
+        assert_eq!(stored.read(), Some(value2));
     }
 
     #[wasm_bindgen_test]
@@ -590,15 +591,15 @@ mod tests {
         // Create initial value
         backend.set(key.clone(), value1.clone()).await.unwrap();
 
-        // Open resource (captures value1)
-        let mut resource = backend.open(&key).await.unwrap();
+        // Open TransactionalMemory (captures value1)
+        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
 
         // Simulate concurrent modification: backend gets updated
         let wrong_value = b"wrong".to_vec();
         backend.set(key.clone(), wrong_value.clone()).await.unwrap();
 
         // Try to update based on stale value1 (should fail)
-        let result = resource.replace(Some(value2.clone())).await;
+        let result = memory.replace(Some(value2.clone()), &backend).await;
         assert!(result.is_err(), "Should fail with wrong CAS condition");
         assert!(
             result
@@ -609,8 +610,8 @@ mod tests {
         );
 
         // Verify value is the concurrent modification
-        let stored = backend.open(&key).await.unwrap();
-        assert_eq!(stored.content(), &Some(wrong_value));
+        let stored = TransactionalMemory::open(key, &backend).await.unwrap();
+        assert_eq!(stored.read(), Some(wrong_value));
     }
 
     #[wasm_bindgen_test]
@@ -630,8 +631,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Open resource (captures expected_old)
-        let mut resource = backend.open(&key).await.unwrap();
+        // Open TransactionalMemory (captures expected_old)
+        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
 
         // Simulate concurrent deletion by directly accessing the database
         let tx = backend
@@ -644,7 +645,7 @@ mod tests {
         tx.commit().await.unwrap();
 
         // Try to update - should fail because key was deleted
-        let result = resource.replace(Some(value)).await;
+        let result = memory.replace(Some(value), &backend).await;
         assert!(
             result.is_err(),
             "Should fail when key was concurrently deleted"
@@ -669,14 +670,14 @@ mod tests {
         let value1 = b"value1".to_vec();
         let value2 = b"value2".to_vec();
 
-        // Open resource for non-existent key (captures None)
-        let mut resource = backend.open(&key).await.unwrap();
+        // Open TransactionalMemory for non-existent key (captures None)
+        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
 
         // Simulate concurrent creation: someone else creates the key
         backend.set(key.clone(), value1.clone()).await.unwrap();
 
         // Try to create with CAS condition "must not exist" (should fail because key now exists)
-        let result = resource.replace(Some(value2)).await;
+        let result = memory.replace(Some(value2), &backend).await;
         assert!(
             result.is_err(),
             "Should fail when key exists but CAS expects it not to"
@@ -690,8 +691,8 @@ mod tests {
         );
 
         // Verify value unchanged
-        let stored = backend.open(&key).await.unwrap();
-        assert_eq!(stored.content(), &Some(value1));
+        let stored = TransactionalMemory::open(key, &backend).await.unwrap();
+        assert_eq!(stored.read(), Some(value1));
     }
 
     #[wasm_bindgen_test]
@@ -707,20 +708,20 @@ mod tests {
         // Create entry
         backend.set(key.clone(), value.clone()).await.unwrap();
 
-        // Open resource and delete with CAS condition
-        let mut resource = backend.open(&key).await.unwrap();
+        // Open TransactionalMemory and delete with CAS condition
+        let memory = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
         assert_eq!(
-            resource.content(),
-            &Some(value),
-            "Resource should have value"
+            memory.read(),
+            Some(value),
+            "Memory should have value"
         );
 
-        let result = resource.replace(None).await;
+        let result = memory.replace(None, &backend).await;
         assert!(result.is_ok(), "Should delete with correct CAS condition");
 
         // Verify deleted
-        let stored = backend.open(&key).await.unwrap();
-        assert_eq!(stored.content(), &None);
+        let stored = TransactionalMemory::open(key, &backend).await.unwrap();
+        assert_eq!(stored.read(), None);
     }
 
     #[wasm_bindgen_test]
@@ -731,11 +732,49 @@ mod tests {
                 .unwrap();
 
         let key = b"nonexistent".to_vec();
-        let result = backend.open(&key).await.unwrap();
+        let result = TransactionalMemory::open(key, &backend).await.unwrap();
         assert_eq!(
-            result.content(),
-            &None,
+            result.read(),
+            None,
             "Should return None for non-existent key"
         );
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_indexeddb_shared_state() {
+        let mut backend =
+            IndexedDbStorageBackend::<Vec<u8>, Vec<u8>>::new("test_db_shared", "test_store")
+                .await
+                .unwrap();
+
+        let key = b"shared_key".to_vec();
+        let value1 = b"value1".to_vec();
+        let value2 = b"value2".to_vec();
+
+        // Create initial value
+        backend.set(key.clone(), value1.clone()).await.unwrap();
+
+        // Open first TransactionalMemory
+        let memory1 = TransactionalMemory::open(key.clone(), &backend).await.unwrap();
+        assert_eq!(memory1.read(), Some(value1.clone()), "memory1 should have value1");
+
+        // Clone to create memory2 - shares the same state
+        let memory2 = memory1.clone();
+        assert_eq!(memory2.read(), Some(value1.clone()), "memory2 should have value1");
+
+        // Update through memory1
+        memory1.replace(Some(value2.clone()), &backend).await.unwrap();
+
+        // Verify both memory1 and memory2 see the update
+        assert_eq!(memory1.read(), Some(value2.clone()), "memory1 should see value2");
+        assert_eq!(memory2.read(), Some(value2.clone()), "memory2 should see value2 (shared state)");
+
+        // Update through memory2
+        let value3 = b"value3".to_vec();
+        memory2.replace(Some(value3.clone()), &backend).await.unwrap();
+
+        // Verify both see the update
+        assert_eq!(memory1.read(), Some(value3.clone()), "memory1 should see value3 (shared state)");
+        assert_eq!(memory2.read(), Some(value3.clone()), "memory2 should see value3");
     }
 }
