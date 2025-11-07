@@ -15,7 +15,7 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use base58::ToBase58;
 use blake3;
-use dialog_common::ConditionalSend;
+use dialog_common::{ConditionalSend, SharedCell};
 use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Tree};
 #[cfg(not(target_arch = "wasm32"))]
 use futures_util::future::BoxFuture;
@@ -309,26 +309,87 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::Encoder for Archive<Bac
 #[derive(Clone, Debug)]
 pub struct Branch<Backend: PlatformBackend + 'static> {
     issuer: Issuer,
-    state: BranchState,
+    id: BranchId,
     storage: PlatformStorage<Backend>,
     archive: Archive<Backend>,
     memory: TypedStoreResource<BranchState, Backend>,
     tree: Arc<RwLock<Index<Backend>>>,
-    upstream: Option<Box<Upstream<Backend>>>,
+    upstream: Arc<SharedCell<Option<Upstream<Backend>>>>,
 }
 
 impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     async fn mount(
         id: &BranchId,
         storage: &PlatformStorage<Backend>,
+        default_state: Option<BranchState>,
     ) -> Result<TypedStoreResource<BranchState, Backend>, ReplicaError> {
-        let key = format!("local/{}", id.to_string());
-        let memory = storage
+        let key = format!("local/{}", id);
+        let mut memory = storage
             .open::<BranchState>(&key.into())
             .await
             .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+
+        // if we branch does not exist yet and we have default state we create
+        // a branch.
+        if let (None, Some(state)) = (memory.content(), default_state) {
+            memory
+                .replace_with(
+                    move |prior| prior.to_owned().or(Some(state.clone())),
+                    5,
+                    storage,
+                )
+                .await
+                .map_err(|_| ReplicaError::StorageError("Updating branch failed".into()))?;
+        }
+
         Ok(memory)
     }
+
+    pub async fn load_with_default(
+        id: &BranchId,
+        issuer: Issuer,
+        storage: PlatformStorage<Backend>,
+        default_state: Option<BranchState>,
+    ) -> Result<Branch<Backend>, ReplicaError> {
+        let memory = Self::mount(id, &storage, default_state).await?;
+        let archive = Archive::new(storage.clone());
+
+        // if we have a memory of tis branch we initialize it otherwise
+        // we produce an error.
+        if let Some(state) = memory.content() {
+            // Load the tree from the revision's tree hash
+            let tree = Tree::from_hash(state.revision.tree().hash(), archive.clone())
+                .await
+                .map_err(|e| ReplicaError::StorageError(format!("Failed to load tree: {:?}", e)))?;
+
+            // If branch has an upstream setup we load it up and configure
+            // archive's remote
+            let upstream = if let Some(state) = &state.upstream {
+                let upstream = Upstream::load(state, issuer.clone(), storage.clone()).await?;
+
+                if let Upstream::Remote(branch) = &upstream {
+                    archive.set_remote(branch.remote_storage.clone()).await;
+                }
+
+                Some(upstream)
+            } else {
+                None
+            };
+
+            Ok(Branch {
+                id: id.clone(),
+                issuer: issuer.clone(),
+                memory,
+                archive,
+                storage: storage.clone(),
+                upstream: Arc::new(SharedCell::new(upstream)),
+                tree: Arc::new(RwLock::new(tree)),
+            })
+        } else {
+            Err(ReplicaError::BranchNotFound { id: id.clone() })
+        }
+    }
+
     /// Mounts a typed store for branch state at the appropriate storage location.
     /// Loads a branch with a given id or creates one if it does not exist.
     pub async fn open(
@@ -336,74 +397,15 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         issuer: Issuer,
         storage: PlatformStorage<Backend>,
     ) -> Result<Branch<Backend>, ReplicaError> {
-        let mut memory = Self::mount(id, &storage).await?;
+        let default_state = Some(BranchState::new(
+            id.clone(),
+            Revision::new(issuer.principal().clone()),
+            None,
+        ));
 
-        let archive = Archive::new(storage.clone());
+        let branch = Self::load_with_default(id, issuer, storage, default_state).await?;
 
-        if let Some(state) = memory.content() {
-            // Clone state before moving memory to avoid borrow issues
-            let state = state.clone();
-            let upstream_state = state.upstream.clone();
-
-            // Load the tree from the revision's tree hash
-            let tree = Tree::from_hash(state.revision.tree().hash(), archive.clone())
-                .await
-                .map_err(|e| ReplicaError::StorageError(format!("Failed to load tree: {:?}", e)))?;
-
-            // Load upstream if configured
-            let loaded_upstream = if let Some(ref upstream_state) = upstream_state {
-                match Upstream::load(upstream_state, issuer.clone(), storage.clone()).await {
-                    Ok(upstream) => {
-                        // Configure archive remote if upstream is remote
-                        if let Upstream::Remote(ref remote_branch) = upstream {
-                            archive
-                                .set_remote(remote_branch.remote_storage.clone())
-                                .await;
-                        }
-                        Some(Box::new(upstream))
-                    }
-                    Err(_) => None,
-                }
-            } else {
-                None
-            };
-
-            let branch = Branch {
-                issuer: issuer.clone(),
-                state,
-                storage: storage.clone(),
-                archive,
-                memory,
-                tree: Arc::new(RwLock::new(tree)),
-                upstream: loaded_upstream,
-            };
-
-            Ok(branch)
-        } else {
-            // create a new branch with a new revision
-            let state = BranchState::new(
-                id.clone(),
-                Revision::new(issuer.principal().to_owned()),
-                None,
-            );
-            memory
-                .replace(Some(state.clone()), &storage)
-                .await
-                .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-
-            // New branch starts with empty tree
-            let tree = Tree::new(archive.clone());
-
-            Ok(Branch {
-                issuer,
-                state,
-                memory,
-                storage,
-                archive,
-                tree: Arc::new(RwLock::new(tree)),
-                upstream: None,
-            })
-        }
+        Ok(branch)
     }
 
     /// Loads a branch from the the the underlaying replica, if branch with a
@@ -413,104 +415,55 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         issuer: Issuer,
         storage: PlatformStorage<Backend>,
     ) -> Result<Branch<Backend>, ReplicaError> {
-        let memory = Self::mount(id, &storage).await?;
-        let archive = Archive::new(storage.clone());
+        let branch = Self::load_with_default(id, issuer, storage, None).await?;
 
-        if let Some(state) = memory.content() {
-            // Clone state before moving memory to avoid borrow issues
-            let state = state.clone();
-            let upstream_state = state.upstream.clone();
-
-            // Load the tree from the revision's tree hash
-            let tree = Tree::from_hash(state.revision.tree().hash(), archive.clone())
-                .await
-                .map_err(|e| ReplicaError::StorageError(format!("Failed to load tree: {:?}", e)))?;
-
-            // Load upstream if configured
-            let loaded_upstream = if let Some(ref upstream_state) = upstream_state {
-                match Upstream::load(upstream_state, issuer.clone(), storage.clone()).await {
-                    Ok(upstream) => {
-                        // Configure archive remote if upstream is remote
-                        if let Upstream::Remote(ref remote_branch) = upstream {
-                            archive
-                                .set_remote(remote_branch.remote_storage.clone())
-                                .await;
-                        }
-                        Some(Box::new(upstream))
-                    }
-                    Err(_) => None,
-                }
-            } else {
-                None
-            };
-
-            let branch = Branch {
-                issuer: issuer.clone(),
-                state,
-                storage: storage.clone(),
-                archive,
-                memory,
-                tree: Arc::new(RwLock::new(tree)),
-                upstream: loaded_upstream,
-            };
-
-            Ok(branch)
-        } else {
-            Err(ReplicaError::BranchNotFound { id: id.clone() })
-        }
+        Ok(branch)
     }
 
     /// Resets the branch to a specific revision.
     ///
     /// The base tree is set to the revision's tree, representing that the branch
     /// is now "in sync" at this revision (no divergence from the synced state).
-    pub async fn reset(&mut self, revision: Revision) -> Result<&mut Self, ReplicaError> {
-        // Base is always set to the revision's tree since reset means
-        // we're establishing this revision as the new synchronized state
-        let base = revision.tree.clone();
-
-        // create new edition from the prior state.
-        let state = BranchState {
-            revision: revision.clone(),
-            id: self.state.id.clone(),
-            description: self.state.description.clone(),
-            upstream: self.state.upstream.clone(),
-            base,
-        };
-
+    pub async fn reset(&mut self, revision: Revision) -> Result<(), ReplicaError> {
+        // Update local state
         self.memory
-            .replace_with(|_| Some(state.clone()), 5, &self.storage)
+            .replace_with(
+                |source| {
+                    if let Some(state) = source {
+                        Some(BranchState {
+                            revision: revision.clone(),
+                            id: self.id.clone(),
+                            description: state.description.clone(),
+                            upstream: state.upstream.clone(),
+                            base: revision.tree.clone(),
+                        })
+                    } else {
+                        Some(BranchState {
+                            revision: revision.clone(),
+                            id: self.id.clone(),
+                            description: "".into(),
+                            upstream: None,
+                            base: revision.tree.clone(),
+                        })
+                    }
+                },
+                5,
+                &self.storage,
+            )
             .await
             .map_err(|_| ReplicaError::StorageError("Updating branch failed".into()))?;
 
-        // Reload the tree from the new revision
-        let tree = Tree::from_hash(revision.tree().hash(), self.archive.clone())
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("Failed to load tree: {:?}", e)))?;
-        *self.tree.write().await = tree;
+        // If memory update worked we also reset the tree
+        let mut tree = self.tree.write().await;
+        tree.set_hash(Some(revision.tree().hash().clone()));
 
-        // If we were able to write a new state update
-        self.state = state;
-
-        Ok(self)
+        Ok(())
     }
 
     /// Lazily initializes and returns a mutable reference to the upstream.
     /// Returns None if no upstream is configured.
-    async fn upstream(&mut self) -> Result<Option<&mut Box<Upstream<Backend>>>, ReplicaError> {
-        if self.state.upstream.is_none() {
-            return Ok(None);
-        }
-
-        if self.upstream.is_none() {
-            if let Some(upstream_state) = &self.state.upstream {
-                let upstream =
-                    Upstream::load(upstream_state, self.issuer.clone(), self.storage.clone())
-                        .await?;
-                self.upstream = Some(Box::new(upstream));
-            }
-        }
-        Ok(self.upstream.as_mut())
+    fn upstream(&self) -> Option<Upstream<Backend>> {
+        self.upstream.read().clone()
     }
 
     /// Fetches remote reference of this branch. If this branch has no upstream
@@ -518,7 +471,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// operation is a no-op. If it has a remote upsteram it tries to fetch
     /// a revision and update corresponding branch record locally
     pub async fn fetch(&mut self) -> Result<Option<Revision>, ReplicaError> {
-        if let Some(upstream) = self.upstream().await? {
+        if let Some(mut upstream) = self.upstream() {
             upstream.fetch().await
         } else {
             Err(ReplicaError::BranchNotFound {
@@ -528,11 +481,17 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     }
 
     fn state(&self) -> BranchState {
-        self.memory.content().unwrap_or_else(|| self.state.clone())
+        self.memory.content().unwrap_or_else(|| {
+            BranchState::new(
+                self.id.clone(),
+                Revision::new(self.issuer.principal().to_owned()),
+                None,
+            )
+        })
     }
     /// Returns the branch identifier.
     pub fn id(&self) -> &BranchId {
-        self.state.id()
+        &self.id
     }
     /// Returns the current revision of this branch.
     pub fn revision(&self) -> Revision {
@@ -548,43 +507,32 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// If upstream is remote, it publishes to the remote and updates local cache.
     /// Returns None if no upstream is configured or if pushing to self.
     pub async fn push(&mut self) -> Result<Option<Revision>, ReplicaError> {
-        // Check if pushing to self (only relevant for local upstreams)
-        if let Some(upstream_state) = &self.state.upstream {
-            if matches!(upstream_state, UpstreamState::Local { .. })
-                && upstream_state.id() == self.id()
-            {
+        let mut upstream = self.upstream();
+
+        // We can only push if we have upstream setup
+        if let Some(upstream) = &upstream {
+            // if upstream is local and is the same branch there
+            // is nothing for us to do.
+            if upstream.is_local() && upstream.id() == self.id() {
                 return Ok(None);
             }
+        } else {
+            Err(ReplicaError::BranchHasNoUpstream {
+                id: self.id.clone(),
+            })
         }
 
-        let after = self.state.revision.clone();
-
-        // Lazily load and push to upstream
-        let before = if let Some(upstream) = self.upstream().await? {
-            upstream.publish(after.clone()).await?
-        } else {
-            // No upstream configured
-            return Ok(None);
-        };
-
-        // create new branch state with published revision
-        let state = BranchState {
-            revision: after.clone(),
-            // reset a base to published tree
-            base: after.tree.clone(),
-            ..self.state.clone()
-        };
+        let after = self.revision();
 
         // update a memory with the latest branch state
-        self.memory
-            .replace_with(|_| Some(state.clone()), 5, &self.storage)
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("Branch update failed {}", e)))?;
-
-        // and update state with latest branch state
-        self.state = state;
-
-        Ok(before)
+        if let Some(upstream) = &mut upstream {
+            let before = upstream.publish(after.clone()).await?;
+            self.reset(after).await?;
+            Ok(before)
+        } else {
+            // No upstream configured
+            Ok(None)
+        }
     }
 
     /// Pulls changes from the upstream branch.
@@ -1546,6 +1494,10 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
             Upstream::Local(branch) => branch.id(),
             Upstream::Remote(remote) => remote.id(),
         }
+    }
+
+    pub fn is_local(&self) -> bool {
+        matches!(self, Upstream::Local(_))
     }
 
     /// Converts this upstream to its state descriptor

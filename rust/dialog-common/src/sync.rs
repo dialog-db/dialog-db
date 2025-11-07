@@ -62,6 +62,7 @@ impl<S> ConditionalSync for S {}
 /// assert_eq!(*cell.read(), 100);
 /// ```
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
 pub struct SharedCell<T>(std::sync::RwLock<T>);
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -83,6 +84,7 @@ impl<T> SharedCell<T> {
 }
 
 #[cfg(target_arch = "wasm32")]
+#[derive(Debug)]
 pub struct SharedCell<T>(std::cell::RefCell<T>);
 
 #[cfg(target_arch = "wasm32")]

@@ -321,11 +321,13 @@ mod tests {
     // Allow the derive macro to reference dialog_query:: from within the crate
     extern crate self as dialog_query;
 
-    use std::collections::HashMap;
+    use std::{collections::HashMap, ops::Neg};
 
     use crate::{
+        attribute::Match,
+        dsl::Assert,
         predicate::{self, concept::Attributes, Fact},
-        Attribute, Parameters, Relation, Type,
+        Application, Attribute, Formula, Parameters, Relation, Type,
     };
 
     use super::*;
@@ -529,7 +531,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // TODO: Migrate from obsolete planning API - this test validates planning behavior
     async fn test_concept_planning_mixed_parameters() -> anyhow::Result<()> {
         use crate::artifact::Type;
         use crate::Term;
@@ -857,4 +858,185 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_implicit_attribute() -> anyhow::Result<()> {
+        use crate::artifact::{Artifacts, Entity};
+        use crate::formulas::string;
+        use crate::query::Output;
+        use crate::rule::When;
+        use crate::{Concept, Match, Negation, Premise, Term};
+        use dialog_storage::MemoryStorageBackend;
+
+        #[derive(Clone, Debug, PartialEq, Concept)]
+        pub struct Employee {
+            /// Employee
+            pub this: Entity,
+            /// Employee Name
+            pub name: String,
+            /// The job title of the employee
+            pub role: String,
+        }
+
+        mod without_role {
+            use crate::{Concept, Entity};
+
+            #[derive(Clone, Debug, PartialEq, Concept)]
+            pub struct Employee {
+                /// Employee
+                pub this: Entity,
+                /// Employee Name
+                pub name: String,
+            }
+        }
+
+        mod with_role {
+            use crate::{Concept, Entity};
+
+            #[derive(Clone, Debug, PartialEq, Concept)]
+            pub struct Employee {
+                /// Employee
+                pub this: Entity,
+                /// The job title of the employee
+                pub role: String,
+            }
+        }
+
+        // Define a rule using the clean function API - no manual DeductiveRule construction!
+        fn employee_with_implicit_title(employee: Match<Employee>) -> impl When {
+            // This rule says: "An employee exists when there's stuff with matching attributes"
+            // The premises check for stuff/name and stuff/role matching employee/name and employee/job
+            (
+                Premise::Apply(Application::Formula(
+                    Match::<string::Is> {
+                        of: Term::Constant("employee".into()),
+                        is: employee.role,
+                    }
+                    .into(),
+                )),
+                // employee.role.is("employee"),
+                Match::<without_role::Employee> {
+                    this: employee.this.clone(),
+                    name: employee.name,
+                },
+                // Premise::Exclude(Negation::not(
+                //     Match::<with_role::Employee> {
+                //         this: employee.this,
+                //         role: Term::var("whatever"),
+                //     }
+                //     .into(),
+                // )),
+            )
+        }
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+
+        // Install the rule using the clean API - no turbofish needed!
+        // The type inference works: Employee is inferred from the function parameter
+        let mut session = Session::open(store).install(employee_with_implicit_title)?;
+
+        let mut transaction = session.edit();
+        transaction.assert(Employee {
+            this: Entity::new()?,
+            name: "Alice".into(),
+            role: "manager".into(),
+        });
+        transaction.assert(without_role::Employee {
+            this: Entity::new()?,
+            name: "Bob".into(),
+        });
+
+        // Create test data as Stuff
+        session.commit(transaction).await?;
+
+        // Verify Stuff records exist
+        let employees = Match::<Employee> {
+            this: Term::var("employee"),
+            name: Term::var("name"),
+            role: Term::var("title"),
+        };
+
+        let result = employees.query(session.clone()).try_vec().await?;
+        assert_eq!(result.len(), 2, "Should have 2 Stuff records");
+
+        // Verify the derived data is correct
+        let mut found_alice = false;
+        let mut found_bob = false;
+
+        for employee in result {
+            match employee.name.as_str() {
+                "Alice" => {
+                    assert_eq!(employee.role, "manager");
+                    found_alice = true;
+                }
+                "Bob" => {
+                    assert_eq!(employee.role, "employee");
+                    found_bob = true;
+                }
+                name => panic!("Unexpected employee: {}", name),
+            }
+        }
+
+        assert!(found_alice, "Should find Alice as an employee");
+        assert!(found_bob, "Should find Bob as an employee");
+
+        Ok(())
+    }
+
+    // #[tokio::test]
+    // async fn test_branch_with_session() -> anyhow::Result<()> {
+    //     use crate::{Concept, Entity, Match, Term};
+    //     use dialog_artifacts::replica::{BranchId, Issuer, Replica};
+    //     use dialog_storage::MemoryStorageBackend;
+
+    //     // Create a replica and branch
+    //     let backend = MemoryStorageBackend::default();
+    //     let issuer = Issuer::from_passphrase("test-user");
+    //     let replica = Replica::open(issuer, backend)?;
+
+    //     let branch_id = BranchId::new("main".to_string());
+    //     let branch = replica.branches.open(&branch_id).await?;
+
+    //     // Verify initial revision
+    //     let initial_revision = branch.revision().await;
+    //     println!("Initial revision: {:?}", initial_revision);
+
+    //     // Create a session with the branch
+    //     let mut session = Session::open(branch.clone());
+
+    //     // Define a simple concept
+    //     #[derive(Clone, Debug, PartialEq, Concept)]
+    //     pub struct Person {
+    //         pub this: Entity,
+    //         pub name: String,
+    //     }
+
+    //     // Create and commit data
+    //     let alice = Person::CONCEPT
+    //         .create()
+    //         .with("name", "Alice".to_string())
+    //         .build()?;
+
+    //     session.transact(vec![alice]).await?;
+
+    //     // Verify revision changed
+    //     let new_revision = branch.revision().await;
+    //     assert_ne!(
+    //         initial_revision, new_revision,
+    //         "Revision should change after commit"
+    //     );
+
+    //     // Query the data
+    //     let query = Match::<Person> {
+    //         this: Term::var("person"),
+    //         name: Term::var("name"),
+    //     };
+
+    //     let results = crate::query::Output::try_vec(query.query(session.clone())).await?;
+    //     assert_eq!(results.len(), 1);
+    //     assert_eq!(results[0].name, "Alice");
+
+    //     Ok(())
+    // }
 }

@@ -61,7 +61,7 @@ impl Required {
             Term::Variable { name, .. } => {
                 let dependency = name
                     .clone()
-                    .expect(".require must be passed a named variable");
+                    .expect(".required must be passed a named variable");
                 self.0.insert(dependency);
             }
         }

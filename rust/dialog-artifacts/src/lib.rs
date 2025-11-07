@@ -47,12 +47,10 @@ pub mod artifacts;
 pub use artifacts::*;
 
 /// Replica abstraction for dialog
-pub mod replica;
-
-mod platform;
-#[allow(ambiguous_glob_reexports)]
-pub use platform::*;
-
+// pub mod replica;
+// mod platform;
+// #[allow(ambiguous_glob_reexports)]
+// pub use platform::*;
 mod reference;
 pub use reference::*;
 
