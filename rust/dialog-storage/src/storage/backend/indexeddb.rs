@@ -1,7 +1,6 @@
 use async_trait::async_trait;
-use blake3::Hash as Blake3Hash;
 use futures_util::{Stream, TryStreamExt};
-use js_sys::Uint8Array;
+use js_sys::{Object, Reflect, Uint8Array};
 use rexie::{ObjectStore, Rexie, RexieBuilder, TransactionMode};
 use std::{marker::PhantomData, rc::Rc};
 use wasm_bindgen::{JsCast, JsValue};
@@ -95,16 +94,7 @@ where
             .await
             .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
 
-        self.content = result
-            .map(|value| {
-                value
-                    .dyn_into::<Uint8Array>()
-                    .map(|arr| Value::from(arr.to_vec()))
-                    .map_err(|_| {
-                        DialogStorageError::StorageBackend("Failed to downcast value".to_string())
-                    })
-            })
-            .transpose()?;
+        self.content = result.map(|js_val| parse_value_only(js_val)).transpose()?;
 
         Ok(prior)
     }
@@ -125,22 +115,18 @@ where
 
         let key_array = bytes_to_typed_array(self.key.as_ref());
 
-        // Read current value in transaction
-        let current = store
+        // Read current value and version in transaction
+        let current_js = store
             .get(key_array.clone())
             .await
             .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
 
-        let current_value = current
-            .map(|value| {
-                value
-                    .dyn_into::<Uint8Array>()
-                    .map(|arr| Value::from(arr.to_vec()))
-                    .map_err(|_| {
-                        DialogStorageError::StorageBackend("Failed to downcast value".to_string())
-                    })
-            })
-            .transpose()?;
+        let (current_value, current_version) = if let Some(js_val) = current_js {
+            let (val, ver) = parse_versioned_value(js_val)?;
+            (Some(val), ver)
+        } else {
+            (None, 0)
+        };
 
         // Check CAS condition - current must match what we expect
         if current_value != self.content {
@@ -154,9 +140,10 @@ where
         // Perform the write or delete
         match &value {
             Some(new_value) => {
-                let value_array = bytes_to_typed_array(new_value.as_ref());
+                let new_version = current_version + 1;
+                let versioned_value = create_versioned_value(new_value.as_ref(), new_version)?;
                 store
-                    .put(&value_array, Some(&key_array))
+                    .put(&versioned_value, Some(&key_array))
                     .await
                     .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
             }
@@ -198,11 +185,26 @@ where
             .store(&self.store_name)
             .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
 
-        let key = bytes_to_typed_array(key.as_ref());
-        let value = bytes_to_typed_array(value.as_ref());
+        let key_array = bytes_to_typed_array(key.as_ref());
+
+        // Read current version if it exists, otherwise start at 1
+        let current_version = store
+            .get(key_array.clone())
+            .await
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?
+            .and_then(|js_val| {
+                Reflect::get(&js_val, &JsValue::from_str("version"))
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .map(|v| v as u64)
+            })
+            .unwrap_or(0);
+
+        let new_version = current_version + 1;
+        let versioned_value = create_versioned_value(value.as_ref(), new_version)?;
 
         store
-            .put(&value, Some(&key))
+            .put(&versioned_value, Some(&key_array))
             .await
             .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
 
@@ -223,7 +225,7 @@ where
             .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
         let key = bytes_to_typed_array(key.as_ref());
 
-        let Some(value) = store
+        let Some(js_val) = store
             .get(key)
             .await
             .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?
@@ -231,20 +233,13 @@ where
             return Ok(None);
         };
 
-        let out = value
-            .dyn_into::<Uint8Array>()
-            .map_err(|value| {
-                DialogStorageError::StorageBackend(format!(
-                    "Failed to downcast value to bytes: {:?}",
-                    value
-                ))
-            })?
-            .to_vec();
+        let value = parse_value_only(js_val)?;
+
         tx.done()
             .await
             .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
 
-        Ok(Some(Value::from(out)))
+        Ok(Some(value))
     }
 
     async fn open(&self, key: &Self::Key) -> Result<Self::Resource, Self::Error> {
@@ -262,16 +257,7 @@ where
             .await
             .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
 
-        let content = result
-            .map(|value| {
-                value
-                    .dyn_into::<Uint8Array>()
-                    .map(|arr| Value::from(arr.to_vec()))
-                    .map_err(|_| {
-                        DialogStorageError::StorageBackend("Failed to downcast value".to_string())
-                    })
-            })
-            .transpose()?;
+        let content = result.map(|js_val| parse_value_only(js_val)).transpose()?;
 
         Ok(IndexedDbResource {
             backend: self.clone(),
@@ -290,20 +276,33 @@ where
     type Address = Key;
     type Value = Value;
     type Error = DialogStorageError;
-    type Edition = Blake3Hash;
+    type Edition = u64;
 
     async fn acquire(
         &self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
-        // Get the current value
-        let value = self.get(address).await?;
+        let tx = self
+            .db
+            .transaction(&[&self.store_name], TransactionMode::ReadOnly)
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+        let store = tx
+            .store(&self.store_name)
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
 
-        // Compute Blake3 hash as edition
-        Ok(value.as_ref().map(|v| {
-            let hash = blake3::hash(v.as_ref());
-            (v.clone(), hash)
-        }))
+        let key_array = bytes_to_typed_array(address.as_ref());
+        let result = store
+            .get(key_array)
+            .await
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+
+        match result {
+            Some(js_val) => {
+                let (value, version) = parse_versioned_value(js_val)?;
+                Ok(Some((value, version)))
+            }
+            None => Ok(None),
+        }
     }
 
     async fn replace(
@@ -322,24 +321,21 @@ where
 
         let key_array = bytes_to_typed_array(address.as_ref());
 
-        // Check CAS condition - get current value and compute its hash
-        let current_value = store
+        // Check CAS condition - get current version
+        let current_js = store
             .get(key_array.clone())
             .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?
-            .map(|value| {
-                value
-                    .dyn_into::<Uint8Array>()
-                    .map(|arr| Value::from(arr.to_vec()))
-                    .map_err(|_| {
-                        DialogStorageError::StorageBackend("Failed to downcast value".to_string())
-                    })
-            })
-            .transpose()?;
+            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
 
-        // Compute hash of current value and verify edition matches
-        let current_hash = current_value.as_ref().map(|v| blake3::hash(v.as_ref()));
-        if current_hash.as_ref() != edition {
+        let current_version = if let Some(js_val) = current_js {
+            let (_, version) = parse_versioned_value::<Value>(js_val)?;
+            Some(version)
+        } else {
+            None
+        };
+
+        // Verify edition matches
+        if current_version.as_ref() != edition {
             return Err(DialogStorageError::StorageBackend(
                 "CAS condition failed: edition mismatch".to_string(),
             ));
@@ -348,9 +344,10 @@ where
         // Perform the operation
         match content {
             Some(new_value) => {
-                let value_array = bytes_to_typed_array(new_value.as_ref());
+                let new_version = current_version.unwrap_or(0) + 1;
+                let versioned_value = create_versioned_value(new_value.as_ref(), new_version)?;
                 store
-                    .put(&value_array, Some(&key_array))
+                    .put(&versioned_value, Some(&key_array))
                     .await
                     .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
 
@@ -358,9 +355,7 @@ where
                     .await
                     .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
 
-                // Return hash of new value as the new edition
-                let new_hash = blake3::hash(new_value.as_ref());
-                Ok(Some(new_hash))
+                Ok(Some(new_version))
             }
             None => {
                 // Delete operation
@@ -413,9 +408,25 @@ where
         let mut entries = Vec::<(JsValue, Option<JsValue>)>::new();
 
         while let Some((key, value)) = stream.try_next().await? {
-            let key = bytes_to_typed_array(key.as_ref());
-            let value = bytes_to_typed_array(value.as_ref());
-            entries.push((value, Some(key)));
+            let key_array = bytes_to_typed_array(key.as_ref());
+
+            // Read current version if exists
+            let current_version = store
+                .get(key_array.clone())
+                .await
+                .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?
+                .and_then(|js_val| {
+                    Reflect::get(&js_val, &JsValue::from_str("version"))
+                        .ok()
+                        .and_then(|v| v.as_f64())
+                        .map(|v| v as u64)
+                })
+                .unwrap_or(0);
+
+            let new_version = current_version + 1;
+            let versioned_value = create_versioned_value(value.as_ref(), new_version)?;
+
+            entries.push((versioned_value, Some(key_array)));
         }
 
         store.put_all(entries.into_iter()).await.map_err(|error| {
@@ -436,6 +447,72 @@ fn bytes_to_typed_array(bytes: &[u8]) -> JsValue {
     let array = Uint8Array::new_with_length(bytes.len() as u32);
     array.copy_from(bytes);
     JsValue::from(array)
+}
+
+/// Creates a versioned value object: { value: Uint8Array, version: number }
+fn create_versioned_value(value: &[u8], version: u64) -> Result<JsValue, DialogStorageError> {
+    let obj = Object::new();
+    let value_array = bytes_to_typed_array(value);
+
+    Reflect::set(&obj, &JsValue::from_str("value"), &value_array).map_err(|_| {
+        DialogStorageError::StorageBackend("Failed to set value property".to_string())
+    })?;
+
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("version"),
+        &JsValue::from_f64(version as f64),
+    )
+    .map_err(|_| {
+        DialogStorageError::StorageBackend("Failed to set version property".to_string())
+    })?;
+
+    Ok(JsValue::from(obj))
+}
+
+/// Extracts value and version from stored object
+fn parse_versioned_value<Value>(js_val: JsValue) -> Result<(Value, u64), DialogStorageError>
+where
+    Value: From<Vec<u8>>,
+{
+    // Get the value bytes
+    let value_js = Reflect::get(&js_val, &JsValue::from_str("value")).map_err(|_| {
+        DialogStorageError::StorageBackend("Failed to get value property".to_string())
+    })?;
+
+    let value_bytes = value_js
+        .dyn_into::<Uint8Array>()
+        .map_err(|_| DialogStorageError::StorageBackend("Value is not Uint8Array".to_string()))?
+        .to_vec();
+
+    // Get the version number
+    let version_js = Reflect::get(&js_val, &JsValue::from_str("version")).map_err(|_| {
+        DialogStorageError::StorageBackend("Failed to get version property".to_string())
+    })?;
+
+    let version = version_js
+        .as_f64()
+        .ok_or_else(|| DialogStorageError::StorageBackend("Version is not a number".to_string()))?
+        as u64;
+
+    Ok((Value::from(value_bytes), version))
+}
+
+/// Extracts just the value from stored object (for StorageBackend get/set operations)
+fn parse_value_only<Value>(js_val: JsValue) -> Result<Value, DialogStorageError>
+where
+    Value: From<Vec<u8>>,
+{
+    let value_js = Reflect::get(&js_val, &JsValue::from_str("value")).map_err(|_| {
+        DialogStorageError::StorageBackend("Failed to get value property".to_string())
+    })?;
+
+    let value_bytes = value_js
+        .dyn_into::<Uint8Array>()
+        .map_err(|_| DialogStorageError::StorageBackend("Value is not Uint8Array".to_string()))?
+        .to_vec();
+
+    Ok(Value::from(value_bytes))
 }
 
 #[cfg(all(test, target_arch = "wasm32"))]
