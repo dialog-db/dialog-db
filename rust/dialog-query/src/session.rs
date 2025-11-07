@@ -864,7 +864,7 @@ mod tests {
         use crate::query::Output;
         use crate::rule::When;
         use crate::strings;
-        use crate::{Application, Concept, Match, Negation, Premise, Term};
+        use crate::{Concept, Fact, Match, Term};
         use dialog_storage::MemoryStorageBackend;
 
         #[derive(Clone, Debug, PartialEq, Concept)]
@@ -906,25 +906,21 @@ mod tests {
             // This rule says: "An employee exists when there's stuff with matching attributes"
             // The premises check for stuff/name and stuff/role matching employee/name and employee/job
             (
-                Premise::Apply(Application::Formula(
-                    Match::<strings::Is> {
-                        of: Term::Constant("employee".into()),
-                        is: employee.role,
-                    }
-                    .into(),
-                )),
-                // employee.role.is("employee"),
-                Match::<without_role::Employee> {
-                    this: employee.this.clone(),
-                    name: employee.name,
-                },
-                // Premise::Exclude(Negation::not(
-                //     Match::<with_role::Employee> {
-                //         this: employee.this,
-                //         role: Term::var("whatever"),
-                //     }
-                //     .into(),
-                // )),
+                employee.role.is("employee"),
+                // employee has a name
+                Fact::<String>::select()
+                    .the("employee/name")
+                    .of(employee.this.clone())
+                    .is(employee.name.clone().as_unknown())
+                    .compile()
+                    .unwrap(),
+                // but does not have role (using ! operator)
+                !Fact::<String>::select()
+                    .the("employee/role")
+                    .of(employee.this.clone())
+                    .is(Term::blank())
+                    .compile()
+                    .unwrap(),
             )
         }
 

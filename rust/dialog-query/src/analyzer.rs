@@ -244,6 +244,9 @@ impl Analysis {
         let params = premise.parameters();
         let env = Environment::new();
 
+        // Negations never bind variables - they only filter
+        let is_negation = matches!(premise, Premise::Exclude(_));
+
         // Use the premise's estimate() method to calculate cost
         // If None, the premise is unbound and should use a high cost
         let cost = premise.estimate(&env).unwrap_or(usize::MAX);
@@ -273,11 +276,19 @@ impl Analysis {
                     continue;
                 }
 
+                // Blank terms are wildcards - they match anything and don't need to be bound
+                if term.is_blank() {
+                    continue;
+                }
+
                 match &constraint.requirement {
                     Requirement::Required(Some(group)) => {
                         // If this group is satisfied, treat as desired (variable will be bound)
                         if satisfied_groups.contains(group) {
-                            binds.add(term);
+                            // Negations don't bind variables, so skip adding to binds
+                            if !is_negation {
+                                binds.add(term);
+                            }
                         } else {
                             requires.add(term);
                         }
@@ -286,7 +297,10 @@ impl Analysis {
                         requires.add(term);
                     }
                     Requirement::Optional => {
-                        binds.add(term);
+                        // Negations don't bind variables, so skip adding to binds
+                        if !is_negation {
+                            binds.add(term);
+                        }
                     }
                 }
             }
