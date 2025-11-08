@@ -1,13 +1,15 @@
 #![allow(missing_docs)]
 
 use std::fmt::Debug;
+use std::collections::HashMap;
+use std::sync::{Arc, Weak};
 
 use crate::replica::{BranchId, Site};
 use async_trait::async_trait;
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_common::{ConditionalSend, ConditionalSync, SharedCell};
 use dialog_storage::{
     CborEncoder, DialogStorageError, Encoder, StorageBackend, TransactionalMemory,
-    TransactionalMemoryBackend,
+    TransactionalMemoryBackend, State,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -62,21 +64,33 @@ impl<T: ConditionalSync + Clone + AsRef<[u8]> + std::fmt::Debug> Address for T {
 /// This is a convenience trait for backends that use Vec<u8> keys (the common case
 /// for platform storage like branches and remotes). Storage is flexible and works
 /// with any key type implementing `From<Vec<u8>> + AsRef<[u8]>`.
+///
+/// The Edition type must be 'static to support caching with weak references.
 pub trait PlatformBackend:
     StorageBackend<Key = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
-    + TransactionalMemoryBackend<Address = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
+    + TransactionalMemoryBackend<
+        Address = Vec<u8>,
+        Value = Vec<u8>,
+        Error = DialogStorageError,
+        Edition = Self::PlatformEdition,
+    >
     + ConditionalSync
     + Clone
 {
+    /// The edition type for this backend, constrained to be 'static
+    type PlatformEdition: Send + Sync + Clone + 'static;
 }
 
 // Blanket implementation - any backend that satisfies the bounds is a PlatformBackend
-impl<B> PlatformBackend for B where
+impl<B> PlatformBackend for B
+where
     B: StorageBackend<Key = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
         + TransactionalMemoryBackend<Address = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSync
-        + Clone
+        + Clone,
+    <B as TransactionalMemoryBackend>::Edition: Send + Sync + Clone + 'static,
 {
+    type PlatformEdition = <B as TransactionalMemoryBackend>::Edition;
 }
 
 /// Adapter that maps a backend's error type to DialogStorageError
@@ -289,9 +303,207 @@ where
 }
 
 
+/// Type-erased weak reference wrapper for cache storage
+trait WeakStateRef: Send + Sync + std::any::Any {
+    /// Try to upgrade the weak reference and check if it's still alive
+    fn is_alive(&self) -> bool;
+
+    /// Required for downcasting
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// Concrete implementation for a specific type
+struct TypedWeakRef<T, Edition>(Weak<SharedCell<State<T, Edition>>>);
+
+impl<T, Edition> WeakStateRef for TypedWeakRef<T, Edition>
+where
+    T: Send + Sync + 'static,
+    Edition: Send + Sync + 'static,
+{
+    fn is_alive(&self) -> bool {
+        self.0.strong_count() > 0
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Platform-specific storage with caching for TransactionalMemory instances.
+///
+/// This wrapper around Storage adds a cache of weak references to TransactionalMemory states.
+/// When you call `open()` multiple times with the same address, you get back TransactionalMemory
+/// instances that share the same underlying state, enabling optimistic concurrency control
+/// across multiple accessors.
+#[derive(Clone)]
+pub struct PlatformStorage<Backend: PlatformBackend> {
+    storage: Storage<Backend>,
+    /// Cache of weak references to TransactionalMemory state, indexed by address
+    /// Assumes each address is only used with one type T
+    cache: Arc<SharedCell<HashMap<Vec<u8>, Arc<dyn WeakStateRef>>>>,
+}
+
+impl<Backend: PlatformBackend> PlatformStorage<Backend> {
+    /// Creates a new platform storage with the given backend
+    pub fn new(backend: Backend) -> Self {
+        Self {
+            storage: Storage::new(backend, CborEncoder),
+            cache: Arc::new(SharedCell::new(HashMap::new())),
+        }
+    }
+
+    /// Opens a transactional memory at the given key with caching.
+    ///
+    /// Multiple calls to `open()` with the same address and type will return
+    /// TransactionalMemory instances that share the same underlying state.
+    /// This sharing persists as long as at least one strong reference exists.
+    pub async fn open<T>(
+        &self,
+        key: &Vec<u8>,
+    ) -> Result<TransactionalMemory<T, Storage<Backend>>, DialogStorageError>
+    where
+        T: Serialize + DeserializeOwned + ConditionalSync + std::fmt::Debug + Clone + Send + Sync + 'static,
+        <Backend as TransactionalMemoryBackend>::Edition: 'static,
+    {
+        // First, try to get from cache and upgrade weak reference
+        {
+            let cache = self.cache.read();
+            if let Some(weak_ref) = cache.get(key) {
+                // Downcast the Arc<dyn WeakStateRef> to access the concrete type
+                if let Some(typed_weak) = weak_ref.as_any().downcast_ref::<TypedWeakRef<T, <Backend as TransactionalMemoryBackend>::Edition>>() {
+                    // Try to upgrade the weak reference
+                    if let Some(state) = typed_weak.0.upgrade() {
+                        // We have a cached state! Create TransactionalMemory with it
+                        return Ok(TransactionalMemory {
+                            address: key.clone(),
+                            state,
+                            codec: CborEncoder,
+                            policy: Default::default(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Not in cache or weak reference expired, create new instance
+        let memory = self.storage.open(key).await?;
+
+        // Store a weak reference in the cache
+        {
+            let weak = Arc::downgrade(&memory.state);
+            let typed_weak = TypedWeakRef(weak);
+            let arc_weak: Arc<dyn WeakStateRef> = Arc::new(typed_weak);
+            let mut cache = self.cache.write();
+            cache.insert(key.clone(), arc_weak);
+        }
+
+        Ok(memory)
+    }
+
+    /// Cleans up expired weak references from the cache
+    pub fn cleanup_cache(&self) {
+        let mut cache = self.cache.write();
+        cache.retain(|_, weak_ref| {
+            // Check if the weak reference is still alive
+            weak_ref.is_alive()
+        });
+    }
+
+    /// Gets the inner storage
+    pub fn storage(&self) -> &Storage<Backend> {
+        &self.storage
+    }
+}
+
+impl<Backend: PlatformBackend> std::fmt::Debug for PlatformStorage<Backend> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformStorage")
+            .field("storage", &self.storage)
+            .field("cache", &format!("{} entries", self.cache.read().len()))
+            .finish()
+    }
+}
+
 /// Type alias for TransactionalMemory with default CborEncoder.
 /// Type alias for backwards compatibility with old TypedStoreResource API.
 /// Now uses TransactionalMemory from dialog_storage.
 /// Both Storage and TransactionalMemory default to CborEncoder, so we don't need to specify it.
 pub type TypedStoreResource<T, Backend> = TransactionalMemory<T, Storage<Backend>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dialog_storage::MemoryStorageBackend;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct TestBranchState {
+        revision: String,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_platform_storage_cache_shares_state() {
+        // Create a PlatformStorage with an in-memory backend
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let storage = PlatformStorage::new(backend);
+
+        let key = b"branch/main".to_vec();
+
+        // Open the same key twice
+        let mut memory1 = storage.open::<TestBranchState>(&key).await.unwrap();
+        let mut memory2 = storage.open::<TestBranchState>(&key).await.unwrap();
+
+        // Initially both should be None
+        assert_eq!(memory1.read(), None);
+        assert_eq!(memory2.read(), None);
+
+        // Update through memory1
+        let state1 = TestBranchState {
+            revision: "rev1".to_string(),
+        };
+        memory1.replace(Some(state1.clone()), storage.storage()).await.unwrap();
+
+        // memory2 should see the update because they share the same state
+        assert_eq!(memory2.read(), Some(state1.clone()));
+
+        // Update through memory2
+        let state2 = TestBranchState {
+            revision: "rev2".to_string(),
+        };
+        memory2.replace(Some(state2.clone()), storage.storage()).await.unwrap();
+
+        // memory1 should see the update
+        assert_eq!(memory1.read(), Some(state2.clone()));
+
+        // Open a third time - should still get shared state
+        let memory3 = storage.open::<TestBranchState>(&key).await.unwrap();
+        assert_eq!(memory3.read(), Some(state2));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_platform_storage_cache_cleanup() {
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let storage = PlatformStorage::new(backend);
+
+        let key1 = b"branch/main".to_vec();
+        let key2 = b"branch/dev".to_vec();
+
+        // Open two different keys
+        {
+            let _memory1 = storage.open::<TestBranchState>(&key1).await.unwrap();
+            let _memory2 = storage.open::<TestBranchState>(&key2).await.unwrap();
+            // Both are in cache now
+        }
+        // After dropping, weak references should be expired
+
+        // Cleanup should remove expired entries
+        storage.cleanup_cache();
+
+        // Cache should be empty or have only living references
+        let cache_size = storage.cache.read().len();
+        assert_eq!(cache_size, 0, "Cache should be empty after cleanup");
+    }
+}
 
