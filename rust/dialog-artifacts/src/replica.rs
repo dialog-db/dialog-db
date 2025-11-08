@@ -339,7 +339,6 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             memory
                 .replace_with(
                     move |prior| prior.to_owned().or(Some(state.clone())),
-                    5,
                     storage,
                 )
                 .await
@@ -450,7 +449,6 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                         })
                     }
                 },
-                5,
                 &self.storage,
             )
             .await
@@ -689,7 +687,6 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                         ..branch.clone()
                     })
                 },
-                5,
                 &self.storage,
             )
             .await
@@ -1186,7 +1183,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         // update local record for the revision.
         let _ = self
             .cache
-            .replace_with(|_| revision.clone(), 5, &self.storage)
+            .replace_with(|_| revision.clone(), &self.storage)
             .await;
         self.revision = revision;
 
@@ -1212,7 +1209,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         // if local state is different we update it also
         if before.as_ref() != Some(&revision) {
             self.cache
-                .replace_with(|_| Some(revision.clone()), 5, &self.storage)
+                .replace_with(|_| Some(revision.clone()), &self.storage)
                 .await
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 

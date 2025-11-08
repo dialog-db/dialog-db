@@ -109,6 +109,8 @@ pub struct TransactionalMemory<Backend: TransactionalMemoryBackend> {
     pub address: Backend::Address,
     /// The cached state (value + edition) shared across clones
     pub state: Arc<SharedCell<State<Backend>>>,
+    /// Policy for retry behavior during replace_with operations
+    pub policy: UpdatePolicy,
 }
 
 impl<Backend: TransactionalMemoryBackend> Clone for TransactionalMemory<Backend>
@@ -119,6 +121,7 @@ where
         Self {
             address: self.address.clone(),
             state: Arc::clone(&self.state),
+            policy: self.policy.clone(),
         }
     }
 }
@@ -132,6 +135,7 @@ impl<Backend: TransactionalMemoryBackend> TransactionalMemory<Backend> {
         Self {
             address,
             state: Arc::new(SharedCell::new(entry.unwrap_or_default())),
+            policy: UpdatePolicy::default(),
         }
     }
 
@@ -223,41 +227,31 @@ impl<Backend: TransactionalMemoryBackend> TransactionalMemory<Backend> {
     /// Replaces content with computed value and retry logic.
     ///
     /// Calls `f` with current cached value to compute new value, then attempts CAS.
-    /// On CAS conflict, reloads and retries up to `max_retries` times.
-    pub async fn replace_with<F>(
-        &mut self,
-        f: F,
-        max_retries: usize,
-        target: &Backend,
-    ) -> Result<(), Backend::Error>
+    /// On CAS conflict, reloads and retries according to the policy.
+    ///
+    /// MaxRetries(n) means: try once optimistically, then reload and retry up to n more times.
+    pub async fn replace_with<F>(&mut self, f: F, target: &Backend) -> Result<(), Backend::Error>
     where
         F: Fn(&Option<Backend::Value>) -> Option<Backend::Value> + ConditionalSend,
         Backend::Value: Clone,
     {
-        for attempt in 0..max_retries {
-            // Read current value and compute new value
-            let new_value = {
-                let entry = self.state.read();
-                f(&entry.value)
-            };
+        let UpdatePolicy::MaxRetries(mut n) = self.policy;
 
-            // Try CAS
-            match self.replace(new_value, target).await {
+        loop {
+            // Try CAS again
+            let input = f(&self.state.read().value);
+            match self.replace(input, target).await {
                 Ok(_) => return Ok(()),
-                Err(_) if attempt + 1 < max_retries => {
-                    // Reload and retry
-                    self.reload(target).await?;
+                Err(e) => {
+                    if n > 0 {
+                        n -= 1;
+                        self.reload(target).await?;
+                    } else {
+                        return Err(e);
+                    }
                 }
-                Err(e) => return Err(e),
             }
         }
-
-        // One last attempt
-        let new_value = {
-            let entry = self.state.read();
-            f(&entry.value)
-        };
-        self.replace(new_value, target).await
     }
 
     /// Returns a reference to the key this asset is positioned at
@@ -296,6 +290,8 @@ where
     pub state: Arc<SharedCell<TypedState<T, Backend::Edition>>>,
     /// The codec for encoding/decoding
     pub codec: Codec,
+    /// Policy for retry behavior during replace_with operations
+    pub policy: UpdatePolicy,
 }
 
 impl<T, Backend, Codec> std::fmt::Debug for TypedTransactionalMemory<T, Backend, Codec>
@@ -324,6 +320,7 @@ where
             address: self.address.clone(),
             state: Arc::clone(&self.state),
             codec: self.codec.clone(),
+            policy: self.policy.clone(),
         }
     }
 }
@@ -361,6 +358,7 @@ where
             address,
             state: Arc::new(SharedCell::new(TypedState { value, edition })),
             codec,
+            policy: UpdatePolicy::default(),
         })
     }
 
@@ -374,6 +372,7 @@ where
             address,
             state: Arc::new(SharedCell::new(state)),
             codec,
+            policy: UpdatePolicy::default(),
         }
     }
 
@@ -454,30 +453,36 @@ where
     }
 
     /// Replaces content with computed value and retry logic.
+    ///
+    /// Calls `f` with current cached value to compute new value, then attempts CAS.
+    /// On CAS conflict, reloads and retries according to the policy.
+    ///
+    /// MaxRetries(n) means: try once optimistically, then reload and retry up to n more times.
     pub async fn replace_with<F>(
         &mut self,
         f: F,
-        max_retries: usize,
         backend: &Backend,
     ) -> Result<(), DialogStorageError>
     where
         F: Fn(&Option<T>) -> Option<T> + ConditionalSend,
     {
-        for attempt in 0..max_retries {
-            let new_value = self.read_with(|current| f(current));
+        let UpdatePolicy::MaxRetries(mut n) = self.policy;
 
-            match self.replace(new_value, backend).await {
+        loop {
+            // Try CAS with current cached state
+            let input = f(&self.state.read().value);
+            match self.replace(input, backend).await {
                 Ok(_) => return Ok(()),
-                Err(_) if attempt + 1 < max_retries => {
-                    self.reload(backend).await?;
+                Err(e) => {
+                    if n > 0 {
+                        n -= 1;
+                        self.reload(backend).await?;
+                    } else {
+                        return Err(e);
+                    }
                 }
-                Err(e) => return Err(e),
             }
         }
-
-        // One last attempt
-        let new_value = self.read_with(|current| f(current));
-        self.replace(new_value, backend).await
     }
 
     /// Returns a reference to the address this memory is positioned at.
