@@ -321,13 +321,11 @@ mod tests {
     // Allow the derive macro to reference dialog_query:: from within the crate
     extern crate self as dialog_query;
 
-    use std::{collections::HashMap, ops::Neg};
+    use std::collections::HashMap;
 
     use crate::{
-        attribute::Match,
-        dsl::Assert,
         predicate::{self, concept::Attributes, Fact},
-        Application, Attribute, Formula, Parameters, Relation, Type,
+        Attribute, Parameters, Relation, Type,
     };
 
     use super::*;
@@ -864,7 +862,6 @@ mod tests {
         use crate::artifact::{Artifacts, Entity};
         use crate::query::Output;
         use crate::rule::When;
-        use crate::strings;
         use crate::{Concept, Fact, Match, Term};
         use dialog_storage::MemoryStorageBackend;
 

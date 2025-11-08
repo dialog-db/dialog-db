@@ -1277,12 +1277,6 @@ mod tests {
         data: String,
     }
 
-    impl TestValue {
-        fn new(data: impl Into<String>) -> Self {
-            Self { data: data.into() }
-        }
-    }
-
     // Helper function to create a test REST backend with a mock server
     async fn create_test_backend() -> (RestStorageBackend<Vec<u8>, Vec<u8>>, mockito::ServerGuard) {
         let server = Server::new_async().await;
@@ -1868,8 +1862,12 @@ mod local_s3_tests {
         // Test TransactionalMemory with wrapped backend
         let key = b"test-key".to_vec();
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &wrapped, CborEncoder)
-                .await?;
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &wrapped,
+                CborEncoder,
+            )
+            .await?;
         assert_eq!(memory.read(), None);
 
         let value = TestValue::new("test-value");
@@ -1900,8 +1898,12 @@ mod local_s3_tests {
 
         // We try to create new branch record
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
-                .await?;
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
+            .await?;
         assert_eq!(memory.read(), None, "currently there is no record");
 
         memory.replace(Some(v1.clone()), &store).await?;
@@ -1943,18 +1945,19 @@ mod local_s3_tests {
 
         // Create initial value
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
-                .await?;
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
+            .await?;
 
         assert_eq!(memory.read(), None, "have no content yet");
 
         // write initila value
         memory.replace(Some(v1.clone()), &store).await?;
 
-        assert!(
-            store.get(&key).await?.is_some(),
-            "record was stored"
-        );
+        assert!(store.get(&key).await?.is_some(), "record was stored");
 
         let v2 = TestValue::new("v2");
         let v3 = TestValue::new("v3");
@@ -1969,10 +1972,7 @@ mod local_s3_tests {
         // Now try to update based on stale v1 -> v3 (should fail)
         let result = memory.replace(Some(v3.clone()), &store).await;
 
-        assert!(
-            result.is_err(),
-            "swap failed"
-        );
+        assert!(result.is_err(), "swap failed");
 
         assert!(
             store.get(&key).await?.is_some(),
@@ -2007,8 +2007,12 @@ mod local_s3_tests {
 
         // Open TransactionalMemory (gets v1)
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
-                .await?;
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
+            .await?;
         assert_eq!(memory.read(), Some(v1.clone()));
 
         // Simulate concurrent deletion by directly deleting from S3
@@ -2041,8 +2045,12 @@ mod local_s3_tests {
 
         // when=None and key missing → success
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
-                .await?;
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
+            .await?;
         memory.replace(Some(value.clone()), &store).await?;
         assert!(store.get(&key).await?.is_some());
 
@@ -2074,14 +2082,22 @@ mod local_s3_tests {
 
         // Open resource (captures expected)
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
-                .await?;
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
+            .await?;
 
         // Simulate concurrent deletion
-        crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
-            .await?
-            .replace(None, &store)
-            .await?;
+        crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+            key.clone(),
+            &store,
+            CborEncoder,
+        )
+        .await?
+        .replace(None, &store)
+        .await?;
 
         // Try to update with stale ETag
         let result = memory.replace(Some(new_val), &store).await;
@@ -2109,8 +2125,12 @@ mod local_s3_tests {
         // when=None and key exists → fail
         // Open resource for non-existent key (captures None)
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
-                .await?;
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
+            .await?;
 
         // Simulate concurrent creation: someone else creates the key
         {
@@ -2151,8 +2171,12 @@ mod local_s3_tests {
 
         // when=Some and matches existing → success
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
-                .await?;
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
+            .await?;
         memory.replace(Some(new_val.clone()), &store).await?;
         assert!(store.get(&key).await?.is_some());
 
@@ -2184,8 +2208,12 @@ mod local_s3_tests {
 
         // Open resource (captures existing)
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
-                .await?;
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
+            .await?;
 
         // Simulate concurrent modification: someone else changes the value
         {
@@ -2205,6 +2233,10 @@ mod local_s3_tests {
 
 #[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
 #[allow(unused_imports, unused_variables, unused_mut, dead_code)]
+/// S3-compatible test server for integration testing.
+///
+/// This module provides a simple in-memory S3-compatible server
+/// for testing REST storage backend functionality.
 pub mod s3 {
     use async_trait::async_trait;
     use hyper::server::conn::http1;
@@ -2228,16 +2260,20 @@ pub mod s3 {
         buckets: Arc<RwLock<HashMap<String, HashMap<String, StoredObject>>>>,
     }
 
+    /// A running S3 test server instance.
     pub struct Service {
+        /// The endpoint URL where the server is listening
         pub endpoint: String,
         shutdown_tx: tokio::sync::oneshot::Sender<()>,
         storage: InMemoryS3,
     }
     impl Service {
+        /// Stops the test server.
         pub fn stop(self) -> Result<(), ()> {
             self.shutdown_tx.send(())
         }
 
+        /// Returns the endpoint URL of the running server.
         pub fn endpoint(&self) -> &str {
             &self.endpoint
         }
@@ -2248,6 +2284,7 @@ pub mod s3 {
         }
     }
 
+    /// Starts a test S3 server.
     pub async fn start() -> anyhow::Result<Service> {
         InMemoryS3::start2().await
     }
@@ -2271,10 +2308,12 @@ pub mod s3 {
                 .unwrap_or_default()
         }
 
+        /// Starts a test S3 server.
         pub async fn start() -> anyhow::Result<Service> {
             Self::serve(Self::default()).await
         }
 
+        /// Starts a test S3 server (alternative implementation).
         pub async fn start2() -> anyhow::Result<Service> {
             let storage = Self::default();
             let s3_handler = S3ServiceBuilder::new(storage.clone()).build();

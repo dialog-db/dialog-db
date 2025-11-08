@@ -1,6 +1,6 @@
 use crate::DialogStorageError;
 
-use super::{StorageBackend};
+use super::StorageBackend;
 use async_trait::async_trait;
 use dialog_common::ConditionalSync;
 use tokio::sync::Mutex;
@@ -47,7 +47,6 @@ where
     }
 }
 
-
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Backend> StorageBackend for StorageCache<Backend>
@@ -77,5 +76,4 @@ where
 
         Ok(None)
     }
-
 }

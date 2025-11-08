@@ -125,7 +125,7 @@ where
 }
 
 #[async_trait(?Send)]
-impl<Key, Value> super::TransactionalMemoryBackend for IndexedDbStorageBackend<Key, Value>
+impl<Key, Value> TransactionalMemoryBackend for IndexedDbStorageBackend<Key, Value>
 where
     Key: AsRef<[u8]> + Clone,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + PartialEq,
@@ -375,8 +375,8 @@ where
 #[cfg(all(test, target_arch = "wasm32"))]
 mod tests {
     use super::*;
-    use crate::storage::transactional_memory::TransactionalMemory;
     use crate::CborEncoder;
+    use crate::storage::transactional_memory::TransactionalMemory;
     use serde::{Deserialize, Serialize};
     use wasm_bindgen_test::*;
 
@@ -405,9 +405,10 @@ mod tests {
         let value = TestValue::new("test_value");
 
         // Open TransactionalMemory for non-existent key
-        let mut memory = TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
-            .await
-            .unwrap();
+        let mut memory =
+            TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
+                .await
+                .unwrap();
         assert_eq!(memory.read(), None, "Memory should start with None");
 
         // Create new entry
@@ -415,7 +416,9 @@ mod tests {
         assert!(result.is_ok(), "Should create new entry");
 
         // Verify it was stored
-        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder).await.unwrap();
+        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder)
+            .await
+            .unwrap();
         assert_eq!(stored.read(), Some(value));
     }
 
@@ -438,9 +441,10 @@ mod tests {
         }
 
         // Open TransactionalMemory with existing value
-        let mut memory = TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
-            .await
-            .unwrap();
+        let mut memory =
+            TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
+                .await
+                .unwrap();
         assert_eq!(
             memory.read(),
             Some(value1.clone()),
@@ -452,7 +456,9 @@ mod tests {
         assert!(result.is_ok(), "Should update with correct CAS condition");
 
         // Verify updated value
-        let mut stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder).await.unwrap();
+        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder)
+            .await
+            .unwrap();
         assert_eq!(stored.read(), Some(value2));
     }
 
@@ -475,9 +481,10 @@ mod tests {
         }
 
         // Open TransactionalMemory (captures value1)
-        let mut memory = TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
-            .await
-            .unwrap();
+        let mut memory =
+            TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
+                .await
+                .unwrap();
 
         // Simulate concurrent modification: backend gets updated
         let wrong_value = TestValue::new("wrong");
@@ -499,7 +506,9 @@ mod tests {
         );
 
         // Verify value is the concurrent modification
-        let mut stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder).await.unwrap();
+        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder)
+            .await
+            .unwrap();
         assert_eq!(stored.read(), Some(wrong_value));
     }
 
@@ -522,9 +531,10 @@ mod tests {
         }
 
         // Open TransactionalMemory (captures expected_old)
-        let mut memory = TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
-            .await
-            .unwrap();
+        let mut memory =
+            TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
+                .await
+                .unwrap();
 
         // Simulate concurrent deletion by directly accessing the database
         let tx = backend
@@ -537,7 +547,7 @@ mod tests {
         tx.commit().await.unwrap();
 
         // Try to update - should fail because key was deleted
-        let mut result = memory.replace(Some(value), &backend).await;
+        let result = memory.replace(Some(value), &backend).await;
         assert!(
             result.is_err(),
             "Should fail when key was concurrently deleted"
@@ -563,9 +573,10 @@ mod tests {
         let value2 = TestValue::new("value2");
 
         // Open TransactionalMemory for non-existent key (captures None)
-        let mut memory = TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
-            .await
-            .unwrap();
+        let mut memory =
+            TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
+                .await
+                .unwrap();
 
         // Simulate concurrent creation: someone else creates the key
         {
@@ -589,7 +600,9 @@ mod tests {
         );
 
         // Verify value unchanged
-        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder).await.unwrap();
+        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder)
+            .await
+            .unwrap();
         assert_eq!(stored.read(), Some(value1));
     }
 
@@ -611,16 +624,19 @@ mod tests {
         }
 
         // Open TransactionalMemory and delete with CAS condition
-        let mut memory = TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
-            .await
-            .unwrap();
+        let mut memory =
+            TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
+                .await
+                .unwrap();
         assert_eq!(memory.read(), Some(value), "Memory should have value");
 
         let result = memory.replace(None, &backend).await;
         assert!(result.is_ok(), "Should delete with correct CAS condition");
 
         // Verify deleted
-        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder).await.unwrap();
+        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder)
+            .await
+            .unwrap();
         assert_eq!(stored.read(), None);
     }
 
@@ -661,9 +677,10 @@ mod tests {
         }
 
         // Open first TransactionalMemory
-        let mut memory1 = TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
-            .await
-            .unwrap();
+        let mut memory1 =
+            TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
+                .await
+                .unwrap();
         assert_eq!(
             memory1.read(),
             Some(value1.clone()),

@@ -288,10 +288,8 @@ where
     }
 }
 
-
 /// Type alias for TransactionalMemory with default CborEncoder.
 /// Type alias for backwards compatibility with old TypedStoreResource API.
 /// Now uses TransactionalMemory from dialog_storage.
 /// Both Storage and TransactionalMemory default to CborEncoder, so we don't need to specify it.
 pub type TypedStoreResource<T, Backend> = TransactionalMemory<T, Storage<Backend>>;
-

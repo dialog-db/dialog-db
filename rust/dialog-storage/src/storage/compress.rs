@@ -6,7 +6,7 @@ use dialog_common::ConditionalSync;
 
 use crate::DialogStorageError;
 
-use super::{StorageBackend};
+use super::StorageBackend;
 
 const BUFFER_SIZE: usize = 4096;
 
@@ -27,7 +27,8 @@ impl<const COMPRESSION_LEVEL: u32, Backend> CompressedStorage<COMPRESSION_LEVEL,
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<const COMPRESSION_LEVEL: u32, Backend> StorageBackend for CompressedStorage<COMPRESSION_LEVEL, Backend>
+impl<const COMPRESSION_LEVEL: u32, Backend> StorageBackend
+    for CompressedStorage<COMPRESSION_LEVEL, Backend>
 where
     Backend: StorageBackend + ConditionalSync,
     Backend::Key: ConditionalSync,
@@ -73,5 +74,4 @@ where
             Ok(None)
         }
     }
-
 }

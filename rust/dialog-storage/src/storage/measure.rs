@@ -5,7 +5,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use super::{StorageBackend};
+use super::StorageBackend;
 
 /// A [MeasuredStorageBackend] acts as a proxy over a [StorageBackend]
 /// implementation that measures reads and writes.
@@ -119,5 +119,4 @@ where
 
         Ok(value)
     }
-
 }

@@ -127,7 +127,9 @@ where
         codec: Codec,
     ) -> Result<Self, DialogStorageError> {
         // Fetch from backend
-        let (value, edition) = if let Some((bytes, edition)) = backend.resolve(&address).await.map_err(|e| e.into())? {
+        let (value, edition) = if let Some((bytes, edition)) =
+            backend.resolve(&address).await.map_err(|e| e.into())?
+        {
             // Decode the bytes
             let decoded: T = codec
                 .decode(bytes.as_ref())
@@ -178,17 +180,18 @@ where
 
     /// Reloads content from storage, decoding it once.
     pub async fn reload(&mut self, backend: &Backend) -> Result<(), DialogStorageError> {
-        let (value, edition) =
-            if let Some((bytes, edition)) = backend.resolve(&self.address).await.map_err(|e| e.into())? {
-                let decoded: T = self
-                    .codec
-                    .decode(bytes.as_ref())
-                    .await
-                    .map_err(|e| DialogStorageError::DecodeFailed(e.to_string()))?;
-                (Some(decoded), Some(edition))
-            } else {
-                (None, None)
-            };
+        let (value, edition) = if let Some((bytes, edition)) =
+            backend.resolve(&self.address).await.map_err(|e| e.into())?
+        {
+            let decoded: T = self
+                .codec
+                .decode(bytes.as_ref())
+                .await
+                .map_err(|e| DialogStorageError::DecodeFailed(e.to_string()))?;
+            (Some(decoded), Some(edition))
+        } else {
+            (None, None)
+        };
 
         *self.state.write() = State { value, edition };
         Ok(())

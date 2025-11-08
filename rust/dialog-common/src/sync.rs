@@ -83,6 +83,31 @@ impl<T> SharedCell<T> {
     }
 }
 
+/// Platform-appropriate shared interior mutability cell.
+///
+/// - Native: `std::sync::RwLock` (multi-threaded read-write lock)
+/// - WASM: `std::cell::RefCell` (single-threaded borrow checking)
+///
+/// # Example
+/// ```
+/// use dialog_common::SharedCell;
+///
+/// let cell = SharedCell::new(42);
+///
+/// // Reading
+/// {
+///     let value = cell.read();
+///     assert_eq!(*value, 42);
+/// }
+///
+/// // Writing
+/// {
+///     let mut value = cell.write();
+///     *value = 100;
+/// }
+///
+/// assert_eq!(*cell.read(), 100);
+/// ```
 #[cfg(target_arch = "wasm32")]
 #[derive(Debug)]
 pub struct SharedCell<T>(std::cell::RefCell<T>);

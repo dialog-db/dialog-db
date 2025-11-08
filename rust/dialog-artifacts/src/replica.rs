@@ -1,5 +1,3 @@
-#![allow(missing_docs)]
-
 use super::platform::Storage as PlatformStorage;
 use super::platform::{ErrorMappingBackend, PlatformBackend, TypedStoreResource};
 pub use super::uri::Uri;
@@ -135,11 +133,14 @@ impl Issuer {
 }
 
 /// A replica represents a local instance of a distributed database.
-#[allow(dead_code)]
+#[derive(Debug)]
 pub struct Replica<Backend: PlatformBackend> {
     issuer: Issuer,
+    #[allow(dead_code)]
     storage: PlatformStorage<Backend>,
+    /// Remote repositories for synchronization
     pub remotes: Remotes<Backend>,
+    /// Local branches in this replica
     pub branches: Branches<Backend>,
 }
 
@@ -157,10 +158,15 @@ impl<Backend: PlatformBackend + 'static> Replica<Backend> {
             branches,
         })
     }
+
+    /// Returns the principal (public key) of the issuer for this replica.
+    pub fn principal(&self) -> &Principal {
+        self.issuer.principal()
+    }
 }
 
 /// Manages multiple branches within a replica.
-#[allow(dead_code)]
+#[derive(Debug)]
 pub struct Branches<Backend: PlatformBackend> {
     issuer: Issuer,
     storage: PlatformStorage<Backend>,
@@ -348,6 +354,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         Ok(memory)
     }
 
+    /// Loads a branch from storage, creating it with the provided default state if it doesn't exist.
     pub async fn load_with_default(
         id: &BranchId,
         issuer: Issuer,
@@ -402,7 +409,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     ) -> Result<Branch<Backend>, ReplicaError> {
         let default_state = Some(BranchState::new(
             id.clone(),
-            Revision::new(issuer.principal().clone()),
+            Revision::new(*issuer.principal()),
             None,
         ));
 
@@ -460,14 +467,16 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         // Only set the hash if it's not the empty tree (all zeros)
         // Empty tree doesn't exist in storage and doesn't need to be loaded
         if revision.tree().hash() != &EMPT_TREE_HASH {
-            tree.set_hash(Some(revision.tree().hash().clone()))
+            tree.set_hash(Some(*revision.tree().hash()))
                 .await
-                .map_err(|e| ReplicaError::StorageError(format!("Failed to set tree hash: {:?}", e)))?;
+                .map_err(|e| {
+                    ReplicaError::StorageError(format!("Failed to set tree hash: {:?}", e))
+                })?;
         } else {
             // For empty tree, set hash to None
-            tree.set_hash(None)
-                .await
-                .map_err(|e| ReplicaError::StorageError(format!("Failed to set tree hash: {:?}", e)))?;
+            tree.set_hash(None).await.map_err(|e| {
+                ReplicaError::StorageError(format!("Failed to set tree hash: {:?}", e))
+            })?;
         }
 
         Ok(())
@@ -506,11 +515,13 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     pub fn id(&self) -> &BranchId {
         &self.id
     }
+
     /// Returns the current revision of this branch.
     pub fn revision(&self) -> Revision {
         self.state().revision().to_owned()
     }
 
+    /// Returns the base tree reference for this branch.
     pub fn base(&self) -> NodeReference {
         self.state().base
     }
@@ -640,7 +651,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
                         // Create new revision with integrated changes
                         let new_revision = Revision {
-                            issuer: self.issuer.principal().clone(),
+                            issuer: *self.issuer.principal(),
                             tree: NodeReference(hash),
                             cause: HashSet::from([revision.edition()?]),
                             period,
@@ -899,7 +910,7 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
             };
 
             let new_revision = Revision {
-                issuer: self.issuer.principal().clone(),
+                issuer: *self.issuer.principal(),
                 tree: tree_reference.clone(),
                 cause: HashSet::from([base_revision.edition().expect("Failed to create edition")]),
                 period,
@@ -942,7 +953,7 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
 }
 
 /// Manages remote repositories for synchronization.
-#[allow(dead_code)]
+#[derive(Debug)]
 pub struct Remotes<Backend: PlatformBackend> {
     storage: PlatformStorage<Backend>,
 }
@@ -969,6 +980,7 @@ impl<Backend: PlatformBackend> Remotes<Backend> {
 pub type RemoteBackend = ErrorMappingBackend<RestStorageBackend<Vec<u8>, Vec<u8>>>;
 
 /// Represents a connection to a remote repository.
+#[derive(Debug)]
 pub struct Remote<Backend: PlatformBackend> {
     site: Site,
     memory: TypedStoreResource<RemoteState, Backend>,
@@ -976,10 +988,12 @@ pub struct Remote<Backend: PlatformBackend> {
     connection: PlatformStorage<RemoteBackend>,
 }
 impl<Backend: PlatformBackend> Remote<Backend> {
+    /// Returns the site identifier for this remote.
     pub fn site(&self) -> &Site {
         &self.site
     }
 
+    /// Mounts the transactional memory for a remote site from storage.
     pub async fn mount(
         site: &Site,
         storage: &PlatformStorage<Backend>,
@@ -1044,6 +1058,27 @@ impl<Backend: PlatformBackend> Remote<Backend> {
         }
     }
 
+    /// Updates the remote address configuration.
+    ///
+    /// This allows changing the endpoint or authentication details for an existing remote.
+    pub async fn update_address(&mut self, address: RestStorageConfig) -> Result<(), ReplicaError> {
+        let new_state = RemoteState {
+            site: self.site.clone(),
+            address,
+        };
+
+        // Update the stored state
+        self.memory
+            .replace(Some(new_state.clone()), &self.storage)
+            .await
+            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+
+        // Update the connection
+        self.connection = new_state.connect()?;
+
+        Ok(())
+    }
+
     /// Opens a branch at this remote
     pub async fn open(&self, id: &BranchId) -> Result<RemoteBranch<Backend>, ReplicaError> {
         RemoteBranch::open(self.site(), id, self.storage.clone()).await
@@ -1073,6 +1108,7 @@ pub struct RemoteBranch<Backend: PlatformBackend> {
 }
 
 impl<Backend: PlatformBackend> RemoteBranch<Backend> {
+    /// Mounts the transactional memory for a remote branch from local storage.
     pub async fn mount(
         site: &Site,
         id: &BranchId,
@@ -1113,6 +1149,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         }
     }
 
+    /// Opens a remote branch, creating it if it doesn't exist.
     pub async fn open(
         site: &Site,
         id: &BranchId,
@@ -1148,6 +1185,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         &self.revision
     }
 
+    /// Connects to the canonical remote storage for this branch.
     pub async fn connect(
         &mut self,
     ) -> Result<&TypedStoreResource<Revision, RemoteBackend>, ReplicaError> {
@@ -1178,7 +1216,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         let canonical = self.canonical.as_mut().expect("connected");
 
         // Force reload from storage to ensure we get fresh data
-        let _ = canonical.reload(&mut self.remote_storage).await;
+        let _ = canonical.reload(&self.remote_storage).await;
 
         let revision = canonical.content().clone();
 
@@ -1203,7 +1241,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         // if revision is different we update
         if canonical.content().as_ref() != Some(&revision) {
             canonical
-                .replace(Some(revision.clone()), &mut self.remote_storage)
+                .replace(Some(revision.clone()), &self.remote_storage)
                 .await
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
         }
@@ -1235,6 +1273,7 @@ pub struct RemoteState {
 }
 
 impl RemoteState {
+    /// Creates a storage connection using this remote's configuration.
     pub fn connect(&self) -> Result<PlatformStorage<RemoteBackend>, ReplicaError> {
         let backend = RestStorageBackend::new(self.address.clone()).map_err(|_| {
             ReplicaError::RemoteConnectionError {
@@ -1394,10 +1433,12 @@ pub struct BranchState {
 pub struct BranchId(String);
 
 impl BranchId {
+    /// Creates a new branch identifier from a string.
     pub fn new(id: String) -> Self {
         BranchId(id)
     }
 
+    /// Returns a reference to the branch identifier string.
     pub fn id(&self) -> &String {
         &self.0
     }
@@ -1452,6 +1493,7 @@ impl BranchState {
         self.upstream.as_ref()
     }
 
+    /// Resets the branch to a new revision.
     pub fn reset(&mut self, revision: Revision) -> &mut Self {
         self.revision = revision;
         self
@@ -1462,7 +1504,9 @@ impl BranchState {
 /// to / from. It can be local or remote.
 #[derive(Debug, Clone)]
 pub enum Upstream<Backend: PlatformBackend + 'static> {
+    /// A local branch upstream
     Local(Branch<Backend>),
+    /// A remote branch upstream
     Remote(RemoteBranch<Backend>),
 }
 
@@ -1488,7 +1532,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
         })
     }
 
-    /// Loads an upstream from its state descriptor (wasm32 version without Send)
+    /// Loads an upstream from its state descriptor
     #[cfg(target_arch = "wasm32")]
     pub fn load(
         state: &UpstreamState,
@@ -1517,6 +1561,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
         }
     }
 
+    /// Returns true if this upstream is a local branch.
     pub fn is_local(&self) -> bool {
         matches!(self, Upstream::Local(_))
     }
@@ -1584,11 +1629,22 @@ impl<Backend: PlatformBackend> From<Upstream<Backend>> for UpstreamState {
 /// Upstream represents some branch being tracked
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UpstreamState {
-    Local { branch: BranchId },
-    Remote { site: Site, branch: BranchId },
+    /// A local branch upstream
+    Local {
+        /// Branch identifier
+        branch: BranchId,
+    },
+    /// A remote branch upstream
+    Remote {
+        /// Remote site identifier
+        site: Site,
+        /// Branch identifier
+        branch: BranchId,
+    },
 }
 
 impl UpstreamState {
+    /// Returns the branch identifier of this upstream.
     pub fn id(&self) -> &BranchId {
         match self {
             Self::Local { branch } => branch,
@@ -1601,6 +1657,7 @@ impl UpstreamState {
 #[derive(Serialize, Deserialize)]
 pub struct Edition<T>([u8; 32], PhantomData<fn() -> T>);
 impl<T> Edition<T> {
+    /// Creates a new edition from a hash.
     pub fn new(hash: [u8; 32]) -> Self {
         Self(hash, PhantomData)
     }
@@ -1689,15 +1746,31 @@ pub enum ReplicaError {
         cause: DialogStorageError,
     },
 
+    /// Remote repository not found
     #[error("Remote {remote} not found")]
-    RemoteNotFound { remote: Site },
+    RemoteNotFound {
+        /// Remote site identifier
+        remote: Site,
+    },
+    /// Remote repository already exists
     #[error("Remote {remote} already exist")]
-    RemoteAlreadyExists { remote: Site },
+    RemoteAlreadyExists {
+        /// Remote site identifier
+        remote: Site,
+    },
+    /// Connection to remote repository failed
     #[error("Connection to remote {remote} failed")]
-    RemoteConnectionError { remote: Site },
+    RemoteConnectionError {
+        /// Remote site identifier
+        remote: Site,
+    },
 
+    /// Branch upstream is set to itself
     #[error("Upsteam of local {id} is set to itself")]
-    BranchUpstreamIsItself { id: BranchId },
+    BranchUpstreamIsItself {
+        /// Branch identifier
+        id: BranchId,
+    },
 }
 
 impl ReplicaError {
@@ -1718,8 +1791,10 @@ pub enum Capability {
     /// Failed while updating a revision
     UpdateRevision,
 
+    /// Failed during archive operation
     ArchiveError,
 
+    /// Failed during encoding operation
     EncodeError,
 }
 impl Display for Capability {
