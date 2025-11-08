@@ -13,7 +13,7 @@
 //! use futures_util::{StreamExt, stream};
 //!
 //! // Substitute with your storage backend of choice:
-//! let storage_backend = MemoryStorageBackend::default();
+//! let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
 //! let mut artifacts = Artifacts::anonymous(storage_backend).await?;
 //!
 //! // Create an artifact
@@ -43,11 +43,14 @@ pub mod web;
 
 /// Core artifacts types and functionality for operating on artifacts
 pub mod artifacts;
+#[allow(ambiguous_glob_reexports)]
 pub use artifacts::*;
 
+mod platform;
 /// Replica abstraction for dialog
 pub mod replica;
-
+// #[allow(ambiguous_glob_reexports)]
+pub use platform::*;
 mod reference;
 pub use reference::*;
 
@@ -58,7 +61,6 @@ mod state;
 pub use state::*;
 
 mod constants;
-pub use constants::*;
 
 mod key;
 pub use key::*;

@@ -3,7 +3,7 @@ use dialog_common::ConditionalSync;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use super::StorageBackend;
+use super::{StorageBackend, TransactionalMemoryBackend};
 
 /// The type of storage operation that was journaled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +24,7 @@ pub struct JournalEntry<Key> {
 }
 
 /// Internal state for the journal including the log and indices.
+#[derive(Debug, Clone)]
 struct JournalState<Key> {
     /// Sequential log of all operations in order.
     log: Vec<JournalEntry<Key>>,
@@ -105,7 +106,7 @@ where
 /// let keys_read = journaled.keys_read();
 /// let keys_written = journaled.keys_written();
 /// ```
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct JournaledStorage<Backend>
 where
     Backend: StorageBackend,
@@ -352,6 +353,8 @@ impl<Backend> StorageBackend for JournaledStorage<Backend>
 where
     Backend: StorageBackend + ConditionalSync,
     Backend::Key: Clone + ConditionalSync + std::hash::Hash + Eq,
+    Backend::Value: ConditionalSync,
+    Backend::Error: ConditionalSync,
 {
     type Key = Backend::Key;
     type Value = Backend::Value;
@@ -373,6 +376,50 @@ where
             key: key.clone(),
         });
         self.backend.get(key).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Backend> TransactionalMemoryBackend for JournaledStorage<Backend>
+where
+    Backend: StorageBackend
+        + TransactionalMemoryBackend<Address = <Backend as StorageBackend>::Key>
+        + ConditionalSync,
+    Backend::Key: Clone + ConditionalSync + std::hash::Hash + Eq,
+    <Backend as TransactionalMemoryBackend>::Value: ConditionalSync,
+    <Backend as TransactionalMemoryBackend>::Edition: ConditionalSync,
+    <Backend as TransactionalMemoryBackend>::Error: ConditionalSync,
+{
+    type Address = Backend::Address;
+    type Value = <Backend as TransactionalMemoryBackend>::Value;
+    type Edition = <Backend as TransactionalMemoryBackend>::Edition;
+    type Error = <Backend as TransactionalMemoryBackend>::Error;
+
+    async fn resolve(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        // Record the read operation
+        self.state.write().unwrap().push(JournalEntry {
+            operation: Operation::Read,
+            key: address.clone(),
+        });
+        self.backend.resolve(address).await
+    }
+
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        // Record the write operation
+        self.state.write().unwrap().push(JournalEntry {
+            operation: Operation::Write,
+            key: address.clone(),
+        });
+        self.backend.replace(address, edition, content).await
     }
 }
 

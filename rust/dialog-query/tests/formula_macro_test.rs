@@ -1,4 +1,4 @@
-use dialog_query::{dsl::Input, Term};
+use dialog_query::{dsl::Input, Match, Term};
 use dialog_query_macros::Formula;
 
 /// Test that the Formula macro can parse basic struct with #[formula] and #[derived] attributes
@@ -32,7 +32,7 @@ fn test_formula_macro_compiles() {
 #[test]
 fn test_input_struct_generated() {
     // Verify TestSumInput exists with only non-derived fields
-    let input = TestSumInput { of: 5, with: 3 };
+    let input = Input::<TestSum> { of: 5, with: 3 };
     assert_eq!(input.of, 5);
     assert_eq!(input.with, 3);
 }
@@ -40,7 +40,7 @@ fn test_input_struct_generated() {
 #[test]
 fn test_match_struct_generated() {
     // Verify TestSumMatch exists with all fields as Term<T>
-    let match_pattern = TestSumMatch {
+    let match_pattern = Match::<TestSum> {
         of: Term::var("x"),
         with: Term::var("y"),
         is: Term::var("result"),

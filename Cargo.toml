@@ -24,7 +24,6 @@ members = [
     "rust/dialog-prolly-tree",
     "rust/dialog-query",
     "rust/dialog-query-macros",
-    "rust/dialog-remote",
     "rust/dialog-storage",
 ]
 resolver = "2"

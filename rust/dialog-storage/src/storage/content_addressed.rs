@@ -15,9 +15,9 @@ use crate::{DialogStorageError, Encoder, HashType, StorageBackend};
 /// [Encoder] and [StorageBackend] in a compatible fashion.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait ContentAddressedStorage<const HASH_SIZE: usize>: ConditionalSync + 'static {
+pub trait ContentAddressedStorage: ConditionalSync + 'static {
     /// The type of hash that is produced by this [ContentAddressedStorage]
-    type Hash: HashType<HASH_SIZE> + ConditionalSync;
+    type Hash: HashType + ConditionalSync;
     /// The type of error that is produced by this [ContentAddressedStorage]
     type Error: Into<DialogStorageError>;
 
@@ -33,14 +33,13 @@ pub trait ContentAddressedStorage<const HASH_SIZE: usize>: ConditionalSync + 'st
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<const HASH_SIZE: usize, Bytes, Hash, EncoderError, BackendError, U>
-    ContentAddressedStorage<HASH_SIZE> for U
+impl<Bytes, Hash, EncoderError, BackendError, U> ContentAddressedStorage for U
 where
-    Hash: HashType<HASH_SIZE> + ConditionalSync,
+    Hash: HashType + ConditionalSync,
     Bytes: AsRef<[u8]> + 'static + ConditionalSync,
     EncoderError: Into<DialogStorageError>,
     BackendError: Into<DialogStorageError>,
-    U: Encoder<HASH_SIZE, Bytes = Bytes, Hash = Hash, Error = EncoderError>
+    U: Encoder<Bytes = Bytes, Hash = Hash, Error = EncoderError>
         + StorageBackend<Key = Hash, Value = Bytes, Error = BackendError>
         + ConditionalSync
         + 'static,
@@ -76,14 +75,13 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<const HASH_SIZE: usize, Bytes, Hash, EncoderError, BackendError, U>
-    ContentAddressedStorage<HASH_SIZE> for Arc<Mutex<U>>
+impl<Bytes, Hash, EncoderError, BackendError, U> ContentAddressedStorage for Arc<Mutex<U>>
 where
-    Hash: HashType<HASH_SIZE> + ConditionalSync,
+    Hash: HashType + ConditionalSync,
     Bytes: AsRef<[u8]> + 'static + ConditionalSync,
     EncoderError: Into<DialogStorageError>,
     BackendError: Into<DialogStorageError>,
-    U: Encoder<HASH_SIZE, Bytes = Bytes, Hash = Hash, Error = EncoderError>
+    U: Encoder<Bytes = Bytes, Hash = Hash, Error = EncoderError>
         + StorageBackend<Key = Hash, Value = Bytes, Error = BackendError>
         + ConditionalSync
         + 'static,

@@ -529,7 +529,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // TODO: Migrate from obsolete planning API - this test validates planning behavior
     async fn test_concept_planning_mixed_parameters() -> anyhow::Result<()> {
         use crate::artifact::Type;
         use crate::Term;
@@ -863,7 +862,6 @@ mod tests {
         use crate::artifact::{Artifacts, Entity};
         use crate::query::Output;
         use crate::rule::When;
-        use crate::strings;
         use crate::{Concept, Fact, Match, Term};
         use dialog_storage::MemoryStorageBackend;
 

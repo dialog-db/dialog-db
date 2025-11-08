@@ -52,8 +52,8 @@ where
 impl<Backend> StorageBackend for StorageCache<Backend>
 where
     Backend: StorageBackend + ConditionalSync,
-    Backend::Key: Eq + Clone + Hash,
-    Backend::Value: Clone,
+    Backend::Key: Eq + Clone + Hash + ConditionalSync,
+    Backend::Value: Clone + ConditionalSync,
 {
     type Key = Backend::Key;
     type Value = Backend::Value;

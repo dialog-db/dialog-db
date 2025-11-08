@@ -37,10 +37,10 @@ use rand::{Rng, distributions::Alphanumeric};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_prolly_tree::{Entry, GeometricDistribution, Tree};
+use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, GeometricDistribution, Tree};
 pub use dialog_storage::{
-    Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, Storage,
-    StorageBackend,
+    Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, HashType,
+    Storage, StorageBackend,
 };
 use futures_util::{Stream, StreamExt};
 use std::{ops::Range, sync::Arc};
@@ -53,22 +53,14 @@ use futures_util::TryStreamExt;
 use async_stream::stream;
 
 use crate::{
-    AttributeKey, BRANCH_FACTOR, DialogArtifactsError, EntityKey, FromKey, HASH_SIZE, Key, KeyView,
-    KeyViewConstruct, KeyViewMut, State, ValueKey, artifacts::selector::Constrained,
-    make_reference,
+    AttributeKey, DialogArtifactsError, EntityKey, FromKey, Key, KeyView, KeyViewConstruct,
+    KeyViewMut, State, ValueKey, artifacts::selector::Constrained, make_reference,
 };
 
 /// An alias type that describes the [`Tree`]-based prolly tree that is
 /// used for each index in [`Artifacts`]
-pub type Index<Key, Value, Backend> = Tree<
-    BRANCH_FACTOR,
-    HASH_SIZE,
-    GeometricDistribution,
-    Key,
-    State<Value>,
-    Blake3Hash,
-    Storage<HASH_SIZE, CborEncoder, Backend>,
->;
+pub type Index<Key, Value, Backend> =
+    Tree<GeometricDistribution, Key, State<Value>, Blake3Hash, Storage<CborEncoder, Backend>>;
 
 /// [`Artifacts`] is an implementor of [`ArtifactStore`] and [`ArtifactStoreMut`].
 /// Internally, [`Artifacts`] maintains indexes built from [`Tree`]s (that is,
@@ -90,7 +82,7 @@ where
         + 'static,
 {
     identifier: String,
-    storage: Storage<HASH_SIZE, CborEncoder, Backend>,
+    storage: Storage<CborEncoder, Backend>,
     index: Arc<RwLock<Index<Key, Datum, Backend>>>,
 }
 
@@ -132,7 +124,8 @@ where
                     // For actual revisions, read the revision from storage
                     let hash = Blake3Hash::try_from(revision_hash_bytes).map_err(|bytes| {
                         DialogArtifactsError::InvalidRevision(format!(
-                            "Incorrect byte length (expected {HASH_SIZE}, received {})",
+                            "Incorrect byte length (expected {}, received {})",
+                            Blake3Hash::SIZE,
                             bytes.len()
                         ))
                     })?;
@@ -271,7 +264,8 @@ where
                         } else {
                             Blake3Hash::try_from(block_data).map_err(|bytes| {
                                 DialogArtifactsError::InvalidRevision(format!(
-                                    "Incorrect byte length (expected {HASH_SIZE}, received {})",
+                                    "Incorrect byte length (expected {}, received {})",
+                                    Blake3Hash::SIZE,
                                     bytes.len()
                                 ))
                             })?
@@ -469,8 +463,9 @@ where
                             if let Some(key) = ancestor_key {
                                 // Prune the old entry from the indexes
                                 let entity_key = EntityKey(key);
-                                let value_key = ValueKey::from_key(&entity_key);
-                                let attribute_key = AttributeKey::from_key(&entity_key);
+                                let value_key: ValueKey<Key> = ValueKey::from_key(&entity_key);
+                                let attribute_key: AttributeKey<Key> =
+                                    AttributeKey::from_key(&entity_key);
 
                                 // TODO: Make it concurrent / parallel
                                 index.delete(&entity_key.into_key()).await?;

@@ -97,23 +97,23 @@ where
 /// Represents either a loaded node or an unloaded reference.
 /// This allows us to defer loading nodes from storage until we actually need them.
 #[derive(Debug, Clone)]
-pub(crate) enum SparseTreeNode<const F: u32, const H: usize, Key, Value, Hash>
+pub(crate) enum SparseTreeNode<Key, Value, Hash>
 where
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<H>,
+    Hash: HashType,
 {
     /// A fully loaded node (already read from storage or held in memory)
-    Node(Node<F, H, Key, Value, Hash>),
+    Node(Node<Key, Value, Hash>),
     /// An unloaded reference (hash + boundary, can be loaded on demand)
-    Ref(Reference<H, Key, Hash>),
+    Ref(Reference<Key, Hash>),
 }
 
-impl<const F: u32, const H: usize, Key, Value, Hash> SparseTreeNode<F, H, Key, Value, Hash>
+impl<Key, Value, Hash> SparseTreeNode<Key, Value, Hash>
 where
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<H>,
+    Hash: HashType,
 {
     /// Get the upper bound of this node or reference
     fn upper_bound(&self) -> &Key {
@@ -135,9 +135,9 @@ where
     async fn load<Storage>(
         self,
         storage: &Storage,
-    ) -> Result<Node<F, H, Key, Value, Hash>, DialogProllyTreeError>
+    ) -> Result<Node<Key, Value, Hash>, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage<H, Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         match self {
             SparseTreeNode::Node(node) => Ok(node),
@@ -148,24 +148,23 @@ where
 
 /// A sparse view of a tree containing only the nodes that differ between two trees.
 #[derive(Debug, Clone)]
-pub(crate) struct SparseTree<'a, const F: u32, const H: usize, Key, Value, Hash, Storage>
+pub(crate) struct SparseTree<'a, Key, Value, Hash, Storage>
 where
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<H>,
-    Storage: ContentAddressedStorage<H, Hash = Hash>,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash>,
 {
     storage: &'a Storage,
-    nodes: Vec<SparseTreeNode<F, H, Key, Value, Hash>>,
+    nodes: Vec<SparseTreeNode<Key, Value, Hash>>,
 }
 
-impl<const F: u32, const H: usize, Key, Value, Hash, Storage>
-    SparseTree<'_, F, H, Key, Value, Hash, Storage>
+impl<Key, Value, Hash, Storage> SparseTree<'_, Key, Value, Hash, Storage>
 where
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<H>,
-    Storage: ContentAddressedStorage<H, Hash = Hash>,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash>,
 {
     /// Expands loaded branch nodes and Refs whose upper bound falls within the given range.
     ///
@@ -225,14 +224,14 @@ where
             match &self.nodes[offset] {
                 SparseTreeNode::Ref(reference) => {
                     // Load the Ref from storage
-                    let node: Node<F, H, Key, Value, Hash> =
+                    let node: Node<Key, Value, Hash> =
                         Node::from_hash(reference.hash().clone(), self.storage).await?;
 
                     // If it's a branch, expand it
                     if node.is_branch() {
                         if let Ok(refs) = node.references() {
                             // Convert references to SparseTreeNode::Ref
-                            let children: Vec<SparseTreeNode<F, H, Key, Value, Hash>> = refs
+                            let children: Vec<SparseTreeNode<Key, Value, Hash>> = refs
                                 .iter()
                                 .map(|r| SparseTreeNode::Ref(r.clone()))
                                 .collect();
@@ -252,7 +251,7 @@ where
                     if node.is_branch() {
                         if let Ok(refs) = node.references() {
                             // Convert references to SparseTreeNode::Ref
-                            let children: Vec<SparseTreeNode<F, H, Key, Value, Hash>> = refs
+                            let children: Vec<SparseTreeNode<Key, Value, Hash>> = refs
                                 .iter()
                                 .map(|r| SparseTreeNode::Ref(r.clone()))
                                 .collect();
@@ -445,23 +444,22 @@ type Pair<T> = (T, T);
 /// efficiently compute the changes needed to transform the source tree into the target tree.
 ///
 /// The tuple structure is `(source_sparse_tree, target_sparse_tree)`.
-pub(crate) struct Delta<'a, const F: u32, const H: usize, Key, Value, Hash, Storage>(
-    SparseTree<'a, F, H, Key, Value, Hash, Storage>,
-    SparseTree<'a, F, H, Key, Value, Hash, Storage>,
+pub(crate) struct Delta<'a, Key, Value, Hash, Storage>(
+    SparseTree<'a, Key, Value, Hash, Storage>,
+    SparseTree<'a, Key, Value, Hash, Storage>,
 )
 where
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<H>,
-    Storage: ContentAddressedStorage<H, Hash = Hash>;
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash>;
 
-impl<'a, const F: u32, const H: usize, Key, Value, Hash, Storage>
-    Delta<'a, F, H, Key, Value, Hash, Storage>
+impl<'a, Key, Value, Hash, Storage> Delta<'a, Key, Value, Hash, Storage>
 where
     Key: KeyType + 'static,
     Value: ValueType + PartialEq,
-    Hash: HashType<H>,
-    Storage: ContentAddressedStorage<H, Hash = Hash>,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash>,
 {
     /// Creates a new Delta from a pair of trees `(source, target)`.
     ///
@@ -477,8 +475,8 @@ where
     /// let delta = Delta::from((old_tree, new_tree));
     /// // This delta can produce changes to transform old_tree → new_tree
     /// ```
-    pub fn from<Distription: crate::Distribution<F, H, Key, Hash>>(
-        (left, right): Pair<&'a Tree<F, H, Distription, Key, Value, Hash, Storage>>,
+    pub fn from<Distription: crate::Distribution<Key, Hash>>(
+        (left, right): Pair<&'a Tree<Distription, Key, Value, Hash, Storage>>,
     ) -> Self {
         Self(
             SparseTree {
@@ -708,13 +706,11 @@ mod tests {
     use futures_util::{StreamExt, pin_mut};
 
     type TestTree = Tree<
-        32,
-        32,
         GeometricDistribution,
         Vec<u8>,
         Vec<u8>,
         Blake3Hash,
-        Storage<32, CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+        Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
     >;
 
     #[tokio::test]
@@ -734,7 +730,7 @@ mod tests {
         tree2.set(vec![1], vec![10]).await.unwrap();
         tree2.set(vec![2], vec![20]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut count = 0;
         while let Some(_) = changes.next().await {
@@ -760,7 +756,7 @@ mod tests {
         tree1.set(vec![2], vec![20]).await.unwrap();
         tree2.set(vec![1], vec![10]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -794,7 +790,7 @@ mod tests {
         tree2.set(vec![1], vec![10]).await.unwrap();
         tree2.set(vec![2], vec![20]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -829,7 +825,7 @@ mod tests {
         tree2.set(vec![1], vec![10]).await.unwrap();
         tree2.set(vec![2], vec![20]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -864,7 +860,7 @@ mod tests {
         tree1.set(vec![1], vec![10]).await.unwrap();
         tree1.set(vec![2], vec![20]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut adds = Vec::new();
 
@@ -893,7 +889,7 @@ mod tests {
         tree2.set(vec![1], vec![10]).await.unwrap();
         tree2.set(vec![2], vec![20]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut removes = Vec::new();
 
@@ -928,7 +924,7 @@ mod tests {
             }
         }
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -1015,12 +1011,13 @@ mod tests {
             .await
             .unwrap();
 
-        // Check which value won based on hash
-        use crate::ValueType;
-        let existing_hash = existing_value.hash();
-        let new_hash = new_value.hash();
+        // Check which value won based on hash comparison
+        use dialog_storage::Encoder;
+        let storage = tree.storage();
+        let (existing_hash, _) = storage.encode(&existing_value).await.unwrap();
+        let (new_hash, _) = storage.encode(&new_value).await.unwrap();
 
-        if new_hash > existing_hash {
+        if new_hash.as_ref() > existing_hash.as_ref() {
             assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(new_value));
         } else {
             assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(existing_value));
@@ -1129,9 +1126,9 @@ mod tests {
         });
 
         let host_a = tree_a.clone();
-        let changes_a = host_a.differentiate(&empty_tree);
+        let changes_a = empty_tree.differentiate(&host_a);
         let host_b = tree_b.clone();
-        let changes_b = host_b.differentiate(&empty_tree);
+        let changes_b = empty_tree.differentiate(&host_b);
 
         // Integrate changes
         tree_a.integrate(changes_b).await.unwrap();
@@ -1144,11 +1141,12 @@ mod tests {
         assert_eq!(final_a, final_b, "Trees should converge to same value");
 
         // Verify the winner is determined by hash
-        use crate::ValueType;
-        let hash_20 = vec![20].hash();
-        let hash_30 = vec![30].hash();
+        use dialog_storage::Encoder;
+        let storage = tree_a.storage();
+        let (hash_20, _) = storage.encode(&vec![20]).await.unwrap();
+        let (hash_30, _) = storage.encode(&vec![30]).await.unwrap();
 
-        if hash_20 > hash_30 {
+        if hash_20.as_ref() > hash_30.as_ref() {
             assert_eq!(final_a, Some(vec![20]));
         } else {
             assert_eq!(final_a, Some(vec![30]));
@@ -1180,7 +1178,7 @@ mod tests {
         // Need to collect changes to avoid borrow checker issues
         // (diff holds immutable ref to start, but integrate needs mutable ref)
         let changes = {
-            let diff = target.differentiate(&start);
+            let diff = start.differentiate(&target);
             pin_mut!(diff);
             let mut changes = Vec::new();
             while let Some(result) = diff.next().await {
@@ -1220,7 +1218,7 @@ mod tests {
         // Need to collect changes to avoid borrow checker issues
         // (diff holds immutable ref to start, but integrate needs mutable ref)
         let changes = {
-            let diff = target.differentiate(&start);
+            let diff = start.differentiate(&target);
             pin_mut!(diff);
             let mut changes = Vec::new();
             while let Some(result) = diff.next().await {
@@ -1266,7 +1264,7 @@ mod tests {
         // Need to collect changes to avoid borrow checker issues
         // (diff holds immutable ref to start, but integrate needs mutable ref)
         let changes = {
-            let diff = target.differentiate(&start);
+            let diff = start.differentiate(&target);
             pin_mut!(diff);
             let mut changes = Vec::new();
             while let Some(result) = diff.next().await {
@@ -1317,7 +1315,7 @@ mod tests {
         // Need to collect changes to avoid borrow checker issues
         // (diff holds immutable ref to start, but integrate needs mutable ref)
         let changes = {
-            let diff = target.differentiate(&start);
+            let diff = start.differentiate(&target);
             pin_mut!(diff);
             let mut changes = Vec::new();
             while let Some(result) = diff.next().await {
@@ -1358,7 +1356,7 @@ mod tests {
             backend: backend.clone(),
         });
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut count = 0;
         while let Some(_) = changes.next().await {
@@ -1383,7 +1381,7 @@ mod tests {
         tree1.set(vec![1], vec![10]).await.unwrap();
         tree2.set(vec![1], vec![20]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -1423,7 +1421,7 @@ mod tests {
         tree2.set(vec![4], vec![40]).await.unwrap();
         tree2.set(vec![6], vec![60]).await.unwrap();
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -1462,7 +1460,7 @@ mod tests {
         superset.set(vec![3], vec![30]).await.unwrap();
         superset.set(vec![4], vec![40]).await.unwrap();
 
-        let changes = superset.differentiate(&subset);
+        let changes = subset.differentiate(&superset);
         pin_mut!(changes);
         let mut adds = Vec::new();
         let mut removes = Vec::new();
@@ -1497,7 +1495,7 @@ mod tests {
             tree2.set(vec![i], vec![i]).await.unwrap();
         }
 
-        let changes = tree1.differentiate(&tree2);
+        let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut count = 0;
 
@@ -1537,7 +1535,7 @@ mod tests {
         // Need to collect changes to avoid borrow checker issues
         // (diff holds immutable ref to start, but integrate needs mutable ref)
         let changes = {
-            let diff = target.differentiate(&start);
+            let diff = start.differentiate(&target);
             pin_mut!(diff);
             let mut changes = Vec::new();
             while let Some(result) = diff.next().await {

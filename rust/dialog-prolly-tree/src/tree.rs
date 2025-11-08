@@ -7,30 +7,26 @@ use std::{
 use super::differential::Change;
 use crate::{Adopter, Delta, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
 use async_stream::try_stream;
-use dialog_storage::{ContentAddressedStorage, HashType};
+use dialog_storage::{ContentAddressedStorage, Encoder, HashType};
 use futures_core::Stream;
 use nonempty::NonEmpty;
 
+/// A hash representing an empty (usually newly created) `Tree`.
+pub static EMPT_TREE_HASH: [u8; 32] = [0; 32];
+
 /// A key-value store backed by a Ranked Prolly Tree with configurable storage,
 /// encoding and rank distribution.
-#[derive(Clone)]
-pub struct Tree<
-    const BRANCH_FACTOR: u32,
-    const HASH_SIZE: usize,
-    Distribution,
-    Key,
-    Value,
-    Hash,
-    Storage,
-> where
-    Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash>,
+#[derive(Debug, Clone)]
+pub struct Tree<Distribution, Key, Value, Hash, Storage>
+where
+    Distribution: crate::Distribution<Key, Hash>,
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<HASH_SIZE>,
-    Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash>,
 {
     storage: Storage,
-    root: Option<Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>>,
+    root: Option<Node<Key, Value, Hash>>,
 
     distribution_type: PhantomData<Distribution>,
     key_type: PhantomData<Key>,
@@ -38,14 +34,13 @@ pub struct Tree<
     hash_type: PhantomData<Hash>,
 }
 
-impl<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Distribution, Key, Value, Hash, Storage>
-    Tree<BRANCH_FACTOR, HASH_SIZE, Distribution, Key, Value, Hash, Storage>
+impl<Distribution, Key, Value, Hash, Storage> Tree<Distribution, Key, Value, Hash, Storage>
 where
-    Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash>,
+    Distribution: crate::Distribution<Key, Hash>,
     Key: KeyType,
     Value: ValueType,
-    Hash: HashType<HASH_SIZE>,
-    Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash>,
 {
     /// Creates a new [`Tree`] with provided [`ContentAddressedStorage`].
     pub fn new(storage: Storage) -> Self {
@@ -62,11 +57,15 @@ where
 
     /// Hydrate a new [`Tree`] from a [`HashType`] that references a [`Node`].
     pub async fn from_hash(hash: &Hash, storage: Storage) -> Result<Self, DialogProllyTreeError> {
-        let root = Node::from_hash(hash.clone(), &storage).await?;
+        let root = if hash.as_ref() == EMPT_TREE_HASH {
+            None
+        } else {
+            Some(Node::from_hash(hash.clone(), &storage).await?)
+        };
+
         Ok(Self {
             storage,
-            root: Some(root),
-
+            root,
             distribution_type: PhantomData,
             key_type: PhantomData,
             value_type: PhantomData,
@@ -82,7 +81,7 @@ where
     /// Returns the [`Node`] representing the root of this tree.
     ///
     /// Returns `None` if the tree is empty.
-    pub fn root(&self) -> Option<&Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>> {
+    pub fn root(&self) -> Option<&Node<Key, Value, Hash>> {
         self.root.as_ref()
     }
 
@@ -146,103 +145,20 @@ where
         }
     }
 
-    /// Returns a difference between this tree and the other tree.
+    /// Returns a differential that produces changes to transform `self` into `other`.
     ///
-    /// Applying the returned differential onto `other` will transform it to match `self`.
-    /// In other words: `other.integrate(self.differentiate(other))` will make `other == self`.
+    /// Usage: `self.integrate(self.differentiate(other))` will result in `other`.
     pub fn differentiate<'a>(
         &'a self,
         other: &'a Self,
     ) -> impl crate::differential::Differential<Key, Value> + 'a {
-        let mut delta = Delta::from((other, self));
+        let mut delta = Delta::from((self, other));
         try_stream! {
             delta.expand().await?;
             for await change in delta.stream() {
                 yield change?;
             }
         }
-    }
-
-    /// Integrates changes into this tree with deterministic conflict resolution.
-    ///
-    /// Applies a differential (stream of changes) with Last-Write-Wins conflict resolution
-    /// based on value hashes. This ensures eventual consistency across replicas.
-    ///
-    /// # Conflict Resolution
-    ///
-    /// - **Add**: If key exists with different value, compare hashes - higher hash wins
-    /// - **Remove**: Only removes if the exact entry (key+value) exists
-    ///
-    /// The operation is atomic - if any change fails, the entire integration is rolled back.
-    pub async fn integrate<Changes>(
-        &mut self,
-        changes: Changes,
-    ) -> Result<(), DialogProllyTreeError>
-    where
-        Changes: crate::differential::Differential<Key, Value>,
-        Value: AsRef<[u8]>,
-    {
-        use futures_util::StreamExt;
-
-        // Copy root here in case we fail integration and need to revert
-        let root = self.root.clone();
-
-        let result: Result<(), DialogProllyTreeError> = {
-            futures_util::pin_mut!(changes);
-            while let Some(change_result) = changes.next().await {
-                let change = change_result?;
-                match change {
-                    Change::Add(entry) => {
-                        // Check if key already exists
-                        match self.get(&entry.key).await? {
-                            None => {
-                                // Key doesn't exist - insert it
-                                self.set(entry.key, entry.value).await?;
-                            }
-                            Some(existing_value) => {
-                                if existing_value == entry.value {
-                                    // Same value - no-op (idempotent)
-                                } else {
-                                    // Different values - resolve conflict by comparing hashes
-                                    let existing_hash = existing_value.hash();
-                                    let new_hash = entry.value.hash();
-
-                                    if new_hash > existing_hash {
-                                        // New value wins - update
-                                        self.set(entry.key, entry.value).await?;
-                                    }
-                                    // Else: existing wins, no-op
-                                }
-                            }
-                        }
-                    }
-                    Change::Remove(entry) => {
-                        // Check if key exists
-                        match self.get(&entry.key).await? {
-                            None => {
-                                // Key doesn't exist - no-op (already removed)
-                            }
-                            Some(existing_value) => {
-                                if existing_value == entry.value {
-                                    // Same value - remove it
-                                    self.delete(&entry.key).await?;
-                                }
-                                // Else: different value - no-op (concurrent update)
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(())
-        };
-
-        // If integration fails we set the root back to the original
-        // as this operation must be atomic.
-        if result.is_err() {
-            self.root = root;
-        }
-
-        result
     }
 
     /// Returns an async stream over all entries.
@@ -327,5 +243,105 @@ where
             value_type: PhantomData,
             hash_type: PhantomData,
         })
+    }
+}
+
+// Impl block for methods that require Encoder
+impl<Distribution, Key, Value, Hash, Storage> Tree<Distribution, Key, Value, Hash, Storage>
+where
+    Distribution: crate::Distribution<Key, Hash>,
+    Key: KeyType,
+    Value: ValueType,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash> + Encoder,
+{
+    /// Integrates changes into this tree with deterministic conflict resolution.
+    ///
+    /// Applies a differential (stream of changes) with Last-Write-Wins conflict resolution
+    /// based on value hashes. This ensures eventual consistency across replicas.
+    ///
+    /// # Conflict Resolution
+    ///
+    /// - **Add**: If key exists with different value, compare hashes - higher hash wins
+    /// - **Remove**: Only removes if the exact entry (key+value) exists
+    ///
+    /// The operation is atomic - if any change fails, the entire integration is rolled back.
+    pub async fn integrate<Changes>(
+        &mut self,
+        changes: Changes,
+    ) -> Result<(), DialogProllyTreeError>
+    where
+        Changes: crate::differential::Differential<Key, Value>,
+    {
+        use futures_util::StreamExt;
+
+        // Copy root here in case we fail integration and need to revert
+        let root = self.root.clone();
+
+        let result: Result<(), DialogProllyTreeError> = {
+            futures_util::pin_mut!(changes);
+            while let Some(change_result) = changes.next().await {
+                let change = change_result?;
+                match change {
+                    Change::Add(entry) => {
+                        // Check if key already exists
+                        match self.get(&entry.key).await? {
+                            None => {
+                                // Key doesn't exist - insert it
+                                self.set(entry.key, entry.value).await?;
+                            }
+                            Some(existing_value) => {
+                                if existing_value == entry.value {
+                                    // Same value - no-op (idempotent)
+                                } else {
+                                    // Different values - resolve conflict by comparing hashes
+
+                                    let (existing_hash, _) = self
+                                        .storage()
+                                        .encode(&existing_value)
+                                        .await
+                                        .map_err(|e| e.into())?;
+                                    let (new_hash, _) = self
+                                        .storage()
+                                        .encode(&entry.value)
+                                        .await
+                                        .map_err(|e| e.into())?;
+
+                                    if new_hash.as_ref() > existing_hash.as_ref() {
+                                        // New value wins - update
+                                        self.set(entry.key, entry.value).await?;
+                                    }
+                                    // Else: existing wins, no-op
+                                }
+                            }
+                        }
+                    }
+                    Change::Remove(entry) => {
+                        // Check if key exists
+                        match self.get(&entry.key).await? {
+                            None => {
+                                // Key doesn't exist - no-op (already removed)
+                            }
+                            Some(existing_value) => {
+                                if existing_value == entry.value {
+                                    // Same value - remove it
+                                    self.delete(&entry.key).await?;
+                                }
+                                // Else: different value - no-op (concurrent update)
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        };
+
+        // If integration fails we set the root back to the original
+        // as this operation must be atomic.
+        if result.is_err() {
+            self.root = root;
+        }
+
+        result
     }
 }

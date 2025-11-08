@@ -100,6 +100,8 @@ pub mod formulas {
 
     // Boolean logic formulas
     pub use crate::logic::{And, Not, Or};
+
+    pub use crate::strings as string;
 }
 
 /// Re-export commonly used types

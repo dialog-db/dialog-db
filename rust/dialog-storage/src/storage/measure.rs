@@ -58,7 +58,9 @@ where
     }
 }
 
-trait Measurable {
+/// Trait for types that can report their byte length.
+pub trait Measurable {
+    /// Returns the byte length of this value.
     fn byte_len(&self) -> usize;
 }
 
@@ -80,13 +82,16 @@ impl<const SIZE: usize> Measurable for [u8; SIZE] {
     }
 }
 
+/// A resource wrapper that measures reload and replace operations
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Backend> StorageBackend for MeasuredStorage<Backend>
 where
     Backend: StorageBackend + ConditionalSync,
-    Backend::Key: Measurable,
-    Backend::Value: Measurable,
+    Backend::Key: Measurable + ConditionalSync,
+    Backend::Value: Measurable + ConditionalSync + Clone,
+    Backend::Error: ConditionalSync,
 {
     type Key = Backend::Key;
     type Value = Backend::Value;

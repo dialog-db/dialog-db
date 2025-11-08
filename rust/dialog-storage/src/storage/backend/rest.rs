@@ -2,10 +2,10 @@ use std::marker::PhantomData;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
-use base58::ToBase58;
 use base64::Engine;
 use dialog_common::ConditionalSync;
 use futures_util::Stream;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
@@ -14,9 +14,88 @@ mod s3_signer;
 use s3_signer::{Access, Credentials};
 
 use crate::{
-    AtomicStorageBackend, DialogStorageError, StorageBackend, StorageSink, StorageSource,
+    DialogStorageError, StorageBackend, StorageSink, StorageSource, TransactionalMemoryBackend,
     storage::backend::rest::s3_signer::Authorization,
 };
+
+/// S3-safe key encoding that preserves path structure.
+///
+/// Keys are treated as `/`-delimited paths. Each path component is checked:
+/// - If it contains only safe characters (alphanumeric, `-`, `_`, `.`), it's kept as-is
+/// - Otherwise, it's base58-encoded and prefixed with `!`
+///
+/// The `!` character is used as a prefix marker because it's in AWS S3's
+/// "safe for use" list and unlikely to appear at the start of path components.
+///
+/// Examples:
+/// - `remote/main` → `remote/main` (all components safe)
+/// - `remote/user@example` → `remote/!<base58>` (@ is unsafe, encode component)
+/// - `foo/bar/baz` → `foo/bar/baz` (all safe)
+pub fn encode_s3_key(bytes: &[u8]) -> String {
+    use base58::ToBase58;
+
+    let key_str = String::from_utf8_lossy(bytes);
+    let components: Vec<&str> = key_str.split('/').collect();
+
+    let encoded_components: Vec<String> = components
+        .iter()
+        .map(|component| {
+            // Check if component contains only safe characters
+            let is_safe = component.bytes().all(|b| {
+                matches!(b,
+                    b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.'
+                )
+            });
+
+            if is_safe && !component.is_empty() {
+                component.to_string()
+            } else {
+                // Base58 encode and prefix with !
+                format!("!{}", component.as_bytes().to_base58())
+            }
+        })
+        .collect();
+
+    encoded_components.join("/")
+}
+
+/// Decode an S3-encoded key back to bytes.
+///
+/// Path components starting with `!` are base58-decoded.
+/// Other components are used as-is.
+pub fn decode_s3_key(encoded: &str) -> Result<Vec<u8>, RestStorageBackendError> {
+    use base58::FromBase58;
+
+    let components: Vec<&str> = encoded.split('/').collect();
+    let mut decoded_components: Vec<Vec<u8>> = Vec::new();
+
+    for component in components {
+        if let Some(encoded_part) = component.strip_prefix('!') {
+            // Base58 decode
+            let decoded = encoded_part.from_base58().map_err(|e| {
+                RestStorageBackendError::SerializationFailed(format!(
+                    "Invalid base58 encoding in component '{}': {:?}",
+                    component, e
+                ))
+            })?;
+            decoded_components.push(decoded);
+        } else {
+            // Use as-is
+            decoded_components.push(component.as_bytes().to_vec());
+        }
+    }
+
+    // Join with /
+    let mut result = Vec::new();
+    for (i, component) in decoded_components.iter().enumerate() {
+        if i > 0 {
+            result.push(b'/');
+        }
+        result.extend_from_slice(component);
+    }
+
+    Ok(result)
+}
 
 /// Errors that can occur when using the REST storage backend
 #[derive(Error, Debug)]
@@ -129,7 +208,7 @@ impl Authority {
 }
 
 /// AWS S3/R2 credentials configuration
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct S3Authority {
     /// AWS Access Key ID
     pub access_key_id: String,
@@ -164,7 +243,7 @@ impl Default for S3Authority {
 }
 
 /// Authentication methods for REST storage backend
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AuthMethod {
     /// No authentication
     None,
@@ -285,7 +364,7 @@ impl Request<'_> {
 // }
 
 /// Configuration for the REST storage backend
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RestStorageConfig {
     /// Base URL for the REST API
     pub endpoint: String,
@@ -320,7 +399,7 @@ impl Default for RestStorageConfig {
 }
 
 /// A storage backend implementation that uses a REST API for S3/R2-like services
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RestStorageBackend<Key, Value>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
@@ -371,7 +450,8 @@ where
 
     /// Build the URL for a given key
     fn build_url(&self, key: &[u8], method: &str) -> Result<Url, RestStorageBackendError> {
-        let key_str = base64::engine::general_purpose::STANDARD.encode(key);
+        // Use S3-safe encoding that preserves path delimiters
+        let key_str = encode_s3_key(key);
 
         // For S3/R2 signed URLs
         if let AuthMethod::S3(authority) = &self.config.auth_method {
@@ -465,7 +545,8 @@ where
             };
 
             // Build the object key with optional prefix
-            let key_str = base64::engine::general_purpose::STANDARD.encode(key);
+            // Use S3-safe encoding that preserves path delimiters
+            let key_str = encode_s3_key(key);
             let object_key = if let Some(prefix) = &self.config.key_prefix {
                 format!("{}/{}", prefix, key_str)
             } else {
@@ -579,7 +660,17 @@ where
         let url = self.build_url(key, "GET")?;
         Ok(self.prepare_request(self.client.get(url), None))
     }
+
+    fn prepare_delete_request(
+        &self,
+        key: &[u8],
+    ) -> Result<reqwest::RequestBuilder, RestStorageBackendError> {
+        let url = self.build_url(key, "DELETE")?;
+        Ok(self.prepare_request(self.client.delete(url), None))
+    }
 }
+
+/// A resource handle for a specific entry in [RestStorageBackend]
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -627,113 +718,121 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Key, Value> AtomicStorageBackend for RestStorageBackend<Key, Value>
+impl<Key, Value> TransactionalMemoryBackend for RestStorageBackend<Key, Value>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
 {
-    type Key = Key;
+    type Address = Key;
     type Value = Value;
     type Error = RestStorageBackendError;
+    type Edition = String;
 
-    async fn swap(
-        &mut self,
-        key: Self::Key,
-        value: Self::Value,
-        when: Option<Self::Value>,
-    ) -> Result<(), Self::Error> {
-        let mut request = self.prepare_put_request(key.as_ref(), value.as_ref())?;
-
-        // Add precondition headers to enforce CAS semantics.
-        request = match &when {
-            Some(value) => request.header("If-Match", format!("\"{:x}\"", md5::compute(value))),
-            None => request.header("If-None-Match", "*"),
-        };
-
+    async fn resolve(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        let request = self.prepare_get_request(address.as_ref())?;
         let response = request.send().await?;
 
-        if response.status().is_success() {
-            return Ok(());
-        }
+        match response.status() {
+            status if status.is_success() => {
+                // Extract ETag from response headers
+                let etag = response
+                    .headers()
+                    .get("etag")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.trim_matches('"').to_string())
+                    .ok_or_else(|| {
+                        RestStorageBackendError::OperationFailed(
+                            "Response missing ETag header".to_string(),
+                        )
+                    })?;
 
-        // If precondition failed, we should fetch the latest version so we can
-        // report actual value if it is different or retry with a different
-        // etag if same, which may happen if multipart upload was used, which
-        // should not happen, but it still good to handle such case gracefully.
-        if response.status() == reqwest::StatusCode::PRECONDITION_FAILED {
-            // Fetch latest revision to see if we it has changed
-            let request = self.prepare_get_request(key.as_ref())?;
-            let latest = request.send().await?;
-            let etag = latest.headers().get("etag").cloned();
-            let status = latest.status();
+                let bytes = response.bytes().await?;
+                let value = Value::from(bytes.to_vec());
 
-            // If key is not found we just need to set If-None-Match: *
-            let actual = if status == reqwest::StatusCode::NOT_FOUND {
-                None
+                Ok(Some((value, etag)))
             }
-            // If fetching latest was successful, we read etag from its headers
-            else if status.is_success() {
-                Some(latest.bytes().await?)
-            } else {
-                Err(RestStorageBackendError::RequestFailed(format!(
-                    "Failed to fetch object after put with precondition was rejected: {}",
-                    response.status()
-                )))?
-            };
-
-            // figure out what etag should we retry put with
-            let precondition = match (when, actual) {
-                (None, None) => Ok(etag),
-                (Some(expected), Some(actual)) => {
-                    if expected.as_ref() != actual.as_ref() {
-                        Err(RestStorageBackendError::OperationFailed(format!(
-                            "Precondition failed, expected key {} to have value {} instead of {}",
-                            ToBase58::to_base58(key.as_ref()),
-                            ToBase58::to_base58(expected.as_ref()),
-                            ToBase58::to_base58(actual.as_ref())
-                        )))
-                    } else {
-                        Ok(etag)
-                    }
-                }
-                (Some(expected), None) => Err(RestStorageBackendError::OperationFailed(format!(
-                    "Precondition failed, expected key {} to have value {} but it was not found",
-                    ToBase58::to_base58(key.as_ref()),
-                    ToBase58::to_base58(expected.as_ref())
-                ))),
-                (None, Some(actual)) => Err(RestStorageBackendError::OperationFailed(format!(
-                    "Precondition failed, expected key {} to not exist but it was found with value {}",
-                    ToBase58::to_base58(key.as_ref()),
-                    ToBase58::to_base58(actual.as_ref())
-                ))),
-            }?;
-
-            let mut request = self.prepare_put_request(key.as_ref(), value.as_ref())?;
-            request = match precondition {
-                Some(etag) => request.header("If-Match", etag),
-                None => request.header("If-None-Match", "*"),
-            };
-
-            let retry = request.send().await?;
-
-            if retry.status().is_success() {
-                return Ok(());
-            } else {
-                return Err(RestStorageBackendError::OperationFailed(format!(
-                    "Retry PUT failed: {}",
-                    retry.status()
-                )));
-            }
-        } else {
-            Err(RestStorageBackendError::OperationFailed(format!(
-                "swap failed: {}",
-                response.status()
-            )))
+            reqwest::StatusCode::NOT_FOUND => Ok(None),
+            status => Err(RestStorageBackendError::OperationFailed(format!(
+                "Failed to acquire value. Status: {status}"
+            ))),
         }
     }
 
-    async fn resolve(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        StorageBackend::get(self, key).await
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        match content {
+            Some(new_value) => {
+                // PUT with If-Match header for CAS
+                let mut request = self.prepare_put_request(address.as_ref(), new_value.as_ref())?;
+
+                // Add If-Match header if edition is provided
+                if let Some(etag) = edition {
+                    request = request.header("If-Match", format!("\"{}\"", etag));
+                } else {
+                    // If no edition, use If-None-Match: * to ensure creation only
+                    request = request.header("If-None-Match", "*");
+                }
+
+                let response = request.send().await?;
+
+                match response.status() {
+                    status if status.is_success() => {
+                        // Extract new ETag from response
+                        let new_etag = response
+                            .headers()
+                            .get("etag")
+                            .and_then(|v| v.to_str().ok())
+                            .map(|s| s.trim_matches('"').to_string())
+                            .ok_or_else(|| {
+                                RestStorageBackendError::OperationFailed(
+                                    "Response missing ETag header".to_string(),
+                                )
+                            })?;
+                        Ok(Some(new_etag))
+                    }
+                    reqwest::StatusCode::PRECONDITION_FAILED => {
+                        Err(RestStorageBackendError::OperationFailed(
+                            "CAS condition failed: edition mismatch".to_string(),
+                        ))
+                    }
+                    status => Err(RestStorageBackendError::OperationFailed(format!(
+                        "Failed to replace value. Status: {status}"
+                    ))),
+                }
+            }
+            None => {
+                // DELETE with If-Match header for CAS
+                let mut request = self.prepare_delete_request(address.as_ref())?;
+
+                // Add If-Match header if edition is provided
+                if let Some(etag) = edition {
+                    request = request.header("If-Match", format!("\"{}\"", etag));
+                }
+
+                let response = request.send().await?;
+
+                match response.status() {
+                    status if status.is_success() || status == reqwest::StatusCode::NOT_FOUND => {
+                        Ok(None)
+                    }
+                    reqwest::StatusCode::PRECONDITION_FAILED => {
+                        Err(RestStorageBackendError::OperationFailed(
+                            "CAS condition failed: edition mismatch".to_string(),
+                        ))
+                    }
+                    status => Err(RestStorageBackendError::OperationFailed(format!(
+                        "Failed to delete value. Status: {status}"
+                    ))),
+                }
+            }
+        }
     }
 }
 
@@ -826,7 +925,8 @@ where
             })?;
 
             for encoded_key in keys {
-                let key_bytes = match base64::engine::general_purpose::STANDARD.decode(&encoded_key) {
+                // Decode S3-encoded key
+                let key_bytes = match decode_s3_key(&encoded_key) {
                     Ok(k) => k,
                     Err(e) => {
                         Err(RestStorageBackendError::SerializationFailed(
@@ -915,12 +1015,12 @@ mod unit_tests {
         };
 
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
-        let key = vec![1, 2, 3]; // Base64: AQID
+        let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
 
         assert_eq!(
             url.as_str(),
-            "https://example.com/test-bucket/test-prefix/AQID"
+            "https://example.com/test-bucket/test-prefix/!Ldp"
         );
     }
 
@@ -935,10 +1035,10 @@ mod unit_tests {
         };
 
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
-        let key = vec![1, 2, 3]; // Base64: AQID
+        let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
 
-        assert_eq!(url.as_str(), "https://example.com/test-bucket/AQID");
+        assert_eq!(url.as_str(), "https://example.com/test-bucket/!Ldp");
     }
 
     #[test]
@@ -952,10 +1052,10 @@ mod unit_tests {
         };
 
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
-        let key = vec![1, 2, 3]; // Base64: AQID
+        let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
 
-        assert_eq!(url.as_str(), "https://example.com/test-prefix/AQID");
+        assert_eq!(url.as_str(), "https://example.com/test-prefix/!Ldp");
     }
 
     #[test]
@@ -969,10 +1069,10 @@ mod unit_tests {
         };
 
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
-        let key = vec![1, 2, 3]; // Base64: AQID
+        let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
 
-        assert_eq!(url.as_str(), "https://example.com/AQID");
+        assert_eq!(url.as_str(), "https://example.com/!Ldp");
     }
 
     #[test]
@@ -986,10 +1086,10 @@ mod unit_tests {
         };
 
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
-        let key = vec![1, 2, 3]; // Base64: AQID
+        let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
 
-        assert_eq!(url.as_str(), "https://example.com/AQID");
+        assert_eq!(url.as_str(), "https://example.com/!Ldp");
     }
 
     #[test]
@@ -1061,7 +1161,7 @@ mod unit_tests {
         };
 
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
-        let key = vec![1, 2, 3]; // Base64: AQID
+        let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
 
         // Generate a signed URL
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
@@ -1088,7 +1188,7 @@ mod unit_tests {
         assert_eq!(url.host_str().unwrap(), "test-bucket.example.com");
 
         // Path should be the key
-        assert_eq!(url.path(), "/AQID");
+        assert_eq!(url.path(), "/!Ldp");
     }
 
     #[test]
@@ -1108,7 +1208,7 @@ mod unit_tests {
         };
 
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
-        let key = vec![1, 2, 3]; // Base64: AQID
+        let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let value = b"hello world";
 
         // Generate a signed URL for PUT with checksum
@@ -1136,7 +1236,7 @@ mod unit_tests {
         assert!(query_params.contains_key("X-Amz-Signature"));
 
         // Method should be PUT
-        assert_eq!(url.path(), "/AQID");
+        assert_eq!(url.path(), "/!Ldp");
     }
 
     #[test]
@@ -1166,9 +1266,16 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use mockito::Server;
+    use serde::{Deserialize, Serialize};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    /// Test struct for exercising serialization/deserialization
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct TestValue {
+        data: String,
+    }
 
     // Helper function to create a test REST backend with a mock server
     async fn create_test_backend() -> (RestStorageBackend<Vec<u8>, Vec<u8>>, mockito::ServerGuard) {
@@ -1217,20 +1324,20 @@ mod tests {
     async fn it_writes_and_reads_a_value() -> Result<()> {
         let (mut backend, mut server) = create_test_backend().await;
 
-        // Key as base64: AQID
+        // Key encodes to: !Ldp
         let key = vec![1, 2, 3];
         let value = vec![4, 5, 6];
 
         // Mock PUT request for set operation
         let put_mock = server
-            .mock("PUT", "/AQID")
+            .mock("PUT", "/!Ldp")
             .with_status(200)
             .with_body("")
             .create();
 
         // Mock GET request for successful retrieval
         let get_mock = server
-            .mock("GET", "/AQID")
+            .mock("GET", "/!Ldp")
             .with_status(200)
             .with_body(&[4, 5, 6])
             .create();
@@ -1253,12 +1360,12 @@ mod tests {
     async fn it_returns_none_for_missing_values() -> Result<()> {
         let (backend, mut server) = create_test_backend().await;
 
-        let key = vec![10, 11, 12]; // Different key, base64: CgsMw==
+        let key = vec![10, 11, 12]; // Encodes to: !<base58> (binary data with ! prefix)
 
         // Mock GET request for missing value (404 response)
-        // Use Matcher::Any since the path will be URL-encoded
+        // Match any path starting with ! (encoded binary keys)
         let mock = server
-            .mock("GET", mockito::Matcher::Regex(r"^/Cgs.*".to_string()))
+            .mock("GET", mockito::Matcher::Regex(r"^/!.*".to_string()))
             .with_status(404)
             .with_body("")
             .create();
@@ -1276,12 +1383,12 @@ mod tests {
     async fn it_handles_error_responses() -> Result<()> {
         let (backend, mut server) = create_test_backend().await;
 
-        let key = vec![20, 21, 22]; // base64: FBUWe==
+        let key = vec![20, 21, 22]; // Encodes to: !7kEh (base58-encoded with ! prefix)
 
         // Mock GET request for server error
         // Use regex matcher for URL-encoded paths
         let mock = server
-            .mock("GET", mockito::Matcher::Regex(r"^/FBUW.*".to_string()))
+            .mock("GET", mockito::Matcher::Regex(r"^/!7kEh.*".to_string()))
             .with_status(500)
             .with_body("Internal Server Error")
             .create();
@@ -1309,7 +1416,7 @@ mod tests {
 
         // Mock PUT request expecting specific headers
         let mock = server
-            .mock("PUT", "/AQID")
+            .mock("PUT", "/!Ldp")
             .match_header("Authorization", "Bearer test-api-key")
             .match_header("X-Custom-Header", "custom-value")
             .with_status(200)
@@ -1337,7 +1444,7 @@ mod tests {
 
         // Mock PUT request with bucket and prefix in path
         let mock = server
-            .mock("PUT", "/test-bucket/test-prefix/AQID")
+            .mock("PUT", "/test-bucket/test-prefix/!Ldp")
             .with_status(200)
             .create();
 
@@ -1357,19 +1464,19 @@ mod tests {
             .mock("GET", "/_list")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"["AQID", "BAUGBw=="]"#)
+            .with_body(r#"["!Ldp", "!6xdze"]"#)
             .create();
 
         // Mock the GET for first key
         let get_mock1 = server
-            .mock("GET", "/AQID")
+            .mock("GET", "/!Ldp")
             .with_status(200)
             .with_body(&[4, 5, 6])
             .create();
 
         // Mock the GET for second key
         let get_mock2 = server
-            .mock("GET", "/BAUGBw==")
+            .mock("GET", "/!6xdze")
             .with_status(200)
             .with_body(&[8, 9, 10])
             .create();
@@ -1405,7 +1512,7 @@ mod tests {
             .mock("GET", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"["AQID", "BAUGBw=="]"#)
+            .with_body(r#"["!Ldp", "!6xdze"]"#)
             .create();
 
         // Mock the GET for first key
@@ -1448,9 +1555,9 @@ mod tests {
         let (mut backend, mut server) = create_test_backend().await;
 
         // Create mocks for two PUT operations
-        let put_mock1 = server.mock("PUT", "/AQID").with_status(200).create();
+        let put_mock1 = server.mock("PUT", "/!Ldp").with_status(200).create();
 
-        let put_mock2 = server.mock("PUT", "/BAUGBw==").with_status(200).create();
+        let put_mock2 = server.mock("PUT", "/!6xdze").with_status(200).create();
 
         // Create a source stream with two items
         use async_stream::try_stream;
@@ -1518,9 +1625,9 @@ mod tests {
         memory_backend.set(vec![4, 5, 6, 7], vec![8, 9, 10]).await?;
 
         // Create mocks for two PUT operations that will happen during transfer
-        let put_mock1 = server.mock("PUT", "/AQID").with_status(200).create();
+        let put_mock1 = server.mock("PUT", "/!Ldp").with_status(200).create();
 
-        let put_mock2 = server.mock("PUT", "/BAUGBw==").with_status(200).create();
+        let put_mock2 = server.mock("PUT", "/!6xdze").with_status(200).create();
 
         // Create a stream with the memory backend data
         use async_stream::try_stream;
@@ -1544,14 +1651,28 @@ mod tests {
 #[allow(unused_imports, unused_variables, unused_mut, dead_code)]
 mod local_s3_tests {
     use super::*;
+    use crate::CborEncoder;
     use hyper::server::conn::http1;
     use hyper_util::rt::TokioIo;
     use s3;
     use s3s::dto::*;
     use s3s::{S3, S3Request, S3Response, S3Result};
+    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
     use tokio::net::TcpListener;
+
+    /// Test struct for exercising serialization/deserialization
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct TestValue {
+        data: String,
+    }
+
+    impl TestValue {
+        fn new(data: impl Into<String>) -> Self {
+            Self { data: data.into() }
+        }
+    }
 
     #[tokio::test]
     async fn test_local_s3_set_and_get() -> anyhow::Result<()> {
@@ -1651,6 +1772,115 @@ mod local_s3_tests {
     const ALICE: &str = "did:key:z6Mkk89bC3JrVqKie71YEcc5M1SMVxuCgNx6zLZ8SYJsxALi";
 
     #[tokio::test]
+    async fn test_local_s3_typed_store_with_path() -> anyhow::Result<()> {
+        use crate::CborEncoder;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        struct TestData {
+            value: String,
+        }
+
+        let service = s3::start().await?;
+
+        let config = RestStorageConfig {
+            endpoint: service.endpoint().into(),
+            auth_method: AuthMethod::None,
+            bucket: Some("test-bucket".to_string()),
+            key_prefix: Some("test-prefix".to_string()),
+            ..Default::default()
+        };
+
+        // Create a typed store with path (like RemoteBranch does)
+        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+
+        // Wrap in layers like platform.rs does
+        struct ErrorMappingBackend<B> {
+            inner: B,
+        }
+
+        impl<B> Clone for ErrorMappingBackend<B>
+        where
+            B: Clone,
+        {
+            fn clone(&self) -> Self {
+                Self {
+                    inner: self.inner.clone(),
+                }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl<B: StorageBackend<Key = Vec<u8>, Value = Vec<u8>> + Send + Sync> StorageBackend
+            for ErrorMappingBackend<B>
+        where
+            B::Error: Send,
+        {
+            type Key = Vec<u8>;
+            type Value = Vec<u8>;
+            type Error = B::Error;
+
+            async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+                self.inner.set(key, value).await
+            }
+
+            async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+                self.inner.get(key).await
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl<B> super::TransactionalMemoryBackend for ErrorMappingBackend<B>
+        where
+            B: super::TransactionalMemoryBackend<Address = Vec<u8>, Value = Vec<u8>> + Send + Sync,
+            B::Error: Send,
+        {
+            type Address = Vec<u8>;
+            type Value = Vec<u8>;
+            type Error = B::Error;
+            type Edition = B::Edition;
+
+            async fn resolve(
+                &self,
+                address: &Self::Address,
+            ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+                self.inner.resolve(address).await
+            }
+
+            async fn replace(
+                &self,
+                address: &Self::Address,
+                edition: Option<&Self::Edition>,
+                content: Option<Self::Value>,
+            ) -> Result<Option<Self::Edition>, Self::Error> {
+                self.inner.replace(address, edition, content).await
+            }
+        }
+
+        let wrapped = ErrorMappingBackend { inner: backend };
+
+        // Test TransactionalMemory with wrapped backend
+        let key = b"test-key".to_vec();
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &wrapped,
+                CborEncoder,
+            )
+            .await?;
+        assert_eq!(memory.read(), None);
+
+        let value = TestValue::new("test-value");
+        memory.replace(Some(value.clone()), &wrapped).await?;
+
+        // Check it was written
+        let keys = service.storage().list_keys("test-bucket").await;
+        assert!(!keys.is_empty(), "Should have written to S3");
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_local_s3_atomic_swap_ok() -> anyhow::Result<()> {
         let service = s3::start().await?;
 
@@ -1662,30 +1892,38 @@ mod local_s3_tests {
             ..Default::default()
         };
 
-        let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
-        let v1: Vec<u8> = "v1".into();
+        let store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+        let v1 = TestValue::new("v1");
         let key: Vec<u8> = ALICE.into();
 
         // We try to create new branch record
-        store.swap(key.clone(), v1.clone(), None).await?;
-
-        assert_eq!(
-            store.resolve(&key).await?.unwrap(),
-            v1.clone(),
-            "resolved to stored record"
-        );
-
-        let v2: Vec<u8> = "v2".into();
-        // We try to update v1 -> v2
-        store
-            .swap(key.clone(), v2.clone(), Some(v1.clone()))
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
             .await?;
+        assert_eq!(memory.read(), None, "currently there is no record");
+
+        memory.replace(Some(v1.clone()), &store).await?;
+
+        assert!(
+            store.get(&key).await?.is_some(),
+            "stored record was updated"
+        );
 
         assert_eq!(
-            store.resolve(&key).await?.unwrap(),
-            v2.clone(),
-            "resolved to new record"
+            memory.read(),
+            Some(v1.clone()),
+            "resource content was updated"
         );
+
+        let v2 = TestValue::new("v2");
+        // We try to update v1 -> v2
+        memory.replace(Some(v2.clone()), &store).await?;
+
+        // assert_eq!(store.get(&key).await?, Some(v2), "resolved to new record");
 
         Ok(())
     }
@@ -1702,33 +1940,43 @@ mod local_s3_tests {
         };
 
         let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
-        let v1: Vec<u8> = "v1".into();
+        let v1 = TestValue::new("v1");
         let key: Vec<u8> = ALICE.into();
 
-        // We try to create new branch record
-        store.swap(key.clone(), v1.clone(), None).await?;
+        // Create initial value
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
+            .await?;
 
-        assert_eq!(
-            store.resolve(&key).await?.unwrap(),
-            v1.clone(),
-            "resolved to stored record"
-        );
+        assert_eq!(memory.read(), None, "have no content yet");
 
-        let v2: Vec<u8> = "v2".into();
-        let v3: Vec<u8> = "v3".into();
+        // write initila value
+        memory.replace(Some(v1.clone()), &store).await?;
 
-        // We try to update v2 -> v3
-        let result = store.swap(key.clone(), v3.clone(), Some(v2.clone())).await;
+        assert!(store.get(&key).await?.is_some(), "record was stored");
+
+        let v2 = TestValue::new("v2");
+        let v3 = TestValue::new("v3");
+
+        // Simulate concurrent modification: someone else changes v1 -> v2
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&v2).await?.1;
+            store.set(key.clone(), encoded).await?;
+        }
+
+        // Now try to update based on stale v1 -> v3 (should fail)
+        let result = memory.replace(Some(v3.clone()), &store).await;
+
+        assert!(result.is_err(), "swap failed");
 
         assert!(
-            matches!(result, Err(RestStorageBackendError::OperationFailed(_))),
-            "swap failed"
-        );
-
-        assert_eq!(
-            store.resolve(&key).await?.unwrap(),
-            v1.clone(),
-            "resolved to old record"
+            store.get(&key).await?.is_some(),
+            "resolved to concurrently modified record"
         );
 
         Ok(())
@@ -1746,16 +1994,37 @@ mod local_s3_tests {
         };
 
         let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
-        let v1: Vec<u8> = "v1".into();
-        let v2: Vec<u8> = "v2".into();
+        let v1 = TestValue::new("v1");
+        let v2 = TestValue::new("v2");
         let key: Vec<u8> = ALICE.into();
 
-        // We try to swap v1 -> v2
-        let result = store.swap(key.clone(), v2.clone(), Some(v1.clone())).await;
+        // Create value first
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&v1).await?.1;
+            store.set(key.clone(), encoded).await?;
+        }
+
+        // Open TransactionalMemory (gets v1)
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
+            .await?;
+        assert_eq!(memory.read(), Some(v1.clone()));
+
+        // Simulate concurrent deletion by directly deleting from S3
+        let delete_request = store.prepare_delete_request(key.as_ref())?;
+        delete_request.send().await?;
+
+        // Now try to update v1 -> v2 (should fail because key was deleted)
+        let result = memory.replace(Some(v2.clone()), &store).await;
 
         assert!(
-            matches!(result, Err(RestStorageBackendError::OperationFailed(_))),
-            "swap failed"
+            result.is_err(),
+            "swap should have failed when key was concurrently deleted"
         );
 
         Ok(())
@@ -1770,13 +2039,20 @@ mod local_s3_tests {
             key_prefix: Some("branch".to_string()),
             ..Default::default()
         };
-        let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+        let store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
         let key: Vec<u8> = ALICE.into();
-        let value: Vec<u8> = b"v1".to_vec();
+        let value = TestValue::new("v1");
 
         // when=None and key missing → success
-        store.swap(key.clone(), value.clone(), None).await?;
-        assert_eq!(store.resolve(&key).await?.unwrap(), value);
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
+            .await?;
+        memory.replace(Some(value.clone()), &store).await?;
+        assert!(store.get(&key).await?.is_some());
 
         Ok(())
     }
@@ -1793,16 +2069,40 @@ mod local_s3_tests {
         };
         let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
         let key: Vec<u8> = ALICE.into();
-        let expected: Vec<u8> = b"v1".to_vec();
-        let new_val: Vec<u8> = b"v2".to_vec();
+        let expected = TestValue::new("v1");
+        let new_val = TestValue::new("v2");
 
         // when=Some but key missing → fail
-        let result = store.swap(key.clone(), new_val, Some(expected)).await;
-        assert!(matches!(
-            result,
-            Err(RestStorageBackendError::OperationFailed(_))
-        ));
-        assert!(store.resolve(&key).await?.is_none());
+        // Create value first
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&expected).await?.1;
+            store.set(key.clone(), encoded).await?;
+        }
+
+        // Open resource (captures expected)
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
+            .await?;
+
+        // Simulate concurrent deletion
+        crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+            key.clone(),
+            &store,
+            CborEncoder,
+        )
+        .await?
+        .replace(None, &store)
+        .await?;
+
+        // Try to update with stale ETag
+        let result = memory.replace(Some(new_val), &store).await;
+        assert!(result.is_err());
+        assert!(store.get(&key).await?.is_none());
 
         Ok(())
     }
@@ -1819,19 +2119,30 @@ mod local_s3_tests {
         };
         let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
         let key: Vec<u8> = ALICE.into();
-        let existing: Vec<u8> = b"v1".to_vec();
-        let new_val: Vec<u8> = b"v2".to_vec();
-
-        // Prepopulate the key
-        store.swap(key.clone(), existing.clone(), None).await?;
+        let existing = TestValue::new("v1");
+        let new_val = TestValue::new("v2");
 
         // when=None and key exists → fail
-        let result = store.swap(key.clone(), new_val, None).await;
-        assert!(matches!(
-            result,
-            Err(RestStorageBackendError::OperationFailed(_))
-        ));
-        assert_eq!(store.resolve(&key).await?.unwrap(), existing);
+        // Open resource for non-existent key (captures None)
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
+            .await?;
+
+        // Simulate concurrent creation: someone else creates the key
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&existing).await?.1;
+            store.set(key.clone(), encoded).await?;
+        }
+
+        // Try to create with CAS condition "must not exist" (should fail because key now exists)
+        let result = memory.replace(Some(new_val), &store).await;
+        assert!(result.is_err());
+        assert!(store.get(&key).await?.is_some());
 
         Ok(())
     }
@@ -1848,17 +2159,26 @@ mod local_s3_tests {
         };
         let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
         let key: Vec<u8> = ALICE.into();
-        let existing: Vec<u8> = b"v1".to_vec();
-        let new_val: Vec<u8> = b"v2".to_vec();
+        let existing = TestValue::new("v1");
+        let new_val = TestValue::new("v2");
 
         // Prepopulate the key
-        store.swap(key.clone(), existing.clone(), None).await?;
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&existing).await?.1;
+            store.set(key.clone(), encoded).await?;
+        }
 
         // when=Some and matches existing → success
-        store
-            .swap(key.clone(), new_val.clone(), Some(existing.clone()))
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
             .await?;
-        assert_eq!(store.resolve(&key).await?.unwrap(), new_val);
+        memory.replace(Some(new_val.clone()), &store).await?;
+        assert!(store.get(&key).await?.is_some());
 
         Ok(())
     }
@@ -1875,30 +2195,49 @@ mod local_s3_tests {
         };
         let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
         let key: Vec<u8> = ALICE.into();
-        let existing: Vec<u8> = b"v1".to_vec();
-        let wrong_expected: Vec<u8> = b"vX".to_vec();
-        let new_val: Vec<u8> = b"v2".to_vec();
+        let existing = TestValue::new("v1");
+        let wrong_expected = TestValue::new("vX");
+        let new_val = TestValue::new("v2");
 
         // Prepopulate the key
-        store.swap(key.clone(), existing.clone(), None).await?;
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&existing).await?.1;
+            store.set(key.clone(), encoded).await?;
+        }
+
+        // Open resource (captures existing)
+        let mut memory =
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(
+                key.clone(),
+                &store,
+                CborEncoder,
+            )
+            .await?;
+
+        // Simulate concurrent modification: someone else changes the value
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&wrong_expected).await?.1;
+            store.set(key.clone(), encoded).await?;
+        }
 
         // when=Some but doesn't match existing → fail
-        let result = store
-            .swap(key.clone(), new_val.clone(), Some(wrong_expected))
-            .await;
-        assert!(matches!(
-            result,
-            Err(RestStorageBackendError::OperationFailed(_))
-        ));
-        assert_eq!(store.resolve(&key).await?.unwrap(), existing);
+        let result = memory.replace(Some(new_val.clone()), &store).await;
+        assert!(result.is_err());
+        assert!(store.get(&key).await?.is_some());
 
         Ok(())
     }
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
 #[allow(unused_imports, unused_variables, unused_mut, dead_code)]
-mod s3 {
+/// S3-compatible test server for integration testing.
+///
+/// This module provides a simple in-memory S3-compatible server
+/// for testing REST storage backend functionality.
+pub mod s3 {
     use async_trait::async_trait;
     use hyper::server::conn::http1;
     use hyper_util::rt::TokioIo;
@@ -1921,31 +2260,63 @@ mod s3 {
         buckets: Arc<RwLock<HashMap<String, HashMap<String, StoredObject>>>>,
     }
 
+    /// A running S3 test server instance.
     pub struct Service {
+        /// The endpoint URL where the server is listening
         pub endpoint: String,
         shutdown_tx: tokio::sync::oneshot::Sender<()>,
+        storage: InMemoryS3,
     }
     impl Service {
+        /// Stops the test server.
         pub fn stop(self) -> Result<(), ()> {
             self.shutdown_tx.send(())
         }
 
+        /// Returns the endpoint URL of the running server.
         pub fn endpoint(&self) -> &str {
             &self.endpoint
         }
+
+        /// Returns the underlying storage for inspection (useful in tests)
+        pub fn storage(&self) -> &InMemoryS3 {
+            &self.storage
+        }
     }
 
+    /// Starts a test S3 server.
     pub async fn start() -> anyhow::Result<Service> {
         InMemoryS3::start2().await
     }
 
     impl InMemoryS3 {
+        /// Get a value from a specific bucket (useful for test verification)
+        pub async fn get_value(&self, bucket: &str, key: &str) -> Option<Vec<u8>> {
+            let buckets = self.buckets.read().await;
+            buckets
+                .get(bucket)
+                .and_then(|bucket_contents| bucket_contents.get(key))
+                .map(|obj| obj.data.clone())
+        }
+
+        /// Get all keys in a bucket (useful for test verification)
+        pub async fn list_keys(&self, bucket: &str) -> Vec<String> {
+            let buckets = self.buckets.read().await;
+            buckets
+                .get(bucket)
+                .map(|bucket_contents| bucket_contents.keys().cloned().collect())
+                .unwrap_or_default()
+        }
+
+        /// Starts a test S3 server.
         pub async fn start() -> anyhow::Result<Service> {
             Self::serve(Self::default()).await
         }
 
+        /// Starts a test S3 server (alternative implementation).
         pub async fn start2() -> anyhow::Result<Service> {
-            let s3_handler = S3ServiceBuilder::new(Self::default()).build();
+            let storage = Self::default();
+            let s3_handler = S3ServiceBuilder::new(storage.clone()).build();
 
             // Bind to a random available port
             let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -1975,6 +2346,7 @@ mod s3 {
             Ok(Service {
                 endpoint,
                 shutdown_tx,
+                storage,
             })
         }
 
@@ -1984,6 +2356,7 @@ mod s3 {
             use s3s::service::S3ServiceBuilder;
             use tokio::net::TcpListener;
 
+            let storage = self.clone();
             let s3_handler = S3ServiceBuilder::new(self).build();
             let listener = TcpListener::bind("127.0.0.1:0").await?;
             let addr = listener.local_addr()?;
@@ -2013,6 +2386,7 @@ mod s3 {
             Ok(Service {
                 endpoint,
                 shutdown_tx,
+                storage,
             })
         }
     }

@@ -26,13 +26,16 @@ pub use transfer::*;
 mod content_addressed;
 pub use content_addressed::*;
 
+mod transactional_memory;
+pub use transactional_memory::*;
+
 /// A universal envelope for all compatible combinations of [Encoder] and
 /// [StorageBackend] implementations. See the crate documentation for
 /// a practical example of usage.
 #[derive(Clone)]
-pub struct Storage<const HASH_SIZE: usize, Encoder, Backend>
+pub struct Storage<Encoder, Backend>
 where
-    Encoder: crate::Encoder<HASH_SIZE>,
+    Encoder: crate::Encoder,
     Backend: StorageBackend,
 {
     /// The [Encoder] used by the [Storage]
@@ -43,10 +46,9 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<const HASH_SIZE: usize, Encoder, Backend> crate::Encoder<HASH_SIZE>
-    for Storage<HASH_SIZE, Encoder, Backend>
+impl<Encoder, Backend> crate::Encoder for Storage<Encoder, Backend>
 where
-    Encoder: crate::Encoder<HASH_SIZE>,
+    Encoder: crate::Encoder,
     Backend: StorageBackend,
     Self: ConditionalSync,
 {
@@ -71,10 +73,9 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<const HASH_SIZE: usize, Encoder, Backend> StorageBackend
-    for Storage<HASH_SIZE, Encoder, Backend>
+impl<Encoder, Backend> StorageBackend for Storage<Encoder, Backend>
 where
-    Encoder: crate::Encoder<HASH_SIZE>,
+    Encoder: crate::Encoder,
     Backend: StorageBackend,
     Self: ConditionalSync,
 {
@@ -88,6 +89,41 @@ where
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         self.backend.get(key).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Encoder, Backend> TransactionalMemoryBackend for Storage<Encoder, Backend>
+where
+    Encoder: crate::Encoder,
+    Backend: StorageBackend
+        + TransactionalMemoryBackend<
+            Address = <Backend as StorageBackend>::Key,
+            Value = <Backend as StorageBackend>::Value,
+            Error = <Backend as StorageBackend>::Error,
+        >,
+    Self: ConditionalSync,
+{
+    type Address = <Backend as StorageBackend>::Key;
+    type Value = <Backend as StorageBackend>::Value;
+    type Error = <Backend as StorageBackend>::Error;
+    type Edition = <Backend as TransactionalMemoryBackend>::Edition;
+
+    async fn resolve(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        self.backend.resolve(address).await
+    }
+
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        self.backend.replace(address, edition, content).await
     }
 }
 
@@ -116,7 +152,7 @@ mod tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl Encoder<32> for TestEncoder {
+    impl Encoder for TestEncoder {
         type Bytes = Vec<u8>;
         type Hash = [u8; 32];
         type Error = DialogStorageError;
