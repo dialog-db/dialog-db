@@ -1097,18 +1097,18 @@ impl<Backend: PlatformBackend> Remote<Backend> {
 /// Represents a branch on a remote repository.
 #[derive(Debug, Clone)]
 pub struct RemoteBranch<Backend: PlatformBackend> {
-    site: Site,
-    id: BranchId,
-    revision: Option<Revision>,
+    pub site: Site,
+    pub id: BranchId,
+    pub revision: Option<Revision>,
 
-    storage: PlatformStorage<Backend>,
+    pub storage: PlatformStorage<Backend>,
     /// Remote storage for canonical operations
-    remote_storage: PlatformStorage<RemoteBackend>,
+    pub remote_storage: PlatformStorage<RemoteBackend>,
 
     /// Local cache for the revision currently branch has
-    cache: TypedStoreResource<Revision, Backend>,
+    pub cache: TypedStoreResource<Revision, Backend>,
     /// Canonical revision, which is created lazily on fetch.
-    canonical: Option<TypedStoreResource<Revision, RemoteBackend>>,
+    pub canonical: Option<TypedStoreResource<Revision, RemoteBackend>>,
 }
 
 impl<Backend: PlatformBackend> RemoteBranch<Backend> {
@@ -1270,10 +1270,10 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
 /// State information for a remote repository connection.
 pub struct RemoteState {
     /// Name for this remote.
-    site: Site,
+    pub site: Site,
 
     /// Address used to configure this remote
-    address: RestStorageConfig,
+    pub address: RestStorageConfig,
 }
 
 impl RemoteState {
@@ -1303,15 +1303,15 @@ impl RemoteState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Occurence {
     /// Site of this occurence.
-    site: Principal,
+    pub site: Principal,
 
     /// Logical coordinated time component denoting a last synchronization
     /// cycle.
-    period: usize,
+    pub period: usize,
 
     /// Local uncoordinated time component denoting a moment within a
     /// period at which occurrence happened.
-    moment: usize,
+    pub moment: usize,
 }
 
 /// A [`Revision`] represents a concrete state of the dialog instance. It is
@@ -1321,10 +1321,10 @@ pub struct Revision {
     /// Site where this revision was created.It as expected to be a signing
     /// principal representing a tool acting on author's behalf. In the future
     /// I expect we'll have signed delegation chain from user to this site.
-    issuer: Principal,
+    pub issuer: Principal,
 
     /// Reference the root of the search tree.
-    tree: NodeReference,
+    pub tree: NodeReference,
 
     /// Set of revisions this is based of. It can be an empty set if this is
     /// a first revision, but more commonly it will point to a previous revision
@@ -1332,14 +1332,14 @@ pub struct Revision {
     /// contain a set of revisions.
     ///
     /// It is effectively equivalent of of `parents` in git commit objects.
-    cause: HashSet<Edition<Revision>>,
+    pub cause: HashSet<Edition<Revision>>,
 
     /// Period indicating when this revision was created. This MUST be derived
     /// from the `cause`al revisions and it must be greater by one than the
     /// maximum period of the `cause`al revisions that have different `by` from
     /// this revision. More simply we create a new period whenever we
     /// synchronize.
-    period: usize,
+    pub period: usize,
 
     /// Moment at which this revision was created. It represents a number of
     /// transactions that have being made in this period. If `cause`al revisions
@@ -1347,7 +1347,7 @@ pub struct Revision {
     /// otherwise it should be `0`. This implies that when we sync we increment
     /// `period` and reset `moment` to `0`. And when we create a transaction we
     /// increment `moment` by one and keep the same `period`.
-    moment: usize,
+    pub moment: usize,
 }
 
 impl Revision {
@@ -1416,20 +1416,20 @@ impl From<Revision> for Occurence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchState {
     /// Unique identifier of this fork.
-    id: BranchId,
+    pub id: BranchId,
 
     /// Free-form human-readable description of this fork.
-    description: String,
+    pub description: String,
 
     /// Current revision associated with this branch.
-    revision: Revision,
+    pub revision: Revision,
 
     /// Root of the search tree our this revision is based off.
-    base: NodeReference,
+    pub base: NodeReference,
 
     /// An upstream through which updates get propagated. Branch may
     /// not have an upstream.
-    upstream: Option<UpstreamState>,
+    pub upstream: Option<UpstreamState>,
 }
 
 /// Unique name for the branch

@@ -67,6 +67,7 @@ pub trait PlatformBackend:
     + TransactionalMemoryBackend<Address = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
     + ConditionalSync
     + Clone
+    + 'static
 {
 }
 
@@ -76,6 +77,7 @@ impl<B> PlatformBackend for B where
         + TransactionalMemoryBackend<Address = Vec<u8>, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSync
         + Clone
+        + 'static
 {
 }
 
