@@ -13,7 +13,7 @@
 //! use futures_util::{StreamExt, stream};
 //!
 //! // Substitute with your storage backend of choice:
-//! let storage_backend = MemoryStorageBackend::default();
+//! let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
 //! let mut artifacts = Artifacts::anonymous(storage_backend).await?;
 //!
 //! // Create an artifact

@@ -566,7 +566,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// 3. Integrates local changes into upstream tree
     /// 4. Creates a new revision with proper period/moment
     pub async fn pull(&mut self) -> Result<Option<Revision>, ReplicaError> {
-        if let Some(upstream) = &mut self.upstream() {
+        if let Some(_upstream) = &mut self.upstream() {
             if let Some(revision) = self.fetch().await? {
                 // if upstream revision is different from our base
                 // we'll merge local changes onto upstream tree otherwise
@@ -970,14 +970,14 @@ pub type RemoteBackend = ErrorMappingBackend<RestStorageBackend<Vec<u8>, Vec<u8>
 
 /// Represents a connection to a remote repository.
 pub struct Remote<Backend: PlatformBackend> {
-    state: RemoteState,
-    storage: PlatformStorage<Backend>,
+    site: Site,
     memory: TypedStoreResource<RemoteState, Backend>,
+    storage: PlatformStorage<Backend>,
     connection: PlatformStorage<RemoteBackend>,
 }
 impl<Backend: PlatformBackend> Remote<Backend> {
     pub fn site(&self) -> &Site {
-        &self.state.site
+        &self.site
     }
 
     pub async fn mount(
@@ -1000,8 +1000,8 @@ impl<Backend: PlatformBackend> Remote<Backend> {
         let memory = Self::mount(site, &storage).await?;
         if let Some(state) = memory.content().clone() {
             Ok(Remote {
+                site: state.site.clone(),
                 connection: state.connect()?,
-                state,
                 memory,
                 storage,
             })
@@ -1028,14 +1028,16 @@ impl<Backend: PlatformBackend> Remote<Backend> {
                 site: state.site.to_string(),
                 address: state.address,
             };
+            let site = state.site.clone();
+            let connection = state.connect()?;
             memory
                 .replace(Some(state.clone()), &storage)
                 .await
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
             Ok(Remote {
-                connection: state.connect()?,
-                state,
+                site,
+                connection,
                 memory,
                 storage,
             })

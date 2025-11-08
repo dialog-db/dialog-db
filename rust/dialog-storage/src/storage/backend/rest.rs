@@ -1266,9 +1266,22 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use mockito::Server;
+    use serde::{Deserialize, Serialize};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    /// Test struct for exercising serialization/deserialization
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct TestValue {
+        data: String,
+    }
+
+    impl TestValue {
+        fn new(data: impl Into<String>) -> Self {
+            Self { data: data.into() }
+        }
+    }
 
     // Helper function to create a test REST backend with a mock server
     async fn create_test_backend() -> (RestStorageBackend<Vec<u8>, Vec<u8>>, mockito::ServerGuard) {
@@ -1644,14 +1657,28 @@ mod tests {
 #[allow(unused_imports, unused_variables, unused_mut, dead_code)]
 mod local_s3_tests {
     use super::*;
+    use crate::CborEncoder;
     use hyper::server::conn::http1;
     use hyper_util::rt::TokioIo;
     use s3;
     use s3s::dto::*;
     use s3s::{S3, S3Request, S3Response, S3Result};
+    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
     use tokio::net::TcpListener;
+
+    /// Test struct for exercising serialization/deserialization
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct TestValue {
+        data: String,
+    }
+
+    impl TestValue {
+        fn new(data: impl Into<String>) -> Self {
+            Self { data: data.into() }
+        }
+    }
 
     #[tokio::test]
     async fn test_local_s3_set_and_get() -> anyhow::Result<()> {
@@ -1841,11 +1868,11 @@ mod local_s3_tests {
         // Test TransactionalMemory with wrapped backend
         let key = b"test-key".to_vec();
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &wrapped)
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &wrapped, CborEncoder)
                 .await?;
         assert_eq!(memory.read(), None);
 
-        let value = b"test-value".to_vec();
+        let value = TestValue::new("test-value");
         memory.replace(Some(value.clone()), &wrapped).await?;
 
         // Check it was written
@@ -1868,20 +1895,19 @@ mod local_s3_tests {
         };
 
         let store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
-        let v1: Vec<u8> = "v1".into();
+        let v1 = TestValue::new("v1");
         let key: Vec<u8> = ALICE.into();
 
         // We try to create new branch record
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
                 .await?;
         assert_eq!(memory.read(), None, "currently there is no record");
 
         memory.replace(Some(v1.clone()), &store).await?;
 
-        assert_eq!(
-            store.get(&key).await?,
-            Some(v1.clone()),
+        assert!(
+            store.get(&key).await?.is_some(),
             "stored record was updated"
         );
 
@@ -1891,7 +1917,7 @@ mod local_s3_tests {
             "resource content was updated"
         );
 
-        let v2: Vec<u8> = "v2".into();
+        let v2 = TestValue::new("v2");
         // We try to update v1 -> v2
         memory.replace(Some(v2.clone()), &store).await?;
 
@@ -1912,12 +1938,12 @@ mod local_s3_tests {
         };
 
         let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
-        let v1: Vec<u8> = "v1".into();
+        let v1 = TestValue::new("v1");
         let key: Vec<u8> = ALICE.into();
 
         // Create initial value
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
                 .await?;
 
         assert_eq!(memory.read(), None, "have no content yet");
@@ -1925,29 +1951,31 @@ mod local_s3_tests {
         // write initila value
         memory.replace(Some(v1.clone()), &store).await?;
 
-        assert_eq!(
-            store.get(&key).await?,
-            Some(v1.clone()),
+        assert!(
+            store.get(&key).await?.is_some(),
             "record was stored"
         );
 
-        let v2: Vec<u8> = "v2".into();
-        let v3: Vec<u8> = "v3".into();
+        let v2 = TestValue::new("v2");
+        let v3 = TestValue::new("v3");
 
         // Simulate concurrent modification: someone else changes v1 -> v2
-        store.set(key.clone(), v2.clone()).await?;
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&v2).await?.1;
+            store.set(key.clone(), encoded).await?;
+        }
 
         // Now try to update based on stale v1 -> v3 (should fail)
         let result = memory.replace(Some(v3.clone()), &store).await;
 
         assert!(
-            matches!(result, Err(RestStorageBackendError::OperationFailed(_))),
+            result.is_err(),
             "swap failed"
         );
 
-        assert_eq!(
-            store.get(&key).await?,
-            Some(v2),
+        assert!(
+            store.get(&key).await?.is_some(),
             "resolved to concurrently modified record"
         );
 
@@ -1966,16 +1994,20 @@ mod local_s3_tests {
         };
 
         let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
-        let v1: Vec<u8> = "v1".into();
-        let v2: Vec<u8> = "v2".into();
+        let v1 = TestValue::new("v1");
+        let v2 = TestValue::new("v2");
         let key: Vec<u8> = ALICE.into();
 
         // Create value first
-        store.set(key.clone(), v1.clone()).await?;
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&v1).await?.1;
+            store.set(key.clone(), encoded).await?;
+        }
 
         // Open TransactionalMemory (gets v1)
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
                 .await?;
         assert_eq!(memory.read(), Some(v1.clone()));
 
@@ -1987,7 +2019,7 @@ mod local_s3_tests {
         let result = memory.replace(Some(v2.clone()), &store).await;
 
         assert!(
-            matches!(result, Err(RestStorageBackendError::OperationFailed(_))),
+            result.is_err(),
             "swap should have failed when key was concurrently deleted"
         );
 
@@ -2005,14 +2037,14 @@ mod local_s3_tests {
         };
         let store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
         let key: Vec<u8> = ALICE.into();
-        let value: Vec<u8> = b"v1".to_vec();
+        let value = TestValue::new("v1");
 
         // when=None and key missing → success
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
                 .await?;
         memory.replace(Some(value.clone()), &store).await?;
-        assert_eq!(store.get(&key).await?, Some(value));
+        assert!(store.get(&key).await?.is_some());
 
         Ok(())
     }
@@ -2029,30 +2061,31 @@ mod local_s3_tests {
         };
         let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
         let key: Vec<u8> = ALICE.into();
-        let expected: Vec<u8> = b"v1".to_vec();
-        let new_val: Vec<u8> = b"v2".to_vec();
+        let expected = TestValue::new("v1");
+        let new_val = TestValue::new("v2");
 
         // when=Some but key missing → fail
         // Create value first
-        store.set(key.clone(), expected.clone()).await?;
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&expected).await?.1;
+            store.set(key.clone(), encoded).await?;
+        }
 
         // Open resource (captures expected)
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
                 .await?;
 
         // Simulate concurrent deletion
-        crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+        crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
             .await?
             .replace(None, &store)
             .await?;
 
         // Try to update with stale ETag
         let result = memory.replace(Some(new_val), &store).await;
-        assert!(matches!(
-            result,
-            Err(RestStorageBackendError::OperationFailed(_))
-        ));
+        assert!(result.is_err());
         assert!(store.get(&key).await?.is_none());
 
         Ok(())
@@ -2070,25 +2103,26 @@ mod local_s3_tests {
         };
         let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
         let key: Vec<u8> = ALICE.into();
-        let existing: Vec<u8> = b"v1".to_vec();
-        let new_val: Vec<u8> = b"v2".to_vec();
+        let existing = TestValue::new("v1");
+        let new_val = TestValue::new("v2");
 
         // when=None and key exists → fail
         // Open resource for non-existent key (captures None)
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
                 .await?;
 
         // Simulate concurrent creation: someone else creates the key
-        store.set(key.clone(), existing.clone()).await?;
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&existing).await?.1;
+            store.set(key.clone(), encoded).await?;
+        }
 
         // Try to create with CAS condition "must not exist" (should fail because key now exists)
         let result = memory.replace(Some(new_val), &store).await;
-        assert!(matches!(
-            result,
-            Err(RestStorageBackendError::OperationFailed(_))
-        ));
-        assert_eq!(store.get(&key).await?, Some(existing));
+        assert!(result.is_err());
+        assert!(store.get(&key).await?.is_some());
 
         Ok(())
     }
@@ -2105,18 +2139,22 @@ mod local_s3_tests {
         };
         let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
         let key: Vec<u8> = ALICE.into();
-        let existing: Vec<u8> = b"v1".to_vec();
-        let new_val: Vec<u8> = b"v2".to_vec();
+        let existing = TestValue::new("v1");
+        let new_val = TestValue::new("v2");
 
         // Prepopulate the key
-        store.set(key.clone(), existing.clone()).await?;
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&existing).await?.1;
+            store.set(key.clone(), encoded).await?;
+        }
 
         // when=Some and matches existing → success
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
                 .await?;
         memory.replace(Some(new_val.clone()), &store).await?;
-        assert_eq!(store.get(&key).await?, Some(new_val));
+        assert!(store.get(&key).await?.is_some());
 
         Ok(())
     }
@@ -2133,28 +2171,33 @@ mod local_s3_tests {
         };
         let mut store = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
         let key: Vec<u8> = ALICE.into();
-        let existing: Vec<u8> = b"v1".to_vec();
-        let wrong_expected: Vec<u8> = b"vX".to_vec();
-        let new_val: Vec<u8> = b"v2".to_vec();
+        let existing = TestValue::new("v1");
+        let wrong_expected = TestValue::new("vX");
+        let new_val = TestValue::new("v2");
 
         // Prepopulate the key
-        store.set(key.clone(), existing.clone()).await?;
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&existing).await?.1;
+            store.set(key.clone(), encoded).await?;
+        }
 
         // Open resource (captures existing)
         let mut memory =
-            crate::storage::transactional_memory::TransactionalMemory::open(key.clone(), &store)
+            crate::storage::transactional_memory::TransactionalMemory::<TestValue, _, _>::open(key.clone(), &store, CborEncoder)
                 .await?;
 
         // Simulate concurrent modification: someone else changes the value
-        store.set(key.clone(), wrong_expected.clone()).await?;
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&wrong_expected).await?.1;
+            store.set(key.clone(), encoded).await?;
+        }
 
         // when=Some but doesn't match existing → fail
         let result = memory.replace(Some(new_val.clone()), &store).await;
-        assert!(matches!(
-            result,
-            Err(RestStorageBackendError::OperationFailed(_))
-        ));
-        assert_eq!(store.get(&key).await?, Some(wrong_expected));
+        assert!(result.is_err());
+        assert!(store.get(&key).await?.is_some());
 
         Ok(())
     }

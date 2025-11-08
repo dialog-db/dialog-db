@@ -9,7 +9,6 @@ use std::{
 };
 
 use super::{StorageBackend, TransactionalMemoryBackend};
-use std::time::SystemTime;
 
 /// A basic file-system-based [StorageBackend] implementation. All values are
 /// stored inside a root directory as files named after their (base58-encoded)

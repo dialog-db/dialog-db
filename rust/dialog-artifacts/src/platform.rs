@@ -1,14 +1,13 @@
 #![allow(missing_docs)]
 
 use std::fmt::Debug;
-use std::sync::Arc;
 
 use crate::replica::{BranchId, Site};
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_storage::{
-    CborEncoder, DialogStorageError, Encoder, StorageBackend, TransactionalMemoryBackend,
-    TypedTransactionalMemory,
+    CborEncoder, DialogStorageError, Encoder, StorageBackend, TransactionalMemory,
+    TransactionalMemoryBackend,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -145,12 +144,6 @@ where
     }
 }
 
-/// A resource wrapper that maps storage errors to platform-specific errors.
-#[derive(Debug, Clone)]
-pub struct ErrorMappingResource<R> {
-    inner: R,
-}
-
 /// A transactional storage wraps a backend and encoder, providing
 /// a foundation for creating typed stores.
 #[derive(Clone)]
@@ -161,16 +154,6 @@ where
 {
     backend: Backend,
     codec: Codec,
-    /// Cache of open TransactionalMemory instances, keyed by address.
-    /// Uses Weak references so entries are automatically cleaned up when all strong refs are dropped.
-    cache: Arc<
-        dialog_common::SharedCell<
-            std::collections::HashMap<
-                Backend::Address,
-                std::sync::Weak<dialog_common::SharedCell<dialog_storage::State<Backend>>>,
-            >,
-        >,
-    >,
 }
 
 impl<Backend: StorageBackend, Codec: Encoder> std::fmt::Debug for Storage<Backend, Codec>
@@ -183,7 +166,6 @@ where
         f.debug_struct("Storage")
             .field("backend", &"<Backend>")
             .field("codec", &self.codec)
-            .field("cache", &"<Cache>")
             .finish()
     }
 }
@@ -248,21 +230,15 @@ where
 {
     /// Creates a new transactional storage with the given backend and encoder
     pub fn new(backend: Backend, codec: Codec) -> Self {
-        Self {
-            backend,
-            codec,
-            cache: Arc::new(dialog_common::SharedCell::new(
-                std::collections::HashMap::new(),
-            )),
-        }
+        Self { backend, codec }
     }
 
-    /// Opens a typed transactional memory at the given key.
+    /// Opens a transactional memory at the given key.
     /// This provides encoding/decoding and caches the decoded value.
     pub async fn open<T>(
         &self,
         key: &Backend::Address,
-    ) -> Result<TypedTransactionalMemory<T, Self, Codec>, DialogStorageError>
+    ) -> Result<TransactionalMemory<T, Self, Codec>, DialogStorageError>
     where
         T: Serialize + DeserializeOwned + ConditionalSync + std::fmt::Debug + Clone,
         Backend: TransactionalMemoryBackend<Value = Vec<u8>, Error = DialogStorageError>
@@ -274,7 +250,7 @@ where
         Codec::Error: std::fmt::Display,
         Self: Clone,
     {
-        TypedTransactionalMemory::open(key.clone(), self, self.codec.clone()).await
+        TransactionalMemory::open(key.clone(), self, self.codec.clone()).await
     }
 }
 
@@ -313,11 +289,9 @@ where
 }
 
 
-/// Type alias for TypedTransactionalMemory with CborEncoder (the common case).
+/// Type alias for TransactionalMemory with default CborEncoder.
 /// Type alias for backwards compatibility with old TypedStoreResource API.
-/// Now uses TypedTransactionalMemory from dialog_storage with a codec.
-/// The Backend type parameter is Storage<Backend, CborEncoder> so that replace/reload
-/// can accept &Storage directly.
-pub type TypedStoreResource<T, Backend> =
-    TypedTransactionalMemory<T, Storage<Backend, CborEncoder>, CborEncoder>;
+/// Now uses TransactionalMemory from dialog_storage.
+/// Both Storage and TransactionalMemory default to CborEncoder, so we don't need to specify it.
+pub type TypedStoreResource<T, Backend> = TransactionalMemory<T, Storage<Backend>>;
 

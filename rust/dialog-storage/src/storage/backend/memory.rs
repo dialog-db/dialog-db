@@ -149,6 +149,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CborEncoder;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+    struct TestValue {
+        data: String,
+    }
+
+    impl TestValue {
+        fn new(data: impl Into<String>) -> Self {
+            Self { data: data.into() }
+        }
+    }
     use crate::storage::transactional_memory::TransactionalMemory;
 
     #[cfg(target_arch = "wasm32")]
@@ -159,10 +172,10 @@ mod tests {
     async fn test_memory_swap_create() {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let key = b"test_key".to_vec();
-        let value = b"test_value".to_vec();
+        let value = TestValue::new("test_value");
 
         // Open TransactionalMemory for non-existent key
-        let mut memory = TransactionalMemory::open(key.clone(), &backend)
+        let mut memory = TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
             .await
             .unwrap();
         assert_eq!(memory.read(), None, "Memory should start with None");
@@ -172,7 +185,7 @@ mod tests {
         assert!(result.is_ok(), "Should create new entry");
 
         // Verify it was stored
-        let stored = TransactionalMemory::open(key, &backend).await.unwrap();
+        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder).await.unwrap();
         assert_eq!(stored.read(), Some(value));
     }
 
@@ -181,14 +194,18 @@ mod tests {
     async fn test_memory_swap_update() {
         let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let key = b"test_key".to_vec();
-        let value1 = b"value1".to_vec();
-        let value2 = b"value2".to_vec();
+        let value1 = TestValue::new("value1");
+        let value2 = TestValue::new("value2");
 
         // Create initial value
-        backend.set(key.clone(), value1.clone()).await.unwrap();
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&value1).await.unwrap().1;
+            backend.set(key.clone(), encoded).await.unwrap();
+        }
 
         // Open TransactionalMemory with existing value
-        let mut memory = TransactionalMemory::open(key.clone(), &backend)
+        let mut memory = TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
             .await
             .unwrap();
         assert_eq!(
@@ -202,7 +219,7 @@ mod tests {
         assert!(result.is_ok(), "Should update with correct CAS condition");
 
         // Verify updated value
-        let stored = TransactionalMemory::open(key, &backend).await.unwrap();
+        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder).await.unwrap();
         assert_eq!(stored.read(), Some(value2));
     }
 
@@ -211,20 +228,28 @@ mod tests {
     async fn test_memory_swap_cas_failure_value_mismatch() {
         let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let key = b"test_key".to_vec();
-        let value1 = b"value1".to_vec();
-        let value2 = b"value2".to_vec();
+        let value1 = TestValue::new("value1");
+        let value2 = TestValue::new("value2");
 
         // Create initial value
-        backend.set(key.clone(), value1.clone()).await.unwrap();
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&value1).await.unwrap().1;
+            backend.set(key.clone(), encoded).await.unwrap();
+        }
 
         // Open TransactionalMemory (captures value1)
-        let mut memory = TransactionalMemory::open(key.clone(), &backend)
+        let mut memory = TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
             .await
             .unwrap();
 
         // Simulate concurrent modification: backend gets updated
-        let wrong_value = b"wrong".to_vec();
-        backend.set(key.clone(), wrong_value.clone()).await.unwrap();
+        let wrong_value = TestValue::new("wrong");
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&wrong_value).await.unwrap().1;
+            backend.set(key.clone(), encoded).await.unwrap();
+        }
 
         // Try to update based on stale value1 (should fail)
         let result = memory.replace(Some(value2.clone()), &backend).await;
@@ -238,7 +263,7 @@ mod tests {
         );
 
         // Verify value is the concurrent modification
-        let stored = TransactionalMemory::open(key, &backend).await.unwrap();
+        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder).await.unwrap();
         assert_eq!(stored.read(), Some(wrong_value));
     }
 
@@ -247,25 +272,27 @@ mod tests {
     async fn test_memory_swap_cas_failure_key_not_exist() {
         let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let key = b"test_key".to_vec();
-        let value = b"new_value".to_vec();
-        let expected_old = b"old_value".to_vec();
+        let value = TestValue::new("new_value");
+        let expected_old = TestValue::new("old_value");
 
         // Create initial value
-        backend
-            .set(key.clone(), expected_old.clone())
-            .await
-            .unwrap();
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&expected_old).await.unwrap().1;
+            backend.set(key.clone(), encoded).await.unwrap();
+        }
 
         // Open TransactionalMemory (captures expected_old)
-        let mut memory = TransactionalMemory::open(key.clone(), &backend)
+        let mut memory = TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
             .await
             .unwrap();
 
         // Simulate concurrent deletion
-        backend
-            .set(key.clone(), expected_old.clone())
-            .await
-            .unwrap(); // Reset to force entry removal on next line
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&expected_old).await.unwrap().1;
+            backend.set(key.clone(), encoded).await.unwrap(); // Reset to force entry removal on next line
+        }
         let mut entries = backend.entries.write().await;
         entries.remove(&key);
         drop(entries);
@@ -290,16 +317,20 @@ mod tests {
     async fn test_memory_swap_cas_failure_key_exists() {
         let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let key = b"existing_key".to_vec();
-        let value1 = b"value1".to_vec();
-        let value2 = b"value2".to_vec();
+        let value1 = TestValue::new("value1");
+        let value2 = TestValue::new("value2");
 
         // Open TransactionalMemory for non-existent key (captures None)
-        let mut memory = TransactionalMemory::open(key.clone(), &backend)
+        let mut memory = TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
             .await
             .unwrap();
 
         // Simulate concurrent creation: someone else creates the key
-        backend.set(key.clone(), value1.clone()).await.unwrap();
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&value1).await.unwrap().1;
+            backend.set(key.clone(), encoded).await.unwrap();
+        }
 
         // Try to create with CAS condition "must not exist" (should fail because key now exists)
         let result = memory.replace(Some(value2), &backend).await;
@@ -316,7 +347,7 @@ mod tests {
         );
 
         // Verify value unchanged
-        let stored = TransactionalMemory::open(key, &backend).await.unwrap();
+        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder).await.unwrap();
         assert_eq!(stored.read(), Some(value1));
     }
 
@@ -325,13 +356,17 @@ mod tests {
     async fn test_memory_swap_delete() {
         let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let key = b"test_key".to_vec();
-        let value = b"test_value".to_vec();
+        let value = TestValue::new("test_value");
 
         // Create entry
-        backend.set(key.clone(), value.clone()).await.unwrap();
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&value).await.unwrap().1;
+            backend.set(key.clone(), encoded).await.unwrap();
+        }
 
         // Open TransactionalMemory and delete with CAS condition
-        let mut memory = TransactionalMemory::open(key.clone(), &backend)
+        let mut memory = TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
             .await
             .unwrap();
         assert_eq!(memory.read(), Some(value), "Memory should have value");
@@ -340,7 +375,7 @@ mod tests {
         assert!(result.is_ok(), "Should delete with correct CAS condition");
 
         // Verify deleted
-        let stored = TransactionalMemory::open(key, &backend).await.unwrap();
+        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder).await.unwrap();
         assert_eq!(stored.read(), None);
     }
 
@@ -349,7 +384,7 @@ mod tests {
     async fn test_memory_resolve_nonexistent() {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let key = b"nonexistent".to_vec();
-        let result = TransactionalMemory::open(key, &backend).await.unwrap();
+        let result = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder).await.unwrap();
         assert_eq!(
             result.read(),
             None,
@@ -362,14 +397,18 @@ mod tests {
     async fn test_memory_shared_state() {
         let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let key = b"shared_key".to_vec();
-        let value1 = b"value1".to_vec();
-        let value2 = b"value2".to_vec();
+        let value1 = TestValue::new("value1");
+        let value2 = TestValue::new("value2");
 
         // Create initial value
-        backend.set(key.clone(), value1.clone()).await.unwrap();
+        {
+            use crate::Encoder;
+            let encoded = CborEncoder.encode(&value1).await.unwrap().1;
+            backend.set(key.clone(), encoded).await.unwrap();
+        }
 
         // Open first TransactionalMemory
-        let mut memory1 = TransactionalMemory::open(key.clone(), &backend)
+        let mut memory1 = TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
             .await
             .unwrap();
         assert_eq!(
@@ -405,7 +444,7 @@ mod tests {
         );
 
         // Update through memory2
-        let value3 = b"value3".to_vec();
+        let value3 = TestValue::new("value3");
         memory2
             .replace(Some(value3.clone()), &backend)
             .await
