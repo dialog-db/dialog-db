@@ -232,8 +232,9 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
     where
         T: serde::de::DeserializeOwned + dialog_common::ConditionalSync,
     {
-        // Convert hash to key
-        let key = hash.to_vec();
+        // Convert hash to key with "index/" prefix
+        let mut key = b"index/".to_vec();
+        key.extend_from_slice(hash);
 
         // Try local first
         if let Some(bytes) =
@@ -263,7 +264,10 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
     {
         // Encode and hash the block
         let (hash, bytes) = self.local.encode(block).await?;
-        let key = hash.to_vec();
+
+        // Prefix key with "index/"
+        let mut key = b"index/".to_vec();
+        key.extend_from_slice(&hash);
 
         // Write to local always
         self.local
@@ -420,10 +424,9 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         Ok(branch)
     }
 
-    /// Resets the branch to a specific revision.
-    ///
-    /// The base tree is set to the revision's tree, representing that the branch
-    /// is now "in sync" at this revision (no divergence from the synced state).
+    /// Advances the branch to a given revision. The base tree is set to the
+    /// revision's tree, representing that the branch is now "in sync" at this
+    /// revision (no divergence from the synced state).
     pub async fn reset(&mut self, revision: Revision) -> Result<(), ReplicaError> {
         // Update local state
         self.memory
@@ -455,7 +458,19 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
         // If memory update worked we also reset the tree
         let mut tree = self.tree.write().await;
-        tree.set_hash(Some(revision.tree().hash().clone()));
+
+        // Only set the hash if it's not the empty tree (all zeros)
+        // Empty tree doesn't exist in storage and doesn't need to be loaded
+        if revision.tree().hash() != &EMPT_TREE_HASH {
+            tree.set_hash(Some(revision.tree().hash().clone()))
+                .await
+                .map_err(|e| ReplicaError::StorageError(format!("Failed to set tree hash: {:?}", e)))?;
+        } else {
+            // For empty tree, set hash to None
+            tree.set_hash(None)
+                .await
+                .map_err(|e| ReplicaError::StorageError(format!("Failed to set tree hash: {:?}", e)))?;
+        }
 
         Ok(())
     }
@@ -497,6 +512,10 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     pub fn revision(&self) -> Revision {
         self.state().revision().to_owned()
     }
+
+    pub fn base(&self) -> NodeReference {
+        self.state().base
+    }
     /// Returns a description of this branch.
     pub fn description(&self) -> String {
         self.state().description().into()
@@ -507,31 +526,36 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// If upstream is remote, it publishes to the remote and updates local cache.
     /// Returns None if no upstream is configured or if pushing to self.
     pub async fn push(&mut self) -> Result<Option<Revision>, ReplicaError> {
-        let mut upstream = self.upstream();
-
-        // We can only push if we have upstream setup
-        if let Some(upstream) = &upstream {
-            // if upstream is local and is the same branch there
-            // is nothing for us to do.
-            if upstream.is_local() && upstream.id() == self.id() {
-                return Ok(None);
+        if let Some(upstream) = &mut self.upstream() {
+            match upstream {
+                Upstream::Local(target) => {
+                    // setting upstream to yourself should be invalid
+                    if target.id() == self.id() {
+                        Err(ReplicaError::BranchUpstreamIsItself {
+                            id: target.id().clone(),
+                        })
+                    } else {
+                        let before = target.revision();
+                        if before.tree() == &self.base() {
+                            target.reset(self.revision()).await?;
+                            self.reset(self.revision()).await?;
+                            Ok(Some(before))
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                }
+                Upstream::Remote(target) => {
+                    // update a memory with the latest branch state
+                    let before = target.publish(self.revision()).await?;
+                    self.reset(self.revision()).await?;
+                    Ok(before)
+                }
             }
         } else {
             Err(ReplicaError::BranchHasNoUpstream {
                 id: self.id.clone(),
             })
-        }
-
-        let after = self.revision();
-
-        // update a memory with the latest branch state
-        if let Some(upstream) = &mut upstream {
-            let before = upstream.publish(after.clone()).await?;
-            self.reset(after).await?;
-            Ok(before)
-        } else {
-            // No upstream configured
-            Ok(None)
         }
     }
 
@@ -544,13 +568,17 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// 3. Integrates local changes into upstream tree
     /// 4. Creates a new revision with proper period/moment
     pub async fn pull(&mut self) -> Result<Option<Revision>, ReplicaError> {
-        if self.state.upstream.is_some() {
-            if let Some(upstream_revision) = self.fetch().await? {
-                // Check if the upstream has changed since our last pull
-                if self.state.base != upstream_revision.tree {
+        if let Some(upstream) = &mut self.upstream() {
+            if let Some(revision) = self.fetch().await? {
+                // if upstream revision is different from our base
+                // we'll merge local changes onto upstream tree otherwise
+                // there's nothing to do because upstream has not changed
+                if &self.base() == revision.tree() {
+                    Ok(None)
+                } else {
                     // Load upstream tree into memory
-                    let mut upstream_tree: Index<Backend> =
-                        Tree::from_hash(upstream_revision.tree.hash(), self.archive.clone())
+                    let mut target: Index<Backend> =
+                        Tree::from_hash(revision.tree.hash(), self.archive.clone())
                             .await
                             .map_err(|e| {
                                 ReplicaError::StorageError(format!(
@@ -560,8 +588,8 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                             })?;
 
                     // Load current tree (base tree) to compute local changes
-                    let base_tree: Index<Backend> =
-                        Tree::from_hash(self.state.base.hash(), self.archive.clone())
+                    let source: Index<Backend> =
+                        Tree::from_hash(self.base().hash(), self.archive.clone())
                             .await
                             .map_err(|e| {
                                 ReplicaError::StorageError(format!(
@@ -570,9 +598,10 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                                 ))
                             })?;
 
+                    // TODO: Maybe use local tree instead of loading a new one
                     // Load our current tree to differentiate
-                    let current_tree: Index<Backend> =
-                        Tree::from_hash(self.state.revision.tree.hash(), self.archive.clone())
+                    let current =
+                        Tree::from_hash(self.revision().tree.hash(), self.archive.clone())
                             .await
                             .map_err(|e| {
                                 ReplicaError::StorageError(format!(
@@ -583,40 +612,39 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
                     // Compute local changes: what operations transform base into current
                     // This gives us the changes we made locally
-                    let local_changes = base_tree.differentiate(&current_tree);
+                    let changes = source.differentiate(&current);
 
                     // Integrate local changes into upstream tree
-                    upstream_tree.integrate(local_changes).await.map_err(|e| {
+                    target.integrate(changes).await.map_err(|e| {
                         ReplicaError::StorageError(format!("Failed to integrate changes: {:?}", e))
                     })?;
 
                     // Get the hash of the integrated tree
-                    let tree_hash = upstream_tree.hash().cloned().unwrap_or(EMPT_TREE_HASH);
+                    let hash = target.hash().cloned().unwrap_or(EMPT_TREE_HASH);
 
                     // Check if integration actually changed the tree
-                    if tree_hash == *upstream_revision.tree.hash() {
+                    if &hash == revision.tree.hash() {
                         // No local changes were integrated - tree unchanged
                         // Just adopt the upstream revision directly without creating a new one
-                        self.reset(upstream_revision.clone()).await?;
+                        self.reset(revision.clone()).await?;
 
-                        Ok(Some(upstream_revision))
+                        Ok(Some(revision))
                     } else {
                         // Integration produced a new tree - create a merged revision
                         // Compute new period and moment based on issuer
-                        let (period, moment) =
-                            if upstream_revision.issuer == *self.issuer.principal() {
-                                // Same issuer: increment moment, keep period
-                                (upstream_revision.period, upstream_revision.moment + 1)
-                            } else {
-                                // Different issuer: new period (sync point), reset moment
-                                (upstream_revision.period + 1, 0)
-                            };
+                        let (period, moment) = if &revision.issuer == self.issuer.principal() {
+                            // Same issuer: increment moment, keep period
+                            (revision.period, revision.moment + 1)
+                        } else {
+                            // Different issuer: new period (sync point), reset moment
+                            (revision.period + 1, 0)
+                        };
 
                         // Create new revision with integrated changes
                         let new_revision = Revision {
-                            issuer: *self.issuer.principal(),
-                            tree: NodeReference(tree_hash),
-                            cause: HashSet::from([upstream_revision.edition()?]),
+                            issuer: self.issuer.principal().clone(),
+                            tree: NodeReference(hash),
+                            cause: HashSet::from([revision.edition()?]),
                             period,
                             moment,
                         };
@@ -626,17 +654,14 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
                         Ok(Some(new_revision))
                     }
-                } else {
-                    // Base hasn't changed, nothing to pull
-                    Ok(None)
                 }
             } else {
-                // No upstream revision found
                 Ok(None)
             }
         } else {
-            // No upstream configured
-            Ok(None)
+            Err(ReplicaError::BranchHasNoUpstream {
+                id: self.id.clone(),
+            })
         }
     }
 
@@ -644,15 +669,35 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// Accepts either a Branch or RemoteBranch via Into<Upstream>.
     pub async fn set_upstream<U: Into<Upstream<Backend>>>(
         &mut self,
-        upstream: U,
+        target: U,
     ) -> Result<(), ReplicaError> {
-        let mut upstream = upstream.into();
+        let upstream = target.into();
 
         // Get the state descriptor from the upstream
-        let upstream_state = upstream.to_state();
+        let state = upstream.to_state();
 
-        // Configure remote archive if upstream is remote
-        match &mut upstream {
+        // First update branch memory with a new upstream
+        self.memory
+            .replace_with(
+                |current| {
+                    let branch = current
+                        .as_ref()
+                        .expect("branch must be loaded before upstream is set");
+
+                    Some(BranchState {
+                        upstream: Some(state.clone()),
+                        ..branch.clone()
+                    })
+                },
+                5,
+                &self.storage,
+            )
+            .await
+            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+
+        // Next set the archive remote to the upstream store if it is a
+        // remote so tree changes will be replicated if local clear the remote
+        match &upstream {
             Upstream::Remote(remote) => {
                 self.archive.set_remote(remote.remote_storage.clone()).await;
             }
@@ -661,17 +706,8 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             }
         }
 
-        // Set the cached upstream
-        self.upstream = Some(Box::new(upstream));
-
-        // Update the state with the new upstream state
-        self.state.upstream = Some(upstream_state);
-
-        // Persist the updated state to memory
-        self.memory
-            .replace(Some(self.state.clone()), &self.storage)
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+        // Also update the upstream on the branch
+        *self.upstream.write() = Some(upstream);
 
         Ok(())
     }
@@ -855,10 +891,8 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
                 let base_period = *base_revision.period();
                 let base_moment = *base_revision.moment();
                 let base_issuer = *base_revision.issuer();
-                let current_issuer: Principal =
-                    *blake3::hash(self.state.id.0.as_bytes()).as_bytes();
 
-                if base_issuer == current_issuer {
+                if &base_issuer == self.issuer.principal() {
                     // Same issuer - increment moment
                     (base_period, base_moment + 1)
                 } else {
@@ -868,37 +902,27 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
             };
 
             let new_revision = Revision {
-                issuer: *self.issuer.principal(),
+                issuer: self.issuer.principal().clone(),
                 tree: tree_reference.clone(),
-                cause: {
-                    let mut set = HashSet::new();
-                    set.insert(base_revision.edition().map_err(|e| {
-                        DialogArtifactsError::Storage(format!("Failed to create edition: {}", e))
-                    })?);
-                    set
-                },
+                cause: HashSet::from([base_revision.edition().expect("Failed to create edition")]),
                 period,
                 moment,
             };
 
             // Update the branch state with the new revision
-            // IMPORTANT: Keep the base tree unchanged - it represents the last synced state,
-            // not the current local state. Base should only update during pull/push operations.
-            let new_state = BranchState {
-                id: self.state.id.clone(),
-                description: self.state.description.clone(),
-                revision: new_revision.clone(),
-                base: self.state.base.clone(),
-                upstream: self.state.upstream.clone(),
-            };
-
-            // Save the new state
+            // IMPORTANT: Keep the base tree unchanged - it represents the last
+            // synced state, not the current local state. Base should only
+            // update during pull/push operations.
             self.memory
-                .replace(Some(new_state.clone()), &self.storage)
+                .replace(
+                    Some(BranchState {
+                        revision: new_revision.clone(),
+                        ..self.state()
+                    }),
+                    &self.storage,
+                )
                 .await
                 .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
-
-            self.state = new_state;
 
             Ok(tree_hash)
         }
@@ -906,16 +930,14 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
 
         match transaction_result {
             Ok(hash) => Ok(hash),
+            // Rollback: reset tree to the prior revision and propagate an error
             Err(error) => {
-                // Rollback: reload tree from base revision
-                let rollback_tree =
-                    Tree::from_hash(base_revision.tree().hash(), self.archive.clone())
-                        .await
-                        .map_err(|e| {
-                            DialogArtifactsError::Storage(format!("Rollback failed: {:?}", e))
-                        })?;
+                self.tree
+                    .write()
+                    .await
+                    .set_hash(Some(*base_revision.tree().hash()))
+                    .await?;
 
-                *self.tree.write().await = rollback_tree;
                 Err(error)
             }
         }
@@ -1058,7 +1080,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         storage: &PlatformStorage<Backend>,
     ) -> Result<TypedStoreResource<Revision, Backend>, ReplicaError> {
         // Open a localy stored revision for this branch
-        let address = format!("remote/{}/{}", site, id.to_string());
+        let address = format!("remote/{}/{}", site, id);
         let memory = storage
             .open::<Revision>(&address.into_bytes())
             .await
@@ -1674,6 +1696,9 @@ pub enum ReplicaError {
     RemoteAlreadyExists { remote: Site },
     #[error("Connection to remote {remote} failed")]
     RemoteConnectionError { remote: Site },
+
+    #[error("Upsteam of local {id} is set to itself")]
+    BranchUpstreamIsItself { id: BranchId },
 }
 
 impl ReplicaError {
@@ -1736,19 +1761,11 @@ mod tests {
         let upstream_branch_id = BranchId::new(upstream_id.to_string());
 
         let issuer = Issuer::from_secret(&test_issuer());
-        let mut branch = Branch::open(&branch_id, issuer, storage.clone()).await?;
+        let mut branch = Branch::open(&branch_id, issuer.clone(), storage.clone()).await?;
+        let target = Branch::open(&upstream_branch_id, issuer, storage.clone()).await?;
 
         // Set up upstream as a local branch
-        branch.state.upstream = Some(UpstreamState::Local {
-            branch: upstream_branch_id,
-        });
-
-        // Save the updated state
-        branch
-            .memory
-            .replace(Some(branch.state.clone()), &storage)
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+        branch.set_upstream(target).await?;
 
         Ok(branch)
     }
@@ -1821,13 +1838,11 @@ mod tests {
                 .await
                 .expect("Failed to create branch");
 
-        let original_revision = branch.revision();
-
-        // Push should be a no-op
-        branch.push().await.expect("Push failed");
-
-        // Revision should be unchanged
-        assert_eq!(branch.revision(), original_revision);
+        // Push fails branch tracks itself
+        assert!(matches!(
+            branch.push().await,
+            Err(ReplicaError::BranchUpstreamIsItself { .. })
+        ))
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -1842,10 +1857,9 @@ mod tests {
             .await
             .expect("Failed to create branch");
 
-        // Push should return None without upstream
+        // Push should fail if upstream is not setup
         let result = branch.push().await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert!(result.is_err());
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -1891,7 +1905,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_pull_without_upstream_returns_none() {
+    async fn test_pull_without_upstream_fails() {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
@@ -1903,8 +1917,7 @@ mod tests {
 
         // Pull without upstream should return None
         let result = branch.pull().await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert!(result.is_err());
     }
 
     #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -2013,8 +2026,7 @@ mod tests {
             .expect("Failed to set upstream");
 
         // Verify upstream is configured
-        assert!(main_branch.state.upstream.is_some());
-        assert!(main_branch.upstream.is_some());
+        assert!(main_branch.upstream().is_some());
 
         // Verify the archive's remote storage is configured
         let has_remote = {
@@ -2051,9 +2063,11 @@ mod tests {
         assert_ne!(tree_hash, EMPT_TREE_HASH);
 
         // Verify that tree nodes were written to storage by checking if we can read them
-        // The tree hash should be a key in the storage
+        // The tree hash should be stored with "index/" prefix
+        let mut tree_key = b"index/".to_vec();
+        tree_key.extend_from_slice(&tree_hash);
         let tree_node_value = journaled_backend
-            .get(&tree_hash.to_vec())
+            .get(&tree_key)
             .await
             .expect("Failed to get tree node");
         assert!(
@@ -2067,10 +2081,10 @@ mod tests {
         let s3_storage = s3_service.storage();
         let s3_keys = s3_storage.list_keys("test-bucket").await;
 
-        // Tree nodes should be written under the test/ prefix with base64url encoded hashes
+        // Tree nodes should be written under the test/index/ prefix with base64url encoded hashes
         let tree_nodes_in_s3 = s3_keys
             .iter()
-            .filter(|key| key.starts_with("test/") && key.len() > 5)
+            .filter(|key| key.starts_with("test/index/") && key.len() > "test/index/".len())
             .count();
 
         assert!(
