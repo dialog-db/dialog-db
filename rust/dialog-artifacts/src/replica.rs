@@ -409,7 +409,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     ) -> Result<Branch<Backend>, ReplicaError> {
         let default_state = Some(BranchState::new(
             id.clone(),
-            Revision::new(*issuer.principal()),
+            Revision::new(issuer.principal().clone()),
             None,
         ));
 
@@ -467,7 +467,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         // Only set the hash if it's not the empty tree (all zeros)
         // Empty tree doesn't exist in storage and doesn't need to be loaded
         if revision.tree().hash() != &EMPT_TREE_HASH {
-            tree.set_hash(Some(*revision.tree().hash()))
+            tree.set_hash(Some(revision.tree().hash().clone()))
                 .await
                 .map_err(|e| {
                     ReplicaError::StorageError(format!("Failed to set tree hash: {:?}", e))
@@ -651,7 +651,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
                         // Create new revision with integrated changes
                         let new_revision = Revision {
-                            issuer: *self.issuer.principal(),
+                            issuer: self.issuer.principal().clone(),
                             tree: NodeReference(hash),
                             cause: HashSet::from([revision.edition()?]),
                             period,
@@ -910,7 +910,7 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
             };
 
             let new_revision = Revision {
-                issuer: *self.issuer.principal(),
+                issuer: self.issuer.principal().clone(),
                 tree: tree_reference.clone(),
                 cause: HashSet::from([base_revision.edition().expect("Failed to create edition")]),
                 period,
