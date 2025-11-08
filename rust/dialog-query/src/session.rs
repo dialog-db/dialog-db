@@ -857,4 +857,125 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_implicit_attribute() -> anyhow::Result<()> {
+        use crate::artifact::{Artifacts, Entity};
+        use crate::query::Output;
+        use crate::rule::When;
+        use crate::strings;
+        use crate::{Concept, Fact, Match, Term};
+        use dialog_storage::MemoryStorageBackend;
+
+        #[derive(Clone, Debug, PartialEq, Concept)]
+        pub struct Employee {
+            /// Employee
+            pub this: Entity,
+            /// Employee Name
+            pub name: String,
+            /// The job title of the employee
+            pub role: String,
+        }
+
+        mod without_role {
+            use crate::{Concept, Entity};
+
+            #[derive(Clone, Debug, PartialEq, Concept)]
+            pub struct Employee {
+                /// Employee
+                pub this: Entity,
+                /// Employee Name
+                pub name: String,
+            }
+        }
+
+        mod with_role {
+            use crate::{Concept, Entity};
+
+            #[derive(Clone, Debug, PartialEq, Concept)]
+            pub struct Employee {
+                /// Employee
+                pub this: Entity,
+                /// The job title of the employee
+                pub role: String,
+            }
+        }
+
+        // Define a rule using the clean function API - no manual DeductiveRule construction!
+        fn employee_with_implicit_title(employee: Match<Employee>) -> impl When {
+            // This rule says: "An employee exists when there's stuff with matching attributes"
+            // The premises check for stuff/name and stuff/role matching employee/name and employee/job
+            (
+                employee.role.is("employee"),
+                // employee has a name
+                Fact::<String>::select()
+                    .the("employee/name")
+                    .of(employee.this.clone())
+                    .is(employee.name.clone().as_unknown())
+                    .compile()
+                    .unwrap(),
+                // but does not have role (using ! operator)
+                !Fact::<String>::select()
+                    .the("employee/role")
+                    .of(employee.this.clone())
+                    .is(Term::blank())
+                    .compile()
+                    .unwrap(),
+            )
+        }
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+
+        // Install the rule using the clean API - no turbofish needed!
+        // The type inference works: Employee is inferred from the function parameter
+        let mut session = Session::open(store).install(employee_with_implicit_title)?;
+
+        let mut transaction = session.edit();
+        transaction.assert(Employee {
+            this: Entity::new()?,
+            name: "Alice".into(),
+            role: "manager".into(),
+        });
+        transaction.assert(without_role::Employee {
+            this: Entity::new()?,
+            name: "Bob".into(),
+        });
+
+        // Create test data as Stuff
+        session.commit(transaction).await?;
+
+        // Verify Stuff records exist
+        let employees = Match::<Employee> {
+            this: Term::var("employee"),
+            name: Term::var("name"),
+            role: Term::var("title"),
+        };
+
+        let result = employees.query(session.clone()).try_vec().await?;
+        assert_eq!(result.len(), 2, "Should have 2 Stuff records");
+
+        // Verify the derived data is correct
+        let mut found_alice = false;
+        let mut found_bob = false;
+
+        for employee in result {
+            match employee.name.as_str() {
+                "Alice" => {
+                    assert_eq!(employee.role, "manager");
+                    found_alice = true;
+                }
+                "Bob" => {
+                    assert_eq!(employee.role, "employee");
+                    found_bob = true;
+                }
+                name => panic!("Unexpected employee: {}", name),
+            }
+        }
+
+        assert!(found_alice, "Should find Alice as an employee");
+        assert!(found_bob, "Should find Bob as an employee");
+
+        Ok(())
+    }
 }
