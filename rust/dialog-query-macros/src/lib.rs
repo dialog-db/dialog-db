@@ -143,46 +143,51 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
         field_types.push(field_type);
         field_name_lits.push(field_name_lit.clone());
 
-        // Extract doc comment for the field
+        // Extract doc comment from the field (for Match struct docs)
+        // Actual attribute description comes from the Attribute trait
         let doc_comment = extract_doc_comments(&field.attrs);
         let doc_comment_lit = syn::LitStr::new(&doc_comment, proc_macro2::Span::call_site());
 
-        // Generate Match field (Term<T>)
+        // Extract the inner type from Attribute - the field type implements Attribute
+        // and we need <FieldType as Attribute>::Type for the Term wrapper
+        let inner_type = quote! { <#field_type as dialog_query::Attribute>::Type };
+
+        // Generate Match field (Term<InnerType>) where InnerType is the Attribute's Type
         match_fields.push(quote! {
             #[doc = #doc_comment_lit]
-            pub #field_name: dialog_query::term::Term<#field_type>
+            pub #field_name: dialog_query::term::Term<#inner_type>
         });
 
         terms_methods.push(quote! {
             impl #terms_name {
-                pub fn #field_name() -> dialog_query::Term<#field_type> {
-                    dialog_query::Term::<#field_type>::var(#field_name_lit)
+                pub fn #field_name() -> dialog_query::Term<#inner_type> {
+                    dialog_query::Term::<#inner_type>::var(#field_name_lit)
                 }
             }
         });
 
-        // Generate Attributes field (Match<T>)
+        // Generate Attributes field (Match<T>) - T is the Attribute's inner type
         attributes_fields.push(quote! {
             #[doc = #doc_comment_lit]
-            pub #field_name: dialog_query::attribute::Match<#field_type>
+            pub #field_name: dialog_query::attribute::Match<#inner_type>
         });
 
-        // Generate Assert field (Term<T>)
+        // Generate Assert field (Term<T>) - T is the Attribute's inner type
         assert_fields.push(quote! {
-            pub #field_name: dialog_query::term::Term<#field_type>
+            pub #field_name: dialog_query::term::Term<#inner_type>
         });
 
-        // Generate Retract field (Term<T>)
+        // Generate Retract field (Term<T>) - T is the Attribute's inner type
         retract_fields.push(quote! {
-            pub #field_name: dialog_query::term::Term<#field_type>
+            pub #field_name: dialog_query::term::Term<#inner_type>
         });
 
         // Generate attribute initialization for Attributes
-        let namespace_for_prefix = namespace.replace(".", "_");
+        // Use a normalized name for the static (since we can't use the field type's path)
         let prefixed_field_name = syn::Ident::new(
             &format!(
                 "{}_{}",
-                namespace_for_prefix.to_uppercase(),
+                namespace.replace(".", "_").to_uppercase(),
                 field_name_str.to_uppercase()
             ),
             field_name.span(),
@@ -191,34 +196,34 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             #field_name: #prefixed_field_name.of(entity.clone())
         });
 
-        // Get the compile-time data type for this field
-        let data_type_value = type_to_value_data_type(field_type);
+        // Generate static attribute definition by extracting metadata from the Attribute trait
+        // The field type implements Attribute, so we extract all metadata from its constants
         typed_attributes.push(quote! {
-            /// Static attribute definition for #field_name
-            pub static #prefixed_field_name: dialog_query::attribute::AttributeSchema<#field_type> = dialog_query::attribute::AttributeSchema {
-                namespace: #namespace_lit,
-                name: #field_name_lit,
-                description: #doc_comment_lit,
-                cardinality: dialog_query::attribute::Cardinality::One,
-                content_type: #data_type_value,
-                marker: std::marker::PhantomData,
-            };
+            /// Static attribute definition for #field_name - delegates to Attribute trait
+            pub static #prefixed_field_name: dialog_query::attribute::AttributeSchema<#inner_type> =
+                dialog_query::attribute::AttributeSchema {
+                    namespace: <#field_type as dialog_query::Attribute>::NAMESPACE,
+                    name: <#field_type as dialog_query::Attribute>::NAME,
+                    description: <#field_type as dialog_query::Attribute>::DESCRIPTION,
+                    cardinality: *<#field_type as dialog_query::Attribute>::CARDINALITY,
+                    content_type: <#inner_type as dialog_query::types::IntoType>::TYPE,
+                    marker: std::marker::PhantomData,
+                };
         });
 
-        // Generate Attribute<Value> for the attributes() method
+        // Generate Attribute<Value> for the attributes() method - extracts from Attribute trait constants
         value_attributes.push(quote! {
             dialog_query::attribute::AttributeSchema {
-                namespace: #namespace_lit,
-                name: #field_name_lit,
-                description: #doc_comment_lit,
-                cardinality: dialog_query::attribute::Cardinality::One,
-                content_type: #data_type_value,
+                namespace: <#field_type as dialog_query::Attribute>::NAMESPACE,
+                name: <#field_type as dialog_query::Attribute>::NAME,
+                description: <#field_type as dialog_query::Attribute>::DESCRIPTION,
+                cardinality: *<#field_type as dialog_query::Attribute>::CARDINALITY,
+                content_type: <#inner_type as dialog_query::types::IntoType>::TYPE,
                 marker: std::marker::PhantomData,
             }
         });
 
-        // Generate rule when field conversion - convert Term<T> to Term<Value>
-        let attr_string = format!("{}/{}", namespace, field_name_str);
+        // Generate rule when field conversion - use Attribute's selector()
         rule_when_fields.push(quote! {
             {
                 let value_term = match &terms.#field_name {
@@ -230,7 +235,7 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
                 };
 
                 dialog_query::predicate::fact::Fact::select()
-                    .the(#attr_string)
+                    .the(<#field_type as dialog_query::Attribute>::selector().to_string())
                     .of(terms.this.clone())
                     .is(value_term)
             }
@@ -244,25 +249,27 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             }
         });
 
-        // Generate attribute tuples for Attributes implementation
+        // Generate attribute tuples for Attributes implementation - use Attribute metadata constants
         attributes_tuples.push(quote! {
-            (#field_name_lit, dialog_query::attribute::AttributeSchema {
-                namespace: #namespace_lit,
-                name: #field_name_lit,
-                description: #doc_comment_lit,
-                cardinality: dialog_query::attribute::Cardinality::One,
-                content_type: #data_type_value,
-                marker: std::marker::PhantomData,
-            })
+            (
+                <#field_type as dialog_query::Attribute>::NAME,
+                dialog_query::attribute::AttributeSchema {
+                    namespace: <#field_type as dialog_query::Attribute>::NAMESPACE,
+                    name: <#field_type as dialog_query::Attribute>::NAME,
+                    description: <#field_type as dialog_query::Attribute>::DESCRIPTION,
+                    cardinality: *<#field_type as dialog_query::Attribute>::CARDINALITY,
+                    content_type: <#inner_type as dialog_query::types::IntoType>::TYPE,
+                    marker: std::marker::PhantomData,
+                }
+            )
         });
 
-        // Generate Relation for IntoIterator implementation
-        let attr_string = format!("{}/{}", namespace, field_name_str);
+        // Generate Relation for IntoIterator implementation - extract value from Attribute
         instance_relations.push(quote! {
             dialog_query::Relation::new(
-                #attr_string.parse().expect("Failed to parse attribute"),
+                <#field_type as dialog_query::Attribute>::selector(),
                 self.this.clone(),
-                dialog_query::types::Scalar::as_value(&self.#field_name),
+                dialog_query::types::Scalar::as_value(self.#field_name.value()),
             )
         });
     }
@@ -298,7 +305,22 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
         struct_name.span(),
     );
 
+    // Create validation function name
+    let validate_fn_name = syn::Ident::new(
+        &format!("validate_{}", struct_name.to_string().to_lowercase()),
+        struct_name.span(),
+    );
+
     let expanded = quote! {
+        // Compile-time validation that all fields (except 'this') implement Attribute
+        const _: () = {
+            fn assert_implements_attribute<T: dialog_query::Attribute>() {}
+            fn #validate_fn_name() {
+                // Each field type must implement Attribute trait
+                #(assert_implements_attribute::<#field_types>();)*
+            }
+        };
+
         /// Match pattern for #struct_name - has Term-wrapped fields for querying
         #[derive(Debug, Clone, PartialEq)]
         pub struct #match_name {
@@ -373,7 +395,8 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             fn realize(&self, source: dialog_query::selection::Answer) -> std::result::Result<Self::Instance, dialog_query::QueryError> {
                 Ok(#struct_name {
                     this: source.get(&self.this)?,
-                    #(#field_names: source.get(&self.#field_names)?),*
+                    // Wrap each extracted value in its Attribute constructor
+                    #(#field_names: #field_types(source.get(&self.#field_names)?)),*
                 })
             }
         }
@@ -1020,17 +1043,15 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
     // Parse cardinality
     let cardinality = parse_cardinality_attribute(&input.attrs);
 
-    // Generate namespace() implementation
-    let namespace_impl = if let Some(ns) = explicit_namespace {
+    // Generate namespace constant
+    let namespace_const = if let Some(ns) = explicit_namespace {
         let namespace_lit = syn::LitStr::new(&ns, proc_macro2::Span::call_site());
         quote! {
-            fn namespace() -> &'static str {
-                #namespace_lit
-            }
+            const NAMESPACE: &'static str = #namespace_lit;
         }
     } else {
         quote! {
-            fn namespace() -> &'static str {
+            const NAMESPACE: &'static str = {
                 // Extract the last component from module path at compile time
                 const fn extract_last_segment(path: &str) -> &str {
                     let bytes = path.as_bytes();
@@ -1063,9 +1084,8 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
                     path
                 }
 
-                const NS: &str = extract_last_segment(module_path!());
-                NS
-            }
+                extract_last_segment(module_path!())
+            };
         }
     };
 
@@ -1073,19 +1093,13 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
         impl dialog_query::attribute::Attribute for #struct_name {
             type Type = #wrapped_type;
 
-            #namespace_impl
+            #namespace_const
 
-            fn description() -> &'static str {
-                #description_lit
-            }
+            const NAME: &'static str = #attr_name_lit;
 
-            fn name() -> &'static str {
-                #attr_name_lit
-            }
+            const DESCRIPTION: &'static str = #description_lit;
 
-            fn cardinality() -> &'static dialog_query::attribute::Cardinality {
-                #cardinality
-            }
+            const CARDINALITY: &'static dialog_query::attribute::Cardinality = #cardinality;
 
             fn value(&self) -> &Self::Type {
                 &self.0

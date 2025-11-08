@@ -328,16 +328,30 @@ impl<T: Scalar> Match<T> {
 pub trait Attribute {
     type Type: Scalar;
 
-    fn namespace() -> &'static str;
-    fn description() -> &'static str;
-    fn name() -> &'static str;
-    fn cardinality() -> &'static Cardinality;
+    const NAMESPACE: &'static str;
+    const NAME: &'static str;
+    const DESCRIPTION: &'static str;
+    const CARDINALITY: &'static Cardinality;
 
     fn value(&self) -> &Self::Type;
     fn selector() -> crate::artifact::Attribute {
-        format!("{}/{}", Self::namespace(), Self::name())
+        format!("{}/{}", Self::NAMESPACE, Self::NAME)
             .parse()
             .expect("Failed to parse attribute")
+    }
+
+    // Provide method versions for backwards compatibility
+    fn namespace() -> &'static str {
+        Self::NAMESPACE
+    }
+    fn name() -> &'static str {
+        Self::NAME
+    }
+    fn description() -> &'static str {
+        Self::DESCRIPTION
+    }
+    fn cardinality() -> &'static Cardinality {
+        Self::CARDINALITY
     }
 }
 
