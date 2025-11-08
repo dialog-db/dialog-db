@@ -35,14 +35,24 @@ impl Negation {
     }
 
     /// Returns schema for negation - all parameters become required
-    /// because negation can't run until all terms are bound
+    /// because negation can't run until all terms are bound.
+    /// Exception: blank terms don't need to be bound.
     pub fn schema(&self) -> Schema {
         let Negation(application) = self;
         let mut schema = application.schema();
+        let params = application.parameters();
 
-        // Convert all desired parameters to required
-        for (_, constraint) in schema.iter_mut() {
-            constraint.requirement = crate::Requirement::Required(None);
+        // Convert all parameters: non-blank become required, blank become optional
+        for (name, constraint) in schema.iter_mut() {
+            if let Some(term) = params.get(name) {
+                constraint.requirement = if term.is_blank() {
+                    // Blank terms are wildcards - mark as optional so they don't block planning
+                    crate::Requirement::Optional
+                } else {
+                    // Non-blank terms must be bound before negation can run
+                    crate::Requirement::Required(None)
+                };
+            }
         }
 
         schema

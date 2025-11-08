@@ -348,6 +348,15 @@ impl Display for FactApplication {
     }
 }
 
+/// Implement `!` operator for FactApplication to create negations
+impl std::ops::Not for FactApplication {
+    type Output = crate::Premise;
+
+    fn not(self) -> Self::Output {
+        crate::Premise::Exclude(crate::Negation::not(Application::Fact(self)))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FactApplicationPlan {
     pub selector: FactApplication,

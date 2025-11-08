@@ -862,10 +862,10 @@ mod tests {
     #[tokio::test]
     async fn test_implicit_attribute() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Entity};
-        use crate::formulas::string;
         use crate::query::Output;
         use crate::rule::When;
-        use crate::{Concept, Match, Negation, Premise, Term};
+        use crate::strings;
+        use crate::{Concept, Fact, Match, Term};
         use dialog_storage::MemoryStorageBackend;
 
         #[derive(Clone, Debug, PartialEq, Concept)]
@@ -907,25 +907,21 @@ mod tests {
             // This rule says: "An employee exists when there's stuff with matching attributes"
             // The premises check for stuff/name and stuff/role matching employee/name and employee/job
             (
-                Premise::Apply(Application::Formula(
-                    Match::<string::Is> {
-                        of: Term::Constant("employee".into()),
-                        is: employee.role,
-                    }
-                    .into(),
-                )),
-                // employee.role.is("employee"),
-                Match::<without_role::Employee> {
-                    this: employee.this.clone(),
-                    name: employee.name,
-                },
-                // Premise::Exclude(Negation::not(
-                //     Match::<with_role::Employee> {
-                //         this: employee.this,
-                //         role: Term::var("whatever"),
-                //     }
-                //     .into(),
-                // )),
+                employee.role.is("employee"),
+                // employee has a name
+                Fact::<String>::select()
+                    .the("employee/name")
+                    .of(employee.this.clone())
+                    .is(employee.name.clone().as_unknown())
+                    .compile()
+                    .unwrap(),
+                // but does not have role (using ! operator)
+                !Fact::<String>::select()
+                    .the("employee/role")
+                    .of(employee.this.clone())
+                    .is(Term::blank())
+                    .compile()
+                    .unwrap(),
             )
         }
 
@@ -983,60 +979,4 @@ mod tests {
 
         Ok(())
     }
-
-    // #[tokio::test]
-    // async fn test_branch_with_session() -> anyhow::Result<()> {
-    //     use crate::{Concept, Entity, Match, Term};
-    //     use dialog_artifacts::replica::{BranchId, Issuer, Replica};
-    //     use dialog_storage::MemoryStorageBackend;
-
-    //     // Create a replica and branch
-    //     let backend = MemoryStorageBackend::default();
-    //     let issuer = Issuer::from_passphrase("test-user");
-    //     let replica = Replica::open(issuer, backend)?;
-
-    //     let branch_id = BranchId::new("main".to_string());
-    //     let branch = replica.branches.open(&branch_id).await?;
-
-    //     // Verify initial revision
-    //     let initial_revision = branch.revision().await;
-    //     println!("Initial revision: {:?}", initial_revision);
-
-    //     // Create a session with the branch
-    //     let mut session = Session::open(branch.clone());
-
-    //     // Define a simple concept
-    //     #[derive(Clone, Debug, PartialEq, Concept)]
-    //     pub struct Person {
-    //         pub this: Entity,
-    //         pub name: String,
-    //     }
-
-    //     // Create and commit data
-    //     let alice = Person::CONCEPT
-    //         .create()
-    //         .with("name", "Alice".to_string())
-    //         .build()?;
-
-    //     session.transact(vec![alice]).await?;
-
-    //     // Verify revision changed
-    //     let new_revision = branch.revision().await;
-    //     assert_ne!(
-    //         initial_revision, new_revision,
-    //         "Revision should change after commit"
-    //     );
-
-    //     // Query the data
-    //     let query = Match::<Person> {
-    //         this: Term::var("person"),
-    //         name: Term::var("name"),
-    //     };
-
-    //     let results = crate::query::Output::try_vec(query.query(session.clone())).await?;
-    //     assert_eq!(results.len(), 1);
-    //     assert_eq!(results[0].name, "Alice");
-
-    //     Ok(())
-    // }
 }

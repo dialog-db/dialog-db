@@ -154,7 +154,19 @@ impl Join {
         // Convert existing plans back to analyses for replanning
         // let candidates: Vec<Analysis> = self.steps.iter().map(|plan| plan.into()).collect();
 
-        let mut planner: Planner = (&self.steps).into();
+        // Re-analyze all premises with the new scope instead of converting Plans to Analyses
+        // This ensures proper Blocked/Viable status based on the new environment
+        let candidates: Vec<Analysis> = self
+            .steps
+            .iter()
+            .map(|plan| {
+                let mut analysis = Analysis::from(plan.premise.clone());
+                analysis.update(scope);
+                analysis
+            })
+            .collect();
+
+        let mut planner = Planner::Active { candidates };
 
         while !planner.done() {
             let plan = planner.top(&bound)?;
