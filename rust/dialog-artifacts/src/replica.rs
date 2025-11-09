@@ -20,13 +20,14 @@ use futures_util::future::BoxFuture;
 #[cfg(target_arch = "wasm32")]
 use futures_util::future::LocalBoxFuture;
 use futures_util::{Stream, StreamExt, TryStreamExt};
+use std::fmt::Debug;
 
 use dialog_storage::{
     Blake3Hash, CborEncoder, DialogStorageError, Encoder, RestStorageBackend, RestStorageConfig,
     StorageBackend,
 };
 use ed25519_dalek::ed25519::signature::SignerMut;
-use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, SigningKey, VerifyingKey};
+use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, SignatureError, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
@@ -38,8 +39,29 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 
 /// Cryptographic identifier like Ed25519 public key representing
-/// an principal that produced a change. We may
-pub type Principal = [u8; 32];
+/// a principal that produced a change.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Principal([u8; 32]);
+impl Principal {
+    pub fn did(&self) -> String {
+        const PREFIX: &str = "z6Mk";
+        let id = [PREFIX, self.0.as_ref().to_base58().as_str()].concat();
+
+        format!("did:key:{id}")
+    }
+}
+impl Debug for Principal {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.did())
+    }
+}
+
+impl TryFrom<Principal> for VerifyingKey {
+    type Error = SignatureError;
+    fn try_from(value: Principal) -> Result<Self, Self::Error> {
+        VerifyingKey::from_bytes(&value.0)
+    }
+}
 
 /// Type alias for the prolly tree index used to store artifacts
 /// Uses dialog_storage::Storage directly (not platform::Storage) because content-addressed
@@ -48,7 +70,7 @@ pub type Index<Backend> =
     Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash, Archive<Backend>>;
 
 /// We reference a tree by the root hash.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeReference(Blake3Hash);
 impl NodeReference {
     fn hash(&self) -> &Blake3Hash {
@@ -59,6 +81,17 @@ impl Default for NodeReference {
     /// By default, a [`NodeReference`] is created to empty search tree.
     fn default() -> Self {
         Self(EMPT_TREE_HASH)
+    }
+}
+impl Display for NodeReference {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let bytes: &[u8] = self.hash();
+        write!(f, "#{}", ToBase58::to_base58(bytes))
+    }
+}
+impl Debug for NodeReference {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self, f)
     }
 }
 
@@ -73,7 +106,7 @@ impl From<NodeReference> for Blake3Hash {
 pub type Site = String;
 
 /// Represents a principal operating a replica.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Issuer {
     id: String,
     signing_key: SigningKey,
@@ -91,24 +124,13 @@ impl Issuer {
         Issuer::new(SigningKey::from_bytes(secret))
     }
     /// Creates a new issuer from a signing key.
-    pub fn new(signing_key: SigningKey) -> Self {
-        let verifying_key = signing_key.verifying_key();
-        const PREFIX: &str = "z6Mk";
-        let id = [
-            PREFIX,
-            SigningKey::generate(&mut rand::thread_rng())
-                .verifying_key()
-                .as_bytes()
-                .as_ref()
-                .to_base58()
-                .as_str(),
-        ]
-        .concat();
+    pub fn new(key: SigningKey) -> Self {
+        let principal = Principal(key.verifying_key().to_bytes());
 
         Self {
-            id: format!("did:key:{id}"),
-            signing_key,
-            verifying_key,
+            id: principal.did(),
+            key,
+            principal,
         }
     }
     /// Generates a new issuer with a random signing key.
@@ -118,7 +140,7 @@ impl Issuer {
 
     /// Signs a payload with this issuer's signing key.
     pub fn sign(&mut self, payload: &[u8]) -> Signature {
-        self.signing_key.sign(payload)
+        self.key.sign(payload)
     }
 
     /// Returns the DID (Decentralized Identifier) for this issuer.
@@ -128,7 +150,7 @@ impl Issuer {
 
     /// Returns the principal (public key bytes) for this issuer.
     pub fn principal(&self) -> &Principal {
-        self.verifying_key.as_bytes()
+        &self.principal
     }
 }
 
@@ -361,8 +383,6 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         storage: PlatformStorage<Backend>,
         default_state: Option<BranchState>,
     ) -> Result<Branch<Backend>, ReplicaError> {
-        use web_sys::console;
-
         let memory = Self::mount(id, &storage, default_state).await?;
         let archive = Archive::new(storage.clone());
 
@@ -903,9 +923,9 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
             let (period, moment) = {
                 let base_period = *base_revision.period();
                 let base_moment = *base_revision.moment();
-                let base_issuer = *base_revision.issuer();
+                let base_issuer = base_revision.issuer();
 
-                if &base_issuer == self.issuer.principal() {
+                if base_issuer == self.issuer.principal() {
                     // Same issuer - increment moment
                     (base_period, base_moment + 1)
                 } else {
@@ -1843,7 +1863,7 @@ mod tests {
     use wasm_bindgen_test::wasm_bindgen_test;
 
     /// Helper to create a test issuer
-    fn test_issuer() -> Principal {
+    fn seed() -> [u8; 32] {
         [1u8; 32]
     }
 
@@ -1859,7 +1879,7 @@ mod tests {
         let branch_id = BranchId::new(id.to_string());
         let upstream_branch_id = BranchId::new(upstream_id.to_string());
 
-        let issuer = Issuer::from_secret(&test_issuer());
+        let issuer = Issuer::from_secret(&seed());
         let mut branch = Branch::open(&branch_id, issuer.clone(), storage.clone()).await?;
         let target = Branch::open(&upstream_branch_id, issuer, storage.clone()).await?;
 
@@ -1878,14 +1898,14 @@ mod tests {
 
         // Create main branch
         let main_id = BranchId::new("main".to_string());
-        let issuer = Issuer::from_secret(&test_issuer());
+        let issuer = Issuer::from_secret(&seed());
         let mut main_branch = Branch::open(&main_id, issuer.clone(), storage.clone())
             .await
             .expect("Failed to create main branch");
 
         // Create a revision for main
         let main_revision = Revision {
-            issuer: test_issuer(),
+            issuer: issuer.principal().clone(),
             tree: NodeReference(EMPT_TREE_HASH),
             cause: HashSet::new(),
             period: 0,
@@ -1903,7 +1923,7 @@ mod tests {
 
         // Create a new revision on feature branch with main_revision as cause
         let feature_revision = Revision {
-            issuer: test_issuer(),
+            issuer: issuer.principal().clone(),
             tree: NodeReference(EMPT_TREE_HASH),
             cause: HashSet::from([main_revision.edition().expect("Failed to create edition")]),
             period: 0,
@@ -1951,7 +1971,7 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branch_id = BranchId::new("no-upstream".to_string());
-        let issuer = Issuer::from_secret(&test_issuer());
+        let issuer = Issuer::from_secret(&seed());
         let mut branch = Branch::open(&branch_id, issuer, storage)
             .await
             .expect("Failed to create branch");
@@ -1969,13 +1989,13 @@ mod tests {
 
         // Create main and feature branches
         let main_id = BranchId::new("main".to_string());
-        let issuer = Issuer::from_secret(&test_issuer());
-        let mut main_branch = Branch::open(&main_id, issuer, storage.clone())
+        let issuer = Issuer::from_secret(&seed());
+        let mut main_branch = Branch::open(&main_id, issuer.clone(), storage.clone())
             .await
             .expect("Failed to create main branch");
 
         let main_revision = Revision {
-            issuer: test_issuer(),
+            issuer: main_branch.principal().clone(),
             tree: NodeReference(EMPT_TREE_HASH),
             cause: HashSet::new(),
             period: 0,
@@ -2009,7 +2029,7 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branch_id = BranchId::new("no-upstream".to_string());
-        let issuer = Issuer::from_secret(&test_issuer());
+        let issuer = Issuer::from_secret(&seed());
         let mut branch = Branch::open(&branch_id, issuer, storage)
             .await
             .expect("Failed to create branch");
