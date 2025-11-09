@@ -165,16 +165,18 @@ pub enum FormulaEvaluationError {
     /// provided in the Terms mapping when the formula was applied.
     ///
     /// # Example
-    /// ```should_panic
+    /// ```
     /// # use dialog_query::math::{Sum};
     /// # use dialog_query::{Term, selection::Answer, Value, Parameters, Formula};
+    /// # use dialog_query::error::SchemaError;
     /// let mut parameters = Parameters::new();
-    /// // Missing "with" parameter!
+    /// // Missing required "with" parameter!
     /// parameters.insert("of".to_string(), Term::var("x"));
+    /// parameters.insert("is".to_string(), Term::var("result"));
     ///
-    /// let sum = Sum::apply(parameters).unwrap();
-    /// let input = Answer::new().set(Term::var("x"), 5u32).unwrap();
-    /// let result = sum.derive(input).unwrap(); // Will panic with RequiredParameter
+    /// // This will fail because "with" parameter is required
+    /// let result = Sum::apply(parameters);
+    /// assert!(matches!(result, Err(SchemaError::OmittedRequirement { .. })));
     /// ```
     #[error("Formula application omits required parameter \"{parameter}\"")]
     RequiredParameter { parameter: String },
@@ -185,9 +187,10 @@ pub enum FormulaEvaluationError {
     /// but that variable has no value in the current match frame.
     ///
     /// # Example
-    /// ```should_panic
+    /// ```
     /// # use dialog_query::math::{Sum};
     /// # use dialog_query::{Term, selection::Answer, Value, Parameters, Formula};
+    /// # use dialog_query::error::FormulaEvaluationError;
     /// # let mut parameters = Parameters::new();
     /// # parameters.insert("of".to_string(), Term::var("x"));
     /// # parameters.insert("with".to_string(), Term::var("y"));
@@ -195,7 +198,8 @@ pub enum FormulaEvaluationError {
     /// # let sum = Sum::apply(parameters).unwrap();
     /// let input = Answer::new();
     /// // Variable ?x is not bound!
-    /// let result = sum.derive(input).unwrap(); // Will panic with UnboundVariable
+    /// let result = sum.derive(input);
+    /// assert!(matches!(result, Err(FormulaEvaluationError::UnboundVariable { .. })));
     /// ```
     #[error("Variable {term} for '{parameter}' required parameter is not bound")]
     UnboundVariable {
@@ -373,7 +377,7 @@ pub enum PlanError {
         "Premise {application} passes unbound variable in a required parameter \"{parameter}\""
     )]
     UnboundParameter {
-        application: Application,
+        application: Box<Application>,
         parameter: String,
         term: Term<Value>,
     },

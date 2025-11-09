@@ -20,13 +20,14 @@ use futures_util::future::BoxFuture;
 #[cfg(target_arch = "wasm32")]
 use futures_util::future::LocalBoxFuture;
 use futures_util::{Stream, StreamExt, TryStreamExt};
+use std::fmt::Debug;
 
 use dialog_storage::{
     Blake3Hash, CborEncoder, DialogStorageError, Encoder, RestStorageBackend, RestStorageConfig,
     StorageBackend,
 };
 use ed25519_dalek::ed25519::signature::SignerMut;
-use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, SigningKey, VerifyingKey};
+use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, SignatureError, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
@@ -38,8 +39,30 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 
 /// Cryptographic identifier like Ed25519 public key representing
-/// an principal that produced a change. We may
-pub type Principal = [u8; 32];
+/// a principal that produced a change.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Principal([u8; 32]);
+impl Principal {
+    /// Formats principal as did:key
+    pub fn did(&self) -> String {
+        const PREFIX: &str = "z6Mk";
+        let id = [PREFIX, self.0.as_ref().to_base58().as_str()].concat();
+
+        format!("did:key:{id}")
+    }
+}
+impl Debug for Principal {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.did())
+    }
+}
+
+impl TryFrom<Principal> for VerifyingKey {
+    type Error = SignatureError;
+    fn try_from(value: Principal) -> Result<Self, Self::Error> {
+        VerifyingKey::from_bytes(&value.0)
+    }
+}
 
 /// Type alias for the prolly tree index used to store artifacts
 /// Uses dialog_storage::Storage directly (not platform::Storage) because content-addressed
@@ -48,7 +71,7 @@ pub type Index<Backend> =
     Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash, Archive<Backend>>;
 
 /// We reference a tree by the root hash.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeReference(Blake3Hash);
 impl NodeReference {
     fn hash(&self) -> &Blake3Hash {
@@ -59,6 +82,17 @@ impl Default for NodeReference {
     /// By default, a [`NodeReference`] is created to empty search tree.
     fn default() -> Self {
         Self(EMPT_TREE_HASH)
+    }
+}
+impl Display for NodeReference {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let bytes: &[u8] = self.hash();
+        write!(f, "#{}", ToBase58::to_base58(bytes))
+    }
+}
+impl Debug for NodeReference {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self, f)
     }
 }
 
@@ -73,11 +107,16 @@ impl From<NodeReference> for Blake3Hash {
 pub type Site = String;
 
 /// Represents a principal operating a replica.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Issuer {
     id: String,
-    signing_key: SigningKey,
-    verifying_key: VerifyingKey,
+    key: SigningKey,
+    principal: Principal,
+}
+impl std::fmt::Debug for Issuer {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.did())
+    }
 }
 
 impl Issuer {
@@ -91,24 +130,13 @@ impl Issuer {
         Issuer::new(SigningKey::from_bytes(secret))
     }
     /// Creates a new issuer from a signing key.
-    pub fn new(signing_key: SigningKey) -> Self {
-        let verifying_key = signing_key.verifying_key();
-        const PREFIX: &str = "z6Mk";
-        let id = [
-            PREFIX,
-            SigningKey::generate(&mut rand::thread_rng())
-                .verifying_key()
-                .as_bytes()
-                .as_ref()
-                .to_base58()
-                .as_str(),
-        ]
-        .concat();
+    pub fn new(key: SigningKey) -> Self {
+        let principal = Principal(key.verifying_key().to_bytes());
 
         Self {
-            id: format!("did:key:{id}"),
-            signing_key,
-            verifying_key,
+            id: principal.did(),
+            key,
+            principal,
         }
     }
     /// Generates a new issuer with a random signing key.
@@ -118,7 +146,7 @@ impl Issuer {
 
     /// Signs a payload with this issuer's signing key.
     pub fn sign(&mut self, payload: &[u8]) -> Signature {
-        self.signing_key.sign(payload)
+        self.key.sign(payload)
     }
 
     /// Returns the DID (Decentralized Identifier) for this issuer.
@@ -128,7 +156,7 @@ impl Issuer {
 
     /// Returns the principal (public key bytes) for this issuer.
     pub fn principal(&self) -> &Principal {
-        self.verifying_key.as_bytes()
+        &self.principal
     }
 }
 
@@ -361,8 +389,6 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         storage: PlatformStorage<Backend>,
         default_state: Option<BranchState>,
     ) -> Result<Branch<Backend>, ReplicaError> {
-        use web_sys::console;
-
         let memory = Self::mount(id, &storage, default_state).await?;
         let archive = Archive::new(storage.clone());
 
@@ -377,7 +403,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             // If branch has an upstream setup we load it up and configure
             // archive's remote
             let upstream = if let Some(state) = &state.upstream {
-                let upstream = Upstream::load(state, issuer.clone(), storage.clone()).await?;
+                let upstream = Upstream::open(state, issuer.clone(), storage.clone()).await?;
 
                 if let Upstream::Remote(branch) = &upstream {
                     archive.set_remote(branch.remote_storage.clone()).await;
@@ -488,7 +514,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
     /// Lazily initializes and returns a mutable reference to the upstream.
     /// Returns None if no upstream is configured.
-    fn upstream(&self) -> Option<Upstream<Backend>> {
+    pub fn upstream(&self) -> Option<Upstream<Backend>> {
         self.upstream.read().clone()
     }
 
@@ -520,6 +546,11 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         &self.id
     }
 
+    /// Returns principal issuing changes on this branch
+    pub fn principal(&self) -> &Principal {
+        self.issuer.principal()
+    }
+
     /// Returns the current revision of this branch.
     pub fn revision(&self) -> Revision {
         self.state().revision().to_owned()
@@ -537,7 +568,8 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// Pushes the current revision to the upstream branch.
     /// If upstream is local, it updates that branch directly.
     /// If upstream is remote, it publishes to the remote and updates local cache.
-    /// Returns None if no upstream is configured or if pushing to self.
+    /// Returns Error if  if branch does not have upstream set. Returns
+    /// Option<Revision> describing prior state of the upstream.
     pub async fn push(&mut self) -> Result<Option<Revision>, ReplicaError> {
         if let Some(upstream) = &mut self.upstream() {
             match upstream {
@@ -560,8 +592,13 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                 }
                 Upstream::Remote(target) => {
                     // update a memory with the latest branch state
-                    let before = target.publish(self.revision()).await?;
-                    self.reset(self.revision()).await?;
+                    let before = target.revision();
+                    let after = self.revision().clone();
+                    if before.as_ref() != Some(&after) {
+                        target.publish(after.clone()).await?;
+                        self.reset(after).await?;
+                    }
+
                     Ok(before)
                 }
             }
@@ -903,9 +940,9 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
             let (period, moment) = {
                 let base_period = *base_revision.period();
                 let base_moment = *base_revision.moment();
-                let base_issuer = *base_revision.issuer();
+                let base_issuer = base_revision.issuer();
 
-                if &base_issuer == self.issuer.principal() {
+                if base_issuer == self.issuer.principal() {
                     // Same issuer - increment moment
                     (base_period, base_moment + 1)
                 } else {
@@ -1096,21 +1133,19 @@ impl<Backend: PlatformBackend> Remote<Backend> {
     pub async fn open(&self, id: &BranchId) -> Result<RemoteBranch<Backend>, ReplicaError> {
         RemoteBranch::open(self.site(), id, self.storage.clone()).await
     }
-
-    /// Loads a branch at this remote
-    pub async fn load(&self, id: &BranchId) -> Result<RemoteBranch<Backend>, ReplicaError> {
-        RemoteBranch::load(self.site(), id, self.storage.clone()).await
-    }
 }
 
 /// Represents a branch on a remote repository.
 #[derive(Debug, Clone)]
 pub struct RemoteBranch<Backend: PlatformBackend> {
+    /// Site of the remote
     pub site: Site,
+    /// Branch id on a remote
     pub id: BranchId,
-    pub revision: Option<Revision>,
 
+    /// Local storage where updates are stored
     pub storage: PlatformStorage<Backend>,
+
     /// Remote storage for canonical operations
     pub remote_storage: PlatformStorage<RemoteBackend>,
 
@@ -1137,43 +1172,6 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         Ok(memory)
     }
 
-    /// Loads a remote branch by name.
-    pub async fn load(
-        site: &Site,
-        id: &BranchId,
-        storage: PlatformStorage<Backend>,
-    ) -> Result<RemoteBranch<Backend>, ReplicaError> {
-        web_sys::console::log_1(&"A".into());
-        let memory = Self::mount(site, id, &storage).await?;
-        let remote = Remote::setup(site, storage.clone()).await?;
-        if let Some(revision) = memory.content().clone() {
-            web_sys::console::log_1(&"B".into());
-            Ok(Self {
-                site: site.clone(),
-                id: id.clone(),
-                storage,
-                revision: Some(revision),
-                cache: memory,
-                canonical: None,
-                remote_storage: remote.connection,
-            })
-        } else {
-            web_sys::console::log_1(&"X".into());
-            Ok(Self {
-                site: site.clone(),
-                id: id.clone(),
-                storage,
-                revision: None,
-                cache: memory,
-                canonical: None,
-                remote_storage: remote.connection,
-            })
-            // Err(ReplicaError::RemoteNotFound {
-            //     remote: site.to_string(),
-            // })
-        }
-    }
-
     /// Opens a remote branch, creating it if it doesn't exist.
     pub async fn open(
         site: &Site,
@@ -1188,7 +1186,6 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
             site: site.clone(),
             id: id.clone(),
             storage,
-            revision: memory.content().clone(),
             cache: memory,
             canonical: None,
             remote_storage: remote.connection,
@@ -1206,8 +1203,8 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
     }
 
     /// Returns the current revision
-    pub fn revision(&self) -> &Option<Revision> {
-        &self.revision
+    pub fn revision(&self) -> Option<Revision> {
+        self.cache.read()
     }
 
     /// Connects to the canonical remote storage for this branch.
@@ -1236,7 +1233,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
     /// Fetcher remote revision for this branch. If remote revision is different
     /// from local revision updates local one to match the remote. Returns
     /// revision of this branch.
-    pub async fn fetch(&mut self) -> Result<&Option<Revision>, ReplicaError> {
+    pub async fn fetch(&mut self) -> Result<Option<Revision>, ReplicaError> {
         self.connect().await?;
         let canonical = self.canonical.as_mut().expect("connected");
 
@@ -1246,24 +1243,22 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         let revision = canonical.content().clone();
 
         // update local record for the revision.
-        let _ = self
-            .cache
+        self.cache
             .replace_with(|_| revision.clone(), &self.storage)
-            .await;
-        self.revision = revision;
+            .await
+            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
         Ok(self.revision())
     }
 
-    /// Publishes new canonical revision. If published revision is different
-    /// from current (local) revision for this branch previous revision is
-    /// returned otherwise None is returned.
-    pub async fn publish(&mut self, revision: Revision) -> Result<Option<Revision>, ReplicaError> {
+    /// Publishes new canonical revision. Returns error if publishing fails.
+    pub async fn publish(&mut self, revision: Revision) -> Result<(), ReplicaError> {
         self.connect().await?;
-        let before = self.revision.clone();
+        let prior = self.revision().clone();
         let canonical = self.canonical.as_mut().expect("connected");
 
-        // if revision is different we update
+        // we only need to publish to upstream if desired revision is different
+        // from the last revision we have read from upstream.
         if canonical.content().as_ref() != Some(&revision) {
             canonical
                 .replace(Some(revision.clone()), &self.remote_storage)
@@ -1271,20 +1266,28 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
         }
 
-        // if local state is different we update it also
-        if before.as_ref() != Some(&revision) {
+        // if revision for the remote branch is different from one published
+        // we got to update local revision. We return revision we replaced
+        if prior.as_ref() != Some(&revision) {
             self.cache
                 .replace_with(|_| Some(revision.clone()), &self.storage)
                 .await
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-
-            self.revision = Some(revision);
-
-            Ok(before)
-        } else {
-            Ok(None)
         }
+
+        Ok(())
     }
+}
+
+/// State of the remote branch
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteBranchState {
+    /// Site of the branch
+    pub site: Site,
+    /// branch id
+    pub id: BranchId,
+    /// Revision that was fetched last
+    pub revision: Revision,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1321,7 +1324,7 @@ impl RemoteState {
 /// time component. This construction allows us to capture synchronization
 /// points allowing us to prioritize replicas that are actively collaborating
 /// over those that are not.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Occurence {
     /// Site of this occurence.
     pub site: Principal,
@@ -1337,7 +1340,7 @@ pub struct Occurence {
 
 /// A [`Revision`] represents a concrete state of the dialog instance. It is
 /// kind of like git commit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Revision {
     /// Site where this revision was created.It as expected to be a signing
     /// principal representing a tool acting on author's behalf. In the future
@@ -1538,7 +1541,7 @@ pub enum Upstream<Backend: PlatformBackend + 'static> {
 impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
     /// Loads an upstream from its state descriptor
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn load(
+    pub fn open(
         state: &UpstreamState,
         issuer: Issuer,
         storage: PlatformStorage<Backend>,
@@ -1550,7 +1553,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
                     Ok(Upstream::Local(branch))
                 }
                 UpstreamState::Remote { site, branch } => {
-                    let remote_branch = RemoteBranch::load(site, branch, storage).await?;
+                    let remote_branch = RemoteBranch::open(site, branch, storage).await?;
                     Ok(Upstream::Remote(remote_branch))
                 }
             }
@@ -1559,7 +1562,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
 
     /// Loads an upstream from its state descriptor
     #[cfg(target_arch = "wasm32")]
-    pub fn load(
+    pub fn open(
         state: &UpstreamState,
         issuer: Issuer,
         storage: PlatformStorage<Backend>,
@@ -1567,11 +1570,11 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
         Box::pin(async move {
             match state {
                 UpstreamState::Local { branch } => {
-                    let branch = Branch::load(branch, issuer, storage).await?;
+                    let branch = Branch::open(branch, issuer, storage).await?;
                     Ok(Upstream::Local(branch))
                 }
                 UpstreamState::Remote { site, branch } => {
-                    let remote_branch = RemoteBranch::load(site, branch, storage).await?;
+                    let remote_branch = RemoteBranch::open(site, branch, storage).await?;
                     Ok(Upstream::Remote(remote_branch))
                 }
             }
@@ -1582,7 +1585,24 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
     pub fn id(&self) -> &BranchId {
         match self {
             Upstream::Local(branch) => branch.id(),
-            Upstream::Remote(remote) => remote.id(),
+            Upstream::Remote(branch) => branch.id(),
+        }
+    }
+
+    /// Returns revision this branch is at
+    pub fn revision(&self) -> Option<Revision> {
+        match self {
+            Upstream::Local(branch) => Some(branch.revision()),
+            Upstream::Remote(branch) => branch.revision(),
+        }
+    }
+
+    /// Returns site of the branch. If local returns None otherwise
+    /// returns site identifier
+    pub fn site(&self) -> Option<&Site> {
+        match self {
+            Upstream::Local(_) => None,
+            Upstream::Remote(branch) => Some(branch.site()),
         }
     }
 
@@ -1613,13 +1633,9 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
     }
 
     /// Pushes a revision to the upstream, returning the previous revision if any
-    pub async fn publish(&mut self, revision: Revision) -> Result<Option<Revision>, ReplicaError> {
+    pub async fn publish(&mut self, revision: Revision) -> Result<(), ReplicaError> {
         match self {
-            Upstream::Local(branch) => {
-                let before = branch.revision();
-                branch.reset(revision).await?;
-                Ok(Some(before))
-            }
+            Upstream::Local(branch) => branch.reset(revision).await,
             Upstream::Remote(remote) => remote.publish(revision).await,
         }
     }
@@ -1693,9 +1709,13 @@ impl<T> Clone for Edition<T> {
     }
 }
 
-impl<T> std::fmt::Debug for Edition<T> {
+impl<T> Debug for Edition<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Edition").field(&self.0).finish()
+        f.write_str(&format!(
+            "#<{}>{}",
+            std::any::type_name::<T>(),
+            self.0.to_base58().as_str()
+        ))
     }
 }
 
@@ -1843,7 +1863,7 @@ mod tests {
     use wasm_bindgen_test::wasm_bindgen_test;
 
     /// Helper to create a test issuer
-    fn test_issuer() -> Principal {
+    fn seed() -> [u8; 32] {
         [1u8; 32]
     }
 
@@ -1859,7 +1879,7 @@ mod tests {
         let branch_id = BranchId::new(id.to_string());
         let upstream_branch_id = BranchId::new(upstream_id.to_string());
 
-        let issuer = Issuer::from_secret(&test_issuer());
+        let issuer = Issuer::from_secret(&seed());
         let mut branch = Branch::open(&branch_id, issuer.clone(), storage.clone()).await?;
         let target = Branch::open(&upstream_branch_id, issuer, storage.clone()).await?;
 
@@ -1878,14 +1898,14 @@ mod tests {
 
         // Create main branch
         let main_id = BranchId::new("main".to_string());
-        let issuer = Issuer::from_secret(&test_issuer());
+        let issuer = Issuer::from_secret(&seed());
         let mut main_branch = Branch::open(&main_id, issuer.clone(), storage.clone())
             .await
             .expect("Failed to create main branch");
 
         // Create a revision for main
         let main_revision = Revision {
-            issuer: test_issuer(),
+            issuer: issuer.principal().clone(),
             tree: NodeReference(EMPT_TREE_HASH),
             cause: HashSet::new(),
             period: 0,
@@ -1903,7 +1923,7 @@ mod tests {
 
         // Create a new revision on feature branch with main_revision as cause
         let feature_revision = Revision {
-            issuer: test_issuer(),
+            issuer: issuer.principal().clone(),
             tree: NodeReference(EMPT_TREE_HASH),
             cause: HashSet::from([main_revision.edition().expect("Failed to create edition")]),
             period: 0,
@@ -1951,7 +1971,7 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branch_id = BranchId::new("no-upstream".to_string());
-        let issuer = Issuer::from_secret(&test_issuer());
+        let issuer = Issuer::from_secret(&seed());
         let mut branch = Branch::open(&branch_id, issuer, storage)
             .await
             .expect("Failed to create branch");
@@ -1969,13 +1989,13 @@ mod tests {
 
         // Create main and feature branches
         let main_id = BranchId::new("main".to_string());
-        let issuer = Issuer::from_secret(&test_issuer());
-        let mut main_branch = Branch::open(&main_id, issuer, storage.clone())
+        let issuer = Issuer::from_secret(&seed());
+        let mut main_branch = Branch::open(&main_id, issuer.clone(), storage.clone())
             .await
             .expect("Failed to create main branch");
 
         let main_revision = Revision {
-            issuer: test_issuer(),
+            issuer: main_branch.principal().clone(),
             tree: NodeReference(EMPT_TREE_HASH),
             cause: HashSet::new(),
             period: 0,
@@ -2009,7 +2029,7 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branch_id = BranchId::new("no-upstream".to_string());
-        let issuer = Issuer::from_secret(&test_issuer());
+        let issuer = Issuer::from_secret(&seed());
         let mut branch = Branch::open(&branch_id, issuer, storage)
             .await
             .expect("Failed to create branch");
@@ -3055,74 +3075,6 @@ mod tests {
         // DIDs should be valid format
         assert!(issuer1.did().starts_with("did:key:"));
         assert!(issuer2.did().starts_with("did:key:"));
-
-        Ok(())
-    }
-
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    #[tokio::test]
-    async fn test_remote_branch_load_vs_open() -> anyhow::Result<()> {
-        // Test RemoteBranch load() vs open() semantics
-        use dialog_storage::{AuthMethod, JournaledStorage, RestStorageConfig};
-        use futures_util::stream;
-
-        let s3_service = dialog_storage::s3_test_server::start().await?;
-
-        let issuer = Issuer::from_passphrase("test-user");
-        let backend = MemoryStorageBackend::default();
-        let journaled = JournaledStorage::new(backend);
-        let mut replica = Replica::open(issuer.clone(), journaled.clone())?;
-
-        let remote_config = RestStorageConfig {
-            endpoint: s3_service.endpoint().to_string(),
-            auth_method: AuthMethod::None,
-            bucket: Some("remote-test".to_string()),
-            key_prefix: Some("test".to_string()),
-            headers: vec![],
-            timeout_seconds: Some(30),
-        };
-
-        let remote_state = RemoteState {
-            site: "origin".to_string(),
-            address: remote_config,
-        };
-        let remote = replica.remotes.add(remote_state).await?;
-
-        let branch_id = BranchId::new("test-branch".to_string());
-
-        // load() should fail when remote branch doesn't exist
-        let load_result = remote.load(&branch_id).await;
-        assert!(
-            load_result.is_err(),
-            "load() should fail for non-existent remote branch"
-        );
-
-        // open() should succeed
-        let remote_branch = remote.open(&branch_id).await?;
-        assert_eq!(remote_branch.id(), &branch_id);
-
-        // Create local branch and push to create remote branch
-        let mut local_branch = replica.branches.open(&branch_id).await?;
-        local_branch.set_upstream(remote_branch).await?;
-
-        let artifact = Artifact {
-            the: "test/data".parse()?,
-            of: "entity:1".parse()?,
-            is: crate::Value::String("value".to_string()),
-            cause: None,
-        };
-        local_branch
-            .commit(stream::iter(vec![Instruction::Assert(artifact)]))
-            .await?;
-        local_branch.push().await?;
-
-        // Now load() should succeed
-        let loaded = remote.load(&branch_id).await?;
-        assert_eq!(loaded.id(), &branch_id);
-        assert!(
-            loaded.revision().is_some(),
-            "Loaded remote branch should have revision"
-        );
 
         Ok(())
     }
