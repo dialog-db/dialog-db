@@ -281,12 +281,12 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
 
         // Fall back to remote if available
         let remote_guard = self.remote.read().await;
-        if let Some(remote) = remote_guard.as_ref()
-            && let Some(bytes) = remote.get(&key).await.map_err(|e| {
+        if let Some(remote) = remote_guard.as_ref() {
+            if let Some(bytes) = remote.get(&key).await.map_err(|e| {
                 dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
-            })?
-        {
-            return remote.decode(&bytes).await.map(Some);
+            })? {
+                return remote.decode(&bytes).await.map(Some);
+            }
         }
 
         Ok(None)
@@ -782,10 +782,11 @@ impl<Backend: PlatformBackend + 'static> ArtifactStore for Branch<Backend> {
                 for await item in stream {
                     let entry = item?;
 
-                    if entry.matches_selector(&selector)
-                        && let Entry { value: State::Added(datum), .. } = entry {
+                    if entry.matches_selector(&selector) {
+                        if let Entry { value: State::Added(datum), .. } = entry {
                             yield Artifact::try_from(datum)?;
                         }
+                    }
                 }
             } else if selector.value().is_some() {
                 let start = <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
@@ -798,10 +799,11 @@ impl<Backend: PlatformBackend + 'static> ArtifactStore for Branch<Backend> {
                 for await item in stream {
                     let entry = item?;
 
-                    if entry.matches_selector(&selector)
-                        && let Entry { value: State::Added(datum), .. } = entry {
+                    if entry.matches_selector(&selector) {
+                        if let Entry { value: State::Added(datum), .. } = entry {
                             yield Artifact::try_from(datum)?;
                         }
+                    }
                 }
             } else if selector.attribute().is_some() {
                 let start = <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
@@ -814,10 +816,11 @@ impl<Backend: PlatformBackend + 'static> ArtifactStore for Branch<Backend> {
                 for await item in stream {
                     let entry = item?;
 
-                    if entry.matches_selector(&selector)
-                        && let Entry { value: State::Added(datum), .. } = entry {
+                    if entry.matches_selector(&selector) {
+                        if let Entry { value: State::Added(datum), .. } = entry {
                             yield Artifact::try_from(datum)?;
                         }
+                    }
                 }
             } else {
                 unreachable!("ArtifactSelector will always have at least one field specified")
