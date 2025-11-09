@@ -197,7 +197,7 @@ impl<Backend: PlatformBackend + 'static> Branches<Backend> {
 /// demand replication. Uses Arc to share remote state across clones.
 #[derive(Clone, Debug)]
 pub struct Archive<Backend: PlatformBackend> {
-    local: Arc<PlatformStorage<Backend>>,
+    local: PlatformStorage<Backend>,
     remote: Arc<RwLock<Option<PlatformStorage<RemoteBackend>>>>,
 }
 
@@ -205,7 +205,7 @@ impl<Backend: PlatformBackend> Archive<Backend> {
     /// Creates a new Archive with the given backend
     pub fn new(local: PlatformStorage<Backend>) -> Self {
         Self {
-            local: Arc::new(local),
+            local,
             remote: Arc::new(RwLock::new(None)),
         }
     }
@@ -251,21 +251,12 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
             return self.local.decode(&bytes).await.map(Some);
         }
 
-        // Fall back to remote if available - clone to avoid holding lock across await
-        let remote_storage = {
-            let remote_guard = self.remote.read().await;
-            remote_guard.clone()
-        };
-
-        if let Some(remote) = remote_storage.as_ref() {
+        // Fall back to remote if available
+        let remote_guard = self.remote.read().await;
+        if let Some(remote) = remote_guard.as_ref() {
             if let Some(bytes) = remote.get(&key).await.map_err(|e| {
                 dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
             })? {
-                // Cache the remote value to local storage
-                // Clone the Arc to get a mutable copy that shares the backend's interior state
-                let mut local = (*self.local).clone();
-                local.set(key, bytes.clone()).await?;
-
                 return remote.decode(&bytes).await.map(Some);
             }
         }
@@ -284,13 +275,11 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
         let mut key = b"index/".to_vec();
         key.extend_from_slice(&hash);
 
-        // Write to local always - clone to get mutable copy
-        {
-            let mut local = (*self.local).clone();
-            local.set(key.clone(), bytes.clone()).await.map_err(|e| {
-                dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
-            })?;
-        }
+        // Write to local always
+        self.local
+            .set(key.clone(), bytes.clone())
+            .await
+            .map_err(|e| dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e)))?;
 
         // Write to remote if available
         let mut remote_guard = self.remote.write().await;
@@ -372,6 +361,8 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         storage: PlatformStorage<Backend>,
         default_state: Option<BranchState>,
     ) -> Result<Branch<Backend>, ReplicaError> {
+        use web_sys::console;
+
         let memory = Self::mount(id, &storage, default_state).await?;
         let archive = Archive::new(storage.clone());
 
@@ -997,8 +988,7 @@ pub type RemoteBackend = ErrorMappingBackend<RestStorageBackend<Vec<u8>, Vec<u8>
 /// Represents a connection to a remote repository.
 #[derive(Debug)]
 pub struct Remote<Backend: PlatformBackend> {
-    /// Site of the remote
-    pub site: Site,
+    site: Site,
     memory: TypedStoreResource<RemoteState, Backend>,
     storage: PlatformStorage<Backend>,
     connection: PlatformStorage<RemoteBackend>,
@@ -1048,30 +1038,37 @@ impl<Backend: PlatformBackend> Remote<Backend> {
         storage: PlatformStorage<Backend>,
     ) -> Result<Remote<Backend>, ReplicaError> {
         let mut memory = Self::mount(&state.site, &storage).await?;
+        let mut alread_exists = false;
 
-        if memory.content().is_some() {
-            Err(ReplicaError::RemoteAlreadyExists {
-                remote: state.site.to_string(),
-            })
-        } else {
-            let state = RemoteState {
-                site: state.site.to_string(),
-                address: state.address,
-            };
-            let site = state.site.clone();
-            let connection = state.connect()?;
+        if let Some(existing_state) = memory.content() {
+            alread_exists = true;
+            if state != existing_state {
+                return Err(ReplicaError::RemoteAlreadyExists {
+                    remote: state.site.to_string(),
+                });
+            }
+        }
+
+        let state = RemoteState {
+            site: state.site.to_string(),
+            address: state.address,
+        };
+        let site = state.site.clone();
+        let connection = state.connect()?;
+
+        if !alread_exists {
             memory
                 .replace(Some(state.clone()), &storage)
                 .await
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-
-            Ok(Remote {
-                site,
-                connection,
-                memory,
-                storage,
-            })
         }
+
+        Ok(Remote {
+            site,
+            connection,
+            memory,
+            storage,
+        })
     }
 
     /// Updates the remote address configuration.
@@ -1109,14 +1106,10 @@ impl<Backend: PlatformBackend> Remote<Backend> {
 /// Represents a branch on a remote repository.
 #[derive(Debug, Clone)]
 pub struct RemoteBranch<Backend: PlatformBackend> {
-    /// Name of the remote this branch is part of
     pub site: Site,
-    /// Branch id on the remote it's on
     pub id: BranchId,
-    /// Current revsion this branch is on
     pub revision: Option<Revision>,
 
-    /// Local storage for where config is stored
     pub storage: PlatformStorage<Backend>,
     /// Remote storage for canonical operations
     pub remote_storage: PlatformStorage<RemoteBackend>,
@@ -1150,9 +1143,11 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         id: &BranchId,
         storage: PlatformStorage<Backend>,
     ) -> Result<RemoteBranch<Backend>, ReplicaError> {
+        web_sys::console::log_1(&"A".into());
         let memory = Self::mount(site, id, &storage).await?;
         let remote = Remote::setup(site, storage.clone()).await?;
         if let Some(revision) = memory.content().clone() {
+            web_sys::console::log_1(&"B".into());
             Ok(Self {
                 site: site.clone(),
                 id: id.clone(),
@@ -1163,9 +1158,19 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
                 remote_storage: remote.connection,
             })
         } else {
-            Err(ReplicaError::RemoteNotFound {
-                remote: id.to_string(),
+            web_sys::console::log_1(&"X".into());
+            Ok(Self {
+                site: site.clone(),
+                id: id.clone(),
+                storage,
+                revision: None,
+                cache: memory,
+                canonical: None,
+                remote_storage: remote.connection,
             })
+            // Err(ReplicaError::RemoteNotFound {
+            //     remote: site.to_string(),
+            // })
         }
     }
 
@@ -1282,7 +1287,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// State information for a remote repository connection.
 pub struct RemoteState {
     /// Name for this remote.
@@ -3118,84 +3123,6 @@ mod tests {
             loaded.revision().is_some(),
             "Loaded remote branch should have revision"
         );
-
-        Ok(())
-    }
-
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    #[tokio::test]
-    async fn test_archive_caches_remote_reads_to_local() -> anyhow::Result<()> {
-        use dialog_storage::{
-            AuthMethod, ContentAddressedStorage, MemoryStorageBackend, RestStorageBackend,
-            RestStorageConfig, s3,
-        };
-        use serde::{Deserialize, Serialize};
-
-        // Define a simple test type
-        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-        struct TestBlock {
-            value: String,
-        }
-
-        // Start S3 test server
-        let s3_server = s3::start().await?;
-        let rest_config = RestStorageConfig {
-            endpoint: s3_server.endpoint().to_string(),
-            auth_method: AuthMethod::None,
-            bucket: Some("test-bucket".to_string()),
-            key_prefix: None,
-            headers: vec![],
-            timeout_seconds: Some(30),
-        };
-        let rest_storage = RestStorageBackend::new(rest_config)?;
-
-        // Create local and remote archives
-        let local_storage = PlatformStorage::new(
-            ErrorMappingBackend::new(MemoryStorageBackend::default()),
-            CborEncoder,
-        );
-        let remote_storage =
-            PlatformStorage::new(ErrorMappingBackend::new(rest_storage), CborEncoder);
-
-        let archive = Archive::new(local_storage.clone());
-        archive.set_remote(remote_storage.clone()).await;
-
-        // Create a test block
-        let test_block = TestBlock {
-            value: "test data from remote".to_string(),
-        };
-
-        // Write directly to remote storage (simulating remote-only data)
-        let hash = {
-            let mut remote_archive = Archive::new(remote_storage.clone());
-            remote_archive.write(&test_block).await?
-        };
-
-        // Verify it's NOT in local storage yet
-        {
-            let local_archive_check = Archive::new(local_storage.clone());
-            let result: Option<TestBlock> = local_archive_check.read(&hash).await?;
-            assert_eq!(result, None, "Block should not be in local storage yet");
-        }
-
-        // Read from archive (should fetch from remote and cache to local)
-        let read_result: Option<TestBlock> = archive.read(&hash).await?;
-        assert_eq!(
-            read_result,
-            Some(test_block.clone()),
-            "Should read from remote"
-        );
-
-        // Verify it's NOW in local storage (cached)
-        {
-            let local_archive_check = Archive::new(local_storage.clone());
-            let cached_result: Option<TestBlock> = local_archive_check.read(&hash).await?;
-            assert_eq!(
-                cached_result,
-                Some(test_block),
-                "Block should now be cached in local storage"
-            );
-        }
 
         Ok(())
     }

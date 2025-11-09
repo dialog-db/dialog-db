@@ -208,7 +208,7 @@ impl Authority {
 }
 
 /// AWS S3/R2 credentials configuration
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct S3Authority {
     /// AWS Access Key ID
     pub access_key_id: String,
@@ -243,7 +243,7 @@ impl Default for S3Authority {
 }
 
 /// Authentication methods for REST storage backend
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AuthMethod {
     /// No authentication
     None,
@@ -364,7 +364,7 @@ impl Request<'_> {
 // }
 
 /// Configuration for the REST storage backend
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RestStorageConfig {
     /// Base URL for the REST API
     pub endpoint: String,
