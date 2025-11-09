@@ -121,14 +121,14 @@ use dialog_storage::{RestStorageBackend, RestStorageConfig, AuthMethod, S3Creden
 let config = RestStorageConfig {
     endpoint: "https://s3.amazonaws.com".to_string(),
     auth_method: AuthMethod::S3(S3Credentials {
-        access_key_id: std::env::var("AWS_ACCESS_KEY_ID")?,
-        secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY")?,
-        region: "us-east-1".to_string(),
+        access_key_id: env!("AWS_ACCESS_KEY_ID").into(),
+        secret_access_key: env!("AWS_SECRET_ACCESS_KEY").into(),
+        region: env!("AWS_REGION").into(),
         expires: 3600,
         ..Default::default()
     }),
-    bucket: Some("my-bucket".to_string()),
-    key_prefix: Some("my-app-data".to_string()),
+    bucket: option_env!("AWS_BUCKET").map(|v| v.into()),
+    key_prefix: option_env!("AWS_KEY_PREFIX").map(|v| v.into()),
     ..Default::default()
 };
 
@@ -146,14 +146,14 @@ use dialog_storage::{RestStorageBackend, RestStorageConfig, AuthMethod, S3Creden
 let config = RestStorageConfig {
     endpoint: "https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com".to_string(),
     auth_method: AuthMethod::S3(S3Credentials {
-        access_key_id: std::env::var("R2_ACCESS_KEY_ID")?,
-        secret_access_key: std::env::var("R2_SECRET_ACCESS_KEY")?,
-        region: "auto".to_string(),  // R2 uses "auto" as the region
+        access_key_id: env!("R2_ACCESS_KEY_ID").into(),
+        secret_access_key: env!("R2_SECRET_ACCESS_KEY").into(),
+        region: "auto",  // R2 uses "auto" as the region
         expires: 3600,
         ..Default::default()
     }),
-    bucket: Some("my-bucket".to_string()),
-    key_prefix: Some("data".to_string()),
+    bucket: Some("my-bucket".into()),
+    key_prefix: Some("data".into()),
     ..Default::default()
 };
 
@@ -180,4 +180,47 @@ R2S3_HOST=https://account.r2.cloudflarestorage.com \
   R2S3_ACCESS_KEY_ID=xxx \
   R2S3_SECRET_ACCESS_KEY=yyy \
   cargo test --lib --features s3_integration_tests -- --ignored
+```
+
+## R2 Configuration
+
+### API Token
+
+You need to setup an API token with following settings
+
+####  Permissions
+
+Object Read & Write: Allows the ability to read, write, and list objects in specific buckets.
+
+#### Specify bucket(s)
+
+Allow a buckets you want to enable access to.
+
+
+### CORS Policy
+
+To make it usable for web clients you need to setup cors policy as follows
+
+```json
+[
+  {
+    "AllowedOrigins": [
+      "*"
+    ],
+    "AllowedMethods": [
+      "GET",
+      "POST",
+      "PUT",
+      "DELETE",
+      "HEAD"
+    ],
+    "AllowedHeaders": [
+      "*"
+    ],
+    "ExposeHeaders": [
+      "ETag",
+      "x-amz-checksum-sha256"
+    ]
+  }
+]
 ```

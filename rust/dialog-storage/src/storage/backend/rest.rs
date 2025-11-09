@@ -2591,47 +2591,62 @@ pub mod s3 {
 ///   R2S3_BUCKET=test-bucket \
 ///   R2S3_ACCESS_KEY_ID=minioadmin \
 ///   R2S3_SECRET_ACCESS_KEY=minioadmin \
-///   cargo test --features s3_integration_tests -- --ignored
+///   cargo test --features s3_integration_tests
 /// ```
-#[cfg(all(test, feature = "s3_integration_tests", not(target_arch = "wasm32")))]
+///
+/// ## Running on WASM
+///
+/// On WASM, environment variables are not available. Instead, provide configuration
+/// via JavaScript by setting `globalThis.dialogTestConfig` before running tests:
+///
+/// ```javascript
+/// globalThis.dialogTestConfig = {
+///   getS3Host: () => "http://localhost:9000",
+///   getS3Region: () => "us-east-1",
+///   getS3Bucket: () => "test-bucket",
+///   getS3AccessKeyId: () => "minioadmin",
+///   getS3SecretAccessKey: () => "minioadmin"
+/// };
+/// ```
+///
+/// Then run the tests:
+/// ```bash
+/// cargo test --target wasm32-unknown-unknown --features s3_integration_tests
+/// ```
+#[cfg(all(test, feature = "s3_integration_tests"))]
 mod s3_integration_tests {
     use super::*;
     use anyhow::Result;
-    use std::env;
 
-    /// Helper to get S3 config from environment variables
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen::prelude::*;
+
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::*;
+
+    /// Helper to get S3 config from environment variables (native) or JavaScript (WASM)
     fn get_s3_config_from_env() -> Result<RestStorageConfig> {
-        let endpoint = env::var("R2S3_HOST")
-            .map_err(|_| anyhow::anyhow!("R2S3_HOST environment variable not set"))?;
-        let region = env::var("R2S3_REGION")
-            .map_err(|_| anyhow::anyhow!("R2S3_REGION environment variable not set"))?;
-        let bucket = env::var("R2S3_BUCKET")
-            .map_err(|_| anyhow::anyhow!("R2S3_BUCKET environment variable not set"))?;
-        let access_key_id = env::var("R2S3_ACCESS_KEY_ID")
-            .map_err(|_| anyhow::anyhow!("R2S3_ACCESS_KEY_ID environment variable not set"))?;
-        let secret_access_key = env::var("R2S3_SECRET_ACCESS_KEY")
-            .map_err(|_| anyhow::anyhow!("R2S3_SECRET_ACCESS_KEY environment variable not set"))?;
-
         let s3_credentials = S3Authority {
-            access_key_id,
-            secret_access_key,
-            session_token: None,
-            region: region.clone(),
+            access_key_id: env!("R2S3_ACCESS_KEY_ID").into(),
+            secret_access_key: env!("R2S3_SECRET_ACCESS_KEY").into(),
+            session_token: option_env!("R2S3_SESSION_TOKEN").map(|v| v.into()),
+            region: env!("R2S3_REGION").into(),
             public_read: false,
             expires: 3600, // 1 hour for tests
         };
 
         Ok(RestStorageConfig {
-            endpoint,
+            endpoint: env!("R2S3_HOST").into(),
+            bucket: Some(env!("R2S3_BUCKET").into()),
             auth_method: AuthMethod::S3(s3_credentials),
-            bucket: Some(bucket),
             key_prefix: Some("test-prefix".to_string()),
             headers: Vec::new(),
             timeout_seconds: Some(30),
         })
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_s3_set_and_get() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let mut backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
@@ -2650,7 +2665,8 @@ mod s3_integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_s3_get_missing_key() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
@@ -2664,7 +2680,8 @@ mod s3_integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_s3_overwrite_value() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let mut backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
@@ -2690,7 +2707,8 @@ mod s3_integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_s3_large_value() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let mut backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
@@ -2709,7 +2727,8 @@ mod s3_integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_s3_multiple_keys() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let mut backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
@@ -2734,7 +2753,8 @@ mod s3_integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_s3_binary_data() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let mut backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
@@ -2753,7 +2773,8 @@ mod s3_integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_s3_checksum_verification() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let mut backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
@@ -2771,7 +2792,8 @@ mod s3_integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     async fn test_s3_bulk_operations() -> Result<()> {
         let config = get_s3_config_from_env()?;
         let mut backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
@@ -2802,5 +2824,375 @@ mod s3_integration_tests {
         }
 
         Ok(())
+    }
+
+    /// Test TransactionalMemory operations with S3 backend
+    /// Covers: read non-existent, write new, update existing, read existing
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_transactional_memory_full_lifecycle() -> Result<()> {
+        use crate::TransactionalMemory;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        struct TestData {
+            name: String,
+            version: u32,
+        }
+
+        let config = get_s3_config_from_env()?;
+        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config)?;
+
+        // Use a unique key for this test run to avoid conflicts
+        let address = format!("txn-test-{}", rand::random::<u32>()).into_bytes();
+
+        // Step 1: Read non-existent key
+        eprintln!("[TEST] Step 1: Reading non-existent key...");
+        let mut txn = TransactionalMemory::<TestData, _, _>::open(
+            address.clone(),
+            &backend,
+            crate::CborEncoder,
+        )
+        .await?;
+
+        let content = txn.read();
+        assert_eq!(content, None, "Non-existent key should return None");
+        eprintln!("[TEST] ✓ Non-existent key returns None");
+
+        // Step 2: Write new value
+        eprintln!("[TEST] Step 2: Writing new value...");
+        let initial_data = TestData {
+            name: "Initial".to_string(),
+            version: 1,
+        };
+
+        txn.replace(Some(initial_data.clone()), &backend).await?;
+        eprintln!("[TEST] ✓ New value written");
+
+        // Verify it was written
+        let content = txn.read();
+        assert_eq!(
+            content,
+            Some(initial_data.clone()),
+            "Should read back the initial value"
+        );
+        eprintln!("[TEST] ✓ Read back initial value from cache");
+
+        // Step 3: Reload from storage to verify persistence
+        eprintln!("[TEST] Step 3: Reloading from storage...");
+        txn.reload(&backend).await?;
+        let content = txn.read();
+        assert_eq!(
+            content,
+            Some(initial_data.clone()),
+            "Should reload the same value from storage"
+        );
+        eprintln!("[TEST] ✓ Value persisted to storage");
+
+        // Step 4: Update existing value
+        eprintln!("[TEST] Step 4: Updating existing value...");
+        let updated_data = TestData {
+            name: "Updated".to_string(),
+            version: 2,
+        };
+
+        txn.replace(Some(updated_data.clone()), &backend).await?;
+        eprintln!("[TEST] ✓ Value updated");
+
+        // Verify update
+        let content = txn.read();
+        assert_eq!(
+            content,
+            Some(updated_data.clone()),
+            "Should read back the updated value"
+        );
+        eprintln!("[TEST] ✓ Read back updated value from cache");
+
+        // Step 5: Create a fresh instance and verify persistence
+        eprintln!("[TEST] Step 5: Creating fresh instance to verify persistence...");
+        let txn2 = TransactionalMemory::<TestData, _, _>::open(
+            address.clone(),
+            &backend,
+            crate::CborEncoder,
+        )
+        .await?;
+
+        let content = txn2.read();
+        assert_eq!(
+            content,
+            Some(updated_data.clone()),
+            "Fresh instance should read the updated value from storage"
+        );
+        eprintln!("[TEST] ✓ Fresh instance reads persisted updated value");
+
+        // Step 6: Test replace_with (conditional update)
+        eprintln!("[TEST] Step 6: Testing replace_with for conditional updates...");
+        let mut txn3 = TransactionalMemory::<TestData, _, _>::open(
+            address.clone(),
+            &backend,
+            crate::CborEncoder,
+        )
+        .await?;
+
+        txn3.replace_with(
+            |current| {
+                // Increment version based on current value
+                current.as_ref().map(|data| TestData {
+                    name: format!("{}-Modified", data.name),
+                    version: data.version + 1,
+                })
+            },
+            &backend,
+        )
+        .await?;
+
+        let content = txn3.read();
+        assert_eq!(
+            content,
+            Some(TestData {
+                name: "Updated-Modified".to_string(),
+                version: 3,
+            }),
+            "replace_with should apply the transformation"
+        );
+        eprintln!("[TEST] ✓ replace_with applied transformation correctly");
+
+        // Step 7: Test reading existing value with fresh TransactionalMemory
+        eprintln!("[TEST] Step 7: Reading existing value with fresh instance...");
+        let txn4 = TransactionalMemory::<TestData, _, _>::open(
+            address.clone(),
+            &backend,
+            crate::CborEncoder,
+        )
+        .await?;
+
+        let content = txn4.read();
+        assert_eq!(
+            content,
+            Some(TestData {
+                name: "Updated-Modified".to_string(),
+                version: 3,
+            }),
+            "Should read the final state"
+        );
+        eprintln!("[TEST] ✓ Final state correctly persisted and retrieved");
+
+        // Step 8: Test deletion (replace with None)
+        eprintln!("[TEST] Step 8: Testing deletion...");
+        let mut txn5 = TransactionalMemory::<TestData, _, _>::open(
+            address.clone(),
+            &backend,
+            crate::CborEncoder,
+        )
+        .await?;
+
+        txn5.replace(None, &backend).await?;
+
+        let content = txn5.read();
+        assert_eq!(content, None, "Value should be deleted");
+        eprintln!("[TEST] ✓ Value deleted");
+
+        // Verify deletion persisted
+        txn5.reload(&backend).await?;
+        let content = txn5.read();
+        assert_eq!(content, None, "Deletion should persist");
+        eprintln!("[TEST] ✓ Deletion persisted");
+
+        eprintln!("[TEST] ✅ All TransactionalMemory lifecycle steps completed successfully!");
+
+        Ok(())
+    }
+}
+
+/// S3 Signature Test Fixtures
+///
+/// These tests generate deterministic S3 signatures that can be compared across
+/// native and WASM platforms to verify the signing implementation is identical.
+///
+/// Run on native to generate fixtures:
+/// ```bash
+/// cargo test s3_signature_fixtures -- --nocapture
+/// ```
+///
+/// Run on WASM to verify signatures match:
+/// ```bash
+/// cargo test --target wasm32-unknown-unknown s3_signature_fixtures -- --nocapture
+/// ```
+#[cfg(test)]
+mod s3_signature_fixtures {
+    use super::*;
+    use chrono::{DateTime, TimeZone, Utc};
+
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::*;
+
+    /// Fixed timestamp for deterministic signatures: 2024-01-15 12:00:00 UTC
+    fn fixed_timestamp() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2024, 1, 15, 12, 0, 0).unwrap()
+    }
+
+    /// Create test credentials
+    fn test_credentials() -> s3_signer::Credentials {
+        s3_signer::Credentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: None,
+        }
+    }
+
+    /// Test fixture 1: Simple PUT request
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    fn test_s3_signature_put_simple() {
+        let creds = test_credentials();
+        let access = s3_signer::Access {
+            region: "us-east-1".to_string(),
+            bucket: "test-bucket".to_string(),
+            key: "test-key.txt".to_string(),
+            checksum: Some("47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=".to_string()),
+            endpoint: Some("https://s3.amazonaws.com".to_string()),
+            expires: 3600,
+            method: "PUT".to_string(),
+            public_read: false,
+            service: "s3".to_string(),
+            time: Some(fixed_timestamp()),
+        };
+
+        let auth = creds
+            .authorize(&access)
+            .expect("Authorization should succeed");
+
+        // Expected values (these will be the same on native and WASM if signing is correct)
+        assert_eq!(auth.timestamp, "20240115T120000Z");
+        assert_eq!(auth.date, "20240115");
+        assert_eq!(auth.region, "us-east-1");
+        assert_eq!(auth.host, "test-bucket.s3.amazonaws.com");
+
+        // The signature should be deterministic and identical on native and WASM
+        assert_eq!(
+            auth.signature, "756d645e6508cc17f42f1686bd1afb20af38bffc43121a3fe635c43492d95029",
+            "Signature must match expected value on both native and WASM"
+        );
+    }
+
+    /// Test fixture 2: GET request
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    fn test_s3_signature_get_simple() {
+        let creds = test_credentials();
+        let access = s3_signer::Access {
+            region: "us-west-2".to_string(),
+            bucket: "my-bucket".to_string(),
+            key: "path/to/object.bin".to_string(),
+            checksum: None,
+            endpoint: Some("https://s3.amazonaws.com".to_string()),
+            expires: 7200,
+            method: "GET".to_string(),
+            public_read: false,
+            service: "s3".to_string(),
+            time: Some(fixed_timestamp()),
+        };
+
+        let auth = creds
+            .authorize(&access)
+            .expect("Authorization should succeed");
+
+        assert_eq!(auth.timestamp, "20240115T120000Z");
+        assert_eq!(auth.date, "20240115");
+        assert_eq!(auth.region, "us-west-2");
+        assert_eq!(
+            auth.signature, "7354907fe843ed9bb1f0d1d77211043d368366c855f52b90dbd506a8e53255d6",
+            "Signature must match expected value on both native and WASM"
+        );
+    }
+
+    /// Test fixture 3: R2 (Cloudflare) PUT request
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    fn test_s3_signature_r2_put() {
+        let creds = test_credentials();
+        let access = s3_signer::Access {
+            region: "auto".to_string(),
+            bucket: "r2-bucket".to_string(),
+            key: "uploads/file.dat".to_string(),
+            checksum: Some("RBNvo1WzZ4oRRq0W9+hknpT7T8If536DEMBg9hyq/4o=".to_string()),
+            endpoint: Some("https://1234567890.r2.cloudflarestorage.com".to_string()),
+            expires: 1800,
+            method: "PUT".to_string(),
+            public_read: false,
+            service: "s3".to_string(),
+            time: Some(fixed_timestamp()),
+        };
+
+        let auth = creds
+            .authorize(&access)
+            .expect("Authorization should succeed");
+
+        assert_eq!(auth.timestamp, "20240115T120000Z");
+        assert_eq!(auth.region, "auto");
+        assert_eq!(
+            auth.signature, "dfa48a3229c104b0c06ff924b17fa243d72d6bf62a2e28179279be519936f1a7",
+            "Signature must match expected value on both native and WASM"
+        );
+    }
+
+    /// Test fixture 4: Public read request
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    fn test_s3_signature_public_read() {
+        let creds = test_credentials();
+        let access = s3_signer::Access {
+            region: "eu-west-1".to_string(),
+            bucket: "public-bucket".to_string(),
+            key: "public/image.jpg".to_string(),
+            checksum: None,
+            endpoint: Some("https://s3.amazonaws.com".to_string()),
+            expires: 3600,
+            method: "PUT".to_string(),
+            public_read: true,
+            service: "s3".to_string(),
+            time: Some(fixed_timestamp()),
+        };
+
+        let auth = creds
+            .authorize(&access)
+            .expect("Authorization should succeed");
+
+        assert_eq!(auth.timestamp, "20240115T120000Z");
+        assert!(auth.public_read);
+        assert_eq!(
+            auth.signature, "ee674e6d680d7a0005fb0b29a54d3d71b11b9aab12a3b8c9edc31ae636f481dc",
+            "Signature must match expected value on both native and WASM"
+        );
+    }
+
+    /// Test fixture 5: Key with special characters
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    fn test_s3_signature_special_chars() {
+        let creds = test_credentials();
+        let access = s3_signer::Access {
+            region: "us-east-1".to_string(),
+            bucket: "test-bucket".to_string(),
+            key: "path with spaces/file-name_123.txt".to_string(),
+            checksum: None,
+            endpoint: Some("https://s3.amazonaws.com".to_string()),
+            expires: 3600,
+            method: "PUT".to_string(),
+            public_read: false,
+            service: "s3".to_string(),
+            time: Some(fixed_timestamp()),
+        };
+
+        let auth = creds
+            .authorize(&access)
+            .expect("Authorization should succeed");
+
+        assert_eq!(
+            auth.signature, "222fb0a12bf29245e037852a1256ebda1d4987c459811bfd86c3b5de22603f62",
+            "Signature must match expected value on both native and WASM"
+        );
+        // URL should properly encode spaces
+        assert!(auth.url.to_string().contains("path%20with%20spaces"));
     }
 }
