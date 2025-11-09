@@ -567,6 +567,11 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         self.state().revision().to_owned()
     }
 
+    /// Logical time on this branch
+    pub fn occurence(&self) -> Occurence {
+        self.revision().into()
+    }
+
     /// Returns the base tree reference for this branch.
     pub fn base(&self) -> NodeReference {
         self.state().base
@@ -629,7 +634,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// 3. Integrates local changes into upstream tree
     /// 4. Creates a new revision with proper period/moment
     pub async fn pull(&mut self) -> Result<Option<Revision>, ReplicaError> {
-        if let Some(_upstream) = &mut self.upstream() {
+        if let Some(_revision) = &mut self.upstream() {
             if let Some(revision) = self.fetch().await? {
                 // if upstream revision is different from our base
                 // we'll merge local changes onto upstream tree otherwise
@@ -691,24 +696,16 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
                         Ok(Some(revision))
                     } else {
-                        // Integration produced a new tree - create a merged revision
-                        // Compute new period and moment based on issuer
-                        let (period, moment) = if &revision.issuer == self.issuer.principal() {
-                            // Same issuer: increment moment, keep period
-                            (revision.period, revision.moment + 1)
-                        } else {
-                            // Different issuer: new period (sync point), reset moment
-                            (revision.period + 1, 0)
-                        };
-
                         // Create new revision with integrated changes
                         #[allow(clippy::clone_on_copy)]
                         let new_revision = Revision {
                             issuer: self.issuer.principal().clone(),
                             tree: NodeReference(hash),
                             cause: HashSet::from([revision.edition()?]),
-                            period,
-                            moment,
+                            // period is max between local and remote periods + 1
+                            period: revision.period.max(self.revision().period) + 1,
+                            // moment is reset when period changes
+                            moment: 0,
                         };
 
                         // Reset branch to the new revision
