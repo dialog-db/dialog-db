@@ -3,8 +3,12 @@ use hmac::{Hmac, Mac};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as FmtWrite;
-// use std::time::SystemTime;
 use url::Url;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::SystemTime;
+
+#[cfg(target_arch = "wasm32")]
 use web_time::{SystemTime, web::SystemTimeExt};
 
 // AWS S3 Signing Constants
@@ -37,7 +41,16 @@ impl Credentials {
         // Get current time or use the provided time option
         let datetime = match options.time {
             Some(time) => time,
-            None => DateTime::<Utc>::from(SystemTime::now().to_std()),
+            None => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    DateTime::<Utc>::from(SystemTime::now().to_std())
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    DateTime::<Utc>::from(SystemTime::now())
+                }
+            }
         };
 
         // Format the timestamp
