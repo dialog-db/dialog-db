@@ -113,7 +113,7 @@ where
     T: Serialize + DeserializeOwned + ConditionalSync + std::fmt::Debug + Clone,
     Backend: TransactionalMemoryBackend<Value = Vec<u8>>,
     Backend::Error: Into<DialogStorageError>,
-    Backend::Address: Clone,
+    Backend::Address: Clone + AsRef<[u8]>,
     Backend::Edition: Clone,
     Codec: Encoder + ConditionalSync + Clone,
     Codec::Bytes: AsRef<[u8]>,
@@ -128,8 +128,13 @@ where
     ) -> Result<Self, DialogStorageError> {
         // Fetch from backend
         let (value, edition) = if let Some((bytes, edition)) =
-            backend.resolve(&address).await.map_err(|e| e.into())?
-        {
+            backend.resolve(&address).await.map_err(|e| {
+                DialogStorageError::StorageBackend(format!(
+                    "Resolving memory at {} failed with error {}",
+                    String::from_utf8_lossy(address.as_ref()),
+                    e.into()
+                ))
+            })? {
             // Decode the bytes
             let decoded: T = codec
                 .decode(bytes.as_ref())

@@ -514,7 +514,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
     /// Lazily initializes and returns a mutable reference to the upstream.
     /// Returns None if no upstream is configured.
-    fn upstream(&self) -> Option<Upstream<Backend>> {
+    pub fn upstream(&self) -> Option<Upstream<Backend>> {
         self.upstream.read().clone()
     }
 
@@ -568,7 +568,8 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// Pushes the current revision to the upstream branch.
     /// If upstream is local, it updates that branch directly.
     /// If upstream is remote, it publishes to the remote and updates local cache.
-    /// Returns None if no upstream is configured or if pushing to self.
+    /// Returns Error if  if branch does not have upstream set. Returns
+    /// Option<Revision> describing prior state of the upstream.
     pub async fn push(&mut self) -> Result<Option<Revision>, ReplicaError> {
         if let Some(upstream) = &mut self.upstream() {
             match upstream {
@@ -592,8 +593,12 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                 Upstream::Remote(target) => {
                     // update a memory with the latest branch state
                     let before = target.revision();
-                    target.publish(self.revision()).await?;
-                    self.reset(self.revision()).await?;
+                    let after = self.revision().clone();
+                    if before.as_ref() != Some(&after) {
+                        target.publish(after.clone()).await?;
+                        self.reset(after).await?;
+                    }
+
                     Ok(before)
                 }
             }
@@ -1246,15 +1251,14 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         Ok(self.revision())
     }
 
-    /// Publishes new canonical revision. If published revision is different
-    /// from current (local) revision for this branch previous revision is
-    /// returned otherwise None is returned.
-    pub async fn publish(&mut self, revision: Revision) -> Result<Option<Revision>, ReplicaError> {
+    /// Publishes new canonical revision. Returns error if publishing fails.
+    pub async fn publish(&mut self, revision: Revision) -> Result<(), ReplicaError> {
         self.connect().await?;
-        let before = self.revision();
+        let prior = self.revision().clone();
         let canonical = self.canonical.as_mut().expect("connected");
 
-        // if revision is different we update
+        // we only need to publish to upstream if desired revision is different
+        // from the last revision we have read from upstream.
         if canonical.content().as_ref() != Some(&revision) {
             canonical
                 .replace(Some(revision.clone()), &self.remote_storage)
@@ -1262,18 +1266,28 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
         }
 
-        // if local state is different we update it also
-        if before.as_ref() != Some(&revision) {
+        // if revision for the remote branch is different from one published
+        // we got to update local revision. We return revision we replaced
+        if prior.as_ref() != Some(&revision) {
             self.cache
                 .replace_with(|_| Some(revision.clone()), &self.storage)
                 .await
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-
-            Ok(before)
-        } else {
-            Ok(None)
         }
+
+        Ok(())
     }
+}
+
+/// State of the remote branch
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteBranchState {
+    /// Site of the branch
+    pub site: Site,
+    /// branch id
+    pub id: BranchId,
+    /// Revision that was fetched last
+    pub revision: Revision,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1571,7 +1585,24 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
     pub fn id(&self) -> &BranchId {
         match self {
             Upstream::Local(branch) => branch.id(),
-            Upstream::Remote(remote) => remote.id(),
+            Upstream::Remote(branch) => branch.id(),
+        }
+    }
+
+    /// Returns revision this branch is at
+    pub fn revision(&self) -> Option<Revision> {
+        match self {
+            Upstream::Local(branch) => Some(branch.revision()),
+            Upstream::Remote(branch) => branch.revision(),
+        }
+    }
+
+    /// Returns site of the branch. If local returns None otherwise
+    /// returns site identifier
+    pub fn site(&self) -> Option<&Site> {
+        match self {
+            Upstream::Local(_) => None,
+            Upstream::Remote(branch) => Some(branch.site()),
         }
     }
 
@@ -1602,13 +1633,9 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
     }
 
     /// Pushes a revision to the upstream, returning the previous revision if any
-    pub async fn publish(&mut self, revision: Revision) -> Result<Option<Revision>, ReplicaError> {
+    pub async fn publish(&mut self, revision: Revision) -> Result<(), ReplicaError> {
         match self {
-            Upstream::Local(branch) => {
-                let before = branch.revision();
-                branch.reset(revision).await?;
-                Ok(Some(before))
-            }
+            Upstream::Local(branch) => branch.reset(revision).await,
             Upstream::Remote(remote) => remote.publish(revision).await,
         }
     }
