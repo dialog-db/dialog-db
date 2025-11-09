@@ -10,7 +10,14 @@ helpers = ["tempfile", "anyhow", "rand"]
 http_tests = []
 r2_tests = []
 s3_integration_tests = []
-test-utils = ["dep:s3s", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes", "dep:tokio-test"]
+test-utils = [
+  "dep:s3s",
+  "dep:hyper",
+  "dep:hyper-util",
+  "dep:http-body-util",
+  "dep:bytes",
+  "dep:tokio-test",
+]
 
 [dependencies]
 dialog-common = { workspace = true }
@@ -41,7 +48,10 @@ tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync", "fs"] }
 s3s = { version = "0.12.0-rc.3", optional = true }
 hyper = { version = "1.0", optional = true }
-hyper-util = { version = "0.1", features = ["server", "tokio"], optional = true }
+hyper-util = { version = "0.1", features = [
+  "server",
+  "tokio",
+], optional = true }
 http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1.0", optional = true }
 tokio-test = { version = "0.4", optional = true }
@@ -50,6 +60,7 @@ tokio-test = { version = "0.4", optional = true }
 js-sys = { workspace = true }
 rexie = { workspace = true }
 wasm-bindgen = { workspace = true }
+web-time = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }

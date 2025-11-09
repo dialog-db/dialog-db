@@ -24,6 +24,19 @@ where
     value_type: PhantomData<Value>,
 }
 
+unsafe impl<Key, Value> Send for IndexedDbStorageBackend<Key, Value>
+where
+    Key: AsRef<[u8]>,
+    Value: AsRef<[u8]> + From<Vec<u8>>,
+{
+}
+unsafe impl<Key, Value> Sync for IndexedDbStorageBackend<Key, Value>
+where
+    Key: AsRef<[u8]>,
+    Value: AsRef<[u8]> + From<Vec<u8>>,
+{
+}
+
 impl<Key, Value> IndexedDbStorageBackend<Key, Value>
 where
     Key: AsRef<[u8]>,

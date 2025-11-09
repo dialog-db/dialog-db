@@ -887,6 +887,7 @@ dependencies = [
  "url",
  "wasm-bindgen",
  "wasm-bindgen-test",
+ "web-time",
 ]
 
 [[package]]

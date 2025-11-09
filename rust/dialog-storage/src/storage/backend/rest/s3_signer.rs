@@ -3,8 +3,9 @@ use hmac::{Hmac, Mac};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as FmtWrite;
-use std::time::SystemTime;
+// use std::time::SystemTime;
 use url::Url;
+use web_time::{SystemTime, web::SystemTimeExt};
 
 // AWS S3 Signing Constants
 pub const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
@@ -36,7 +37,7 @@ impl Credentials {
         // Get current time or use the provided time option
         let datetime = match options.time {
             Some(time) => time,
-            None => DateTime::<Utc>::from(SystemTime::now()),
+            None => DateTime::<Utc>::from(SystemTime::now().to_std()),
         };
 
         // Format the timestamp
