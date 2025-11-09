@@ -47,6 +47,7 @@ clap_derive = "4"
 console_error_panic_hook = "0.1"
 csv-async = { version = "1", features = ["tokio"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+futures = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
 # getrandom = "0.3"

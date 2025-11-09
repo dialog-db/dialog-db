@@ -91,6 +91,10 @@ impl<B> ErrorMappingBackend<B> {
     pub fn new(inner: B) -> Self {
         Self { inner }
     }
+
+    pub fn inner(&self) -> &B {
+        &self.inner
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -253,6 +257,10 @@ where
         Self: Clone,
     {
         TransactionalMemory::open(key.clone(), self, self.codec.clone()).await
+    }
+
+    pub fn backend(&self) -> &Backend {
+        &self.backend
     }
 }
 

@@ -8,3 +8,11 @@ license.workspace = true
 
 [dependencies]
 blake3 = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+wasm-bindgen-futures = { workspace = true }
+futures = { workspace = true }
+
+# [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

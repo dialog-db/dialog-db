@@ -13,7 +13,7 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use base58::ToBase58;
 use blake3;
-use dialog_common::{ConditionalSend, SharedCell};
+use dialog_common::{ConditionalSend, SharedCell, TaskQueue};
 use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Tree};
 #[cfg(not(target_arch = "wasm32"))]
 use futures_util::future::BoxFuture;
@@ -36,7 +36,7 @@ use std::marker::PhantomData;
 use std::ops::Range;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// Cryptographic identifier like Ed25519 public key representing
 /// a principal that produced a change.
@@ -164,6 +164,7 @@ impl Issuer {
 #[derive(Debug)]
 pub struct Replica<Backend: PlatformBackend> {
     issuer: Issuer,
+
     #[allow(dead_code)]
     storage: PlatformStorage<Backend>,
     /// Remote repositories for synchronization
@@ -174,7 +175,11 @@ pub struct Replica<Backend: PlatformBackend> {
 
 impl<Backend: PlatformBackend + 'static> Replica<Backend> {
     /// Creates a new replica with the given issuer and storage backend.
-    pub fn open(issuer: Issuer, backend: Backend) -> Result<Self, ReplicaError> {
+    pub fn open(
+        issuer: Issuer,
+        backend: Backend,
+        work_queue: Arc<Mutex<TaskQueue>>,
+    ) -> Result<Self, ReplicaError> {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branches = Branches::new(issuer.clone(), backend.clone());
@@ -209,14 +214,22 @@ impl<Backend: PlatformBackend + 'static> Branches<Backend> {
 
     /// Loads a branch with given identifier, produces an error if it does not
     /// exists.
-    pub async fn load(&self, id: &BranchId) -> Result<Branch<Backend>, ReplicaError> {
-        Branch::load(id, self.issuer.clone(), self.storage.clone()).await
+    pub async fn load(
+        &self,
+        id: &BranchId,
+        work_queue: Arc<Mutex<TaskQueue>>,
+    ) -> Result<Branch<Backend>, ReplicaError> {
+        Branch::load(id, self.issuer.clone(), self.storage.clone(), work_queue).await
     }
 
     /// Loads a branch with the given identifier or creates a new one if
     /// it does not already exist.
-    pub async fn open(&self, id: &BranchId) -> Result<Branch<Backend>, ReplicaError> {
-        Branch::open(id, self.issuer.clone(), self.storage.clone()).await
+    pub async fn open(
+        &self,
+        id: &BranchId,
+        work_queue: Arc<Mutex<TaskQueue>>,
+    ) -> Result<Branch<Backend>, ReplicaError> {
+        Branch::open(id, self.issuer.clone(), self.storage.clone(), work_queue).await
     }
 }
 
@@ -399,6 +412,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         issuer: Issuer,
         storage: PlatformStorage<Backend>,
         default_state: Option<BranchState>,
+        work_queue: Arc<Mutex<TaskQueue>>,
     ) -> Result<Branch<Backend>, ReplicaError> {
         let memory = Self::mount(id, &storage, default_state).await?;
         let archive = Archive::new(storage.clone());
@@ -414,7 +428,8 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             // If branch has an upstream setup we load it up and configure
             // archive's remote
             let upstream = if let Some(state) = &state.upstream {
-                let upstream = Upstream::open(state, issuer.clone(), storage.clone()).await?;
+                let upstream =
+                    Upstream::open(state, issuer.clone(), storage.clone(), work_queue).await?;
 
                 if let Upstream::Remote(branch) = &upstream {
                     archive.set_remote(branch.remote_storage.clone()).await;
@@ -445,6 +460,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         id: &BranchId,
         issuer: Issuer,
         storage: PlatformStorage<Backend>,
+        work_queue: Arc<Mutex<TaskQueue>>,
     ) -> Result<Branch<Backend>, ReplicaError> {
         let default_state = Some(BranchState::new(
             id.clone(),
@@ -453,7 +469,8 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             None,
         ));
 
-        let branch = Self::load_with_default(id, issuer, storage, default_state).await?;
+        let branch =
+            Self::load_with_default(id, issuer, storage, default_state, work_queue).await?;
 
         Ok(branch)
     }
@@ -464,8 +481,9 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         id: &BranchId,
         issuer: Issuer,
         storage: PlatformStorage<Backend>,
+        work_queue: Arc<Mutex<TaskQueue>>,
     ) -> Result<Branch<Backend>, ReplicaError> {
-        let branch = Self::load_with_default(id, issuer, storage, None).await?;
+        let branch = Self::load_with_default(id, issuer, storage, None, work_queue).await?;
 
         Ok(branch)
     }
@@ -1017,13 +1035,21 @@ impl<Backend: PlatformBackend> Remotes<Backend> {
     }
 
     /// Loads an existing remote repository by name.
-    pub async fn load(&self, site: &Site) -> Result<Remote<Backend>, ReplicaError> {
-        Remote::setup(site, self.storage.clone()).await
+    pub async fn load(
+        &self,
+        site: &Site,
+        work_queue: Arc<Mutex<TaskQueue>>,
+    ) -> Result<Remote<Backend>, ReplicaError> {
+        Remote::setup(site, self.storage.clone(), work_queue).await
     }
 
     /// Adds a new remote repository with the given name and address.
-    pub async fn add(&mut self, state: RemoteState) -> Result<Remote<Backend>, ReplicaError> {
-        Remote::add(state, self.storage.clone()).await
+    pub async fn add(
+        &mut self,
+        state: RemoteState,
+        work_queue: Arc<Mutex<TaskQueue>>,
+    ) -> Result<Remote<Backend>, ReplicaError> {
+        Remote::add(state, self.storage.clone(), work_queue).await
     }
 }
 
@@ -1062,12 +1088,13 @@ impl<Backend: PlatformBackend> Remote<Backend> {
     pub async fn setup(
         site: &Site,
         storage: PlatformStorage<Backend>,
+        work_queue: Arc<Mutex<TaskQueue>>,
     ) -> Result<Remote<Backend>, ReplicaError> {
         let memory = Self::mount(site, &storage).await?;
         if let Some(state) = memory.content().clone() {
             Ok(Remote {
                 site: state.site.clone(),
-                connection: state.connect()?,
+                connection: state.connect(work_queue)?,
                 memory,
                 storage,
             })
@@ -1082,6 +1109,7 @@ impl<Backend: PlatformBackend> Remote<Backend> {
     pub async fn add(
         state: RemoteState,
         storage: PlatformStorage<Backend>,
+        work_queue: Arc<Mutex<TaskQueue>>,
     ) -> Result<Remote<Backend>, ReplicaError> {
         let mut memory = Self::mount(&state.site, &storage).await?;
         let mut alread_exists = false;
@@ -1100,7 +1128,7 @@ impl<Backend: PlatformBackend> Remote<Backend> {
             address: state.address,
         };
         let site = state.site.clone();
-        let connection = state.connect()?;
+        let connection = state.connect(work_queue)?;
 
         if !alread_exists {
             memory
@@ -1133,14 +1161,18 @@ impl<Backend: PlatformBackend> Remote<Backend> {
             .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
         // Update the connection
-        self.connection = new_state.connect()?;
+        self.connection = new_state.connect(self.connection.backend().inner().work_queue())?;
 
         Ok(())
     }
 
     /// Opens a branch at this remote
-    pub async fn open(&self, id: &BranchId) -> Result<RemoteBranch<Backend>, ReplicaError> {
-        RemoteBranch::open(self.site(), id, self.storage.clone()).await
+    pub async fn open(
+        &self,
+        id: &BranchId,
+        work_queue: Arc<Mutex<TaskQueue>>,
+    ) -> Result<RemoteBranch<Backend>, ReplicaError> {
+        RemoteBranch::open(self.site(), id, self.storage.clone(), work_queue).await
     }
 }
 
@@ -1186,10 +1218,11 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         site: &Site,
         id: &BranchId,
         storage: PlatformStorage<Backend>,
+        work_queue: Arc<Mutex<TaskQueue>>,
     ) -> Result<RemoteBranch<Backend>, ReplicaError> {
         // Open a localy stored revision for this branch
         let memory = Self::mount(site, id, &storage).await?;
-        let remote = Remote::setup(site, storage.clone()).await?;
+        let remote = Remote::setup(site, storage.clone(), work_queue).await?;
 
         Ok(Self {
             site: site.clone(),
@@ -1311,8 +1344,11 @@ pub struct RemoteState {
 
 impl RemoteState {
     /// Creates a storage connection using this remote's configuration.
-    pub fn connect(&self) -> Result<PlatformStorage<RemoteBackend>, ReplicaError> {
-        let backend = RestStorageBackend::new(self.address.clone()).map_err(|_| {
+    pub fn connect(
+        &self,
+        work_queue: Arc<Mutex<TaskQueue>>,
+    ) -> Result<PlatformStorage<RemoteBackend>, ReplicaError> {
+        let backend = RestStorageBackend::new(self.address.clone(), work_queue).map_err(|_| {
             ReplicaError::RemoteConnectionError {
                 remote: self.site.clone(),
             }
@@ -1575,15 +1611,17 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
         state: &UpstreamState,
         issuer: Issuer,
         storage: PlatformStorage<Backend>,
+        work_queue: Arc<Mutex<TaskQueue>>,
     ) -> LocalBoxFuture<'_, Result<Self, ReplicaError>> {
         Box::pin(async move {
             match state {
                 UpstreamState::Local { branch } => {
-                    let branch = Branch::open(branch, issuer, storage).await?;
+                    let branch = Branch::open(branch, issuer, storage, work_queue).await?;
                     Ok(Upstream::Local(branch))
                 }
                 UpstreamState::Remote { site, branch } => {
-                    let remote_branch = RemoteBranch::open(site, branch, storage).await?;
+                    let remote_branch =
+                        RemoteBranch::open(site, branch, storage, work_queue).await?;
                     Ok(Upstream::Remote(remote_branch))
                 }
             }
@@ -1881,6 +1919,7 @@ mod tests {
         storage: PlatformStorage<Backend>,
         id: &str,
         upstream_id: &str,
+        work_queue: Arc<Mutex<TaskQueue>>,
     ) -> Result<Branch<Backend>, ReplicaError>
     where
         Backend: PlatformBackend + 'static,
@@ -1889,8 +1928,20 @@ mod tests {
         let upstream_branch_id = BranchId::new(upstream_id.to_string());
 
         let issuer = Issuer::from_secret(&seed());
-        let mut branch = Branch::open(&branch_id, issuer.clone(), storage.clone()).await?;
-        let target = Branch::open(&upstream_branch_id, issuer, storage.clone()).await?;
+        let mut branch = Branch::open(
+            &branch_id,
+            issuer.clone(),
+            storage.clone(),
+            work_queue.clone(),
+        )
+        .await?;
+        let target = Branch::open(
+            &upstream_branch_id,
+            issuer,
+            storage.clone(),
+            work_queue.clone(),
+        )
+        .await?;
 
         // Set up upstream as a local branch
         branch.set_upstream(target).await?;

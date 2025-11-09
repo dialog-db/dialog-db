@@ -44,7 +44,7 @@ where
     K: AsRef<[u8]> + Clone + dialog_common::ConditionalSync + From<Vec<u8>>,
     V: AsRef<[u8]> + From<Vec<u8>> + Clone + dialog_common::ConditionalSync,
 {
-    Ok(RestStorageBackend::new(config)?)
+    Ok(RestStorageBackend::new(config, Default::default())?)
 }
 
 /// Create a REST-based storage backend with default binary key/value types

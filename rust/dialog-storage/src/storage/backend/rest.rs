@@ -1,13 +1,14 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 
 use async_stream::try_stream;
 use async_trait::async_trait;
 use base64::Engine;
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, DialogAsyncError, TaskQueue};
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::sync::Mutex;
 use url::Url;
 
 mod s3_signer;
@@ -407,6 +408,7 @@ where
 {
     config: RestStorageConfig,
     client: reqwest::Client,
+    work_queue: Arc<Mutex<TaskQueue>>,
     _key: PhantomData<Key>,
     _value: PhantomData<Value>,
 }
@@ -417,7 +419,10 @@ where
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
 {
     /// Create a new REST storage backend with the given configuration
-    pub fn new(config: RestStorageConfig) -> Result<Self, RestStorageBackendError> {
+    pub fn new(
+        config: RestStorageConfig,
+        work_queue: Arc<Mutex<TaskQueue>>,
+    ) -> Result<Self, RestStorageBackendError> {
         // Timeout is only available on non-WASM targets
         #[cfg(not(target_arch = "wasm32"))]
         let client_builder = {
@@ -438,9 +443,15 @@ where
         Ok(Self {
             config,
             client,
+            work_queue,
             _key: PhantomData,
             _value: PhantomData,
         })
+    }
+
+    /// Get a pointer to the connection's work queue
+    pub fn work_queue(&self) -> Arc<Mutex<TaskQueue>> {
+        self.work_queue.clone()
     }
 
     /// Get the configuration of the backend
@@ -685,16 +696,23 @@ where
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         let request = self.prepare_put_request(key.as_ref(), value.as_ref())?;
-        let response = request.send().await?;
-        let status = response.status();
-        if status.is_success() {
-            Ok(())
-        } else {
-            Err(RestStorageBackendError::OperationFailed(format!(
-                "Failed to set value: {}",
-                status
-            )))
-        }
+
+        self.work_queue.lock().await.spawn(async move {
+            let response = request
+                .send()
+                .await
+                .map_err(|_| DialogAsyncError::JoinError)?;
+
+            let status = response.status();
+
+            if status.is_success() {
+                Ok(())
+            } else {
+                Err(DialogAsyncError::JoinError)
+            }
+        });
+
+        Ok(())
     }
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
@@ -1013,8 +1031,9 @@ mod unit_tests {
             key_prefix: Some("test-prefix".to_string()),
             ..Default::default()
         };
+        let work_queue = Arc::new(Mutex::new(TaskQueue::default()));
 
-        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
+        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config, work_queue).unwrap();
         let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
 
@@ -1034,7 +1053,8 @@ mod unit_tests {
             ..Default::default()
         };
 
-        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
+        let backend =
+            RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config, Default::default()).unwrap();
         let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
 
@@ -1051,7 +1071,8 @@ mod unit_tests {
             ..Default::default()
         };
 
-        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
+        let backend =
+            RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config, Default::default()).unwrap();
         let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
 
@@ -1068,7 +1089,8 @@ mod unit_tests {
             ..Default::default()
         };
 
-        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
+        let backend =
+            RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config, Default::default()).unwrap();
         let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
 
@@ -1085,7 +1107,8 @@ mod unit_tests {
             ..Default::default()
         };
 
-        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
+        let backend =
+            RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config, Default::default()).unwrap();
         let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let url = backend.build_url(key.as_ref(), "GET").unwrap();
 
@@ -1134,7 +1157,8 @@ mod unit_tests {
     #[test]
     fn test_calculate_checksum() {
         let config = RestStorageConfig::default();
-        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
+        let backend =
+            RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config, Default::default()).unwrap();
 
         // Test with a known value
         let data = b"hello world";
@@ -1160,7 +1184,8 @@ mod unit_tests {
             ..Default::default()
         };
 
-        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
+        let backend =
+            RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config, Default::default()).unwrap();
         let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
 
         // Generate a signed URL
@@ -1207,7 +1232,8 @@ mod unit_tests {
             ..Default::default()
         };
 
-        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
+        let backend =
+            RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config, Default::default()).unwrap();
         let key = vec![1, 2, 3]; // Encodes to: !Ldp (base58-encoded with ! prefix)
         let value = b"hello world";
 
@@ -1247,7 +1273,8 @@ mod unit_tests {
             ..Default::default()
         };
 
-        let backend = RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config).unwrap();
+        let backend =
+            RestStorageBackend::<Vec<u8>, Vec<u8>>::new(config, Default::default()).unwrap();
 
         // Create a simple request and prepare it
         let client = reqwest::Client::new();

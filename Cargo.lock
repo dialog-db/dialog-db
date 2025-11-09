@@ -752,6 +752,10 @@ name = "dialog-common"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "futures",
+ "thiserror 2.0.17",
+ "tokio",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

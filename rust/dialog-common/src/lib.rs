@@ -9,3 +9,6 @@ pub use sync::*;
 
 mod hash;
 pub use hash::*;
+
+mod r#async;
+pub use r#async::*;
