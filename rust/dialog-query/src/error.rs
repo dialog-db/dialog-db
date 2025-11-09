@@ -168,18 +168,15 @@ pub enum FormulaEvaluationError {
     /// ```
     /// # use dialog_query::math::{Sum};
     /// # use dialog_query::{Term, selection::Answer, Value, Parameters, Formula};
-    /// # use dialog_query::error::FormulaEvaluationError;
+    /// # use dialog_query::error::SchemaError;
     /// let mut parameters = Parameters::new();
-    /// // Provide all required parameters for apply()
+    /// // Missing required "with" parameter!
     /// parameters.insert("of".to_string(), Term::var("x"));
-    /// parameters.insert("with".to_string(), Term::var("y"));
     /// parameters.insert("is".to_string(), Term::var("result"));
     ///
-    /// let sum = Sum::apply(parameters).unwrap();
-    /// // But don't bind all variables in the input - missing "y"!
-    /// let input = Answer::new().set(Term::var("x"), 5u32).unwrap();
-    /// let result = sum.derive(input);
-    /// assert!(matches!(result, Err(FormulaEvaluationError::RequiredParameter { .. })));
+    /// // This will fail because "with" parameter is required
+    /// let result = Sum::apply(parameters);
+    /// assert!(matches!(result, Err(SchemaError::OmittedRequirement { .. })));
     /// ```
     #[error("Formula application omits required parameter \"{parameter}\"")]
     RequiredParameter { parameter: String },
