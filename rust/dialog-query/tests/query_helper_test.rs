@@ -2,20 +2,26 @@
 
 use anyhow::Result;
 use dialog_query::{
-    artifact::{Artifacts, Attribute, Entity, Value},
+    artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value},
     term::Term,
-    Concept, Match, Relation, Session,
+    Attribute, Concept, Match, Relation, Session,
 };
 use dialog_storage::MemoryStorageBackend;
 
-/// Helper function to commit claims using the transaction-based API
+mod person {
+    use dialog_query::Attribute;
+
+    /// Name of the person
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Name(pub String);
+}
 
 #[derive(Concept, Debug, Clone)]
 pub struct Person {
     /// The entity this person represents
     pub this: Entity,
     /// Name of the person
-    pub name: String,
+    pub name: person::Name,
 }
 
 #[tokio::test]
@@ -30,12 +36,12 @@ async fn test_person_concept_basic() -> Result<()> {
 
     let claims = vec![
         Relation {
-            the: "person/name".parse::<Attribute>()?,
+            the: "person/name".parse::<ArtifactAttribute>()?,
             of: alice.clone(),
             is: Value::String("Alice".to_string()),
         },
         Relation {
-            the: "person/name".parse::<Attribute>()?,
+            the: "person/name".parse::<ArtifactAttribute>()?,
             of: bob.clone(),
             is: Value::String("Bob".to_string()),
         },
@@ -47,7 +53,7 @@ async fn test_person_concept_basic() -> Result<()> {
     // Step 2: Create match patterns for querying
     let alice_match = Match::<Person> {
         this: Term::var("person"),
-        name: "Alice".into(),
+        name: Term::from("Alice".to_string()),
     };
 
     // Test the new convenient query method
@@ -57,7 +63,7 @@ async fn test_person_concept_basic() -> Result<()> {
     let people = alice_match.query(session).try_vec().await?;
 
     assert_eq!(people.len(), 1);
-    assert_eq!(people[0].name, "Alice");
+    assert_eq!(people[0].name.value(), "Alice");
 
     Ok(())
 }

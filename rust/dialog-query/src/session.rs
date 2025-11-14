@@ -443,11 +443,21 @@ mod tests {
         let store = Artifacts::anonymous(backend).await?;
         let mut _session = Session::open(store);
 
+        mod person {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Name(pub String);
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Age(pub u32);
+        }
+
         #[derive(Debug, Clone, PartialEq, Concept)]
         pub struct Person {
             this: Entity,
-            name: String,
-            age: u32,
+            name: person::Name,
+            age: person::Age,
         }
 
         // let alice = Entity::new()?;
@@ -652,23 +662,43 @@ mod tests {
         use crate::{Concept, Fact, Term};
         use dialog_storage::MemoryStorageBackend;
 
+        mod employee {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Name(pub String);
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Job(pub String);
+        }
+
+        mod stuff {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Name(pub String);
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Role(pub String);
+        }
+
         #[derive(Clone, Debug, PartialEq, Concept)]
         pub struct Employee {
             /// Employee
             pub this: Entity,
             /// Employee Name
-            pub name: String,
+            pub name: employee::Name,
             /// The job title of the employee
-            pub job: String,
+            pub job: employee::Job,
         }
 
         #[derive(Clone, Debug, PartialEq, Concept)]
         pub struct Stuff {
             pub this: Entity,
             /// Name of the stuff member
-            pub name: String,
+            pub name: stuff::Name,
             /// Role of the stuff member
-            pub role: String,
+            pub role: stuff::Role,
         }
 
         // employee can be derived from the stuff concept
@@ -708,8 +738,8 @@ mod tests {
 
         let _mallory = Stuff {
             this: Entity::new()?,
-            name: "Mallory".into(),
-            role: "developer".into(),
+            name: stuff::Name("Mallory".into()),
+            role: stuff::Role("developer".into()),
         };
 
         session.transact(vec![alice, bob]).await?;
@@ -748,23 +778,43 @@ mod tests {
         use crate::{Concept, Match, Term};
         use dialog_storage::MemoryStorageBackend;
 
+        mod employee {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Name(pub String);
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Job(pub String);
+        }
+
+        mod stuff {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Name(pub String);
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Role(pub String);
+        }
+
         #[derive(Clone, Debug, PartialEq, Concept)]
         pub struct Employee {
             /// Employee
             pub this: Entity,
             /// Employee Name
-            pub name: String,
+            pub name: employee::Name,
             /// The job title of the employee
-            pub job: String,
+            pub job: employee::Job,
         }
 
         #[derive(Clone, Debug, PartialEq, Concept)]
         pub struct Stuff {
             pub this: Entity,
             /// Name of the stuff member
-            pub name: String,
+            pub name: stuff::Name,
             /// Role of the stuff member
-            pub role: String,
+            pub role: stuff::Role,
         }
 
         // Define a rule using the clean function API - no manual DeductiveRule construction!
@@ -844,13 +894,14 @@ mod tests {
         let mut found_bob = false;
 
         for employee in employees {
-            match employee.name.as_str() {
+            use crate::Attribute as _;
+            match employee.name.value().as_str() {
                 "Alice" => {
-                    assert_eq!(employee.job, "manager");
+                    assert_eq!(employee.job.value(), "manager");
                     found_alice = true;
                 }
                 "Bob" => {
-                    assert_eq!(employee.job, "developer");
+                    assert_eq!(employee.job.value(), "developer");
                     found_bob = true;
                 }
                 name => panic!("Unexpected employee: {}", name),

@@ -325,34 +325,96 @@ impl<T: Scalar> Match<T> {
     }
 }
 
-pub trait Attribute {
+pub trait Attribute: Sized {
     type Type: Scalar;
 
     const NAMESPACE: &'static str;
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
-    const CARDINALITY: &'static Cardinality;
+    const CARDINALITY: Cardinality;
+    const SCHEMA: AttributeSchema<Self::Type>;
 
     fn value(&self) -> &Self::Type;
+    fn namespace() -> String {
+        Self::NAMESPACE.into()
+    }
+    fn name() -> String {
+        Self::NAME.into()
+    }
+    fn description() -> String {
+        Self::DESCRIPTION.into()
+    }
+    fn cardinality() -> Cardinality {
+        Self::CARDINALITY.clone()
+    }
     fn selector() -> crate::artifact::Attribute {
         format!("{}/{}", Self::NAMESPACE, Self::NAME)
             .parse()
             .expect("Failed to parse attribute")
     }
 
-    // Provide method versions for backwards compatibility
-    fn namespace() -> &'static str {
-        Self::NAMESPACE
+    /// Create a query builder for a specific entity
+    fn of<E: Into<Term<Entity>>>(entity: E) -> AttributeQueryBuilder<Self::Type> {
+        AttributeQueryBuilder {
+            schema: &Self::SCHEMA,
+            entity: entity.into(),
+            content_type: PhantomData,
+        }
     }
-    fn name() -> &'static str {
-        Self::NAME
+
+    fn content_type() -> Option<Type> {
+        <Self::Type as IntoType>::TYPE
     }
-    fn description() -> &'static str {
-        Self::DESCRIPTION
+}
+
+/// Query builder for attribute queries
+pub struct AttributeQueryBuilder<T: Scalar> {
+    schema: &'static AttributeSchema<T>,
+    entity: Term<Entity>,
+    content_type: PhantomData<T>,
+}
+
+impl<T: Scalar> AttributeQueryBuilder<T> {
+    pub fn is<V: Into<Term<T>>>(self, _value: V) -> Match<T> {
+        Match {
+            attribute: self.schema.clone(),
+            of: self.entity,
+        }
     }
-    fn cardinality() -> &'static Cardinality {
-        Self::CARDINALITY
+}
+
+/// Query pattern for attributes - enables Match::<AttributeType> { of, is } syntax
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttributeMatch<A: Attribute> {
+    pub of: Term<Entity>,
+    pub is: Term<A::Type>,
+    pub content_type: PhantomData<A>,
+}
+
+impl<A: Attribute> AttributeMatch<A> {
+    /// Create a new attribute match pattern
+    pub fn new(of: Term<Entity>, is: Term<A::Type>) -> Self {
+        Self {
+            of,
+            is,
+            content_type: PhantomData,
+        }
     }
+}
+
+impl<A: Attribute> Default for AttributeMatch<A> {
+    fn default() -> Self {
+        Self {
+            of: Term::var("of"),
+            is: Term::var("is"),
+            content_type: PhantomData,
+        }
+    }
+}
+
+/// Implement Quarriable for all Attribute types
+impl<A: Attribute> crate::dsl::Quarriable for A {
+    type Query = AttributeMatch<A>;
 }
 
 /// Macro to generate Quarriable and Claim implementations for attribute tuples
@@ -448,18 +510,20 @@ mod tests {
         impl Attribute for Name {
             type Type = String;
 
-            fn namespace() -> &'static str {
-                "person"
-            }
-            fn description() -> &'static str {
-                "The name of the person"
-            }
-            fn name() -> &'static str {
-                "name"
-            }
-            fn cardinality() -> &'static Cardinality {
-                &Cardinality::One
-            }
+            const NAMESPACE: &'static str = "person";
+            const NAME: &'static str = "name";
+            const DESCRIPTION: &'static str = "The name of the person";
+            const CARDINALITY: Cardinality = Cardinality::One;
+            const SCHEMA: crate::attribute::AttributeSchema<Self::Type> =
+                crate::attribute::AttributeSchema {
+                    namespace: Self::NAMESPACE,
+                    name: Self::NAME,
+                    description: Self::DESCRIPTION,
+                    cardinality: Self::CARDINALITY,
+                    content_type: <String as crate::types::IntoType>::TYPE,
+                    marker: std::marker::PhantomData,
+                };
+
             fn value(&self) -> &Self::Type {
                 &self.0
             }
@@ -469,18 +533,20 @@ mod tests {
         impl Attribute for Birthday {
             type Type = u32;
 
-            fn namespace() -> &'static str {
-                "person"
-            }
-            fn description() -> &'static str {
-                "The birthday of the person"
-            }
-            fn name() -> &'static str {
-                "birthday"
-            }
-            fn cardinality() -> &'static Cardinality {
-                &Cardinality::One
-            }
+            const NAMESPACE: &'static str = "person";
+            const NAME: &'static str = "birthday";
+            const DESCRIPTION: &'static str = "The birthday of the person";
+            const CARDINALITY: Cardinality = Cardinality::One;
+            const SCHEMA: crate::attribute::AttributeSchema<Self::Type> =
+                crate::attribute::AttributeSchema {
+                    namespace: Self::NAMESPACE,
+                    name: Self::NAME,
+                    description: Self::DESCRIPTION,
+                    cardinality: Self::CARDINALITY,
+                    content_type: <u32 as crate::types::IntoType>::TYPE,
+                    marker: std::marker::PhantomData,
+                };
+
             fn value(&self) -> &Self::Type {
                 &self.0
             }
@@ -491,7 +557,7 @@ mod tests {
     fn test_person_name() {
         let _name = person::Name("hello".into());
         // Basic test that Attribute trait is implemented
-        assert_eq!(person::Name::namespace(), "person");
-        assert_eq!(person::Name::name(), "name");
+        assert_eq!(person::Name::NAMESPACE, "person");
+        assert_eq!(person::Name::NAME, "name");
     }
 }

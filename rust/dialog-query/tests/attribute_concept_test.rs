@@ -8,15 +8,15 @@ mod person {
     use super::*;
 
     /// Name of the person
-    #[derive(Attribute, Debug, Clone, PartialEq)]
+    #[derive(Attribute, Clone, PartialEq)]
     pub struct Name(pub String);
 
     /// Birthday of the person (Unix timestamp)
-    #[derive(Attribute, Debug, Clone, PartialEq)]
+    #[derive(Attribute, Clone, PartialEq)]
     pub struct Birthday(pub u32);
 
     /// Email address of the person
-    #[derive(Attribute, Debug, Clone, PartialEq)]
+    #[derive(Attribute, Clone, PartialEq)]
     pub struct Email(pub String);
 }
 

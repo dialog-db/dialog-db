@@ -4,15 +4,15 @@ mod employee {
     use super::*;
 
     /// Name of the employee
-    #[derive(Attribute, Debug, Clone)]
+    #[derive(Attribute, Clone)]
     pub struct Name(pub String);
 
     /// Job title of the employee
-    #[derive(Attribute, Debug, Clone)]
+    #[derive(Attribute, Clone)]
     pub struct Job(pub String);
 
     /// Salary of the employee
-    #[derive(Attribute, Debug, Clone)]
+    #[derive(Attribute, Clone)]
     pub struct Salary(pub u32);
 }
 
@@ -20,11 +20,11 @@ mod person {
     use super::*;
 
     /// Name of the person
-    #[derive(Attribute, Debug, Clone)]
+    #[derive(Attribute, Clone)]
     pub struct Name(pub String);
 
     /// Employees managed by this person
-    #[derive(Attribute, Debug, Clone)]
+    #[derive(Attribute, Clone)]
     #[cardinality(many)]
     pub struct Manages(pub dialog_query::Entity);
 }
@@ -43,7 +43,7 @@ fn test_employee_name_derives_attribute() {
     assert_eq!(employee::Name::description(), "Name of the employee");
 
     // Test cardinality - should default to One
-    assert_eq!(employee::Name::cardinality(), &Cardinality::One);
+    assert_eq!(employee::Name::cardinality(), Cardinality::One);
 
     // Test value
     assert_eq!(name.value(), "Alice");
@@ -59,7 +59,7 @@ fn test_employee_job_derives_attribute() {
     assert_eq!(employee::Job::namespace(), "employee");
     assert_eq!(employee::Job::name(), "job");
     assert_eq!(employee::Job::description(), "Job title of the employee");
-    assert_eq!(employee::Job::cardinality(), &Cardinality::One);
+    assert_eq!(employee::Job::cardinality(), Cardinality::One);
     assert_eq!(job.value(), "Engineer");
     assert_eq!(employee::Job::selector().to_string(), "employee/job");
 }
@@ -71,7 +71,7 @@ fn test_employee_salary_derives_attribute() {
     assert_eq!(employee::Salary::namespace(), "employee");
     assert_eq!(employee::Salary::name(), "salary");
     assert_eq!(employee::Salary::description(), "Salary of the employee");
-    assert_eq!(employee::Salary::cardinality(), &Cardinality::One);
+    assert_eq!(employee::Salary::cardinality(), Cardinality::One);
     assert_eq!(salary.value(), &100000u32);
     assert_eq!(
         employee::Salary::selector().to_string(),
@@ -93,7 +93,7 @@ fn test_person_namespace() {
 #[test]
 fn test_cardinality_many() {
     // Test that cardinality(many) works
-    assert_eq!(person::Manages::cardinality(), &Cardinality::Many);
+    assert_eq!(person::Manages::cardinality(), Cardinality::Many);
     assert_eq!(
         person::Manages::description(),
         "Employees managed by this person"
@@ -105,7 +105,7 @@ mod custom_ns_test {
     use super::*;
 
     /// Custom namespace override test
-    #[derive(Attribute, Debug, Clone)]
+    #[derive(Attribute, Clone)]
     #[namespace = "custom"]
     pub struct Field(pub String);
 }

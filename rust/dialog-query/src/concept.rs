@@ -758,11 +758,21 @@ mod tests {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
+        mod employee {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            pub struct Name(pub String);
+
+            #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            pub struct Role(pub String);
+        }
+
         #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
         pub struct Employee {
             this: Entity,
-            name: String,
-            role: String,
+            name: employee::Name,
+            role: employee::Role,
         }
 
         let alice = Entity::new()?;
@@ -777,13 +787,13 @@ mod tests {
         transaction
             .assert(Employee {
                 this: alice.clone(),
-                name: "Alice".to_string(),
-                role: "cryptographer".to_string(),
+                name: employee::Name("Alice".to_string()),
+                role: employee::Role("cryptographer".to_string()),
             })
             .assert(Employee {
                 this: bob.clone(),
-                name: "Bob".to_string(),
-                role: "janitor".to_string(),
+                name: employee::Name("Bob".to_string()),
+                role: employee::Role("janitor".to_string()),
             })
             .assert(Relation {
                 the: "employee/name".parse::<ArtifactAttribute>()?,
@@ -810,18 +820,18 @@ mod tests {
             vec![
                 Employee {
                     this: bob.clone(),
-                    name: "Bob".to_string(),
-                    role: "janitor".to_string(),
+                    name: employee::Name("Bob".to_string()),
+                    role: employee::Role("janitor".to_string()),
                 },
                 Employee {
                     this: alice.clone(),
-                    name: "Alice".to_string(),
-                    role: "cryptographer".to_string(),
+                    name: employee::Name("Alice".to_string()),
+                    role: employee::Role("cryptographer".to_string()),
                 },
                 Employee {
                     this: mallory.clone(),
-                    name: "Mallory".to_string(),
-                    role: "Hacker".to_string(),
+                    name: employee::Name("Mallory".to_string()),
+                    role: employee::Role("Hacker".to_string()),
                 },
             ]
             .sort()
@@ -839,11 +849,21 @@ mod tests {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
+        mod person {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Name(pub String);
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Age(pub usize);
+        }
+
         #[derive(Concept, Debug, Clone, PartialEq)]
         pub struct Person {
             this: Entity,
-            name: String,
-            age: usize,
+            name: person::Name,
+            age: person::Age,
         }
 
         let alice = Entity::new()?;
@@ -852,8 +872,8 @@ mod tests {
         let mut session = Session::open(artifacts.clone());
         let alice_person = Person {
             this: alice.clone(),
-            name: "Alice".to_string(),
-            age: 25,
+            name: person::Name("Alice".to_string()),
+            age: person::Age(25),
         };
 
         session.transact(vec![alice_person.clone()]).await?;

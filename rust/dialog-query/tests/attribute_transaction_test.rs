@@ -8,19 +8,19 @@ mod employee {
     use super::*;
 
     /// Name of the employee
-    #[derive(Attribute, Debug, Clone)]
+    #[derive(Attribute, Clone)]
     pub struct Name(pub String);
 
     /// Job title of the employee
-    #[derive(Attribute, Debug, Clone)]
+    #[derive(Attribute, Clone)]
     pub struct Job(pub String);
 
     /// Salary of the employee
-    #[derive(Attribute, Debug, Clone)]
+    #[derive(Attribute, Clone)]
     pub struct Salary(pub u32);
 
     /// Employee's manager
-    #[derive(Attribute, Debug, Clone)]
+    #[derive(Attribute, Clone)]
     pub struct Manager(pub Entity);
 }
 
