@@ -1,5 +1,5 @@
 use dialog_query::artifact::Type;
-use dialog_query::attribute::Attribute;
+use dialog_query::attribute::AttributeSchema;
 use dialog_query::predicate::concept::Attributes;
 use dialog_query::predicate::Concept;
 
@@ -10,11 +10,11 @@ fn test_concept_serialization_to_specific_json() {
         attributes: Attributes::from(vec![
             (
                 "name".to_string(),
-                Attribute::new("user", "name", "User's name", Type::String),
+                AttributeSchema::new("user", "name", "User's name", Type::String),
             ),
             (
                 "age".to_string(),
-                Attribute::new("user", "age", "User's age", Type::UnsignedInt),
+                AttributeSchema::new("user", "age", "User's age", Type::UnsignedInt),
             ),
         ]),
     };
@@ -108,7 +108,7 @@ fn test_concept_round_trip_serialization() {
         operator: "game".to_string(),
         attributes: Attributes::from(vec![(
             "score".to_string(),
-            Attribute::new("game", "score", "Game score", Type::UnsignedInt),
+            AttributeSchema::new("game", "score", "Game score", Type::UnsignedInt),
         )]),
     };
 
@@ -148,7 +148,7 @@ fn test_expected_json_structure() {
         operator: "product".to_string(),
         attributes: Attributes::from(vec![(
             "id".to_string(),
-            Attribute::new("product", "id", "Product ID", Type::UnsignedInt),
+            AttributeSchema::new("product", "id", "Product ID", Type::UnsignedInt),
         )]),
     };
 

@@ -143,46 +143,51 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
         field_types.push(field_type);
         field_name_lits.push(field_name_lit.clone());
 
-        // Extract doc comment for the field
+        // Extract doc comment from the field (for Match struct docs)
+        // Actual attribute description comes from the Attribute trait
         let doc_comment = extract_doc_comments(&field.attrs);
         let doc_comment_lit = syn::LitStr::new(&doc_comment, proc_macro2::Span::call_site());
 
-        // Generate Match field (Term<T>)
+        // Extract the inner type from Attribute - the field type implements Attribute
+        // and we need <FieldType as Attribute>::Type for the Term wrapper
+        let inner_type = quote! { <#field_type as dialog_query::Attribute>::Type };
+
+        // Generate Match field (Term<InnerType>) where InnerType is the Attribute's Type
         match_fields.push(quote! {
             #[doc = #doc_comment_lit]
-            pub #field_name: dialog_query::term::Term<#field_type>
+            pub #field_name: dialog_query::term::Term<#inner_type>
         });
 
         terms_methods.push(quote! {
             impl #terms_name {
-                pub fn #field_name() -> dialog_query::Term<#field_type> {
-                    dialog_query::Term::<#field_type>::var(#field_name_lit)
+                pub fn #field_name() -> dialog_query::Term<#inner_type> {
+                    dialog_query::Term::<#inner_type>::var(#field_name_lit)
                 }
             }
         });
 
-        // Generate Attributes field (Match<T>)
+        // Generate Attributes field (Match<T>) - T is the Attribute's inner type
         attributes_fields.push(quote! {
             #[doc = #doc_comment_lit]
-            pub #field_name: dialog_query::attribute::Match<#field_type>
+            pub #field_name: dialog_query::attribute::Match<#inner_type>
         });
 
-        // Generate Assert field (Term<T>)
+        // Generate Assert field (Term<T>) - T is the Attribute's inner type
         assert_fields.push(quote! {
-            pub #field_name: dialog_query::term::Term<#field_type>
+            pub #field_name: dialog_query::term::Term<#inner_type>
         });
 
-        // Generate Retract field (Term<T>)
+        // Generate Retract field (Term<T>) - T is the Attribute's inner type
         retract_fields.push(quote! {
-            pub #field_name: dialog_query::term::Term<#field_type>
+            pub #field_name: dialog_query::term::Term<#inner_type>
         });
 
         // Generate attribute initialization for Attributes
-        let namespace_for_prefix = namespace.replace(".", "_");
+        // Use a normalized name for the static (since we can't use the field type's path)
         let prefixed_field_name = syn::Ident::new(
             &format!(
                 "{}_{}",
-                namespace_for_prefix.to_uppercase(),
+                namespace.replace(".", "_").to_uppercase(),
                 field_name_str.to_uppercase()
             ),
             field_name.span(),
@@ -191,34 +196,35 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             #field_name: #prefixed_field_name.of(entity.clone())
         });
 
-        // Get the compile-time data type for this field
-        let data_type_value = type_to_value_data_type(field_type);
+        // Generate static attribute definition by extracting metadata from the Attribute trait
+        // The field type implements Attribute, so we extract all metadata from its methods
+        // Uses LazyLock since methods may compute values at runtime
         typed_attributes.push(quote! {
-            /// Static attribute definition for #field_name
-            pub static #prefixed_field_name: dialog_query::attribute::Attribute<#field_type> = dialog_query::attribute::Attribute {
-                namespace: #namespace_lit,
-                name: #field_name_lit,
-                description: #doc_comment_lit,
-                cardinality: dialog_query::attribute::Cardinality::One,
-                content_type: #data_type_value,
-                marker: std::marker::PhantomData,
-            };
+            /// Static attribute definition for #field_name - delegates to Attribute trait
+            pub static #prefixed_field_name: std::sync::LazyLock<dialog_query::attribute::AttributeSchema<#inner_type>> =
+                std::sync::LazyLock::new(|| dialog_query::attribute::AttributeSchema {
+                    namespace: <#field_type as dialog_query::Attribute>::NAMESPACE,
+                    name: <#field_type as dialog_query::Attribute>::NAME,
+                    description: <#field_type as dialog_query::Attribute>::DESCRIPTION,
+                    cardinality: <#field_type as dialog_query::Attribute>::CARDINALITY,
+                    content_type: <#inner_type as dialog_query::types::IntoType>::TYPE,
+                    marker: std::marker::PhantomData,
+                });
         });
 
-        // Generate Attribute<Value> for the attributes() method
+        // Generate Attribute<Value> for the attributes() method - extracts from Attribute trait methods
         value_attributes.push(quote! {
-            dialog_query::attribute::Attribute {
-                namespace: #namespace_lit,
-                name: #field_name_lit,
-                description: #doc_comment_lit,
-                cardinality: dialog_query::attribute::Cardinality::One,
-                content_type: #data_type_value,
+            dialog_query::attribute::AttributeSchema {
+                namespace: <#field_type as dialog_query::Attribute>::NAMESPACE,
+                name: <#field_type as dialog_query::Attribute>::NAME,
+                description: <#field_type as dialog_query::Attribute>::DESCRIPTION,
+                cardinality: <#field_type as dialog_query::Attribute>::CARDINALITY,
+                content_type: <#inner_type as dialog_query::types::IntoType>::TYPE,
                 marker: std::marker::PhantomData,
             }
         });
 
-        // Generate rule when field conversion - convert Term<T> to Term<Value>
-        let attr_string = format!("{}/{}", namespace, field_name_str);
+        // Generate rule when field conversion - use Attribute's selector()
         rule_when_fields.push(quote! {
             {
                 let value_term = match &terms.#field_name {
@@ -230,7 +236,7 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
                 };
 
                 dialog_query::predicate::fact::Fact::select()
-                    .the(#attr_string)
+                    .the(<#field_type as dialog_query::Attribute>::selector().to_string())
                     .of(terms.this.clone())
                     .is(value_term)
             }
@@ -244,25 +250,27 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             }
         });
 
-        // Generate attribute tuples for Attributes implementation
+        // Generate attribute tuples for Attributes implementation - use Attribute metadata methods
         attributes_tuples.push(quote! {
-            (#field_name_lit, dialog_query::attribute::Attribute {
-                namespace: #namespace_lit,
-                name: #field_name_lit,
-                description: #doc_comment_lit,
-                cardinality: dialog_query::attribute::Cardinality::One,
-                content_type: #data_type_value,
-                marker: std::marker::PhantomData,
-            })
+            (
+                <#field_type as dialog_query::Attribute>::NAME,
+                dialog_query::attribute::AttributeSchema {
+                    namespace: <#field_type as dialog_query::Attribute>::NAMESPACE,
+                    name: <#field_type as dialog_query::Attribute>::NAME,
+                    description: <#field_type as dialog_query::Attribute>::DESCRIPTION,
+                    cardinality: <#field_type as dialog_query::Attribute>::CARDINALITY,
+                    content_type: <#inner_type as dialog_query::types::IntoType>::TYPE,
+                    marker: std::marker::PhantomData,
+                }
+            )
         });
 
-        // Generate Relation for IntoIterator implementation
-        let attr_string = format!("{}/{}", namespace, field_name_str);
+        // Generate Relation for IntoIterator implementation - extract value from Attribute
         instance_relations.push(quote! {
             dialog_query::Relation::new(
-                #attr_string.parse().expect("Failed to parse attribute"),
+                <#field_type as dialog_query::Attribute>::selector(),
                 self.this.clone(),
-                dialog_query::types::Scalar::as_value(&self.#field_name),
+                dialog_query::types::Scalar::as_value(<#field_type as dialog_query::Attribute>::value(&self.#field_name)),
             )
         });
     }
@@ -298,7 +306,22 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
         struct_name.span(),
     );
 
+    // Create validation function name
+    let validate_fn_name = syn::Ident::new(
+        &format!("validate_{}", struct_name.to_string().to_lowercase()),
+        struct_name.span(),
+    );
+
     let expanded = quote! {
+        // Compile-time validation that all fields (except 'this') implement Attribute
+        const _: () = {
+            fn assert_implements_attribute<T: dialog_query::Attribute>() {}
+            fn #validate_fn_name() {
+                // Each field type must implement Attribute trait
+                #(assert_implements_attribute::<#field_types>();)*
+            }
+        };
+
         /// Match pattern for #struct_name - has Term-wrapped fields for querying
         #[derive(Debug, Clone, PartialEq)]
         pub struct #match_name {
@@ -349,18 +372,39 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
         #(#typed_attributes)*
 
         /// All attributes as Attribute<Value> for the attributes() method
-        pub static #attributes_array_name: &[dialog_query::attribute::Attribute<dialog_query::artifact::Value>] = &[
-            #(#value_attributes),*
-        ];
+        pub static #attributes_array_name: std::sync::LazyLock<Vec<dialog_query::attribute::AttributeSchema<dialog_query::artifact::Value>>> =
+            std::sync::LazyLock::new(|| vec![
+                #(#value_attributes),*
+            ]);
 
         /// Attribute tuples for the Attributes trait implementation
-        pub static #attribute_tuples_name: &[(&str, dialog_query::attribute::Attribute<dialog_query::artifact::Value>)] = &[
-            #(#attributes_tuples),*
-        ];
+        pub static #attribute_tuples_name: std::sync::LazyLock<Vec<(String, dialog_query::attribute::AttributeSchema<dialog_query::artifact::Value>)>> =
+            std::sync::LazyLock::new(|| vec![
+                #(
+                    (#field_name_lits.to_string(), dialog_query::attribute::AttributeSchema {
+                        namespace: <#field_types as dialog_query::Attribute>::NAMESPACE,
+                        name: <#field_types as dialog_query::Attribute>::NAME,
+                        description: <#field_types as dialog_query::Attribute>::DESCRIPTION,
+                        cardinality: <#field_types as dialog_query::Attribute>::CARDINALITY,
+                        content_type: <<#field_types as dialog_query::Attribute>::Type as dialog_query::types::IntoType>::TYPE,
+                        marker: std::marker::PhantomData,
+                    })
+                ),*
+            ]);
 
-        /// Const Attributes for this concept (Static variant)
-        pub const #attributes_const_name: dialog_query::predicate::concept::Attributes =
-            dialog_query::predicate::concept::Attributes::Static(#attribute_tuples_name);
+        /// Static const array of attribute tuples for CONCEPT
+        static #attributes_const_name: &[(&str, dialog_query::attribute::AttributeSchema<dialog_query::artifact::Value>)] = &[
+            #(
+                (#field_name_lits, dialog_query::attribute::AttributeSchema {
+                    namespace: <#field_types as dialog_query::Attribute>::NAMESPACE,
+                    name: <#field_types as dialog_query::Attribute>::NAME,
+                    description: <#field_types as dialog_query::Attribute>::DESCRIPTION,
+                    cardinality: <#field_types as dialog_query::Attribute>::CARDINALITY,
+                    content_type: <<#field_types as dialog_query::Attribute>::Type as dialog_query::types::IntoType>::TYPE,
+                    marker: std::marker::PhantomData,
+                })
+            ),*
+        ];
 
         /// Const operator name for this concept
         pub const #operator_const_name: &str = #namespace_lit;
@@ -373,7 +417,8 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             fn realize(&self, source: dialog_query::selection::Answer) -> std::result::Result<Self::Instance, dialog_query::QueryError> {
                 Ok(#struct_name {
                     this: source.get(&self.this)?,
-                    #(#field_names: source.get(&self.#field_names)?),*
+                    // Wrap each extracted value in its Attribute constructor
+                    #(#field_names: #field_types(source.get(&self.#field_names)?)),*
                 })
             }
         }
@@ -476,7 +521,7 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             const CONCEPT: dialog_query::predicate::concept::Concept =
                 dialog_query::predicate::concept::Concept::Static {
                     operator: #namespace_lit,
-                    attributes: &#attributes_const_name,
+                    attributes: &dialog_query::predicate::concept::Attributes::Static(#attributes_const_name),
                 };
         }
 
@@ -591,6 +636,61 @@ fn to_snake_case(s: &str) -> String {
     }
 
     result
+}
+
+/// Convert PascalCase or snake_case to kebab-case at compile time
+/// Examples:
+/// - UserName -> user-name
+/// - HTTPRequest -> http-request
+/// - account_name -> account-name
+fn to_kebab_case(s: &str) -> String {
+    let mut result = String::new();
+    let mut prev_is_lower = false;
+    let mut prev_is_upper = false;
+
+    for (i, ch) in s.chars().enumerate() {
+        if ch == '_' {
+            result.push('-');
+            prev_is_lower = false;
+            prev_is_upper = false;
+        } else if ch.is_uppercase() {
+            // Add hyphen before uppercase if:
+            // 1. Not at start
+            // 2. Previous was lowercase (camelCase boundary)
+            // 3. Next is lowercase and previous was uppercase (HTTPRequest -> http-request)
+            if i > 0 && (prev_is_lower || (prev_is_upper && s.chars().nth(i + 1).map_or(false, |c| c.is_lowercase()))) {
+                result.push('-');
+            }
+            result.push(ch.to_lowercase().next().unwrap());
+            prev_is_lower = false;
+            prev_is_upper = true;
+        } else {
+            result.push(ch);
+            prev_is_lower = true;
+            prev_is_upper = false;
+        }
+    }
+
+    result
+}
+
+/// Convert module path to namespace at compile time
+/// Examples:
+/// - my_module::sub_module -> my-module.sub-module
+/// - crate_name::my::config -> my.config (skips crate name)
+fn module_path_to_namespace(path: &str) -> String {
+    let segments: Vec<&str> = path.split("::").collect();
+    let relevant_segments = if segments.len() > 1 {
+        &segments[1..]  // Skip crate name
+    } else {
+        &segments[..]
+    };
+
+    relevant_segments
+        .iter()
+        .map(|s| s.replace('_', "-"))
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// Derive macro to generate Formula implementation from a struct definition.
@@ -929,4 +1029,291 @@ fn parse_derived_attribute(attrs: &[Attribute]) -> Option<usize> {
         }
     }
     None
+}
+
+/// Derive macro for the Attribute trait
+///
+/// Generates an implementation of the `dialog_query::attribute::Attribute` trait
+/// for tuple structs that wrap a single Scalar value.
+///
+/// # Example
+///
+/// ```ignore
+/// mod employee {
+///     use dialog_query::attribute::Attribute;
+///
+///     /// Name of the employee
+///     #[derive(Attribute)]
+///     pub struct Name(String);
+///
+///     /// Employees managed by this entity
+///     #[derive(Attribute)]
+///     #[cardinality(many)]
+///     pub struct Manages(Entity);
+/// }
+/// ```
+///
+/// # Attributes
+///
+/// - `#[cardinality(many)]` - Marks the attribute as having many values (defaults to One)
+/// - `#[namespace = "custom"]` - Override the default namespace (defaults to lowercase struct name)
+///
+/// # Generated Implementation
+///
+/// The macro generates:
+/// - `namespace()` - Returns the namespace (defaults to lowercase struct name)
+/// - `name()` - Returns the attribute name (lowercase struct name)
+/// - `description()` - Returns doc comment text
+/// - `cardinality()` - Returns cardinality (One or Many)
+/// - `value()` - Returns reference to the wrapped value
+/// - `selector()` - Returns the full attribute selector (namespace/name)
+#[proc_macro_derive(Attribute, attributes(cardinality, namespace))]
+pub fn derive_attribute(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+
+    let struct_name = &input.ident;
+
+    // Parse tuple struct with single field
+    let wrapped_type = match &input.data {
+        Data::Struct(data_struct) => match &data_struct.fields {
+            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                &fields.unnamed.first().unwrap().ty
+            }
+            Fields::Unnamed(_) => {
+                return syn::Error::new_spanned(
+                    &input,
+                    "Attribute can only be derived for tuple structs with exactly one field",
+                )
+                .to_compile_error()
+                .into();
+            }
+            _ => {
+                return syn::Error::new_spanned(
+                    &input,
+                    "Attribute can only be derived for tuple structs (e.g., struct Name(String))",
+                )
+                .to_compile_error()
+                .into();
+            }
+        },
+        _ => {
+            return syn::Error::new_spanned(
+                &input,
+                "Attribute can only be derived for tuple structs",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    // Check if namespace is explicitly specified
+    let explicit_namespace = parse_namespace_attribute(&input.attrs);
+
+    // Extract attribute name (convert PascalCase/snake_case to kebab-case)
+    let attr_name = to_kebab_case(&struct_name.to_string());
+    let attr_name_lit = syn::LitStr::new(&attr_name, proc_macro2::Span::call_site());
+
+    // Extract doc comments
+    let description = extract_doc_comments(&input.attrs);
+    let description_lit = syn::LitStr::new(&description, proc_macro2::Span::call_site());
+
+    // Parse cardinality
+    let cardinality = parse_cardinality_attribute(&input.attrs);
+
+    // Create static schema name
+    let schema_name = syn::Ident::new(
+        &format!("{}_SCHEMA", struct_name.to_string().to_uppercase()),
+        struct_name.span(),
+    );
+
+    // Generate namespace static names (unique per struct)
+    let compute_len_name = syn::Ident::new(
+        &format!("__compute_{}_namespace_len", struct_name.to_string().to_lowercase()),
+        struct_name.span(),
+    );
+    let compute_bytes_name = syn::Ident::new(
+        &format!("__compute_{}_namespace_bytes", struct_name.to_string().to_lowercase()),
+        struct_name.span(),
+    );
+    let namespace_len_name = syn::Ident::new(
+        &format!("__{}_NAMESPACE_LEN", struct_name.to_string().to_uppercase()),
+        struct_name.span(),
+    );
+    let namespace_bytes_name = syn::Ident::new(
+        &format!("{}_NAMESPACE_BYTES", struct_name.to_string().to_uppercase()),
+        struct_name.span(),
+    );
+    let namespace_name = syn::Ident::new(
+        &format!("{}_NAMESPACE", struct_name.to_string().to_uppercase()),
+        struct_name.span(),
+    );
+
+    // Generate namespace - explicit or derived
+    let (namespace_static_decl, namespace_expr) = if let Some(ref ns) = explicit_namespace {
+        let ns_lit = syn::LitStr::new(ns, proc_macro2::Span::call_site());
+        (quote! {}, quote! { #ns_lit })
+    } else {
+        // For derived namespaces: use const fn with fixed-size array
+        (
+            quote! {
+                const fn #compute_len_name(path: &str) -> usize {
+                    let bytes = path.as_bytes();
+
+                    // Find the last segment (after the last ::)
+                    let mut last_sep_pos = 0;
+                    let mut i = 0;
+                    while i < bytes.len() {
+                        if i + 1 < bytes.len() && bytes[i] == b':' && bytes[i + 1] == b':' {
+                            last_sep_pos = i + 2;
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+
+                    // Count length from last separator to end
+                    bytes.len() - last_sep_pos
+                }
+
+                const fn #compute_bytes_name<const N: usize>(path: &str) -> [u8; N] {
+                    let mut result = [0u8; N];
+                    let bytes = path.as_bytes();
+
+                    // Find the last segment (after the last ::)
+                    let mut last_sep_pos = 0;
+                    let mut i = 0;
+                    while i < bytes.len() {
+                        if i + 1 < bytes.len() && bytes[i] == b':' && bytes[i + 1] == b':' {
+                            last_sep_pos = i + 2;
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+
+                    // Copy last segment, converting underscore to hyphen
+                    let mut out = 0;
+                    i = last_sep_pos;
+                    while i < bytes.len() && out < N {
+                        let byte = if bytes[i] == b'_' { b'-' } else { bytes[i] };
+                        result[out] = byte;
+                        out += 1;
+                        i += 1;
+                    }
+
+                    result
+                }
+
+                const #namespace_len_name: usize = #compute_len_name(module_path!());
+                static #namespace_bytes_name: [u8; #namespace_len_name] = #compute_bytes_name(module_path!());
+                #[allow(non_upper_case_globals)]
+                static #namespace_name: &str = unsafe {
+                    std::str::from_utf8_unchecked(&#namespace_bytes_name)
+                };
+            },
+            quote! { #namespace_name },
+        )
+    };
+
+    let expanded = quote! {
+        #namespace_static_decl
+
+        impl dialog_query::attribute::Attribute for #struct_name {
+            type Type = #wrapped_type;
+
+            const NAMESPACE: &'static str = #namespace_expr;
+            const NAME: &'static str = #attr_name_lit;
+            const DESCRIPTION: &'static str = #description_lit;
+            const CARDINALITY: dialog_query::attribute::Cardinality = #cardinality;
+            const SCHEMA: dialog_query::attribute::AttributeSchema<Self::Type> = dialog_query::attribute::AttributeSchema {
+                namespace: Self::NAMESPACE,
+                name: Self::NAME,
+                description: Self::DESCRIPTION,
+                cardinality: Self::CARDINALITY,
+                content_type: <#wrapped_type as dialog_query::types::IntoType>::TYPE,
+                marker: std::marker::PhantomData,
+            };
+
+            fn value(&self) -> &Self::Type {
+                &self.0
+            }
+        }
+
+        // Debug implementation showing attribute metadata
+        impl std::fmt::Debug for #struct_name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct(stringify!(#struct_name))
+                    .field("namespace", &<Self as dialog_query::attribute::Attribute>::NAMESPACE)
+                    .field("name", &<Self as dialog_query::attribute::Attribute>::NAME)
+                    .field("value", &self.0)
+                    .finish()
+            }
+        }
+
+        // Display implementation showing selector and value
+        impl std::fmt::Display for #struct_name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}/{}: {:?}",
+                    <Self as dialog_query::attribute::Attribute>::NAMESPACE,
+                    <Self as dialog_query::attribute::Attribute>::NAME,
+                    self.0
+                )
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Parse the #[namespace = "..."] attribute
+/// Returns Some(namespace) if specified, None to use default
+fn parse_namespace_attribute(attrs: &[Attribute]) -> Option<String> {
+    for attr in attrs {
+        if attr.path().is_ident("namespace") {
+            if let Meta::NameValue(nv) = &attr.meta {
+                if let Expr::Lit(expr_lit) = &nv.value {
+                    if let Lit::Str(lit) = &expr_lit.lit {
+                        return Some(lit.value());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parse the #[cardinality(many)] attribute
+/// Returns the appropriate Cardinality reference
+fn parse_cardinality_attribute(attrs: &[Attribute]) -> proc_macro2::TokenStream {
+    for attr in attrs {
+        if attr.path().is_ident("cardinality") {
+            let result = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("many") {
+                    Ok(())
+                } else if meta.path.is_ident("one") {
+                    Ok(())
+                } else {
+                    Err(meta.error("cardinality must be 'one' or 'many'"))
+                }
+            });
+
+            match result {
+                Ok(()) => {
+                    // Check which one it was
+                    if let Meta::List(list) = &attr.meta {
+                        let tokens_str = list.tokens.to_string();
+                        if tokens_str.contains("many") {
+                            return quote! { dialog_query::attribute::Cardinality::Many };
+                        }
+                    }
+                }
+                Err(e) => {
+                    panic!("Error parsing cardinality attribute: {}", e);
+                }
+            }
+        }
+    }
+
+    // Default to One
+    quote! { dialog_query::attribute::Cardinality::One }
 }

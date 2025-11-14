@@ -10,7 +10,7 @@ pub struct Person {
 mod person {
     pub use super::Person;
     use dialog_query::artifact::{Entity, Value};
-    use dialog_query::attribute::{Attribute, Cardinality};
+    use dialog_query::attribute::{AttributeSchema, Cardinality};
 
     use dialog_query::predicate::concept::Attributes;
     use dialog_query::term::Term;
@@ -22,7 +22,7 @@ mod person {
     const PERSON_ATTRIBUTES: Attributes = Attributes::Static(&[
         (
             "name",
-            Attribute {
+            AttributeSchema {
                 namespace: NAMESPACE,
                 name: "name",
                 description: "person name",
@@ -33,7 +33,7 @@ mod person {
         ),
         (
             "age",
-            Attribute {
+            AttributeSchema {
                 namespace: NAMESPACE,
                 name: "age",
                 description: "person age",

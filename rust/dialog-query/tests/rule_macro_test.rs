@@ -1,5 +1,17 @@
 use dialog_query::rule::Match;
-use dialog_query::{Concept, Entity, Term, Type};
+use dialog_query::{Attribute, Concept, Entity, Term, Type};
+
+mod person {
+    use dialog_query::Attribute;
+
+    /// Name of the person
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Name(pub String);
+
+    /// Birthday of the person
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Birthday(pub u32);
+}
 
 #[derive(Concept, Debug, Clone)]
 pub struct Person {
@@ -7,10 +19,10 @@ pub struct Person {
     pub this: Entity,
 
     /// Name of the person
-    pub name: String,
+    pub name: person::Name,
 
     /// Birthday of the person
-    pub birthday: u32,
+    pub birthday: person::Birthday,
 }
 
 #[test]

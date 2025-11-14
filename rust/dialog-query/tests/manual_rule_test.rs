@@ -1,6 +1,6 @@
 use dialog_query::application::ConceptApplication;
 use dialog_query::artifact::{Entity, Type, Value};
-use dialog_query::attribute::{Attribute, Cardinality};
+use dialog_query::attribute::Cardinality;
 use dialog_query::concept::{Concept, Instance, Match as ConceptMatch};
 use dialog_query::dsl::Quarriable;
 use dialog_query::rule::Match;
@@ -71,13 +71,15 @@ impl PersonTerms {
 
 // Module to hold Person-related constants and attributes
 pub mod person {
+    use dialog_query::attribute::AttributeSchema;
+
     use super::*;
 
     /// The namespace for Person attributes
     pub const NAMESPACE: &str = "person";
 
     /// Static attribute definitions
-    pub static NAME_ATTR: Attribute<String> = Attribute {
+    pub static NAME_ATTR: AttributeSchema<String> = AttributeSchema {
         namespace: NAMESPACE,
         name: "name",
         description: "Name of the person",
@@ -86,7 +88,7 @@ pub mod person {
         marker: PhantomData,
     };
 
-    pub static AGE_ATTR: Attribute<u32> = Attribute {
+    pub static AGE_ATTR: AttributeSchema<u32> = AttributeSchema {
         namespace: NAMESPACE,
         name: "age",
         description: "Age of the person",
@@ -96,8 +98,8 @@ pub mod person {
     };
 
     /// All attributes as Attribute<Value> for the attributes() method
-    pub static ATTRIBUTES: &[Attribute<Value>] = &[
-        Attribute {
+    pub static ATTRIBUTES: &[AttributeSchema<Value>] = &[
+        AttributeSchema {
             namespace: NAMESPACE,
             name: "name",
             description: "Name of the person",
@@ -105,7 +107,7 @@ pub mod person {
             content_type: Some(Type::String),
             marker: PhantomData,
         },
-        Attribute {
+        AttributeSchema {
             namespace: NAMESPACE,
             name: "age",
             description: "Age of the person",
@@ -116,10 +118,10 @@ pub mod person {
     ];
 
     /// Attribute tuples for the Attributes trait implementation
-    pub static ATTRIBUTE_TUPLES: &[(&str, Attribute<Value>)] = &[
+    pub static ATTRIBUTE_TUPLES: &[(&str, AttributeSchema<Value>)] = &[
         (
             "name",
-            Attribute {
+            AttributeSchema {
                 namespace: NAMESPACE,
                 name: "name",
                 description: "Name of the person",
@@ -130,7 +132,7 @@ pub mod person {
         ),
         (
             "age",
-            Attribute {
+            AttributeSchema {
                 namespace: NAMESPACE,
                 name: "age",
                 description: "Age of the person",

@@ -1,11 +1,11 @@
 use crate::application::ConceptApplication;
-use crate::attribute::Attribution;
+use crate::attribute::{AttributeSchema, Attribution};
 use crate::claim::Revert;
 use crate::error::SchemaError;
 use crate::types::Scalar;
 use crate::{
-    Application, Attribute, Cardinality, Claim, Entity, Field, Parameters, Relation, Requirement,
-    Schema, Type, Value,
+    Application, Cardinality, Claim, Entity, Field, Parameters, Relation, Requirement, Schema,
+    Type, Value,
 };
 
 use serde::{Deserialize, Serialize};
@@ -15,19 +15,19 @@ use std::ops::Not;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attributes {
     /// Static attributes from compile-time generated code (const-compatible)
-    Static(&'static [(&'static str, Attribute<Value>)]),
+    Static(&'static [(&'static str, AttributeSchema<Value>)]),
     /// Dynamic attributes from runtime construction
-    Dynamic(Vec<(String, Attribute<Value>)>),
+    Dynamic(Vec<(String, AttributeSchema<Value>)>),
 }
 
 /// Iterator over attribute (name, value) pairs
 pub enum AttributesIter<'a> {
-    Static(std::slice::Iter<'a, (&'static str, Attribute<Value>)>),
-    Dynamic(std::slice::Iter<'a, (String, Attribute<Value>)>),
+    Static(std::slice::Iter<'a, (&'static str, AttributeSchema<Value>)>),
+    Dynamic(std::slice::Iter<'a, (String, AttributeSchema<Value>)>),
 }
 
 impl<'a> Iterator for AttributesIter<'a> {
-    type Item = (&'a str, &'a Attribute<Value>);
+    type Item = (&'a str, &'a AttributeSchema<Value>);
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
@@ -96,8 +96,8 @@ impl Attributes {
     }
 }
 
-impl<const N: usize> From<[(&str, Attribute<Value>); N]> for Attributes {
-    fn from(arr: [(&str, Attribute<Value>); N]) -> Self {
+impl<const N: usize> From<[(&str, AttributeSchema<Value>); N]> for Attributes {
+    fn from(arr: [(&str, AttributeSchema<Value>); N]) -> Self {
         Attributes::Dynamic(
             arr.into_iter()
                 .map(|(name, attr)| (name.to_string(), attr))
@@ -106,14 +106,14 @@ impl<const N: usize> From<[(&str, Attribute<Value>); N]> for Attributes {
     }
 }
 
-impl<const N: usize> From<[(String, Attribute<Value>); N]> for Attributes {
-    fn from(arr: [(String, Attribute<Value>); N]) -> Self {
+impl<const N: usize> From<[(String, AttributeSchema<Value>); N]> for Attributes {
+    fn from(arr: [(String, AttributeSchema<Value>); N]) -> Self {
         Attributes::Dynamic(arr.into_iter().collect())
     }
 }
 
-impl From<Vec<(&str, Attribute<Value>)>> for Attributes {
-    fn from(vec: Vec<(&str, Attribute<Value>)>) -> Self {
+impl From<Vec<(&str, AttributeSchema<Value>)>> for Attributes {
+    fn from(vec: Vec<(&str, AttributeSchema<Value>)>) -> Self {
         Attributes::Dynamic(
             vec.into_iter()
                 .map(|(name, attr)| (name.to_string(), attr))
@@ -122,21 +122,21 @@ impl From<Vec<(&str, Attribute<Value>)>> for Attributes {
     }
 }
 
-impl From<Vec<(String, Attribute<Value>)>> for Attributes {
-    fn from(vec: Vec<(String, Attribute<Value>)>) -> Self {
+impl From<Vec<(String, AttributeSchema<Value>)>> for Attributes {
+    fn from(vec: Vec<(String, AttributeSchema<Value>)>) -> Self {
         Attributes::Dynamic(vec)
     }
 }
 
-impl From<HashMap<String, Attribute<Value>>> for Attributes {
-    fn from(map: HashMap<String, Attribute<Value>>) -> Self {
+impl From<HashMap<String, AttributeSchema<Value>>> for Attributes {
+    fn from(map: HashMap<String, AttributeSchema<Value>>) -> Self {
         Attributes::Dynamic(map.into_iter().collect())
     }
 }
 
 // From static slice - creates const-compatible Static variant
-impl From<&'static [(&'static str, Attribute<Value>)]> for Attributes {
-    fn from(slice: &'static [(&'static str, Attribute<Value>)]) -> Self {
+impl From<&'static [(&'static str, AttributeSchema<Value>)]> for Attributes {
+    fn from(slice: &'static [(&'static str, AttributeSchema<Value>)]) -> Self {
         Attributes::Static(slice)
     }
 }
@@ -147,7 +147,7 @@ impl Serialize for Attributes {
     where
         S: serde::Serializer,
     {
-        let map: HashMap<&str, &Attribute<Value>> = self.iter().collect();
+        let map: HashMap<&str, &AttributeSchema<Value>> = self.iter().collect();
         map.serialize(serializer)
     }
 }
@@ -158,7 +158,7 @@ impl<'de> Deserialize<'de> for Attributes {
     where
         D: serde::Deserializer<'de>,
     {
-        let map = HashMap::<String, Attribute<Value>>::deserialize(deserializer)?;
+        let map = HashMap::<String, AttributeSchema<Value>>::deserialize(deserializer)?;
         Ok(Attributes::from(map))
     }
 }
@@ -478,11 +478,11 @@ mod tests {
         let attributes = <Attributes as From<_>>::from([
             (
                 "name",
-                Attribute::<Value>::new("user", "name", "User's name", Type::String),
+                AttributeSchema::<Value>::new("user", "name", "User's name", Type::String),
             ),
             (
                 "age",
-                Attribute::<Value>::new("user", "age", "User's age", Type::UnsignedInt),
+                AttributeSchema::<Value>::new("user", "age", "User's age", Type::UnsignedInt),
             ),
         ]);
 
@@ -580,7 +580,7 @@ mod tests {
             operator: "game".to_string(),
             attributes: [(
                 "score",
-                Attribute::<Value>::new("game", "score", "Game score", Type::UnsignedInt),
+                AttributeSchema::<Value>::new("game", "score", "Game score", Type::UnsignedInt),
             )]
             .into(),
         };

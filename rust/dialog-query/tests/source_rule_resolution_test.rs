@@ -4,7 +4,7 @@ use dialog_query::{
     predicate::{concept::Attributes, Concept, DeductiveRule},
     query::Source,
     session::{QuerySession, Session},
-    Attribute,
+    AttributeSchema,
 };
 use dialog_storage::MemoryStorageBackend;
 
@@ -25,11 +25,11 @@ async fn test_session_source_rule_resolution() -> Result<()> {
         attributes: Attributes::from(vec![
             (
                 "name",
-                Attribute::new("adult", "name", "Adult name", Type::String),
+                AttributeSchema::new("adult", "name", "Adult name", Type::String),
             ),
             (
                 "age",
-                Attribute::new("adult", "age", "Adult age", Type::UnsignedInt),
+                AttributeSchema::new("adult", "age", "Adult age", Type::UnsignedInt),
             ),
         ]),
     };
@@ -104,7 +104,7 @@ async fn test_multiple_rules_same_operator() -> Result<()> {
         operator: "person".into(),
         attributes: [(
             "name".to_string(),
-            Attribute::new("person", "name", "Person name", Type::String),
+            AttributeSchema::new("person", "name", "Person name", Type::String),
         )]
         .into(),
     };
@@ -113,7 +113,7 @@ async fn test_multiple_rules_same_operator() -> Result<()> {
         operator: "person".into(),
         attributes: [(
             "age".to_string(),
-            Attribute::new("person", "age", "Person age", Type::UnsignedInt),
+            AttributeSchema::new("person", "age", "Person age", Type::UnsignedInt),
         )]
         .into(),
     };
@@ -160,7 +160,7 @@ async fn test_explicit_conversion_pattern() -> Result<()> {
         operator: "adult".into(),
         attributes: [(
             "name".to_string(),
-            Attribute::new("person", "name", "Adult name", Type::String),
+            AttributeSchema::new("person", "name", "Adult name", Type::String),
         )]
         .into(),
     };
