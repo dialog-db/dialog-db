@@ -19,7 +19,11 @@ use std::fmt::Debug;
 /// Concepts are used to describe conclusions of the rules, providing a mapping
 /// between conclusions and facts. In that sense you concepts are on-demand
 /// cache of all the conclusions from the associated rules.
-pub trait Concept: Quarriable + IntoIterator<Item = Relation> + Clone + Debug {
+///
+/// Note: IntoIterator is not a bound on this trait to allow attributes to
+/// implement Concept by delegating to their instance types (e.g., Title
+/// delegates to WithTitle). Instance types still implement IntoIterator.
+pub trait Concept: Quarriable + Clone + Debug {
     type Instance: Instance;
     /// Type representing a query of this concept. It is a set of terms
     /// corresponding to the set of attributes defined by this concept.
@@ -27,13 +31,6 @@ pub trait Concept: Quarriable + IntoIterator<Item = Relation> + Clone + Debug {
     type Match: Match<Concept = Self, Instance = Self::Instance>;
 
     type Term;
-    /// Type representing an assertion of this concept. It is used in the
-    /// inductive rules that describe how state of the concept changes
-    /// (or persists) over time.
-    type Assert;
-    /// Type representing a retraction of this concept. It is used in the
-    /// inductive rules to describe conditions for the of the concepts lifecycle.
-    type Retract;
 
     /// The static concept definition for this type.
     /// This is typically defined by the macro as a Concept::Static variant.
@@ -141,28 +138,11 @@ mod tests {
         }
     }
 
-    // PersonAssert for assertions - uses typed Terms, no 'this' field
-    #[derive(Debug, Clone)]
-    #[allow(dead_code)]
-    struct PersonAssert {
-        pub name: Term<String>,
-        pub age: Term<u32>,
-    }
-
-    // PersonRetract for retractions - uses typed Terms, no 'this' field
-    #[derive(Debug, Clone)]
-    #[allow(dead_code)]
-    struct PersonRetract {
-        pub name: Term<String>,
-        pub age: Term<u32>,
-    }
 
     // Implement Concept for Person
     impl Concept for Person {
         type Instance = Person;
         type Match = PersonMatch;
-        type Assert = PersonAssert;
-        type Retract = PersonRetract;
         type Term = PersonTerms;
 
         const CONCEPT: predicate::concept::Concept = {

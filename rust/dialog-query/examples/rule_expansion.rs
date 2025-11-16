@@ -125,8 +125,6 @@ mod person {
         type Instance = Person;
         type Match = Match;
         type Term = PersonTerms;
-        type Assert = Assert;
-        type Retract = Retract;
 
         const CONCEPT: dialog_query::predicate::concept::Concept =
             dialog_query::predicate::concept::Concept::Static {

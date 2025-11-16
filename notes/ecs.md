@@ -73,44 +73,82 @@ Attributes could be derived only on structs that wrap closed set of data types t
 
 ### Support for Atomic Records
 
-Attributes could also be derived for composite structs in which case they need to satisfy `ValueType` trait in which case they will be represented as bytes and serialized / deserialized on demand.
+> ⚠️ Note this is not yet supported, but something we should be able to support in the future.
+
+Attributes could also be derived for composite structs that satisfy `ValueType` trait. Such attribute values can be represented as bytes and serialized / deserialized on demand.
 
 Generally it is recommended to use this only in cases where only atomic updates should be possible. Geolocation and time are good example of values where updating individual components should not be possible.
 
-## Concepts
+## Working with Attributes
 
-Dialog has notion of concepts which is similar to [entity maps]  in clojure spec. It is also equivalent to queries in bevy. Concepts can be made up on the fly with a group of attributes.
+### Assertions and Retractions
+
+Attributes can be asserted and retracted on entities ad-hoc using `With<A>` wrapper, representing an entity that has desired attribute:
 
 ```rs
-pub mod person {
-    /// Name of the person
-    #[derive(Attribute, Debug, Clone)]
-    pub struct Name(String);
+use dialog_query::With;
 
-    /// Address of the person
-    #[derive(Attribute, Debug, Clone)]
-    pub struct Birthday(String);
-}
+let mut session = Session::open(store.clone());
+let mut transaction = session.edit();
 
-/// Person entity a name and an address
-type Person = (Entity, person::Name, person::Birthday);
+// Assert an attribute on an entity
+transaction.assert(With {
+    this: alice,
+    has: employee::Name("Alice".into()),
+});
 
-let alice = Match<Person>(
-    Term::var("person"),
-    "Alice".into(),
-    birthday: 1983_07_03u32.into(),
-);
+// Retract an attribute
+transaction.retract(With {
+    this: alice,
+    has: employee::Name("Alison".into()),
+});
 
-let store = MemoryStorageBackend::default();
-let artifacts = Artifacts::anonymous(store).await?;
-let dialog = Dialog::open(artifacts);
-
-// Find for all `Person` that have name `Alice` and birthday `1983_07_03`
-let results = alice.query(dialog).await?;
+// commit transaction
+session.commit(transaction).await?;
 ```
 
-It is also possible to define more reusable concepts with named members as follows
+### Querying Attributes
 
+Query for entities with specific attributes using `Match::<With<A>>` syntax. The value field is always named `has`:
+
+```rs
+// Query for all entities with a name attribute
+let query = Match::<With<employee::Name>> {
+    this: Term::var("entity"),
+    has: Term::var("has"),  // Always "has", regardless of attribute type
+};
+
+// Query with a specific value
+let query = Match::<With<employee::Name>> {
+    this: Term::var("entity"),
+    has: Term::from("Alice"),
+};
+```
+
+### Using Attributes in Rules
+
+Attributes work seamlessly in rule definitions:
+
+```rs
+pub fn migrate_name(terms: Match<Employee>) -> impl When {
+    (
+        // has employee_v2::Name
+        Match::<With<employee_v2::Name>> {
+            this: terms.this.clone(),
+            has: terms.name.clone(),
+        },
+        // and does not have employee::Name
+        !Match::<With<employee::Name>> {
+            this: terms.this,
+            has: terms.name,
+        },
+    )
+}
+```
+
+## Concepts
+
+Dialog has notion of concepts which combine multiple attributes into reusable patterns:
 
 ```rs
 #[derive(Concept, Debug, Clone)]
@@ -120,8 +158,7 @@ pub struct Person {
     birthday: person::Birthday,
 }
 
-// Predicate that can be used to query for `Person` with given
-// name `John` and birthday `1983_07_03`
+// Query for a person with specific values
 let john = Match::<Person> {
     this: Term::var("person"),
     name: "John".into(),
@@ -132,34 +169,8 @@ let store = MemoryStorageBackend::default();
 let artifacts = Artifacts::anonymous(store).await?;
 let session = Dialog::open(artifacts);
 
-// Find for all `Person` that have name `John` and birthday `1983_07_03`
+// Find all Person entities matching the pattern
 let results = john.query(session).await?;
-```
-
-## Updates
-
-Updating individual attributes on entity should be pretty straightforward.
-
-```rs
-let mut transaction = session.edit();
-
-// retracts name "Alice"
-transaction.retract(
-    (
-        alice,
-        person::Name("Alice"),
-    )
-);
-// and assert name "Alison" instead
-transaction.assert(
-    (
-        alice,
-        person::Name("Alison"),
-        employee::Job("Neuropsychologist"),
-    )
-);
-
-transaction.commit().await?;
 ```
 
 [datomic schema]:https://docs.datomic.com/schema/schema-reference.html

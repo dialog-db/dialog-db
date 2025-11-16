@@ -4,8 +4,8 @@ use crate::claim::Revert;
 use crate::error::SchemaError;
 use crate::types::Scalar;
 use crate::{
-    Application, Cardinality, Claim, Entity, Field, Parameters, Relation, Requirement, Schema,
-    Type, Value,
+    Application, Attribute, Cardinality, Claim, Entity, Field, Parameters, Relation, Requirement,
+    Schema, Term, Type, Value,
 };
 
 use serde::{Deserialize, Serialize};

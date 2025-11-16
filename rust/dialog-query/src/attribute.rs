@@ -1,10 +1,11 @@
-use crate::application::{Application, FactApplication};
+use crate::application::FactApplication;
 pub use crate::artifact::{Attribute as ArtifactsAttribute, Cause, Entity, Value};
+use crate::claim::Claim;
 use crate::error::{SchemaError, TypeError};
 pub use crate::predicate::Fact;
 pub use crate::schema::Cardinality;
 pub use crate::types::{IntoType, Scalar, Type};
-use crate::Parameters;
+use crate::{Application, Parameters, Relation, Transaction};
 pub use crate::{Premise, Term};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use std::marker::PhantomData;
@@ -328,13 +329,22 @@ impl<T: Scalar> Match<T> {
 pub trait Attribute: Sized {
     type Type: Scalar;
 
+    // Associated types for Concept implementation
+    type Match;
+    type Instance;
+    type Term;
+
     const NAMESPACE: &'static str;
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
     const CARDINALITY: Cardinality;
     const SCHEMA: AttributeSchema<Self::Type>;
+    const CONCEPT: crate::predicate::concept::Concept;
 
     fn value(&self) -> &Self::Type;
+
+    /// Construct an attribute from its inner value
+    fn from_value(value: Self::Type) -> Self;
     fn namespace() -> String {
         Self::NAMESPACE.into()
     }
@@ -412,94 +422,251 @@ impl<A: Attribute> Default for AttributeMatch<A> {
     }
 }
 
-/// Implement Quarriable for all Attribute types
-impl<A: Attribute> crate::dsl::Quarriable for A {
-    type Query = AttributeMatch<A>;
+/// Quarriable is now implemented by the #[derive(Attribute)] macro
+/// to generate a proper Match struct for each attribute.
+/// The blanket implementation has been removed to avoid conflicts.
+
+/// Type-erases an attribute schema to AttributeSchema<Value>.
+/// This is necessary for storing attribute schemas in const contexts and enums.
+fn erase_attribute_type<A: Attribute>() -> AttributeSchema<Value>
+where
+    A::Type: Scalar,
+{
+    AttributeSchema {
+        namespace: A::NAMESPACE,
+        name: A::NAME,
+        description: A::DESCRIPTION,
+        cardinality: A::SCHEMA.cardinality,
+        content_type: A::SCHEMA.content_type,
+        marker: std::marker::PhantomData,
+    }
 }
 
-/// Macro to generate Quarriable and Claim implementations for attribute tuples
-macro_rules! impl_attribute_tuples {
-    // Base case: (Entity, T1, T2, ...)
-    ($(($($T:ident),+)),*) => {
-        $(
-            impl_attribute_tuples!(@quarriable $($T),+);
-            impl_attribute_tuples!(@claim $($T),+);
-        )*
-    };
-
-    // Generate Quarriable for (Entity, T1, T2, ...)
-    (@quarriable $($T:ident),+) => {
-        impl<$($T: Attribute),+> crate::dsl::Quarriable for (Entity, $($T),+) {
-            type Query = (Term<Entity>, $(Term<$T::Type>),+);
-        }
-    };
-
-    // Generate Claim for (Entity, T1, T2, ...)
-    (@claim $T1:ident $(, $T:ident)*) => {
-        #[allow(non_snake_case)]
-        impl<$T1: Attribute $(, $T: Attribute)*> crate::claim::Claim for (Entity, $T1 $(, $T)*) {
-            fn assert(self, transaction: &mut crate::Transaction) {
-                let (entity, $T1 $(, $T)*) = self;
-
-                transaction.associate(crate::Relation {
-                    the: $T1::selector(),
-                    of: entity.clone(),
-                    is: $T1.value().as_value(),
-                });
-
-                $(
-                    transaction.associate(crate::Relation {
-                        the: $T::selector(),
-                        of: entity.clone(),
-                        is: $T.value().as_value(),
-                    });
-                )*
-            }
-
-            fn retract(self, transaction: &mut crate::Transaction) {
-                let (entity, $T1 $(, $T)*) = self;
-
-                transaction.dissociate(crate::Relation {
-                    the: $T1::selector(),
-                    of: entity.clone(),
-                    is: $T1.value().as_value(),
-                });
-
-                $(
-                    transaction.dissociate(crate::Relation {
-                        the: $T::selector(),
-                        of: entity.clone(),
-                        is: $T.value().as_value(),
-                    });
-                )*
-            }
-        }
-    };
+/// Represents an entity with a single attribute.
+///
+/// Used to assert, retract, and query entities by their attributes.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Assertion
+/// tr.assert(With {
+///     this: alice,
+///     has: person::Name("Alice".into())
+/// });
+///
+/// // Retraction
+/// tr.retract(With {
+///     this: alice,
+///     has: person::Name("Alice".into())
+/// });
+///
+/// // Query
+/// Match::<With<person::Name>> {
+///     this: Term::var("entity"),
+///     has: Term::var("name")
+/// }
+/// ```
+#[derive(Clone, Debug, PartialEq)]
+pub struct With<A: Attribute> {
+    pub this: Entity,
+    pub has: A,
 }
 
-// Generate implementations for tuples of size 1-15 (matching Bevy's tuple limits)
-impl_attribute_tuples!(
-    (T1),
-    (T1, T2),
-    (T1, T2, T3),
-    (T1, T2, T3, T4),
-    (T1, T2, T3, T4, T5),
-    (T1, T2, T3, T4, T5, T6),
-    (T1, T2, T3, T4, T5, T6, T7),
-    (T1, T2, T3, T4, T5, T6, T7, T8),
-    (T1, T2, T3, T4, T5, T6, T7, T8, T9),
-    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10),
-    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11),
-    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12),
-    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13),
-    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14),
-    (T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15)
-);
+/// Query pattern for entities with a specific attribute.
+///
+/// Use with the `Match` type alias to query for entities that have an attribute.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WithMatch<A: Attribute> {
+    pub this: Term<Entity>,
+    pub has: Term<A::Type>,
+}
+
+impl<A: Attribute> Default for WithMatch<A> {
+    fn default() -> Self {
+        Self {
+            this: Term::var("this"),
+            has: Term::var("has"),
+        }
+    }
+}
+
+/// Helper methods for constructing term variables in queries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WithTerms<A: Attribute> {
+    _marker: PhantomData<A>,
+}
+
+impl<A: Attribute> WithTerms<A> {
+    pub fn this() -> Term<Entity> {
+        Term::var("this")
+    }
+
+    pub fn has() -> Term<A::Type> {
+        Term::var("has")
+    }
+}
+
+// Implement Concept for With<A>
+impl<A: Attribute> crate::concept::Concept for With<A>
+where
+    A: Clone + std::fmt::Debug + Send + 'static,
+{
+    type Instance = With<A>;
+    type Match = WithMatch<A>;
+    type Term = WithTerms<A>;
+
+    const CONCEPT: crate::predicate::concept::Concept = A::CONCEPT;
+}
+
+// Implement Quarriable for With<A>
+impl<A: Attribute> crate::dsl::Quarriable for With<A>
+where
+    A: Clone + std::fmt::Debug + Send + 'static,
+{
+    type Query = WithMatch<A>;
+}
+
+// Implement Instance trait for With<A>
+impl<A: Attribute> crate::concept::Instance for With<A>
+where
+    A: Clone + Send,
+{
+    fn this(&self) -> Entity {
+        self.this.clone()
+    }
+}
+
+// Implement Claim trait for With<A>
+impl<A: Attribute> crate::claim::Claim for With<A>
+where
+    A: Clone,
+{
+    fn assert(self, transaction: &mut Transaction) {
+        use crate::types::Scalar;
+        crate::Relation::new(A::selector(), self.this, self.has.value().as_value())
+            .assert(transaction);
+    }
+
+    fn retract(self, transaction: &mut Transaction) {
+        use crate::types::Scalar;
+        crate::Relation::new(A::selector(), self.this, self.has.value().as_value())
+            .retract(transaction);
+    }
+}
+
+// Implement Not operator for With<A> to support retractions with `!`
+impl<A: Attribute> std::ops::Not for With<A>
+where
+    A: Clone,
+{
+    type Output = crate::claim::Revert<With<A>>;
+
+    fn not(self) -> Self::Output {
+        self.revert()
+    }
+}
+
+// Implement IntoIterator for With<A>
+impl<A: Attribute> IntoIterator for With<A>
+where
+    A: Clone,
+{
+    type Item = Relation;
+    type IntoIter = std::iter::Once<Relation>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        use crate::types::Scalar;
+        std::iter::once(crate::Relation::new(
+            A::selector(),
+            self.this,
+            self.has.value().as_value(),
+        ))
+    }
+}
+
+// Implement Match trait for WithMatch<A>
+impl<A: Attribute> crate::concept::Match for WithMatch<A>
+where
+    A: Clone + std::fmt::Debug + Send + 'static,
+{
+    type Concept = With<A>;
+    type Instance = With<A>;
+
+    fn realize(
+        &self,
+        source: crate::selection::Answer,
+    ) -> Result<Self::Instance, crate::QueryError> {
+        Ok(With {
+            this: source.get(&self.this)?,
+            has: A::from_value(source.get(&self.has)?),
+        })
+    }
+}
+
+// Implement Not operator for WithMatch<A> to support negations in pattern matching
+impl<A: Attribute> std::ops::Not for WithMatch<A>
+where
+    A: Clone + std::fmt::Debug + Send + 'static,
+{
+    type Output = crate::Premise;
+
+    fn not(self) -> Self::Output {
+        // Convert to Application, then wrap in Negation
+        let application: Application = self.into();
+        crate::Premise::Exclude(crate::negation::Negation::not(application))
+    }
+}
+
+// Implement From<WithMatch<A>> for Parameters
+impl<A: Attribute> From<WithMatch<A>> for Parameters
+where
+    A: Clone,
+{
+    fn from(source: WithMatch<A>) -> Self {
+        let mut params = Self::new();
+        params.insert("this".to_string(), source.this.as_unknown());
+        params.insert("has".to_string(), source.has.as_unknown());
+        params
+    }
+}
+
+// Implement From<WithMatch<A>> for ConceptApplication
+impl<A: Attribute> From<WithMatch<A>> for crate::application::ConceptApplication
+where
+    A: Clone,
+{
+    fn from(source: WithMatch<A>) -> Self {
+        crate::application::ConceptApplication {
+            terms: source.into(),
+            concept: A::CONCEPT,
+        }
+    }
+}
+
+// Implement From<WithMatch<A>> for Application
+impl<A: Attribute> From<WithMatch<A>> for Application
+where
+    A: Clone,
+{
+    fn from(source: WithMatch<A>) -> Self {
+        Application::Concept(source.into())
+    }
+}
+
+// Implement From<WithMatch<A>> for Premise
+impl<A: Attribute> From<WithMatch<A>> for Premise
+where
+    A: Clone,
+{
+    fn from(source: WithMatch<A>) -> Self {
+        Premise::Apply(source.into())
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use crate::attribute::Attribute;
-    use crate::Cardinality;
 
     mod person {
         use crate::attribute::Attribute;
@@ -507,8 +674,30 @@ mod tests {
 
         pub struct Name(pub String);
 
+        const NAME_CONCEPT: crate::predicate::concept::Concept = {
+            const ATTRS: crate::predicate::concept::Attributes =
+                crate::predicate::concept::Attributes::Static(&[(
+                    "name",
+                    crate::attribute::AttributeSchema {
+                        namespace: "person",
+                        name: "name",
+                        description: "The name of the person",
+                        cardinality: Cardinality::One,
+                        content_type: <String as crate::types::IntoType>::TYPE,
+                        marker: std::marker::PhantomData,
+                    },
+                )]);
+            crate::predicate::concept::Concept::Static {
+                operator: "person",
+                attributes: &ATTRS,
+            }
+        };
+
         impl Attribute for Name {
             type Type = String;
+            type Match = crate::attribute::WithMatch<Self>;
+            type Instance = crate::attribute::With<Self>;
+            type Term = crate::attribute::WithTerms<Self>;
 
             const NAMESPACE: &'static str = "person";
             const NAME: &'static str = "name";
@@ -523,15 +712,43 @@ mod tests {
                     content_type: <String as crate::types::IntoType>::TYPE,
                     marker: std::marker::PhantomData,
                 };
+            const CONCEPT: crate::predicate::concept::Concept = NAME_CONCEPT;
 
             fn value(&self) -> &Self::Type {
                 &self.0
             }
+
+            fn from_value(value: Self::Type) -> Self {
+                Self(value)
+            }
         }
 
         pub struct Birthday(pub u32);
+
+        const BIRTHDAY_CONCEPT: crate::predicate::concept::Concept = {
+            const ATTRS: crate::predicate::concept::Attributes =
+                crate::predicate::concept::Attributes::Static(&[(
+                    "birthday",
+                    crate::attribute::AttributeSchema {
+                        namespace: "person",
+                        name: "birthday",
+                        description: "The birthday of the person",
+                        cardinality: Cardinality::One,
+                        content_type: <u32 as crate::types::IntoType>::TYPE,
+                        marker: std::marker::PhantomData,
+                    },
+                )]);
+            crate::predicate::concept::Concept::Static {
+                operator: "person",
+                attributes: &ATTRS,
+            }
+        };
+
         impl Attribute for Birthday {
             type Type = u32;
+            type Match = crate::attribute::WithMatch<Self>;
+            type Instance = crate::attribute::With<Self>;
+            type Term = crate::attribute::WithTerms<Self>;
 
             const NAMESPACE: &'static str = "person";
             const NAME: &'static str = "birthday";
@@ -546,9 +763,14 @@ mod tests {
                     content_type: <u32 as crate::types::IntoType>::TYPE,
                     marker: std::marker::PhantomData,
                 };
+            const CONCEPT: crate::predicate::concept::Concept = BIRTHDAY_CONCEPT;
 
             fn value(&self) -> &Self::Type {
                 &self.0
+            }
+
+            fn from_value(value: Self::Type) -> Self {
+                Self(value)
             }
         }
     }

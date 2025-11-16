@@ -40,20 +40,6 @@ impl Default for PersonMatch {
     }
 }
 
-/// Assert pattern for Person - used in rule conclusions
-#[derive(Debug, Clone)]
-pub struct PersonAssert {
-    pub name: Term<String>,
-    pub age: Term<u32>,
-}
-
-/// Retract pattern for Person - used for removing facts
-#[derive(Debug, Clone)]
-pub struct PersonRetract {
-    pub name: Term<String>,
-    pub age: Term<u32>,
-}
-
 /// Attributes pattern for Person - enables fluent query building
 #[derive(Debug, Clone)]
 pub struct PersonTerms;
@@ -147,8 +133,6 @@ pub mod person {
 impl Concept for Person {
     type Instance = Person;
     type Match = PersonMatch;
-    type Assert = PersonAssert;
-    type Retract = PersonRetract;
     type Term = PersonTerms;
 
     const CONCEPT: dialog_query::predicate::concept::Concept = {

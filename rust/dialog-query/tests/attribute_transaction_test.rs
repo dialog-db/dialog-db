@@ -32,9 +32,14 @@ async fn test_single_attribute_assert_and_retract() -> anyhow::Result<()> {
     let alice = Entity::new()?;
     let name = employee::Name("Alice".to_string());
 
-    // Assert using Bevy-like API
+    // Assert using With instance
     let mut session = Session::open(store.clone());
-    session.transact(vec![(alice.clone(), name.clone())]).await?;
+    session
+        .transact(vec![dialog_query::attribute::With {
+            this: alice.clone(),
+            has: name.clone(),
+        }])
+        .await?;
 
     // Query to verify the fact was asserted
     let query = Fact::<Value>::select()
@@ -57,7 +62,12 @@ async fn test_single_attribute_assert_and_retract() -> anyhow::Result<()> {
 
     // Retract using the revert pattern
     let mut session = Session::open(store.clone());
-    session.transact(vec![(alice.clone(), name).revert()]).await?;
+    session
+        .transact(vec![!dialog_query::attribute::With {
+            this: alice.clone(),
+            has: name,
+        }])
+        .await?;
 
     // Verify the fact was retracted
     let query = Fact::<Value>::select()
@@ -84,9 +94,20 @@ async fn test_multiple_attributes_assert() -> anyhow::Result<()> {
     let name = employee::Name("Bob".to_string());
     let job = employee::Job("Engineer".to_string());
 
-    // Assert multiple attributes at once using tuple
+    // Assert multiple attributes separately
     let mut session = Session::open(store.clone());
-    session.transact(vec![(bob.clone(), name, job)]).await?;
+    session
+        .transact(vec![dialog_query::attribute::With {
+            this: bob.clone(),
+            has: name,
+        }])
+        .await?;
+    session
+        .transact(vec![dialog_query::attribute::With {
+            this: bob.clone(),
+            has: job,
+        }])
+        .await?;
 
     // Verify both facts were asserted
     let name_query = Fact::<Value>::select()
@@ -138,10 +159,25 @@ async fn test_three_attributes_assert() -> anyhow::Result<()> {
     let job = employee::Job("Manager".to_string());
     let salary = employee::Salary(120000);
 
-    // Assert three attributes at once
+    // Assert three attributes separately
     let mut session = Session::open(store.clone());
     session
-        .transact(vec![(charlie.clone(), name, job, salary)])
+        .transact(vec![dialog_query::attribute::With {
+            this: charlie.clone(),
+            has: name,
+        }])
+        .await?;
+    session
+        .transact(vec![dialog_query::attribute::With {
+            this: charlie.clone(),
+            has: job,
+        }])
+        .await?;
+    session
+        .transact(vec![dialog_query::attribute::With {
+            this: charlie.clone(),
+            has: salary,
+        }])
         .await?;
 
     // Verify all three facts were asserted
@@ -214,13 +250,31 @@ async fn test_multiple_attributes_retract() -> anyhow::Result<()> {
     // Assert
     let mut session = Session::open(store.clone());
     session
-        .transact(vec![(dave.clone(), name.clone(), job.clone())])
+        .transact(vec![dialog_query::attribute::With {
+            this: dave.clone(),
+            has: name.clone(),
+        }])
+        .await?;
+    session
+        .transact(vec![dialog_query::attribute::With {
+            this: dave.clone(),
+            has: job.clone(),
+        }])
         .await?;
 
     // Retract both attributes
     let mut session = Session::open(store.clone());
     session
-        .transact(vec![(dave.clone(), name, job).revert()])
+        .transact(vec![!dialog_query::attribute::With {
+            this: dave.clone(),
+            has: name,
+        }])
+        .await?;
+    session
+        .transact(vec![!dialog_query::attribute::With {
+            this: dave.clone(),
+            has: job,
+        }])
         .await?;
 
     // Verify both facts were retracted
@@ -261,18 +315,27 @@ async fn test_update_attribute() -> anyhow::Result<()> {
     // Assert initial job
     let mut session = Session::open(store.clone());
     session
-        .transact(vec![(eve.clone(), old_job.clone())])
+        .transact(vec![dialog_query::attribute::With {
+            this: eve.clone(),
+            has: old_job.clone(),
+        }])
         .await?;
 
     // Update job (retract old in one transaction, assert new in another)
     let mut session = Session::open(store.clone());
     session
-        .transact(vec![(eve.clone(), old_job).revert()])
+        .transact(vec![!dialog_query::attribute::With {
+            this: eve.clone(),
+            has: old_job,
+        }])
         .await?;
 
     let new_job = employee::Job("Senior Developer".to_string());
     let mut session = Session::open(store.clone());
-    session.transact(vec![(eve.clone(), new_job)]).await?;
+    session.transact(vec![dialog_query::attribute::With {
+        this: eve.clone(),
+        has: new_job,
+    }]).await?;
 
     // Verify the job was updated
     let query = Fact::<Value>::select()
@@ -311,12 +374,24 @@ async fn test_entity_reference_attribute() -> anyhow::Result<()> {
     // Assert entities in separate transactions
     let mut session = Session::open(store.clone());
     session
-        .transact(vec![(manager.clone(), manager_name)])
+        .transact(vec![dialog_query::attribute::With {
+            this: manager.clone(),
+            has: manager_name,
+        }])
         .await?;
 
     let mut session = Session::open(store.clone());
     session
-        .transact(vec![(employee_entity.clone(), employee_name, reports_to)])
+        .transact(vec![dialog_query::attribute::With {
+            this: employee_entity.clone(),
+            has: employee_name,
+        }])
+        .await?;
+    session
+        .transact(vec![dialog_query::attribute::With {
+            this: employee_entity.clone(),
+            has: reports_to,
+        }])
         .await?;
 
     // Verify the manager relationship

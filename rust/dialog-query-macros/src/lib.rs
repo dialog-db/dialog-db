@@ -107,8 +107,6 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
     // Extract field information
     let mut match_fields = Vec::new();
     let mut attributes_fields = Vec::new();
-    let mut assert_fields = Vec::new();
-    let mut retract_fields = Vec::new();
     let mut rule_when_fields = Vec::new();
     let mut attribute_init_fields = Vec::new();
     let mut typed_attributes = Vec::new();
@@ -170,16 +168,6 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
         attributes_fields.push(quote! {
             #[doc = #doc_comment_lit]
             pub #field_name: dialog_query::attribute::Match<#inner_type>
-        });
-
-        // Generate Assert field (Term<T>) - T is the Attribute's inner type
-        assert_fields.push(quote! {
-            pub #field_name: dialog_query::term::Term<#inner_type>
-        });
-
-        // Generate Retract field (Term<T>) - T is the Attribute's inner type
-        retract_fields.push(quote! {
-            pub #field_name: dialog_query::term::Term<#inner_type>
         });
 
         // Generate attribute initialization for Attributes
@@ -275,10 +263,8 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
         });
     }
 
-    // Generate type names based on struct name (e.g., Person -> PersonMatch, PersonAssert, etc.)
+    // Generate type names based on struct name (e.g., Person -> PersonMatch, PersonTerms, etc.)
     let match_name = syn::Ident::new(&format!("{}Match", struct_name), struct_name.span());
-    let assert_name = syn::Ident::new(&format!("{}Assert", struct_name), struct_name.span());
-    let retract_name = syn::Ident::new(&format!("{}Retract", struct_name), struct_name.span());
     let attributes_name =
         syn::Ident::new(&format!("{}Attributes", struct_name), struct_name.span());
 
@@ -347,18 +333,6 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             }
         }
         #(#terms_methods)*
-
-        /// Assert pattern for #struct_name - used in rule conclusions
-        #[derive(Debug, Clone, PartialEq)]
-        pub struct #assert_name {
-            #(#assert_fields),*
-        }
-
-        /// Retract pattern for #struct_name - used for removing facts
-        #[derive(Debug, Clone, PartialEq)]
-        pub struct #retract_name {
-            #(#retract_fields),*
-        }
 
         /// Attributes pattern for #struct_name - enables fluent query building
         #[derive(Debug, Clone, PartialEq)]
@@ -515,8 +489,6 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             type Instance = #struct_name;
             type Match = #match_name;
             type Term = #terms_name;
-            type Assert = #assert_name;
-            type Retract = #retract_name;
 
             const CONCEPT: dialog_query::predicate::concept::Concept =
                 dialog_query::predicate::concept::Concept::Static {
@@ -1215,11 +1187,44 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
         )
     };
 
+
+    // Generate concept const name
+    let concept_const_name = syn::Ident::new(
+        &format!("{}_CONCEPT", struct_name.to_string().to_uppercase()),
+        struct_name.span(),
+    );
+
     let expanded = quote! {
         #namespace_static_decl
 
+        // Generate the CONCEPT constant
+        const #concept_const_name: dialog_query::predicate::concept::Concept = {
+            const ATTRS: dialog_query::predicate::concept::Attributes =
+                dialog_query::predicate::concept::Attributes::Static(&[(
+                    "has",  // Use "has" as the parameter key to match With<A> field name
+                    dialog_query::attribute::AttributeSchema {
+                        namespace: #namespace_expr,
+                        name: #attr_name_lit,
+                        description: #description_lit,
+                        cardinality: #cardinality,
+                        content_type: <#wrapped_type as dialog_query::types::IntoType>::TYPE,
+                        marker: std::marker::PhantomData,
+                    },
+                )]);
+
+            dialog_query::predicate::concept::Concept::Static {
+                operator: #namespace_expr,
+                attributes: &ATTRS,
+            }
+        };
+
         impl dialog_query::attribute::Attribute for #struct_name {
             type Type = #wrapped_type;
+
+            // Associated types pointing to generic With types
+            type Match = dialog_query::attribute::WithMatch<Self>;
+            type Instance = dialog_query::attribute::With<Self>;
+            type Term = dialog_query::attribute::WithTerms<Self>;
 
             const NAMESPACE: &'static str = #namespace_expr;
             const NAME: &'static str = #attr_name_lit;
@@ -1233,9 +1238,14 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
                 content_type: <#wrapped_type as dialog_query::types::IntoType>::TYPE,
                 marker: std::marker::PhantomData,
             };
+            const CONCEPT: dialog_query::predicate::concept::Concept = #concept_const_name;
 
             fn value(&self) -> &Self::Type {
                 &self.0
+            }
+
+            fn from_value(value: Self::Type) -> Self {
+                Self(value)
             }
         }
 
@@ -1260,6 +1270,8 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
                 )
             }
         }
+
+
     };
 
     TokenStream::from(expanded)

@@ -51,16 +51,20 @@ fn test_schema_static() {
 }
 
 #[test]
-fn test_of_is_pattern() {
-    use dialog_query::Entity;
+fn test_match_struct_literal() {
+    use dialog_query::{Match, Term, Entity};
 
     let entity_id = Entity::new().unwrap();
 
-    // Test that of().is() works via blanket trait
-    let query = test_pascal::UserName::of(entity_id).is("Alice");
+    // Test that Match::<With<AttributeType>> { ... } works
+    let query = Match::<dialog_query::attribute::With<test_pascal::UserName>> {
+        this: Term::from(entity_id),
+        has: Term::from("Alice".to_string()),
+    };
 
-    // Verify the Match was created correctly
-    assert_eq!(query.attribute.name, "user-name");
+    // Verify the fields are accessible
+    assert!(matches!(query.this, Term::Constant(_)));
+    assert!(matches!(query.has, Term::Constant(_)));
 }
 
 #[test]
@@ -69,31 +73,25 @@ fn test_quarriable_match_pattern() {
 
     let entity_id = Entity::new().unwrap();
 
-    // Test that Match::<AttributeType> { of, is } works via Quarriable
-    let query = Match::<test_pascal::UserName> {
-        of: Term::from(entity_id),
-        is: Term::from("Alice"),
-        ..Default::default()
+    // Test that Match::<With<AttributeType>> { this, has } works via Quarriable
+    let query = Match::<dialog_query::attribute::With<test_pascal::UserName>> {
+        this: Term::from(entity_id),
+        has: Term::from("Alice".to_string()),
     };
 
     // Verify the fields are accessible
-    assert!(matches!(query.of, Term::Constant(_)));
-    assert!(matches!(query.is, Term::Constant(_)));
+    assert!(matches!(query.this, Term::Constant(_)));
+    assert!(matches!(query.has, Term::Constant(_)));
 }
 
 #[test]
-fn test_attribute_match_constructor() {
-    use dialog_query::{attribute::AttributeMatch, Term, Entity};
+fn test_default_match_constructor() {
+    use dialog_query::{Match, Term};
 
-    let entity_id = Entity::new().unwrap();
+    // Test using Default to create a match with variables
+    let query = Match::<dialog_query::attribute::With<test_pascal::UserName>>::default();
 
-    // Test using the new() constructor
-    let query = AttributeMatch::<test_pascal::UserName>::new(
-        Term::from(entity_id),
-        Term::from("Alice".to_string())
-    );
-
-    // Verify the fields are accessible
-    assert!(matches!(query.of, Term::Constant(_)));
-    assert!(matches!(query.is, Term::Constant(_)));
+    // Default should create variable terms
+    assert!(matches!(query.this, Term::Variable { .. }));
+    assert!(matches!(query.has, Term::Variable { .. }));
 }

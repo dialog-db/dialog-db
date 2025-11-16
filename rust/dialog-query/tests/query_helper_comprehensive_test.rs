@@ -50,8 +50,14 @@ async fn test_single_attribute_query_works() -> Result<()> {
 
     let mut session = Session::open(artifacts.clone());
     let mut transaction = session.edit();
-    transaction.assert((alice, person::Name("Alice".into())));
-    transaction.assert((bob, person::Name("Bob".into())));
+    transaction.assert(dialog_query::attribute::With {
+        this: alice,
+        has: person::Name("Alice".into()),
+    });
+    transaction.assert(dialog_query::attribute::With {
+        this: bob,
+        has: person::Name("Bob".into()),
+    });
     session.commit(transaction).await?;
 
     // ✅ This works: Single attribute with constant
@@ -113,16 +119,22 @@ async fn test_multi_attribute_constant_query_works() -> Result<()> {
 
     let mut session = Session::open(artifacts.clone());
     let mut transaction = session.edit();
-    transaction.assert((
-        alice.clone(),
-        employee::Name("Alice".into()),
-        employee::Department("Engineering".into()),
-    ));
-    transaction.assert((
-        bob,
-        employee::Name("Bob".into()),
-        employee::Department("Sales".into()),
-    ));
+    transaction.assert(dialog_query::attribute::With {
+        this: alice.clone(),
+        has: employee::Name("Alice".into()),
+    });
+    transaction.assert(dialog_query::attribute::With {
+        this: alice.clone(),
+        has: employee::Department("Engineering".into()),
+    });
+    transaction.assert(dialog_query::attribute::With {
+        this: bob.clone(),
+        has: employee::Name("Bob".into()),
+    });
+    transaction.assert(dialog_query::attribute::With {
+        this: bob,
+        has: employee::Department("Sales".into()),
+    });
     session.commit(transaction).await?;
 
     // ✅ This works: Multi-attribute with all constants
@@ -155,16 +167,22 @@ async fn test_multi_attribute_variable_query_limitation() -> Result<()> {
 
     let mut session = Session::open(artifacts.clone());
     let mut transaction = session.edit();
-    transaction.assert((
-        alice.clone(),
-        employee::Name("Alice".into()),
-        employee::Department("Engineering".into()),
-    ));
-    transaction.assert((
-        bob.clone(),
-        employee::Name("Bob".into()),
-        employee::Department("Sales".into()),
-    ));
+    transaction.assert(dialog_query::attribute::With {
+        this: alice.clone(),
+        has: employee::Name("Alice".into()),
+    });
+    transaction.assert(dialog_query::attribute::With {
+        this: alice.clone(),
+        has: employee::Department("Engineering".into()),
+    });
+    transaction.assert(dialog_query::attribute::With {
+        this: bob.clone(),
+        has: employee::Name("Bob".into()),
+    });
+    transaction.assert(dialog_query::attribute::With {
+        this: bob.clone(),
+        has: employee::Department("Sales".into()),
+    });
     session.commit(transaction).await?;
 
     let engineering_query = Match::<Employee> {
