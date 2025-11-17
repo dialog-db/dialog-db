@@ -31,7 +31,8 @@ fn test_attribute_concept_const() {
     use dialog_query::predicate::concept::Concept as ConceptPredicate;
 
     // Access the CONCEPT const from With<Attribute>
-    let concept: ConceptPredicate = <dialog_query::attribute::With<note::Title> as Concept>::CONCEPT;
+    let concept: ConceptPredicate =
+        <dialog_query::attribute::With<note::Title> as Concept>::CONCEPT;
 
     match concept {
         ConceptPredicate::Static { operator, .. } => {

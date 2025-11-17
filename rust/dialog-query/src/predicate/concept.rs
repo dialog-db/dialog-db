@@ -4,8 +4,8 @@ use crate::claim::Revert;
 use crate::error::SchemaError;
 use crate::types::Scalar;
 use crate::{
-    Application, Attribute, Cardinality, Claim, Entity, Field, Parameters, Relation, Requirement,
-    Schema, Term, Type, Value,
+    Application, Cardinality, Claim, Entity, Field, Parameters, Relation, Requirement, Schema,
+    Type, Value,
 };
 
 use serde::{Deserialize, Serialize};
@@ -378,7 +378,7 @@ impl Concept {
     ///
     /// # Returns
     /// A builder that can be used to set attribute values for the entity
-    pub fn edit(&self, entity: Entity) -> Builder {
+    pub fn edit(&'_ self, entity: Entity) -> Builder<'_> {
         Builder::edit(entity, self)
     }
 
@@ -387,7 +387,7 @@ impl Concept {
     /// # Returns
     /// * `Ok(Builder)` - A builder for the new entity
     /// * `Err(DialogArtifactsError)` - If entity creation fails
-    pub fn create(&self) -> Builder {
+    pub fn create(&'_ self) -> Builder<'_> {
         Builder::new(self)
     }
 }

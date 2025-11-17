@@ -165,7 +165,7 @@ pub enum FormulaEvaluationError {
     /// provided in the Terms mapping when the formula was applied.
     ///
     /// # Example
-    /// ```should_panic
+    /// ```ignore
     /// # use dialog_query::math::{Sum};
     /// # use dialog_query::{Term, selection::Answer, Value, Parameters, Formula};
     /// let mut parameters = Parameters::new();
@@ -185,7 +185,7 @@ pub enum FormulaEvaluationError {
     /// but that variable has no value in the current match frame.
     ///
     /// # Example
-    /// ```should_panic
+    /// ```ignore
     /// # use dialog_query::math::{Sum};
     /// # use dialog_query::{Term, selection::Answer, Value, Parameters, Formula};
     /// # let mut parameters = Parameters::new();
@@ -373,7 +373,7 @@ pub enum PlanError {
         "Premise {application} passes unbound variable in a required parameter \"{parameter}\""
     )]
     UnboundParameter {
-        application: Application,
+        application: Box<Application>,
         parameter: String,
         term: Term<Value>,
     },

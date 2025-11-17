@@ -1,5 +1,5 @@
 use dialog_query::artifact::{Artifacts, Value};
-use dialog_query::{Attribute, Claim, Entity, Fact, Session};
+use dialog_query::{Attribute, Entity, Fact, Session};
 use dialog_storage::MemoryStorageBackend;
 use futures_util::TryStreamExt;
 
@@ -75,10 +75,7 @@ async fn test_single_attribute_assert_and_retract() -> anyhow::Result<()> {
         .of(alice)
         .compile()?;
 
-    let facts: Vec<_> = query
-        .query(&Session::open(store))
-        .try_collect()
-        .await?;
+    let facts: Vec<_> = query.query(&Session::open(store)).try_collect().await?;
 
     assert_eq!(facts.len(), 0);
 
@@ -125,10 +122,7 @@ async fn test_multiple_attributes_assert() -> anyhow::Result<()> {
         .try_collect()
         .await?;
 
-    let job_facts: Vec<_> = job_query
-        .query(&Session::open(store))
-        .try_collect()
-        .await?;
+    let job_facts: Vec<_> = job_query.query(&Session::open(store)).try_collect().await?;
 
     assert_eq!(name_facts.len(), 1);
     match &name_facts[0] {
@@ -293,10 +287,7 @@ async fn test_multiple_attributes_retract() -> anyhow::Result<()> {
         .try_collect()
         .await?;
 
-    let job_facts: Vec<_> = job_query
-        .query(&Session::open(store))
-        .try_collect()
-        .await?;
+    let job_facts: Vec<_> = job_query.query(&Session::open(store)).try_collect().await?;
 
     assert_eq!(name_facts.len(), 0);
     assert_eq!(job_facts.len(), 0);
@@ -332,10 +323,12 @@ async fn test_update_attribute() -> anyhow::Result<()> {
 
     let new_job = employee::Job("Senior Developer".to_string());
     let mut session = Session::open(store.clone());
-    session.transact(vec![dialog_query::attribute::With {
-        this: eve.clone(),
-        has: new_job,
-    }]).await?;
+    session
+        .transact(vec![dialog_query::attribute::With {
+            this: eve.clone(),
+            has: new_job,
+        }])
+        .await?;
 
     // Verify the job was updated
     let query = Fact::<Value>::select()
@@ -343,10 +336,7 @@ async fn test_update_attribute() -> anyhow::Result<()> {
         .of(eve)
         .compile()?;
 
-    let job_facts: Vec<_> = query
-        .query(&Session::open(store))
-        .try_collect()
-        .await?;
+    let job_facts: Vec<_> = query.query(&Session::open(store)).try_collect().await?;
 
     assert_eq!(job_facts.len(), 1);
     match &job_facts[0] {
@@ -400,10 +390,7 @@ async fn test_entity_reference_attribute() -> anyhow::Result<()> {
         .of(employee_entity)
         .compile()?;
 
-    let manager_facts: Vec<_> = query
-        .query(&Session::open(store))
-        .try_collect()
-        .await?;
+    let manager_facts: Vec<_> = query.query(&Session::open(store)).try_collect().await?;
 
     assert_eq!(manager_facts.len(), 1);
     match &manager_facts[0] {

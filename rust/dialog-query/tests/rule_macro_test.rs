@@ -1,5 +1,5 @@
 use dialog_query::rule::Match;
-use dialog_query::{Attribute, Concept, Entity, Term, Type};
+use dialog_query::{Concept, Entity, Term, Type};
 
 mod person {
     use dialog_query::Attribute;

@@ -2,11 +2,11 @@
 
 use anyhow::Result;
 use dialog_query::{
-    artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value},
+    artifact::{Artifacts, Entity},
     query::Output,
     rule::Match,
     term::Term,
-    Attribute, Claim, Concept, Relation, Session,
+    Attribute, Concept, Session,
 };
 use dialog_storage::MemoryStorageBackend;
 
@@ -93,29 +93,6 @@ async fn test_multi_attribute_constant_query_works() -> Result<()> {
 
     let alice = Entity::new()?;
     let bob = Entity::new()?;
-
-    let claims = vec![
-        Relation {
-            the: "employee/name".parse::<ArtifactAttribute>()?,
-            of: alice.clone(),
-            is: Value::String("Alice".into()),
-        },
-        Relation {
-            the: "employee/department".parse::<ArtifactAttribute>()?,
-            of: alice.clone(),
-            is: Value::String("Engineering".into()),
-        },
-        Relation {
-            the: "employee/name".parse::<ArtifactAttribute>()?,
-            of: bob.clone(),
-            is: Value::String("Bob".into()),
-        },
-        Relation {
-            the: "employee/department".parse::<ArtifactAttribute>()?,
-            of: bob.clone(),
-            is: Value::String("Sales".into()),
-        },
-    ];
 
     let mut session = Session::open(artifacts.clone());
     let mut transaction = session.edit();

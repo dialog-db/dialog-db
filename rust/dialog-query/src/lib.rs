@@ -52,7 +52,7 @@ pub mod types;
 
 pub use application::Application;
 pub use artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
-pub use attribute::{Attribute, AttributeSchema, Cardinality};
+pub use attribute::{Attribute, AttributeSchema, Cardinality, With};
 pub use claim::Claim;
 pub use concept::Concept;
 pub use context::{EvaluationContext, EvaluationPlan};

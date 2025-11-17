@@ -73,10 +73,7 @@ fn test_employee_salary_derives_attribute() {
     assert_eq!(employee::Salary::description(), "Salary of the employee");
     assert_eq!(employee::Salary::cardinality(), Cardinality::One);
     assert_eq!(salary.value(), &100000u32);
-    assert_eq!(
-        employee::Salary::selector().to_string(),
-        "employee/salary"
-    );
+    assert_eq!(employee::Salary::selector().to_string(), "employee/salary");
 }
 
 #[test]

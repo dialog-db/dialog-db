@@ -52,7 +52,7 @@ fn test_schema_static() {
 
 #[test]
 fn test_match_struct_literal() {
-    use dialog_query::{Match, Term, Entity};
+    use dialog_query::{Entity, Match, Term};
 
     let entity_id = Entity::new().unwrap();
 
@@ -69,7 +69,7 @@ fn test_match_struct_literal() {
 
 #[test]
 fn test_quarriable_match_pattern() {
-    use dialog_query::{Match, Term, Entity};
+    use dialog_query::{Entity, Match, Term};
 
     let entity_id = Entity::new().unwrap();
 

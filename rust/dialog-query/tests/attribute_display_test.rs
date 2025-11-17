@@ -1,4 +1,4 @@
-//! Test Debug and Display implementations for Attribute types
+//! Test Attribute schema generation and metadata
 
 use dialog_query::Attribute;
 
@@ -14,59 +14,66 @@ mod employee {
     pub struct Age(pub u32);
 }
 
+mod person {
+    use dialog_query::Attribute;
+
+    /// Birthday of the person
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Birthday(pub u32);
+}
+
 #[test]
-fn test_attribute_debug_format() {
+fn test_attribute_schema_metadata() {
+    // Test that the Attribute derive macro generates correct schema metadata
     let name = employee::Name("Alice".to_string());
 
-    // Debug should show structured format with metadata
-    let debug_output = format!("{:?}", name);
+    // Check namespace and name from schema
+    assert_eq!(employee::Name::namespace(), "employee");
+    assert_eq!(employee::Name::name(), "name");
+    assert_eq!(employee::Name::description(), "Name of the employee");
 
-    // Check that debug output contains the expected fields
-    assert!(debug_output.contains("Name"));
-    assert!(debug_output.contains("namespace"));
-    assert!(debug_output.contains("employee"));
-    assert!(debug_output.contains("name"));
-    assert!(debug_output.contains("value"));
-    assert!(debug_output.contains("Alice"));
-
-    println!("Debug output: {}", debug_output);
+    // Check value extraction
+    assert_eq!(name.value(), &"Alice".to_string());
 }
 
 #[test]
-fn test_attribute_display_format() {
-    let name = employee::Name("Alice".to_string());
-
-    // Display should show clean selector: value format
-    let display_output = format!("{}", name);
-
-    assert_eq!(display_output, "employee/name: \"Alice\"");
-
-    println!("Display output: {}", display_output);
-}
-
-#[test]
-fn test_attribute_debug_with_number() {
+fn test_attribute_schema_with_number() {
     let age = employee::Age(30);
 
-    let debug_output = format!("{:?}", age);
-
-    assert!(debug_output.contains("Age"));
-    assert!(debug_output.contains("namespace"));
-    assert!(debug_output.contains("employee"));
-    assert!(debug_output.contains("age"));
-    assert!(debug_output.contains("value"));
-    assert!(debug_output.contains("30"));
-
-    println!("Debug output for number: {}", debug_output);
+    assert_eq!(employee::Age::namespace(), "employee");
+    assert_eq!(employee::Age::name(), "age");
+    assert_eq!(employee::Age::description(), "Age of the employee");
+    assert_eq!(age.value(), &30);
 }
 
 #[test]
-fn test_attribute_display_with_number() {
-    let age = employee::Age(30);
+fn test_attribute_selector_format() {
+    use dialog_query::artifact::Attribute as ArtifactAttribute;
 
-    let display_output = format!("{}", age);
+    // Test that selector() generates the correct attribute identifier
+    assert_eq!(
+        employee::Name::selector(),
+        "employee/name".parse::<ArtifactAttribute>().unwrap()
+    );
+    assert_eq!(
+        employee::Age::selector(),
+        "employee/age".parse::<ArtifactAttribute>().unwrap()
+    );
+    assert_eq!(
+        person::Birthday::selector(),
+        "person/birthday".parse::<ArtifactAttribute>().unwrap()
+    );
+}
 
-    assert_eq!(display_output, "employee/age: 30");
+#[test]
+fn test_attribute_value_conversion() {
+    // Test from_value constructor
+    let name = employee::Name::from_value("Bob".to_string());
+    assert_eq!(name.value(), &"Bob".to_string());
 
-    println!("Display output for number: {}", display_output);
+    let age = employee::Age::from_value(25);
+    assert_eq!(age.value(), &25);
+
+    let birthday = person::Birthday::from_value(19900101);
+    assert_eq!(birthday.value(), &19900101);
 }

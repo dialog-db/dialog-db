@@ -355,7 +355,7 @@ pub trait Attribute: Sized {
         Self::DESCRIPTION.into()
     }
     fn cardinality() -> Cardinality {
-        Self::CARDINALITY.clone()
+        Self::CARDINALITY
     }
     fn selector() -> crate::artifact::Attribute {
         format!("{}/{}", Self::NAMESPACE, Self::NAME)
@@ -419,26 +419,6 @@ impl<A: Attribute> Default for AttributeMatch<A> {
             is: Term::var("is"),
             content_type: PhantomData,
         }
-    }
-}
-
-/// Quarriable is now implemented by the #[derive(Attribute)] macro
-/// to generate a proper Match struct for each attribute.
-/// The blanket implementation has been removed to avoid conflicts.
-
-/// Type-erases an attribute schema to AttributeSchema<Value>.
-/// This is necessary for storing attribute schemas in const contexts and enums.
-fn erase_attribute_type<A: Attribute>() -> AttributeSchema<Value>
-where
-    A::Type: Scalar,
-{
-    AttributeSchema {
-        namespace: A::NAMESPACE,
-        name: A::NAME,
-        description: A::DESCRIPTION,
-        cardinality: A::SCHEMA.cardinality,
-        content_type: A::SCHEMA.content_type,
-        marker: std::marker::PhantomData,
     }
 }
 
@@ -713,57 +693,6 @@ mod tests {
                     marker: std::marker::PhantomData,
                 };
             const CONCEPT: crate::predicate::concept::Concept = NAME_CONCEPT;
-
-            fn value(&self) -> &Self::Type {
-                &self.0
-            }
-
-            fn from_value(value: Self::Type) -> Self {
-                Self(value)
-            }
-        }
-
-        pub struct Birthday(pub u32);
-
-        const BIRTHDAY_CONCEPT: crate::predicate::concept::Concept = {
-            const ATTRS: crate::predicate::concept::Attributes =
-                crate::predicate::concept::Attributes::Static(&[(
-                    "birthday",
-                    crate::attribute::AttributeSchema {
-                        namespace: "person",
-                        name: "birthday",
-                        description: "The birthday of the person",
-                        cardinality: Cardinality::One,
-                        content_type: <u32 as crate::types::IntoType>::TYPE,
-                        marker: std::marker::PhantomData,
-                    },
-                )]);
-            crate::predicate::concept::Concept::Static {
-                operator: "person",
-                attributes: &ATTRS,
-            }
-        };
-
-        impl Attribute for Birthday {
-            type Type = u32;
-            type Match = crate::attribute::WithMatch<Self>;
-            type Instance = crate::attribute::With<Self>;
-            type Term = crate::attribute::WithTerms<Self>;
-
-            const NAMESPACE: &'static str = "person";
-            const NAME: &'static str = "birthday";
-            const DESCRIPTION: &'static str = "The birthday of the person";
-            const CARDINALITY: Cardinality = Cardinality::One;
-            const SCHEMA: crate::attribute::AttributeSchema<Self::Type> =
-                crate::attribute::AttributeSchema {
-                    namespace: Self::NAMESPACE,
-                    name: Self::NAME,
-                    description: Self::DESCRIPTION,
-                    cardinality: Self::CARDINALITY,
-                    content_type: <u32 as crate::types::IntoType>::TYPE,
-                    marker: std::marker::PhantomData,
-                };
-            const CONCEPT: crate::predicate::concept::Concept = BIRTHDAY_CONCEPT;
 
             fn value(&self) -> &Self::Type {
                 &self.0

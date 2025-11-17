@@ -62,9 +62,6 @@ mod person {
         }
     }
 
-    pub struct Assert;
-    pub struct Retract;
-
     #[derive(Debug, Clone, PartialEq)]
     pub struct Match {
         pub this: Term<Entity>,

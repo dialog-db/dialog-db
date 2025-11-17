@@ -4,8 +4,10 @@ pub use crate::dsl::Quarriable;
 pub use crate::predicate::concept::Attributes;
 use crate::query::{Output, Source};
 use crate::selection::Answer;
+#[cfg(test)]
+use crate::Relation;
 use crate::{predicate, QueryError};
-use crate::{Entity, Parameters, Relation};
+use crate::{Entity, Parameters};
 use dialog_common::ConditionalSend;
 use futures_util::StreamExt;
 use std::fmt::Debug;
@@ -137,7 +139,6 @@ mod tests {
             Term::<u32>::var("age")
         }
     }
-
 
     // Implement Concept for Person
     impl Concept for Person {

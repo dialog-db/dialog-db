@@ -60,10 +60,7 @@ fn test_explicit_namespace_override() {
     // Explicit namespace should override any module-based derivation
     assert_eq!(Value::NAMESPACE, "my.custom.namespace");
     assert_eq!(Value::NAME, "value");
-    assert_eq!(
-        Value::selector().to_string(),
-        "my.custom.namespace/value"
-    );
+    assert_eq!(Value::selector().to_string(), "my.custom.namespace/value");
 }
 
 #[test]
@@ -84,13 +81,7 @@ fn test_all_metadata_preserved() {
     // Check all trait constants work correctly
     assert_eq!(account_name::Name::NAMESPACE, "account-name");
     assert_eq!(account_name::Name::NAME, "name");
-    assert_eq!(
-        account_name::Name::DESCRIPTION,
-        "Account holder's name"
-    );
-    assert_eq!(
-        account_name::Name::CARDINALITY,
-        Cardinality::One
-    );
+    assert_eq!(account_name::Name::DESCRIPTION, "Account holder's name");
+    assert_eq!(account_name::Name::CARDINALITY, Cardinality::One);
     assert_eq!(name.value(), "John Doe");
 }

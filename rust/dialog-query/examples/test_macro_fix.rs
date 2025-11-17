@@ -1,5 +1,5 @@
 // Test to verify the Concept macro generates correct code with the fixes
-use dialog_query::{Attribute, Concept, Entity, Term};
+use dialog_query::{Concept, Entity, Term};
 
 mod test_person {
     use dialog_query::Attribute;

@@ -38,7 +38,7 @@ trait Type: TypeInfo {
 
 #[derive(Serialize, Clone)]
 #[serde(into = "Kind", try_from = "Kind")]
-struct Buffer;
+pub struct Buffer;
 
 impl Into<Kind> for Buffer {
     fn into(self) -> Kind {

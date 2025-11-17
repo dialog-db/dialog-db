@@ -630,7 +630,10 @@ fn to_kebab_case(s: &str) -> String {
             // 1. Not at start
             // 2. Previous was lowercase (camelCase boundary)
             // 3. Next is lowercase and previous was uppercase (HTTPRequest -> http-request)
-            if i > 0 && (prev_is_lower || (prev_is_upper && s.chars().nth(i + 1).map_or(false, |c| c.is_lowercase()))) {
+            if i > 0
+                && (prev_is_lower
+                    || (prev_is_upper && s.chars().nth(i + 1).is_some_and(|c| c.is_lowercase())))
+            {
                 result.push('-');
             }
             result.push(ch.to_lowercase().next().unwrap());
@@ -644,25 +647,6 @@ fn to_kebab_case(s: &str) -> String {
     }
 
     result
-}
-
-/// Convert module path to namespace at compile time
-/// Examples:
-/// - my_module::sub_module -> my-module.sub-module
-/// - crate_name::my::config -> my.config (skips crate name)
-fn module_path_to_namespace(path: &str) -> String {
-    let segments: Vec<&str> = path.split("::").collect();
-    let relevant_segments = if segments.len() > 1 {
-        &segments[1..]  // Skip crate name
-    } else {
-        &segments[..]
-    };
-
-    relevant_segments
-        .iter()
-        .map(|s| s.replace('_', "-"))
-        .collect::<Vec<_>>()
-        .join(".")
 }
 
 /// Derive macro to generate Formula implementation from a struct definition.
@@ -1092,19 +1076,25 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
     // Parse cardinality
     let cardinality = parse_cardinality_attribute(&input.attrs);
 
-    // Create static schema name
-    let schema_name = syn::Ident::new(
+    // Create static schema name (unused currently, but may be needed in the future)
+    let _schema_name = syn::Ident::new(
         &format!("{}_SCHEMA", struct_name.to_string().to_uppercase()),
         struct_name.span(),
     );
 
     // Generate namespace static names (unique per struct)
     let compute_len_name = syn::Ident::new(
-        &format!("__compute_{}_namespace_len", struct_name.to_string().to_lowercase()),
+        &format!(
+            "__compute_{}_namespace_len",
+            struct_name.to_string().to_lowercase()
+        ),
         struct_name.span(),
     );
     let compute_bytes_name = syn::Ident::new(
-        &format!("__compute_{}_namespace_bytes", struct_name.to_string().to_lowercase()),
+        &format!(
+            "__compute_{}_namespace_bytes",
+            struct_name.to_string().to_lowercase()
+        ),
         struct_name.span(),
     );
     let namespace_len_name = syn::Ident::new(
@@ -1120,14 +1110,23 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
         struct_name.span(),
     );
 
+    // Generate additional const name for module path
+    let module_path_const_name = syn::Ident::new(
+        &format!("__{}_MODULE_PATH", struct_name.to_string().to_uppercase()),
+        struct_name.span(),
+    );
+
     // Generate namespace - explicit or derived
     let (namespace_static_decl, namespace_expr) = if let Some(ref ns) = explicit_namespace {
         let ns_lit = syn::LitStr::new(ns, proc_macro2::Span::call_site());
         (quote! {}, quote! { #ns_lit })
     } else {
-        // For derived namespaces: use const fn with fixed-size array
+        // For derived namespaces: use const fn with const-compatible str construction
         (
             quote! {
+                // Capture module_path!() in a const to avoid temporary value issues
+                const #module_path_const_name: &str = module_path!();
+
                 const fn #compute_len_name(path: &str) -> usize {
                     let bytes = path.as_bytes();
 
@@ -1176,17 +1175,19 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
                     result
                 }
 
-                const #namespace_len_name: usize = #compute_len_name(module_path!());
-                static #namespace_bytes_name: [u8; #namespace_len_name] = #compute_bytes_name(module_path!());
-                #[allow(non_upper_case_globals)]
-                static #namespace_name: &str = unsafe {
-                    std::str::from_utf8_unchecked(&#namespace_bytes_name)
-                };
+                #[allow(non_snake_case)]
+                const fn #namespace_name<const N: usize>(bytes: &[u8; N]) -> &str {
+                    // SAFETY: We only insert valid UTF-8 bytes (ASCII letters, hyphens)
+                    // in compute_bytes_name, so this is guaranteed to be valid UTF-8
+                    unsafe { std::str::from_utf8_unchecked(bytes) }
+                }
+
+                const #namespace_len_name: usize = #compute_len_name(#module_path_const_name);
+                const #namespace_bytes_name: [u8; #namespace_len_name] = #compute_bytes_name(#module_path_const_name);
             },
-            quote! { #namespace_name },
+            quote! { #namespace_name(&#namespace_bytes_name) },
         )
     };
-
 
     // Generate concept const name
     let concept_const_name = syn::Ident::new(
@@ -1300,9 +1301,7 @@ fn parse_cardinality_attribute(attrs: &[Attribute]) -> proc_macro2::TokenStream 
     for attr in attrs {
         if attr.path().is_ident("cardinality") {
             let result = attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("many") {
-                    Ok(())
-                } else if meta.path.is_ident("one") {
+                if meta.path.is_ident("many") || meta.path.is_ident("one") {
                     Ok(())
                 } else {
                     Err(meta.error("cardinality must be 'one' or 'many'"))
