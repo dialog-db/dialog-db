@@ -12,11 +12,11 @@
 use std::fmt;
 use std::marker::PhantomData;
 
-use crate::artifact::{Attribute, Entity, Type, Value};
+use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
 use crate::constraint::{Constraint, Equality};
 use crate::error::SyntaxError;
 use crate::types::{IntoType, Scalar};
-use crate::Premise;
+use crate::{Attribute, Premise};
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 
@@ -455,8 +455,8 @@ impl From<Value> for Term<Value> {
     }
 }
 
-impl From<Attribute> for Term<Value> {
-    fn from(attr: Attribute) -> Self {
+impl From<ArtifactAttribute> for Term<Value> {
+    fn from(attr: ArtifactAttribute) -> Self {
         Term::Constant(Value::String(attr.to_string()))
     }
 }
@@ -473,35 +473,35 @@ impl From<Entity> for Term<Value> {
 /// for other Term types while still allowing convenient attribute creation.
 pub trait IntoAttributeTerm {
     /// Convert self into a Term<Attribute>
-    fn into_attribute_term(self) -> Term<Attribute>;
+    fn into_attribute_term(self) -> Term<ArtifactAttribute>;
 }
 
 impl IntoAttributeTerm for &str {
-    fn into_attribute_term(self) -> Term<Attribute> {
+    fn into_attribute_term(self) -> Term<ArtifactAttribute> {
         Term::Constant(self.parse().unwrap())
     }
 }
 
 impl IntoAttributeTerm for String {
-    fn into_attribute_term(self) -> Term<Attribute> {
+    fn into_attribute_term(self) -> Term<ArtifactAttribute> {
         Term::Constant(self.parse().unwrap())
     }
 }
 
-impl IntoAttributeTerm for Attribute {
-    fn into_attribute_term(self) -> Term<Attribute> {
+impl IntoAttributeTerm for ArtifactAttribute {
+    fn into_attribute_term(self) -> Term<ArtifactAttribute> {
         Term::Constant(self)
     }
 }
 
-impl IntoAttributeTerm for Term<Attribute> {
-    fn into_attribute_term(self) -> Term<Attribute> {
+impl IntoAttributeTerm for Term<ArtifactAttribute> {
+    fn into_attribute_term(self) -> Term<ArtifactAttribute> {
         self
     }
 }
 
-impl From<Attribute> for Term<Attribute> {
-    fn from(attr: Attribute) -> Self {
+impl From<ArtifactAttribute> for Term<ArtifactAttribute> {
+    fn from(attr: ArtifactAttribute) -> Self {
         Term::Constant(attr)
     }
 }
@@ -540,7 +540,7 @@ impl From<&str> for Term<Value> {
     }
 }
 
-impl TryFrom<String> for Term<Attribute> {
+impl TryFrom<String> for Term<ArtifactAttribute> {
     type Error = SyntaxError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
@@ -551,7 +551,7 @@ impl TryFrom<String> for Term<Attribute> {
     }
 }
 
-impl TryFrom<&str> for Term<Attribute> {
+impl TryFrom<&str> for Term<ArtifactAttribute> {
     type Error = SyntaxError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
@@ -603,6 +603,18 @@ impl From<f64> for Term<f64> {
 impl From<Vec<u8>> for Term<Vec<u8>> {
     fn from(value: Vec<u8>) -> Self {
         Term::Constant(value)
+    }
+}
+
+/// Convert an Attribute to a Term of its inner type
+///
+/// This allows ergonomic conversion from attribute values to terms:
+/// ```ignore
+/// let name_term: Term<String> = employee::Name("Alice".into()).into();
+/// ```
+impl<A: Attribute> From<A> for Term<A::Type> {
+    fn from(attr: A) -> Self {
+        Term::Constant(attr.value().clone())
     }
 }
 

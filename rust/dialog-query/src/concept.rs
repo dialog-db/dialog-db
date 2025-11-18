@@ -37,6 +37,36 @@ pub trait Concept: Quarriable + Clone + Debug {
     /// The static concept definition for this type.
     /// This is typically defined by the macro as a Concept::Static variant.
     const CONCEPT: predicate::concept::Concept;
+
+    /// Convenience method to query for all instances of this concept.
+    ///
+    /// This creates a default Match pattern (all fields as variables) and queries it.
+    /// It's equivalent to calling `Match::<Self>::default().query(source)`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // These are equivalent:
+    /// let employees = Employee::query(session).try_collect::<Vec<_>>().await?;
+    ///
+    /// let employees = Match::<Employee>::default()
+    ///     .query(session)
+    ///     .try_collect::<Vec<_>>().await?;
+    /// ```
+    fn query<S: Source>(source: S) -> impl Output<Self::Instance>
+    where
+        ConceptApplication: From<Self::Match>,
+    {
+        // Create the default match pattern
+        let pattern = Self::Match::default();
+
+        // Inline the query logic to avoid lifetime issues with the temporary
+        let application: ConceptApplication = pattern.clone().into();
+        let cloned = pattern.clone();
+        application
+            .query(source)
+            .map(move |input| cloned.realize(input?))
+    }
 }
 
 /// Concepts can be matched and this trait describes an abstract match for the

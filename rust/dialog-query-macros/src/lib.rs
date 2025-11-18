@@ -1245,7 +1245,7 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
                 &self.0
             }
 
-            fn from_value(value: Self::Type) -> Self {
+            fn new(value: Self::Type) -> Self {
                 Self(value)
             }
         }
@@ -1272,7 +1272,12 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
             }
         }
 
-
+        // Generic From implementation for any type that can convert into the wrapped type
+        impl<U: ::std::convert::Into<#wrapped_type>> ::std::convert::From<U> for #struct_name {
+            fn from(value: U) -> Self {
+                <Self as dialog_query::attribute::Attribute>::new(value.into())
+            }
+        }
     };
 
     TokenStream::from(expanded)

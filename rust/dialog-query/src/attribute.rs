@@ -344,7 +344,8 @@ pub trait Attribute: Sized {
     fn value(&self) -> &Self::Type;
 
     /// Construct an attribute from its inner value
-    fn from_value(value: Self::Type) -> Self;
+    fn new(value: Self::Type) -> Self;
+
     fn namespace() -> String {
         Self::NAMESPACE.into()
     }
@@ -579,7 +580,7 @@ where
     ) -> Result<Self::Instance, crate::QueryError> {
         Ok(With {
             this: source.get(&self.this)?,
-            has: A::from_value(source.get(&self.has)?),
+            has: A::new(source.get(&self.has)?),
         })
     }
 }
@@ -698,7 +699,7 @@ mod tests {
                 &self.0
             }
 
-            fn from_value(value: Self::Type) -> Self {
+            fn new(value: Self::Type) -> Self {
                 Self(value)
             }
         }

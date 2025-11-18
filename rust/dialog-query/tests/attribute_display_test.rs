@@ -67,13 +67,13 @@ fn test_attribute_selector_format() {
 
 #[test]
 fn test_attribute_value_conversion() {
-    // Test from_value constructor
-    let name = employee::Name::from_value("Bob".to_string());
+    // Test new constructor
+    let name = employee::Name::new("Bob".to_string());
     assert_eq!(name.value(), &"Bob".to_string());
 
-    let age = employee::Age::from_value(25);
+    let age = employee::Age::new(25);
     assert_eq!(age.value(), &25);
 
-    let birthday = person::Birthday::from_value(19900101);
+    let birthday = person::Birthday::new(19900101);
     assert_eq!(birthday.value(), &19900101);
 }
