@@ -174,6 +174,61 @@ impl<T: Scalar> AttributeSchema<T> {
 
         Ok(FactApplication::new(the, of, is, cause, self.cardinality))
     }
+
+    /// Encode this attribute schema as CBOR for hashing
+    ///
+    /// Creates a CBOR-encoded representation with fields:
+    /// - domain: namespace
+    /// - name: name
+    /// - cardinality: cardinality
+    /// - type: content_type
+    ///
+    /// Description is excluded from the encoding.
+    pub fn to_cbor_bytes(&self) -> Vec<u8> {
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        struct CborAttributeSchema<'a> {
+            domain: &'a str,
+            name: &'a str,
+            cardinality: &'a Cardinality,
+            #[serde(rename = "type")]
+            content_type: &'a Option<Type>,
+        }
+
+        let schema = CborAttributeSchema {
+            domain: self.namespace,
+            name: self.name,
+            cardinality: &self.cardinality,
+            content_type: &self.content_type,
+        };
+
+        serde_ipld_dagcbor::to_vec(&schema).expect("CBOR encoding should not fail")
+    }
+
+    /// Compute blake3 hash of this attribute schema
+    ///
+    /// Returns a 32-byte blake3 hash of the CBOR-encoded schema
+    pub fn hash(&self) -> blake3::Hash {
+        let cbor_bytes = self.to_cbor_bytes();
+        blake3::hash(&cbor_bytes)
+    }
+
+    /// Format this attribute's hash as a URI
+    ///
+    /// Returns a string in the format: `the:{blake3_hash_hex}`
+    pub fn to_uri(&self) -> String {
+        format!("the:{}", self.hash().to_hex())
+    }
+
+    /// Parse an attribute URI and extract the hash
+    ///
+    /// Expects format: `the:{blake3_hash_hex}`
+    /// Returns None if the format is invalid
+    pub fn parse_uri(uri: &str) -> Option<blake3::Hash> {
+        let uri = uri.strip_prefix("the:")?;
+        blake3::Hash::from_hex(uri).ok()
+    }
 }
 
 impl<T: Scalar> Serialize for AttributeSchema<T> {
@@ -362,6 +417,22 @@ pub trait Attribute: Sized {
         format!("{}/{}", Self::NAMESPACE, Self::NAME)
             .parse()
             .expect("Failed to parse attribute")
+    }
+
+    /// Compute blake3 hash of this attribute's schema
+    ///
+    /// Returns a 32-byte blake3 hash of the CBOR-encoded attribute schema
+    /// (namespace, name, cardinality, content_type - excluding description)
+    fn hash() -> blake3::Hash {
+        let cbor_bytes = Self::SCHEMA.to_cbor_bytes();
+        blake3::hash(&cbor_bytes)
+    }
+
+    /// Format this attribute's hash as a URI
+    ///
+    /// Returns a string in the format: `the:{blake3_hash_hex}`
+    fn to_uri() -> String {
+        Self::SCHEMA.to_uri()
     }
 
     /// Create a query builder for a specific entity
@@ -669,7 +740,6 @@ mod tests {
                     },
                 )]);
             crate::predicate::concept::Concept::Static {
-                operator: "person",
                 description: "",
                 attributes: &ATTRS,
             }

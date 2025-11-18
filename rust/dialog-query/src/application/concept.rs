@@ -229,7 +229,7 @@ impl ConceptApplication {
         let concept = self.concept.clone();
 
         let mut rules = vec![DeductiveRule::from(&concept)];
-        rules.extend(context.source.resolve_rules(concept.operator()));
+        rules.extend(context.source.resolve_rules(&concept.operator()));
         let plan = rules
             .iter()
             .map(|rule| Join::from(&rule.premises))
@@ -333,7 +333,6 @@ mod tests {
         // Create a person concept
         let concept = Concept::Dynamic {
             description: String::new(),
-            operator: "person".to_string(),
             attributes: vec![
                 (
                     "name",
@@ -422,7 +421,6 @@ mod tests {
         // Create a person concept
         let concept = Concept::Dynamic {
             description: String::new(),
-            operator: "person".to_string(),
             attributes: vec![
                 (
                     "name",
@@ -496,7 +494,6 @@ async fn test_concept_application_respects_constant_entity_parameter() -> anyhow
 
     let concept = Concept::Dynamic {
         description: String::new(),
-        operator: "person".to_string(),
         attributes: vec![(
             "name",
             crate::attribute::AttributeSchema::new(
@@ -575,7 +572,6 @@ async fn test_concept_application_respects_constant_attribute_parameter() -> any
 
     let concept = Concept::Dynamic {
         description: String::new(),
-        operator: "person".to_string(),
         attributes: vec![
             (
                 "name",
@@ -666,7 +662,6 @@ async fn test_concept_application_respects_multiple_constant_parameters() -> any
 
     let concept = Concept::Dynamic {
         description: String::new(),
-        operator: "person".to_string(),
         attributes: vec![
             (
                 "name",

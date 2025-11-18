@@ -66,13 +66,13 @@ impl<S: Store> Session<S> {
 
     /// Register a new rule into the session
     pub fn register(mut self, rule: DeductiveRule) -> Self {
-        if let Some(rules) = self.rules.get_mut(rule.conclusion.operator()) {
+        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator()) {
             if !rules.contains(&rule) {
                 rules.push(rule);
             }
         } else {
             self.rules
-                .insert(rule.conclusion.operator().into(), vec![rule.clone()]);
+                .insert(rule.conclusion.operator(), vec![rule.clone()]);
         }
 
         self
@@ -246,13 +246,12 @@ impl<S: ArtifactStore> QuerySession<S> {
     ///     .install(senior_rule);
     /// ```
     pub fn install(mut self, rule: DeductiveRule) -> Self {
-        if let Some(rules) = self.rules.get_mut(rule.conclusion.operator()) {
+        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator()) {
             if !rules.contains(&rule) {
                 rules.push(rule);
             }
         } else {
-            self.rules
-                .insert(rule.conclusion.operator().into(), vec![rule]);
+            self.rules.insert(rule.conclusion.operator(), vec![rule]);
         }
         self
     }
@@ -375,7 +374,6 @@ mod tests {
 
         let person = predicate::Concept::Dynamic {
             description: String::new(),
-            operator: "person".into(),
             attributes: [
                 (
                     "name",
@@ -563,7 +561,6 @@ mod tests {
 
         let person = predicate::Concept::Dynamic {
             description: String::new(),
-            operator: "person".into(),
             attributes: Attributes::from(attributes),
         };
 
@@ -589,7 +586,6 @@ mod tests {
 
         let person = predicate::Concept::Dynamic {
             description: String::new(),
-            operator: "person".into(),
             attributes: [
                 (
                     "name",

@@ -30,7 +30,7 @@ impl DeductiveRule {
         uncompiled.compile()
     }
 
-    pub fn operator(&self) -> &str {
+    pub fn operator(&self) -> String {
         self.conclusion.operator()
     }
     pub fn operands(&self) -> impl Iterator<Item = &str> {
@@ -138,7 +138,6 @@ fn test_rule_compiles_with_valid_premises() {
     // Rule: person(name, age) :- fact(user/name, ?user, name), fact(user/age, ?user, age)
     let conclusion = Concept::Dynamic {
         description: String::new(),
-        operator: "person".to_string(),
         attributes: vec![
             (
                 "name",
@@ -180,7 +179,6 @@ fn test_rule_fails_with_unconstrained_fact() {
     // Rule: person(key, value) :- fact(key, ?user, value) - all params unconstrained
     let conclusion = Concept::Dynamic {
         description: String::new(),
-        operator: "person".to_string(),
         attributes: vec![
             (
                 "key",
@@ -210,7 +208,6 @@ fn test_rule_fails_with_unused_parameter() {
     // Rule: person(name, age) :- fact(user/name, ?this, name) - 'age' unused
     let conclusion = Concept::Dynamic {
         description: String::new(),
-        operator: "person".to_string(),
         attributes: vec![
             (
                 "name",
@@ -244,7 +241,6 @@ fn test_rule_fails_with_no_premises() {
     // Rule: person(name, age) :- (empty)
     let conclusion = Concept::Dynamic {
         description: String::new(),
-        operator: "person".to_string(),
         attributes: vec![
             (
                 "name",
@@ -267,7 +263,6 @@ fn test_rule_compiles_with_chained_dependencies() {
     // First fact constrains ?user, allowing second fact to be planned
     let conclusion = Concept::Dynamic {
         description: String::new(),
-        operator: "result".to_string(),
         attributes: vec![
             (
                 "key",
@@ -312,7 +307,6 @@ fn test_rule_parameter_name_vs_variable_name() {
     // Parameter "is" maps to variable "key_var", not "key"
     let conclusion = Concept::Dynamic {
         description: String::new(),
-        operator: "result".to_string(),
         attributes: vec![(
             "key",
             crate::attribute::AttributeSchema::new("result", "key", "", Type::String),

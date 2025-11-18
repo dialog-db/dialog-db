@@ -67,6 +67,30 @@ pub trait Concept: Quarriable + Clone + Debug {
             .query(source)
             .map(move |input| cloned.realize(input?))
     }
+
+    /// Compute the blake3 hash of this concept's CBOR-encoded representation.
+    ///
+    /// The hash is computed from the CBOR encoding of the concept's attribute set,
+    /// ensuring that concepts with the same attributes (regardless of field names)
+    /// produce the same identifier.
+    fn hash() -> blake3::Hash {
+        Self::CONCEPT.hash()
+    }
+
+    /// Format this concept's identifier as a URI.
+    ///
+    /// Returns a URI in the format `concept:{blake3_hash_hex}`.
+    fn to_uri() -> String {
+        Self::CONCEPT.to_uri()
+    }
+
+    /// Parse a concept URI and extract its hash.
+    ///
+    /// Returns `Some(hash)` if the URI has the format `concept:{valid_hex}`,
+    /// or `None` if the URI is invalid.
+    fn parse_uri(uri: &str) -> Option<blake3::Hash> {
+        predicate::concept::Concept::parse_uri(uri)
+    }
 }
 
 /// Concepts can be matched and this trait describes an abstract match for the
@@ -210,7 +234,6 @@ mod tests {
                 predicate::concept::Attributes::Static(ATTRIBUTE_TUPLES);
 
             predicate::concept::Concept::Static {
-                operator: "person",
                 description: "",
                 attributes: &ATTRS,
             }
@@ -434,7 +457,11 @@ mod tests {
     fn test_person_concept_creation() {
         // Test that the Person concept has the expected properties
         let concept = Person::CONCEPT;
-        assert_eq!(concept.operator(), "person");
+        // Operator is now a URI based on the hash of the concept's attributes
+        assert!(
+            concept.operator().starts_with("concept:"),
+            "Operator should be a concept URI"
+        );
 
         // Test Person has 2 attributes (name and age)
         let attributes = concept.attributes();
@@ -522,9 +549,13 @@ mod tests {
 
     #[test]
     fn test_concept_name_consistency() {
-        // Test that concept name is consistent across different access patterns
+        // Test that concept identifier is consistent across different access patterns
         let concept = Person::CONCEPT;
-        assert_eq!(concept.operator(), "person");
+        // Operator is now a URI based on the hash of the concept's attributes
+        assert!(
+            concept.operator().starts_with("concept:"),
+            "Operator should be a concept URI"
+        );
 
         // The concept should have consistent naming
         let _person = Person {
@@ -533,9 +564,13 @@ mod tests {
             age: 1,
         };
 
-        // Instance should have the same concept name
+        // Instance should have the same concept identifier
         // (though our current Instance impl doesn't store concept info)
-        assert_eq!(concept.operator(), "person");
+        // Verify the identifier is still consistent
+        assert!(
+            concept.operator().starts_with("concept:"),
+            "Operator should be a concept URI"
+        );
     }
 
     #[test]

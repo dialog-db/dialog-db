@@ -961,7 +961,6 @@ mod cost_model_tests {
         // Create a ConceptApplication with single attribute
         let concept = Concept::Dynamic {
             description: String::new(),
-            operator: "user".to_string(),
             attributes: [(
                 "name",
                 crate::AttributeSchema::new("user", "name", "User name", crate::Type::String),
@@ -1015,7 +1014,6 @@ mod cost_model_tests {
         // Create a ConceptApplication with single attribute
         let concept = Concept::Dynamic {
             description: String::new(),
-            operator: "user".to_string(),
             attributes: [(
                 "name",
                 crate::AttributeSchema::new("user", "name", "User name", crate::Type::String),
@@ -1062,7 +1060,6 @@ mod cost_model_tests {
         // Create a ConceptApplication with single attribute
         let concept = Concept::Dynamic {
             description: String::new(),
-            operator: "user".to_string(),
             attributes: [(
                 "name",
                 crate::AttributeSchema::new("user", "name", "User name", crate::Type::String),
@@ -1113,7 +1110,6 @@ mod cost_model_tests {
 
         let concept = Concept::Dynamic {
             description: String::new(),
-            operator: "user".to_string(),
             attributes: [("tags", concept_attr)].into(),
         };
 
@@ -1159,7 +1155,6 @@ mod cost_model_tests {
 
         let concept = Concept::Dynamic {
             description: String::new(),
-            operator: "user".to_string(),
             attributes: [("tags", concept_attr)].into(),
         };
 

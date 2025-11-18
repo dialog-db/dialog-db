@@ -10,6 +10,10 @@ license.workspace = true
 # Serialization
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
+
+# Hashing
+blake3 = { workspace = true }
 
 # (removed async-trait since we're using sync traits for now)
 

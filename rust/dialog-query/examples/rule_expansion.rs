@@ -125,7 +125,6 @@ mod person {
 
         const CONCEPT: dialog_query::predicate::concept::Concept =
             dialog_query::predicate::concept::Concept::Static {
-                operator: &NAMESPACE,
                 description: "",
                 attributes: &PERSON_ATTRIBUTES,
             };

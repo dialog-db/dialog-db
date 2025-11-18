@@ -43,7 +43,11 @@ fn test_derive_rule_generates_types() {
 
     // Test that Person implements Concept
     let concept = Person::CONCEPT;
-    assert_eq!(concept.operator(), "person");
+    // Operator is now a computed URI
+    assert!(
+        concept.operator().starts_with("concept:"),
+        "Operator should be a concept URI"
+    );
 
     // Test the attributes() method
     let attrs = concept.attributes().iter().collect::<Vec<_>>();

@@ -198,16 +198,17 @@ impl From<&Attributes> for Schema {
 /// Represents a concept which is a set of attributes that define an entity type.
 /// Concepts are similar to tables in relational databases but are more flexible
 /// as they can be derived from rules rather than just stored directly.
+///
+/// Concepts are identified by a blake3 hash of their attribute set, encoded
+/// as a URI in the format `concept:{hash}`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Concept {
     Dynamic {
-        operator: String,
         description: String,
         attributes: Attributes,
     },
     Static {
-        operator: &'static str,
         description: &'static str,
         attributes: &'static Attributes,
     },
@@ -221,7 +222,6 @@ impl<'de> Deserialize<'de> for Concept {
     {
         #[derive(Deserialize)]
         struct DynamicConcept {
-            operator: String,
             #[serde(default)]
             description: String,
             attributes: Attributes,
@@ -229,7 +229,6 @@ impl<'de> Deserialize<'de> for Concept {
 
         let dynamic = DynamicConcept::deserialize(deserializer)?;
         Ok(Concept::Dynamic {
-            operator: dynamic.operator,
             description: dynamic.description,
             attributes: dynamic.attributes,
         })
@@ -302,11 +301,11 @@ impl Not for Conception {
 }
 
 impl Concept {
-    pub fn new(operator: String) -> Self {
+    /// Creates a new dynamic concept with the given attributes.
+    pub fn new(attributes: Attributes) -> Self {
         Concept::Dynamic {
-            operator,
             description: String::new(),
-            attributes: Attributes::new(),
+            attributes,
         }
     }
 
@@ -317,11 +316,15 @@ impl Concept {
         }
     }
 
-    pub fn operator(&self) -> &str {
-        match self {
-            Self::Dynamic { operator, .. } => operator,
-            Self::Static { operator, .. } => operator,
-        }
+    /// Returns the concept identifier as a URI.
+    ///
+    /// This is a computed value based on the blake3 hash of the concept's
+    /// attribute set, in the format `concept:{hash}`.
+    ///
+    /// Note: This method returns a String (not &str) because the identifier
+    /// is computed on-demand rather than stored.
+    pub fn operator(&self) -> String {
+        self.to_uri()
     }
 
     pub fn operands(&self) -> impl Iterator<Item = &str> {
@@ -330,6 +333,54 @@ impl Concept {
 
     pub fn schema(&self) -> Schema {
         self.attributes().into()
+    }
+
+    /// Encode this concept as CBOR for hashing
+    ///
+    /// Creates a CBOR-encoded representation as a map where:
+    /// - Keys are attribute URIs (the:{hash}) in sorted order
+    /// - Values are empty objects {}
+    pub fn to_cbor_bytes(&self) -> Vec<u8> {
+        use serde::Serialize;
+        use std::collections::BTreeMap;
+
+        #[derive(Serialize)]
+        struct EmptyObject {}
+
+        // Collect attribute URIs
+        let mut attr_map: BTreeMap<String, EmptyObject> = BTreeMap::new();
+
+        for (_name, schema) in self.attributes().iter() {
+            let uri = schema.to_uri();
+            // Use empty object as value
+            attr_map.insert(uri, EmptyObject {});
+        }
+
+        serde_ipld_dagcbor::to_vec(&attr_map).expect("CBOR encoding should not fail")
+    }
+
+    /// Compute blake3 hash of this concept
+    ///
+    /// Returns a 32-byte blake3 hash of the CBOR-encoded concept
+    pub fn hash(&self) -> blake3::Hash {
+        let cbor_bytes = self.to_cbor_bytes();
+        blake3::hash(&cbor_bytes)
+    }
+
+    /// Format this concept's hash as a URI
+    ///
+    /// Returns a string in the format: `concept:{blake3_hash_hex}`
+    pub fn to_uri(&self) -> String {
+        format!("concept:{}", self.hash().to_hex())
+    }
+
+    /// Parse a concept URI and extract the hash
+    ///
+    /// Expects format: `concept:{blake3_hash_hex}`
+    /// Returns None if the format is invalid
+    pub fn parse_uri(uri: &str) -> Option<blake3::Hash> {
+        let uri = uri.strip_prefix("concept:")?;
+        blake3::Hash::from_hex(uri).ok()
     }
 
     /// Creates an application for this concept.
@@ -494,7 +545,6 @@ mod tests {
 
         let concept = Concept::Dynamic {
             description: String::new(),
-            operator: "user".to_string(),
             attributes,
         };
 
@@ -505,8 +555,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
         let obj = parsed.as_object().expect("Should be object");
 
-        // Check operator
-        assert_eq!(obj["operator"], "user");
+        // Note: operator is no longer serialized as it's a computed value
 
         // Check attributes structure
         let attributes_obj = obj["attributes"]
@@ -555,7 +604,11 @@ mod tests {
 
         let concept: Concept = serde_json::from_str(json).expect("Should deserialize");
 
-        assert_eq!(concept.operator(), "person");
+        // Operator is now a URI based on the hash of the concept's attributes
+        assert!(
+            concept.operator().starts_with("concept:"),
+            "Operator should be a concept URI"
+        );
         assert_eq!(concept.attributes().count(), 2);
 
         let email_attr = concept
@@ -585,7 +638,6 @@ mod tests {
     fn test_concept_round_trip_serialization() {
         let original = Concept::Dynamic {
             description: String::new(),
-            operator: "game".to_string(),
             attributes: [(
                 "score",
                 AttributeSchema::<Value>::new("game", "score", "Game score", Type::UnsignedInt),

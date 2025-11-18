@@ -497,7 +497,6 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 
             const CONCEPT: dialog_query::predicate::concept::Concept =
                 dialog_query::predicate::concept::Concept::Static {
-                    operator: #namespace_lit,
                     description: #concept_description_lit,
                     attributes: &dialog_query::predicate::concept::Attributes::Static(#attributes_const_name),
                 };
@@ -1220,7 +1219,6 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
                 )]);
 
             dialog_query::predicate::concept::Concept::Static {
-                operator: #namespace_expr,
                 description: #description_lit,
                 attributes: &ATTRS,
             }

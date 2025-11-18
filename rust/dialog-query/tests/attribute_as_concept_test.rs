@@ -35,9 +35,14 @@ fn test_attribute_concept_const() {
         <dialog_query::attribute::With<note::Title> as Concept>::CONCEPT;
 
     match concept {
-        ConceptPredicate::Static { operator, .. } => {
+        ConceptPredicate::Static { .. } => {
+            let operator = concept.operator();
             println!("✓ Concept operator: {}", operator);
-            assert_eq!(operator, "note");
+            // Note: operator is now a URI in the format concept:{hash}
+            assert!(
+                operator.starts_with("concept:"),
+                "Operator should be a concept URI"
+            );
         }
         _ => panic!("Expected Static concept"),
     }
