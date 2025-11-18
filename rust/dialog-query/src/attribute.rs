@@ -670,6 +670,7 @@ mod tests {
                 )]);
             crate::predicate::concept::Concept::Static {
                 operator: "person",
+                description: "",
                 attributes: &ATTRS,
             }
         };

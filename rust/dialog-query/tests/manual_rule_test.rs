@@ -141,6 +141,7 @@ impl Concept for Person {
 
         dialog_query::predicate::concept::Concept::Static {
             operator: "person",
+            description: "",
             attributes: &ATTRS,
         }
     };

@@ -22,6 +22,7 @@ async fn test_session_source_rule_resolution() -> Result<()> {
 
     let adult_conclusion = Concept::Dynamic {
         operator: "adult".into(),
+        description: String::new(),
         attributes: Attributes::from(vec![
             (
                 "name",
@@ -102,6 +103,7 @@ async fn test_multiple_rules_same_operator() -> Result<()> {
     // Create two different rules for the same concept
     let concept1 = Concept::Dynamic {
         operator: "person".into(),
+        description: String::new(),
         attributes: [(
             "name".to_string(),
             AttributeSchema::new("person", "name", "Person name", Type::String),
@@ -111,6 +113,7 @@ async fn test_multiple_rules_same_operator() -> Result<()> {
 
     let concept2 = Concept::Dynamic {
         operator: "person".into(),
+        description: String::new(),
         attributes: [(
             "age".to_string(),
             AttributeSchema::new("person", "age", "Person age", Type::UnsignedInt),
@@ -158,6 +161,7 @@ async fn test_explicit_conversion_pattern() -> Result<()> {
     // Test 2: Conversion with rule installation
     let adult_concept = Concept::Dynamic {
         operator: "adult".into(),
+        description: String::new(),
         attributes: [(
             "name".to_string(),
             AttributeSchema::new("person", "name", "Adult name", Type::String),

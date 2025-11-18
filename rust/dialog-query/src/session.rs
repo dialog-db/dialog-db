@@ -374,6 +374,7 @@ mod tests {
             .await?;
 
         let person = predicate::Concept::Dynamic {
+            description: String::new(),
             operator: "person".into(),
             attributes: [
                 (
@@ -561,6 +562,7 @@ mod tests {
         );
 
         let person = predicate::Concept::Dynamic {
+            description: String::new(),
             operator: "person".into(),
             attributes: Attributes::from(attributes),
         };
@@ -586,6 +588,7 @@ mod tests {
         let mut session = Session::open(store);
 
         let person = predicate::Concept::Dynamic {
+            description: String::new(),
             operator: "person".into(),
             attributes: [
                 (

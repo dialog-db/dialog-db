@@ -1,8 +1,8 @@
 //! Test the concept query shortcut syntax: Employee::query(session)
 
 use anyhow::Result;
-use dialog_query::{Attribute, Concept, Entity, Match, Session, Term};
 use dialog_query::artifact::Artifacts;
+use dialog_query::{Attribute, Concept, Entity, Match, Session, Term};
 use dialog_storage::MemoryStorageBackend;
 use futures_util::TryStreamExt;
 
@@ -38,7 +38,8 @@ async fn test_concept_query_shortcut() -> Result<()> {
         this: alice.clone(),
         name: employee::Name("Alice".into()),
         job: employee::Job("Engineer".into()),
-    }).assert(Employee {
+    })
+    .assert(Employee {
         this: bob.clone(),
         name: employee::Name("Bob".into()),
         job: employee::Job("Designer".into()),
@@ -46,9 +47,7 @@ async fn test_concept_query_shortcut() -> Result<()> {
     session.commit(edit).await?;
 
     // Test the shortcut syntax: Employee::query(session)
-    let employees_shortcut: Vec<Employee> = Employee::query(session.clone())
-        .try_collect()
-        .await?;
+    let employees_shortcut: Vec<Employee> = Employee::query(session.clone()).try_collect().await?;
 
     // Test the explicit syntax: Match::<Employee>::default().query(session)
     let employees_explicit: Vec<Employee> = Match::<Employee>::default()
@@ -105,7 +104,10 @@ async fn test_both_syntaxes_equivalent() -> Result<()> {
         this: Term::var("this"),
         name: Term::var("name"),
         job: Term::var("job"),
-    }.query(session.clone()).try_collect().await?;
+    }
+    .query(session.clone())
+    .try_collect()
+    .await?;
 
     // Default Match syntax
     let result3: Vec<Employee> = Match::<Employee>::default()

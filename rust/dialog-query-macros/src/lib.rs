@@ -57,6 +57,11 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 
     let struct_name = &input.ident;
 
+    // Extract doc comments from the concept struct
+    let concept_description = extract_doc_comments(&input.attrs);
+    let concept_description_lit =
+        syn::LitStr::new(&concept_description, proc_macro2::Span::call_site());
+
     // Extract fields from the ostruct
     let fields = match &input.data {
         Data::Struct(data_struct) => match &data_struct.fields {
@@ -493,6 +498,7 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
             const CONCEPT: dialog_query::predicate::concept::Concept =
                 dialog_query::predicate::concept::Concept::Static {
                     operator: #namespace_lit,
+                    description: #concept_description_lit,
                     attributes: &dialog_query::predicate::concept::Attributes::Static(#attributes_const_name),
                 };
         }
@@ -1215,6 +1221,7 @@ pub fn derive_attribute(input: TokenStream) -> TokenStream {
 
             dialog_query::predicate::concept::Concept::Static {
                 operator: #namespace_expr,
+                description: #description_lit,
                 attributes: &ATTRS,
             }
         };

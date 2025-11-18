@@ -203,10 +203,12 @@ impl From<&Attributes> for Schema {
 pub enum Concept {
     Dynamic {
         operator: String,
+        description: String,
         attributes: Attributes,
     },
     Static {
         operator: &'static str,
+        description: &'static str,
         attributes: &'static Attributes,
     },
 }
@@ -220,12 +222,15 @@ impl<'de> Deserialize<'de> for Concept {
         #[derive(Deserialize)]
         struct DynamicConcept {
             operator: String,
+            #[serde(default)]
+            description: String,
             attributes: Attributes,
         }
 
         let dynamic = DynamicConcept::deserialize(deserializer)?;
         Ok(Concept::Dynamic {
             operator: dynamic.operator,
+            description: dynamic.description,
             attributes: dynamic.attributes,
         })
     }
@@ -300,6 +305,7 @@ impl Concept {
     pub fn new(operator: String) -> Self {
         Concept::Dynamic {
             operator,
+            description: String::new(),
             attributes: Attributes::new(),
         }
     }
@@ -487,6 +493,7 @@ mod tests {
         ]);
 
         let concept = Concept::Dynamic {
+            description: String::new(),
             operator: "user".to_string(),
             attributes,
         };
@@ -577,6 +584,7 @@ mod tests {
     #[test]
     fn test_concept_round_trip_serialization() {
         let original = Concept::Dynamic {
+            description: String::new(),
             operator: "game".to_string(),
             attributes: [(
                 "score",

@@ -14,6 +14,7 @@ use std::collections::HashSet;
 fn test_concept_as_conclusion_operations() {
     let concept = Concept::Dynamic {
         operator: "person".to_string(),
+        description: String::new(),
         attributes: Attributes::from(vec![
             (
                 "name",
@@ -38,6 +39,7 @@ fn test_concept_as_conclusion_operations() {
 fn test_concept_creation() {
     let concept = Concept::Dynamic {
         operator: "person".to_string(),
+        description: String::new(),
         attributes: Attributes::from(vec![(
             "name".to_string(),
             AttributeSchema::<Value>::new("person", "name", "Person name", Type::String),
@@ -53,6 +55,7 @@ fn test_concept_creation() {
 fn test_concept_application_analysis() {
     let concept = Concept::Dynamic {
         operator: "person".to_string(),
+        description: String::new(),
         attributes: Attributes::from(vec![
             (
                 "name".to_string(),
@@ -88,6 +91,7 @@ fn test_deductive_rule_parameters() {
     let rule = DeductiveRule {
         conclusion: Concept::Dynamic {
             operator: "adult".into(),
+            description: String::new(),
             attributes: [
                 (
                     "name".to_string(),
@@ -133,6 +137,7 @@ fn test_error_types() {
     let rule = DeductiveRule {
         conclusion: Concept::Dynamic {
             operator: "test".to_string(),
+            description: String::new(),
             attributes: Attributes::new(),
         },
         premises: vec![],
@@ -181,6 +186,7 @@ fn test_application_variants() {
     terms.insert("test".to_string(), Term::var("test_var"));
     let concept = Concept::Dynamic {
         operator: "test".to_string(),
+        description: String::new(),
         attributes: Attributes::new(),
     };
     let concept_app = Application::Concept(ConceptApplication { terms, concept });

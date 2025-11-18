@@ -5,6 +5,7 @@ use dialog_query::Type;
 fn main() {
     let concept = Concept::Dynamic {
         operator: "user".to_string(),
+        description: String::new(),
         attributes: [
             (
                 "name",

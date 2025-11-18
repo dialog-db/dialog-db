@@ -7,6 +7,7 @@ use dialog_query::predicate::Concept;
 fn test_concept_serialization_to_specific_json() {
     let concept = Concept::Dynamic {
         operator: "user".to_string(),
+        description: String::new(),
         attributes: Attributes::from(vec![
             (
                 "name".to_string(),
@@ -106,6 +107,7 @@ fn test_concept_deserialization_from_specific_json() {
 fn test_concept_round_trip_serialization() {
     let original = Concept::Dynamic {
         operator: "game".to_string(),
+        description: String::new(),
         attributes: Attributes::from(vec![(
             "score".to_string(),
             AttributeSchema::new("game", "score", "Game score", Type::UnsignedInt),
@@ -146,6 +148,7 @@ fn test_expected_json_structure() {
     // Test that we get exactly the JSON structure we expect
     let concept = Concept::Dynamic {
         operator: "product".to_string(),
+        description: String::new(),
         attributes: Attributes::from(vec![(
             "id".to_string(),
             AttributeSchema::new("product", "id", "Product ID", Type::UnsignedInt),
@@ -157,6 +160,7 @@ fn test_expected_json_structure() {
     // Parse and check exact structure
     let expected_structure = r#"{
   "operator": "product",
+  "description": "",
   "attributes": {
     "id": {
       "namespace": "product",

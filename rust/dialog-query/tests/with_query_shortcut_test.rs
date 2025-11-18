@@ -1,9 +1,9 @@
 //! Test that With<A>::query() shortcut syntax works
 
 use anyhow::Result;
-use dialog_query::{Attribute, Concept, Entity, Session};
-use dialog_query::attribute::With;
 use dialog_query::artifact::Artifacts;
+use dialog_query::attribute::With;
+use dialog_query::{Attribute, Concept, Entity, Session};
 use dialog_storage::MemoryStorageBackend;
 use futures_util::TryStreamExt;
 
@@ -28,10 +28,22 @@ async fn test_with_query_shortcut() -> Result<()> {
     let bob = Entity::new()?;
 
     let mut edit = session.edit();
-    edit.assert(With { this: alice.clone(), has: employee::Name("Alice".into()) })
-        .assert(With { this: bob.clone(), has: employee::Name("Bob".into()) })
-        .assert(With { this: alice.clone(), has: employee::Job("Engineer".into()) })
-        .assert(With { this: bob.clone(), has: employee::Job("Designer".into()) });
+    edit.assert(With {
+        this: alice.clone(),
+        has: employee::Name("Alice".into()),
+    })
+    .assert(With {
+        this: bob.clone(),
+        has: employee::Name("Bob".into()),
+    })
+    .assert(With {
+        this: alice.clone(),
+        has: employee::Job("Engineer".into()),
+    })
+    .assert(With {
+        this: bob.clone(),
+        has: employee::Job("Designer".into()),
+    });
     session.commit(edit).await?;
 
     // Test the shortcut syntax: With::<employee::Name>::query(session)
