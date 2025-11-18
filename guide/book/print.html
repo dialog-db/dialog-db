@@ -177,6 +177,2041 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="introduction"><a class="header" href="#introduction">Introduction</a></h1>
+<h2 id="what-is-dialog"><a class="header" href="#what-is-dialog">What is Dialog?</a></h2>
+<p>Dialog is a database that stores <strong>facts</strong> instead of documents or rows. Each fact is a small, immutable piece of knowledge that can be queried, combined, and reasoned about.</p>
+<p>Think of it like building with LEGO blocks instead of carving monolithic sculptures. Instead of storing a complete "employee" document, you store individual facts:</p>
+<ul>
+<li>The name of employee #123 is "Alice"</li>
+<li>The salary of employee #123 is 60000</li>
+<li>The manager of employee #123 is employee #456</li>
+</ul>
+<p>This granular approach gives you flexibility: the same data can be interpreted through different lenses, queried in ways you didn't anticipate, and evolved without breaking existing code.</p>
+<h2 id="facts-not-documents"><a class="header" href="#facts-not-documents">Facts, Not Documents</a></h2>
+<p>Traditional databases force you to decide upfront: "Is this a SQL table? A JSON document? A graph?" Dialog doesn't ask you to choose. Facts naturally express:</p>
+<ul>
+<li><strong>Structured data</strong> (like SQL rows)</li>
+<li><strong>Nested data</strong> (like JSON documents)</li>
+<li><strong>Connected data</strong> (like graph edges)</li>
+</ul>
+<p>All at the same time, using the same primitives.</p>
+<p>Dialog is <strong>schema-on-read</strong>, not schema-on-write. You don't need migrations when your model evolves. Multiple applications can interpret the same facts differently. Your data remains flexible as requirements change.</p>
+<h2 id="built-for-collaboration"><a class="header" href="#built-for-collaboration">Built for Collaboration</a></h2>
+<p>Dialog is designed for <strong>local-first, privacy-preserving collaboration</strong>:</p>
+<ul>
+<li>Queries run against your <strong>local database</strong></li>
+<li>Changes <strong>synchronize</strong> using content-addressed storage</li>
+<li><strong>Conflict-free replication</strong> through causal timestamps</li>
+<li>You control your data and who sees it</li>
+</ul>
+<h2 id="lets-build-something"><a class="header" href="#lets-build-something">Let's Build Something</a></h2>
+<p>In the next chapter, we'll explore the paradigm that makes Dialog different: how modeling information as immutable facts changes everything.</p>
+<p>Then we'll jump straight into code - defining attributes, modeling data, and running queries.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="paradigm"><a class="header" href="#paradigm">Paradigm</a></h1>
+<p>Before we start writing code, let's understand what makes Dialog fundamentally different.</p>
+<h2 id="places-vs-information"><a class="header" href="#places-vs-information">Places vs Information</a></h2>
+<p>Most databases are organized around <strong>places</strong> - mutable containers that change over time. Tables, documents, and objects are all abstractions for mutable memory locations. When you update them, you lose what was there before and destroy history.</p>
+<p>Dialog takes a different approach: <strong>information accumulates as immutable facts</strong>.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Traditional: A place that changes
+table.update({ id: "alice", salary: 60000 });  // Old salary gone
+table.update({ id: "alice", salary: 65000 });  // 60000 lost forever
+
+// Dialog: Information that accumulates
+Assertion { employee/salary of alice is 50000, at t1 }
+Assertion { employee/salary of alice is 65000, at t2 }
+// Both facts exist - true at different points in time
+<span class="boring">}</span></code></pre></pre>
+<p>This paradigm shift provides:</p>
+<ul>
+<li><strong>Time is queryable</strong>: Query "what was true then?" without special infrastructure</li>
+<li><strong>Identity is separate from state</strong>: An entity is just an ID; facts about it evolve independently</li>
+<li><strong>No coordination needed</strong>: Facts are immutable values that merge deterministically</li>
+<li><strong>Multiple interpretations</strong>: The same facts can satisfy different query patterns</li>
+</ul>
+<h2 id="building-blocks"><a class="header" href="#building-blocks">Building Blocks</a></h2>
+<h3 id="entities-identity-without-state"><a class="header" href="#entities-identity-without-state">Entities: Identity Without State</a></h3>
+<p>An <strong>entity</strong> is pure identity - a stable identifier with no inherent state:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let alice = Entity::new()?;
+// Creates: did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK
+<span class="boring">}</span></code></pre></pre>
+<p><strong>Key insight</strong>: An entity is not a container. It has no fields, no properties, no data. It's just an ID.</p>
+<p>All information about alice exists as <strong>separate facts</strong>:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// alice doesn't "contain" a name
+// Rather: there exists a fact "alice has name 'Alice'"
+Relation {
+    the: employee::Name,
+    of: alice,
+    is: "Alice"
+}
+<span class="boring">}</span></code></pre></pre>
+<p>This separation means:</p>
+<ul>
+<li><strong>Identity is stable</strong>: alice is always alice, regardless of what's true about her</li>
+<li><strong>State evolves</strong>: Facts about alice can be asserted and retracted without affecting alice's identity</li>
+<li><strong>No coupling</strong>: Different facts about alice can change independently</li>
+</ul>
+<p>Entities are globally unique (using <a href="https://w3c-ccg.github.io/did-key-spec/">did:key</a> URIs), so they work across databases without coordination.</p>
+<h3 id="relations-the-shape-of-information"><a class="header" href="#relations-the-shape-of-information">Relations: The Shape of Information</a></h3>
+<p>A <strong>relation</strong> is a triple expressing information about an entity:</p>
+<pre><code>{ the, of, is }
+</code></pre>
+<ul>
+<li><strong>the</strong> - which attribute (e.g., employee::Name)</li>
+<li><strong>of</strong> - which entity (e.g., alice)</li>
+<li><strong>is</strong> - what value (e.g., "Alice", 60000, or another entity)</li>
+</ul>
+<p>This reads naturally: <strong>the</strong> name <strong>of</strong> alice <strong>is</strong> "Alice".</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Scalar values
+Relation { the: employee::Name, of: alice, is: "Alice" }
+Relation { the: employee::Salary, of: alice, is: 60000 }
+
+// Entity references (forming graphs)
+Relation { the: employee::Manager, of: bob, is: alice }
+<span class="boring">}</span></code></pre></pre>
+<p><strong>Key insight</strong>: Relations are uniform. Every piece of information has the same shape, regardless of type. This uniformity makes querying, replication, and reasoning consistent across all data.</p>
+<p>Attributes use namespace/name format (<code>employee/name</code>, <code>person/birthday</code>) to organize information without constraining what facts can exist:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// alice can have facts from any namespace
+alice has employee/name "Alice"
+alice has employee/salary 60000
+alice has person/birthday "1990-01-15"
+alice has account/username "alice123"
+<span class="boring">}</span></code></pre></pre>
+<p>No schema enforcement - facts accumulate freely.</p>
+<h3 id="facts-information--time"><a class="header" href="#facts-information--time">Facts: Information + Time</a></h3>
+<p>A <strong>fact</strong> is a relation placed in time - information about when something became (or stopped being) true:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Assertion: makes a relation true at a causal point
+Fact::Assertion {
+    the: employee::Name,
+    of: alice,
+    is: "Alice",
+    cause: t1
+}
+// "At t1, alice's name became 'Alice'"
+
+// Retraction: makes a relation false at a causal point
+Fact::Retraction {
+    the: employee::Salary,
+    of: alice,
+    is: 50000,
+    cause: t2
+}
+// "At t2, alice's salary of 50000 stopped being true"
+<span class="boring">}</span></code></pre></pre>
+<p><strong>Key insight</strong>: Facts are immutable values. Once asserted, a fact never changes. To "update" data, you assert new facts and retract old ones.</p>
+<p>Example - giving Alice a raise:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// t1: Hire Alice at 50k
+Assertion { the: employee::Salary, of: alice, is: 50000, cause: t1 }
+
+// t2: Give Alice a raise to 60k
+Retraction { the: employee::Salary, of: alice, is: 50000, cause: t2 }
+Assertion { the: employee::Salary, of: alice, is: 60000, cause: t2 }
+
+// Query at t3: 60000 (current)
+// Query at t1.5: 50000 (time-travel!)
+<span class="boring">}</span></code></pre></pre>
+<p>Nothing was destroyed. Both "Alice earns 50000" and "Alice earns 60000" are true - just at different times.</p>
+<h3 id="cardinality-single-vs-multiple-values"><a class="header" href="#cardinality-single-vs-multiple-values">Cardinality: Single vs Multiple Values</a></h3>
+<p>Attributes declare cardinality to control how facts relate to each other over time:</p>
+<p><strong>Cardinality::One</strong> - Only one value is true at a time. Newer facts supersede older ones:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// employee::Salary has Cardinality::One
+Assertion { the: employee::Salary, of: alice, is: 50000, cause: t1 }
+Assertion { the: employee::Salary, of: alice, is: 60000, cause: t2 }
+
+// Query at t1.5: returns 50000 (what was true then)
+// Query at t3: returns 60000 (what is true now)
+
+// The fact "salary was 50000 at t1" remains eternally true
+// The fact "salary is 60000 from t2 onward" is also true
+// Both facts exist - they're just true at different points in time
+<span class="boring">}</span></code></pre></pre>
+<p><strong>Cardinality::Many</strong> - Multiple values can be true simultaneously:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// employee::Skill has Cardinality::Many
+Assertion { the: employee::Skill, of: alice, is: "Rust", cause: t1 }
+Assertion { the: employee::Skill, of: alice, is: "Python", cause: t2 }
+
+// Query at t1.5: returns ["Rust"]
+// Query at t3: returns ["Rust", "Python"]
+
+// Both facts are true at the same time from t2 onward
+<span class="boring">}</span></code></pre></pre>
+<h3 id="time-logical-not-physical"><a class="header" href="#time-logical-not-physical">Time: Logical, Not Physical</a></h3>
+<p>Dialog doesn't use wall-clock time. Instead, facts exist in <strong>causal order</strong> using logical timestamps:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>Fact::Assertion {
+    the: employee::Name,
+    of: alice,
+    is: "Alice",
+    cause: logical_timestamp  // Causal position, not wall-clock time
+}
+<span class="boring">}</span></code></pre></pre>
+<p><strong>Why logical timestamps?</strong></p>
+<ul>
+<li><strong>No coordination needed</strong>: Distributed peers don't need synchronized clocks</li>
+<li><strong>Concurrent edits work</strong>: Multiple peers can create facts simultaneously - their logical timestamps establish partial order</li>
+<li><strong>Deterministic merging</strong>: When peers sync, facts merge based on causality, not wall-clock time</li>
+</ul>
+<p>Example - two peers edit simultaneously:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Peer 1 at 3:00pm
+Assertion { the: employee::Salary, of: alice, is: 65000, cause: peer1_t5 }
+
+// Peer 2 at 3:00pm (same wall-clock time!)
+Assertion { the: employee::Salary, of: alice, is: 70000, cause: peer2_t3 }
+
+// When peers sync:
+// - Both facts are preserved (no data loss)
+// - Logical timestamps establish order
+// - Conflict resolution applies (last-write-wins, max, etc.)
+// - History contains both values
+<span class="boring">}</span></code></pre></pre>
+<p><strong>You don't manage causality</strong>. Dialog handles logical timestamps automatically when you commit transactions.</p>
+<hr />
+<p>Now that we understand how Dialog models information as immutable facts, let's start building with attributes and concepts.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="information-model"><a class="header" href="#information-model">Information Model</a></h1>
+<p>The information model in Dialog has two parts:</p>
+<ol>
+<li><strong>Attributes</strong> - The vocabulary of facts (name, salary, manager)</li>
+<li><strong>Concepts</strong> - Interpretations of groups of facts</li>
+</ol>
+<p>Attributes give semantic meaning to the "the" part of relations. They're labels with metadata (type, cardinality) but don't constrain what facts you can assert.</p>
+<p>Concepts are patterns for interpreting entities - they describe how to make sense of groups of related facts.</p>
+<p>Let's start by defining attributes.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="attributes"><a class="header" href="#attributes">Attributes</a></h1>
+<p>An <strong>attribute</strong> defines a relation you can express in your database. It describes what can be said about an entity.</p>
+<h2 id="your-first-attribute"><a class="header" href="#your-first-attribute">Your First Attribute</a></h2>
+<p>Let's define an employee name attribute:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod employee {
+    use dialog_query::Attribute;
+
+    /// Name of the employee
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+}
+<span class="boring">}</span></code></pre></pre>
+<p>That's it! The <code>#[derive(Attribute)]</code> macro generates everything you need.</p>
+<h2 id="what-gets-generated"><a class="header" href="#what-gets-generated">What Gets Generated</a></h2>
+<p>When you derive <code>Attribute</code>, Dialog automatically creates:</p>
+<ul>
+<li><strong>Namespace</strong>: <code>employee</code> (from the module name)</li>
+<li><strong>Attribute name</strong>: <code>name</code> (from the struct name, converted to lowercase)</li>
+<li><strong>Full selector</strong>: <code>employee/name</code></li>
+<li><strong>Value type</strong>: <code>String</code> (from the field type)</li>
+<li><strong>Cardinality</strong>: <code>One</code> (default, unless specified otherwise)</li>
+<li><strong>Description</strong>: "Name of the employee" (from the doc comment)</li>
+</ul>
+<h2 id="anatomy-of-an-attribute"><a class="header" href="#anatomy-of-an-attribute">Anatomy of an Attribute</a></h2>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod employee {
+//  ^^^^^^^^ The module name becomes the namespace
+    use dialog_query::Attribute;
+
+    /// Name of the employee
+    //  ^^^^^^^^^^^^^^^^^^^^ Doc comment becomes description
+    #[derive(Attribute)]
+    //       └─ This macro does the magic
+    pub struct Name(pub String);
+    //         ^^^^     ^^^^^^
+    //         |        └─ The value type
+    //         └─ Converted to lowercase: "name"
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="namespaces"><a class="header" href="#namespaces">Namespaces</a></h2>
+<p>Attributes are organized into namespaces. The namespace comes from the module:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod employee {
+    use dialog_query::Attribute;
+
+    /// Name of the employee
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+    // Selector: employee/name
+
+    /// Salary of the employee
+    #[derive(Attribute)]
+    pub struct Salary(pub u32);
+    // Selector: employee/salary
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="why-namespaces"><a class="header" href="#why-namespaces">Why Namespaces?</a></h3>
+<ol>
+<li><strong>Avoid conflicts</strong>: <code>employee::Name</code> vs <code>customer::Name</code></li>
+<li><strong>Data locality</strong>: Attributes in the same namespace are stored together, making queries faster</li>
+<li><strong>Organization</strong>: Group related attributes</li>
+</ol>
+<h3 id="namespace-recommendations"><a class="header" href="#namespace-recommendations">Namespace Recommendations</a></h3>
+<p>Use reverse domain notation for global uniqueness:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod io_example_employee {
+    // Selector: io-example-employee/name
+}
+<span class="boring">}</span></code></pre></pre>
+<p>For local development, simple names work fine:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod employee {
+    // Selector: employee/name
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="value-types"><a class="header" href="#value-types">Value Types</a></h2>
+<p>Attributes can hold different value types:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::{Attribute, Entity};
+
+mod employee {
+    use super::*;
+
+    /// Name - a string
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    /// Age - a number
+    #[derive(Attribute)]
+    pub struct Age(pub u32);
+
+    /// Active status - a boolean
+    #[derive(Attribute)]
+    pub struct Active(pub bool);
+
+    /// Manager - a reference to another entity
+    #[derive(Attribute)]
+    pub struct Manager(pub Entity);
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="cardinality"><a class="header" href="#cardinality">Cardinality</a></h2>
+<p>Attributes have a <strong>cardinality</strong> that determines how many values an entity can have for that attribute.</p>
+<h3 id="cardinalityone"><a class="header" href="#cardinalityone">Cardinality::One</a></h3>
+<p>An entity can have at most <strong>one</strong> value for this attribute. If you assert a new value, it supersedes the previous assertion.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod employee {
+    use dialog_query::Attribute;
+
+    /// Employee's current salary (only one at a time)
+    #[derive(Attribute)]
+    pub struct Salary(pub u32);
+}
+
+// First assertion
+let mut edit = session.edit();
+edit.assert(With { this: alice.clone(), has: Salary(50000) });
+session.commit(edit).await?;
+
+// Second assertion supersedes the first
+let mut edit = session.edit();
+edit.assert(With { this: alice.clone(), has: Salary(60000) });
+session.commit(edit).await?;
+
+// Query returns: 60000 (only the latest)
+<span class="boring">}</span></code></pre></pre>
+<p>This is the default cardinality for attributes.</p>
+<h3 id="cardinalitymany"><a class="header" href="#cardinalitymany">Cardinality::Many</a></h3>
+<p>An entity can have <strong>multiple</strong> values for this attribute. Each assertion adds a new value without superseding previous ones.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod employee {
+    use dialog_query::Attribute;
+
+    /// Employee's skills (can have multiple)
+    #[derive(Attribute)]
+    #[cardinality(many)]  // Specify many cardinality
+    pub struct Skill(pub String);
+}
+
+// Each assertion adds a skill
+let mut edit = session.edit();
+edit.assert(With { this: alice.clone(), has: Skill("Rust".into()) });
+session.commit(edit).await?;
+
+let mut edit = session.edit();
+edit.assert(With { this: alice.clone(), has: Skill("Python".into()) });
+session.commit(edit).await?;
+
+// Query returns both: ["Rust", "Python"]
+<span class="boring">}</span></code></pre></pre>
+<p>Use <code>many</code> cardinality for:</p>
+<ul>
+<li>Tags or labels</li>
+<li>Multiple relationships (e.g., team members, skills)</li>
+<li>Collections of values</li>
+</ul>
+<h2 id="multiple-attributes"><a class="header" href="#multiple-attributes">Multiple Attributes</a></h2>
+<p>Group related attributes in a module:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod employee {
+    use dialog_query::{Attribute, Entity};
+
+    /// Name of the employee
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    /// Job title
+    #[derive(Attribute)]
+    pub struct Job(pub String);
+
+    /// Salary in dollars
+    #[derive(Attribute)]
+    pub struct Salary(pub u32);
+
+    /// The employee's manager
+    #[derive(Attribute)]
+    pub struct Manager(pub Entity);
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="accessing-metadata"><a class="header" href="#accessing-metadata">Accessing Metadata</a></h2>
+<p>Attributes expose metadata at compile time:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use employee::Name;
+
+// Get the namespace
+assert_eq!(Name::namespace(), "employee");
+
+// Get the attribute name
+assert_eq!(Name::name(), "name");
+
+// Get the full selector
+assert_eq!(Name::selector().to_string(), "employee/name");
+
+// Get the description
+assert_eq!(Name::description(), "Name of the employee");
+<span class="boring">}</span></code></pre></pre>
+<h2 id="next-steps"><a class="header" href="#next-steps">Next Steps</a></h2>
+<p>Now that you can define attributes, let's learn how to group them into concepts to model domain entities.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="concepts"><a class="header" href="#concepts">Concepts</a></h1>
+<p>A <strong>concept</strong> describes an entity in terms of the attributes it has. Concepts apply meaning by specifying which attributes an entity should have, without constraining what gets stored.</p>
+<p>Concepts are <strong>expectations, not constraints</strong>. They don't enforce structure at write time - they provide interpretation at query time.</p>
+<h2 id="defining-concepts"><a class="header" href="#defining-concepts">Defining Concepts</a></h2>
+<p>Define a concept by grouping related attributes:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod employee {
+    use dialog_query::{Attribute, Entity};
+
+    /// Full name of the employee
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    /// Annual salary in dollars
+    #[derive(Attribute)]
+    pub struct Salary(pub u32);
+
+    /// Job title
+    #[derive(Attribute)]
+    pub struct Job(pub String);
+}
+
+use dialog_query::Concept;
+
+/// An employee in the system
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: employee::Name,
+    salary: employee::Salary,
+    job: employee::Job,
+}
+<span class="boring">}</span></code></pre></pre>
+<p>The <code>#[derive(Concept)]</code> macro generates everything needed to work with this concept.</p>
+<p><strong>Doc Comments Help Discovery</strong>: Adding doc comments to your attributes and concepts makes your schema self-documenting. These descriptions are captured in the generated code and become part of the schema metadata - attribute descriptions are accessible via <code>Attribute::description()</code> and concept descriptions via the <code>Concept</code> type. This enables tools, IDEs, and runtime introspection to help users discover and understand your data model without needing to read the source code.</p>
+<h2 id="what-concepts-provide"><a class="header" href="#what-concepts-provide">What Concepts Provide</a></h2>
+<p>Concepts give you:</p>
+<p><strong>Type Safety</strong>: The compiler knows what attributes belong together</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::Attribute;
+
+// Employee must have name, salary, and job
+let employee = Employee {
+    this: alice,
+    name: employee::Name::from("Alice"),
+    salary: employee::Salary::from(60000),
+    job: employee::Job::from("Engineer"),
+};
+<span class="boring">}</span></code></pre></pre>
+<p><strong>Reusable Queries</strong>: Define once, query many times</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Query for all employees
+let employees = Employee::query()
+    .query(&amp;session)
+    .try_collect::&lt;Vec&lt;_&gt;&gt;()
+    .await?;
+<span class="boring">}</span></code></pre></pre>
+<p><strong>Documentation</strong>: Make your data model explicit</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>/// An employee in the system
+///
+/// Required attributes:
+/// - name: Employee's full name
+/// - salary: Current salary in dollars
+/// - job: Job title
+#[derive(Concept)]
+struct Employee { ... }
+<span class="boring">}</span></code></pre></pre>
+<h2 id="querying-concepts"><a class="header" href="#querying-concepts">Querying Concepts</a></h2>
+<p>Query for all entities that match a concept:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::Concept; // Required to use the query() shortcut
+
+// Simple syntax: query all employees
+let results = Employee::query(session.clone())
+    .try_collect::&lt;Vec&lt;_&gt;&gt;()
+    .await?;
+
+for employee in results {
+    println!("{} - {} - ${}",
+        employee.name.value(),
+        employee.job.value(),
+        employee.salary.value()
+    );
+}
+<span class="boring">}</span></code></pre></pre>
+<p>The <code>Employee::query()</code> method is a shortcut for creating a <code>Match</code> with all fields as variables. For more control, use the explicit <code>Match</code> syntax:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::{Attribute, Match, Term};
+
+// Explicit syntax with all fields as variables
+let all_employees = Match::&lt;Employee&gt; {
+    this: Term::var("this"),
+    name: Term::var("name"),
+    salary: Term::var("salary"),
+    job: Term::var("job"),
+};
+
+let results = all_employees.query(session).try_collect::&lt;Vec&lt;_&gt;&gt;().await?;
+
+// Or filter by specific values
+let engineers = Match::&lt;Employee&gt; {
+    this: Term::var("this"),
+    name: Term::var("name"),
+    salary: Term::var("salary"),
+    job: employee::Job::from("Engineer").into(),
+};
+
+let results = engineers.query(session).try_collect::&lt;Vec&lt;_&gt;&gt;().await?;
+<span class="boring">}</span></code></pre></pre>
+<h2 id="transacting-concepts"><a class="header" href="#transacting-concepts">Transacting Concepts</a></h2>
+<p>Assert entities using concepts:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::Attribute;
+
+let alice = Entity::new()?;
+
+let employee = Employee {
+    this: alice,
+    name: employee::Name::from("Alice"),
+    salary: employee::Salary::from(60000),
+    job: employee::Job::from("Engineer"),
+};
+
+let mut edit = session.edit();
+edit.assert(employee);
+session.commit(edit).await?;
+<span class="boring">}</span></code></pre></pre>
+<p>This asserts all the attributes in one transaction.</p>
+<h2 id="concepts-vs-relations"><a class="header" href="#concepts-vs-relations">Concepts vs Relations</a></h2>
+<p>Important distinction:</p>
+<ul>
+<li><strong>Relations</strong> (<code>{ the, of, is }</code>) - the actual facts in the database</li>
+<li><strong>Concepts</strong> - interpretations of groups of relations</li>
+</ul>
+<p>The same relations can satisfy multiple concepts:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// alice has these relations:
+// - employee/name: "Alice"
+// - employee/salary: 60000
+// - employee/direct_reports: [bob]
+
+// alice satisfies these concepts:
+// - Employee (has name, salary)
+// - Manager (has direct_reports)
+// - Person (has name)
+<span class="boring">}</span></code></pre></pre>
+<h2 id="with-ad-hoc-concepts"><a class="header" href="#with-ad-hoc-concepts">With<A>: Ad-Hoc Concepts</a></h2>
+<p>For convenience, Dialog provides <code>With&lt;A&gt;</code> - an ad-hoc concept for working with individual attributes without defining a formal concept.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::{Attribute, Concept}; // Required to use the query() shortcut
+use dialog_query::attribute::With;
+
+// Instead of defining a concept, use With directly
+let mut edit = session.edit();
+edit.assert(With { this: alice.clone(), has: employee::Name::from("Alice") })
+    .assert(With { this: alice.clone(), has: employee::Salary::from(60000) });
+session.commit(edit).await?;
+
+// Query individual attributes using the shortcut syntax
+let names = With::&lt;employee::Name&gt;::query(session.clone())
+    .try_collect::&lt;Vec&lt;_&gt;&gt;()
+    .await?;
+
+for with_name in names {
+    println!("{}", with_name.has.value());
+}
+<span class="boring">}</span></code></pre></pre>
+<p><code>With&lt;A&gt;</code> is useful when:</p>
+<ul>
+<li>You're working with individual attributes</li>
+<li>You don't need the structure of a full concept</li>
+<li>You're doing quick operations or prototyping</li>
+</ul>
+<p>Think of <code>With&lt;A&gt;</code> as saying: "this entity has this attribute value"</p>
+<h2 id="when-to-use-what"><a class="header" href="#when-to-use-what">When to Use What</a></h2>
+<p><strong>Use Concepts when</strong>:</p>
+<ul>
+<li>You have groups of related attributes</li>
+<li>You want type safety and reusability</li>
+<li>You're modeling domain entities</li>
+</ul>
+<p><strong>Use <code>With&lt;A&gt;</code> when</strong>:</p>
+<ul>
+<li>Working with individual attributes</li>
+<li>Building direct, simple queries</li>
+<li>Prototyping or exploring data</li>
+</ul>
+<h2 id="documentation-and-discovery"><a class="header" href="#documentation-and-discovery">Documentation and Discovery</a></h2>
+<p>Doc comments on attributes and concepts are more than just code documentation - they become part of your schema:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod employee {
+    use dialog_query::Attribute;
+
+    /// Full legal name of the employee
+    ///
+    /// This should match the name on official documents.
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    /// Annual base salary in US dollars
+    ///
+    /// Does not include bonuses or stock compensation.
+    #[derive(Attribute)]
+    pub struct Salary(pub u32);
+}
+
+/// An employee in the organization
+///
+/// Represents a person employed by the company with their
+/// basic information including name, position, and compensation.
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: employee::Name,
+    salary: employee::Salary,
+    job: employee::Job,
+}
+<span class="boring">}</span></code></pre></pre>
+<p>Benefits of documenting your schema:</p>
+<p><strong>IDE Support</strong>: Your editor can show attribute and concept descriptions while you code.</p>
+<p><strong>Runtime Introspection</strong>: Attribute descriptions are accessible at runtime via <code>employee::Name::description()</code>, concept descriptions via the <code>Concept</code> type. Tools can query these to generate documentation, build admin UIs, create forms, or provide contextual help.</p>
+<p><strong>Discovery</strong>: When exploring an unfamiliar schema, users can call <code>description()</code> on any attribute to understand what it represents without finding the source code.</p>
+<p><strong>Team Communication</strong>: New team members can understand the data model by reading the descriptions, whether in code or at runtime.</p>
+<p><strong>Self-Documenting</strong>: The schema itself explains what each piece of data means and how it should be used, making the codebase more maintainable.</p>
+<h2 id="from-concepts-to-rules"><a class="header" href="#from-concepts-to-rules">From Concepts to Rules</a></h2>
+<p>Concepts can be combined with rules (covered in a later chapter) to:</p>
+<ul>
+<li>Derive one concept from others</li>
+<li>Create views and computed data</li>
+<li>Bridge different data models</li>
+<li>Handle schema evolution</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="querying"><a class="header" href="#querying">Querying</a></h1>
+<p>Querying in Dialog is built on pattern matching. You describe what you're looking for, and Dialog finds all the matching facts.</p>
+<h2 id="querying-concepts-1"><a class="header" href="#querying-concepts-1">Querying Concepts</a></h2>
+<p>The primary way to query is using concepts:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::{Attribute, Concept, Entity};
+
+mod employee {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute, Clone)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute, Clone)]
+    pub struct Salary(pub u32);
+
+    #[derive(Attribute, Clone)]
+    pub struct Job(pub String);
+}
+
+#[derive(Concept, Debug, Clone)]
+pub struct Employee {
+    pub this: Entity,
+    pub name: employee::Name,
+    pub salary: employee::Salary,
+    pub job: employee::Job,
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="find-all-matching-a-concept"><a class="header" href="#find-all-matching-a-concept">Find All Matching a Concept</a></h3>
+<p>Use the shortcut syntax to query all instances:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Find all employees
+let results: Vec&lt;Employee&gt; = Employee::query(session.clone())
+    .try_collect()
+    .await?;
+
+for employee in results {
+    println!("{} - {} - ${}",
+        employee.name.value(),
+        employee.job.value(),
+        employee.salary.value()
+    );
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="find-with-specific-values"><a class="header" href="#find-with-specific-values">Find with Specific Values</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::Attribute;
+
+// Find all engineers
+let engineers_pattern = Match::&lt;Employee&gt; {
+    this: Term::var("this"),
+    name: Term::var("name"),
+    salary: Term::var("salary"),
+    job: employee::Job::from("Engineer").into(),
+};
+
+let engineers: Vec&lt;Employee&gt; = engineers_pattern.query(&amp;session).try_collect().await?;
+<span class="boring">}</span></code></pre></pre>
+<h3 id="query-a-specific-entity"><a class="header" href="#query-a-specific-entity">Query a Specific Entity</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Get alice's employee data
+let query = Match::&lt;Employee&gt; {
+    this: Term::value(alice),
+    name: Term::var("name"),
+    salary: Term::var("salary"),
+    job: Term::var("job"),
+};
+
+let results: Vec&lt;Employee&gt; = query.query(&amp;session).try_collect().await?;
+
+match results.first() {
+    Some(emp) =&gt; println!("{} works as {}", emp.name.value(), emp.job.value()),
+    None =&gt; println!("Not found"),
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="processing-results"><a class="header" href="#processing-results">Processing Results</a></h2>
+<p>Queries return a stream of results that you can process:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use futures_util::TryStreamExt;
+
+let query = Match::&lt;Employee&gt; {
+    this: Term::var("this"),
+    name: Term::var("name"),
+    salary: Term::var("salary"),
+    job: Term::var("job"),
+};
+
+// Collect all results
+let all_employees: Vec&lt;Employee&gt; = query.query(&amp;session).try_collect().await?;
+
+// Or process as a stream
+query.query(&amp;session)
+    .try_for_each(|employee| async move {
+        println!("{} - ${}", employee.name.value(), employee.salary.value());
+        Ok(())
+    })
+    .await?;
+<span class="boring">}</span></code></pre></pre>
+<h2 id="working-with-results"><a class="header" href="#working-with-results">Working with Results</a></h2>
+<p>Query results are concept instances:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let employee: Employee = /* ... */;
+
+// Access the entity
+let entity: Entity = employee.this;
+
+// Access attribute values
+let name: &amp;String = employee.name.value();
+let salary: u32 = *employee.salary.value();
+let job: &amp;String = employee.job.value();
+<span class="boring">}</span></code></pre></pre>
+<h2 id="querying-individual-attributes-with-witha"><a class="header" href="#querying-individual-attributes-with-witha">Querying Individual Attributes with <code>With&lt;A&gt;</code></a></h2>
+<p>For working with individual attributes without defining a full concept, use <code>With&lt;A&gt;</code>:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::Concept; // Required to use the query() shortcut
+use dialog_query::attribute::With;
+
+// Find all entities that have a name using the shortcut syntax
+let results: Vec&lt;With&lt;employee::Name&gt;&gt; = With::&lt;employee::Name&gt;::query(session.clone())
+    .try_collect()
+    .await?;
+
+for result in results {
+    println!("Entity: {}, Name: {}", result.this, result.has.value());
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="query-patterns-with-witha"><a class="header" href="#query-patterns-with-witha">Query Patterns with <code>With&lt;A&gt;</code></a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::Attribute;
+
+// Specific entity's attribute
+let pattern = With {
+    this: alice.clone(),
+    has: employee::Salary::variable()
+};
+
+// Reverse lookup: who has this value?
+let pattern = With {
+    this: Entity::variable(),
+    has: employee::Name::from("Alice")
+};
+
+// Entity references: who has alice as manager?
+let pattern = With {
+    this: Entity::variable(),
+    has: employee::Manager::from(alice.clone())
+};
+<span class="boring">}</span></code></pre></pre>
+<h2 id="index-selection"><a class="header" href="#index-selection">Index Selection</a></h2>
+<p>Dialog automatically uses the right index for your query. Whether you're querying concepts or individual attributes, the query planner selects the optimal index based on your pattern.</p>
+<p>No manual query planning needed - every pattern is efficient!</p>
+<h2 id="complete-example"><a class="header" href="#complete-example">Complete Example</a></h2>
+<pre><pre class="playground"><code class="language-rust">use dialog_query::{Attribute, Entity, Session, Concept, Match, Term};
+use dialog_query::artifact::Artifacts;
+use dialog_storage::MemoryStorageBackend;
+use futures_util::TryStreamExt;
+
+mod employee {
+    use dialog_query::{Attribute, Entity};
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct Salary(pub u32);
+
+    #[derive(Attribute)]
+    pub struct Job(pub String);
+}
+
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: employee::Name,
+    salary: employee::Salary,
+    job: employee::Job,
+}
+
+#[tokio::main]
+async fn main() -&gt; anyhow::Result&lt;()&gt; {
+    let backend = MemoryStorageBackend::default();
+    let store = Artifacts::anonymous(backend).await?;
+    let mut session = Session::open(store.clone());
+
+    // Add some data
+    let alice = Entity::new()?;
+    let bob = Entity::new()?;
+
+    let mut edit = session.edit();
+    edit.assert(Employee {
+        this: alice.clone(),
+        name: employee::Name::from("Alice"),
+        salary: employee::Salary::from(75000),
+        job: employee::Job::from("Engineer"),
+    }).assert(Employee {
+        this: bob.clone(),
+        name: employee::Name::from("Bob"),
+        salary: employee::Salary::from(60000),
+        job: employee::Job::from("Designer"),
+    });
+    session.commit(edit).await?;
+
+    // Query: Find all employees
+    println!("All employees:");
+    let all_employees = Match::&lt;Employee&gt; {
+        this: Term::var("this"),
+        name: Term::var("name"),
+        salary: Term::var("salary"),
+        job: Term::var("job"),
+    };
+    let employees: Vec&lt;_&gt; = all_employees.query(&amp;session).try_collect().await?;
+    for emp in employees {
+        println!("  - {} ({}) - ${}",
+            emp.name.value(),
+            emp.job.value(),
+            emp.salary.value()
+        );
+    }
+
+    // Query: Find all engineers
+    println!("\nEngineers:");
+    let engineers_pattern = Match::&lt;Employee&gt; {
+        this: Term::var("this"),
+        name: Term::var("name"),
+        salary: Term::var("salary"),
+        job: employee::Job::from("Engineer").into(),
+    };
+    let engineers: Vec&lt;_&gt; = engineers_pattern.query(&amp;session).try_collect().await?;
+    for eng in engineers {
+        println!("  - {}", eng.name.value());
+    }
+
+    // Query: Get alice's data
+    println!("\nAlice's details:");
+    let alice_pattern = Match::&lt;Employee&gt; {
+        this: Term::value(alice),
+        name: Term::var("name"),
+        salary: Term::var("salary"),
+        job: Term::var("job"),
+    };
+    let results: Vec&lt;_&gt; = alice_pattern.query(&amp;session).try_collect().await?;
+    if let Some(emp) = results.first() {
+        println!("  Name: {}", emp.name.value());
+        println!("  Job: {}", emp.job.value());
+        println!("  Salary: ${}", emp.salary.value());
+    }
+
+    Ok(())
+}</code></pre></pre>
+<p>Next, let's explore transactions - how to assert and retract facts atomically.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="transacting"><a class="header" href="#transacting">Transacting</a></h1>
+<p>Transactions are how you modify the database - asserting new facts or retracting existing ones. All changes happen atomically: either all succeed together, or none do.</p>
+<h2 id="sessions"><a class="header" href="#sessions">Sessions</a></h2>
+<p>Before you can transact, you need a <strong>session</strong>:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::Session;
+use dialog_query::artifact::Artifacts;
+use dialog_storage::MemoryStorageBackend;
+
+let backend = MemoryStorageBackend::default();
+let store = Artifacts::anonymous(backend).await?;
+
+let mut session = Session::open(store);
+<span class="boring">}</span></code></pre></pre>
+<p>A session provides the context for both queries and transactions.</p>
+<h2 id="asserting-concepts"><a class="header" href="#asserting-concepts">Asserting Concepts</a></h2>
+<p>The primary way to transact is by asserting concept instances:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::{Attribute, Concept, Entity};
+
+mod employee {
+    use dialog_query::{Attribute, Entity};
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct Salary(pub u32);
+
+    #[derive(Attribute)]
+    pub struct Job(pub String);
+}
+
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: employee::Name,
+    salary: employee::Salary,
+    job: employee::Job,
+}
+
+let alice = Entity::new()?;
+
+let employee = Employee {
+    this: alice,
+    name: employee::Name::from("Alice"),
+    salary: employee::Salary::from(75000),
+    job: employee::Job::from("Engineer"),
+};
+
+let mut edit = session.edit();
+edit.assert(employee);
+session.commit(edit).await?;
+<span class="boring">}</span></code></pre></pre>
+<p>This creates assertions for all attributes of the concept in one transaction.</p>
+<h3 id="multiple-entities-in-one-transaction"><a class="header" href="#multiple-entities-in-one-transaction">Multiple Entities in One Transaction</a></h3>
+<p>Transactions can include multiple concept instances:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::Attribute;
+
+let alice = Entity::new()?;
+let bob = Entity::new()?;
+
+let mut edit = session.edit();
+edit.assert(Employee {
+    this: alice,
+    name: employee::Name::from("Alice"),
+    salary: employee::Salary::from(75000),
+    job: employee::Job::from("Engineer"),
+}).assert(Employee {
+    this: bob,
+    name: employee::Name::from("Bob"),
+    salary: employee::Salary::from(60000),
+    job: employee::Job::from("Designer"),
+});
+session.commit(edit).await?;
+<span class="boring">}</span></code></pre></pre>
+<p>Either all facts are asserted, or none are - transactions are atomic.</p>
+<h2 id="updating-with-cardinalityone"><a class="header" href="#updating-with-cardinalityone">Updating with Cardinality::One</a></h2>
+<p>For attributes with <code>Cardinality::One</code>, asserting a new value automatically supersedes the old one:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod employee {
+    use dialog_query::Attribute;
+
+    /// Salary has Cardinality::One by default
+    #[derive(Attribute)]
+    pub struct Salary(pub u32);
+}
+
+// First assertion
+let mut edit = session.edit();
+edit.assert(With { this: alice.clone(), has: employee::Salary::from(60000) });
+session.commit(edit).await?;
+
+// Second assertion supersedes the first
+let mut edit = session.edit();
+edit.assert(With { this: alice.clone(), has: employee::Salary::from(75000) });
+session.commit(edit).await?;
+
+// Query returns only: 75000
+<span class="boring">}</span></code></pre></pre>
+<p>No explicit retraction needed for <code>Cardinality::One</code> attributes.</p>
+<h2 id="retracting-facts"><a class="header" href="#retracting-facts">Retracting Facts</a></h2>
+<p>Use <code>.retract()</code> to explicitly remove facts:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::{Attribute, attribute::With};
+
+let mut edit = session.edit();
+edit.retract(With { this: alice.clone(), has: employee::Name::from("Alice") });
+session.commit(edit).await?;
+<span class="boring">}</span></code></pre></pre>
+<p>This creates a <strong>retraction</strong> - a fact saying "alice no longer has this name" at this causal point.</p>
+<h2 id="transaction-lifecycle"><a class="header" href="#transaction-lifecycle">Transaction Lifecycle</a></h2>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// 1. Open session
+let mut session = Session::open(store.clone());
+
+// 2. Create an edit
+let mut edit = session.edit();
+
+// 3. Add changes to the edit
+edit.assert(Employee {
+    this: alice,
+    name: employee::Name::from("Alice"),
+    salary: employee::Salary::from(75000),
+    job: employee::Job::from("Engineer"),
+});
+
+// 4. Commit the edit
+session.commit(edit).await?;
+
+// 5. Changes are now visible
+// Session now sees the new data
+
+// 6. Query to verify
+let query = Match::&lt;Employee&gt; {
+    this: Term::value(alice),
+    name: Term::var("name"),
+    salary: Term::var("salary"),
+    job: Term::var("job"),
+};
+let results: Vec&lt;_&gt; = query.query(&amp;session).try_collect().await?;
+<span class="boring">}</span></code></pre></pre>
+<h2 id="atomicity-guarantees"><a class="header" href="#atomicity-guarantees">Atomicity Guarantees</a></h2>
+<p>Transactions ensure <strong>atomicity</strong>:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// This transaction will either:
+// - Assert all facts from both concepts, OR
+// - Assert none of them (if there's an error)
+let mut edit = session.edit();
+edit.assert(Employee {
+    this: alice.clone(),
+    name: employee::Name::from("Alice"),
+    salary: employee::Salary::from(75000),
+    job: employee::Job::from("Engineer"),
+}).assert(Employee {
+    this: bob.clone(),
+    name: employee::Name::from("Bob"),
+    salary: employee::Salary::from(60000),
+    job: employee::Job::from("Designer"),
+});
+session.commit(edit).await?;
+<span class="boring">}</span></code></pre></pre>
+<p>You never get partial updates - either the whole transaction succeeds or it fails.</p>
+<h2 id="revisions"><a class="header" href="#revisions">Revisions</a></h2>
+<p>Each successful transaction creates a new <strong>revision</strong> of the database:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Revision 1: Empty database
+let mut session1 = Session::open(store.clone());
+
+// Revision 2: Added alice
+let mut edit = session1.edit();
+edit.assert(Employee {
+    this: alice.clone(),
+    name: employee::Name::from("Alice"),
+    salary: employee::Salary::from(75000),
+    job: employee::Job::from("Engineer"),
+});
+session1.commit(edit).await?;
+
+// Revision 3: Added bob
+let mut edit = session1.edit();
+edit.assert(Employee {
+    this: bob.clone(),
+    name: employee::Name::from("Bob"),
+    salary: employee::Salary::from(60000),
+    job: employee::Job::from("Designer"),
+});
+session1.commit(edit).await?;
+<span class="boring">}</span></code></pre></pre>
+<p>Revisions enable:</p>
+<ul>
+<li><strong>Time-travel</strong>: Query the database as it existed at any revision</li>
+<li><strong>Audit trails</strong>: See what changed and when</li>
+<li><strong>Synchronization</strong>: Efficiently sync changes between peers</li>
+</ul>
+<h2 id="transacting-individual-attributes-with-witha"><a class="header" href="#transacting-individual-attributes-with-witha">Transacting Individual Attributes with <code>With&lt;A&gt;</code></a></h2>
+<p>For working with individual attributes without concepts, use <code>With&lt;A&gt;</code>:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::attribute::With;
+
+let alice = Entity::new()?;
+
+let mut edit = session.edit();
+edit.assert(With { this: alice.clone(), has: employee::Name::from("Alice") })
+    .assert(With { this: alice.clone(), has: employee::Salary::from(75000) });
+session.commit(edit).await?;
+<span class="boring">}</span></code></pre></pre>
+<p>This is useful when:</p>
+<ul>
+<li>Working with individual attributes</li>
+<li>Building quick prototypes</li>
+<li>Attributes span multiple namespaces/concepts</li>
+</ul>
+<h2 id="entity-references"><a class="header" href="#entity-references">Entity References</a></h2>
+<p>Attributes can reference other entities to create relationships:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod employee {
+    use dialog_query::{Attribute, Entity};
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct Salary(pub u32);
+
+    #[derive(Attribute)]
+    pub struct Job(pub String);
+
+    #[derive(Attribute)]
+    pub struct Manager(pub Entity);
+}
+
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: employee::Name,
+    salary: employee::Salary,
+    job: employee::Job,
+    manager: employee::Manager,
+}
+
+let alice = Entity::new()?;
+let bob = Entity::new()?;
+
+let mut edit = session.edit();
+edit.assert(Employee {
+    this: alice.clone(),
+    name: employee::Name::from("Alice"),
+    salary: employee::Salary::from(100000),
+    job: employee::Job::from("Director"),
+    manager: employee::Manager::from(Entity::nil()), // No manager
+}).assert(Employee {
+    this: bob,
+    name: employee::Name::from("Bob"),
+    salary: employee::Salary::from(60000),
+    job: employee::Job::from("Engineer"),
+    manager: employee::Manager::from(alice), // Bob reports to Alice
+});
+session.commit(edit).await?;
+<span class="boring">}</span></code></pre></pre>
+<h2 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h2>
+<p>Transactions can fail:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let mut edit = session.edit();
+edit.assert(Employee {
+    this: alice,
+    name: employee::Name::from("Alice"),
+    salary: employee::Salary::from(75000),
+    job: employee::Job::from("Engineer"),
+});
+
+match session.commit(edit).await {
+    Ok(_) =&gt; println!("Transaction succeeded"),
+    Err(e) =&gt; eprintln!("Transaction failed: {}", e),
+}
+<span class="boring">}</span></code></pre></pre>
+<p>When a transaction fails, no changes are applied.</p>
+<h2 id="complete-example-1"><a class="header" href="#complete-example-1">Complete Example</a></h2>
+<pre><pre class="playground"><code class="language-rust">use dialog_query::{Attribute, Entity, Session, Concept, Match, Term};
+use dialog_query::artifact::Artifacts;
+use dialog_storage::MemoryStorageBackend;
+use futures_util::TryStreamExt;
+
+mod employee {
+    use dialog_query::{Attribute, Entity};
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct Salary(pub u32);
+
+    #[derive(Attribute)]
+    pub struct Job(pub String);
+}
+
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: employee::Name,
+    salary: employee::Salary,
+    job: employee::Job,
+}
+
+#[tokio::main]
+async fn main() -&gt; anyhow::Result&lt;()&gt; {
+    let backend = MemoryStorageBackend::default();
+    let store = Artifacts::anonymous(backend).await?;
+    let mut session = Session::open(store.clone());
+
+    // Create entities
+    let alice = Entity::new()?;
+    let bob = Entity::new()?;
+
+    // Transaction 1: Add alice
+    let mut edit = session.edit();
+    edit.assert(Employee {
+        this: alice.clone(),
+        name: employee::Name::from("Alice"),
+        salary: employee::Salary::from(75000),
+        job: employee::Job::from("Engineer"),
+    });
+    session.commit(edit).await?;
+    println!("Added Alice");
+
+    // Transaction 2: Add bob
+    let mut edit = session.edit();
+    edit.assert(Employee {
+        this: bob.clone(),
+        name: employee::Name::from("Bob"),
+        salary: employee::Salary::from(50000),
+        job: employee::Job::from("Designer"),
+    });
+    session.commit(edit).await?;
+    println!("Added Bob");
+
+    // Transaction 3: Give bob a raise (Cardinality::One supersedes)
+    let mut edit = session.edit();
+    edit.assert(Employee {
+        this: bob.clone(),
+        name: employee::Name::from("Bob"),
+        salary: employee::Salary::from(60000),  // This supersedes the old salary
+        job: employee::Job::from("Designer"),
+    });
+    session.commit(edit).await?;
+    println!("Gave Bob a raise");
+
+    // Query to verify
+    let query = Match::&lt;Employee&gt; {
+        this: Term::value(bob),
+        name: Term::var("name"),
+        salary: Term::var("salary"),
+        job: Term::var("job"),
+    };
+    let results: Vec&lt;_&gt; = query.query(&amp;session).try_collect().await?;
+
+    if let Some(emp) = results.first() {
+        println!("Bob's new salary: ${}", emp.salary.value());
+    }
+
+    Ok(())
+}</code></pre></pre>
+<h2 id="best-practices"><a class="header" href="#best-practices">Best Practices</a></h2>
+<p><strong>Use concepts for structured data</strong>: Concepts provide type safety and group related attributes.</p>
+<p><strong>Use <code>With&lt;A&gt;</code> for individual attributes</strong>: When working with single attributes or prototyping.</p>
+<p><strong>Leverage Cardinality::One</strong>: For single-valued attributes, new assertions automatically supersede old ones - no need to retract.</p>
+<p><strong>Entity references create structure</strong>: Use entity references to build relationships and graphs.</p>
+<p><strong>Keep transactions focused</strong>: Smaller transactions are easier to reason about and have less chance of conflicts.</p>
+<p>Next, let's explore rules - how to derive new knowledge from existing facts.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="rules"><a class="header" href="#rules">Rules</a></h1>
+<p>Rules are Dialog's equivalent of <strong>views</strong> in relational databases. They define how concepts can be derived from existing facts through logical inference.</p>
+<h2 id="what-are-rules"><a class="header" href="#what-are-rules">What Are Rules?</a></h2>
+<p>A rule says: "If these premises are true, then this conclusion follows."</p>
+<pre><code>If:
+  - alice has employee/name = "Alice"
+  - alice has employee/direct_reports = bob
+Then:
+  - alice is a Manager
+</code></pre>
+<p>Rules let you:</p>
+<ul>
+<li><strong>Derive concepts from facts</strong>: Define "Manager" based on having direct reports</li>
+<li><strong>Bridge data models</strong>: Adapt between different schemas</li>
+<li><strong>Handle schema evolution</strong>: Support old and new models simultaneously</li>
+<li><strong>Create computed views</strong>: Generate derived data on the fly</li>
+</ul>
+<h2 id="defining-rules"><a class="header" href="#defining-rules">Defining Rules</a></h2>
+<p>Rules are functions that take a <code>Match&lt;T&gt;</code> pattern and return premises:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::{Concept, Entity, Match, Term, When};
+
+mod employee {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct DirectReports(pub u32);
+}
+
+mod manager {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+}
+
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: employee::Name,
+    direct_reports: employee::DirectReports,
+}
+
+#[derive(Concept)]
+struct Manager {
+    this: Entity,
+    name: manager::Name,
+}
+
+// A Manager is an Employee who has direct reports &gt; 0
+fn manager_rule(manager: Match&lt;Manager&gt;) -&gt; impl When {
+    (
+        Match::&lt;Employee&gt; {
+            this: manager.this,
+            name: manager.name,
+            direct_reports: Term::var("count"),
+        },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>The rule function:</p>
+<ol>
+<li>Takes a <code>Match&lt;Manager&gt;</code> representing what we're trying to prove</li>
+<li>Returns premises that must be true (here, an <code>Employee</code> with matching attributes)</li>
+<li>Returns <code>impl When</code> - premises can be tuples, arrays, or vecs</li>
+</ol>
+<h2 id="installing-rules"><a class="header" href="#installing-rules">Installing Rules</a></h2>
+<p>Install rules on a session to make them active:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let mut session = Session::open(store).install(manager_rule)?;
+<span class="boring">}</span></code></pre></pre>
+<p>Once installed, querying for <code>Manager</code> will derive results from <code>Employee</code> facts.</p>
+<h2 id="schema-bridging"><a class="header" href="#schema-bridging">Schema Bridging</a></h2>
+<p>Rules enable different applications to use different models for the same data:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod employee_v1 {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct Job(pub String);
+}
+
+mod stuff {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct Role(pub String);
+}
+
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: employee_v1::Name,
+    job: employee_v1::Job,
+}
+
+#[derive(Concept)]
+struct Stuff {
+    this: Entity,
+    name: stuff::Name,
+    role: stuff::Role,
+}
+
+// Bridge: Employee can be derived from Stuff
+fn employee_from_stuff(employee: Match&lt;Employee&gt;) -&gt; impl When {
+    (
+        Match::&lt;Stuff&gt; {
+            this: employee.this,
+            name: employee.name,
+            role: employee.job,
+        },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>Now queries for <code>Employee</code> work even if data is stored as <code>Stuff</code>.</p>
+<h2 id="schema-evolution"><a class="header" href="#schema-evolution">Schema Evolution</a></h2>
+<p>Rules make schema migration painless:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod note {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Title(pub String);
+}
+
+mod note_v2 {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+}
+
+#[derive(Concept)]
+struct Note {
+    this: Entity,
+    title: note::Title,
+}
+
+#[derive(Concept)]
+struct NoteV2 {
+    this: Entity,
+    name: note_v2::Name,
+}
+
+// Migrate Note to NoteV2
+fn note_v2_migration(note_v2: Match&lt;NoteV2&gt;) -&gt; impl When {
+    (
+        Match::&lt;Note&gt; {
+            this: note_v2.this,
+            title: note_v2.name,
+        },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>Old code querying <code>Note</code> continues working. New code can query <code>NoteV2</code> and get the same data.</p>
+<h2 id="multiple-premises"><a class="header" href="#multiple-premises">Multiple Premises</a></h2>
+<p>Rules can have multiple premises as a tuple:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod person {
+    use dialog_query::{Attribute, Entity};
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct Age(pub u32);
+
+    #[derive(Attribute)]
+    pub struct Manager(pub Entity);
+}
+
+#[derive(Concept)]
+struct Person {
+    this: Entity,
+    name: person::Name,
+    age: person::Age,
+}
+
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: person::Name,
+    manager: person::Manager,
+}
+
+#[derive(Concept)]
+struct SeniorEmployee {
+    this: Entity,
+    name: person::Name,
+}
+
+// A SeniorEmployee is a Person over 50 who is an Employee
+fn senior_employee_rule(senior: Match&lt;SeniorEmployee&gt;) -&gt; impl When {
+    (
+        Match::&lt;Person&gt; {
+            this: senior.this.clone(),
+            name: senior.name.clone(),
+            age: Term::var("age"),
+        },
+        Match::&lt;Employee&gt; {
+            this: senior.this,
+            name: senior.name,
+            manager: Term::var("manager"),
+        },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>Both premises must be satisfied for the rule to derive a <code>SeniorEmployee</code>.</p>
+<h2 id="negation"><a class="header" href="#negation">Negation</a></h2>
+<p>Rules can use negation with the <code>!</code> operator:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::attribute::With;
+
+#[derive(Concept)]
+struct ActiveEmployee {
+    this: Entity,
+    name: employee::Name,
+}
+
+mod termination {
+    use dialog_query::{Attribute, Entity};
+
+    #[derive(Attribute)]
+    pub struct Date(pub String);
+}
+
+// An ActiveEmployee is an Employee without a termination date
+fn active_employee_rule(active: Match&lt;ActiveEmployee&gt;) -&gt; impl When {
+    (
+        Match::&lt;Employee&gt; {
+            this: active.this.clone(),
+            name: active.name,
+            direct_reports: Term::var("reports"),
+        },
+        !Match::&lt;With&lt;termination::Date&gt;&gt; {
+            this: active.this,
+            has: Term::var("date"),
+        },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>The <code>!</code> negates the premise - the rule only matches when the entity does NOT have a termination date.</p>
+<h2 id="complete-example-2"><a class="header" href="#complete-example-2">Complete Example</a></h2>
+<pre><pre class="playground"><code class="language-rust">use dialog_query::{Attribute, Concept, Entity, Match, Session, Term, When};
+use dialog_query::artifact::Artifacts;
+use dialog_storage::MemoryStorageBackend;
+use futures_util::TryStreamExt;
+
+mod employee {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct Job(pub String);
+}
+
+mod stuff {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct Role(pub String);
+}
+
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: employee::Name,
+    job: employee::Job,
+}
+
+#[derive(Concept)]
+struct Stuff {
+    this: Entity,
+    name: stuff::Name,
+    role: stuff::Role,
+}
+
+// Rule: Employees can be derived from Stuff
+fn employee_from_stuff(employee: Match&lt;Employee&gt;) -&gt; impl When {
+    (
+        Match::&lt;Stuff&gt; {
+            this: employee.this,
+            name: employee.name,
+            role: employee.job,
+        },
+    )
+}
+
+#[tokio::main]
+async fn main() -&gt; anyhow::Result&lt;()&gt; {
+    let backend = MemoryStorageBackend::default();
+    let store = Artifacts::anonymous(backend).await?;
+
+    // Install the rule
+    let mut session = Session::open(store).install(employee_from_stuff)?;
+
+    // Insert data as Stuff
+    let alice = Entity::new()?;
+    let bob = Entity::new()?;
+
+    let mut edit = session.edit();
+    edit.assert(Stuff {
+        this: alice.clone(),
+        name: stuff::Name("Alice".into()),
+        role: stuff::Role("Engineer".into()),
+    }).assert(Stuff {
+        this: bob.clone(),
+        name: stuff::Name("Bob".into()),
+        role: stuff::Role("Designer".into()),
+    });
+    session.commit(edit).await?;
+
+    // Query for Employees - rule derives them from Stuff
+    let query = Match::&lt;Employee&gt; {
+        this: Term::var("employee"),
+        name: Term::var("name"),
+        job: Term::var("job"),
+    };
+
+    let employees: Vec&lt;Employee&gt; = query
+        .query(&amp;session)
+        .try_collect()
+        .await?;
+
+    for emp in employees {
+        println!("{} - {}", emp.name.value(), emp.job.value());
+    }
+    // Output:
+    // Alice - Engineer
+    // Bob - Designer
+
+    Ok(())
+}</code></pre></pre>
+<h2 id="terms"><a class="header" href="#terms">Terms</a></h2>
+<p>Terms are the building blocks of queries and rules. A <code>Term&lt;T&gt;</code> can be:</p>
+<h3 id="variables"><a class="header" href="#variables">Variables</a></h3>
+<p>Variables match any value and bind the result:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::Term;
+
+// Match any entity
+let entity_var = Term::var("person");
+
+// Match any name
+let name_var: Term&lt;String&gt; = Term::var("name");
+
+// Match any number
+let age_var: Term&lt;u32&gt; = Term::var("age");
+<span class="boring">}</span></code></pre></pre>
+<h3 id="constants"><a class="header" href="#constants">Constants</a></h3>
+<p>Constants match specific values:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Match specific entity
+let alice = Entity::new()?;
+let alice_term = Term::value(alice);
+
+// Match specific string
+let name_term = Term::value("Alice".to_string());
+
+// Match specific number
+let age_term = Term::value(42u32);
+<span class="boring">}</span></code></pre></pre>
+<p>You can also use <code>Term::from()</code> for convenience:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let name: Term&lt;String&gt; = Term::from("Alice".to_string());
+let age: Term&lt;u32&gt; = Term::from(25u32);
+<span class="boring">}</span></code></pre></pre>
+<h2 id="formulas"><a class="header" href="#formulas">Formulas</a></h2>
+<p>Formulas are computational predicates that derive output values from input values. They enable calculations within rules.</p>
+<h3 id="built-in-formulas"><a class="header" href="#built-in-formulas">Built-in Formulas</a></h3>
+<p>Dialog provides formulas for math and strings:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::formulas::*;
+
+// Math operations
+Sum { of: 10, with: 5, is: ? }          // Addition
+Difference { of: 20, subtract: 8, is: ? }  // Subtraction
+Product { of: 6, times: 7, is: ? }      // Multiplication
+Quotient { of: 42, by: 6, is: ? }      // Division
+
+// String operations
+Concatenate { first: "Hello", second: " World", is: ? }
+Length { of: "test", is: ? }
+Uppercase { of: "hello", is: ? }
+Lowercase { of: "HELLO", is: ? }
+<span class="boring">}</span></code></pre></pre>
+<h3 id="using-formulas-in-rules"><a class="header" href="#using-formulas-in-rules">Using Formulas in Rules</a></h3>
+<p>Formulas can be used as premises in rules to perform computations:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod person {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct FirstName(pub String);
+
+    #[derive(Attribute)]
+    pub struct LastName(pub String);
+
+    #[derive(Attribute)]
+    pub struct FullName(pub String);
+}
+
+#[derive(Concept)]
+struct Person {
+    this: Entity,
+    first_name: person::FirstName,
+    last_name: person::LastName,
+}
+
+#[derive(Concept)]
+struct PersonWithFullName {
+    this: Entity,
+    full_name: person::FullName,
+}
+
+use dialog_query::formulas::Concatenate;
+
+// Derive full name from first and last names
+fn full_name_rule(person: Match&lt;PersonWithFullName&gt;) -&gt; impl When {
+    (
+        Match::&lt;Person&gt; {
+            this: person.this.clone(),
+            first_name: Term::var("first"),
+            last_name: Term::var("last"),
+        },
+        Concatenate {
+            first: Term::var("first"),
+            second: Term::var("last"),
+            is: person.full_name,
+        },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>The <code>Concatenate</code> formula computes the full name from the first and last name variables.</p>
+<h2 id="conjunctions-and"><a class="header" href="#conjunctions-and">Conjunctions (AND)</a></h2>
+<p>A <strong>conjunction</strong> means all premises must be satisfied. In Dialog, conjunctions are expressed as tuples of premises.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// This rule requires BOTH conditions to be true
+fn senior_manager_rule(senior: Match&lt;SeniorManager&gt;) -&gt; impl When {
+    (
+        // Must be a manager
+        Match::&lt;Manager&gt; {
+            this: senior.this.clone(),
+            name: senior.name.clone(),
+        },
+        // AND must be over 50
+        Match::&lt;Person&gt; {
+            this: senior.this,
+            name: senior.name,
+            age: Term::var("age"),  // age must exist and be bound
+        },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>Both the <code>Manager</code> match AND the <code>Person</code> match must succeed for the rule to derive a <code>SeniorManager</code>.</p>
+<h3 id="multiple-conjunctions"><a class="header" href="#multiple-conjunctions">Multiple Conjunctions</a></h3>
+<p>You can have many premises in a conjunction:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>fn complex_rule(target: Match&lt;Target&gt;) -&gt; impl When {
+    (
+        Match::&lt;ConceptA&gt; { /* ... */ },
+        Match::&lt;ConceptB&gt; { /* ... */ },
+        Match::&lt;ConceptC&gt; { /* ... */ },
+        Concatenate { /* compute something */ },
+        Sum { /* calculate something */ },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>All five premises must be satisfied for the rule to succeed.</p>
+<h2 id="disjunctions-or"><a class="header" href="#disjunctions-or">Disjunctions (OR)</a></h2>
+<p>A <strong>disjunction</strong> means at least one alternative must be satisfied. In Dialog, disjunctions are expressed by defining multiple rules for the same concept.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>#[derive(Concept)]
+struct VIPCustomer {
+    this: Entity,
+    name: customer::Name,
+}
+
+// Rule 1: VIP if high spending
+fn vip_by_spending(vip: Match&lt;VIPCustomer&gt;) -&gt; impl When {
+    (
+        Match::&lt;Customer&gt; {
+            this: vip.this,
+            name: vip.name,
+            total_spent: Term::var("spent"),
+        },
+        // Some formula checking spent &gt; 10000
+    )
+}
+
+// Rule 2: VIP if premium member
+fn vip_by_membership(vip: Match&lt;VIPCustomer&gt;) -&gt; impl When {
+    (
+        Match::&lt;Customer&gt; {
+            this: vip.this,
+            name: vip.name,
+            membership: Term::value("Premium".to_string()),
+        },
+    )
+}
+
+// Install both rules
+let session = Session::open(store)
+    .install(vip_by_spending)?
+    .install(vip_by_membership)?;
+<span class="boring">}</span></code></pre></pre>
+<p>Now querying for <code>VIPCustomer</code> returns entities that satisfy <strong>either</strong> rule - customers with high spending <strong>OR</strong> premium membership.</p>
+<h3 id="disjunction-semantics"><a class="header" href="#disjunction-semantics">Disjunction Semantics</a></h3>
+<p>When multiple rules define the same concept:</p>
+<ul>
+<li>The concept matches if <strong>any</strong> rule matches</li>
+<li>Results from all matching rules are combined</li>
+<li>Duplicates are naturally handled (same entity appears once)</li>
+</ul>
+<p>This is how Dialog implements <strong>OR</strong> logic:</p>
+<pre><code>VIPCustomer(?customer) :-
+    HighSpending(?customer).      // Rule 1
+
+VIPCustomer(?customer) :-
+    PremiumMember(?customer).     // Rule 2
+</code></pre>
+<p>A customer is a VIP if they match Rule 1 <strong>OR</strong> Rule 2 <strong>OR</strong> both.</p>
+<h2 id="conjunctions-within-disjunctions"><a class="header" href="#conjunctions-within-disjunctions">Conjunctions within Disjunctions</a></h2>
+<p>You can combine AND and OR logic by using multiple rules with multiple premises:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Executive: (Director AND HighSalary) OR (VP)
+fn executive_via_director(exec: Match&lt;Executive&gt;) -&gt; impl When {
+    (
+        Match::&lt;Director&gt; { /* ... */ },  // AND
+        Match::&lt;HighSalary&gt; { /* ... */ },
+    )
+}
+
+fn executive_via_vp(exec: Match&lt;Executive&gt;) -&gt; impl When {
+    (
+        Match::&lt;VP&gt; { /* ... */ },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>An <code>Executive</code> is derived if:</p>
+<ul>
+<li>(They are a <code>Director</code> AND have <code>HighSalary</code>) OR</li>
+<li>(They are a <code>VP</code>)</li>
+</ul>
+<h2 id="how-rules-work"><a class="header" href="#how-rules-work">How Rules Work</a></h2>
+<p>Rules are evaluated at <strong>query time</strong>, not write time:</p>
+<ol>
+<li>You query for a concept (e.g., "all Employees")</li>
+<li>Dialog applies installed rules to find matching facts</li>
+<li>For each match, Dialog derives an instance of the concept</li>
+<li>You get back the derived instances</li>
+</ol>
+<p>This is <strong>lazy evaluation</strong> - rules only run when you query for them.</p>
+<h2 id="schema-on-read"><a class="header" href="#schema-on-read">Schema-on-Read</a></h2>
+<p>Rules implement <strong>schema-on-read</strong>:</p>
+<ul>
+<li>Write facts once</li>
+<li>Read them through multiple lenses (rules)</li>
+<li>Different applications see different views</li>
+<li>No data duplication</li>
+<li>No migration needed</li>
+</ul>
+<p>This is the foundation of Dialog's flexibility.</p>
+<h2 id="when-to-use-rules"><a class="header" href="#when-to-use-rules">When to Use Rules</a></h2>
+<p><strong>Use rules when</strong>:</p>
+<ul>
+<li>Deriving one concept from others</li>
+<li>Supporting multiple schemas</li>
+<li>Creating computed views</li>
+<li>Adapting data for different clients</li>
+</ul>
+<p><strong>Use direct queries when</strong>:</p>
+<ul>
+<li>Finding specific facts</li>
+<li>Simple attribute lookups</li>
+<li>Building transactions</li>
+</ul>
+<h2 id="whats-next"><a class="header" href="#whats-next">What's Next?</a></h2>
+<p>You now understand Dialog's core concepts:</p>
+<ul>
+<li><strong>Relations</strong> and <strong>facts</strong> - the building blocks</li>
+<li><strong>Entities</strong> - persistent identities</li>
+<li><strong>Attributes</strong> - defining what can be said</li>
+<li><strong>Concepts</strong> - structured models</li>
+<li><strong>Queries</strong> - finding facts</li>
+<li><strong>Transactions</strong> - modifying the database</li>
+<li><strong>Rules</strong> - deriving knowledge</li>
+</ul>
+<p>For more details, check the <a href="./Glossary.html">Glossary</a> for comprehensive definitions of all terms.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="glossary"><a class="header" href="#glossary">Glossary</a></h1>
+<p>This glossary provides comprehensive definitions for Dialog concepts. Terms are organized by category for easy reference.</p>
+<hr />
+<h2 id="core-concepts"><a class="header" href="#core-concepts">Core Concepts</a></h2>
+<h3 id="entity"><a class="header" href="#entity">Entity</a></h3>
+<p>A persistent subject of knowledge. An entity serves as the anchor for facts and descriptions over time, across changing roles and perspectives. It is not bound to a single concept or structure — the same entity may participate in multiple conceptual models.</p>
+<p><strong>Entity Identifier (<code>of</code>)</strong>: Entities are uniquely identified by URIs. In practice, these are Ed25519 <a href="https://w3c-ccg.github.io/did-key-spec/">did:key</a> identifiers derived from the hash of what makes the entity unique within the system.</p>
+<h3 id="attribute"><a class="header" href="#attribute">Attribute</a></h3>
+<p>Attributes define the space of expressible relations in the system — they describe what can be said about an entity and how. An attribute is a description consisting of:</p>
+<ul>
+<li>A namespace and name (e.g., <code>person/name</code>)</li>
+<li>A value type (e.g., <code>string</code>, <code>boolean</code>, ...)</li>
+<li>A cardinality (<code>One</code> or <code>Many</code>)</li>
+<li>A description of the semantics of the relation</li>
+</ul>
+<p><strong>Attribute Identifier (<code>the</code>)</strong>: Attributes are referred to in relations via a unique identifier, denoted by the <code>the</code> field. They are often encoded as string representations like <code>person/name</code>.</p>
+<p><strong>Namespace</strong>: The first component of an attribute name. Namespaces serve a role similar to table names in a relational store but without imposing constraints. An entity can have attributes from multiple namespaces. It is generally recommended to use <a href="https://en.wikipedia.org/wiki/Reverse_domain_name_notation">reverse domain name notation</a> (e.g., <code>io.gozala.note</code>).</p>
+<p><strong>Cardinality</strong>: Determines how many values an entity can have for an attribute. <code>Cardinality::One</code> means at most one value (new assertions supersede previous ones). <code>Cardinality::Many</code> means multiple values (each assertion adds a new value).</p>
+<h3 id="value-is"><a class="header" href="#value-is">Value (<code>is</code>)</a></h3>
+<p>An immutable scalar representing data such as <code>42</code>, <code>"John"</code>, <code>true</code>, or an entity reference. Values are the concrete data attached to attributes in a relation. Supported types include: <code>boolean</code>, <code>integer</code>, <code>float</code>, <code>string</code>, <code>bytes</code>, <code>symbol</code>, <code>entity</code>.</p>
+<h3 id="relation"><a class="header" href="#relation">Relation</a></h3>
+<p>A statement in the form of <code>{ the, of, is }</code> describing a possible connection between an entity, an attribute, and a value. A relation is not a fact itself — it's a unit of knowledge that can be asserted or retracted.</p>
+<blockquote>
+<p>Relations are inspired by natural language structure: <em>the</em> <strong>color</strong> <em>of</em> <strong>sky</strong> <em>is</em> <strong>blue</strong>.</p>
+</blockquote>
+<h3 id="attribution"><a class="header" href="#attribution">Attribution</a></h3>
+<p>An attribution describes a potential relation between an attribute and a value, independently of any entity.</p>
+<h3 id="fact"><a class="header" href="#fact">Fact</a></h3>
+<p>Atomic, immutable unit of knowledge which is either an assertion or a retraction of a relation at specific causal point in time.</p>
+<p><strong>Assertion</strong>: An atomic fact in the system, associating an entity with a particular value of an attribute at specific causal point in time. Opposite of retraction.</p>
+<p><strong>Retraction</strong>: An atomic fact in the system, dissociating an entity from particular value of an attribute at specific causal point in time. Opposite of assertion.</p>
+<h3 id="causal-reference-cause"><a class="header" href="#causal-reference-cause">Causal Reference (cause)</a></h3>
+<p>Causal references ground facts in time and establish partial order between them. They are represented as logical timestamps that enable causal reasoning without requiring global clock synchronization.</p>
+<h3 id="concept"><a class="header" href="#concept">Concept</a></h3>
+<p>A concept describes a set of attributes that an entity may have — similar to a table in a relational database or a schema in a document store. Concepts define expected relations, giving structure and semantic meaning to facts.</p>
+<p>Concepts in Dialog are composable and applied at query time. Unlike rigid schemas, they do not enforce structure at write time, allowing for flexible, evolving knowledge.</p>
+<h3 id="realization"><a class="header" href="#realization">Realization</a></h3>
+<p>A realization is an instance of a concept — a set of facts describing an entity according to the concept's definition. It is similar to a document in a document store or a row in a relational table, but grounded in relations.</p>
+<h3 id="rule"><a class="header" href="#rule">Rule</a></h3>
+<p>Rules are equivalent of views in relational databases. Rules define how concepts can be derived from existing facts through set of premises that must be true. They enable logical inference by deriving new conclusions from existing facts.</p>
+<p>Unlike materialized views, rules do not have predetermined evaluation time and can be evaluated lazily at query time or eagerly at assertion time.</p>
+<hr />
+<h2 id="database-operations"><a class="header" href="#database-operations">Database Operations</a></h2>
+<h3 id="claim"><a class="header" href="#claim">Claim</a></h3>
+<p>A claim represents a proposed change to the system - either assertion or retraction of a relation. Claims are not facts until they are accepted at specific causal point in time.</p>
+<h3 id="transaction"><a class="header" href="#transaction">Transaction</a></h3>
+<p>Atomic operation describing set of assertions and retractions in the database. Transactions ensure atomicity, that is all assertions &amp; retractions are applied together or none are, maintaining database consistency. Each transaction results in a new revision.</p>
+<h3 id="commit"><a class="header" href="#commit">Commit</a></h3>
+<p>Act of applying a transaction to the database, resulting in a new revision.</p>
+<h3 id="instruction"><a class="header" href="#instruction">Instruction</a></h3>
+<p>Instruction is a way to refer to a component of the transaction without specifying whether it is an assertion or a retraction.</p>
+<h3 id="session"><a class="header" href="#session">Session</a></h3>
+<p>Database connection providing query and transaction capabilities. Sessions manage the context for interacting with the database, including caching and transaction boundaries.</p>
+<h3 id="revision"><a class="header" href="#revision">Revision</a></h3>
+<p>Immutable snapshot of the database state at a point in time, represented as a content hash. Each commit creates a new revision, enabling time-travel queries and audit trails.</p>
+<hr />
+<h2 id="querying-1"><a class="header" href="#querying-1">Querying</a></h2>
+<h3 id="datalog"><a class="header" href="#datalog">Datalog</a></h3>
+<p>The declarative query language used by DialogDB, well-suited for graph-structured facts. Datalog allows expressing complex graph traversals and pattern matching through logical rules.</p>
+<h3 id="variable"><a class="header" href="#variable">Variable</a></h3>
+<p>Query placeholder that gets bound to values during evaluation, denoted with <code>?</code> prefix (e.g., <code>?person</code>, <code>?name</code>). Variables act as unknowns that the query engine fills in by pattern matching against facts in the database.</p>
+<h3 id="term"><a class="header" href="#term">Term</a></h3>
+<p>Either a concrete scalar value or a variable in a query. Terms are the building blocks of query patterns - concrete terms match exact values while variable terms match any value and bind it for use elsewhere in the query.</p>
+<h3 id="selector"><a class="header" href="#selector">Selector</a></h3>
+<p>Basic filter for querying facts, specifying patterns for the <code>the</code>, <code>of</code>, and/or <code>is</code> components. Selectors are the simplest form of query, matching facts directly without complex logic.</p>
+<h3 id="premise"><a class="header" href="#premise">Premise</a></h3>
+<p>Query component that can be a formula application, rule application or a negation. Predicates extend basic pattern matching with computational logic, enabling derived values and complex conditions.</p>
+<h3 id="formula"><a class="header" href="#formula">Formula</a></h3>
+<p>Computational predicate that derives output values from input values. Formulas perform calculations within queries, such as string manipulation, arithmetic, or data transformation.</p>
+<h3 id="negation-1"><a class="header" href="#negation-1">Negation</a></h3>
+<p>Query constraint that matches when a pattern is NOT present. Negation enables queries like "find all people without email addresses" by matching the absence of facts.</p>
+<h3 id="query-planner"><a class="header" href="#query-planner">Query Planner</a></h3>
+<p>Component that reorders query conjuncts to minimize search space and detect cycles. The planner optimizes query execution by choosing the most selective patterns first and identifying infinite loops.</p>
+<hr />
+<h2 id="data-architecture"><a class="header" href="#data-architecture">Data Architecture</a></h2>
+<h3 id="schema-on-read-1"><a class="header" href="#schema-on-read-1">Schema-on-Read</a></h3>
+<p>DialogDB's approach where schema is applied at query time rather than write time. Unlike traditional databases that enforce schema constraints during data insertion, DialogDB allows any valid fact to be stored and applies interpretation during queries.</p>
+<h3 id="local-first"><a class="header" href="#local-first">Local-First</a></h3>
+<p>Core principle where all queries run against local database instances with background synchronization. This architecture ensures applications remain responsive and functional even without network connectivity.</p>
+<h3 id="causal-temporal-model"><a class="header" href="#causal-temporal-model">Causal Temporal Model</a></h3>
+<p>DialogDB's approach to time where facts exist in causal timelines rather than a universal timeline. This model allows distributed nodes to operate independently and merge their timelines later.</p>
+<hr />
+<h2 id="indexing--storage"><a class="header" href="#indexing--storage">Indexing &amp; Storage</a></h2>
+<h3 id="eav-index-entity-attribute-value"><a class="header" href="#eav-index-entity-attribute-value">EAV Index (Entity-Attribute-Value)</a></h3>
+<p>Primary index optimized for retrieving all attributes of a given entity. Efficiently answers questions like "What do we know about entity X?"</p>
+<h3 id="aev-index-attribute-entity-value"><a class="header" href="#aev-index-attribute-entity-value">AEV Index (Attribute-Entity-Value)</a></h3>
+<p>Index optimized for retrieving all entities with a specific attribute. Efficiently answers questions like "Which entities have a 'name' attribute?"</p>
+<h3 id="vae-index-value-attribute-entity"><a class="header" href="#vae-index-value-attribute-entity">VAE Index (Value-Attribute-Entity)</a></h3>
+<p>Index optimized for finding entities with specific attribute values. Efficiently answers questions like "Which entities have the name 'Alice'?"</p>
+<h3 id="probabilistic-search-tree"><a class="header" href="#probabilistic-search-tree">Probabilistic Search Tree</a></h3>
+<p>Deterministic, content-addressed tree structure ensuring same data produces same tree regardless of insertion order. They use content-based splitting decisions rather than child count, making them optimal for replication.</p>
+<h3 id="content-addressed-storage"><a class="header" href="#content-addressed-storage">Content-Addressed Storage</a></h3>
+<p>Storage system where data is addressed by its cryptographic hash rather than location. This approach ensures data integrity, enables deduplication, and allows efficient caching.</p>
+<h3 id="blob-store"><a class="header" href="#blob-store">Blob Store</a></h3>
+<p>Hash-addressed storage system for immutable, content-addressed blobs. DialogDB is agnostic to the specific blob store implementation - any system supporting get/put operations by hash can serve as a blob store.</p>
+<hr />
+<h2 id="distributed-systems"><a class="header" href="#distributed-systems">Distributed Systems</a></h2>
+<h3 id="crdt-conflict-free-replicated-data-type"><a class="header" href="#crdt-conflict-free-replicated-data-type">CRDT (Conflict-free Replicated Data Type)</a></h3>
+<p>DialogDB implements Merkle-CRDT properties for convergent replication. CRDTs ensure that distributed replicas can be updated independently and will converge to the same state when they exchange updates.</p>
+<h3 id="merkle-crdt"><a class="header" href="#merkle-crdt">Merkle-CRDT</a></h3>
+<p>Conflict-free replicated data type using merkle trees, forming the basis of DialogDB's synchronization. The merkle tree structure allows efficient detection of differences between replicas.</p>
+<h3 id="mutable-pointer"><a class="header" href="#mutable-pointer">Mutable Pointer</a></h3>
+<p>Cryptographically signed reference to the current root hash, identified by DID:Key. The mutable pointer serves as the "HEAD" of the database, allowing the immutable content-addressed structure to have a stable, updatable reference point.</p>
+<h3 id="did-decentralized-identifier"><a class="header" href="#did-decentralized-identifier">DID (Decentralized Identifier)</a></h3>
+<p>Identifier format used for databases, formatted as <code>did:method:identifier</code>. DialogDB currently supports <code>did:key</code> method where the identifier is derived from a public key.</p>
+<h3 id="eventual-consistency"><a class="header" href="#eventual-consistency">Eventual Consistency</a></h3>
+<p>Property where all replicas converge to the same state when they have the same facts. DialogDB's CRDT-based design ensures that regardless of the order in which updates are applied, all replicas will eventually reach identical states.</p>
+<hr />
+<p>For the complete glossary with all terms, see the <a href="../../notes/glossary.html">comprehensive glossary</a>.</p>
 
                     </main>
 

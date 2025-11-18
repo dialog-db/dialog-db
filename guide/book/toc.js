@@ -8,7 +8,7 @@ class MDBookSidebarScrollbox extends HTMLElement {
         super();
     }
     connectedCallback() {
-        this.innerHTML = '<ol class="chapter"><li class="chapter-item expanded "><a href="Introduction.html"><strong aria-hidden="true">1.</strong> Introduction</a></li></ol>';
+        this.innerHTML = '<ol class="chapter"><li class="chapter-item expanded "><a href="Introduction.html"><strong aria-hidden="true">1.</strong> Introduction</a></li><li class="chapter-item expanded "><a href="Paradigm.html"><strong aria-hidden="true">2.</strong> Paradigm</a></li><li class="chapter-item expanded "><a href="Information_Model.html"><strong aria-hidden="true">3.</strong> Information Model</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="Attributes.html"><strong aria-hidden="true">3.1.</strong> Attributes</a></li><li class="chapter-item expanded "><a href="Concepts.html"><strong aria-hidden="true">3.2.</strong> Concepts</a></li></ol></li><li class="chapter-item expanded "><a href="Querying.html"><strong aria-hidden="true">4.</strong> Querying</a></li><li class="chapter-item expanded "><a href="Transacting.html"><strong aria-hidden="true">5.</strong> Transacting</a></li><li class="chapter-item expanded "><a href="Rules.html"><strong aria-hidden="true">6.</strong> Rules</a></li><li class="chapter-item expanded "><a href="Glossary.html"><strong aria-hidden="true">7.</strong> Glossary</a></li></ol>';
         // Set the current, active page, and reveal it if it's hidden
         let current_page = document.location.href.toString().split("#")[0].split("?")[0];
         if (current_page.endsWith("/")) {

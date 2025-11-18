@@ -1,0 +1,349 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Glossary - Dialog</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Dialog</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="glossary"><a class="header" href="#glossary">Glossary</a></h1>
+<p>This glossary provides comprehensive definitions for Dialog concepts. Terms are organized by category for easy reference.</p>
+<hr />
+<h2 id="core-concepts"><a class="header" href="#core-concepts">Core Concepts</a></h2>
+<h3 id="entity"><a class="header" href="#entity">Entity</a></h3>
+<p>A persistent subject of knowledge. An entity serves as the anchor for facts and descriptions over time, across changing roles and perspectives. It is not bound to a single concept or structure — the same entity may participate in multiple conceptual models.</p>
+<p><strong>Entity Identifier (<code>of</code>)</strong>: Entities are uniquely identified by URIs. In practice, these are Ed25519 <a href="https://w3c-ccg.github.io/did-key-spec/">did:key</a> identifiers derived from the hash of what makes the entity unique within the system.</p>
+<h3 id="attribute"><a class="header" href="#attribute">Attribute</a></h3>
+<p>Attributes define the space of expressible relations in the system — they describe what can be said about an entity and how. An attribute is a description consisting of:</p>
+<ul>
+<li>A namespace and name (e.g., <code>person/name</code>)</li>
+<li>A value type (e.g., <code>string</code>, <code>boolean</code>, ...)</li>
+<li>A cardinality (<code>One</code> or <code>Many</code>)</li>
+<li>A description of the semantics of the relation</li>
+</ul>
+<p><strong>Attribute Identifier (<code>the</code>)</strong>: Attributes are referred to in relations via a unique identifier, denoted by the <code>the</code> field. They are often encoded as string representations like <code>person/name</code>.</p>
+<p><strong>Namespace</strong>: The first component of an attribute name. Namespaces serve a role similar to table names in a relational store but without imposing constraints. An entity can have attributes from multiple namespaces. It is generally recommended to use <a href="https://en.wikipedia.org/wiki/Reverse_domain_name_notation">reverse domain name notation</a> (e.g., <code>io.gozala.note</code>).</p>
+<p><strong>Cardinality</strong>: Determines how many values an entity can have for an attribute. <code>Cardinality::One</code> means at most one value (new assertions supersede previous ones). <code>Cardinality::Many</code> means multiple values (each assertion adds a new value).</p>
+<h3 id="value-is"><a class="header" href="#value-is">Value (<code>is</code>)</a></h3>
+<p>An immutable scalar representing data such as <code>42</code>, <code>"John"</code>, <code>true</code>, or an entity reference. Values are the concrete data attached to attributes in a relation. Supported types include: <code>boolean</code>, <code>integer</code>, <code>float</code>, <code>string</code>, <code>bytes</code>, <code>symbol</code>, <code>entity</code>.</p>
+<h3 id="relation"><a class="header" href="#relation">Relation</a></h3>
+<p>A statement in the form of <code>{ the, of, is }</code> describing a possible connection between an entity, an attribute, and a value. A relation is not a fact itself — it's a unit of knowledge that can be asserted or retracted.</p>
+<blockquote>
+<p>Relations are inspired by natural language structure: <em>the</em> <strong>color</strong> <em>of</em> <strong>sky</strong> <em>is</em> <strong>blue</strong>.</p>
+</blockquote>
+<h3 id="attribution"><a class="header" href="#attribution">Attribution</a></h3>
+<p>An attribution describes a potential relation between an attribute and a value, independently of any entity.</p>
+<h3 id="fact"><a class="header" href="#fact">Fact</a></h3>
+<p>Atomic, immutable unit of knowledge which is either an assertion or a retraction of a relation at specific causal point in time.</p>
+<p><strong>Assertion</strong>: An atomic fact in the system, associating an entity with a particular value of an attribute at specific causal point in time. Opposite of retraction.</p>
+<p><strong>Retraction</strong>: An atomic fact in the system, dissociating an entity from particular value of an attribute at specific causal point in time. Opposite of assertion.</p>
+<h3 id="causal-reference-cause"><a class="header" href="#causal-reference-cause">Causal Reference (cause)</a></h3>
+<p>Causal references ground facts in time and establish partial order between them. They are represented as logical timestamps that enable causal reasoning without requiring global clock synchronization.</p>
+<h3 id="concept"><a class="header" href="#concept">Concept</a></h3>
+<p>A concept describes a set of attributes that an entity may have — similar to a table in a relational database or a schema in a document store. Concepts define expected relations, giving structure and semantic meaning to facts.</p>
+<p>Concepts in Dialog are composable and applied at query time. Unlike rigid schemas, they do not enforce structure at write time, allowing for flexible, evolving knowledge.</p>
+<h3 id="realization"><a class="header" href="#realization">Realization</a></h3>
+<p>A realization is an instance of a concept — a set of facts describing an entity according to the concept's definition. It is similar to a document in a document store or a row in a relational table, but grounded in relations.</p>
+<h3 id="rule"><a class="header" href="#rule">Rule</a></h3>
+<p>Rules are equivalent of views in relational databases. Rules define how concepts can be derived from existing facts through set of premises that must be true. They enable logical inference by deriving new conclusions from existing facts.</p>
+<p>Unlike materialized views, rules do not have predetermined evaluation time and can be evaluated lazily at query time or eagerly at assertion time.</p>
+<hr />
+<h2 id="database-operations"><a class="header" href="#database-operations">Database Operations</a></h2>
+<h3 id="claim"><a class="header" href="#claim">Claim</a></h3>
+<p>A claim represents a proposed change to the system - either assertion or retraction of a relation. Claims are not facts until they are accepted at specific causal point in time.</p>
+<h3 id="transaction"><a class="header" href="#transaction">Transaction</a></h3>
+<p>Atomic operation describing set of assertions and retractions in the database. Transactions ensure atomicity, that is all assertions &amp; retractions are applied together or none are, maintaining database consistency. Each transaction results in a new revision.</p>
+<h3 id="commit"><a class="header" href="#commit">Commit</a></h3>
+<p>Act of applying a transaction to the database, resulting in a new revision.</p>
+<h3 id="instruction"><a class="header" href="#instruction">Instruction</a></h3>
+<p>Instruction is a way to refer to a component of the transaction without specifying whether it is an assertion or a retraction.</p>
+<h3 id="session"><a class="header" href="#session">Session</a></h3>
+<p>Database connection providing query and transaction capabilities. Sessions manage the context for interacting with the database, including caching and transaction boundaries.</p>
+<h3 id="revision"><a class="header" href="#revision">Revision</a></h3>
+<p>Immutable snapshot of the database state at a point in time, represented as a content hash. Each commit creates a new revision, enabling time-travel queries and audit trails.</p>
+<hr />
+<h2 id="querying"><a class="header" href="#querying">Querying</a></h2>
+<h3 id="datalog"><a class="header" href="#datalog">Datalog</a></h3>
+<p>The declarative query language used by DialogDB, well-suited for graph-structured facts. Datalog allows expressing complex graph traversals and pattern matching through logical rules.</p>
+<h3 id="variable"><a class="header" href="#variable">Variable</a></h3>
+<p>Query placeholder that gets bound to values during evaluation, denoted with <code>?</code> prefix (e.g., <code>?person</code>, <code>?name</code>). Variables act as unknowns that the query engine fills in by pattern matching against facts in the database.</p>
+<h3 id="term"><a class="header" href="#term">Term</a></h3>
+<p>Either a concrete scalar value or a variable in a query. Terms are the building blocks of query patterns - concrete terms match exact values while variable terms match any value and bind it for use elsewhere in the query.</p>
+<h3 id="selector"><a class="header" href="#selector">Selector</a></h3>
+<p>Basic filter for querying facts, specifying patterns for the <code>the</code>, <code>of</code>, and/or <code>is</code> components. Selectors are the simplest form of query, matching facts directly without complex logic.</p>
+<h3 id="premise"><a class="header" href="#premise">Premise</a></h3>
+<p>Query component that can be a formula application, rule application or a negation. Predicates extend basic pattern matching with computational logic, enabling derived values and complex conditions.</p>
+<h3 id="formula"><a class="header" href="#formula">Formula</a></h3>
+<p>Computational predicate that derives output values from input values. Formulas perform calculations within queries, such as string manipulation, arithmetic, or data transformation.</p>
+<h3 id="negation"><a class="header" href="#negation">Negation</a></h3>
+<p>Query constraint that matches when a pattern is NOT present. Negation enables queries like "find all people without email addresses" by matching the absence of facts.</p>
+<h3 id="query-planner"><a class="header" href="#query-planner">Query Planner</a></h3>
+<p>Component that reorders query conjuncts to minimize search space and detect cycles. The planner optimizes query execution by choosing the most selective patterns first and identifying infinite loops.</p>
+<hr />
+<h2 id="data-architecture"><a class="header" href="#data-architecture">Data Architecture</a></h2>
+<h3 id="schema-on-read"><a class="header" href="#schema-on-read">Schema-on-Read</a></h3>
+<p>DialogDB's approach where schema is applied at query time rather than write time. Unlike traditional databases that enforce schema constraints during data insertion, DialogDB allows any valid fact to be stored and applies interpretation during queries.</p>
+<h3 id="local-first"><a class="header" href="#local-first">Local-First</a></h3>
+<p>Core principle where all queries run against local database instances with background synchronization. This architecture ensures applications remain responsive and functional even without network connectivity.</p>
+<h3 id="causal-temporal-model"><a class="header" href="#causal-temporal-model">Causal Temporal Model</a></h3>
+<p>DialogDB's approach to time where facts exist in causal timelines rather than a universal timeline. This model allows distributed nodes to operate independently and merge their timelines later.</p>
+<hr />
+<h2 id="indexing--storage"><a class="header" href="#indexing--storage">Indexing &amp; Storage</a></h2>
+<h3 id="eav-index-entity-attribute-value"><a class="header" href="#eav-index-entity-attribute-value">EAV Index (Entity-Attribute-Value)</a></h3>
+<p>Primary index optimized for retrieving all attributes of a given entity. Efficiently answers questions like "What do we know about entity X?"</p>
+<h3 id="aev-index-attribute-entity-value"><a class="header" href="#aev-index-attribute-entity-value">AEV Index (Attribute-Entity-Value)</a></h3>
+<p>Index optimized for retrieving all entities with a specific attribute. Efficiently answers questions like "Which entities have a 'name' attribute?"</p>
+<h3 id="vae-index-value-attribute-entity"><a class="header" href="#vae-index-value-attribute-entity">VAE Index (Value-Attribute-Entity)</a></h3>
+<p>Index optimized for finding entities with specific attribute values. Efficiently answers questions like "Which entities have the name 'Alice'?"</p>
+<h3 id="probabilistic-search-tree"><a class="header" href="#probabilistic-search-tree">Probabilistic Search Tree</a></h3>
+<p>Deterministic, content-addressed tree structure ensuring same data produces same tree regardless of insertion order. They use content-based splitting decisions rather than child count, making them optimal for replication.</p>
+<h3 id="content-addressed-storage"><a class="header" href="#content-addressed-storage">Content-Addressed Storage</a></h3>
+<p>Storage system where data is addressed by its cryptographic hash rather than location. This approach ensures data integrity, enables deduplication, and allows efficient caching.</p>
+<h3 id="blob-store"><a class="header" href="#blob-store">Blob Store</a></h3>
+<p>Hash-addressed storage system for immutable, content-addressed blobs. DialogDB is agnostic to the specific blob store implementation - any system supporting get/put operations by hash can serve as a blob store.</p>
+<hr />
+<h2 id="distributed-systems"><a class="header" href="#distributed-systems">Distributed Systems</a></h2>
+<h3 id="crdt-conflict-free-replicated-data-type"><a class="header" href="#crdt-conflict-free-replicated-data-type">CRDT (Conflict-free Replicated Data Type)</a></h3>
+<p>DialogDB implements Merkle-CRDT properties for convergent replication. CRDTs ensure that distributed replicas can be updated independently and will converge to the same state when they exchange updates.</p>
+<h3 id="merkle-crdt"><a class="header" href="#merkle-crdt">Merkle-CRDT</a></h3>
+<p>Conflict-free replicated data type using merkle trees, forming the basis of DialogDB's synchronization. The merkle tree structure allows efficient detection of differences between replicas.</p>
+<h3 id="mutable-pointer"><a class="header" href="#mutable-pointer">Mutable Pointer</a></h3>
+<p>Cryptographically signed reference to the current root hash, identified by DID:Key. The mutable pointer serves as the "HEAD" of the database, allowing the immutable content-addressed structure to have a stable, updatable reference point.</p>
+<h3 id="did-decentralized-identifier"><a class="header" href="#did-decentralized-identifier">DID (Decentralized Identifier)</a></h3>
+<p>Identifier format used for databases, formatted as <code>did:method:identifier</code>. DialogDB currently supports <code>did:key</code> method where the identifier is derived from a public key.</p>
+<h3 id="eventual-consistency"><a class="header" href="#eventual-consistency">Eventual Consistency</a></h3>
+<p>Property where all replicas converge to the same state when they have the same facts. DialogDB's CRDT-based design ensures that regardless of the order in which updates are applied, all replicas will eventually reach identical states.</p>
+<hr />
+<p>For the complete glossary with all terms, see the <a href="../../notes/glossary.html">comprehensive glossary</a>.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="Rules.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="Rules.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+            </nav>
+
+        </div>
+
+        <!-- Livereload script (if served using the cli tool) -->
+        <script>
+            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
+            const socket = new WebSocket(wsAddress);
+            socket.onmessage = function (event) {
+                if (event.data === "reload") {
+                    socket.close();
+                    location.reload();
+                }
+            };
+
+            window.onbeforeunload = function() {
+                socket.close();
+            }
+        </script>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

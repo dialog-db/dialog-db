@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Introduction - Dialog</title>
+        <title>Information Model - Dialog</title>
 
 
         <!-- Custom HTML head -->
@@ -175,43 +175,25 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="introduction"><a class="header" href="#introduction">Introduction</a></h1>
-<h2 id="what-is-dialog"><a class="header" href="#what-is-dialog">What is Dialog?</a></h2>
-<p>Dialog is a database that stores <strong>facts</strong> instead of documents or rows. Each fact is a small, immutable piece of knowledge that can be queried, combined, and reasoned about.</p>
-<p>Think of it like building with LEGO blocks instead of carving monolithic sculptures. Instead of storing a complete "employee" document, you store individual facts:</p>
-<ul>
-<li>The name of employee #123 is "Alice"</li>
-<li>The salary of employee #123 is 60000</li>
-<li>The manager of employee #123 is employee #456</li>
-</ul>
-<p>This granular approach gives you flexibility: the same data can be interpreted through different lenses, queried in ways you didn't anticipate, and evolved without breaking existing code.</p>
-<h2 id="facts-not-documents"><a class="header" href="#facts-not-documents">Facts, Not Documents</a></h2>
-<p>Traditional databases force you to decide upfront: "Is this a SQL table? A JSON document? A graph?" Dialog doesn't ask you to choose. Facts naturally express:</p>
-<ul>
-<li><strong>Structured data</strong> (like SQL rows)</li>
-<li><strong>Nested data</strong> (like JSON documents)</li>
-<li><strong>Connected data</strong> (like graph edges)</li>
-</ul>
-<p>All at the same time, using the same primitives.</p>
-<p>Dialog is <strong>schema-on-read</strong>, not schema-on-write. You don't need migrations when your model evolves. Multiple applications can interpret the same facts differently. Your data remains flexible as requirements change.</p>
-<h2 id="built-for-collaboration"><a class="header" href="#built-for-collaboration">Built for Collaboration</a></h2>
-<p>Dialog is designed for <strong>local-first, privacy-preserving collaboration</strong>:</p>
-<ul>
-<li>Queries run against your <strong>local database</strong></li>
-<li>Changes <strong>synchronize</strong> using content-addressed storage</li>
-<li><strong>Conflict-free replication</strong> through causal timestamps</li>
-<li>You control your data and who sees it</li>
-</ul>
-<h2 id="lets-build-something"><a class="header" href="#lets-build-something">Let's Build Something</a></h2>
-<p>In the next chapter, we'll explore the paradigm that makes Dialog different: how modeling information as immutable facts changes everything.</p>
-<p>Then we'll jump straight into code - defining attributes, modeling data, and running queries.</p>
+                        <h1 id="information-model"><a class="header" href="#information-model">Information Model</a></h1>
+<p>The information model in Dialog has two parts:</p>
+<ol>
+<li><strong>Attributes</strong> - The vocabulary of facts (name, salary, manager)</li>
+<li><strong>Concepts</strong> - Interpretations of groups of facts</li>
+</ol>
+<p>Attributes give semantic meaning to the "the" part of relations. They're labels with metadata (type, cardinality) but don't constrain what facts you can assert.</p>
+<p>Concepts are patterns for interpreting entities - they describe how to make sense of groups of related facts.</p>
+<p>Let's start by defining attributes.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="Paradigm.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
 
-                            <a rel="next prefetch" href="Paradigm.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="Attributes.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -221,8 +203,11 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="Paradigm.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
 
-                    <a rel="next prefetch" href="Paradigm.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="Attributes.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

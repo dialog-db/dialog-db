@@ -1,0 +1,504 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Querying - Dialog</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Dialog</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="querying"><a class="header" href="#querying">Querying</a></h1>
+<p>Querying in Dialog is built on pattern matching. You describe what you're looking for, and Dialog finds all the matching facts.</p>
+<h2 id="querying-concepts"><a class="header" href="#querying-concepts">Querying Concepts</a></h2>
+<p>The primary way to query is using concepts:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::{Attribute, Concept, Entity};
+
+mod employee {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute, Clone)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute, Clone)]
+    pub struct Salary(pub u32);
+
+    #[derive(Attribute, Clone)]
+    pub struct Job(pub String);
+}
+
+#[derive(Concept, Debug, Clone)]
+pub struct Employee {
+    pub this: Entity,
+    pub name: employee::Name,
+    pub salary: employee::Salary,
+    pub job: employee::Job,
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="find-all-matching-a-concept"><a class="header" href="#find-all-matching-a-concept">Find All Matching a Concept</a></h3>
+<p>Use the shortcut syntax to query all instances:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Find all employees
+let results: Vec&lt;Employee&gt; = Employee::query(session.clone())
+    .try_collect()
+    .await?;
+
+for employee in results {
+    println!("{} - {} - ${}",
+        employee.name.value(),
+        employee.job.value(),
+        employee.salary.value()
+    );
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="find-with-specific-values"><a class="header" href="#find-with-specific-values">Find with Specific Values</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::Attribute;
+
+// Find all engineers
+let engineers_pattern = Match::&lt;Employee&gt; {
+    this: Term::var("this"),
+    name: Term::var("name"),
+    salary: Term::var("salary"),
+    job: employee::Job::from("Engineer").into(),
+};
+
+let engineers: Vec&lt;Employee&gt; = engineers_pattern.query(&amp;session).try_collect().await?;
+<span class="boring">}</span></code></pre></pre>
+<h3 id="query-a-specific-entity"><a class="header" href="#query-a-specific-entity">Query a Specific Entity</a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Get alice's employee data
+let query = Match::&lt;Employee&gt; {
+    this: Term::value(alice),
+    name: Term::var("name"),
+    salary: Term::var("salary"),
+    job: Term::var("job"),
+};
+
+let results: Vec&lt;Employee&gt; = query.query(&amp;session).try_collect().await?;
+
+match results.first() {
+    Some(emp) =&gt; println!("{} works as {}", emp.name.value(), emp.job.value()),
+    None =&gt; println!("Not found"),
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="processing-results"><a class="header" href="#processing-results">Processing Results</a></h2>
+<p>Queries return a stream of results that you can process:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use futures_util::TryStreamExt;
+
+let query = Match::&lt;Employee&gt; {
+    this: Term::var("this"),
+    name: Term::var("name"),
+    salary: Term::var("salary"),
+    job: Term::var("job"),
+};
+
+// Collect all results
+let all_employees: Vec&lt;Employee&gt; = query.query(&amp;session).try_collect().await?;
+
+// Or process as a stream
+query.query(&amp;session)
+    .try_for_each(|employee| async move {
+        println!("{} - ${}", employee.name.value(), employee.salary.value());
+        Ok(())
+    })
+    .await?;
+<span class="boring">}</span></code></pre></pre>
+<h2 id="working-with-results"><a class="header" href="#working-with-results">Working with Results</a></h2>
+<p>Query results are concept instances:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let employee: Employee = /* ... */;
+
+// Access the entity
+let entity: Entity = employee.this;
+
+// Access attribute values
+let name: &amp;String = employee.name.value();
+let salary: u32 = *employee.salary.value();
+let job: &amp;String = employee.job.value();
+<span class="boring">}</span></code></pre></pre>
+<h2 id="querying-individual-attributes-with-witha"><a class="header" href="#querying-individual-attributes-with-witha">Querying Individual Attributes with <code>With&lt;A&gt;</code></a></h2>
+<p>For working with individual attributes without defining a full concept, use <code>With&lt;A&gt;</code>:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::Concept; // Required to use the query() shortcut
+use dialog_query::attribute::With;
+
+// Find all entities that have a name using the shortcut syntax
+let results: Vec&lt;With&lt;employee::Name&gt;&gt; = With::&lt;employee::Name&gt;::query(session.clone())
+    .try_collect()
+    .await?;
+
+for result in results {
+    println!("Entity: {}, Name: {}", result.this, result.has.value());
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="query-patterns-with-witha"><a class="header" href="#query-patterns-with-witha">Query Patterns with <code>With&lt;A&gt;</code></a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::Attribute;
+
+// Specific entity's attribute
+let pattern = With {
+    this: alice.clone(),
+    has: employee::Salary::variable()
+};
+
+// Reverse lookup: who has this value?
+let pattern = With {
+    this: Entity::variable(),
+    has: employee::Name::from("Alice")
+};
+
+// Entity references: who has alice as manager?
+let pattern = With {
+    this: Entity::variable(),
+    has: employee::Manager::from(alice.clone())
+};
+<span class="boring">}</span></code></pre></pre>
+<h2 id="index-selection"><a class="header" href="#index-selection">Index Selection</a></h2>
+<p>Dialog automatically uses the right index for your query. Whether you're querying concepts or individual attributes, the query planner selects the optimal index based on your pattern.</p>
+<p>No manual query planning needed - every pattern is efficient!</p>
+<h2 id="complete-example"><a class="header" href="#complete-example">Complete Example</a></h2>
+<pre><pre class="playground"><code class="language-rust">use dialog_query::{Attribute, Entity, Session, Concept, Match, Term};
+use dialog_query::artifact::Artifacts;
+use dialog_storage::MemoryStorageBackend;
+use futures_util::TryStreamExt;
+
+mod employee {
+    use dialog_query::{Attribute, Entity};
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct Salary(pub u32);
+
+    #[derive(Attribute)]
+    pub struct Job(pub String);
+}
+
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: employee::Name,
+    salary: employee::Salary,
+    job: employee::Job,
+}
+
+#[tokio::main]
+async fn main() -&gt; anyhow::Result&lt;()&gt; {
+    let backend = MemoryStorageBackend::default();
+    let store = Artifacts::anonymous(backend).await?;
+    let mut session = Session::open(store.clone());
+
+    // Add some data
+    let alice = Entity::new()?;
+    let bob = Entity::new()?;
+
+    let mut edit = session.edit();
+    edit.assert(Employee {
+        this: alice.clone(),
+        name: employee::Name::from("Alice"),
+        salary: employee::Salary::from(75000),
+        job: employee::Job::from("Engineer"),
+    }).assert(Employee {
+        this: bob.clone(),
+        name: employee::Name::from("Bob"),
+        salary: employee::Salary::from(60000),
+        job: employee::Job::from("Designer"),
+    });
+    session.commit(edit).await?;
+
+    // Query: Find all employees
+    println!("All employees:");
+    let all_employees = Match::&lt;Employee&gt; {
+        this: Term::var("this"),
+        name: Term::var("name"),
+        salary: Term::var("salary"),
+        job: Term::var("job"),
+    };
+    let employees: Vec&lt;_&gt; = all_employees.query(&amp;session).try_collect().await?;
+    for emp in employees {
+        println!("  - {} ({}) - ${}",
+            emp.name.value(),
+            emp.job.value(),
+            emp.salary.value()
+        );
+    }
+
+    // Query: Find all engineers
+    println!("\nEngineers:");
+    let engineers_pattern = Match::&lt;Employee&gt; {
+        this: Term::var("this"),
+        name: Term::var("name"),
+        salary: Term::var("salary"),
+        job: employee::Job::from("Engineer").into(),
+    };
+    let engineers: Vec&lt;_&gt; = engineers_pattern.query(&amp;session).try_collect().await?;
+    for eng in engineers {
+        println!("  - {}", eng.name.value());
+    }
+
+    // Query: Get alice's data
+    println!("\nAlice's details:");
+    let alice_pattern = Match::&lt;Employee&gt; {
+        this: Term::value(alice),
+        name: Term::var("name"),
+        salary: Term::var("salary"),
+        job: Term::var("job"),
+    };
+    let results: Vec&lt;_&gt; = alice_pattern.query(&amp;session).try_collect().await?;
+    if let Some(emp) = results.first() {
+        println!("  Name: {}", emp.name.value());
+        println!("  Job: {}", emp.job.value());
+        println!("  Salary: ${}", emp.salary.value());
+    }
+
+    Ok(())
+}</code></pre></pre>
+<p>Next, let's explore transactions - how to assert and retract facts atomically.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="Concepts.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="Transacting.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="Concepts.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="Transacting.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+        <!-- Livereload script (if served using the cli tool) -->
+        <script>
+            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
+            const socket = new WebSocket(wsAddress);
+            socket.onmessage = function (event) {
+                if (event.data === "reload") {
+                    socket.close();
+                    location.reload();
+                }
+            };
+
+            window.onbeforeunload = function() {
+                socket.close();
+            }
+        </script>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

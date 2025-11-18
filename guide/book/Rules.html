@@ -1,0 +1,864 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Rules - Dialog</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Dialog</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="rules"><a class="header" href="#rules">Rules</a></h1>
+<p>Rules are Dialog's equivalent of <strong>views</strong> in relational databases. They define how concepts can be derived from existing facts through logical inference.</p>
+<h2 id="what-are-rules"><a class="header" href="#what-are-rules">What Are Rules?</a></h2>
+<p>A rule says: "If these premises are true, then this conclusion follows."</p>
+<pre><code>If:
+  - alice has employee/name = "Alice"
+  - alice has employee/direct_reports = bob
+Then:
+  - alice is a Manager
+</code></pre>
+<p>Rules let you:</p>
+<ul>
+<li><strong>Derive concepts from facts</strong>: Define "Manager" based on having direct reports</li>
+<li><strong>Bridge data models</strong>: Adapt between different schemas</li>
+<li><strong>Handle schema evolution</strong>: Support old and new models simultaneously</li>
+<li><strong>Create computed views</strong>: Generate derived data on the fly</li>
+</ul>
+<h2 id="defining-rules"><a class="header" href="#defining-rules">Defining Rules</a></h2>
+<p>Rules are functions that take a <code>Match&lt;T&gt;</code> pattern and return premises:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::{Concept, Entity, Match, Term, When};
+
+mod employee {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct DirectReports(pub u32);
+}
+
+mod manager {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+}
+
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: employee::Name,
+    direct_reports: employee::DirectReports,
+}
+
+#[derive(Concept)]
+struct Manager {
+    this: Entity,
+    name: manager::Name,
+}
+
+// A Manager is an Employee who has direct reports &gt; 0
+fn manager_rule(manager: Match&lt;Manager&gt;) -&gt; impl When {
+    (
+        Match::&lt;Employee&gt; {
+            this: manager.this,
+            name: manager.name,
+            direct_reports: Term::var("count"),
+        },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>The rule function:</p>
+<ol>
+<li>Takes a <code>Match&lt;Manager&gt;</code> representing what we're trying to prove</li>
+<li>Returns premises that must be true (here, an <code>Employee</code> with matching attributes)</li>
+<li>Returns <code>impl When</code> - premises can be tuples, arrays, or vecs</li>
+</ol>
+<h2 id="installing-rules"><a class="header" href="#installing-rules">Installing Rules</a></h2>
+<p>Install rules on a session to make them active:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let mut session = Session::open(store).install(manager_rule)?;
+<span class="boring">}</span></code></pre></pre>
+<p>Once installed, querying for <code>Manager</code> will derive results from <code>Employee</code> facts.</p>
+<h2 id="schema-bridging"><a class="header" href="#schema-bridging">Schema Bridging</a></h2>
+<p>Rules enable different applications to use different models for the same data:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod employee_v1 {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct Job(pub String);
+}
+
+mod stuff {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct Role(pub String);
+}
+
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: employee_v1::Name,
+    job: employee_v1::Job,
+}
+
+#[derive(Concept)]
+struct Stuff {
+    this: Entity,
+    name: stuff::Name,
+    role: stuff::Role,
+}
+
+// Bridge: Employee can be derived from Stuff
+fn employee_from_stuff(employee: Match&lt;Employee&gt;) -&gt; impl When {
+    (
+        Match::&lt;Stuff&gt; {
+            this: employee.this,
+            name: employee.name,
+            role: employee.job,
+        },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>Now queries for <code>Employee</code> work even if data is stored as <code>Stuff</code>.</p>
+<h2 id="schema-evolution"><a class="header" href="#schema-evolution">Schema Evolution</a></h2>
+<p>Rules make schema migration painless:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod note {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Title(pub String);
+}
+
+mod note_v2 {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+}
+
+#[derive(Concept)]
+struct Note {
+    this: Entity,
+    title: note::Title,
+}
+
+#[derive(Concept)]
+struct NoteV2 {
+    this: Entity,
+    name: note_v2::Name,
+}
+
+// Migrate Note to NoteV2
+fn note_v2_migration(note_v2: Match&lt;NoteV2&gt;) -&gt; impl When {
+    (
+        Match::&lt;Note&gt; {
+            this: note_v2.this,
+            title: note_v2.name,
+        },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>Old code querying <code>Note</code> continues working. New code can query <code>NoteV2</code> and get the same data.</p>
+<h2 id="multiple-premises"><a class="header" href="#multiple-premises">Multiple Premises</a></h2>
+<p>Rules can have multiple premises as a tuple:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod person {
+    use dialog_query::{Attribute, Entity};
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct Age(pub u32);
+
+    #[derive(Attribute)]
+    pub struct Manager(pub Entity);
+}
+
+#[derive(Concept)]
+struct Person {
+    this: Entity,
+    name: person::Name,
+    age: person::Age,
+}
+
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: person::Name,
+    manager: person::Manager,
+}
+
+#[derive(Concept)]
+struct SeniorEmployee {
+    this: Entity,
+    name: person::Name,
+}
+
+// A SeniorEmployee is a Person over 50 who is an Employee
+fn senior_employee_rule(senior: Match&lt;SeniorEmployee&gt;) -&gt; impl When {
+    (
+        Match::&lt;Person&gt; {
+            this: senior.this.clone(),
+            name: senior.name.clone(),
+            age: Term::var("age"),
+        },
+        Match::&lt;Employee&gt; {
+            this: senior.this,
+            name: senior.name,
+            manager: Term::var("manager"),
+        },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>Both premises must be satisfied for the rule to derive a <code>SeniorEmployee</code>.</p>
+<h2 id="negation"><a class="header" href="#negation">Negation</a></h2>
+<p>Rules can use negation with the <code>!</code> operator:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::attribute::With;
+
+#[derive(Concept)]
+struct ActiveEmployee {
+    this: Entity,
+    name: employee::Name,
+}
+
+mod termination {
+    use dialog_query::{Attribute, Entity};
+
+    #[derive(Attribute)]
+    pub struct Date(pub String);
+}
+
+// An ActiveEmployee is an Employee without a termination date
+fn active_employee_rule(active: Match&lt;ActiveEmployee&gt;) -&gt; impl When {
+    (
+        Match::&lt;Employee&gt; {
+            this: active.this.clone(),
+            name: active.name,
+            direct_reports: Term::var("reports"),
+        },
+        !Match::&lt;With&lt;termination::Date&gt;&gt; {
+            this: active.this,
+            has: Term::var("date"),
+        },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>The <code>!</code> negates the premise - the rule only matches when the entity does NOT have a termination date.</p>
+<h2 id="complete-example"><a class="header" href="#complete-example">Complete Example</a></h2>
+<pre><pre class="playground"><code class="language-rust">use dialog_query::{Attribute, Concept, Entity, Match, Session, Term, When};
+use dialog_query::artifact::Artifacts;
+use dialog_storage::MemoryStorageBackend;
+use futures_util::TryStreamExt;
+
+mod employee {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct Job(pub String);
+}
+
+mod stuff {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute)]
+    pub struct Role(pub String);
+}
+
+#[derive(Concept)]
+struct Employee {
+    this: Entity,
+    name: employee::Name,
+    job: employee::Job,
+}
+
+#[derive(Concept)]
+struct Stuff {
+    this: Entity,
+    name: stuff::Name,
+    role: stuff::Role,
+}
+
+// Rule: Employees can be derived from Stuff
+fn employee_from_stuff(employee: Match&lt;Employee&gt;) -&gt; impl When {
+    (
+        Match::&lt;Stuff&gt; {
+            this: employee.this,
+            name: employee.name,
+            role: employee.job,
+        },
+    )
+}
+
+#[tokio::main]
+async fn main() -&gt; anyhow::Result&lt;()&gt; {
+    let backend = MemoryStorageBackend::default();
+    let store = Artifacts::anonymous(backend).await?;
+
+    // Install the rule
+    let mut session = Session::open(store).install(employee_from_stuff)?;
+
+    // Insert data as Stuff
+    let alice = Entity::new()?;
+    let bob = Entity::new()?;
+
+    let mut edit = session.edit();
+    edit.assert(Stuff {
+        this: alice.clone(),
+        name: stuff::Name("Alice".into()),
+        role: stuff::Role("Engineer".into()),
+    }).assert(Stuff {
+        this: bob.clone(),
+        name: stuff::Name("Bob".into()),
+        role: stuff::Role("Designer".into()),
+    });
+    session.commit(edit).await?;
+
+    // Query for Employees - rule derives them from Stuff
+    let query = Match::&lt;Employee&gt; {
+        this: Term::var("employee"),
+        name: Term::var("name"),
+        job: Term::var("job"),
+    };
+
+    let employees: Vec&lt;Employee&gt; = query
+        .query(&amp;session)
+        .try_collect()
+        .await?;
+
+    for emp in employees {
+        println!("{} - {}", emp.name.value(), emp.job.value());
+    }
+    // Output:
+    // Alice - Engineer
+    // Bob - Designer
+
+    Ok(())
+}</code></pre></pre>
+<h2 id="terms"><a class="header" href="#terms">Terms</a></h2>
+<p>Terms are the building blocks of queries and rules. A <code>Term&lt;T&gt;</code> can be:</p>
+<h3 id="variables"><a class="header" href="#variables">Variables</a></h3>
+<p>Variables match any value and bind the result:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::Term;
+
+// Match any entity
+let entity_var = Term::var("person");
+
+// Match any name
+let name_var: Term&lt;String&gt; = Term::var("name");
+
+// Match any number
+let age_var: Term&lt;u32&gt; = Term::var("age");
+<span class="boring">}</span></code></pre></pre>
+<h3 id="constants"><a class="header" href="#constants">Constants</a></h3>
+<p>Constants match specific values:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Match specific entity
+let alice = Entity::new()?;
+let alice_term = Term::value(alice);
+
+// Match specific string
+let name_term = Term::value("Alice".to_string());
+
+// Match specific number
+let age_term = Term::value(42u32);
+<span class="boring">}</span></code></pre></pre>
+<p>You can also use <code>Term::from()</code> for convenience:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let name: Term&lt;String&gt; = Term::from("Alice".to_string());
+let age: Term&lt;u32&gt; = Term::from(25u32);
+<span class="boring">}</span></code></pre></pre>
+<h2 id="formulas"><a class="header" href="#formulas">Formulas</a></h2>
+<p>Formulas are computational predicates that derive output values from input values. They enable calculations within rules.</p>
+<h3 id="built-in-formulas"><a class="header" href="#built-in-formulas">Built-in Formulas</a></h3>
+<p>Dialog provides formulas for math and strings:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use dialog_query::formulas::*;
+
+// Math operations
+Sum { of: 10, with: 5, is: ? }          // Addition
+Difference { of: 20, subtract: 8, is: ? }  // Subtraction
+Product { of: 6, times: 7, is: ? }      // Multiplication
+Quotient { of: 42, by: 6, is: ? }      // Division
+
+// String operations
+Concatenate { first: "Hello", second: " World", is: ? }
+Length { of: "test", is: ? }
+Uppercase { of: "hello", is: ? }
+Lowercase { of: "HELLO", is: ? }
+<span class="boring">}</span></code></pre></pre>
+<h3 id="using-formulas-in-rules"><a class="header" href="#using-formulas-in-rules">Using Formulas in Rules</a></h3>
+<p>Formulas can be used as premises in rules to perform computations:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>mod person {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute)]
+    pub struct FirstName(pub String);
+
+    #[derive(Attribute)]
+    pub struct LastName(pub String);
+
+    #[derive(Attribute)]
+    pub struct FullName(pub String);
+}
+
+#[derive(Concept)]
+struct Person {
+    this: Entity,
+    first_name: person::FirstName,
+    last_name: person::LastName,
+}
+
+#[derive(Concept)]
+struct PersonWithFullName {
+    this: Entity,
+    full_name: person::FullName,
+}
+
+use dialog_query::formulas::Concatenate;
+
+// Derive full name from first and last names
+fn full_name_rule(person: Match&lt;PersonWithFullName&gt;) -&gt; impl When {
+    (
+        Match::&lt;Person&gt; {
+            this: person.this.clone(),
+            first_name: Term::var("first"),
+            last_name: Term::var("last"),
+        },
+        Concatenate {
+            first: Term::var("first"),
+            second: Term::var("last"),
+            is: person.full_name,
+        },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>The <code>Concatenate</code> formula computes the full name from the first and last name variables.</p>
+<h2 id="conjunctions-and"><a class="header" href="#conjunctions-and">Conjunctions (AND)</a></h2>
+<p>A <strong>conjunction</strong> means all premises must be satisfied. In Dialog, conjunctions are expressed as tuples of premises.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// This rule requires BOTH conditions to be true
+fn senior_manager_rule(senior: Match&lt;SeniorManager&gt;) -&gt; impl When {
+    (
+        // Must be a manager
+        Match::&lt;Manager&gt; {
+            this: senior.this.clone(),
+            name: senior.name.clone(),
+        },
+        // AND must be over 50
+        Match::&lt;Person&gt; {
+            this: senior.this,
+            name: senior.name,
+            age: Term::var("age"),  // age must exist and be bound
+        },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>Both the <code>Manager</code> match AND the <code>Person</code> match must succeed for the rule to derive a <code>SeniorManager</code>.</p>
+<h3 id="multiple-conjunctions"><a class="header" href="#multiple-conjunctions">Multiple Conjunctions</a></h3>
+<p>You can have many premises in a conjunction:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>fn complex_rule(target: Match&lt;Target&gt;) -&gt; impl When {
+    (
+        Match::&lt;ConceptA&gt; { /* ... */ },
+        Match::&lt;ConceptB&gt; { /* ... */ },
+        Match::&lt;ConceptC&gt; { /* ... */ },
+        Concatenate { /* compute something */ },
+        Sum { /* calculate something */ },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>All five premises must be satisfied for the rule to succeed.</p>
+<h2 id="disjunctions-or"><a class="header" href="#disjunctions-or">Disjunctions (OR)</a></h2>
+<p>A <strong>disjunction</strong> means at least one alternative must be satisfied. In Dialog, disjunctions are expressed by defining multiple rules for the same concept.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>#[derive(Concept)]
+struct VIPCustomer {
+    this: Entity,
+    name: customer::Name,
+}
+
+// Rule 1: VIP if high spending
+fn vip_by_spending(vip: Match&lt;VIPCustomer&gt;) -&gt; impl When {
+    (
+        Match::&lt;Customer&gt; {
+            this: vip.this,
+            name: vip.name,
+            total_spent: Term::var("spent"),
+        },
+        // Some formula checking spent &gt; 10000
+    )
+}
+
+// Rule 2: VIP if premium member
+fn vip_by_membership(vip: Match&lt;VIPCustomer&gt;) -&gt; impl When {
+    (
+        Match::&lt;Customer&gt; {
+            this: vip.this,
+            name: vip.name,
+            membership: Term::value("Premium".to_string()),
+        },
+    )
+}
+
+// Install both rules
+let session = Session::open(store)
+    .install(vip_by_spending)?
+    .install(vip_by_membership)?;
+<span class="boring">}</span></code></pre></pre>
+<p>Now querying for <code>VIPCustomer</code> returns entities that satisfy <strong>either</strong> rule - customers with high spending <strong>OR</strong> premium membership.</p>
+<h3 id="disjunction-semantics"><a class="header" href="#disjunction-semantics">Disjunction Semantics</a></h3>
+<p>When multiple rules define the same concept:</p>
+<ul>
+<li>The concept matches if <strong>any</strong> rule matches</li>
+<li>Results from all matching rules are combined</li>
+<li>Duplicates are naturally handled (same entity appears once)</li>
+</ul>
+<p>This is how Dialog implements <strong>OR</strong> logic:</p>
+<pre><code>VIPCustomer(?customer) :-
+    HighSpending(?customer).      // Rule 1
+
+VIPCustomer(?customer) :-
+    PremiumMember(?customer).     // Rule 2
+</code></pre>
+<p>A customer is a VIP if they match Rule 1 <strong>OR</strong> Rule 2 <strong>OR</strong> both.</p>
+<h2 id="conjunctions-within-disjunctions"><a class="header" href="#conjunctions-within-disjunctions">Conjunctions within Disjunctions</a></h2>
+<p>You can combine AND and OR logic by using multiple rules with multiple premises:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Executive: (Director AND HighSalary) OR (VP)
+fn executive_via_director(exec: Match&lt;Executive&gt;) -&gt; impl When {
+    (
+        Match::&lt;Director&gt; { /* ... */ },  // AND
+        Match::&lt;HighSalary&gt; { /* ... */ },
+    )
+}
+
+fn executive_via_vp(exec: Match&lt;Executive&gt;) -&gt; impl When {
+    (
+        Match::&lt;VP&gt; { /* ... */ },
+    )
+}
+<span class="boring">}</span></code></pre></pre>
+<p>An <code>Executive</code> is derived if:</p>
+<ul>
+<li>(They are a <code>Director</code> AND have <code>HighSalary</code>) OR</li>
+<li>(They are a <code>VP</code>)</li>
+</ul>
+<h2 id="how-rules-work"><a class="header" href="#how-rules-work">How Rules Work</a></h2>
+<p>Rules are evaluated at <strong>query time</strong>, not write time:</p>
+<ol>
+<li>You query for a concept (e.g., "all Employees")</li>
+<li>Dialog applies installed rules to find matching facts</li>
+<li>For each match, Dialog derives an instance of the concept</li>
+<li>You get back the derived instances</li>
+</ol>
+<p>This is <strong>lazy evaluation</strong> - rules only run when you query for them.</p>
+<h2 id="schema-on-read"><a class="header" href="#schema-on-read">Schema-on-Read</a></h2>
+<p>Rules implement <strong>schema-on-read</strong>:</p>
+<ul>
+<li>Write facts once</li>
+<li>Read them through multiple lenses (rules)</li>
+<li>Different applications see different views</li>
+<li>No data duplication</li>
+<li>No migration needed</li>
+</ul>
+<p>This is the foundation of Dialog's flexibility.</p>
+<h2 id="when-to-use-rules"><a class="header" href="#when-to-use-rules">When to Use Rules</a></h2>
+<p><strong>Use rules when</strong>:</p>
+<ul>
+<li>Deriving one concept from others</li>
+<li>Supporting multiple schemas</li>
+<li>Creating computed views</li>
+<li>Adapting data for different clients</li>
+</ul>
+<p><strong>Use direct queries when</strong>:</p>
+<ul>
+<li>Finding specific facts</li>
+<li>Simple attribute lookups</li>
+<li>Building transactions</li>
+</ul>
+<h2 id="whats-next"><a class="header" href="#whats-next">What's Next?</a></h2>
+<p>You now understand Dialog's core concepts:</p>
+<ul>
+<li><strong>Relations</strong> and <strong>facts</strong> - the building blocks</li>
+<li><strong>Entities</strong> - persistent identities</li>
+<li><strong>Attributes</strong> - defining what can be said</li>
+<li><strong>Concepts</strong> - structured models</li>
+<li><strong>Queries</strong> - finding facts</li>
+<li><strong>Transactions</strong> - modifying the database</li>
+<li><strong>Rules</strong> - deriving knowledge</li>
+</ul>
+<p>For more details, check the <a href="./Glossary.html">Glossary</a> for comprehensive definitions of all terms.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="Transacting.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="Glossary.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="Transacting.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="Glossary.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+        <!-- Livereload script (if served using the cli tool) -->
+        <script>
+            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
+            const socket = new WebSocket(wsAddress);
+            socket.onmessage = function (event) {
+                if (event.data === "reload") {
+                    socket.close();
+                    location.reload();
+                }
+            };
+
+            window.onbeforeunload = function() {
+                socket.close();
+            }
+        </script>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>
