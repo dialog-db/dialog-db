@@ -7,6 +7,17 @@ license.workspace = true
 
 [features]
 helpers = ["tempfile", "anyhow", "rand"]
+http_tests = []
+r2_tests = []
+s3_integration_tests = []
+test-utils = [
+  "dep:s3s",
+  "dep:hyper",
+  "dep:hyper-util",
+  "dep:http-body-util",
+  "dep:bytes",
+  "dep:tokio-test",
+]
 
 [dependencies]
 dialog-common = { workspace = true }
@@ -15,33 +26,66 @@ anyhow = { workspace = true, optional = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
+base64 = { workspace = true }
 blake3 = { workspace = true }
 brotli = { workspace = true }
+chrono = "0.4"
 futures-util = { workspace = true }
+hmac = "0.12"
+md5 = "0.8.0"
+reqwest = { workspace = true, features = ["json"] }
+sha2 = "0.10"
 sieve-cache = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }
 rand = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
+url = "2.5"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync", "fs"] }
+s3s = { version = "0.12.0-rc.3", optional = true }
+hyper = { version = "1.0", optional = true }
+hyper-util = { version = "0.1", features = [
+  "server",
+  "tokio",
+], optional = true }
+http-body-util = { version = "0.1", optional = true }
+bytes = { version = "1.0", optional = true }
+tokio-test = { version = "0.4", optional = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 js-sys = { workspace = true }
 rexie = { workspace = true }
 wasm-bindgen = { workspace = true }
+web-time = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
 blake3 = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0"
 rand = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+bytes = "1.0"
+chrono = "0.4"
+tokio-test = "0.4"
+mockito = "1.2"
+s3s = "0.12.0-rc.3"
+hyper = "1.0"
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+http-body-util = "0.1"
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["sync", "macros", "rt", "fs"] }
+tokio = { workspace = true, features = [
+  "sync",
+  "macros",
+  "rt",
+  "fs",
+  "rt-multi-thread",
+] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 # getrandom = { workspace = true, features = ["wasm_js"] }

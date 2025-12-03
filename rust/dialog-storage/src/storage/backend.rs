@@ -14,6 +14,14 @@ mod indexeddb;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub use indexeddb::*;
 
+mod rest;
+pub use rest::*;
+
+// Export s3 test module for integration testing
+#[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
+pub use rest::s3;
+
+
 #[cfg(not(target_arch = "wasm32"))]
 mod fs;
 #[cfg(not(target_arch = "wasm32"))]
