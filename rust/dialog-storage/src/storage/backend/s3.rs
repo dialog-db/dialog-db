@@ -486,8 +486,8 @@ where
     hasher: Hasher,
     /// HTTP client
     client: reqwest::Client,
-    _key: PhantomData<Key>,
-    _value: PhantomData<Value>,
+    key_type: PhantomData<Key>,
+    value_type: PhantomData<Value>,
 }
 
 impl<Key, Value> S3<Key, Value>
@@ -510,8 +510,8 @@ where
             session,
             hasher: Hasher::Sha256,
             client: reqwest::Client::new(),
-            _key: PhantomData,
-            _value: PhantomData,
+            key_type: PhantomData,
+            value_type: PhantomData,
         }
     }
 
