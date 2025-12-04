@@ -703,12 +703,9 @@ mod unit_tests {
 
     #[test]
     fn test_s3_with_hasher() {
-        let backend = S3::<Vec<u8>, Vec<u8>>::open(
-            "https://s3.amazonaws.com",
-            "bucket",
-            Session::Public,
-        )
-        .with_hasher(Hasher::Sha256);
+        let backend =
+            S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public)
+                .with_hasher(Hasher::Sha256);
 
         // Hasher should be set (we can't directly inspect it, but the backend should work)
         assert!(backend.url(b"key").is_ok());
@@ -751,7 +748,10 @@ mod unit_tests {
         assert_eq!(Acl::PublicReadWrite.as_str(), "public-read-write");
         assert_eq!(Acl::AuthenticatedRead.as_str(), "authenticated-read");
         assert_eq!(Acl::BucketOwnerRead.as_str(), "bucket-owner-read");
-        assert_eq!(Acl::BucketOwnerFullControl.as_str(), "bucket-owner-full-control");
+        assert_eq!(
+            Acl::BucketOwnerFullControl.as_str(),
+            "bucket-owner-full-control"
+        );
     }
 }
 
@@ -1429,5 +1429,243 @@ pub mod test_server {
             shutdown_tx,
             storage,
         })
+    }
+}
+
+// ============================================================================
+// Integration Tests (requires s3_integration_tests feature and env vars)
+// ============================================================================
+
+/// Integration tests that run against a real S3/R2/MinIO endpoint.
+///
+/// ## Environment Variables
+///
+/// These tests require the following environment variables:
+/// - R2S3_HOST: The S3-compatible endpoint (e.g., "https://s3.amazonaws.com" or "https://xxx.r2.cloudflarestorage.com")
+/// - R2S3_REGION: AWS region (e.g., "us-east-1" or "auto" for R2)
+/// - R2S3_BUCKET: Bucket name
+/// - R2S3_ACCESS_KEY_ID: Access key ID
+/// - R2S3_SECRET_ACCESS_KEY: Secret access key
+///
+/// Run these tests with:
+/// ```bash
+/// R2S3_HOST=... R2S3_REGION=... R2S3_BUCKET=... R2S3_ACCESS_KEY_ID=... R2S3_SECRET_ACCESS_KEY=... \
+///   cargo test --features s3_integration_tests -- --ignored
+/// ```
+///
+/// Or use with MinIO locally:
+/// ```bash
+/// # Start MinIO
+/// docker run -p 9000:9000 -p 9001:9001 \
+///   -e "MINIO_ROOT_USER=minioadmin" \
+///   -e "MINIO_ROOT_PASSWORD=minioadmin" \
+///   minio/minio server /data --console-address ":9001"
+///
+/// # Create a bucket (using mc client or MinIO console)
+/// # Then run tests:
+/// R2S3_HOST=http://localhost:9000 \
+///   R2S3_REGION=us-east-1 \
+///   R2S3_BUCKET=test-bucket \
+///   R2S3_ACCESS_KEY_ID=minioadmin \
+///   R2S3_SECRET_ACCESS_KEY=minioadmin \
+///   cargo test --features s3_integration_tests
+/// ```
+#[cfg(all(test, feature = "s3_integration_tests"))]
+mod s3_integration_tests {
+    use super::*;
+    use anyhow::Result;
+
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::*;
+
+    /// Helper to create an S3 backend from environment variables.
+    fn create_s3_backend_from_env() -> Result<S3<Vec<u8>, Vec<u8>>> {
+        let credentials = Credentials {
+            access_key_id: env!("R2S3_ACCESS_KEY_ID").into(),
+            secret_access_key: env!("R2S3_SECRET_ACCESS_KEY").into(),
+            session_token: option_env!("R2S3_SESSION_TOKEN").map(|v| v.into()),
+        };
+
+        let region = env!("R2S3_REGION");
+        let service = Service::s3(region);
+        let session = Session::new(&credentials, &service, 3600);
+
+        let endpoint = env!("R2S3_HOST");
+        let bucket = env!("R2S3_BUCKET");
+
+        Ok(S3::open(endpoint, bucket, session).with_prefix("test-prefix"))
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_set_and_get() -> Result<()> {
+        let mut backend = create_s3_backend_from_env()?;
+
+        // Test data
+        let key = b"test-key-1".to_vec();
+        let value = b"test-value-1".to_vec();
+
+        // Set the value
+        backend.set(key.clone(), value.clone()).await?;
+
+        // Get the value back
+        let retrieved = backend.get(&key).await?;
+        assert_eq!(retrieved, Some(value));
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_get_missing_key() -> Result<()> {
+        let backend = create_s3_backend_from_env()?;
+
+        // Try to get a key that doesn't exist
+        let key = b"nonexistent-key-12345".to_vec();
+        let retrieved = backend.get(&key).await?;
+
+        assert_eq!(retrieved, None);
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_overwrite_value() -> Result<()> {
+        let mut backend = create_s3_backend_from_env()?;
+
+        let key = b"test-key-overwrite".to_vec();
+        let value1 = b"original-value".to_vec();
+        let value2 = b"updated-value".to_vec();
+
+        // Set initial value
+        backend.set(key.clone(), value1.clone()).await?;
+
+        // Verify it was set
+        let retrieved = backend.get(&key).await?;
+        assert_eq!(retrieved, Some(value1));
+
+        // Overwrite with new value
+        backend.set(key.clone(), value2.clone()).await?;
+
+        // Verify it was updated
+        let retrieved = backend.get(&key).await?;
+        assert_eq!(retrieved, Some(value2));
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_large_value() -> Result<()> {
+        let mut backend = create_s3_backend_from_env()?;
+
+        let key = b"test-key-large".to_vec();
+        // Create a 1MB value
+        let value: Vec<u8> = (0..1_000_000).map(|i| (i % 256) as u8).collect();
+
+        // Set the large value
+        backend.set(key.clone(), value.clone()).await?;
+
+        // Get it back and verify
+        let retrieved = backend.get(&key).await?;
+        assert_eq!(retrieved, Some(value));
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_multiple_keys() -> Result<()> {
+        let mut backend = create_s3_backend_from_env()?;
+
+        // Set multiple key-value pairs
+        let pairs = vec![
+            (b"key1".to_vec(), b"value1".to_vec()),
+            (b"key2".to_vec(), b"value2".to_vec()),
+            (b"key3".to_vec(), b"value3".to_vec()),
+        ];
+
+        for (key, value) in &pairs {
+            backend.set(key.clone(), value.clone()).await?;
+        }
+
+        // Verify all keys can be retrieved
+        for (key, expected_value) in &pairs {
+            let retrieved = backend.get(key).await?;
+            assert_eq!(retrieved.as_ref(), Some(expected_value));
+        }
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_binary_data() -> Result<()> {
+        let mut backend = create_s3_backend_from_env()?;
+
+        let key = b"test-key-binary".to_vec();
+        // Create binary data with all possible byte values
+        let value: Vec<u8> = (0..=255).collect();
+
+        // Set the binary value
+        backend.set(key.clone(), value.clone()).await?;
+
+        // Get it back and verify
+        let retrieved = backend.get(&key).await?;
+        assert_eq!(retrieved, Some(value));
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_checksum_verification() -> Result<()> {
+        let mut backend = create_s3_backend_from_env()?;
+
+        let key = b"test-key-checksum".to_vec();
+        let value = b"data-to-checksum".to_vec();
+
+        // The backend should automatically calculate and include checksums for S3
+        backend.set(key.clone(), value.clone()).await?;
+
+        // Retrieve and verify the data is intact
+        let retrieved = backend.get(&key).await?;
+        assert_eq!(retrieved, Some(value));
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_bulk_operations() -> Result<()> {
+        let mut backend = create_s3_backend_from_env()?;
+
+        // Create a stream of test data
+        use async_stream::try_stream;
+
+        let test_data = vec![
+            (b"bulk1".to_vec(), b"value1".to_vec()),
+            (b"bulk2".to_vec(), b"value2".to_vec()),
+            (b"bulk3".to_vec(), b"value3".to_vec()),
+        ];
+
+        let data_clone = test_data.clone();
+        let source_stream = try_stream! {
+            for (key, value) in data_clone {
+                yield (key, value);
+            }
+        };
+
+        // Write all data
+        backend.write(source_stream).await?;
+
+        // Verify all items were written
+        for (key, expected_value) in test_data {
+            let retrieved = backend.get(&key).await?;
+            assert_eq!(retrieved, Some(expected_value));
+        }
+
+        Ok(())
     }
 }
