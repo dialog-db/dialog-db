@@ -76,10 +76,11 @@
 //!
 //! # Key Encoding
 //!
-//! Keys are automatically encoded to be S3-safe:
-//! - Safe characters (`a-z`, `A-Z`, `0-9`, `-`, `_`, `.`) are kept as-is
-//! - Unsafe characters or binary data are base58-encoded with a `!` prefix
-//! - Path separators (`/`) in keys create S3 key hierarchies
+//! Keys are automatically encoded to be S3-safe. Keys are treated as `/`-delimited
+//! paths, and each segment is encoded independently:
+//! - Segments containing only safe characters (`a-z`, `A-Z`, `0-9`, `-`, `_`, `.`) are kept as-is
+//! - Segments containing unsafe characters or binary data are base58-encoded with a `!` prefix
+//! - Path separators (`/`) preserve the S3 key hierarchy
 
 use std::marker::PhantomData;
 
