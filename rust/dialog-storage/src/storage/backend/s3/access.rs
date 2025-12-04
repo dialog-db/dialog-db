@@ -114,7 +114,7 @@ impl SessionKey {
     }
 
     fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
-        let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key size");
+        let mut mac = Hmac::<Sha256>::new(key.into());
         mac.update(data);
         mac.finalize().into_bytes().to_vec()
     }
