@@ -246,29 +246,38 @@ impl Authority {
             .collect::<Vec<_>>()
             .join(";");
 
-        // Build query parameters
-        let mut query_params = vec![
-            ("X-Amz-Algorithm", "AWS4-HMAC-SHA256".to_string()),
-            ("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD".to_string()),
+        // Build query parameters (using String for both key and value to accommodate
+        // both static signing params and dynamic URL params)
+        let mut query_params: Vec<(String, String)> = vec![
+            ("X-Amz-Algorithm".into(), "AWS4-HMAC-SHA256".into()),
+            ("X-Amz-Content-Sha256".into(), "UNSIGNED-PAYLOAD".into()),
             (
-                "X-Amz-Credential",
+                "X-Amz-Credential".into(),
                 format!("{}/{}", self.access_key_id, self.scope),
             ),
-            ("X-Amz-Date", self.timestamp.clone()),
-            ("X-Amz-Expires", self.duration.to_string()),
+            ("X-Amz-Date".into(), self.timestamp.clone()),
+            ("X-Amz-Expires".into(), self.duration.to_string()),
         ];
 
         if let Some(token) = &self.session_token {
-            query_params.push(("X-Amz-Security-Token", token.clone()));
+            query_params.push(("X-Amz-Security-Token".into(), token.clone()));
         }
 
         // Include ACL if specified by the request
         if let Some(acl) = request.acl() {
-            query_params.push(("x-amz-acl", acl.as_str().to_string()));
+            query_params.push(("x-amz-acl".into(), acl.as_str().to_string()));
         }
 
-        query_params.push(("X-Amz-SignedHeaders", signed_headers_str.clone()));
-        query_params.sort_by(|a, b| a.0.cmp(b.0));
+        query_params.push(("X-Amz-SignedHeaders".into(), signed_headers_str.clone()));
+
+        // Include existing query parameters from the request URL
+        // (e.g., list-type=2, prefix=... for ListObjectsV2)
+        for (key, value) in request.url().query_pairs() {
+            query_params.push((key.into_owned(), value.into_owned()));
+        }
+
+        // Sort all query parameters alphabetically (required by SigV4)
+        query_params.sort_by(|a, b| a.0.cmp(&b.0));
 
         // Build canonical request
         let canonical_uri = percent_encode_path(request.url().path());
@@ -306,8 +315,9 @@ impl Authority {
         // Compute signature
         let signature = self.key.sign(payload.as_bytes());
 
-        // Build final URL with signature
+        // Build final URL with all query parameters (original + signing + signature)
         let mut url = request.url().clone();
+        url.set_query(None); // Clear existing query params (we'll add them all back)
         {
             let mut query = url.query_pairs_mut();
             for (k, v) in &query_params {

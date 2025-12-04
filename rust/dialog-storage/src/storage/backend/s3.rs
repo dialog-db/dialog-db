@@ -1627,6 +1627,85 @@ mod local_s3_tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_local_s3_list_with_signed_session() -> anyhow::Result<()> {
+        let service = test_server::start_with_auth("test-access-key", "test-secret-key").await?;
+
+        // Create credentials matching the test server
+        let credentials = super::Credentials {
+            access_key_id: "test-access-key".into(),
+            secret_access_key: "test-secret-key".into(),
+            session_token: None,
+        };
+
+        let session = Session::new(&credentials, &super::Service::s3("us-east-1"), 3600);
+
+        let mut backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session)
+                .with_prefix("signed-list-test");
+
+        // Set multiple values
+        backend.set(b"key1".to_vec(), b"value1".to_vec()).await?;
+        backend.set(b"key2".to_vec(), b"value2".to_vec()).await?;
+
+        // List objects with signed request
+        let result = backend.list(None).await?;
+
+        assert_eq!(result.keys.len(), 2);
+        assert!(!result.is_truncated);
+
+        // All keys should have the prefix
+        for key in &result.keys {
+            assert!(
+                key.starts_with("signed-list-test/"),
+                "Key {} should start with prefix",
+                key
+            );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_read_stream_with_signed_session() -> anyhow::Result<()> {
+        use futures_util::TryStreamExt;
+
+        let service = test_server::start_with_auth("test-access-key", "test-secret-key").await?;
+
+        let credentials = super::Credentials {
+            access_key_id: "test-access-key".into(),
+            secret_access_key: "test-secret-key".into(),
+            session_token: None,
+        };
+
+        let session = Session::new(&credentials, &super::Service::s3("us-east-1"), 3600);
+
+        let mut backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session)
+                .with_prefix("signed-stream-test");
+
+        // Set multiple values
+        backend.set(b"a".to_vec(), b"value-a".to_vec()).await?;
+        backend.set(b"b".to_vec(), b"value-b".to_vec()).await?;
+
+        // Read all items via StorageSource (uses list internally)
+        let mut items: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut stream = Box::pin(backend.read());
+
+        while let Some((key, value)) = stream.try_next().await? {
+            items.push((key, value));
+        }
+
+        assert_eq!(items.len(), 2);
+
+        // Verify the items (order may vary)
+        let keys: Vec<&[u8]> = items.iter().map(|(k, _)| k.as_slice()).collect();
+        assert!(keys.contains(&b"a".as_slice()));
+        assert!(keys.contains(&b"b".as_slice()));
+
+        Ok(())
+    }
 }
 
 #[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
