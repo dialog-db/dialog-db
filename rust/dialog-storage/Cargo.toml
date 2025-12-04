@@ -73,7 +73,6 @@ rand = { workspace = true }
 bytes = "1.0"
 chrono = "0.4"
 tokio-test = "0.4"
-mockito = "1.2"
 s3s = "0.12.0-rc.3"
 hyper = "1.0"
 hyper-util = { version = "0.1", features = ["server", "tokio"] }

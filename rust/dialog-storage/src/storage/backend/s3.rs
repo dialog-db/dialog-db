@@ -102,6 +102,78 @@ impl Invocation for Get {
 }
 impl Request for Get {}
 
+/// A DELETE request to remove an object.
+#[derive(Debug, Clone)]
+pub struct Delete {
+    url: Url,
+}
+
+impl Delete {
+    /// Create a new DELETE request for the given URL.
+    pub fn new(url: Url) -> Self {
+        Self { url }
+    }
+}
+
+impl Invocation for Delete {
+    fn method(&self) -> &'static str {
+        "DELETE"
+    }
+
+    fn url(&self) -> &Url {
+        &self.url
+    }
+}
+impl Request for Delete {}
+
+/// A GET request to list objects in a bucket.
+///
+/// Uses the S3 ListObjectsV2 API to retrieve object keys.
+#[derive(Debug, Clone)]
+pub struct List {
+    url: Url,
+}
+
+impl List {
+    /// Create a new list request for the given bucket URL with optional prefix.
+    ///
+    /// The URL should be the bucket root (e.g., `https://s3.amazonaws.com/bucket`)
+    /// with query parameters for `list-type=2` and optionally `prefix`.
+    pub fn new(mut url: Url, prefix: Option<&str>, continuation_token: Option<&str>) -> Self {
+        url.query_pairs_mut().append_pair("list-type", "2");
+        if let Some(prefix) = prefix {
+            url.query_pairs_mut().append_pair("prefix", prefix);
+        }
+        if let Some(token) = continuation_token {
+            url.query_pairs_mut()
+                .append_pair("continuation-token", token);
+        }
+        Self { url }
+    }
+}
+
+impl Invocation for List {
+    fn method(&self) -> &'static str {
+        "GET"
+    }
+
+    fn url(&self) -> &Url {
+        &self.url
+    }
+}
+impl Request for List {}
+
+/// Response from S3 ListObjectsV2 API (simplified).
+#[derive(Debug)]
+pub struct ListResult {
+    /// Object keys returned in this response.
+    pub keys: Vec<String>,
+    /// If true, there are more results to fetch.
+    pub is_truncated: bool,
+    /// Token to use for fetching the next page of results.
+    pub next_continuation_token: Option<String>,
+}
+
 /// S3-safe key encoding that preserves path structure.
 ///
 /// Keys are treated as `/`-delimited paths. Each path component is checked:
@@ -367,6 +439,118 @@ where
         Url::parse(&url_str)
             .map_err(|e| S3StorageError::OperationFailed(format!("Failed to parse URL: {}", e)))
     }
+
+    /// Build the bucket URL (for listing operations).
+    fn bucket_url(&self) -> Result<Url, S3StorageError> {
+        let base_url = self.endpoint.trim_end_matches('/');
+        let url_str = format!("{base_url}/{}", self.bucket);
+
+        Url::parse(&url_str)
+            .map_err(|e| S3StorageError::OperationFailed(format!("Failed to parse URL: {}", e)))
+    }
+
+    /// Delete an object from S3.
+    ///
+    /// Note: S3 DELETE always returns 204 No Content, even if the object didn't exist.
+    /// This method always returns `Ok(())` on success.
+    pub async fn delete(&mut self, key: &Key) -> Result<(), S3StorageError> {
+        let url = self.url(key.as_ref())?;
+        let response = Delete::new(url).perform(self).await?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(S3StorageError::OperationFailed(format!(
+                "Failed to delete object: {}",
+                response.status()
+            )))
+        }
+    }
+
+    /// List objects in the bucket with the configured prefix.
+    ///
+    /// Returns an iterator over object keys (encoded S3 keys, not decoded).
+    /// Use `continuation_token` for pagination when `is_truncated` is true.
+    pub async fn list(
+        &self,
+        continuation_token: Option<&str>,
+    ) -> Result<ListResult, S3StorageError> {
+        let bucket_url = self.bucket_url()?;
+        let list_request = List::new(bucket_url, self.prefix.as_deref(), continuation_token);
+        let response = list_request.perform(self).await?;
+
+        if !response.status().is_success() {
+            return Err(S3StorageError::OperationFailed(format!(
+                "Failed to list objects: {}",
+                response.status()
+            )));
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| S3StorageError::RequestFailed(e.to_string()))?;
+
+        // Parse the XML response
+        Self::parse_list_response(&body)
+    }
+
+    /// Parse the S3 ListObjectsV2 XML response.
+    fn parse_list_response(xml: &str) -> Result<ListResult, S3StorageError> {
+        // Simple XML parsing for ListObjectsV2 response
+        // Format:
+        // <ListBucketResult>
+        //   <IsTruncated>false</IsTruncated>
+        //   <Contents><Key>...</Key></Contents>
+        //   <NextContinuationToken>...</NextContinuationToken>
+        // </ListBucketResult>
+
+        let mut keys = Vec::new();
+        let mut is_truncated = false;
+        let mut next_continuation_token = None;
+
+        // Parse IsTruncated
+        if let Some(start) = xml.find("<IsTruncated>") {
+            if let Some(end) = xml[start..].find("</IsTruncated>") {
+                let value = &xml[start + 13..start + end];
+                is_truncated = value == "true";
+            }
+        }
+
+        // Parse NextContinuationToken
+        if let Some(start) = xml.find("<NextContinuationToken>") {
+            if let Some(end) = xml[start..].find("</NextContinuationToken>") {
+                let token = xml[start + 23..start + end].to_string();
+                if !token.is_empty() {
+                    next_continuation_token = Some(token);
+                }
+            }
+        }
+
+        // Parse all <Key> elements within <Contents>
+        let mut search_start = 0;
+        while let Some(contents_start) = xml[search_start..].find("<Contents>") {
+            let abs_start = search_start + contents_start;
+            if let Some(contents_end) = xml[abs_start..].find("</Contents>") {
+                let contents = &xml[abs_start..abs_start + contents_end];
+                if let Some(key_start) = contents.find("<Key>") {
+                    if let Some(key_end) = contents[key_start..].find("</Key>") {
+                        let key = contents[key_start + 5..key_start + key_end].to_string();
+                        keys.push(key);
+                    }
+                }
+                search_start = abs_start + contents_end;
+            } else {
+                break;
+            }
+        }
+
+        Ok(ListResult {
+            keys,
+            is_truncated,
+            next_continuation_token,
+        })
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -445,26 +629,42 @@ where
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
 {
     fn read(&self) -> impl Stream<Item = Result<(Self::Key, Self::Value), Self::Error>> {
-        let client = self.client.clone();
-        let endpoint = self.endpoint.clone();
+        let storage = self.clone();
+        let prefix = self.prefix.clone();
 
         try_stream! {
-            // Get list of keys from _list endpoint
-            let list_url = format!("{}/_list", endpoint);
-            let list_response = client.get(&list_url).send().await?;
+            let mut continuation_token: Option<String> = None;
 
-            if list_response.status().is_success() {
-                let keys: Vec<String> = list_response.json().await
-                    .map_err(|e| S3StorageError::SerializationFailed(e.to_string()))?;
+            loop {
+                // Use the S3 ListObjectsV2 API with proper authorization
+                let result = storage.list(continuation_token.as_deref()).await?;
 
-                for encoded_key in keys {
+                for encoded_key in result.keys {
+                    // Strip the prefix from the key if present
+                    let key_without_prefix = match &prefix {
+                        Some(p) => {
+                            let prefix_with_slash = format!("{}/", p);
+                            encoded_key.strip_prefix(&prefix_with_slash)
+                                .unwrap_or(&encoded_key)
+                                .to_string()
+                        }
+                        None => encoded_key,
+                    };
+
                     // Decode the key
-                    let key_bytes = decode_s3_key(&encoded_key)?;
+                    let key_bytes = decode_s3_key(&key_without_prefix)?;
 
                     // Fetch the value
-                    if let Some(value) = self.get(&Key::from(key_bytes.clone())).await? {
+                    if let Some(value) = storage.get(&Key::from(key_bytes.clone())).await? {
                         yield (Key::from(key_bytes), value);
                     }
+                }
+
+                // Check if there are more results
+                if result.is_truncated {
+                    continuation_token = result.next_continuation_token;
+                } else {
+                    break;
                 }
             }
         }
@@ -753,352 +953,100 @@ mod unit_tests {
             "bucket-owner-full-control"
         );
     }
-}
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests {
-    use super::*;
-    use anyhow::Result;
-    use mockito::Server;
-    use serde::{Deserialize, Serialize};
+    #[test]
+    fn test_delete_request() {
+        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
+        let request = Delete::new(url.clone());
 
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    use wasm_bindgen_test::wasm_bindgen_test;
-
-    /// Test struct for exercising serialization/deserialization
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    struct TestValue {
-        data: String,
+        assert_eq!(request.method(), "DELETE");
+        assert_eq!(request.url(), &url);
+        assert!(request.checksum().is_none());
+        assert!(request.acl().is_none());
     }
 
-    // Helper function to create an unsigned S3 backend with a mock server
-    async fn create_test_backend() -> (S3<Vec<u8>, Vec<u8>>, mockito::ServerGuard) {
-        let server = Server::new_async().await;
+    #[test]
+    fn test_list_request() {
+        let url = Url::parse("https://s3.amazonaws.com/bucket").unwrap();
+        let request = List::new(url.clone(), Some("prefix/"), None);
 
-        let backend = S3::open(server.url(), "bucket", Session::Public);
-
-        (backend, server)
+        assert_eq!(request.method(), "GET");
+        assert!(request.url().as_str().contains("list-type=2"));
+        assert!(request.url().as_str().contains("prefix=prefix%2F"));
     }
 
-    // Helper function to create a signed S3 backend with a mock server
-    async fn create_s3_test_backend() -> (S3<Vec<u8>, Vec<u8>>, mockito::ServerGuard) {
-        let server = Server::new_async().await;
-        let endpoint = server.url();
+    #[test]
+    fn test_list_request_with_continuation_token() {
+        let url = Url::parse("https://s3.amazonaws.com/bucket").unwrap();
+        let request = List::new(url.clone(), None, Some("token123"));
 
-        // Use fixed credentials for testing
-        let credentials = Credentials {
-            access_key_id: "test-access-key".to_string(),
-            secret_access_key: "test-secret-key".to_string(),
-            session_token: None,
-        };
-
-        let service = Service::s3("us-east-1");
-        let session = Session::new(&credentials, &service, 86400);
-
-        let backend = S3::open(endpoint, "test-bucket", session);
-
-        (backend, server)
+        assert!(
+            request
+                .url()
+                .as_str()
+                .contains("continuation-token=token123")
+        );
     }
 
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_writes_and_reads_a_value() -> Result<()> {
-        let (mut backend, mut server) = create_test_backend().await;
+    #[test]
+    fn test_parse_list_response_empty() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <ListBucketResult>
+                <IsTruncated>false</IsTruncated>
+            </ListBucketResult>"#;
 
-        // Key encodes to: !Ldp
-        let key = vec![1, 2, 3];
-        let value = vec![4, 5, 6];
-
-        // Mock PUT request for set operation (with bucket in path)
-        let put_mock = server
-            .mock("PUT", "/bucket/!Ldp")
-            .with_status(200)
-            .with_body("")
-            .create();
-
-        // Mock GET request for successful retrieval
-        let get_mock = server
-            .mock("GET", "/bucket/!Ldp")
-            .with_status(200)
-            .with_body(&[4, 5, 6])
-            .create();
-
-        // Test set operation
-        backend.set(key.clone(), value.clone()).await?;
-        put_mock.assert();
-
-        // Test get operation
-        let retrieved = backend.get(&key).await?;
-        get_mock.assert();
-
-        assert_eq!(retrieved, Some(value));
-
-        Ok(())
+        let result = S3::<Vec<u8>, Vec<u8>>::parse_list_response(xml).unwrap();
+        assert!(result.keys.is_empty());
+        assert!(!result.is_truncated);
+        assert!(result.next_continuation_token.is_none());
     }
 
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_returns_none_for_missing_values() -> Result<()> {
-        let (backend, mut server) = create_test_backend().await;
+    #[test]
+    fn test_parse_list_response_with_keys() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <ListBucketResult>
+                <IsTruncated>false</IsTruncated>
+                <Contents>
+                    <Key>prefix/key1</Key>
+                    <Size>100</Size>
+                </Contents>
+                <Contents>
+                    <Key>prefix/key2</Key>
+                    <Size>200</Size>
+                </Contents>
+            </ListBucketResult>"#;
 
-        let key = vec![10, 11, 12]; // Encodes to: !<base58> (binary data with ! prefix)
-
-        // Mock GET request for missing value (404 response)
-        // Match any path starting with /bucket/! (encoded binary keys)
-        let mock = server
-            .mock("GET", mockito::Matcher::Regex(r"^/bucket/!.*".to_string()))
-            .with_status(404)
-            .with_body("")
-            .create();
-
-        let retrieved = backend.get(&key).await?;
-        mock.assert();
-
-        assert_eq!(retrieved, None);
-
-        Ok(())
+        let result = S3::<Vec<u8>, Vec<u8>>::parse_list_response(xml).unwrap();
+        assert_eq!(result.keys.len(), 2);
+        assert_eq!(result.keys[0], "prefix/key1");
+        assert_eq!(result.keys[1], "prefix/key2");
+        assert!(!result.is_truncated);
     }
 
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_handles_error_responses() -> Result<()> {
-        let (backend, mut server) = create_test_backend().await;
+    #[test]
+    fn test_parse_list_response_truncated() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <ListBucketResult>
+                <IsTruncated>true</IsTruncated>
+                <NextContinuationToken>abc123</NextContinuationToken>
+                <Contents>
+                    <Key>key1</Key>
+                </Contents>
+            </ListBucketResult>"#;
 
-        let key = vec![20, 21, 22]; // Encodes to: !7kEh (base58-encoded with ! prefix)
-
-        // Mock GET request for server error
-        // Use regex matcher for URL-encoded paths
-        let mock = server
-            .mock(
-                "GET",
-                mockito::Matcher::Regex(r"^/bucket/!7kEh.*".to_string()),
-            )
-            .with_status(500)
-            .with_body("Internal Server Error")
-            .create();
-
-        let result = backend.get(&key).await;
-        mock.assert();
-
-        assert!(result.is_err());
-
-        Ok(())
+        let result = S3::<Vec<u8>, Vec<u8>>::parse_list_response(xml).unwrap();
+        assert_eq!(result.keys.len(), 1);
+        assert!(result.is_truncated);
+        assert_eq!(result.next_continuation_token, Some("abc123".to_string()));
     }
 
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_uses_prefix() -> Result<()> {
-        let mut server = Server::new_async().await;
-        let mut backend =
-            S3::open(server.url(), "bucket", Session::Public).with_prefix("test-prefix");
+    #[test]
+    fn test_bucket_url() {
+        let backend =
+            S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public);
 
-        // Mock PUT request with prefix in path
-        let mock = server
-            .mock("PUT", "/bucket/test-prefix/!Ldp")
-            .with_status(200)
-            .create();
-
-        backend.set(vec![1, 2, 3], vec![4, 5, 6]).await?;
-        mock.assert();
-
-        Ok(())
-    }
-
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_can_perform_list_operations() -> Result<()> {
-        let (backend, mut server) = create_test_backend().await;
-
-        // Mock the list endpoint
-        let list_mock = server
-            .mock("GET", "/_list")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"["!Ldp", "!6xdze"]"#)
-            .create();
-
-        // Mock the GET for first key
-        let get_mock1 = server
-            .mock("GET", "/bucket/!Ldp")
-            .with_status(200)
-            .with_body(&[4, 5, 6])
-            .create();
-
-        // Mock the GET for second key
-        let get_mock2 = server
-            .mock("GET", "/bucket/!6xdze")
-            .with_status(200)
-            .with_body(&[8, 9, 10])
-            .create();
-
-        use futures_util::TryStreamExt;
-
-        let mut items = Vec::new();
-        let mut stream = Box::pin(backend.read());
-
-        while let Some((key, value)) = stream.try_next().await? {
-            items.push((key, value));
-        }
-
-        list_mock.assert();
-        get_mock1.assert();
-        get_mock2.assert();
-
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0], (vec![1, 2, 3], vec![4, 5, 6]));
-        assert_eq!(items[1], (vec![4, 5, 6, 7], vec![8, 9, 10]));
-
-        Ok(())
-    }
-
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    #[ignore] // S3 signing doesn't work with mockito's IP-based URLs
-    async fn it_can_perform_s3_list_operations() -> Result<()> {
-        let (backend, mut server) = create_s3_test_backend().await;
-
-        // Mock the list endpoint, which will have a signed URL
-        let list_mock = server
-            .mock("GET", mockito::Matcher::Any)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"["!Ldp", "!6xdze"]"#)
-            .create();
-
-        // Mock the GET for first key
-        let get_mock1 = server
-            .mock("GET", mockito::Matcher::Any)
-            .with_status(200)
-            .with_body(&[4, 5, 6])
-            .create();
-
-        // Mock the GET for second key
-        let get_mock2 = server
-            .mock("GET", mockito::Matcher::Any)
-            .with_status(200)
-            .with_body(&[8, 9, 10])
-            .create();
-
-        use futures_util::TryStreamExt;
-
-        let mut items = Vec::new();
-        let mut stream = Box::pin(backend.read());
-
-        while let Some((key, value)) = stream.try_next().await? {
-            items.push((key, value));
-        }
-
-        list_mock.assert();
-        get_mock1.assert();
-        get_mock2.assert();
-
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0], (vec![1, 2, 3], vec![4, 5, 6]));
-        assert_eq!(items[1], (vec![4, 5, 6, 7], vec![8, 9, 10]));
-
-        Ok(())
-    }
-
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_can_perform_bulk_writes() -> Result<()> {
-        let (mut backend, mut server) = create_test_backend().await;
-
-        // Create mocks for two PUT operations (with bucket in path)
-        let put_mock1 = server.mock("PUT", "/bucket/!Ldp").with_status(200).create();
-
-        let put_mock2 = server
-            .mock("PUT", "/bucket/!6xdze")
-            .with_status(200)
-            .create();
-
-        // Create a source stream with two items
-        use async_stream::try_stream;
-
-        let source_stream = try_stream! {
-            yield (vec![1, 2, 3], vec![4, 5, 6]);
-            yield (vec![4, 5, 6, 7], vec![8, 9, 10]);
-        };
-
-        // Perform the bulk write
-        backend.write(source_stream).await?;
-
-        put_mock1.assert();
-        put_mock2.assert();
-
-        Ok(())
-    }
-
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    #[ignore] // S3 signing doesn't work with mockito's IP-based URLs
-    async fn it_can_perform_s3_bulk_writes() -> Result<()> {
-        let (mut backend, mut server) = create_s3_test_backend().await;
-
-        // Create mocks for two PUT operations with signed URLs
-        let put_mock1 = server
-            .mock("PUT", mockito::Matcher::Any)
-            .match_header("x-amz-checksum-sha256", mockito::Matcher::Any)
-            .with_status(200)
-            .create();
-
-        let put_mock2 = server
-            .mock("PUT", mockito::Matcher::Any)
-            .match_header("x-amz-checksum-sha256", mockito::Matcher::Any)
-            .with_status(200)
-            .create();
-
-        // Create a source stream with two items
-        use async_stream::try_stream;
-
-        let source_stream = try_stream! {
-            yield (vec![1, 2, 3], vec![4, 5, 6]);
-            yield (vec![4, 5, 6, 7], vec![8, 9, 10]);
-        };
-
-        // Perform the bulk write
-        backend.write(source_stream).await?;
-
-        put_mock1.assert();
-        put_mock2.assert();
-
-        Ok(())
-    }
-
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_integrates_with_memory_backend() -> Result<()> {
-        let (mut rest_backend, mut server) = create_test_backend().await;
-
-        // Create a memory backend with some data
-        let mut memory_backend = crate::MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
-
-        // Add some data to the memory backend
-        memory_backend.set(vec![1, 2, 3], vec![4, 5, 6]).await?;
-        memory_backend.set(vec![4, 5, 6, 7], vec![8, 9, 10]).await?;
-
-        // Create mocks for two PUT operations that will happen during transfer
-        let put_mock1 = server.mock("PUT", "/bucket/!Ldp").with_status(200).create();
-
-        let put_mock2 = server
-            .mock("PUT", "/bucket/!6xdze")
-            .with_status(200)
-            .create();
-
-        // Create a stream with the memory backend data
-        use async_stream::try_stream;
-        let custom_stream = try_stream! {
-            yield (vec![1, 2, 3], vec![4, 5, 6]);
-            yield (vec![4, 5, 6, 7], vec![8, 9, 10]);
-        };
-
-        // Transfer data to REST backend
-        rest_backend.write(custom_stream).await?;
-
-        put_mock1.assert();
-        put_mock2.assert();
-
-        Ok(())
+        let url = backend.bucket_url().unwrap();
+        assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket");
     }
 }
 
@@ -1110,22 +1058,9 @@ mod local_s3_tests {
     use crate::CborEncoder;
     use s3s::dto::*;
     use s3s::{S3 as S3Trait, S3Request, S3Response, S3Result};
-    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
     use tokio::net::TcpListener;
-
-    /// Test struct for exercising serialization/deserialization
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    struct TestValue {
-        data: String,
-    }
-
-    impl TestValue {
-        fn new(data: impl Into<String>) -> Self {
-            Self { data: data.into() }
-        }
-    }
 
     #[tokio::test]
     async fn test_local_s3_set_and_get() -> anyhow::Result<()> {
@@ -1203,6 +1138,359 @@ mod local_s3_tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_local_s3_delete() -> anyhow::Result<()> {
+        let service = test_server::start().await?;
+
+        let mut backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+
+        let key = b"delete-test-key".to_vec();
+        let value = b"delete-test-value".to_vec();
+
+        // Set the value
+        backend.set(key.clone(), value.clone()).await?;
+
+        // Verify it exists
+        assert_eq!(backend.get(&key).await?, Some(value));
+
+        // Delete it
+        backend.delete(&key).await?;
+
+        // Verify it's gone
+        assert_eq!(backend.get(&key).await?, None);
+
+        // Delete non-existent key should still succeed (S3 behavior)
+        backend.delete(&key).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_list() -> anyhow::Result<()> {
+        let service = test_server::start().await?;
+
+        let mut backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
+                .with_prefix("list-test");
+
+        // Set multiple values
+        backend.set(b"key1".to_vec(), b"value1".to_vec()).await?;
+        backend.set(b"key2".to_vec(), b"value2".to_vec()).await?;
+        backend.set(b"key3".to_vec(), b"value3".to_vec()).await?;
+
+        // List objects
+        let result = backend.list(None).await?;
+
+        assert_eq!(result.keys.len(), 3);
+        assert!(!result.is_truncated);
+
+        // All keys should have the prefix
+        for key in &result.keys {
+            assert!(key.starts_with("list-test/"));
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_read_stream() -> anyhow::Result<()> {
+        use futures_util::TryStreamExt;
+
+        let service = test_server::start().await?;
+
+        let mut backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
+                .with_prefix("stream-test");
+
+        // Set multiple values
+        backend.set(b"a".to_vec(), b"value-a".to_vec()).await?;
+        backend.set(b"b".to_vec(), b"value-b".to_vec()).await?;
+
+        // Read all items via StorageSource
+        let mut items: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut stream = Box::pin(backend.read());
+
+        while let Some((key, value)) = stream.try_next().await? {
+            items.push((key, value));
+        }
+
+        assert_eq!(items.len(), 2);
+
+        // Verify the items (order may vary)
+        let keys: Vec<&[u8]> = items.iter().map(|(k, _)| k.as_slice()).collect();
+        assert!(keys.contains(&b"a".as_slice()));
+        assert!(keys.contains(&b"b".as_slice()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_returns_none_for_missing_values() -> anyhow::Result<()> {
+        let service = test_server::start().await?;
+
+        let backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+
+        // Try to get a key that doesn't exist
+        let key = b"nonexistent-key".to_vec();
+        let retrieved = backend.get(&key).await?;
+
+        assert_eq!(retrieved, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_bulk_writes() -> anyhow::Result<()> {
+        let service = test_server::start().await?;
+
+        let mut backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
+                .with_prefix("bulk-test");
+
+        // Create a source stream with multiple items
+        use async_stream::try_stream;
+
+        let source_stream = try_stream! {
+            yield (vec![1, 2, 3], vec![4, 5, 6]);
+            yield (vec![4, 5, 6, 7], vec![8, 9, 10]);
+            yield (vec![7, 8, 9], vec![10, 11, 12]);
+        };
+
+        // Perform the bulk write
+        backend.write(source_stream).await?;
+
+        // Verify all items were written
+        assert_eq!(backend.get(&vec![1, 2, 3]).await?, Some(vec![4, 5, 6]));
+        assert_eq!(backend.get(&vec![4, 5, 6, 7]).await?, Some(vec![8, 9, 10]));
+        assert_eq!(backend.get(&vec![7, 8, 9]).await?, Some(vec![10, 11, 12]));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_integrates_with_memory_backend() -> anyhow::Result<()> {
+        use crate::StorageSource;
+        use futures_util::StreamExt;
+
+        let service = test_server::start().await?;
+
+        let mut s3_backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
+                .with_prefix("memory-integration");
+
+        // Create a memory backend with some data
+        let mut memory_backend = crate::MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+
+        // Add some data to the memory backend
+        memory_backend.set(vec![1, 2, 3], vec![4, 5, 6]).await?;
+        memory_backend.set(vec![4, 5, 6, 7], vec![8, 9, 10]).await?;
+
+        // Transfer data from memory backend to S3 backend using drain()
+        // Map DialogStorageError to S3StorageError for type compatibility
+        let source_stream = memory_backend.drain().map(|result| {
+            result.map_err(|e| S3StorageError::OperationFailed(e.to_string()))
+        });
+        s3_backend.write(source_stream).await?;
+
+        // Verify all items were transferred to S3
+        assert_eq!(s3_backend.get(&vec![1, 2, 3]).await?, Some(vec![4, 5, 6]));
+        assert_eq!(
+            s3_backend.get(&vec![4, 5, 6, 7]).await?,
+            Some(vec![8, 9, 10])
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_uses_prefix() -> anyhow::Result<()> {
+        let service = test_server::start().await?;
+
+        // Create two backends with different prefixes
+        let mut backend1 =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
+                .with_prefix("prefix-a");
+
+        let mut backend2 =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
+                .with_prefix("prefix-b");
+
+        // Set the same key in both backends
+        let key = b"shared-key".to_vec();
+        backend1.set(key.clone(), b"value-a".to_vec()).await?;
+        backend2.set(key.clone(), b"value-b".to_vec()).await?;
+
+        // Each backend should see its own value
+        assert_eq!(backend1.get(&key).await?, Some(b"value-a".to_vec()));
+        assert_eq!(backend2.get(&key).await?, Some(b"value-b".to_vec()));
+
+        // Listing should only return keys from respective prefix
+        let list1 = backend1.list(None).await?;
+        let list2 = backend2.list(None).await?;
+
+        assert!(list1.keys.iter().all(|k| k.starts_with("prefix-a/")));
+        assert!(list2.keys.iter().all(|k| k.starts_with("prefix-b/")));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_overwrite_value() -> anyhow::Result<()> {
+        let service = test_server::start().await?;
+
+        let mut backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+
+        let key = b"overwrite-key".to_vec();
+
+        // Set initial value
+        backend.set(key.clone(), b"initial".to_vec()).await?;
+        assert_eq!(backend.get(&key).await?, Some(b"initial".to_vec()));
+
+        // Overwrite with new value
+        backend.set(key.clone(), b"updated".to_vec()).await?;
+        assert_eq!(backend.get(&key).await?, Some(b"updated".to_vec()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_binary_keys() -> anyhow::Result<()> {
+        let service = test_server::start().await?;
+
+        let mut backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+
+        // Binary key with non-UTF8 bytes
+        let key = vec![0x00, 0xFF, 0x80, 0x7F];
+        let value = b"binary-key-value".to_vec();
+
+        backend.set(key.clone(), value.clone()).await?;
+        let retrieved = backend.get(&key).await?;
+
+        assert_eq!(retrieved, Some(value));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_path_like_keys() -> anyhow::Result<()> {
+        let service = test_server::start().await?;
+
+        let mut backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+
+        // Path-like key with slashes
+        let key = b"path/to/nested/key".to_vec();
+        let value = b"nested-value".to_vec();
+
+        backend.set(key.clone(), value.clone()).await?;
+        let retrieved = backend.get(&key).await?;
+
+        assert_eq!(retrieved, Some(value));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_encoded_key_segments() -> anyhow::Result<()> {
+        let service = test_server::start().await?;
+
+        let mut backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+
+        // Test key with mixed safe and unsafe segments
+        // "safe-segment/user@example.com" - first segment is safe, second has @ which is unsafe
+        let key_mixed = b"safe-segment/user@example.com".to_vec();
+        let value_mixed = b"value-for-mixed-key".to_vec();
+
+        // Verify encoding behavior
+        let encoded = encode_s3_key(&key_mixed);
+        // Should be "safe-segment/!<base58>" where first part is unchanged and second is encoded
+        assert!(
+            encoded.starts_with("safe-segment/!"),
+            "First segment should be safe, second should be encoded with ! prefix: {}",
+            encoded
+        );
+
+        // Write and read back
+        backend.set(key_mixed.clone(), value_mixed.clone()).await?;
+        let retrieved = backend.get(&key_mixed).await?;
+        assert_eq!(retrieved, Some(value_mixed));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_multi_segment_mixed_encoding() -> anyhow::Result<()> {
+        let service = test_server::start().await?;
+
+        let mut backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+
+        // Test key with multiple segments: safe/unsafe/safe/unsafe pattern
+        // "data/file name with spaces/v1/special!chars"
+        let key = b"data/file name with spaces/v1/special!chars".to_vec();
+        let value = b"value-for-complex-path".to_vec();
+
+        // Verify encoding behavior
+        let encoded = encode_s3_key(&key);
+        let segments: Vec<&str> = encoded.split('/').collect();
+        assert_eq!(segments.len(), 4, "Should have 4 segments");
+        assert_eq!(segments[0], "data", "First segment should be safe");
+        assert!(
+            segments[1].starts_with('!'),
+            "Second segment should be encoded (has spaces)"
+        );
+        assert_eq!(segments[2], "v1", "Third segment should be safe");
+        assert!(
+            segments[3].starts_with('!'),
+            "Fourth segment should be encoded (has !)"
+        );
+
+        // Write and read back
+        backend.set(key.clone(), value.clone()).await?;
+        let retrieved = backend.get(&key).await?;
+        assert_eq!(retrieved, Some(value));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_key_encoding_roundtrip() -> anyhow::Result<()> {
+        // Test that encode and decode are inverse operations for valid UTF-8 keys
+        // Note: Keys with invalid UTF-8 bytes (like 0xFF, 0x80) will be lossy
+        // because encode_s3_key uses String::from_utf8_lossy internally.
+        // For pure binary keys, the roundtrip still works via base58 encoding,
+        // but the bytes get normalized through UTF-8 replacement characters.
+        let test_keys: Vec<Vec<u8>> = vec![
+            b"simple-key".to_vec(),
+            b"path/to/key".to_vec(),
+            b"key with spaces".to_vec(),
+            b"key@with!special#chars".to_vec(),
+            b"safe/unsafe@mixed/safe2".to_vec(),
+        ];
+
+        for key in test_keys {
+            let encoded = encode_s3_key(&key);
+            let decoded = decode_s3_key(&encoded)?;
+            assert_eq!(
+                decoded, key,
+                "Roundtrip failed for key: {:?}, encoded as: {}",
+                key, encoded
+            );
+        }
+
+        Ok(())
+    }
+
+    // Note: Signed session testing is done in s3_integration_tests with real S3/R2/MinIO.
+    // The s3s test server doesn't support presigned URL query parameters used by signed sessions.
+    // All core S3 operations (get, set, delete, list) are verified with Session::Public above,
+    // and the signing logic itself is unit tested in access.rs.
 }
 
 #[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
@@ -1388,6 +1676,43 @@ pub mod test_server {
             }
             Err(s3_error!(NoSuchKey))
         }
+
+        async fn list_objects_v2(
+            &self,
+            req: S3Request<ListObjectsV2Input>,
+        ) -> S3Result<S3Response<ListObjectsV2Output>> {
+            let bucket = &req.input.bucket;
+            let prefix = req.input.prefix.as_deref().unwrap_or("");
+
+            let buckets = self.buckets.read().await;
+            let mut contents = Vec::new();
+
+            if let Some(bucket_contents) = buckets.get(bucket) {
+                for (key, obj) in bucket_contents.iter() {
+                    // Filter by prefix
+                    if key.starts_with(prefix) {
+                        contents.push(Object {
+                            key: Some(key.clone()),
+                            size: Some(obj.data.len() as i64),
+                            e_tag: Some(ETag::Strong(obj.e_tag.clone())),
+                            last_modified: Some(obj.last_modified.clone()),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+
+            // Sort by key for consistent ordering
+            contents.sort_by(|a, b| a.key.cmp(&b.key));
+
+            let output = ListObjectsV2Output {
+                contents: Some(contents),
+                is_truncated: Some(false),
+                key_count: None,
+                ..Default::default()
+            };
+            Ok(S3Response::new(output))
+        }
     }
 
     /// Start a local S3-compatible test server.
@@ -1454,24 +1779,6 @@ pub mod test_server {
 ///   R2S3_BUCKET=dialog-test \
 ///   R2S3_ACCESS_KEY_ID=access_key \
 ///   R2S3_SECRET_ACCESS_KEY=secret \
-///   cargo test s3_integration_tests --features s3_integration_tests
-/// ```
-///
-/// Or use with MinIO locally:
-/// ```bash
-/// # Start MinIO
-/// docker run -p 9000:9000 -p 9001:9001 \
-///   -e "MINIO_ROOT_USER=minioadmin" \
-///   -e "MINIO_ROOT_PASSWORD=minioadmin" \
-///   minio/minio server /data --console-address ":9001"
-///
-/// # Create a bucket (using mc client or MinIO console)
-/// # Then run tests:
-/// R2S3_HOST=http://localhost:9000 \
-///   R2S3_REGION=us-east-1 \
-///   R2S3_BUCKET=test-bucket \
-///   R2S3_ACCESS_KEY_ID=minioadmin \
-///   R2S3_SECRET_ACCESS_KEY=minioadmin \
 ///   cargo test s3_integration_tests --features s3_integration_tests
 /// ```
 #[cfg(all(test, feature = "s3_integration_tests"))]
@@ -1616,24 +1923,6 @@ mod s3_integration_tests {
         backend.set(key.clone(), value.clone()).await?;
 
         // Get it back and verify
-        let retrieved = backend.get(&key).await?;
-        assert_eq!(retrieved, Some(value));
-
-        Ok(())
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_checksum_verification() -> Result<()> {
-        let mut backend = create_s3_backend_from_env()?;
-
-        let key = b"test-key-checksum".to_vec();
-        let value = b"data-to-checksum".to_vec();
-
-        // The backend should automatically calculate and include checksums for S3
-        backend.set(key.clone(), value.clone()).await?;
-
-        // Retrieve and verify the data is intact
         let retrieved = backend.get(&key).await?;
         assert_eq!(retrieved, Some(value));
 
@@ -1821,6 +2110,143 @@ mod s3_integration_tests {
         backend.set(key.clone(), value.clone()).await?;
         let retrieved = backend.get(&key).await?;
         assert_eq!(retrieved, Some(value));
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_delete() -> Result<()> {
+        let mut backend = create_s3_backend_from_env()?;
+
+        let key = b"delete-integration-test".to_vec();
+        let value = b"value-to-delete".to_vec();
+
+        // Set the value
+        backend.set(key.clone(), value.clone()).await?;
+
+        // Verify it exists
+        let retrieved = backend.get(&key).await?;
+        assert_eq!(retrieved, Some(value));
+
+        // Delete it
+        backend.delete(&key).await?;
+
+        // Verify it's gone
+        let retrieved = backend.get(&key).await?;
+        assert_eq!(retrieved, None);
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_list() -> Result<()> {
+        let mut backend = create_s3_backend_from_env()?;
+
+        // Use a unique prefix for this test
+        let test_prefix = format!(
+            "list-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
+
+        // Create a backend with the unique prefix
+        let credentials = Credentials {
+            access_key_id: env!("R2S3_ACCESS_KEY_ID").into(),
+            secret_access_key: env!("R2S3_SECRET_ACCESS_KEY").into(),
+            session_token: option_env!("R2S3_SESSION_TOKEN").map(|v| v.into()),
+        };
+        let region = env!("R2S3_REGION");
+        let service = Service::s3(region);
+        let session = Session::new(&credentials, &service, 3600);
+        let endpoint = env!("R2S3_HOST");
+        let bucket = env!("R2S3_BUCKET");
+
+        let mut backend = S3::open(endpoint, bucket, session).with_prefix(&test_prefix);
+
+        // Set a few values
+        backend
+            .set(b"list-key1".to_vec(), b"value1".to_vec())
+            .await?;
+        backend
+            .set(b"list-key2".to_vec(), b"value2".to_vec())
+            .await?;
+
+        // List objects
+        let result = backend.list(None).await?;
+
+        // Should have at least 2 keys (may have more if other tests ran)
+        assert!(
+            result.keys.len() >= 2,
+            "Expected at least 2 keys, got {}",
+            result.keys.len()
+        );
+
+        // All keys should have our prefix
+        for key in &result.keys {
+            assert!(
+                key.starts_with(&test_prefix),
+                "Key {} should start with prefix {}",
+                key,
+                test_prefix
+            );
+        }
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_read_stream() -> Result<()> {
+        use futures_util::TryStreamExt;
+
+        // Use a unique prefix for this test
+        let test_prefix = format!(
+            "stream-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
+
+        let credentials = Credentials {
+            access_key_id: env!("R2S3_ACCESS_KEY_ID").into(),
+            secret_access_key: env!("R2S3_SECRET_ACCESS_KEY").into(),
+            session_token: option_env!("R2S3_SESSION_TOKEN").map(|v| v.into()),
+        };
+        let region = env!("R2S3_REGION");
+        let service = Service::s3(region);
+        let session = Session::new(&credentials, &service, 3600);
+        let endpoint = env!("R2S3_HOST");
+        let bucket = env!("R2S3_BUCKET");
+
+        let mut backend = S3::open(endpoint, bucket, session).with_prefix(&test_prefix);
+
+        // Set a few values
+        backend
+            .set(b"stream-a".to_vec(), b"value-a".to_vec())
+            .await?;
+        backend
+            .set(b"stream-b".to_vec(), b"value-b".to_vec())
+            .await?;
+
+        // Read all items via StorageSource
+        let mut items: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut stream = Box::pin(backend.read());
+
+        while let Some((key, value)) = stream.try_next().await? {
+            items.push((key, value));
+        }
+
+        assert_eq!(items.len(), 2);
+
+        // Verify the items (order may vary)
+        let keys: Vec<&[u8]> = items.iter().map(|(k, _)| k.as_slice()).collect();
+        assert!(keys.contains(&b"stream-a".as_slice()));
+        assert!(keys.contains(&b"stream-b".as_slice()));
 
         Ok(())
     }
