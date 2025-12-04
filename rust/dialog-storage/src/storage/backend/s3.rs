@@ -86,8 +86,9 @@ use std::marker::PhantomData;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
+use base58::{FromBase58, ToBase58};
 use dialog_common::ConditionalSync;
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt};
 use reqwest;
 use thiserror::Error;
 use url::Url;
@@ -273,8 +274,6 @@ pub struct ListResult {
 ///
 /// [Object key naming guidelines]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html
 pub fn encode_s3_key(bytes: &[u8]) -> String {
-    use base58::ToBase58;
-
     let key_str = String::from_utf8_lossy(bytes);
     let components: Vec<&str> = key_str.split('/').collect();
 
@@ -305,8 +304,6 @@ pub fn encode_s3_key(bytes: &[u8]) -> String {
 /// Path components starting with `!` are base58-decoded.
 /// Other components are used as-is.
 pub fn decode_s3_key(encoded: &str) -> Result<Vec<u8>, S3StorageError> {
-    use base58::FromBase58;
-
     let components: Vec<&str> = encoded.split('/').collect();
     let mut decoded_components: Vec<Vec<u8>> = Vec::new();
 
@@ -698,7 +695,6 @@ where
     where
         S: Stream<Item = Result<(Self::Key, Self::Value), Self::Error>> + Send,
     {
-        use futures_util::StreamExt;
         futures_util::pin_mut!(source);
         while let Some(result) = source.next().await {
             let (key, value) = result?;
