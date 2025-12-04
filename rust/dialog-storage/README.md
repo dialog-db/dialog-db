@@ -184,7 +184,7 @@ R2S3_REGION=auto \
 R2S3_BUCKET=my-bucket \
 R2S3_ACCESS_KEY_ID=xxx \
 R2S3_SECRET_ACCESS_KEY=yyy \
-cargo test --lib --features s3_integration_tests
+cargo test --lib --features s3-integration-tests
 ```
 
 ## R2 Configuration

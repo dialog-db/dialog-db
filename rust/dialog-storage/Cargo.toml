@@ -7,9 +7,9 @@ license.workspace = true
 
 [features]
 helpers = ["tempfile", "anyhow", "rand"]
-http_tests = []
-r2_tests = []
-s3_integration_tests = []
+# Enables real S3/R2 integration tests (requires R2S3_* environment variables)
+s3-integration-tests = []
+# Exposes the `test_server` module for running a local in-memory S3 server
 test-utils = [
   "dep:s3s",
   "dep:hyper",

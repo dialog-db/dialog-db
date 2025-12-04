@@ -1641,9 +1641,8 @@ mod local_s3_tests {
 
         let session = Session::new(&credentials, &super::Service::s3("us-east-1"), 3600);
 
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session)
-                .with_prefix("signed-list-test");
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session)
+            .with_prefix("signed-list-test");
 
         // Set multiple values
         backend.set(b"key1".to_vec(), b"value1".to_vec()).await?;
@@ -1681,9 +1680,8 @@ mod local_s3_tests {
 
         let session = Session::new(&credentials, &super::Service::s3("us-east-1"), 3600);
 
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session)
-                .with_prefix("signed-stream-test");
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session)
+            .with_prefix("signed-stream-test");
 
         // Set multiple values
         backend.set(b"a".to_vec(), b"value-a".to_vec()).await?;
@@ -1987,7 +1985,7 @@ pub mod test_server {
 }
 
 // ============================================================================
-// Integration Tests (requires s3_integration_tests feature and env vars)
+// Integration Tests (requires s3-integration-tests feature and env vars)
 // ============================================================================
 
 /// Integration tests that run against a real S3/R2/MinIO endpoint.
@@ -2008,9 +2006,9 @@ pub mod test_server {
 ///   R2S3_BUCKET=dialog-test \
 ///   R2S3_ACCESS_KEY_ID=access_key \
 ///   R2S3_SECRET_ACCESS_KEY=secret \
-///   cargo test s3_integration_tests --features s3_integration_tests
+///   cargo test s3_integration_tests --features s3-integration-tests
 /// ```
-#[cfg(all(test, feature = "s3_integration_tests"))]
+#[cfg(all(test, feature = "s3-integration-tests"))]
 mod s3_integration_tests {
     use super::*;
     use anyhow::Result;
