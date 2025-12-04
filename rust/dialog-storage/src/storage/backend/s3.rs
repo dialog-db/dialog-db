@@ -263,10 +263,15 @@ pub struct ListResult {
 /// The `!` character is used as a prefix marker because it's in AWS S3's
 /// "safe for use" list and unlikely to appear at the start of path components.
 ///
-/// Examples:
+/// See [Object key naming guidelines] for more information about S3 key requirements.
+///
+/// # Examples
+///
 /// - `remote/main` → `remote/main` (all components safe)
 /// - `remote/user@example` → `remote/!<base58>` (@ is unsafe, encode component)
 /// - `foo/bar/baz` → `foo/bar/baz` (all safe)
+///
+/// [Object key naming guidelines]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html
 pub fn encode_s3_key(bytes: &[u8]) -> String {
     use base58::ToBase58;
 
