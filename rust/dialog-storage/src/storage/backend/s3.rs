@@ -1288,9 +1288,9 @@ mod local_s3_tests {
 
         // Transfer data from memory backend to S3 backend using drain()
         // Map DialogStorageError to S3StorageError for type compatibility
-        let source_stream = memory_backend.drain().map(|result| {
-            result.map_err(|e| S3StorageError::OperationFailed(e.to_string()))
-        });
+        let source_stream = memory_backend
+            .drain()
+            .map(|result| result.map_err(|e| S3StorageError::OperationFailed(e.to_string())));
         s3_backend.write(source_stream).await?;
 
         // Verify all items were transferred to S3
@@ -1498,9 +1498,8 @@ mod local_s3_tests {
 
         let session = Session::new(&credentials, &super::Service::s3("us-east-1"), 3600);
 
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session)
-                .with_prefix("signed-test");
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session)
+            .with_prefix("signed-test");
 
         // Test data
         let key = b"signed-key".to_vec();
@@ -1529,8 +1528,7 @@ mod local_s3_tests {
 
         let session = Session::new(&credentials, &super::Service::s3("us-east-1"), 3600);
 
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session);
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session);
 
         // Attempt to set a value - should fail due to signature mismatch
         let result = backend.set(b"key".to_vec(), b"value".to_vec()).await;
@@ -1556,8 +1554,7 @@ mod local_s3_tests {
 
         let session = Session::new(&credentials, &super::Service::s3("us-east-1"), 3600);
 
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session);
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session);
 
         // Attempt to set a value - should fail due to unknown access key
         let result = backend.set(b"key".to_vec(), b"value".to_vec()).await;
@@ -1862,10 +1859,7 @@ pub mod test_server {
     }
 
     /// Start a test server with authentication enabled.
-    pub async fn start_with_auth(
-        access_key: &str,
-        secret_key: &str,
-    ) -> anyhow::Result<Service> {
+    pub async fn start_with_auth(access_key: &str, secret_key: &str) -> anyhow::Result<Service> {
         let auth = s3s::auth::SimpleAuth::from_single(access_key, secret_key);
         start_internal(Some(auth)).await
     }
