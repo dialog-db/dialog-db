@@ -95,6 +95,7 @@
 
 use std::marker::PhantomData;
 
+#[cfg(feature = "s3-list")]
 use async_stream::try_stream;
 use async_trait::async_trait;
 use base58::{FromBase58, ToBase58};
@@ -110,7 +111,14 @@ pub use access::{Acl, Credentials, Invocation, Service, Session, SigningError};
 mod checksum;
 pub use checksum::{Checksum, Hasher};
 
-use crate::{DialogStorageError, StorageBackend, StorageSink, StorageSource};
+#[cfg(feature = "s3-list")]
+mod list;
+#[cfg(feature = "s3-list")]
+pub use list::{List, ListResult};
+
+#[cfg(feature = "s3-list")]
+use crate::StorageSource;
+use crate::{DialogStorageError, StorageBackend, StorageSink};
 
 /// A PUT request to upload data.
 #[derive(Debug)]
@@ -217,54 +225,6 @@ impl Invocation for Delete {
     }
 }
 impl Request for Delete {}
-
-/// A GET request to list objects in a bucket.
-///
-/// Uses the S3 ListObjectsV2 API to retrieve object keys.
-#[derive(Debug, Clone)]
-pub struct List {
-    url: Url,
-}
-
-impl List {
-    /// Create a new list request for the given bucket URL with optional prefix.
-    ///
-    /// The URL should be the bucket root (e.g., `https://s3.amazonaws.com/bucket`)
-    /// with query parameters for `list-type=2` and optionally `prefix`.
-    pub fn new(mut url: Url, prefix: Option<&str>, continuation_token: Option<&str>) -> Self {
-        url.query_pairs_mut().append_pair("list-type", "2");
-        if let Some(prefix) = prefix {
-            url.query_pairs_mut().append_pair("prefix", prefix);
-        }
-        if let Some(token) = continuation_token {
-            url.query_pairs_mut()
-                .append_pair("continuation-token", token);
-        }
-        Self { url }
-    }
-}
-
-impl Invocation for List {
-    fn method(&self) -> &'static str {
-        "GET"
-    }
-
-    fn url(&self) -> &Url {
-        &self.url
-    }
-}
-impl Request for List {}
-
-/// Response from S3 ListObjectsV2 API (simplified).
-#[derive(Debug)]
-pub struct ListResult {
-    /// Object keys returned in this response.
-    pub keys: Vec<String>,
-    /// If true, there are more results to fetch.
-    pub is_truncated: bool,
-    /// Token to use for fetching the next page of results.
-    pub next_continuation_token: Option<String>,
-}
 
 /// S3-safe key encoding that preserves path structure.
 ///
@@ -402,9 +362,10 @@ pub trait Request: Invocation + Sized {
         Key: AsRef<[u8]> + Clone + ConditionalSync,
         Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
     {
-        let authorized = s3.session.authorize(self).map_err(|e| {
-            S3StorageError::AuthorizationError(e.to_string())
-        })?;
+        let authorized = s3
+            .session
+            .authorize(self)
+            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
 
         let mut builder = match self.method() {
             "GET" => s3.client.get(authorized.url),
@@ -529,15 +490,6 @@ where
             .map_err(|e| S3StorageError::ServiceError(format!("Invalid URL: {}", e)))
     }
 
-    /// Build the bucket URL (for listing operations).
-    fn bucket_url(&self) -> Result<Url, S3StorageError> {
-        let base_url = self.endpoint.trim_end_matches('/');
-        let url_str = format!("{base_url}/{}", self.bucket);
-
-        Url::parse(&url_str)
-            .map_err(|e| S3StorageError::ServiceError(format!("Invalid URL: {}", e)))
-    }
-
     /// Delete an object from S3.
     ///
     /// Note: S3 DELETE always returns 204 No Content, even if the object didn't exist.
@@ -554,91 +506,6 @@ where
                 response.status()
             )))
         }
-    }
-
-    /// List objects in the bucket with the configured prefix.
-    ///
-    /// Returns an iterator over object keys (encoded S3 keys, not decoded).
-    /// Use `continuation_token` for pagination when `is_truncated` is true.
-    pub async fn list(
-        &self,
-        continuation_token: Option<&str>,
-    ) -> Result<ListResult, S3StorageError> {
-        let bucket_url = self.bucket_url()?;
-        let list_request = List::new(bucket_url, self.prefix.as_deref(), continuation_token);
-        let response = list_request.perform(self).await?;
-
-        if !response.status().is_success() {
-            return Err(S3StorageError::ServiceError(format!(
-                "Failed to list objects: {}",
-                response.status()
-            )));
-        }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|e| S3StorageError::TransportError(e.to_string()))?;
-
-        // Parse the XML response
-        Self::parse_list_response(&body)
-    }
-
-    /// Parse the S3 ListObjectsV2 XML response.
-    fn parse_list_response(xml: &str) -> Result<ListResult, S3StorageError> {
-        // Simple XML parsing for ListObjectsV2 response
-        // Format:
-        // <ListBucketResult>
-        //   <IsTruncated>false</IsTruncated>
-        //   <Contents><Key>...</Key></Contents>
-        //   <NextContinuationToken>...</NextContinuationToken>
-        // </ListBucketResult>
-
-        let mut keys = Vec::new();
-        let mut is_truncated = false;
-        let mut next_continuation_token = None;
-
-        // Parse IsTruncated
-        if let Some(start) = xml.find("<IsTruncated>") {
-            if let Some(end) = xml[start..].find("</IsTruncated>") {
-                let value = &xml[start + 13..start + end];
-                is_truncated = value == "true";
-            }
-        }
-
-        // Parse NextContinuationToken
-        if let Some(start) = xml.find("<NextContinuationToken>") {
-            if let Some(end) = xml[start..].find("</NextContinuationToken>") {
-                let token = xml[start + 23..start + end].to_string();
-                if !token.is_empty() {
-                    next_continuation_token = Some(token);
-                }
-            }
-        }
-
-        // Parse all <Key> elements within <Contents>
-        let mut search_start = 0;
-        while let Some(contents_start) = xml[search_start..].find("<Contents>") {
-            let abs_start = search_start + contents_start;
-            if let Some(contents_end) = xml[abs_start..].find("</Contents>") {
-                let contents = &xml[abs_start..abs_start + contents_end];
-                if let Some(key_start) = contents.find("<Key>") {
-                    if let Some(key_end) = contents[key_start..].find("</Key>") {
-                        let key = contents[key_start + 5..key_start + key_end].to_string();
-                        keys.push(key);
-                    }
-                }
-                search_start = abs_start + contents_end;
-            } else {
-                break;
-            }
-        }
-
-        Ok(ListResult {
-            keys,
-            is_truncated,
-            next_continuation_token,
-        })
     }
 }
 
@@ -711,6 +578,7 @@ where
     }
 }
 
+#[cfg(feature = "s3-list")]
 impl<Key, Value> StorageSource for S3<Key, Value>
 where
     Key: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
@@ -1047,90 +915,6 @@ mod unit_tests {
         assert!(request.checksum().is_none());
         assert!(request.acl().is_none());
     }
-
-    #[test]
-    fn test_list_request() {
-        let url = Url::parse("https://s3.amazonaws.com/bucket").unwrap();
-        let request = List::new(url.clone(), Some("prefix/"), None);
-
-        assert_eq!(request.method(), "GET");
-        assert!(request.url().as_str().contains("list-type=2"));
-        assert!(request.url().as_str().contains("prefix=prefix%2F"));
-    }
-
-    #[test]
-    fn test_list_request_with_continuation_token() {
-        let url = Url::parse("https://s3.amazonaws.com/bucket").unwrap();
-        let request = List::new(url.clone(), None, Some("token123"));
-
-        assert!(
-            request
-                .url()
-                .as_str()
-                .contains("continuation-token=token123")
-        );
-    }
-
-    #[test]
-    fn test_parse_list_response_empty() {
-        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-            <ListBucketResult>
-                <IsTruncated>false</IsTruncated>
-            </ListBucketResult>"#;
-
-        let result = S3::<Vec<u8>, Vec<u8>>::parse_list_response(xml).unwrap();
-        assert!(result.keys.is_empty());
-        assert!(!result.is_truncated);
-        assert!(result.next_continuation_token.is_none());
-    }
-
-    #[test]
-    fn test_parse_list_response_with_keys() {
-        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-            <ListBucketResult>
-                <IsTruncated>false</IsTruncated>
-                <Contents>
-                    <Key>prefix/key1</Key>
-                    <Size>100</Size>
-                </Contents>
-                <Contents>
-                    <Key>prefix/key2</Key>
-                    <Size>200</Size>
-                </Contents>
-            </ListBucketResult>"#;
-
-        let result = S3::<Vec<u8>, Vec<u8>>::parse_list_response(xml).unwrap();
-        assert_eq!(result.keys.len(), 2);
-        assert_eq!(result.keys[0], "prefix/key1");
-        assert_eq!(result.keys[1], "prefix/key2");
-        assert!(!result.is_truncated);
-    }
-
-    #[test]
-    fn test_parse_list_response_truncated() {
-        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-            <ListBucketResult>
-                <IsTruncated>true</IsTruncated>
-                <NextContinuationToken>abc123</NextContinuationToken>
-                <Contents>
-                    <Key>key1</Key>
-                </Contents>
-            </ListBucketResult>"#;
-
-        let result = S3::<Vec<u8>, Vec<u8>>::parse_list_response(xml).unwrap();
-        assert_eq!(result.keys.len(), 1);
-        assert!(result.is_truncated);
-        assert_eq!(result.next_continuation_token, Some("abc123".to_string()));
-    }
-
-    #[test]
-    fn test_bucket_url() {
-        let backend =
-            S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public);
-
-        let url = backend.bucket_url().unwrap();
-        assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket");
-    }
 }
 
 /// Local S3 server tests using s3s for end-to-end testing
@@ -1248,6 +1032,7 @@ mod local_s3_tests {
         Ok(())
     }
 
+    #[cfg(feature = "s3-list")]
     #[tokio::test]
     async fn test_local_s3_list() -> anyhow::Result<()> {
         let service = test_server::start().await?;
@@ -1275,6 +1060,7 @@ mod local_s3_tests {
         Ok(())
     }
 
+    #[cfg(feature = "s3-list")]
     #[tokio::test]
     async fn test_local_s3_read_stream() -> anyhow::Result<()> {
         use futures_util::TryStreamExt;
@@ -1407,6 +1193,28 @@ mod local_s3_tests {
         // Each backend should see its own value
         assert_eq!(backend1.get(&key).await?, Some(b"value-a".to_vec()));
         assert_eq!(backend2.get(&key).await?, Some(b"value-b".to_vec()));
+
+        Ok(())
+    }
+
+    #[cfg(feature = "s3-list")]
+    #[tokio::test]
+    async fn test_local_s3_uses_prefix_listing() -> anyhow::Result<()> {
+        let service = test_server::start().await?;
+
+        // Create two backends with different prefixes
+        let mut backend1 =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
+                .with_prefix("prefix-a");
+
+        let mut backend2 =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
+                .with_prefix("prefix-b");
+
+        // Set the same key in both backends
+        let key = b"shared-key".to_vec();
+        backend1.set(key.clone(), b"value-a".to_vec()).await?;
+        backend2.set(key.clone(), b"value-b".to_vec()).await?;
 
         // Listing should only return keys from respective prefix
         let list1 = backend1.list(None).await?;
@@ -1711,6 +1519,7 @@ mod local_s3_tests {
         Ok(())
     }
 
+    #[cfg(feature = "s3-list")]
     #[tokio::test]
     async fn test_local_s3_list_with_signed_session() -> anyhow::Result<()> {
         let service = test_server::start_with_auth("test-access-key", "test-secret-key").await?;
@@ -1749,6 +1558,7 @@ mod local_s3_tests {
         Ok(())
     }
 
+    #[cfg(feature = "s3-list")]
     #[tokio::test]
     async fn test_local_s3_read_stream_with_signed_session() -> anyhow::Result<()> {
         use futures_util::TryStreamExt;

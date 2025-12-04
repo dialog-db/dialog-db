@@ -9,11 +9,13 @@ license.workspace = true
 helpers = ["tempfile", "anyhow", "rand"]
 # Enables the S3/R2-compatible storage backend
 s3 = ["dep:chrono", "dep:hmac", "dep:reqwest", "dep:sha2", "dep:url"]
+# Enables S3 list operations (ListObjectsV2) with XML parsing
+s3-list = ["s3", "dep:quick-xml"]
 # Enables real S3/R2 integration tests (requires R2S3_* environment variables)
-s3-integration-tests = ["s3"]
+s3-integration-tests = ["s3-list"]
 # Exposes the `test_server` module for running a local in-memory S3 server
 s3-test-utils = [
-  "s3",
+  "s3-list",
   "dep:s3s",
   "dep:hyper",
   "dep:hyper-util",
@@ -38,6 +40,7 @@ hmac = { version = "0.12", optional = true }
 md5 = "0.8.0"
 reqwest = { workspace = true, features = ["json"], optional = true }
 sha2 = { version = "0.10", optional = true }
+quick-xml = { version = "0.37", features = ["serde", "serialize"], optional = true }
 sieve-cache = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }
