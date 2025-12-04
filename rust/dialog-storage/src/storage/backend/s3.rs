@@ -1066,10 +1066,8 @@ mod local_s3_tests {
     async fn test_local_s3_set_and_get() -> anyhow::Result<()> {
         let service = test_server::start().await?;
 
-        // Note: We use no auth for the local test server since S3 signing doesn't work
-        // with IP-based URLs (it creates bucket.127.0.0.1 which is invalid).
-        // The real S3 signing is tested with mockito unit tests and the environment-based
-        // integration tests with real S3/R2 endpoints.
+        // Using Session::Public for simplicity. Signed sessions are tested in
+        // test_local_s3_with_signed_session using start_with_auth().
         let mut backend =
             S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
                 .with_prefix("test");
@@ -1487,10 +1485,151 @@ mod local_s3_tests {
         Ok(())
     }
 
-    // Note: Signed session testing is done in s3_integration_tests with real S3/R2/MinIO.
-    // The s3s test server doesn't support presigned URL query parameters used by signed sessions.
-    // All core S3 operations (get, set, delete, list) are verified with Session::Public above,
-    // and the signing logic itself is unit tested in access.rs.
+    #[tokio::test]
+    async fn test_local_s3_with_signed_session() -> anyhow::Result<()> {
+        let service = test_server::start_with_auth("test-access-key", "test-secret-key").await?;
+
+        // Create credentials matching the test server
+        let credentials = super::Credentials {
+            access_key_id: "test-access-key".into(),
+            secret_access_key: "test-secret-key".into(),
+            session_token: None,
+        };
+
+        let session = Session::new(&credentials, &super::Service::s3("us-east-1"), 3600);
+
+        let mut backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session)
+                .with_prefix("signed-test");
+
+        // Test data
+        let key = b"signed-key".to_vec();
+        let value = b"signed-value".to_vec();
+
+        // Set the value (uses PUT with presigned URL)
+        backend.set(key.clone(), value.clone()).await?;
+
+        // Get the value back (uses GET with presigned URL)
+        let retrieved = backend.get(&key).await?;
+        assert_eq!(retrieved, Some(value));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_wrong_secret_key_fails() -> anyhow::Result<()> {
+        let service = test_server::start_with_auth("test-access-key", "correct-secret").await?;
+
+        // Create credentials with WRONG secret key
+        let credentials = super::Credentials {
+            access_key_id: "test-access-key".into(),
+            secret_access_key: "wrong-secret".into(),
+            session_token: None,
+        };
+
+        let session = Session::new(&credentials, &super::Service::s3("us-east-1"), 3600);
+
+        let mut backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session);
+
+        // Attempt to set a value - should fail due to signature mismatch
+        let result = backend.set(b"key".to_vec(), b"value".to_vec()).await;
+
+        assert!(
+            result.is_err(),
+            "Expected authentication failure with wrong secret key"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_wrong_access_key_fails() -> anyhow::Result<()> {
+        let service = test_server::start_with_auth("correct-access-key", "test-secret").await?;
+
+        // Create credentials with WRONG access key
+        let credentials = super::Credentials {
+            access_key_id: "wrong-access-key".into(),
+            secret_access_key: "test-secret".into(),
+            session_token: None,
+        };
+
+        let session = Session::new(&credentials, &super::Service::s3("us-east-1"), 3600);
+
+        let mut backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session);
+
+        // Attempt to set a value - should fail due to unknown access key
+        let result = backend.set(b"key".to_vec(), b"value".to_vec()).await;
+
+        assert!(
+            result.is_err(),
+            "Expected authentication failure with wrong access key"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_unsigned_request_to_auth_server_fails() -> anyhow::Result<()> {
+        // Server requires authentication
+        let service = test_server::start_with_auth("test-access-key", "test-secret-key").await?;
+
+        // Client uses Session::Public (no signing)
+        let mut backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+
+        // Attempt to set a value - should fail because server expects signed requests
+        let result = backend.set(b"key".to_vec(), b"value".to_vec()).await;
+
+        assert!(
+            result.is_err(),
+            "Expected authentication failure when sending unsigned request to authenticated server"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_s3_get_with_wrong_credentials_fails() -> anyhow::Result<()> {
+        let service = test_server::start_with_auth("test-access-key", "test-secret-key").await?;
+
+        // First, set a value with correct credentials
+        let correct_credentials = super::Credentials {
+            access_key_id: "test-access-key".into(),
+            secret_access_key: "test-secret-key".into(),
+            session_token: None,
+        };
+        let correct_session =
+            Session::new(&correct_credentials, &super::Service::s3("us-east-1"), 3600);
+        let mut correct_backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", correct_session);
+
+        correct_backend
+            .set(b"protected-key".to_vec(), b"secret-value".to_vec())
+            .await?;
+
+        // Now try to GET with wrong credentials
+        let wrong_credentials = super::Credentials {
+            access_key_id: "test-access-key".into(),
+            secret_access_key: "wrong-secret".into(),
+            session_token: None,
+        };
+        let wrong_session =
+            Session::new(&wrong_credentials, &super::Service::s3("us-east-1"), 3600);
+        let wrong_backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", wrong_session);
+
+        // Attempt to get the value - should fail
+        let result = wrong_backend.get(&b"protected-key".to_vec()).await;
+
+        assert!(
+            result.is_err(),
+            "Expected authentication failure when getting with wrong credentials"
+        );
+
+        Ok(())
+    }
 }
 
 #[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
@@ -1719,11 +1858,28 @@ pub mod test_server {
     ///
     /// Returns a handle that can be used to get the endpoint URL and stop the server.
     pub async fn start() -> anyhow::Result<Service> {
+        start_internal(None).await
+    }
+
+    /// Start a test server with authentication enabled.
+    pub async fn start_with_auth(
+        access_key: &str,
+        secret_key: &str,
+    ) -> anyhow::Result<Service> {
+        let auth = s3s::auth::SimpleAuth::from_single(access_key, secret_key);
+        start_internal(Some(auth)).await
+    }
+
+    async fn start_internal(auth: Option<s3s::auth::SimpleAuth>) -> anyhow::Result<Service> {
         use std::sync::Arc;
 
         let storage = InMemoryS3::default();
 
-        let service = Arc::new(S3ServiceBuilder::new(storage.clone()).build());
+        let mut builder = S3ServiceBuilder::new(storage.clone());
+        if let Some(auth) = auth {
+            builder.set_auth(auth);
+        }
+        let service = Arc::new(builder.build());
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
