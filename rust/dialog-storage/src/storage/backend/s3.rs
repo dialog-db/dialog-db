@@ -17,9 +17,11 @@
 //!
 //! For publicly accessible buckets that don't require authentication:
 //!
-//! ```ignore
+//! ```no_run
 //! use dialog_storage::s3::{S3, Session};
+//! use dialog_storage::StorageBackend;
 //!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut backend = S3::<Vec<u8>, Vec<u8>>::open(
 //!     "https://s3.amazonaws.com",
 //!     "my-bucket",
@@ -28,16 +30,20 @@
 //!
 //! backend.set(b"key".to_vec(), b"value".to_vec()).await?;
 //! let value = backend.get(&b"key".to_vec()).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Authorized Access (Credentials based Authentication)
 //!
-//! ```ignore
+//! ```no_run
 //! use dialog_storage::s3::{S3, Credentials, Service, Session};
+//! use dialog_storage::StorageBackend;
 //!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let credentials = Credentials {
-//!     access_key_id: env!("AWS_ACCESS_KEY_ID"),
-//!     secret_access_key: env!("AWS_SECRET_ACCESS_KEY"),
+//!     access_key_id: std::env::var("AWS_ACCESS_KEY_ID")?,
+//!     secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY")?,
 //!     session_token: None,
 //! };
 //!
@@ -51,27 +57,32 @@
 //! ).with_prefix("data");
 //!
 //! backend.set(b"key".to_vec(), b"value".to_vec()).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Cloudflare R2
 //!
-//! ```ignore
+//! ```no_run
 //! use dialog_storage::s3::{S3, Credentials, Service, Session};
 //!
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let credentials = Credentials {
-//!     access_key_id: env!("R2_ACCESS_KEY_ID"),
-//!     secret_access_key: env!("R2_SECRET_ACCESS_KEY"),
+//!     access_key_id: std::env::var("R2_ACCESS_KEY_ID")?,
+//!     secret_access_key: std::env::var("R2_SECRET_ACCESS_KEY")?,
 //!     session_token: None,
 //! };
 //!
 //! let service = Service::s3("auto"); // Use R2 "auto" region
 //! let session = Session::new(&credentials, &service, 3600);
 //!
-//! let mut backend = S3::<Vec<u8>, Vec<u8>>::open(
+//! let backend = S3::<Vec<u8>, Vec<u8>>::open(
 //!     "https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com",
 //!     "my-bucket",
 //!     session
 //! ).with_prefix("data");
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Key Encoding
@@ -435,9 +446,11 @@ pub trait Request: Invocation + Sized {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use dialog_storage::s3::{S3, Session, Service, Credentials};
+/// use dialog_storage::StorageBackend;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let credentials = Credentials {
 ///     access_key_id: "...".into(),
 ///     secret_access_key: "...".into(),
@@ -452,6 +465,8 @@ pub trait Request: Invocation + Sized {
 ///     session,
 /// );
 /// storage.set(b"key".to_vec(), b"value".to_vec()).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct S3<Key, Value>
