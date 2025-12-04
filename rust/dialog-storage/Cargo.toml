@@ -7,10 +7,13 @@ license.workspace = true
 
 [features]
 helpers = ["tempfile", "anyhow", "rand"]
+# Enables the S3/R2-compatible storage backend
+s3 = ["dep:chrono", "dep:hmac", "dep:reqwest", "dep:sha2", "dep:url"]
 # Enables real S3/R2 integration tests (requires R2S3_* environment variables)
-s3-integration-tests = []
+s3-integration-tests = ["s3"]
 # Exposes the `test_server` module for running a local in-memory S3 server
-test-utils = [
+s3-test-utils = [
+  "s3",
   "dep:s3s",
   "dep:hyper",
   "dep:hyper-util",
@@ -29,19 +32,19 @@ base58 = { workspace = true }
 base64 = { workspace = true }
 blake3 = { workspace = true }
 brotli = { workspace = true }
-chrono = "0.4"
+chrono = { version = "0.4", optional = true }
 futures-util = { workspace = true }
-hmac = "0.12"
+hmac = { version = "0.12", optional = true }
 md5 = "0.8.0"
-reqwest = { workspace = true, features = ["json"] }
-sha2 = "0.10"
+reqwest = { workspace = true, features = ["json"], optional = true }
+sha2 = { version = "0.10", optional = true }
 sieve-cache = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }
 rand = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
-url = "2.5"
+url = { version = "2.5", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tempfile = { workspace = true, optional = true }

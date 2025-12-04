@@ -15,11 +15,17 @@ mod indexeddb;
 pub use indexeddb::*;
 
 /// S3/R2-compatible storage backend.
+#[cfg(feature = "s3")]
 pub mod s3;
+#[cfg(feature = "s3")]
 pub use s3::{S3, S3StorageError};
 
 // Export s3 test server module for integration testing
-#[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
+#[cfg(all(
+    any(test, feature = "s3-test-utils"),
+    not(target_arch = "wasm32"),
+    feature = "s3"
+))]
 pub use s3::test_server;
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -1706,7 +1706,7 @@ mod local_s3_tests {
     }
 }
 
-#[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
+#[cfg(all(any(test, feature = "s3-test-utils"), not(target_arch = "wasm32")))]
 #[allow(unused_imports, unused_variables, unused_mut, dead_code)]
 /// S3-compatible test server for integration testing.
 ///
