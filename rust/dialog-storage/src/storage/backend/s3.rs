@@ -1449,8 +1449,12 @@ pub mod test_server {
 ///
 /// Run these tests with:
 /// ```bash
-/// R2S3_HOST=... R2S3_REGION=... R2S3_BUCKET=... R2S3_ACCESS_KEY_ID=... R2S3_SECRET_ACCESS_KEY=... \
-///   cargo test --features s3_integration_tests -- --ignored
+/// R2S3_HOST=https://2fc7ca2f9584223662c5a882977b89ac.r2.cloudflarestorage.com \
+///   R2S3_REGION=auto \
+///   R2S3_BUCKET=dialog-test \
+///   R2S3_ACCESS_KEY_ID=access_key \
+///   R2S3_SECRET_ACCESS_KEY=secret \
+///   cargo test s3_integration_tests --features s3_integration_tests
 /// ```
 ///
 /// Or use with MinIO locally:
@@ -1468,7 +1472,7 @@ pub mod test_server {
 ///   R2S3_BUCKET=test-bucket \
 ///   R2S3_ACCESS_KEY_ID=minioadmin \
 ///   R2S3_SECRET_ACCESS_KEY=minioadmin \
-///   cargo test --features s3_integration_tests
+///   cargo test s3_integration_tests --features s3_integration_tests
 /// ```
 #[cfg(all(test, feature = "s3_integration_tests"))]
 mod s3_integration_tests {
@@ -1665,6 +1669,158 @@ mod s3_integration_tests {
             let retrieved = backend.get(&key).await?;
             assert_eq!(retrieved, Some(expected_value));
         }
+
+        Ok(())
+    }
+
+    /// Helper to create an S3 backend without prefix from environment variables.
+    fn create_s3_backend_without_prefix_from_env() -> Result<S3<Vec<u8>, Vec<u8>>> {
+        let credentials = Credentials {
+            access_key_id: env!("R2S3_ACCESS_KEY_ID").into(),
+            secret_access_key: env!("R2S3_SECRET_ACCESS_KEY").into(),
+            session_token: option_env!("R2S3_SESSION_TOKEN").map(|v| v.into()),
+        };
+
+        let region = env!("R2S3_REGION");
+        let service = Service::s3(region);
+        let session = Session::new(&credentials, &service, 3600);
+
+        let endpoint = env!("R2S3_HOST");
+        let bucket = env!("R2S3_BUCKET");
+
+        // No prefix - keys go directly into the bucket root
+        Ok(S3::open(endpoint, bucket, session))
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_without_prefix() -> Result<()> {
+        let mut backend = create_s3_backend_without_prefix_from_env()?;
+
+        // Test data - use unique key to avoid conflicts
+        let key = b"no-prefix-test-key".to_vec();
+        let value = b"no-prefix-test-value".to_vec();
+
+        // Set the value
+        backend.set(key.clone(), value.clone()).await?;
+
+        // Get the value back
+        let retrieved = backend.get(&key).await?;
+        assert_eq!(retrieved, Some(value));
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_encoded_key_segments() -> Result<()> {
+        let mut backend = create_s3_backend_from_env()?;
+
+        // Test key with path structure where one segment is safe and another needs encoding
+        // "safe-segment/user@example.com" - first segment is safe, second has @ which is unsafe
+        let key_mixed = b"safe-segment/user@example.com".to_vec();
+        let value_mixed = b"value-for-mixed-key".to_vec();
+
+        // Verify encoding behavior
+        let encoded = super::encode_s3_key(&key_mixed);
+        // Should be "safe-segment/!<base58>" where first part is unchanged and second is encoded
+        assert!(
+            encoded.starts_with("safe-segment/!"),
+            "First segment should be safe, second should be encoded with ! prefix: {}",
+            encoded
+        );
+
+        // Write and read back
+        backend.set(key_mixed.clone(), value_mixed.clone()).await?;
+        let retrieved = backend.get(&key_mixed).await?;
+        assert_eq!(retrieved, Some(value_mixed));
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_fully_encoded_key() -> Result<()> {
+        let mut backend = create_s3_backend_from_env()?;
+
+        // Test key that is fully binary (all segments need encoding)
+        let key_binary = vec![0x01, 0x02, 0xFF, 0xFE];
+        let value_binary = b"value-for-binary-key".to_vec();
+
+        // Verify encoding behavior - binary data should be encoded
+        let encoded = super::encode_s3_key(&key_binary);
+        assert!(
+            encoded.starts_with('!'),
+            "Binary key should be encoded with ! prefix: {}",
+            encoded
+        );
+
+        // Write and read back
+        backend
+            .set(key_binary.clone(), value_binary.clone())
+            .await?;
+        let retrieved = backend.get(&key_binary).await?;
+        assert_eq!(retrieved, Some(value_binary));
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_multi_segment_mixed_encoding() -> Result<()> {
+        let mut backend = create_s3_backend_from_env()?;
+
+        // Test key with multiple segments: safe/unsafe/safe/unsafe pattern
+        // "data/file name with spaces/v1/special!chars"
+        let key = b"data/file name with spaces/v1/special!chars".to_vec();
+        let value = b"value-for-complex-path".to_vec();
+
+        // Verify encoding behavior
+        let encoded = super::encode_s3_key(&key);
+        let segments: Vec<&str> = encoded.split('/').collect();
+        assert_eq!(segments.len(), 4, "Should have 4 segments");
+        assert_eq!(segments[0], "data", "First segment should be safe");
+        assert!(
+            segments[1].starts_with('!'),
+            "Second segment should be encoded (has spaces)"
+        );
+        assert_eq!(segments[2], "v1", "Third segment should be safe");
+        assert!(
+            segments[3].starts_with('!'),
+            "Fourth segment should be encoded (has !)"
+        );
+
+        // Write and read back
+        backend.set(key.clone(), value.clone()).await?;
+        let retrieved = backend.get(&key).await?;
+        assert_eq!(retrieved, Some(value));
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_without_prefix_encoded_key() -> Result<()> {
+        let mut backend = create_s3_backend_without_prefix_from_env()?;
+
+        // Test encoded key without prefix
+        let key = b"path/with spaces/data".to_vec();
+        let value = b"value-for-encoded-no-prefix".to_vec();
+
+        // Verify encoding
+        let encoded = super::encode_s3_key(&key);
+        let segments: Vec<&str> = encoded.split('/').collect();
+        assert_eq!(segments[0], "path", "First segment should be safe");
+        assert!(
+            segments[1].starts_with('!'),
+            "Second segment should be encoded"
+        );
+        assert_eq!(segments[2], "data", "Third segment should be safe");
+
+        // Write and read back without prefix
+        backend.set(key.clone(), value.clone()).await?;
+        let retrieved = backend.get(&key).await?;
+        assert_eq!(retrieved, Some(value));
 
         Ok(())
     }
