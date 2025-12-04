@@ -322,7 +322,7 @@ pub fn decode_s3_key(encoded: &str) -> Result<Vec<u8>, S3StorageError> {
         if let Some(encoded_part) = component.strip_prefix('!') {
             // Base58 decode
             let decoded = encoded_part.from_base58().map_err(|e| {
-                S3StorageError::SerializationFailed(format!(
+                S3StorageError::SerializationError(format!(
                     "Invalid base58 encoding in component '{}': {:?}",
                     component, e
                 ))
@@ -346,24 +346,24 @@ pub fn decode_s3_key(encoded: &str) -> Result<Vec<u8>, S3StorageError> {
     Ok(result)
 }
 
-/// Errors that can occur when using the S3 storage backend
+/// Errors that can occur when using the S3 storage backend.
 #[derive(Error, Debug)]
 pub enum S3StorageError {
-    /// Error that occurs when connection to the S3 API fails
-    #[error("Failed to connect to S3: {0}")]
-    ConnectionFailed(String),
+    /// Failed to authorize the request (signing or credential issues).
+    #[error("Authorization error: {0}")]
+    AuthorizationError(String),
 
-    /// Error that occurs when an S3 operation fails
-    #[error("Failed to perform S3 operation: {0}")]
-    OperationFailed(String),
+    /// Transport-level error (connection failed, timeout, network issues).
+    #[error("Transport error: {0}")]
+    TransportError(String),
 
-    /// Error that occurs when an API request fails
-    #[error("S3 request failed: {0}")]
-    RequestFailed(String),
+    /// Service-level error (S3 returned an error response).
+    #[error("Service error: {0}")]
+    ServiceError(String),
 
-    /// Error that occurs during serialization or deserialization of data
-    #[error("Failed to serialize/deserialize data: {0}")]
-    SerializationFailed(String),
+    /// Error during serialization or deserialization of data.
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
 }
 
 impl From<S3StorageError> for DialogStorageError {
@@ -374,21 +374,7 @@ impl From<S3StorageError> for DialogStorageError {
 
 impl From<reqwest::Error> for S3StorageError {
     fn from(error: reqwest::Error) -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if error.is_connect() {
-                S3StorageError::ConnectionFailed(error.to_string())
-            } else if error.is_request() {
-                S3StorageError::OperationFailed(error.to_string())
-            } else {
-                S3StorageError::RequestFailed(error.to_string())
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            // WASM doesn't have is_connect() or is_request() methods
-            S3StorageError::RequestFailed(error.to_string())
-        }
+        S3StorageError::TransportError(error.to_string())
     }
 }
 
@@ -417,7 +403,7 @@ pub trait Request: Invocation + Sized {
         Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
     {
         let authorized = s3.session.authorize(self).map_err(|e| {
-            S3StorageError::OperationFailed(format!("Failed to authorize request: {}", e))
+            S3StorageError::AuthorizationError(e.to_string())
         })?;
 
         let mut builder = match self.method() {
@@ -540,7 +526,7 @@ where
         let url_str = format!("{base_url}/{}/{object_key}", self.bucket);
 
         Url::parse(&url_str)
-            .map_err(|e| S3StorageError::OperationFailed(format!("Failed to parse URL: {}", e)))
+            .map_err(|e| S3StorageError::ServiceError(format!("Invalid URL: {}", e)))
     }
 
     /// Build the bucket URL (for listing operations).
@@ -549,7 +535,7 @@ where
         let url_str = format!("{base_url}/{}", self.bucket);
 
         Url::parse(&url_str)
-            .map_err(|e| S3StorageError::OperationFailed(format!("Failed to parse URL: {}", e)))
+            .map_err(|e| S3StorageError::ServiceError(format!("Invalid URL: {}", e)))
     }
 
     /// Delete an object from S3.
@@ -563,7 +549,7 @@ where
         if response.status().is_success() {
             Ok(())
         } else {
-            Err(S3StorageError::OperationFailed(format!(
+            Err(S3StorageError::ServiceError(format!(
                 "Failed to delete object: {}",
                 response.status()
             )))
@@ -583,7 +569,7 @@ where
         let response = list_request.perform(self).await?;
 
         if !response.status().is_success() {
-            return Err(S3StorageError::OperationFailed(format!(
+            return Err(S3StorageError::ServiceError(format!(
                 "Failed to list objects: {}",
                 response.status()
             )));
@@ -592,7 +578,7 @@ where
         let body = response
             .text()
             .await
-            .map_err(|e| S3StorageError::RequestFailed(e.to_string()))?;
+            .map_err(|e| S3StorageError::TransportError(e.to_string()))?;
 
         // Parse the XML response
         Self::parse_list_response(&body)
@@ -677,7 +663,7 @@ where
         if response.status().is_success() {
             Ok(())
         } else {
-            Err(S3StorageError::OperationFailed(format!(
+            Err(S3StorageError::ServiceError(format!(
                 "Failed to set value: {}",
                 response.status()
             )))
@@ -692,12 +678,12 @@ where
             let bytes = response
                 .bytes()
                 .await
-                .map_err(|e| S3StorageError::RequestFailed(e.to_string()))?;
+                .map_err(|e| S3StorageError::TransportError(e.to_string()))?;
             Ok(Some(Value::from(bytes.to_vec())))
         } else if response.status() == reqwest::StatusCode::NOT_FOUND {
             Ok(None)
         } else {
-            Err(S3StorageError::OperationFailed(format!(
+            Err(S3StorageError::ServiceError(format!(
                 "Failed to get value: {}",
                 response.status()
             )))
@@ -1018,25 +1004,24 @@ mod unit_tests {
 
     #[test]
     fn test_error_conversion() {
-        let error = S3StorageError::ConnectionFailed("test".into());
+        let error = S3StorageError::TransportError("test".into());
         let dialog_error: DialogStorageError = error.into();
         assert!(dialog_error.to_string().contains("test"));
     }
 
     #[test]
     fn test_error_types() {
-        // Test all error variants
-        let conn_err = S3StorageError::ConnectionFailed("conn".into());
-        assert!(conn_err.to_string().contains("connect"));
+        let auth_err = S3StorageError::AuthorizationError("invalid credentials".into());
+        assert!(auth_err.to_string().contains("Authorization"));
 
-        let op_err = S3StorageError::OperationFailed("op".into());
-        assert!(op_err.to_string().contains("operation"));
+        let transport_err = S3StorageError::TransportError("connection timeout".into());
+        assert!(transport_err.to_string().contains("Transport"));
 
-        let req_err = S3StorageError::RequestFailed("req".into());
-        assert!(req_err.to_string().contains("request"));
+        let service_err = S3StorageError::ServiceError("access denied".into());
+        assert!(service_err.to_string().contains("Service"));
 
-        let ser_err = S3StorageError::SerializationFailed("ser".into());
-        assert!(ser_err.to_string().contains("serialize"));
+        let ser_err = S3StorageError::SerializationError("invalid format".into());
+        assert!(ser_err.to_string().contains("Serialization"));
     }
 
     #[test]
@@ -1388,7 +1373,7 @@ mod local_s3_tests {
         // Map DialogStorageError to S3StorageError for type compatibility
         let source_stream = memory_backend
             .drain()
-            .map(|result| result.map_err(|e| S3StorageError::OperationFailed(e.to_string())));
+            .map(|result| result.map_err(|e| S3StorageError::ServiceError(e.to_string())));
         s3_backend.write(source_stream).await?;
 
         // Verify all items were transferred to S3
