@@ -381,11 +381,17 @@ impl From<reqwest::Error> for S3StorageError {
     }
 }
 
-/// Extension trait for requests that can be performed against an S3 backend.
+/// Executable S3 request with an optional body.
+///
+/// This trait extends [`Invocation`] with the request body and the ability to
+/// execute the request against an S3 backend. The separation exists because
+/// [`Invocation`] lives in the [`access`] module which handles authorization
+/// concerns independently and only needs the metadata required for signing
+/// (method, URL, checksum, ACL), not the actual payload.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Request: Invocation + Sized {
-    /// The request body, if any. Used when sending the request.
+    /// The request body, if any.
     fn body(&self) -> Option<&[u8]> {
         None
     }

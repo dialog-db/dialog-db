@@ -326,11 +326,14 @@ impl Authority {
     }
 }
 
-/// Trait for request invocations that can be authorized and sent.
+/// Request metadata required for S3 authorization.
 ///
-/// Implementors describe the HTTP method, URL, and optional checksum/ACL
-/// for S3 requests. The [`Request`](super::Request) trait extends this
-/// with a body and the ability to perform the request.
+/// This trait captures the information needed to sign an S3 request: the HTTP
+/// method, URL, and optional checksum/ACL. It intentionally excludes the request
+/// body since authorization only needs metadata, not the payload itself.
+///
+/// The [`Request`](super::Request) trait extends this with the body and execution
+/// capability.
 pub trait Invocation {
     /// The HTTP method for this request.
     fn method(&self) -> &'static str;
