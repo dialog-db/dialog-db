@@ -1,3 +1,86 @@
+//! S3-compatible storage backend for AWS S3, Cloudflare R2, and other S3-compatible services.
+//!
+//! This module provides an [`S3`] storage backend that implements [`StorageBackend`],
+//! allowing you to use S3-compatible object storage as a key-value store.
+//!
+//! # Features
+//!
+//! - AWS SigV4 presigned URL signing for authorization
+//! - Support for public (unsigned) and authenticated access
+//! - Automatic key encoding to handle binary and special characters
+//! - Checksum verification using SHA-256
+//! - Compatible with S3-compatible services
+//!
+//! # Examples
+//!
+//! ## Public Access (No Authentication)
+//!
+//! For publicly accessible buckets that don't require authentication:
+//!
+//! ```ignore
+//! use dialog_storage::s3::{S3, Session};
+//!
+//! let mut backend = S3::<Vec<u8>, Vec<u8>>::open(
+//!     "https://s3.amazonaws.com",
+//!     "my-bucket",
+//!     Session::Public
+//! ).with_prefix("data");
+//!
+//! backend.set(b"key".to_vec(), b"value".to_vec()).await?;
+//! let value = backend.get(&b"key".to_vec()).await?;
+//! ```
+//!
+//! ## Authorized Access (Credentials based Authentication)
+//!
+//! ```ignore
+//! use dialog_storage::s3::{S3, Credentials, Service, Session};
+//!
+//! let credentials = Credentials {
+//!     access_key_id: env!("AWS_ACCESS_KEY_ID"),
+//!     secret_access_key: env!("AWS_SECRET_ACCESS_KEY"),
+//!     session_token: None,
+//! };
+//!
+//! let service = Service::s3("us-east-1");
+//! let session = Session::new(&credentials, &service, 3600); // 1 hour expiry
+//!
+//! let mut backend = S3::<Vec<u8>, Vec<u8>>::open(
+//!     "https://s3.us-east-1.amazonaws.com",
+//!     "my-bucket",
+//!     session
+//! ).with_prefix("data");
+//!
+//! backend.set(b"key".to_vec(), b"value".to_vec()).await?;
+//! ```
+//!
+//! ## Cloudflare R2
+//!
+//! ```ignore
+//! use dialog_storage::s3::{S3, Credentials, Service, Session};
+//!
+//! let credentials = Credentials {
+//!     access_key_id: env!("R2_ACCESS_KEY_ID"),
+//!     secret_access_key: env!("R2_SECRET_ACCESS_KEY"),
+//!     session_token: None,
+//! };
+//!
+//! let service = Service::s3("auto"); // Use R2 "auto" region
+//! let session = Session::new(&credentials, &service, 3600);
+//!
+//! let mut backend = S3::<Vec<u8>, Vec<u8>>::open(
+//!     "https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com",
+//!     "my-bucket",
+//!     session
+//! ).with_prefix("data");
+//! ```
+//!
+//! # Key Encoding
+//!
+//! Keys are automatically encoded to be S3-safe:
+//! - Safe characters (`a-z`, `A-Z`, `0-9`, `-`, `_`, `.`) are kept as-is
+//! - Unsafe characters or binary data are base58-encoded with a `!` prefix
+//! - Path separators (`/`) in keys create S3 key hierarchies
+
 use std::marker::PhantomData;
 
 use async_stream::try_stream;
@@ -15,10 +98,6 @@ mod checksum;
 pub use checksum::{Checksum, Hasher};
 
 use crate::{DialogStorageError, StorageBackend, StorageSink, StorageSource};
-
-// ============================================================================
-// Request Types
-// ============================================================================
 
 /// A PUT request to upload data.
 #[derive(Debug)]
@@ -675,10 +754,6 @@ where
         self.read()
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod unit_tests {
@@ -1983,10 +2058,6 @@ pub mod test_server {
         })
     }
 }
-
-// ============================================================================
-// Integration Tests (requires s3-integration-tests feature and env vars)
-// ============================================================================
 
 /// Integration tests that run against a real S3/R2/MinIO endpoint.
 ///

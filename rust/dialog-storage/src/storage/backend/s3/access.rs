@@ -17,10 +17,6 @@ use std::time::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use web_time::{SystemTime, web::SystemTimeExt};
 
-// ============================================================================
-// Public Types
-// ============================================================================
-
 /// AWS S3 credentials for signing requests.
 #[derive(Debug, Clone)]
 pub struct Credentials {
@@ -399,10 +395,6 @@ impl From<url::ParseError> for SigningError {
     }
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
 fn current_time() -> DateTime<Utc> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -440,10 +432,6 @@ fn percent_encode(s: &str) -> String {
 fn percent_encode_path(path: &str) -> String {
     percent_encode(path).replace("%2F", "/")
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {
