@@ -259,7 +259,7 @@ impl Authority {
         }
         headers.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let signed_headers_str: String = headers
+        let signed_headers: String = headers
             .iter()
             .map(|(k, _)| k.as_str())
             .collect::<Vec<_>>()
@@ -287,7 +287,7 @@ impl Authority {
             query_params.push(("x-amz-acl".into(), acl.as_str().to_string()));
         }
 
-        query_params.push(("X-Amz-SignedHeaders".into(), signed_headers_str.clone()));
+        query_params.push(("X-Amz-SignedHeaders".into(), signed_headers.clone()));
 
         // Include existing query parameters from the request URL
         // (e.g., list-type=2, prefix=... for ListObjectsV2)
@@ -319,7 +319,7 @@ impl Authority {
             canonical_uri,
             canonical_query,
             canonical_headers,
-            signed_headers_str
+            signed_headers
         );
 
         // Create string to sign

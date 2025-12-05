@@ -101,10 +101,10 @@ where
 {
     /// Build the bucket URL (for listing operations).
     fn bucket_url(&self) -> Result<Url, S3StorageError> {
-        let base_url = self.endpoint.trim_end_matches('/');
-        let url_str = format!("{base_url}/{}", self.bucket);
+        let base = self.endpoint.trim_end_matches('/');
+        let url = format!("{base}/{}", self.bucket);
 
-        Url::parse(&url_str)
+        Url::parse(&url)
             .map_err(|e| S3StorageError::ServiceError(format!("Invalid URL: {}", e)))
     }
 
