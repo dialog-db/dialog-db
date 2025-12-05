@@ -1,7 +1,9 @@
 //! AWS S3 Signature Version 4 signing implementation.
 //!
 //! This module provides presigned URL generation for S3-compatible storage services
-//! including AWS S3 and Cloudflare R2.
+//! including AWS S3 and Cloudflare R2, using [query string authentication].
+//!
+//! [query string authentication]: https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html
 
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};

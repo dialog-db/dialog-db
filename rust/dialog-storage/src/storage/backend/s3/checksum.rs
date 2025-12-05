@@ -1,7 +1,9 @@
 //! Checksum algorithms for S3 object integrity verification.
 //!
 //! This module provides checksum types used in the `x-amz-checksum-{algorithm}` headers
-//! for S3-compatible storage services.
+//! for S3-compatible storage services. See [Checking object integrity] for more details.
+//!
+//! [Checking object integrity]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity-upload.html
 
 use base64::Engine;
 use sha2::{Digest, Sha256};

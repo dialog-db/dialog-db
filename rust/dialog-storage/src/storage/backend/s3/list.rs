@@ -1,7 +1,9 @@
 //! S3 ListObjectsV2 operations.
 //!
 //! This module provides the [`List`] request type and [`ListResult`] response type
-//! for listing objects in an S3 bucket using the ListObjectsV2 API.
+//! for listing objects in an S3 bucket using the [ListObjectsV2] API.
+//!
+//! [ListObjectsV2]: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
 
 use serde::Deserialize;
 use url::Url;
@@ -11,7 +13,9 @@ use dialog_common::ConditionalSync;
 
 /// A GET request to list objects in a bucket.
 ///
-/// Uses the S3 ListObjectsV2 API to retrieve object keys.
+/// Uses the S3 [ListObjectsV2] API to retrieve object keys.
+///
+/// [ListObjectsV2]: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
 #[derive(Debug, Clone)]
 pub struct List {
     url: Url,
