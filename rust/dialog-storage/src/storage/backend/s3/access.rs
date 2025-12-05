@@ -411,7 +411,6 @@ pub enum SigningError {
     UrlParse(#[from] url::ParseError),
 }
 
-
 /// Get the current time as a UTC datetime.
 ///
 /// Uses platform-appropriate time sources (std on native, web-time on wasm).

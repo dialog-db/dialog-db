@@ -104,8 +104,7 @@ where
         let base = self.endpoint.trim_end_matches('/');
         let url = format!("{base}/{}", self.bucket);
 
-        Url::parse(&url)
-            .map_err(|e| S3StorageError::ServiceError(format!("Invalid URL: {}", e)))
+        Url::parse(&url).map_err(|e| S3StorageError::ServiceError(format!("Invalid URL: {}", e)))
     }
 
     /// List objects in the bucket with the configured prefix.
