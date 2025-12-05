@@ -462,17 +462,16 @@ where
 
     /// Build the URL for a given key.
     fn url(&self, key: &[u8]) -> Result<Url, S3StorageError> {
-        let key_str = encode_s3_key(key);
+        let encoded = encode_s3_key(key);
 
         let object_key = match &self.prefix {
-            Some(prefix) => format!("{}/{}", prefix, key_str),
-            None => key_str,
+            Some(prefix) => format!("{}/{}", prefix, encoded),
+            None => encoded,
         };
 
-        let base_url = self.endpoint.trim_end_matches('/');
-        let url_str = format!("{base_url}/{}/{object_key}", self.bucket);
+        let base = self.endpoint.trim_end_matches('/');
 
-        Url::parse(&url_str)
+        Url::parse(&format!("{base}/{}/{object_key}", self.bucket))
             .map_err(|e| S3StorageError::ServiceError(format!("Invalid URL: {}", e)))
     }
 
@@ -606,12 +605,11 @@ where
                         None => encoded_key,
                     };
 
-                    // Decode the key
-                    let key_bytes = decode_s3_key(&key_without_prefix)?;
+                    // Decode and fetch the value
+                    let decoded = decode_s3_key(&key_without_prefix)?;
 
-                    // Fetch the value
-                    if let Some(value) = storage.get(&Key::from(key_bytes.clone())).await? {
-                        yield (Key::from(key_bytes), value);
+                    if let Some(value) = storage.get(&Key::from(decoded.clone())).await? {
+                        yield (Key::from(decoded), value);
                     }
                 }
 
@@ -960,12 +958,6 @@ mod unit_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod local_s3_tests {
     use super::*;
-    use crate::CborEncoder;
-    use s3s::dto::*;
-    use s3s::{S3 as S3Trait, S3Request, S3Response, S3Result};
-    use std::collections::HashMap;
-    use std::sync::{Arc, RwLock};
-    use tokio::net::TcpListener;
 
     #[tokio::test]
     async fn it_sets_and_gets_values() -> anyhow::Result<()> {
@@ -1704,7 +1696,6 @@ mod local_s3_tests {
 pub mod test_server {
     use async_trait::async_trait;
     use bytes::Bytes;
-    use futures_util::TryStreamExt;
     use hyper::server::conn::http1;
     use hyper_util::rt::TokioIo;
     use s3s::dto::*;
@@ -1828,12 +1819,12 @@ pub mod test_server {
             };
 
             // Calculate MD5 for ETag
-            let e_tag_str = format!("{:x}", md5::compute(&data));
+            let e_tag = format!("{:x}", md5::compute(&data));
 
             let stored = StoredObject {
                 data,
                 content_type,
-                e_tag: e_tag_str.clone(),
+                e_tag: e_tag.clone(),
                 last_modified: Timestamp::from(SystemTime::now()),
             };
 
@@ -1843,7 +1834,7 @@ pub mod test_server {
             }
 
             let output = PutObjectOutput {
-                e_tag: Some(ETag::Strong(e_tag_str)),
+                e_tag: Some(ETag::Strong(e_tag)),
                 ..Default::default()
             };
             Ok(S3Response::new(output))

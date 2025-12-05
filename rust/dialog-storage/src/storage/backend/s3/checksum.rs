@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 ///
 /// Use a `Hasher` variant to compute a [`Checksum`] from data:
 ///
-/// ```ignore
+/// ```no_run
+/// use dialog_storage::s3::{Hasher};
 /// let checksum = Hasher::Sha256.checksum(b"hello world");
 /// ```
 #[derive(Debug, Clone, Copy)]
