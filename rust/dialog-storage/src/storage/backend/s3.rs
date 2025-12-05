@@ -245,11 +245,8 @@ impl Request for Delete {}
 ///
 /// [Object key naming guidelines]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html
 pub fn encode_s3_key(bytes: &[u8]) -> String {
-    let key_str = String::from_utf8_lossy(bytes);
-    let components: Vec<&str> = key_str.split('/').collect();
-
-    let encoded_components: Vec<String> = components
-        .iter()
+    String::from_utf8_lossy(bytes)
+        .split('/')
         .map(|component| {
             // Check if component contains only safe characters
             let is_safe = component.bytes().all(|b| {
@@ -265,9 +262,8 @@ pub fn encode_s3_key(bytes: &[u8]) -> String {
                 format!("!{}", component.as_bytes().to_base58())
             }
         })
-        .collect();
-
-    encoded_components.join("/")
+        .collect::<Vec<String>>()
+        .join("/")
 }
 
 /// Decode an S3-encoded key back to bytes.
@@ -275,35 +271,25 @@ pub fn encode_s3_key(bytes: &[u8]) -> String {
 /// Path components starting with `!` are base58-decoded.
 /// Other components are used as-is.
 pub fn decode_s3_key(encoded: &str) -> Result<Vec<u8>, S3StorageError> {
-    let components: Vec<&str> = encoded.split('/').collect();
-    let mut decoded_components: Vec<Vec<u8>> = Vec::new();
+    // Decode each path component: `!`-prefixed ones are base58, others are plain text
+    let components = encoded
+        .split('/')
+        .map(|component| {
+            if let Some(encoded_part) = component.strip_prefix('!') {
+                encoded_part.from_base58().map_err(|e| {
+                    S3StorageError::SerializationError(format!(
+                        "Invalid base58 encoding in component '{}': {:?}",
+                        component, e
+                    ))
+                })
+            } else {
+                Ok(component.as_bytes().to_vec())
+            }
+        })
+        .collect::<Result<Vec<Vec<u8>>, S3StorageError>>()?;
 
-    for component in components {
-        if let Some(encoded_part) = component.strip_prefix('!') {
-            // Base58 decode
-            let decoded = encoded_part.from_base58().map_err(|e| {
-                S3StorageError::SerializationError(format!(
-                    "Invalid base58 encoding in component '{}': {:?}",
-                    component, e
-                ))
-            })?;
-            decoded_components.push(decoded);
-        } else {
-            // Use as-is
-            decoded_components.push(component.as_bytes().to_vec());
-        }
-    }
-
-    // Join with /
-    let mut result = Vec::new();
-    for (i, component) in decoded_components.iter().enumerate() {
-        if i > 0 {
-            result.push(b'/');
-        }
-        result.extend_from_slice(component);
-    }
-
-    Ok(result)
+    // Join decoded components with `/` separator
+    Ok(components.join(&b'/'))
 }
 
 /// Errors that can occur when using the S3 storage backend.
