@@ -642,7 +642,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_url_without_prefix() -> Result<()> {
+    async fn it_builds_url_without_prefix() -> Result<()> {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public);
 
@@ -654,7 +654,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_url_with_prefix() -> Result<()> {
+    async fn it_builds_url_with_prefix() -> Result<()> {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public)
                 .with_prefix("prefix");
@@ -667,7 +667,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_url_with_trailing_slash() -> Result<()> {
+    async fn it_builds_url_with_trailing_slash() -> Result<()> {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com/", "bucket", Session::Public);
 
@@ -679,7 +679,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_s3_url_with_bucket_only() -> Result<()> {
+    async fn it_builds_url_with_bucket_only() -> Result<()> {
         let backend = S3::<Vec<u8>, Vec<u8>>::open(
             "https://s3.us-east-1.amazonaws.com",
             "my-bucket",
@@ -698,7 +698,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_s3_url_with_bucket_and_prefix() -> Result<()> {
+    async fn it_builds_url_with_bucket_and_prefix() -> Result<()> {
         let backend = S3::<Vec<u8>, Vec<u8>>::open(
             "https://s3.us-east-1.amazonaws.com",
             "my-bucket",
@@ -718,7 +718,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_s3_signed_url_generation() -> Result<()> {
+    async fn it_generates_signed_urls() -> Result<()> {
         let credentials = Credentials {
             access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
             secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
@@ -754,7 +754,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_put_with_checksum() -> Result<()> {
+    async fn it_creates_put_request_with_checksum() -> Result<()> {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url, b"test value").with_checksum(&Hasher::Sha256);
 
@@ -768,7 +768,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_put_without_checksum() -> Result<()> {
+    async fn it_creates_put_request_without_checksum() -> Result<()> {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url, b"test value");
 
@@ -780,7 +780,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_put_with_acl() -> Result<()> {
+    async fn it_creates_put_request_with_acl() -> Result<()> {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url, b"test value").with_acl(Acl::PublicRead);
 
@@ -791,7 +791,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_get_request() -> Result<()> {
+    async fn it_creates_get_request() -> Result<()> {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Get::new(url.clone());
 
@@ -805,7 +805,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_encode_s3_key_safe_chars() -> Result<()> {
+    async fn it_encodes_s3_key_safe_chars() -> Result<()> {
         // Safe characters should pass through unchanged
         assert_eq!(encode_s3_key(b"simple-key"), "simple-key");
         assert_eq!(encode_s3_key(b"with_underscore"), "with_underscore");
@@ -817,7 +817,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_encode_s3_key_path_structure() -> Result<()> {
+    async fn it_encodes_s3_key_path_structure() -> Result<()> {
         // Path structure should be preserved
         assert_eq!(encode_s3_key(b"path/to/key"), "path/to/key");
         assert_eq!(encode_s3_key(b"a/b/c"), "a/b/c");
@@ -827,7 +827,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_encode_s3_key_unsafe_chars() -> Result<()> {
+    async fn it_encodes_s3_key_unsafe_chars() -> Result<()> {
         // Unsafe characters trigger base58 encoding with ! prefix
         let encoded = encode_s3_key(b"user@example");
         assert!(encoded.starts_with('!'));
@@ -840,7 +840,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_encode_s3_key_binary() -> Result<()> {
+    async fn it_encodes_s3_key_binary() -> Result<()> {
         // Binary data gets base58 encoded
         let encoded = encode_s3_key(&[0x01, 0x02, 0x03]);
         assert!(encoded.starts_with('!'));
@@ -850,7 +850,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_decode_s3_key_safe_chars() -> Result<()> {
+    async fn it_decodes_s3_key_safe_chars() -> Result<()> {
         // Safe keys decode to themselves
         assert_eq!(decode_s3_key("simple-key").unwrap(), b"simple-key");
         assert_eq!(decode_s3_key("path/to/key").unwrap(), b"path/to/key");
@@ -860,7 +860,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_encode_decode_roundtrip() -> Result<()> {
+    async fn it_roundtrips_encode_decode() -> Result<()> {
         // Roundtrip encoding should preserve original data
         let original = b"test-key";
         let encoded = encode_s3_key(original);
@@ -884,7 +884,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_public_session_authorization() -> Result<()> {
+    async fn it_authorizes_public_session() -> Result<()> {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url.clone(), b"test").with_checksum(&Hasher::Sha256);
 
@@ -910,7 +910,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_s3_with_hasher() -> Result<()> {
+    async fn it_configures_s3_with_hasher() -> Result<()> {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public)
                 .with_hasher(Hasher::Sha256);
@@ -923,7 +923,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_decode_s3_key_invalid_base58() -> Result<()> {
+    async fn it_errors_on_invalid_base58() -> Result<()> {
         // Invalid base58 should return an error
         let result = decode_s3_key("!invalid@@base58");
         assert!(result.is_err());
@@ -933,7 +933,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_error_conversion() -> Result<()> {
+    async fn it_converts_errors_to_dialog_error() -> Result<()> {
         let error = S3StorageError::TransportError("test".into());
         let dialog_error: DialogStorageError = error.into();
         assert!(dialog_error.to_string().contains("test"));
@@ -943,7 +943,7 @@ mod unit_tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_delete_request() -> Result<()> {
+    async fn it_creates_delete_request() -> Result<()> {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Delete::new(url.clone());
 
@@ -958,7 +958,6 @@ mod unit_tests {
 
 /// Local S3 server tests using s3s for end-to-end testing
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[allow(unused_imports, unused_variables, unused_mut, dead_code)]
 mod local_s3_tests {
     use super::*;
     use crate::CborEncoder;
@@ -969,7 +968,7 @@ mod local_s3_tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
-    async fn test_local_s3_set_and_get() -> anyhow::Result<()> {
+    async fn it_sets_and_gets_values() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         // Using Session::Public for simplicity. Signed sessions are tested in
@@ -993,7 +992,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_multiple_operations() -> anyhow::Result<()> {
+    async fn it_performs_multiple_operations() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
@@ -1025,7 +1024,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_large_value() -> anyhow::Result<()> {
+    async fn it_handles_large_values() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
@@ -1044,7 +1043,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_delete() -> anyhow::Result<()> {
+    async fn it_deletes_values() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
@@ -1073,7 +1072,7 @@ mod local_s3_tests {
 
     #[cfg(feature = "s3-list")]
     #[tokio::test]
-    async fn test_local_s3_list() -> anyhow::Result<()> {
+    async fn it_lists_objects() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
@@ -1101,7 +1100,7 @@ mod local_s3_tests {
 
     #[cfg(feature = "s3-list")]
     #[tokio::test]
-    async fn test_local_s3_list_nonexistent_prefix() -> anyhow::Result<()> {
+    async fn it_lists_empty_for_nonexistent_prefix() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         let backend =
@@ -1120,7 +1119,7 @@ mod local_s3_tests {
 
     #[cfg(feature = "s3-list")]
     #[tokio::test]
-    async fn test_local_s3_list_nonexistent_bucket() -> anyhow::Result<()> {
+    async fn it_errors_on_nonexistent_bucket() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         let backend = S3::<Vec<u8>, Vec<u8>>::open(
@@ -1146,7 +1145,7 @@ mod local_s3_tests {
 
     #[cfg(feature = "s3-list")]
     #[tokio::test]
-    async fn test_local_s3_read_stream() -> anyhow::Result<()> {
+    async fn it_reads_stream() -> anyhow::Result<()> {
         use futures_util::TryStreamExt;
 
         let service = test_server::start(&["test-bucket"]).await?;
@@ -1178,7 +1177,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_returns_none_for_missing_values() -> anyhow::Result<()> {
+    async fn it_returns_none_for_missing_values() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         let backend =
@@ -1194,7 +1193,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_bulk_writes() -> anyhow::Result<()> {
+    async fn it_performs_bulk_writes() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
@@ -1222,7 +1221,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_integrates_with_memory_backend() -> anyhow::Result<()> {
+    async fn it_integrates_with_memory_backend() -> anyhow::Result<()> {
         use crate::StorageSource;
         use futures_util::StreamExt;
 
@@ -1257,7 +1256,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_uses_prefix() -> anyhow::Result<()> {
+    async fn it_uses_prefix() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         // Create two backends with different prefixes
@@ -1283,7 +1282,7 @@ mod local_s3_tests {
 
     #[cfg(feature = "s3-list")]
     #[tokio::test]
-    async fn test_local_s3_uses_prefix_listing() -> anyhow::Result<()> {
+    async fn it_uses_prefix_for_listing() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         // Create two backends with different prefixes
@@ -1311,7 +1310,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_overwrite_value() -> anyhow::Result<()> {
+    async fn it_overwrites_value() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
@@ -1331,7 +1330,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_binary_keys() -> anyhow::Result<()> {
+    async fn it_handles_binary_keys() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
@@ -1350,7 +1349,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_path_like_keys() -> anyhow::Result<()> {
+    async fn it_handles_path_like_keys() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
@@ -1369,7 +1368,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_encoded_key_segments() -> anyhow::Result<()> {
+    async fn it_handles_encoded_key_segments() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
@@ -1398,7 +1397,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_multi_segment_mixed_encoding() -> anyhow::Result<()> {
+    async fn it_handles_multi_segment_mixed_encoding() -> anyhow::Result<()> {
         let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
@@ -1433,7 +1432,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_key_encoding_roundtrip() -> anyhow::Result<()> {
+    async fn it_roundtrips_key_encoding() -> anyhow::Result<()> {
         // Test that encode and decode are inverse operations for valid UTF-8 keys
         // Note: Keys with invalid UTF-8 bytes (like 0xFF, 0x80) will be lossy
         // because encode_s3_key uses String::from_utf8_lossy internally.
@@ -1461,7 +1460,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_with_signed_session() -> anyhow::Result<()> {
+    async fn it_works_with_signed_session() -> anyhow::Result<()> {
         let service =
             test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"])
                 .await?;
@@ -1493,7 +1492,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_wrong_secret_key_fails() -> anyhow::Result<()> {
+    async fn it_fails_with_wrong_secret_key() -> anyhow::Result<()> {
         let service =
             test_server::start_with_auth("test-access-key", "correct-secret", &["test-bucket"])
                 .await?;
@@ -1521,7 +1520,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_wrong_access_key_fails() -> anyhow::Result<()> {
+    async fn it_fails_with_wrong_access_key() -> anyhow::Result<()> {
         let service =
             test_server::start_with_auth("correct-access-key", "test-secret", &["test-bucket"])
                 .await?;
@@ -1549,7 +1548,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_unsigned_request_to_auth_server_fails() -> anyhow::Result<()> {
+    async fn it_fails_unsigned_request_to_auth_server() -> anyhow::Result<()> {
         // Server requires authentication
         let service =
             test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"])
@@ -1571,7 +1570,7 @@ mod local_s3_tests {
     }
 
     #[tokio::test]
-    async fn test_local_s3_get_with_wrong_credentials_fails() -> anyhow::Result<()> {
+    async fn it_fails_get_with_wrong_credentials() -> anyhow::Result<()> {
         let service =
             test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"])
                 .await?;
@@ -1615,7 +1614,7 @@ mod local_s3_tests {
 
     #[cfg(feature = "s3-list")]
     #[tokio::test]
-    async fn test_local_s3_list_with_signed_session() -> anyhow::Result<()> {
+    async fn it_lists_with_signed_session() -> anyhow::Result<()> {
         let service =
             test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"])
                 .await?;
@@ -1656,7 +1655,7 @@ mod local_s3_tests {
 
     #[cfg(feature = "s3-list")]
     #[tokio::test]
-    async fn test_local_s3_read_stream_with_signed_session() -> anyhow::Result<()> {
+    async fn it_reads_stream_with_signed_session() -> anyhow::Result<()> {
         use futures_util::TryStreamExt;
 
         let service =
@@ -1698,7 +1697,6 @@ mod local_s3_tests {
 }
 
 #[cfg(all(any(test, feature = "s3-test-utils"), not(target_arch = "wasm32")))]
-#[allow(unused_imports, unused_variables, unused_mut, dead_code)]
 /// S3-compatible test server for integration testing.
 ///
 /// This module provides a simple in-memory S3-compatible server
@@ -2045,7 +2043,7 @@ mod s3_integration_tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_set_and_get() -> Result<()> {
+    async fn it_sets_and_gets_values() -> Result<()> {
         let mut backend = create_s3_backend_from_env()?;
 
         // Test data
@@ -2064,7 +2062,7 @@ mod s3_integration_tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_get_missing_key() -> Result<()> {
+    async fn it_returns_none_for_missing_key() -> Result<()> {
         let backend = create_s3_backend_from_env()?;
 
         // Try to get a key that doesn't exist
@@ -2078,7 +2076,7 @@ mod s3_integration_tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_overwrite_value() -> Result<()> {
+    async fn it_overwrites_values() -> Result<()> {
         let mut backend = create_s3_backend_from_env()?;
 
         let key = b"test-key-overwrite".to_vec();
@@ -2104,7 +2102,7 @@ mod s3_integration_tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_large_value() -> Result<()> {
+    async fn it_handles_large_values() -> Result<()> {
         let mut backend = create_s3_backend_from_env()?;
 
         let key = b"test-key-large".to_vec();
@@ -2123,7 +2121,7 @@ mod s3_integration_tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_multiple_keys() -> Result<()> {
+    async fn it_handles_multiple_keys() -> Result<()> {
         let mut backend = create_s3_backend_from_env()?;
 
         // Set multiple key-value pairs
@@ -2148,7 +2146,7 @@ mod s3_integration_tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_binary_data() -> Result<()> {
+    async fn it_handles_binary_data() -> Result<()> {
         let mut backend = create_s3_backend_from_env()?;
 
         let key = b"test-key-binary".to_vec();
@@ -2167,7 +2165,7 @@ mod s3_integration_tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_bulk_operations() -> Result<()> {
+    async fn it_performs_bulk_operations() -> Result<()> {
         let mut backend = create_s3_backend_from_env()?;
 
         // Create a stream of test data
@@ -2219,7 +2217,7 @@ mod s3_integration_tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_without_prefix() -> Result<()> {
+    async fn it_works_without_prefix() -> Result<()> {
         let mut backend = create_s3_backend_without_prefix_from_env()?;
 
         // Test data - use unique key to avoid conflicts
@@ -2238,7 +2236,7 @@ mod s3_integration_tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_encoded_key_segments() -> Result<()> {
+    async fn it_handles_encoded_key_segments() -> Result<()> {
         let mut backend = create_s3_backend_from_env()?;
 
         // Test key with path structure where one segment is safe and another needs encoding
@@ -2265,7 +2263,7 @@ mod s3_integration_tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_fully_encoded_key() -> Result<()> {
+    async fn it_handles_fully_encoded_key() -> Result<()> {
         let mut backend = create_s3_backend_from_env()?;
 
         // Test key that is fully binary (all segments need encoding)
@@ -2292,7 +2290,7 @@ mod s3_integration_tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_multi_segment_mixed_encoding() -> Result<()> {
+    async fn it_handles_multi_segment_mixed_encoding() -> Result<()> {
         let mut backend = create_s3_backend_from_env()?;
 
         // Test key with multiple segments: safe/unsafe/safe/unsafe pattern
@@ -2325,7 +2323,7 @@ mod s3_integration_tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_without_prefix_encoded_key() -> Result<()> {
+    async fn it_handles_encoded_key_without_prefix() -> Result<()> {
         let mut backend = create_s3_backend_without_prefix_from_env()?;
 
         // Test encoded key without prefix
@@ -2352,7 +2350,7 @@ mod s3_integration_tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_delete() -> Result<()> {
+    async fn it_deletes_values() -> Result<()> {
         let mut backend = create_s3_backend_from_env()?;
 
         let key = b"delete-integration-test".to_vec();
@@ -2377,7 +2375,7 @@ mod s3_integration_tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_list() -> Result<()> {
+    async fn it_lists_objects() -> Result<()> {
         let mut backend = create_s3_backend_from_env()?;
 
         // Use a unique prefix for this test
@@ -2436,7 +2434,7 @@ mod s3_integration_tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_read_stream() -> Result<()> {
+    async fn it_reads_stream() -> Result<()> {
         use futures_util::TryStreamExt;
 
         // Use a unique prefix for this test
@@ -2492,7 +2490,7 @@ mod s3_integration_tests {
     /// This verifies real S3/R2 behavior: a prefix is just a filter, not a path that must exist.
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    async fn test_s3_list_nonexistent_prefix() -> Result<()> {
+    async fn it_lists_empty_for_nonexistent_prefix() -> Result<()> {
         let credentials = Credentials {
             access_key_id: env!("R2S3_ACCESS_KEY_ID").into(),
             secret_access_key: env!("R2S3_SECRET_ACCESS_KEY").into(),

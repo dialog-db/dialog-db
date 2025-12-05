@@ -73,14 +73,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sha256_checksum() {
+    fn it_computes_sha256_checksum() {
         let checksum = Hasher::Sha256.checksum(b"hello world");
         // SHA-256 of "hello world" should be 32 bytes
         assert_eq!(checksum.as_bytes().len(), 32);
     }
 
     #[test]
-    fn test_checksum_to_string() {
+    fn it_formats_checksum_as_base64() {
         let checksum = Hasher::Sha256.checksum(b"hello world");
         // SHA-256 of "hello world" base64 encoded
         assert_eq!(
@@ -90,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn test_checksum_name() {
+    fn it_returns_checksum_algorithm_name() {
         let checksum = Hasher::Sha256.checksum(b"test");
         assert_eq!(checksum.name(), "sha256");
     }

@@ -580,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn test_s3_authorize() {
+    fn it_authorizes_s3_put_request() {
         let authority = Session::new_at_time(
             &test_credentials(),
             &test_service(),
@@ -600,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn test_r2_authorize() {
+    fn it_authorizes_r2_put_request() {
         let authority = Session::new_at_time(
             &test_credentials(),
             &test_service(),
@@ -619,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_request() {
+    fn it_authorizes_get_request() {
         let authority = Session::new_at_time(
             &test_credentials(),
             &test_service(),
@@ -637,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_request() {
+    fn it_authorizes_delete_request() {
         let authority = Session::new_at_time(
             &test_credentials(),
             &test_service(),
@@ -655,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn test_put_with_checksum() {
+    fn it_includes_checksum_header_in_put_request() {
         let authority = Session::new_at_time(
             &test_credentials(),
             &test_service(),
@@ -675,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn test_put_with_acl() {
+    fn it_includes_acl_in_put_request() {
         let authority = Session::new_at_time(
             &test_credentials(),
             &test_service(),
@@ -691,19 +691,19 @@ mod tests {
     }
 
     #[test]
-    fn test_hex_encode() {
+    fn it_hex_encodes_bytes() {
         assert_eq!(hex_encode(&[0x01, 0x02, 0x03, 0x0A, 0x0F]), "0102030a0f");
     }
 
     #[test]
-    fn test_percent_encode() {
+    fn it_percent_encodes_strings() {
         assert_eq!(percent_encode("abc123"), "abc123");
         assert_eq!(percent_encode("a b+c"), "a%20b%2Bc");
         assert_eq!(percent_encode("test/path"), "test%2Fpath");
     }
 
     #[test]
-    fn test_headers_with_checksum() {
+    fn it_includes_host_and_checksum_headers() {
         let authority = Session::new_at_time(
             &test_credentials(),
             &test_service(),

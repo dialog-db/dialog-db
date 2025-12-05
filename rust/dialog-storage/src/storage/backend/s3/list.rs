@@ -193,7 +193,7 @@ mod tests {
     use crate::s3::Session;
 
     #[test]
-    fn test_list_request() {
+    fn it_builds_list_request_with_prefix() {
         let url = Url::parse("https://s3.amazonaws.com/bucket").unwrap();
         let request = List::new(url.clone(), Some("prefix/"), None);
 
@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn test_list_request_with_continuation_token() {
+    fn it_builds_list_request_with_continuation_token() {
         let url = Url::parse("https://s3.amazonaws.com/bucket").unwrap();
         let request = List::new(url.clone(), None, Some("token123"));
 
@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_list_response_empty() {
+    fn it_parses_empty_list_response() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <ListBucketResult>
                 <IsTruncated>false</IsTruncated>
@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_list_response_with_keys() {
+    fn it_parses_list_response_with_keys() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <ListBucketResult>
                 <IsTruncated>false</IsTruncated>
@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_list_response_truncated() {
+    fn it_parses_truncated_list_response() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <ListBucketResult>
                 <IsTruncated>true</IsTruncated>
@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bucket_url() {
+    fn it_builds_bucket_url() {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public);
 
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_list_response_malformed_xml() {
+    fn it_errors_on_malformed_xml() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <ListBucketResult>
                 <IsTruncated>true</IsTruncated>
@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_list_response_unexpected_structure() {
+    fn it_errors_on_unexpected_xml_structure() {
         // XML is valid but doesn't have the expected ListBucketResult root element.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <SomeUnknownElement>
@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_list_response_wrong_root_element() {
+    fn it_errors_on_wrong_root_element() {
         // Valid XML structure but wrong root element name - should error.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <WrongRootElement>
@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_list_response_not_xml() {
+    fn it_errors_on_non_xml_input() {
         // Not XML at all - should error
         let xml = "this is not xml at all { json: maybe? }";
 
@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_list_response_no_such_bucket_error() {
+    fn it_parses_no_such_bucket_error() {
         // S3 returns an Error XML when bucket doesn't exist.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <Error>
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_list_response_access_denied_error() {
+    fn it_parses_access_denied_error() {
         // S3 returns an Error XML when access is denied.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <Error>
