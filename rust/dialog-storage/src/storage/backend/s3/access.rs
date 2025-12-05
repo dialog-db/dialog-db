@@ -115,8 +115,29 @@ impl SessionKey {
         Self(Self::hmac(&k_service, b"aws4_request"))
     }
 
+    /// Compute HMAC-SHA256.
     fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
-        let mut mac = Hmac::<Sha256>::new(key.into());
+        // # Why `.expect()` cannot panic
+        //
+        // The `Mac::new_from_slice` method returns `Result<Self, InvalidLength>` because
+        // the [`KeyInit`] trait in `crypto-common` defines it that way for the general case
+        // where some algorithms have key size restrictions.
+        //
+        // However, `Hmac<Sha256>` **overrides** `new_from_slice` in [`hmac::optim`] to accept
+        // keys of any length by using an internal `get_der_key` function that:
+        // - Pads keys shorter than 64 bytes (SHA-256 block size) with zeros
+        // - Hashes keys longer than 64 bytes, then pads the result
+        //
+        // The overridden implementation **always returns `Ok(...)`** - see:
+        // <https://docs.rs/hmac/0.12.1/src/hmac/optim.rs.html#152-173>
+        //
+        // Even `KeyInit::new()` in the hmac crate internally calls `new_from_slice().unwrap()`:
+        // <https://docs.rs/hmac/0.12.1/src/hmac/optim.rs.html#147-149>
+        //
+        // [`KeyInit`]: https://docs.rs/digest/latest/digest/trait.KeyInit.html
+        // [`hmac::optim`]: https://docs.rs/hmac/0.12.1/src/hmac/optim.rs.html
+        let mut mac = Hmac::<Sha256>::new_from_slice(key)
+            .expect("HMAC-SHA256 accepts keys of any size; see doc comment");
         mac.update(data);
         mac.finalize().into_bytes().to_vec()
     }
