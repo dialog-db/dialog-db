@@ -92,10 +92,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - flags: '--features s3'
-          - flags: '--features s3 --release'
-          - flags: '--features s3 --target wasm32-unknown-unknown'
-          - flags: '--features s3 --target wasm32-unknown-unknown --release'
+          - flags: '--features s3,s3-list'
+          - flags: '--features s3,s3-list --release'
+          - flags: '--features s3,s3-list --target wasm32-unknown-unknown'
+          - flags: '--features s3,s3-list --target wasm32-unknown-unknown --release'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

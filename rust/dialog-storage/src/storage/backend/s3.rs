@@ -931,7 +931,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_set_and_get() -> anyhow::Result<()> {
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         // Using Session::Public for simplicity. Signed sessions are tested in
         // test_local_s3_with_signed_session using start_with_auth().
@@ -955,7 +955,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_multiple_operations() -> anyhow::Result<()> {
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
             S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
@@ -987,7 +987,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_large_value() -> anyhow::Result<()> {
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
             S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
@@ -1006,7 +1006,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_delete() -> anyhow::Result<()> {
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
             S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
@@ -1035,7 +1035,7 @@ mod local_s3_tests {
     #[cfg(feature = "s3-list")]
     #[tokio::test]
     async fn test_local_s3_list() -> anyhow::Result<()> {
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
             S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
@@ -1062,10 +1062,55 @@ mod local_s3_tests {
 
     #[cfg(feature = "s3-list")]
     #[tokio::test]
+    async fn test_local_s3_list_nonexistent_prefix() -> anyhow::Result<()> {
+        let service = test_server::start(&["test-bucket"]).await?;
+
+        let backend =
+            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
+                .with_prefix("nonexistent-prefix-that-does-not-exist");
+
+        // List objects with a prefix that has no objects - should return empty list
+        let result = backend.list(None).await?;
+
+        assert!(result.keys.is_empty());
+        assert!(!result.is_truncated);
+        assert!(result.next_continuation_token.is_none());
+
+        Ok(())
+    }
+
+    #[cfg(feature = "s3-list")]
+    #[tokio::test]
+    async fn test_local_s3_list_nonexistent_bucket() -> anyhow::Result<()> {
+        let service = test_server::start(&["test-bucket"]).await?;
+
+        let backend = S3::<Vec<u8>, Vec<u8>>::open(
+            service.endpoint(),
+            "bucket-that-does-not-exist",
+            Session::Public,
+        );
+
+        // S3 returns 404 NoSuchBucket error when listing a non-existent bucket.
+        // See: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_Errors
+        let result = backend.list(None).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, S3StorageError::ServiceError(ref msg) if msg.contains("NoSuchBucket")),
+            "Expected NoSuchBucket error for non-existent bucket, got: {:?}",
+            err
+        );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "s3-list")]
+    #[tokio::test]
     async fn test_local_s3_read_stream() -> anyhow::Result<()> {
         use futures_util::TryStreamExt;
 
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
             S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
@@ -1095,7 +1140,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_returns_none_for_missing_values() -> anyhow::Result<()> {
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
@@ -1111,7 +1156,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_bulk_writes() -> anyhow::Result<()> {
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
             S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
@@ -1142,7 +1187,7 @@ mod local_s3_tests {
         use crate::StorageSource;
         use futures_util::StreamExt;
 
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         let mut s3_backend =
             S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
@@ -1174,7 +1219,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_uses_prefix() -> anyhow::Result<()> {
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         // Create two backends with different prefixes
         let mut backend1 =
@@ -1200,7 +1245,7 @@ mod local_s3_tests {
     #[cfg(feature = "s3-list")]
     #[tokio::test]
     async fn test_local_s3_uses_prefix_listing() -> anyhow::Result<()> {
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         // Create two backends with different prefixes
         let mut backend1 =
@@ -1228,7 +1273,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_overwrite_value() -> anyhow::Result<()> {
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
             S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
@@ -1248,7 +1293,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_binary_keys() -> anyhow::Result<()> {
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
             S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
@@ -1267,7 +1312,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_path_like_keys() -> anyhow::Result<()> {
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
             S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
@@ -1286,7 +1331,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_encoded_key_segments() -> anyhow::Result<()> {
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
             S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
@@ -1315,7 +1360,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_multi_segment_mixed_encoding() -> anyhow::Result<()> {
-        let service = test_server::start().await?;
+        let service = test_server::start(&["test-bucket"]).await?;
 
         let mut backend =
             S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
@@ -1378,7 +1423,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_with_signed_session() -> anyhow::Result<()> {
-        let service = test_server::start_with_auth("test-access-key", "test-secret-key").await?;
+        let service = test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"]).await?;
 
         // Create credentials matching the test server
         let credentials = super::Credentials {
@@ -1408,7 +1453,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_wrong_secret_key_fails() -> anyhow::Result<()> {
-        let service = test_server::start_with_auth("test-access-key", "correct-secret").await?;
+        let service = test_server::start_with_auth("test-access-key", "correct-secret", &["test-bucket"]).await?;
 
         // Create credentials with WRONG secret key
         let credentials = super::Credentials {
@@ -1434,7 +1479,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_wrong_access_key_fails() -> anyhow::Result<()> {
-        let service = test_server::start_with_auth("correct-access-key", "test-secret").await?;
+        let service = test_server::start_with_auth("correct-access-key", "test-secret", &["test-bucket"]).await?;
 
         // Create credentials with WRONG access key
         let credentials = super::Credentials {
@@ -1461,7 +1506,7 @@ mod local_s3_tests {
     #[tokio::test]
     async fn test_local_s3_unsigned_request_to_auth_server_fails() -> anyhow::Result<()> {
         // Server requires authentication
-        let service = test_server::start_with_auth("test-access-key", "test-secret-key").await?;
+        let service = test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"]).await?;
 
         // Client uses Session::Public (no signing)
         let mut backend =
@@ -1480,7 +1525,7 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_get_with_wrong_credentials_fails() -> anyhow::Result<()> {
-        let service = test_server::start_with_auth("test-access-key", "test-secret-key").await?;
+        let service = test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"]).await?;
 
         // First, set a value with correct credentials
         let correct_credentials = super::Credentials {
@@ -1522,7 +1567,7 @@ mod local_s3_tests {
     #[cfg(feature = "s3-list")]
     #[tokio::test]
     async fn test_local_s3_list_with_signed_session() -> anyhow::Result<()> {
-        let service = test_server::start_with_auth("test-access-key", "test-secret-key").await?;
+        let service = test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"]).await?;
 
         // Create credentials matching the test server
         let credentials = super::Credentials {
@@ -1563,7 +1608,7 @@ mod local_s3_tests {
     async fn test_local_s3_read_stream_with_signed_session() -> anyhow::Result<()> {
         use futures_util::TryStreamExt;
 
-        let service = test_server::start_with_auth("test-access-key", "test-secret-key").await?;
+        let service = test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"]).await?;
 
         let credentials = super::Credentials {
             access_key_id: "test-access-key".into(),
@@ -1661,6 +1706,14 @@ pub mod test_server {
     }
 
     impl InMemoryS3 {
+        /// Create a bucket if it doesn't exist.
+        pub async fn create_bucket(&self, bucket: &str) {
+            let mut buckets = self.buckets.write().await;
+            if !buckets.contains_key(bucket) {
+                buckets.insert(bucket.to_string(), HashMap::new());
+            }
+        }
+
         async fn get_or_create_bucket(
             &self,
             bucket: &str,
@@ -1791,20 +1844,22 @@ pub mod test_server {
             let prefix = req.input.prefix.as_deref().unwrap_or("");
 
             let buckets = self.buckets.read().await;
-            let mut contents = Vec::new();
 
-            if let Some(bucket_contents) = buckets.get(bucket) {
-                for (key, obj) in bucket_contents.iter() {
-                    // Filter by prefix
-                    if key.starts_with(prefix) {
-                        contents.push(Object {
-                            key: Some(key.clone()),
-                            size: Some(obj.data.len() as i64),
-                            e_tag: Some(ETag::Strong(obj.e_tag.clone())),
-                            last_modified: Some(obj.last_modified.clone()),
-                            ..Default::default()
-                        });
-                    }
+            // Return NoSuchBucket error if bucket doesn't exist (matches real S3 behavior)
+            // See: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_Errors
+            let bucket_contents = buckets.get(bucket).ok_or_else(|| s3_error!(NoSuchBucket))?;
+
+            let mut contents = Vec::new();
+            for (key, obj) in bucket_contents.iter() {
+                // Filter by prefix
+                if key.starts_with(prefix) {
+                    contents.push(Object {
+                        key: Some(key.clone()),
+                        size: Some(obj.data.len() as i64),
+                        e_tag: Some(ETag::Strong(obj.e_tag.clone())),
+                        last_modified: Some(obj.last_modified.clone()),
+                        ..Default::default()
+                    });
                 }
             }
 
@@ -1821,23 +1876,35 @@ pub mod test_server {
         }
     }
 
-    /// Start a local S3-compatible test server.
+    /// Start a local S3-compatible test server with pre-created buckets.
     ///
     /// Returns a handle that can be used to get the endpoint URL and stop the server.
-    pub async fn start() -> anyhow::Result<Service> {
-        start_internal(None).await
+    pub async fn start(buckets: &[&str]) -> anyhow::Result<Service> {
+        start_internal(None, buckets).await
     }
 
-    /// Start a test server with authentication enabled.
-    pub async fn start_with_auth(access_key: &str, secret_key: &str) -> anyhow::Result<Service> {
+    /// Start a test server with authentication and pre-created buckets.
+    pub async fn start_with_auth(
+        access_key: &str,
+        secret_key: &str,
+        buckets: &[&str],
+    ) -> anyhow::Result<Service> {
         let auth = s3s::auth::SimpleAuth::from_single(access_key, secret_key);
-        start_internal(Some(auth)).await
+        start_internal(Some(auth), buckets).await
     }
 
-    async fn start_internal(auth: Option<s3s::auth::SimpleAuth>) -> anyhow::Result<Service> {
+    async fn start_internal(
+        auth: Option<s3s::auth::SimpleAuth>,
+        buckets: &[&str],
+    ) -> anyhow::Result<Service> {
         use std::sync::Arc;
 
         let storage = InMemoryS3::default();
+
+        // Pre-create buckets
+        for bucket in buckets {
+            storage.create_bucket(bucket).await;
+        }
 
         let mut builder = S3ServiceBuilder::new(storage.clone());
         if let Some(auth) = auth {
@@ -2363,6 +2430,39 @@ mod s3_integration_tests {
         let keys: Vec<&[u8]> = items.iter().map(|(k, _)| k.as_slice()).collect();
         assert!(keys.contains(&b"stream-a".as_slice()));
         assert!(keys.contains(&b"stream-b".as_slice()));
+
+        Ok(())
+    }
+
+    /// Test that listing with a nonexistent prefix returns an empty list (not an error).
+    ///
+    /// This verifies real S3/R2 behavior: a prefix is just a filter, not a path that must exist.
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    async fn test_s3_list_nonexistent_prefix() -> Result<()> {
+        let credentials = Credentials {
+            access_key_id: env!("R2S3_ACCESS_KEY_ID").into(),
+            secret_access_key: env!("R2S3_SECRET_ACCESS_KEY").into(),
+            session_token: option_env!("R2S3_SESSION_TOKEN").map(|v| v.into()),
+        };
+
+        let region = env!("R2S3_REGION");
+        let service = Service::s3(region);
+        let session = Session::new(&credentials, &service, 3600);
+
+        let endpoint = env!("R2S3_HOST");
+        let bucket = env!("R2S3_BUCKET");
+
+        // Use a prefix that definitely doesn't exist
+        let backend = S3::<Vec<u8>, Vec<u8>>::open(endpoint, bucket, session)
+            .with_prefix("nonexistent-prefix-that-should-not-exist-12345");
+
+        // Listing should return empty result, not an error
+        let result = backend.list(None).await?;
+
+        assert!(result.keys.is_empty());
+        assert!(!result.is_truncated);
+        assert!(result.next_continuation_token.is_none());
 
         Ok(())
     }
