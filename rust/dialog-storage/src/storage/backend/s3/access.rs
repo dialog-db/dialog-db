@@ -107,6 +107,10 @@ impl Acl {
 struct SessionKey(Vec<u8>);
 
 impl SessionKey {
+    /// Derive a signing key from credentials using the AWS4 key derivation algorithm.
+    ///
+    /// The key is derived through an HMAC chain:
+    /// `HMAC(HMAC(HMAC(HMAC("AWS4" + secret, date), region), service), "aws4_request")`
     fn new(credentials: &Credentials, service: &Service, date: &[u8]) -> Self {
         let secret = format!("AWS4{}", credentials.secret_access_key);
         // Derive signing key: HMAC chain of date -> region -> service -> "aws4_request"
@@ -408,6 +412,9 @@ pub enum SigningError {
 }
 
 
+/// Get the current time as a UTC datetime.
+///
+/// Uses platform-appropriate time sources (std on native, web-time on wasm).
 fn current_time() -> DateTime<Utc> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -419,6 +426,9 @@ fn current_time() -> DateTime<Utc> {
     }
 }
 
+/// Encode bytes as lowercase hexadecimal string.
+///
+/// Used for encoding SHA-256 hashes in AWS signature strings.
 fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -427,6 +437,10 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
+/// Percent-encode a string according to RFC 3986.
+///
+/// Unreserved characters (A-Z, a-z, 0-9, `-`, `_`, `.`, `~`) are not encoded.
+/// All other bytes are encoded as `%XX` where XX is the uppercase hex value.
 fn percent_encode(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 3);
     for byte in s.bytes() {
@@ -442,6 +456,10 @@ fn percent_encode(s: &str) -> String {
     result
 }
 
+/// Percent-encode a URL path, preserving forward slashes.
+///
+/// Like [`percent_encode`], but keeps `/` characters unencoded to preserve
+/// the path hierarchy in S3 keys.
 fn percent_encode_path(path: &str) -> String {
     percent_encode(path).replace("%2F", "/")
 }
