@@ -2012,7 +2012,9 @@ mod s3_integration_tests {
     use anyhow::Result;
 
     #[cfg(target_arch = "wasm32")]
-    use wasm_bindgen_test::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     /// Helper to create an S3 backend from environment variables.
     fn create_s3_backend_from_env() -> Result<S3<Vec<u8>, Vec<u8>>> {
