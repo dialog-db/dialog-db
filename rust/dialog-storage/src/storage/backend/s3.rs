@@ -567,7 +567,7 @@ where
 {
     async fn write<S>(&mut self, source: S) -> Result<(), Self::Error>
     where
-        S: Stream<Item = Result<(Self::Key, Self::Value), Self::Error>> + Send,
+        S: Stream<Item = Result<(Self::Key, Self::Value), Self::Error>>,
     {
         futures_util::pin_mut!(source);
         while let Some(result) = source.next().await {
@@ -1423,7 +1423,9 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_with_signed_session() -> anyhow::Result<()> {
-        let service = test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"]).await?;
+        let service =
+            test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"])
+                .await?;
 
         // Create credentials matching the test server
         let credentials = super::Credentials {
@@ -1453,7 +1455,9 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_wrong_secret_key_fails() -> anyhow::Result<()> {
-        let service = test_server::start_with_auth("test-access-key", "correct-secret", &["test-bucket"]).await?;
+        let service =
+            test_server::start_with_auth("test-access-key", "correct-secret", &["test-bucket"])
+                .await?;
 
         // Create credentials with WRONG secret key
         let credentials = super::Credentials {
@@ -1479,7 +1483,9 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_wrong_access_key_fails() -> anyhow::Result<()> {
-        let service = test_server::start_with_auth("correct-access-key", "test-secret", &["test-bucket"]).await?;
+        let service =
+            test_server::start_with_auth("correct-access-key", "test-secret", &["test-bucket"])
+                .await?;
 
         // Create credentials with WRONG access key
         let credentials = super::Credentials {
@@ -1506,7 +1512,9 @@ mod local_s3_tests {
     #[tokio::test]
     async fn test_local_s3_unsigned_request_to_auth_server_fails() -> anyhow::Result<()> {
         // Server requires authentication
-        let service = test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"]).await?;
+        let service =
+            test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"])
+                .await?;
 
         // Client uses Session::Public (no signing)
         let mut backend =
@@ -1525,7 +1533,9 @@ mod local_s3_tests {
 
     #[tokio::test]
     async fn test_local_s3_get_with_wrong_credentials_fails() -> anyhow::Result<()> {
-        let service = test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"]).await?;
+        let service =
+            test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"])
+                .await?;
 
         // First, set a value with correct credentials
         let correct_credentials = super::Credentials {
@@ -1567,7 +1577,9 @@ mod local_s3_tests {
     #[cfg(feature = "s3-list")]
     #[tokio::test]
     async fn test_local_s3_list_with_signed_session() -> anyhow::Result<()> {
-        let service = test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"]).await?;
+        let service =
+            test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"])
+                .await?;
 
         // Create credentials matching the test server
         let credentials = super::Credentials {
@@ -1608,7 +1620,9 @@ mod local_s3_tests {
     async fn test_local_s3_read_stream_with_signed_session() -> anyhow::Result<()> {
         use futures_util::TryStreamExt;
 
-        let service = test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"]).await?;
+        let service =
+            test_server::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"])
+                .await?;
 
         let credentials = super::Credentials {
             access_key_id: "test-access-key".into(),
