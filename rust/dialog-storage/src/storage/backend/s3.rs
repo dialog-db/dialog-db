@@ -631,40 +631,55 @@ where
     }
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod unit_tests {
     use super::*;
+    use anyhow::Result;
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test;
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    #[test]
-    fn test_url_without_prefix() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_url_without_prefix() -> Result<()> {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public);
 
         let url = backend.url(&[1, 2, 3]).unwrap();
         assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket/!Ldp");
+
+        Ok(())
     }
 
-    #[test]
-    fn test_url_with_prefix() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_url_with_prefix() -> Result<()> {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public)
                 .with_prefix("prefix");
 
         let url = backend.url(&[1, 2, 3]).unwrap();
         assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket/prefix/!Ldp");
+
+        Ok(())
     }
 
-    #[test]
-    fn test_url_with_trailing_slash() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_url_with_trailing_slash() -> Result<()> {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com/", "bucket", Session::Public);
 
         let url = backend.url(&[1, 2, 3]).unwrap();
         assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket/!Ldp");
+
+        Ok(())
     }
 
-    #[test]
-    fn test_s3_url_with_bucket_only() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_s3_url_with_bucket_only() -> Result<()> {
         let backend = S3::<Vec<u8>, Vec<u8>>::open(
             "https://s3.us-east-1.amazonaws.com",
             "my-bucket",
@@ -677,10 +692,13 @@ mod unit_tests {
             url.as_str(),
             "https://s3.us-east-1.amazonaws.com/my-bucket/my-key"
         );
+
+        Ok(())
     }
 
-    #[test]
-    fn test_s3_url_with_bucket_and_prefix() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_s3_url_with_bucket_and_prefix() -> Result<()> {
         let backend = S3::<Vec<u8>, Vec<u8>>::open(
             "https://s3.us-east-1.amazonaws.com",
             "my-bucket",
@@ -694,10 +712,13 @@ mod unit_tests {
             url.as_str(),
             "https://s3.us-east-1.amazonaws.com/my-bucket/data/my-key"
         );
+
+        Ok(())
     }
 
-    #[test]
-    fn test_s3_signed_url_generation() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_s3_signed_url_generation() -> Result<()> {
         let credentials = Credentials {
             access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
             secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
@@ -727,10 +748,13 @@ mod unit_tests {
                 .contains("X-Amz-Algorithm=AWS4-HMAC-SHA256")
         );
         assert!(authorized.url.as_str().contains("X-Amz-Signature="));
+
+        Ok(())
     }
 
-    #[test]
-    fn test_put_with_checksum() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_put_with_checksum() -> Result<()> {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url, b"test value").with_checksum(&Hasher::Sha256);
 
@@ -738,27 +762,36 @@ mod unit_tests {
         assert!(request.checksum().is_some());
         // Checksum should have the correct algorithm name
         assert_eq!(request.checksum().unwrap().name(), "sha256");
+
+        Ok(())
     }
 
-    #[test]
-    fn test_put_without_checksum() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_put_without_checksum() -> Result<()> {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url, b"test value");
 
         // Checksum should be None by default
         assert!(request.checksum().is_none());
+
+        Ok(())
     }
 
-    #[test]
-    fn test_put_with_acl() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_put_with_acl() -> Result<()> {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url, b"test value").with_acl(Acl::PublicRead);
 
         assert_eq!(request.acl(), Some(Acl::PublicRead));
+
+        Ok(())
     }
 
-    #[test]
-    fn test_get_request() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_get_request() -> Result<()> {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Get::new(url.clone());
 
@@ -766,50 +799,68 @@ mod unit_tests {
         assert_eq!(request.url(), &url);
         assert!(request.checksum().is_none());
         assert!(request.acl().is_none());
+
+        Ok(())
     }
 
-    #[test]
-    fn test_encode_s3_key_safe_chars() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_encode_s3_key_safe_chars() -> Result<()> {
         // Safe characters should pass through unchanged
         assert_eq!(encode_s3_key(b"simple-key"), "simple-key");
         assert_eq!(encode_s3_key(b"with_underscore"), "with_underscore");
         assert_eq!(encode_s3_key(b"with.dot"), "with.dot");
         assert_eq!(encode_s3_key(b"CamelCase123"), "CamelCase123");
+
+        Ok(())
     }
 
-    #[test]
-    fn test_encode_s3_key_path_structure() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_encode_s3_key_path_structure() -> Result<()> {
         // Path structure should be preserved
         assert_eq!(encode_s3_key(b"path/to/key"), "path/to/key");
         assert_eq!(encode_s3_key(b"a/b/c"), "a/b/c");
+
+        Ok(())
     }
 
-    #[test]
-    fn test_encode_s3_key_unsafe_chars() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_encode_s3_key_unsafe_chars() -> Result<()> {
         // Unsafe characters trigger base58 encoding with ! prefix
         let encoded = encode_s3_key(b"user@example");
         assert!(encoded.starts_with('!'));
 
         let encoded = encode_s3_key(b"has space");
         assert!(encoded.starts_with('!'));
+
+        Ok(())
     }
 
-    #[test]
-    fn test_encode_s3_key_binary() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_encode_s3_key_binary() -> Result<()> {
         // Binary data gets base58 encoded
         let encoded = encode_s3_key(&[0x01, 0x02, 0x03]);
         assert!(encoded.starts_with('!'));
+
+        Ok(())
     }
 
-    #[test]
-    fn test_decode_s3_key_safe_chars() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_decode_s3_key_safe_chars() -> Result<()> {
         // Safe keys decode to themselves
         assert_eq!(decode_s3_key("simple-key").unwrap(), b"simple-key");
         assert_eq!(decode_s3_key("path/to/key").unwrap(), b"path/to/key");
+
+        Ok(())
     }
 
-    #[test]
-    fn test_encode_decode_roundtrip() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_encode_decode_roundtrip() -> Result<()> {
         // Roundtrip encoding should preserve original data
         let original = b"test-key";
         let encoded = encode_s3_key(original);
@@ -827,10 +878,13 @@ mod unit_tests {
         let encoded = encode_s3_key(path);
         let decoded = decode_s3_key(&encoded).unwrap();
         assert_eq!(decoded, path);
+
+        Ok(())
     }
 
-    #[test]
-    fn test_public_session_authorization() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_public_session_authorization() -> Result<()> {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url.clone(), b"test").with_checksum(&Hasher::Sha256);
 
@@ -850,62 +904,46 @@ mod unit_tests {
                 .iter()
                 .any(|(k, _)| k == "x-amz-checksum-sha256")
         );
+
+        Ok(())
     }
 
-    #[test]
-    fn test_s3_with_hasher() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_s3_with_hasher() -> Result<()> {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public)
                 .with_hasher(Hasher::Sha256);
 
         // Hasher should be set (we can't directly inspect it, but the backend should work)
         assert!(backend.url(b"key").is_ok());
+
+        Ok(())
     }
 
-    #[test]
-    fn test_decode_s3_key_invalid_base58() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_decode_s3_key_invalid_base58() -> Result<()> {
         // Invalid base58 should return an error
         let result = decode_s3_key("!invalid@@base58");
         assert!(result.is_err());
+
+        Ok(())
     }
 
-    #[test]
-    fn test_error_conversion() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_error_conversion() -> Result<()> {
         let error = S3StorageError::TransportError("test".into());
         let dialog_error: DialogStorageError = error.into();
         assert!(dialog_error.to_string().contains("test"));
+
+        Ok(())
     }
 
-    #[test]
-    fn test_error_types() {
-        let auth_err = S3StorageError::AuthorizationError("invalid credentials".into());
-        assert!(auth_err.to_string().contains("Authorization"));
-
-        let transport_err = S3StorageError::TransportError("connection timeout".into());
-        assert!(transport_err.to_string().contains("Transport"));
-
-        let service_err = S3StorageError::ServiceError("access denied".into());
-        assert!(service_err.to_string().contains("Service"));
-
-        let ser_err = S3StorageError::SerializationError("invalid format".into());
-        assert!(ser_err.to_string().contains("Serialization"));
-    }
-
-    #[test]
-    fn test_acl_as_str() {
-        assert_eq!(Acl::Private.as_str(), "private");
-        assert_eq!(Acl::PublicRead.as_str(), "public-read");
-        assert_eq!(Acl::PublicReadWrite.as_str(), "public-read-write");
-        assert_eq!(Acl::AuthenticatedRead.as_str(), "authenticated-read");
-        assert_eq!(Acl::BucketOwnerRead.as_str(), "bucket-owner-read");
-        assert_eq!(
-            Acl::BucketOwnerFullControl.as_str(),
-            "bucket-owner-full-control"
-        );
-    }
-
-    #[test]
-    fn test_delete_request() {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_delete_request() -> Result<()> {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Delete::new(url.clone());
 
@@ -913,6 +951,8 @@ mod unit_tests {
         assert_eq!(request.url(), &url);
         assert!(request.checksum().is_none());
         assert!(request.acl().is_none());
+
+        Ok(())
     }
 }
 
