@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as FmtWrite;
+use thiserror::Error;
 use url::Url;
 
 use super::Checksum;
@@ -396,30 +397,16 @@ impl std::fmt::Display for Signature {
 }
 
 /// Errors that can occur during signing.
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum SigningError {
     /// The endpoint URL is invalid (e.g., missing host).
+    #[error("invalid endpoint: {0}")]
     InvalidEndpoint(String),
     /// Failed to parse a URL.
-    UrlParse(url::ParseError),
+    #[error("URL parse error: {0}")]
+    UrlParse(#[from] url::ParseError),
 }
 
-impl std::fmt::Display for SigningError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidEndpoint(msg) => write!(f, "invalid endpoint: {}", msg),
-            Self::UrlParse(e) => write!(f, "URL parse error: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for SigningError {}
-
-impl From<url::ParseError> for SigningError {
-    fn from(e: url::ParseError) -> Self {
-        Self::UrlParse(e)
-    }
-}
 
 fn current_time() -> DateTime<Utc> {
     #[cfg(target_arch = "wasm32")]
