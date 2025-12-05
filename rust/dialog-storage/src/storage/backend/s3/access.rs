@@ -183,11 +183,11 @@ impl Session {
     /// * `service` - The cloud storage service configuration
     /// * `duration` - URL signature expiration in seconds (e.g., 86400 = 24 hours)
     pub fn new(credentials: &Credentials, service: &Service, duration: u64) -> Self {
-        Self::new_at(credentials, service, duration, current_time())
+        Self::new_at_time(credentials, service, duration, current_time())
     }
 
     /// Create a new authorized session with a specific timestamp (useful for testing).
-    pub fn new_at(
+    pub fn new_at_time(
         credentials: &Credentials,
         service: &Service,
         duration: u64,
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn test_s3_authorize() {
-        let authority = Session::new_at(
+        let authority = Session::new_at_time(
             &test_credentials(),
             &test_service(),
             TEST_DURATION,
@@ -597,7 +597,7 @@ mod tests {
 
     #[test]
     fn test_r2_authorize() {
-        let authority = Session::new_at(
+        let authority = Session::new_at_time(
             &test_credentials(),
             &test_service(),
             TEST_DURATION,
@@ -616,7 +616,7 @@ mod tests {
 
     #[test]
     fn test_get_request() {
-        let authority = Session::new_at(
+        let authority = Session::new_at_time(
             &test_credentials(),
             &test_service(),
             TEST_DURATION,
@@ -634,7 +634,7 @@ mod tests {
 
     #[test]
     fn test_delete_request() {
-        let authority = Session::new_at(
+        let authority = Session::new_at_time(
             &test_credentials(),
             &test_service(),
             TEST_DURATION,
@@ -652,7 +652,7 @@ mod tests {
 
     #[test]
     fn test_put_with_checksum() {
-        let authority = Session::new_at(
+        let authority = Session::new_at_time(
             &test_credentials(),
             &test_service(),
             TEST_DURATION,
@@ -672,7 +672,7 @@ mod tests {
 
     #[test]
     fn test_put_with_acl() {
-        let authority = Session::new_at(
+        let authority = Session::new_at_time(
             &test_credentials(),
             &test_service(),
             TEST_DURATION,
@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn test_headers_with_checksum() {
-        let authority = Session::new_at(
+        let authority = Session::new_at_time(
             &test_credentials(),
             &test_service(),
             TEST_DURATION,
