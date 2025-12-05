@@ -100,7 +100,7 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use base58::{FromBase58, ToBase58};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use reqwest;
 use thiserror::Error;
 use url::Url;
@@ -544,6 +544,11 @@ where
     }
 }
 
+/// Maximum number of concurrent S3 PUT requests when writing.
+/// Modern mainstream browsers typically enforce a limit of 6 concurren
+/// requests on HTTP/1.1 which is what S3 is.
+const MAX_CONCURRENT_WRITES: usize = 6;
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Key, Value> StorageSink for S3<Key, Value>
@@ -555,12 +560,20 @@ where
     where
         S: Stream<Item = Result<(Self::Key, Self::Value), Self::Error>> + ConditionalSend,
     {
-        futures_util::pin_mut!(source);
-        while let Some(result) = source.next().await {
-            let (key, value) = result?;
-            self.set(key, value).await?;
-        }
-        Ok(())
+        let storage = self.clone();
+
+        // Map each item to a set operation, then run up to MAX_CONCURRENT_WRITES in parallel
+        source
+            .map(|result| {
+                let mut storage = storage.clone();
+                async move {
+                    let (key, value) = result?;
+                    storage.set(key, value).await
+                }
+            })
+            .buffer_unordered(MAX_CONCURRENT_WRITES)
+            .try_collect()
+            .await
     }
 }
 
