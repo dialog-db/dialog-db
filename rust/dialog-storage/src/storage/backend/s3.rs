@@ -99,7 +99,7 @@ use std::marker::PhantomData;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use base58::{FromBase58, ToBase58};
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSend, ConditionalSync};
 use futures_util::{Stream, StreamExt};
 use reqwest;
 use thiserror::Error;
@@ -567,7 +567,7 @@ where
 {
     async fn write<S>(&mut self, source: S) -> Result<(), Self::Error>
     where
-        S: Stream<Item = Result<(Self::Key, Self::Value), Self::Error>>,
+        S: Stream<Item = Result<(Self::Key, Self::Value), Self::Error>> + ConditionalSend,
     {
         futures_util::pin_mut!(source);
         while let Some(result) = source.next().await {
