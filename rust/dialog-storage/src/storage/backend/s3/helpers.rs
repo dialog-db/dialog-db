@@ -7,9 +7,9 @@ use bytes::Bytes;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use s3s::dto::{
-    DeleteObjectInput, DeleteObjectOutput, ETag, GetObjectInput, GetObjectOutput,
-    HeadObjectInput, HeadObjectOutput, ListObjectsV2Input, ListObjectsV2Output, Object,
-    PutObjectInput, PutObjectOutput, StreamingBlob, Timestamp,
+    DeleteObjectInput, DeleteObjectOutput, ETag, GetObjectInput, GetObjectOutput, HeadObjectInput,
+    HeadObjectOutput, ListObjectsV2Input, ListObjectsV2Output, Object, PutObjectInput,
+    PutObjectOutput, StreamingBlob, Timestamp,
 };
 use s3s::service::S3ServiceBuilder;
 use s3s::{S3, S3Request, S3Response, S3Result, s3_error};
