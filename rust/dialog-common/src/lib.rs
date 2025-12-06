@@ -4,9 +4,7 @@
 //! across multiple other crates. Their chief quality is that they have
 //! virtually zero dependencies.
 
-// Allow the crate to refer to itself as `dialog_common` in generated macro code.
-// This is needed because our test macros expand to `::dialog_common::helpers::...`.
-#[cfg(feature = "helpers")]
+// Allow the crate to refer to itself as `dialog_common`
 extern crate self as dialog_common;
 
 mod sync;
