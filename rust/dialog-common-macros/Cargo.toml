@@ -1,0 +1,15 @@
+[package]
+name = "dialog-common-macros"
+description = "Procedural macros for dialog-common"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "parsing"] }

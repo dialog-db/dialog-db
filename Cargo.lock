@@ -591,7 +591,22 @@ dependencies = [
 name = "dialog-common"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "blake3",
+ "dialog-common-macros",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wasm-bindgen-test",
+]
+
+[[package]]
+name = "dialog-common-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
