@@ -6,16 +6,10 @@ authors.workspace = true
 license.workspace = true
 
 [features]
-helpers = ["tempfile", "anyhow", "rand"]
-# Enables the S3/R2-compatible storage backend
-s3 = ["dep:chrono", "dep:hmac", "dep:reqwest", "dep:sha2", "dep:url"]
-# Enables S3 list operations (ListObjectsV2) with XML parsing
-s3-list = ["s3", "dep:quick-xml"]
-# Enables real S3/R2 integration tests (requires R2S3_* environment variables)
-s3-integration-tests = ["s3-list"]
-# Exposes the `test_server` module for running a local in-memory S3 server
-s3-test-utils = [
-  "s3-list",
+helpers = [
+  "tempfile",
+  "anyhow",
+  "rand",
   "dep:s3s",
   "dep:hyper",
   "dep:hyper-util",
@@ -23,6 +17,12 @@ s3-test-utils = [
   "dep:bytes",
   "dep:tokio-test",
 ]
+# Enables the S3/R2-compatible storage backend
+s3 = ["dep:chrono", "dep:hmac", "dep:reqwest", "dep:sha2", "dep:url"]
+# Enables S3 list operations (ListObjectsV2) with XML parsing
+s3-list = ["s3", "dep:quick-xml"]
+# Enables real S3/R2 integration tests (requires R2S3_* environment variables)
+s3-integration-tests = ["s3-list"]
 
 [dependencies]
 dialog-common = { workspace = true }
@@ -51,7 +51,7 @@ url = { version = "2.5", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tempfile = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["sync", "fs"] }
+tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net"] }
 s3s = { version = "0.12.0-rc.3", optional = true }
 hyper = { version = "1.0", optional = true }
 hyper-util = { version = "0.1", features = [

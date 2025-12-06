@@ -124,9 +124,9 @@ pub use list::{List, ListResult};
 use crate::StorageSource;
 use crate::{DialogStorageError, StorageBackend, StorageSink};
 
-#[cfg(all(any(test, feature = "helpers"), not(target_arch = "wasm32")))]
+#[cfg(all(feature = "helpers", not(target_arch = "wasm32")))]
 mod helpers;
-#[cfg(all(any(test, feature = "helpers"), not(target_arch = "wasm32")))]
+#[cfg(all(feature = "helpers", not(target_arch = "wasm32")))]
 pub use helpers::*;
 
 /// Errors that can occur when using the S3 storage backend.
@@ -741,7 +741,7 @@ mod unit_tests {
 }
 
 /// Local S3 server tests using s3s for end-to-end testing
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(all(test, feature = "helpers", not(target_arch = "wasm32")))]
 mod local_s3_tests {
     use super::*;
     use helpers::LocalS3;
