@@ -17,6 +17,8 @@
 use proc_macro::TokenStream;
 mod test;
 
+// disabling because we don't want to add crate dependencies just for this
+#[cfg(not(doctest))]
 /// A cross-platform test macro with default test framework attributes.
 ///
 /// This macro always adds the default test framework attributes:
@@ -29,7 +31,9 @@ mod test;
 ///
 /// ## Simple test (no provisioning)
 ///
-/// ```no_run
+/// For tests that don't require external resources:
+///
+/// ```rs
 /// #[dialog_common::test]
 /// async fn it_works() {
 ///     assert_eq!(2 + 2, 4);
@@ -38,38 +42,116 @@ mod test;
 ///
 /// ## With provisioned resources
 ///
-/// When a function takes a `Resource` parameter, the macro generates:
+/// For tests that need external infrastructure (servers, databases, etc.), you can
+/// define a `Resource` type that describes what the test needs and a `Provider` that
+/// sets it up.
 ///
-/// 1. **Outer test (native)**: Starts the provider, serializes environment,
-///    invokes inner test, then stops the provider.
+/// ### Step 1: Define the resource (what the test receives)
 ///
-/// 2. **Inner test**: Deserializes environment and runs test logic.
+/// The resource is serializable so it can be passed to inner tests via environment:
 ///
-/// ```no_run
-/// use dialog_common::helpers::Resource;
+/// ```rs
+/// use serde::{Deserialize, Serialize};
+///
+/// /// Connection info for a test server.
+/// #[derive(Debug, Clone, Serialize, Deserialize)]
+/// pub struct TestServer {
+///     pub endpoint: String,
+///     pub port: u16,
+/// }
+/// ```
+///
+/// ### Step 2: Define the provider (native only)
+///
+/// The provider runs on native only and handles setup/teardown. Use `#[cfg]` to
+/// exclude it from WASM builds:
+///
+/// ```rs
+/// use serde::{Deserialize, Serialize};
+/// use dialog_common::helpers::{Provider, Resource};
 ///
 /// #[derive(Debug, Clone, Serialize, Deserialize)]
-/// pub struct S3Resource {
+/// pub struct TestServer {
 ///     pub endpoint: String,
-///     pub bucket: String,
+///     pub port: u16,
 /// }
 ///
-/// impl Resource for S3Resource {
-///     type Provider = S3Server;
-///     // ...
+/// // Provider is native-only (starts actual servers)
+/// #[cfg(not(target_arch = "wasm32"))]
+/// pub struct LocalServer {
+///     handle: tokio::task::JoinHandle<()>,
+///     port: u16,
 /// }
 ///
+/// #[cfg(not(target_arch = "wasm32"))]
+/// impl Provider for LocalServer {
+///     type Resource = TestServer;
+///     type Settings = ();
+///
+///     async fn start(_settings: Self::Settings) -> anyhow::Result<Self> {
+///         // Start server on random port...
+///         let port = 8080; // simplified
+///         Ok(Self { handle: todo!(), port })
+///     }
+///
+///     fn resource(&self) -> Self::Resource {
+///         TestServer {
+///             endpoint: format!("http://127.0.0.1:{}", self.port),
+///             port: self.port,
+///         }
+///     }
+///
+///     async fn stop(self) -> anyhow::Result<()> {
+///         self.handle.abort();
+///         Ok(())
+///     }
+/// }
+///
+/// // Resource impl is also native-only (references the Provider type)
+/// #[cfg(not(target_arch = "wasm32"))]
+/// impl Resource for TestServer {
+///     type Provider = LocalServer;
+/// }
+/// ```
+///
+/// ### Step 3: Write the test
+///
+/// When a function takes a `Resource` parameter, the macro generates:
+///
+/// 1. **Outer test (native only)**: Starts the provider, serializes the resource
+///    to an environment variable, invokes the inner test as a subprocess, then
+///    stops the provider.
+///
+/// 2. **Inner test (any target)**: Deserializes the resource from the environment
+///    variable and runs the test logic.
+///
+/// ```rs
 /// #[dialog_common::test]
-/// async fn it_stores_and_retrieves(env: S3Resource) -> anyhow::Result<()> {
-///     let backend = S3::open(&env.endpoint, &env.bucket, Session::Public);
-///     // ...
+/// async fn it_connects_to_server(server: TestServer) -> anyhow::Result<()> {
+///     // Use server.endpoint to connect...
 ///     Ok(())
 /// }
+/// ```
 ///
-/// // With custom settings (fields must be pub on Settings type):
-/// #[dialog_common::test(bucket = "custom-bucket")]
-/// async fn it_uses_custom_bucket(env: S3Resource) -> anyhow::Result<()> {
-///     // ...
+/// ### With custom settings
+///
+/// Provider settings can be customized via macro attributes. Settings must have
+/// `pub` fields for macro access:
+///
+/// ```rs
+/// #[derive(Default)]
+/// pub struct ServerSettings {
+///     pub port: u16,
+///     pub tls: bool,
+/// }
+/// ```
+///
+/// Override specific fields in the test:
+///
+/// ```rs
+/// #[dialog_common::test(port = 9000u16, tls = true)]
+/// async fn it_uses_custom_port(server: TestServer) -> anyhow::Result<()> {
+///     assert_eq!(server.port, 9000);
 ///     Ok(())
 /// }
 /// ```
@@ -87,20 +169,24 @@ pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Usage
 ///
-/// ```no_run
-/// // With custom tokio configuration
+/// With custom tokio configuration:
+///
+/// ```rs
 /// #[dialog_common::test::custom]
 /// #[tokio::test(flavor = "multi_thread")]
-/// async fn it_needs_multi_thread(env: S3Resource) -> anyhow::Result<()> {
-///     // ...
+/// async fn it_needs_multi_thread(server: TestServer) -> anyhow::Result<()> {
+///     // Test logic here...
 ///     Ok(())
 /// }
+/// ```
 ///
-/// // With settings
-/// #[dialog_common::test::custom(bucket = "custom")]
+/// With settings:
+///
+/// ```rs
+/// #[dialog_common::test::custom(port = 9000u16)]
 /// #[tokio::test]
-/// async fn it_uses_custom_bucket(env: S3Resource) -> anyhow::Result<()> {
-///     // ...
+/// async fn it_uses_custom_port(server: TestServer) -> anyhow::Result<()> {
+///     // Test logic here...
 ///     Ok(())
 /// }
 /// ```
