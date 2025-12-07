@@ -16,19 +16,75 @@ pub use hash::*;
 #[cfg(feature = "helpers")]
 pub mod helpers;
 
-/// Test utilities and macros for provisioned testing.
+/// Test macro for cross-platform testing with resource provisioning.
 ///
-/// Use `#[dialog_common::test]` for default test attributes, or
-/// `#[dialog_common::test::custom]` when you need custom test framework configuration.
+/// # Usage
+///
+/// ```rust
+/// use dialog_common::helpers::Service;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Debug, Clone, Serialize, Deserialize)]
+/// pub struct Host {
+///     pub url: String,
+/// }
+///
+/// #[dialog_common::test]
+/// async fn it_starts_server(host: Host) -> anyhow::Result<()> {
+///     assert!(host.url.starts_with("http://127.0.0.1:"));
+///     Ok(())
+/// }
+///
+/// // Test with custom settings
+/// #[dialog_common::test(port = 8080)]
+/// async fn it_uses_custom_port(host: Host) -> anyhow::Result<()> {
+///   assert!(host.url.contains(":8080"));
+///   Ok(())
+/// }
+///
+/// #[derive(Debug, Clone, Default)]
+/// pub struct Settings {
+///     pub port: u16,   // 0 = random available port
+/// }
+///
+/// #[dialog_common::provider]
+/// async fn tcp_server(settings: Settings) -> anyhow::Result<Service<Host, (std::net::TcpListener,)>> {
+///     let listener = std::net::TcpListener::bind(format!("127.0.0.1:{}", settings.port))?;
+///     let addr = listener.local_addr()?;
+///     Ok(Service::new(Host { url: format!("http://{}", addr) }, (listener,)))
+/// }
+/// ```
+///
+/// See the macro documentation for the full CI test matrix.
 #[cfg(feature = "helpers")]
 pub use dialog_common_macros::test;
 
-/// Additional test macros for custom configurations.
+/// Provider macro for defining service providers for integration tests.
+///
+/// # Usage
+///
+/// ```rust
+/// use dialog_common::helpers::Service;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Debug, Clone, Serialize, Deserialize)]
+/// pub struct Host {
+///     pub url: String,
+/// }
+///
+/// #[derive(Debug, Clone, Default)]
+/// pub struct Settings {
+///     pub port: u16,   // 0 = random available port
+/// }
+///
+/// #[dialog_common::provider]
+/// async fn tcp_server(settings: Settings) -> anyhow::Result<Service<Host, (std::net::TcpListener,)>> {
+///     let listener = std::net::TcpListener::bind(format!("127.0.0.1:{}", settings.port))?;
+///     let addr = listener.local_addr()?;
+///     Ok(Service::new(Host { url: format!("http://{}", addr) }, (listener,)))
+/// }
+/// ```
+///
+/// See the macro documentation for details.
 #[cfg(feature = "helpers")]
-pub mod test {
-    /// A test macro without default test framework attributes.
-    ///
-    /// Use this when you want to provide your own `#[tokio::test]` or other
-    /// test framework attributes with custom configuration.
-    pub use dialog_common_macros::test_custom as custom;
-}
+pub use dialog_common_macros::provider;

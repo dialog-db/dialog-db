@@ -10,6 +10,7 @@ license.workspace = true
 proc-macro = true
 
 [dependencies]
+blake3 = "1"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "parsing"] }

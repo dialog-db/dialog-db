@@ -1,105 +1,151 @@
-//! Testing utilities for integration tests with provisioned resources.
+//! Testing utilities for cross-target integration tests with provisioned services.
 //!
-//! This module provides traits and helpers for writing integration tests that require
-//! external resources (like S3 servers, databases, etc.) where the resource is started
-//! in an "outer" test and the actual test logic runs in an "inner" test that receives
-//! serialized resource state.
+//! This module enables writing integration tests where:
+//! - A **native** outer test starts a service (e.g., TCP server, database)
+//! - The test body runs on **any target** (native or wasm) using the service
 //!
 //! # Example
 //!
 //! ```no_run
-//! use dialog_common::helpers::{Resource, Provider};
+//! use dialog_common::helpers::Service;
 //! use serde::{Deserialize, Serialize};
 //!
-//! // The resource passed to inner tests (serialized)
+//! // Address passed to tests (must be serializable)
 //! #[derive(Debug, Clone, Serialize, Deserialize)]
-//! pub struct TestResource {
-//!     pub endpoint: String,
+//! pub struct ServerAddress {
+//!     pub url: String,
 //! }
 //!
-//! // The provider that creates resources
-//! pub struct TestServer {
-//!     endpoint: String,
+//! // Settings to configure the provider (must impl Default)
+//! #[derive(Debug, Clone, Default)]
+//! pub struct ServerSettings {
+//!     pub port: u16,   // 0 = random available port
+//!     pub host: String,
 //! }
 //!
-//! impl Resource for TestResource {
-//!     type Settings = ();
-//!     type Provider = TestServer;
-//!
-//!     async fn start(_settings: Self::Settings) -> anyhow::Result<Self::Provider> {
-//!         Ok(TestServer { endpoint: "http://localhost:8080".to_string() })
-//!     }
+//! #[dialog_common::provider]
+//! async fn tcp_server(settings: ServerSettings) -> anyhow::Result<Service<ServerAddress, (std::net::TcpListener,)>> {
+//!     let host = if settings.host.is_empty() { "127.0.0.1" } else { &settings.host };
+//!     let listener = std::net::TcpListener::bind(format!("{}:{}", host, settings.port))?;
+//!     let addr = listener.local_addr()?;
+//!     Ok(Service::new(ServerAddress { url: format!("http://{}", addr) }, (listener,)))
 //! }
 //!
-//! impl Provider for TestServer {
-//!     type Resource = TestResource;
-//!
-//!     fn provide(&self) -> TestResource {
-//!         TestResource { endpoint: self.endpoint.clone() }
-//!     }
-//! }
-//!
-//! // Then in tests:
+//! // Test with default settings
 //! #[dialog_common::test]
-//! async fn my_test(env: TestResource) -> anyhow::Result<()> {
-//!     assert!(!env.endpoint.is_empty());
+//! async fn it_starts_server(addr: ServerAddress) -> anyhow::Result<()> {
+//!     assert!(addr.url.starts_with("http://127.0.0.1:"));
 //!     Ok(())
 //! }
+//!
+//! // Test with custom settings
+//! #[dialog_common::test(port = 8080u16)]
+//! async fn it_uses_custom_port(addr: ServerAddress) -> anyhow::Result<()> {
+//!     assert!(addr.url.contains(":8080"));
+//!     Ok(())
+//! }
+//! # fn main() {}
 //! ```
+//!
+//! # How It Works
+//!
+//! - **Native mode**: Provider starts, test runs, provider stops
+//! - **Wasm mode** (`--cfg dialog_test_wasm`): Native outer test starts provider,
+//!   serializes address to env var, spawns wasm inner test which deserializes and runs
 
+use async_trait::async_trait;
+use dialog_common::ConditionalSend;
 use serde::{Serialize, de::DeserializeOwned};
 
-/// Environment variable name used to pass serialized resource to inner tests.
-pub const PROVISIONED_ENV_VAR: &str = "PROVISIONED_ENV";
+/// Environment variable name used to pass serialized address to inner tests.
+pub const PROVISIONED_SERVICE_ADDRESS: &str = "PROVISIONED_SERVICE_ADDRESS";
 
-/// A type representing the resource passed to inner tests.
+/// A provider that manages the lifecycle of a service.
 ///
-/// This trait is implemented on the "resource" type that gets serialized and passed
-/// to the inner test. It declares which [`Provider`] can create it.
-pub trait Resource: Sized + Serialize + DeserializeOwned {
-    /// Settings to configure the provider. Must implement Default.
-    type Settings: Default;
-    /// The provider type that can create this resource.
-    type Provider: Provider<Resource = Self>;
-
-    /// Start a provider with the given settings.
-    fn start(
-        settings: Self::Settings,
-    ) -> impl std::future::Future<Output = anyhow::Result<Self::Provider>> + Send;
-}
-
-/// A provider that can start and stop resources for testing.
+/// Implement this trait on types that hold service state and need cleanup.
+/// The default `stop` implementation simply drops self, which works for
+/// types that clean up in their `Drop` implementation.
 ///
-/// This trait is implemented on the "server" or "resource" type that stays alive
-/// during the inner test execution.
-pub trait Provider: Sized {
-    /// The resource type this provider produces.
-    type Resource: Resource<Provider = Self>;
-
-    /// Provide the resource to pass to the inner test.
-    ///
-    /// This is called after `start()` to extract the serializable state
-    /// that will be passed to the inner test via environment variables.
-    fn provide(&self) -> Self::Resource;
-
+/// For async cleanup, override the `stop` method.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait Provider: Sized + ConditionalSend {
     /// Stop the provider and clean up resources.
     ///
-    /// This is called after the inner test completes (success or failure).
     /// The default implementation simply drops self.
-    fn stop(self) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
-        async { Ok(()) }
+    async fn stop(self) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
-/// Deserialize resource from the PROVISIONED_ENV env var.
-///
-/// This is called by the inner test to retrieve the resource set by the outer test.
-pub fn resource<R: Resource>() -> anyhow::Result<R> {
-    let json = std::env::var(PROVISIONED_ENV_VAR)
-        .map_err(|_| anyhow::anyhow!("Missing {} environment variable", PROVISIONED_ENV_VAR))?;
+/// Unit type is a valid provider (no cleanup needed).
+impl Provider for () {}
 
-    serde_json::from_str(&json)
-        .map_err(|e| anyhow::anyhow!("Failed to deserialize resource: {}", e))
+/// Any type wrapped in a tuple is a valid provider (cleanup via drop).
+impl<T: ConditionalSend> Provider for (T,) {}
+
+/// A running service with an address and a provider.
+///
+/// - `Address`: Serializable data passed to tests (endpoint, port, credentials, etc.)
+/// - `P`: The provider that manages the service lifecycle
+///
+/// When the service is stopped, the provider's `stop` method is called.
+pub struct Service<Address, P: Provider = ()> {
+    /// The address of the service, passed to tests.
+    pub address: Address,
+    provider: P,
+}
+
+impl<A, P: Provider> Service<A, P> {
+    /// Create a new service with the given address and provider.
+    pub fn new(address: A, provider: P) -> Self {
+        Service { address, provider }
+    }
+}
+
+impl<A, P: Provider> Service<A, P> {
+    /// Stop the service by stopping its provider.
+    pub async fn stop(self) -> anyhow::Result<()> {
+        self.provider.stop().await
+    }
+}
+
+impl<A: Serialize, P: Provider> Service<A, P> {
+    /// Serialize the address to JSON.
+    pub fn address_json(&self) -> anyhow::Result<String> {
+        serde_json::to_string(&self.address)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize address: {}", e))
+    }
+}
+
+/// A type that can be provisioned for testing.
+///
+/// This trait is implemented on the "address" type that gets serialized and passed
+/// to the inner test. The `#[dialog_common::provider]` macro generates this impl.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait Provisionable: Sized + Serialize + DeserializeOwned + Clone {
+    /// Settings to configure the provider. Must implement Default.
+    type Settings: Default;
+    /// The provider type that manages the service.
+    type Provider: Provider;
+
+    /// Start a service with the given settings.
+    async fn start(settings: Self::Settings) -> anyhow::Result<Service<Self, Self::Provider>>;
+}
+
+/// Deserialize an address from the PROVISIONED_SERVICE_ADDRESS env var.
+///
+/// This is called by the inner test to retrieve the address set by the outer test.
+pub fn address<A: DeserializeOwned>() -> anyhow::Result<A> {
+    let json = std::env::var(PROVISIONED_SERVICE_ADDRESS).map_err(|_| {
+        anyhow::anyhow!(
+            "Missing {} environment variable",
+            PROVISIONED_SERVICE_ADDRESS
+        )
+    })?;
+
+    serde_json::from_str(&json).map_err(|e| anyhow::anyhow!("Failed to deserialize address: {}", e))
 }
 
 #[cfg(test)]
@@ -107,145 +153,104 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
 
-    /// Minimal test resource for macro testing
+    // Simple test resource (no real provider)
+
+    /// Minimal test address for macro testing
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct TestResource {
+    pub struct TestAddress {
         pub value: String,
     }
 
     /// Minimal provider for macro testing
-    pub struct TestProvider;
+    pub struct TestServer;
 
-    impl Resource for TestResource {
-        type Settings = ();
-        type Provider = TestProvider;
+    impl Provider for TestServer {}
 
-        async fn start(_settings: Self::Settings) -> anyhow::Result<Self::Provider> {
-            Ok(TestProvider)
-        }
-    }
-
-    impl Provider for TestProvider {
-        type Resource = TestResource;
-
-        fn provide(&self) -> TestResource {
-            TestResource {
+    /// Provider function for TestAddress
+    #[dialog_common::provider]
+    async fn test_service(_settings: ()) -> anyhow::Result<Service<TestAddress, TestServer>> {
+        Ok(Service::new(
+            TestAddress {
                 value: "test".to_string(),
-            }
-        }
+            },
+            TestServer,
+        ))
     }
 
-    // --- Resource with Settings ---
+    // Resource with Settings
 
-    /// Resource that uses configurable settings
+    /// Address that uses configurable settings
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct ConfiguredResource {
+    pub struct ConfiguredAddress {
         pub endpoint: String,
         pub bucket: String,
     }
 
-    /// Settings for ConfiguredResource
+    /// Settings for ConfiguredAddress (native-only, used by provider)
+    #[cfg(not(target_arch = "wasm32"))]
     #[derive(Debug, Clone, Default)]
     pub struct ConfiguredSettings {
         pub endpoint: String,
         pub bucket: String,
     }
 
-    /// Provider that uses settings to configure the resource
-    pub struct ConfiguredProvider {
-        endpoint: String,
-        bucket: String,
+    /// Provider that uses settings (empty struct since this is just a demo)
+    #[cfg(not(target_arch = "wasm32"))]
+    pub struct ConfiguredServer;
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Provider for ConfiguredServer {}
+
+    /// Provider function for ConfiguredAddress
+    #[dialog_common::provider]
+    async fn configured_service(
+        settings: ConfiguredSettings,
+    ) -> anyhow::Result<Service<ConfiguredAddress, ConfiguredServer>> {
+        let endpoint = if settings.endpoint.is_empty() {
+            "http://default:9000".to_string()
+        } else {
+            settings.endpoint
+        };
+        let bucket = if settings.bucket.is_empty() {
+            "default-bucket".to_string()
+        } else {
+            settings.bucket
+        };
+        Ok(Service::new(
+            ConfiguredAddress { endpoint, bucket },
+            ConfiguredServer,
+        ))
     }
 
-    impl Resource for ConfiguredResource {
-        type Settings = ConfiguredSettings;
-        type Provider = ConfiguredProvider;
+    // Resource with actual native provider
 
-        async fn start(settings: Self::Settings) -> anyhow::Result<Self::Provider> {
-            Ok(ConfiguredProvider {
-                endpoint: if settings.endpoint.is_empty() {
-                    "http://default:9000".to_string()
-                } else {
-                    settings.endpoint
-                },
-                bucket: if settings.bucket.is_empty() {
-                    "default-bucket".to_string()
-                } else {
-                    settings.bucket
-                },
-            })
-        }
-    }
-
-    impl Provider for ConfiguredProvider {
-        type Resource = ConfiguredResource;
-
-        fn provide(&self) -> ConfiguredResource {
-            ConfiguredResource {
-                endpoint: self.endpoint.clone(),
-                bucket: self.bucket.clone(),
-            }
-        }
-    }
-
-    // --- Resource with actual native provider ---
-
-    /// Resource that represents a running TCP server
+    /// Address that represents a running TCP server
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct ServerResource {
+    pub struct ServerAddress {
         pub port: u16,
     }
 
     /// Settings for the server
+    #[cfg(not(target_arch = "wasm32"))]
     #[derive(Debug, Clone, Default)]
     pub struct ServerSettings {
         pub port: u16,
     }
 
-    /// A simple TCP listener provider (native only)
-    #[cfg(not(target_arch = "wasm32"))]
-    pub struct TcpServerProvider {
-        listener: std::net::TcpListener,
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    impl Resource for ServerResource {
-        type Settings = ServerSettings;
-        type Provider = TcpServerProvider;
-
-        async fn start(settings: Self::Settings) -> anyhow::Result<Self::Provider> {
-            // Bind to localhost with specified port (0 = random available port)
-            let addr = format!("127.0.0.1:{}", settings.port);
-            let listener = std::net::TcpListener::bind(&addr)?;
-            Ok(TcpServerProvider { listener })
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    impl Provider for TcpServerProvider {
-        type Resource = ServerResource;
-
-        fn provide(&self) -> ServerResource {
-            ServerResource {
-                port: self.listener.local_addr().unwrap().port(),
-            }
-        }
+    /// Provider function for ServerAddress
+    #[dialog_common::provider]
+    async fn tcp_server(
+        settings: ServerSettings,
+    ) -> anyhow::Result<Service<ServerAddress, (std::net::TcpListener,)>> {
+        let addr = format!("127.0.0.1:{}", settings.port);
+        let listener = std::net::TcpListener::bind(&addr)?;
+        let port = listener.local_addr()?.port();
+        Ok(Service::new(ServerAddress { port }, (listener,)))
     }
 
     /// Tests that the macro generates working outer/inner test pairs.
-    /// This test verifies that doc comments don't break test attribute generation.
     #[dialog_common::test]
-    async fn it_runs_provisioned_test(env: TestResource) -> anyhow::Result<()> {
-        assert_eq!(env.value, "test");
-        Ok(())
-    }
-
-    /// Tests the custom macro variant with user-provided test attributes.
-    #[dialog_common::test::custom]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    async fn it_runs_custom_provisioned_test(env: TestResource) -> anyhow::Result<()> {
-        assert_eq!(env.value, "test");
+    async fn it_runs_provisioned_test(addr: TestAddress) -> anyhow::Result<()> {
+        assert_eq!(addr.value, "test");
         Ok(())
     }
 
@@ -255,74 +260,50 @@ mod tests {
         assert_eq!(2 + 2, 4);
     }
 
-    /// Tests a simple test with custom attributes.
-    #[dialog_common::test::custom]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    async fn it_runs_custom_simple_test() {
-        assert_eq!(3 + 3, 6);
-    }
-
-    /// Test that only runs in native
-    #[dialog_common::test::custom]
-    #[tokio::test]
-    async fn it_runs_only_in_native() {
-        assert_eq!("native", "native");
-    }
-
-    /// Test that only runs in wasm
-    #[dialog_common::test::custom]
-    #[wasm_bindgen_test::wasm_bindgen_test]
-    async fn it_runs_only_in_wasm() {
-        assert_eq!("wasm32", "wasm32");
-    }
-
-    // --- Tests with settings ---
-
     /// Tests provisioned test with default settings
     #[dialog_common::test]
-    async fn it_uses_default_settings(env: ConfiguredResource) -> anyhow::Result<()> {
-        assert_eq!(env.endpoint, "http://default:9000");
-        assert_eq!(env.bucket, "default-bucket");
+    async fn it_uses_default_settings(addr: ConfiguredAddress) -> anyhow::Result<()> {
+        assert_eq!(addr.endpoint, "http://default:9000");
+        assert_eq!(addr.bucket, "default-bucket");
         Ok(())
     }
 
     /// Tests provisioned test with custom settings
     #[dialog_common::test(endpoint = "http://custom:8080", bucket = "my-bucket")]
-    async fn it_uses_custom_settings(env: ConfiguredResource) -> anyhow::Result<()> {
-        assert_eq!(env.endpoint, "http://custom:8080");
-        assert_eq!(env.bucket, "my-bucket");
+    async fn it_uses_custom_settings(addr: ConfiguredAddress) -> anyhow::Result<()> {
+        assert_eq!(addr.endpoint, "http://custom:8080");
+        assert_eq!(addr.bucket, "my-bucket");
         Ok(())
     }
 
     /// Tests provisioned test with partial settings (only bucket)
     #[dialog_common::test(bucket = "partial-bucket")]
-    async fn it_uses_partial_settings(env: ConfiguredResource) -> anyhow::Result<()> {
-        assert_eq!(env.endpoint, "http://default:9000");
-        assert_eq!(env.bucket, "partial-bucket");
+    async fn it_uses_partial_settings(addr: ConfiguredAddress) -> anyhow::Result<()> {
+        assert_eq!(addr.endpoint, "http://default:9000");
+        assert_eq!(addr.bucket, "partial-bucket");
         Ok(())
     }
 
     // --- Tests with actual native provider ---
+    // These tests are native-only because TcpServer can't run in wasm.
+    // They're also skipped in wasm integration mode (dialog_test_wasm) since
+    // there's no wasm inner test to spawn.
 
     /// Tests a real TCP server provider (native only)
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(dialog_test_wasm)))]
     #[dialog_common::test]
-    async fn it_starts_tcp_server(env: ServerResource) -> anyhow::Result<()> {
-        // The provider started a real TCP listener, we got the port
-        assert!(env.port > 0);
-        // Try to connect to verify it's actually listening
-        let addr = format!("127.0.0.1:{}", env.port);
-        std::net::TcpStream::connect(&addr)?;
+    async fn it_starts_tcp_server(addr: ServerAddress) -> anyhow::Result<()> {
+        assert!(addr.port > 0);
+        let addr_str = format!("127.0.0.1:{}", addr.port);
+        std::net::TcpStream::connect(&addr_str)?;
         Ok(())
     }
 
     /// Tests TCP server with specific port setting
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(dialog_test_wasm)))]
     #[dialog_common::test(port = 0u16)]
-    async fn it_starts_tcp_server_on_random_port(env: ServerResource) -> anyhow::Result<()> {
-        // port = 0 means OS picks a random available port
-        assert!(env.port > 0);
+    async fn it_starts_tcp_server_on_random_port(addr: ServerAddress) -> anyhow::Result<()> {
+        assert!(addr.port > 0);
         Ok(())
     }
 }

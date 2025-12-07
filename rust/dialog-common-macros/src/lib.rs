@@ -1,61 +1,65 @@
 #![warn(missing_docs)]
 
-//! Procedural macros for dialog-db testing.
+//! Procedural macros for [`dialog_common`].
 //!
-//! This crate provides macros for writing tests that can run across different
-//! targets (native, WASM, etc.) with optional provisioned resources.
-//!
-//! # Macros
-//!
-//! - [`test`] - Adds default test framework attributes (`tokio::test` / `wasm_bindgen_test`)
-//! - [`test_custom`] - Just provisioning, no test attributes (bring your own)
-//!
-//! These are re-exported from `dialog_common` as:
-//! - `#[dialog_common::test]` - Default macro with test attributes
-//! - `#[dialog_common::test::custom]` - Custom macro without test attributes
+//! This crate provides the procedural macro implementations that are re-exported
+//! by `dialog_common`. It exists as a separate crate because procedural macros
+//! must be defined in their own crate.
 
 use proc_macro::TokenStream;
+mod provider;
 mod test;
 
 // disabling because we don't want to add crate dependencies just for this
 #[cfg(not(doctest))]
-/// A cross-platform test macro with default test framework attributes.
+/// A cross-platform test macro with automatic service provisioning.
 ///
-/// This macro always adds the default test framework attributes:
-/// - `#[tokio::test]` for native targets
-/// - `#[wasm_bindgen_test]` for WASM targets
+/// # CI Test Matrix
 ///
-/// If you need custom test framework attributes, use `#[dialog_common::test::custom]` instead.
+/// The macro generates code that supports these CI configurations:
+///
+/// 1. `cargo test` - All tests run natively (unit tests + integration tests inline)
+/// 2. `cargo test --target wasm32-unknown-unknown` - Unit tests run in wasm
+/// 3. `RUSTFLAGS="--cfg dialog_test_wasm" cargo test` - Integration tests run in wasm
+///    (native provider spawns wasm inner tests)
 ///
 /// # Usage
 ///
-/// ## Simple test (no provisioning)
+/// ## Unit tests
 ///
-/// For tests that don't require external resources:
+/// Tests that do not require external services:
 ///
 /// ```rs
+/// // Sync test
 /// #[dialog_common::test]
-/// async fn it_works() {
+/// fn it_works() {
 ///     assert_eq!(2 + 2, 4);
+/// }
+///
+/// // Async test
+/// #[dialog_common::test]
+/// async fn it_works_async() -> anyhow::Result<()> {
+///     assert_eq!(2 + 2, 4);
+///     Ok(())
 /// }
 /// ```
 ///
-/// ## With provisioned resources
+/// Unit tests are gated with `#[cfg(not(dialog_test_wasm))]` so they don't
+/// run during wasm integration test runs (case 3 above).
 ///
-/// For tests that need external infrastructure (servers, databases, etc.), you can
-/// define a `Resource` type that describes what the test needs and a `Provider` that
-/// sets it up.
+/// ## Integration tests
 ///
-/// ### Step 1: Define the resource (what the test receives)
+/// Tests that need external services (S3, databases, servers, etc.):
 ///
-/// The resource is serializable so it can be passed to inner tests via environment:
+/// ### Step 1: Define the address (what the test receives)
+///
+/// The address is serializable so it can be passed to wasm tests via environment:
 ///
 /// ```rs
 /// use serde::{Deserialize, Serialize};
 ///
-/// /// Connection info for a test server.
 /// #[derive(Debug, Clone, Serialize, Deserialize)]
-/// pub struct TestServer {
+/// pub struct ServerAddress {
 ///     pub endpoint: String,
 ///     pub port: u16,
 /// }
@@ -63,71 +67,41 @@ mod test;
 ///
 /// ### Step 2: Define the provider (native only)
 ///
-/// The provider runs on native only and handles setup/teardown. Use `#[cfg]` to
-/// exclude it from WASM builds:
+/// Use `#[dialog_common::provider]` to create a function that starts the service
+/// and returns its address:
 ///
 /// ```rs
-/// use serde::{Deserialize, Serialize};
-/// use dialog_common::helpers::{Provider, Resource};
+/// use dialog_common::helpers::{Provider, Service};
 ///
-/// #[derive(Debug, Clone, Serialize, Deserialize)]
-/// pub struct TestServer {
-///     pub endpoint: String,
-///     pub port: u16,
-/// }
+/// pub struct LocalServer { /* ... */ }
 ///
-/// // Provider is native-only (starts actual servers)
-/// #[cfg(not(target_arch = "wasm32"))]
-/// pub struct LocalServer {
-///     handle: tokio::task::JoinHandle<()>,
-///     port: u16,
-/// }
-///
-/// #[cfg(not(target_arch = "wasm32"))]
 /// impl Provider for LocalServer {
-///     type Resource = TestServer;
-///     type Settings = ();
-///
-///     async fn start(_settings: Self::Settings) -> anyhow::Result<Self> {
-///         // Start server on random port...
-///         let port = 8080; // simplified
-///         Ok(Self { handle: todo!(), port })
-///     }
-///
-///     fn resource(&self) -> Self::Resource {
-///         TestServer {
-///             endpoint: format!("http://127.0.0.1:{}", self.port),
-///             port: self.port,
-///         }
-///     }
-///
 ///     async fn stop(self) -> anyhow::Result<()> {
-///         self.handle.abort();
 ///         Ok(())
 ///     }
 /// }
 ///
-/// // Resource impl is also native-only (references the Provider type)
-/// #[cfg(not(target_arch = "wasm32"))]
-/// impl Resource for TestServer {
-///     type Provider = LocalServer;
+/// #[dialog_common::provider]
+/// async fn server(_settings: ()) -> anyhow::Result<Service<ServerAddress, LocalServer>> {
+///     let server = LocalServer { /* start server */ };
+///     Ok(Service::new(
+///         ServerAddress { endpoint: "...".into(), port: 8080 },
+///         server
+///     ))
 /// }
 /// ```
 ///
 /// ### Step 3: Write the test
 ///
-/// When a function takes a `Resource` parameter, the macro generates:
+/// When a function takes an address parameter, the macro generates:
 ///
-/// 1. **Outer test (native only)**: Starts the provider, serializes the resource
-///    to an environment variable, invokes the inner test as a subprocess, then
-///    stops the provider.
-///
-/// 2. **Inner test (any target)**: Deserializes the resource from the environment
-///    variable and runs the test logic.
+/// - **Native inline provider**: Starts service, runs test via `tokio::spawn`, stops service
+/// - **Native wasm-spawn provider**: Starts service, spawns `cargo test --target wasm32...`
+/// - **Wasm inner**: Deserializes address from env var, runs test
 ///
 /// ```rs
 /// #[dialog_common::test]
-/// async fn it_connects_to_server(server: TestServer) -> anyhow::Result<()> {
+/// async fn it_connects_to_server(server: ServerAddress) -> anyhow::Result<()> {
 ///     // Use server.endpoint to connect...
 ///     Ok(())
 /// }
@@ -135,22 +109,11 @@ mod test;
 ///
 /// ### With custom settings
 ///
-/// Provider settings can be customized via macro attributes. Settings must have
-/// `pub` fields for macro access:
+/// Provider settings can be customized via macro attributes:
 ///
 /// ```rs
-/// #[derive(Default)]
-/// pub struct ServerSettings {
-///     pub port: u16,
-///     pub tls: bool,
-/// }
-/// ```
-///
-/// Override specific fields in the test:
-///
-/// ```rs
-/// #[dialog_common::test(port = 9000u16, tls = true)]
-/// async fn it_uses_custom_port(server: TestServer) -> anyhow::Result<()> {
+/// #[dialog_common::test(port = 9000, tls = true)]
+/// async fn it_uses_custom_port(server: ServerAddress) -> anyhow::Result<()> {
 ///     assert_eq!(server.port, 9000);
 ///     Ok(())
 /// }
@@ -160,37 +123,45 @@ pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
     test::generate(attr, item)
 }
 
-/// A cross-platform test macro without default test framework attributes.
+// disabling because we don't want to add crate dependencies just for this
+#[cfg(not(doctest))]
+/// Mark a function as a service provider for integration tests.
 ///
-/// Use this when you want to provide your own test framework attributes.
-/// This macro only handles resource provisioning (outer/inner test setup).
-///
-/// Re-exported as `#[dialog_common::test::custom]`.
+/// This macro transforms an async function returning `Service<Address, Provider>`
+/// into a `Provisionable` implementation that works with the `#[dialog_common::test]` macro.
 ///
 /// # Usage
 ///
-/// With custom tokio configuration:
+/// ```rust
+/// use dialog_common::helpers::Service;
+/// use serde::{Deserialize, Serialize};
 ///
-/// ```rs
-/// #[dialog_common::test::custom]
-/// #[tokio::test(flavor = "multi_thread")]
-/// async fn it_needs_multi_thread(server: TestServer) -> anyhow::Result<()> {
-///     // Test logic here...
-///     Ok(())
+/// #[derive(Debug, Clone, Serialize, Deserialize)]
+/// pub struct Host {
+///     pub url: String,
+/// }
+///
+/// #[derive(Debug, Clone, Default)]
+/// pub struct Settings {
+///     pub port: u16,   // 0 = random available port
+/// }
+///
+/// #[dialog_common::provider]
+/// async fn tcp_server(settings: Settings) -> anyhow::Result<Service<Host, (std::net::TcpListener,)>> {
+///     let listener = std::net::TcpListener::bind(format!("127.0.0.1:{}", settings.port))?;
+///     let addr = listener.local_addr()?;
+///     Ok(Service::new(Host { url: format!("http://{}", addr) }, (listener,)))
 /// }
 /// ```
 ///
-/// With settings:
+/// # Generated Code
 ///
-/// ```rs
-/// #[dialog_common::test::custom(port = 9000u16)]
-/// #[tokio::test]
-/// async fn it_uses_custom_port(server: TestServer) -> anyhow::Result<()> {
-///     // Test logic here...
-///     Ok(())
-/// }
-/// ```
+/// The macro generates:
+/// 1. The original provider function (native-only via `#[cfg(not(target_arch = "wasm32"))]`)
+/// 2. A `Provisionable` trait implementation on the address type
+///
+/// This allows the address type to be used with `#[dialog_common::test]`.
 #[proc_macro_attribute]
-pub fn test_custom(attr: TokenStream, item: TokenStream) -> TokenStream {
-    test::generate_custom(attr, item)
+pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
+    provider::generate(attr, item)
 }
