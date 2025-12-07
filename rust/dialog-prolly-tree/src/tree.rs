@@ -10,27 +10,22 @@ use futures_core::Stream;
 use nonempty::NonEmpty;
 
 use crate::{Adopter, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
+/// A hash representing an empty (usually newly created) `Tree`.
+pub static EMPT_TREE_HASH: [u8; 32] = [0; 32];
 
 /// A key-value store backed by a Ranked Prolly Tree with configurable storage,
 /// encoding and rank distribution.
-#[derive(Clone)]
-pub struct Tree<
-    const BRANCH_FACTOR: u32,
-    const HASH_SIZE: usize,
-    Distribution,
-    Key,
-    Value,
-    Hash,
-    Storage,
-> where
-    Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash>,
+#[derive(Debug, Clone)]
+pub struct Tree<Distribution, Key, Value, Hash, Storage>
+where
+    Distribution: crate::Distribution<Key, Hash>,
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<HASH_SIZE>,
-    Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash>,
 {
     storage: Storage,
-    root: Option<Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>>,
+    root: Option<Node<Key, Value, Hash>>,
 
     distribution_type: PhantomData<Distribution>,
     key_type: PhantomData<Key>,
@@ -38,14 +33,13 @@ pub struct Tree<
     hash_type: PhantomData<Hash>,
 }
 
-impl<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Distribution, Key, Value, Hash, Storage>
-    Tree<BRANCH_FACTOR, HASH_SIZE, Distribution, Key, Value, Hash, Storage>
+impl<Distribution, Key, Value, Hash, Storage> Tree<Distribution, Key, Value, Hash, Storage>
 where
-    Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash>,
+    Distribution: crate::Distribution<Key, Hash>,
     Key: KeyType,
     Value: ValueType,
-    Hash: HashType<HASH_SIZE>,
-    Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash>,
 {
     /// Creates a new [`Tree`] with provided [`ContentAddressedStorage`].
     pub fn new(storage: Storage) -> Self {
@@ -62,11 +56,15 @@ where
 
     /// Hydrate a new [`Tree`] from a [`HashType`] that references a [`Node`].
     pub async fn from_hash(hash: &Hash, storage: Storage) -> Result<Self, DialogProllyTreeError> {
-        let root = Node::from_hash(hash.clone(), &storage).await?;
+        let root = if hash.as_ref() == EMPT_TREE_HASH {
+            None
+        } else {
+            Some(Node::from_hash(hash.clone(), &storage).await?)
+        };
+
         Ok(Self {
             storage,
-            root: Some(root),
-
+            root,
             distribution_type: PhantomData,
             key_type: PhantomData,
             value_type: PhantomData,
@@ -82,7 +80,7 @@ where
     /// Returns the [`Node`] representing the root of this tree.
     ///
     /// Returns `None` if the tree is empty.
-    pub fn root(&self) -> Option<&Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>> {
+    pub fn root(&self) -> Option<&Node<Key, Value, Hash>> {
         self.root.as_ref()
     }
 
@@ -97,7 +95,7 @@ where
         Ok(())
     }
 
-    /// Returns the [`HashType`] representing the root of this tree.
+    /// Returns the [`Hash`] representing the root of this tree.
     ///
     /// Returns `None` if the tree is empty.
     pub fn hash(&self) -> Option<&Hash> {

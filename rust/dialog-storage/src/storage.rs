@@ -27,9 +27,9 @@ pub use content_addressed::*;
 /// [StorageBackend] implementations. See the crate documentation for
 /// a practical example of usage.
 #[derive(Clone)]
-pub struct Storage<const HASH_SIZE: usize, Encoder, Backend>
+pub struct Storage<Encoder, Backend>
 where
-    Encoder: crate::Encoder<HASH_SIZE>,
+    Encoder: crate::Encoder,
     Backend: StorageBackend,
 {
     /// The [Encoder] used by the [Storage]
@@ -40,10 +40,9 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<const HASH_SIZE: usize, Encoder, Backend> crate::Encoder<HASH_SIZE>
-    for Storage<HASH_SIZE, Encoder, Backend>
+impl<Encoder, Backend> crate::Encoder for Storage<Encoder, Backend>
 where
-    Encoder: crate::Encoder<HASH_SIZE>,
+    Encoder: crate::Encoder,
     Backend: StorageBackend,
     Self: ConditionalSync,
 {
@@ -68,10 +67,9 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<const HASH_SIZE: usize, Encoder, Backend> StorageBackend
-    for Storage<HASH_SIZE, Encoder, Backend>
+impl<Encoder, Backend> StorageBackend for Storage<Encoder, Backend>
 where
-    Encoder: crate::Encoder<HASH_SIZE>,
+    Encoder: crate::Encoder,
     Backend: StorageBackend,
     Self: ConditionalSync,
 {
@@ -113,7 +111,7 @@ mod tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl Encoder<32> for TestEncoder {
+    impl Encoder for TestEncoder {
         type Bytes = Vec<u8>;
         type Hash = [u8; 32];
         type Error = DialogStorageError;
