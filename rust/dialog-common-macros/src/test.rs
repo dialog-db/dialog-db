@@ -1,10 +1,30 @@
 //! Test macro implementation for dialog-db testing.
 //!
 //! This module provides the implementation for cross-platform test macros
-//! that handle resource provisioning and multi-target testing.
+//! that handle service provisioning and multi-target testing.
+//!
+//! # CI Test Matrix
+//!
+//! The macro is designed to support this CI workflow:
+//!
+//! 1. `cargo test` - Run all tests natively (unit tests + integration tests inline)
+//! 2. `cargo test --target wasm32-unknown-unknown` - Run unit tests in wasm
+//! 3. `RUSTFLAGS="--cfg dialog_test_wasm" cargo test` - Run integration tests in wasm
+//!    (native provider spawns wasm inner tests)
+//!
+//! # Generated Code
+//!
+//! For unit tests (no parameters):
+//! - Gated with `not(dialog_test_wasm)` so they don't run during wasm integration runs
+//! - Uses `tokio::test` on native, `wasm_bindgen_test` on wasm
+//!
+//! For integration tests (with address parameter):
+//! - Tests that require external services (S3, databases, etc.) that need provisioning
+//! - Native inline provider: starts service, runs test via tokio::spawn, stops service
+//! - Native wasm-spawn provider: starts service, spawns `cargo test --target wasm32...`
+//! - Wasm inner: deserializes address from env var, runs test
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
     Expr, FnArg, Ident, ItemFn, Pat, Token, Type,
@@ -12,42 +32,6 @@ use syn::{
     parse_macro_input,
     punctuated::Punctuated,
 };
-
-/// Combine user attributes from the function with extra framework attributes.
-fn combine_attrs(input: &ItemFn, extra_attrs: TokenStream2) -> TokenStream2 {
-    let user_attrs = &input.attrs;
-    quote! { #(#user_attrs)* #extra_attrs }
-}
-
-/// Check if an attribute is a test framework attribute that should only apply to functions.
-fn is_test_framework_attr(attr: &syn::Attribute) -> bool {
-    let path = attr.path();
-    // Check for tokio::test, wasm_bindgen_test::wasm_bindgen_test, etc.
-    if path.segments.len() >= 2 {
-        let first = path.segments.first().map(|s| s.ident.to_string());
-        let last = path.segments.last().map(|s| s.ident.to_string());
-        matches!(
-            (first.as_deref(), last.as_deref()),
-            (Some("tokio"), Some("test")) | (Some("wasm_bindgen_test"), Some("wasm_bindgen_test"))
-        )
-    } else if path.segments.len() == 1 {
-        // Check for bare #[test]
-        path.segments
-            .first()
-            .map(|s| s.ident == "test")
-            .unwrap_or(false)
-    } else {
-        false
-    }
-}
-
-/// Filter out test framework attributes from a list of attributes.
-fn filter_non_test_attrs(attrs: &[syn::Attribute]) -> Vec<&syn::Attribute> {
-    attrs
-        .iter()
-        .filter(|a| !is_test_framework_attr(a))
-        .collect()
-}
 
 /// Read feature names from the crate's Cargo.toml.
 fn read_crate_features() -> Vec<String> {
@@ -76,7 +60,15 @@ fn read_crate_features() -> Vec<String> {
     features
 }
 
-/// Assignments for Resource::Settings, e.g.:
+/// Generate a blake3 hash from the function source so it can be
+/// uniqueily identified.
+fn source_hash(func: &ItemFn) -> String {
+    let source = quote::quote!(#func).to_string();
+    let hash = blake3::hash(source.as_bytes());
+    hash.to_hex().to_string()
+}
+
+/// Assignments for Provisionable::Settings, e.g.:
 /// `#[dialog_common::test(bucket = "custom-bucket")]`
 pub struct ProviderSettings(pub Vec<(Ident, Expr)>);
 
@@ -109,172 +101,347 @@ impl Parse for Setting {
 pub fn generate(attr: TokenStream, item: TokenStream) -> TokenStream {
     let settings = parse_macro_input!(attr as ProviderSettings);
     let input = parse_macro_input!(item as ItemFn);
-    let attrs = combine_attrs(&input, default_test_attrs());
 
-    generate_test(&input, attrs, &settings)
-}
-
-/// Implementation used by `dialog_common::test::custom` macro.
-pub fn generate_custom(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let settings = parse_macro_input!(attr as ProviderSettings);
-    let input = parse_macro_input!(item as ItemFn);
-    let attrs = combine_attrs(&input, quote! {});
-
-    generate_test(&input, attrs, &settings)
-}
-
-/// Shared implementation for both macros.
-fn generate_test(input: &ItemFn, attrs: TokenStream2, settings: &ProviderSettings) -> TokenStream {
-    // Check if function has parameters (provisioned test) or not (simple test)
     if input.sig.inputs.is_empty() {
-        // Simple test - no provisioning needed
-        generate_basic_test(input, &attrs)
+        generate_unit_test(&input)
     } else {
-        // Provisioned test - provider/test setup
-        generate_provisioned_test(input, &attrs, settings)
+        generate_integration_test(&input, &settings)
     }
 }
 
-/// Generate default test framework attributes.
-fn default_test_attrs() -> TokenStream2 {
-    quote! {
-        #[cfg_attr(
-            all(test, not(target_arch = "wasm32")),
-            tokio::test
-        )]
-        #[cfg_attr(
-            all(test, target_arch = "wasm32"),
-            wasm_bindgen_test::wasm_bindgen_test
-        )]
-    }
-}
+/// Given a `source` function it generates a unit test
+/// by adding attributes for both wasm and native runtimes.
+///
+/// ```rs
+/// #[dialog_common::test]
+/// fn it_works() {
+///     assert_eq!(2 + 2, 4);
+/// }
+///
+/// #[dialog_common::test]
+/// async fn it_works_async() {
+///     assert_eq!(2 + 2, 4);
+/// }
+/// ```
+///
+/// Generates:
+/// ```rs
+/// // Compile during wasm integration test but as a dead code as it is not
+/// // an integration test and we want to supress import warnings
+/// #[cfg_attr(dialog_test_wasm, allow(dead_code))]
+/// // Compile as test on native, except for wasm integration
+/// #[cfg_attr(all(not(dialog_test_wasm), not(target_arch = "wasm32")), test)]
+/// // Compile as bindgen test on wasm, expcept for wasm integration
+/// #[cfg_attr(all(not(dialog_test_wasm), target_arch = "wasm32"), wasm_bindgen_test::wasm_bindgen_test)]
+/// fn it_works() {
+///     assert_eq!(2 + 2, 4);
+/// }
+///
+/// // Compile during wasm integration test but as a dead code as it is not
+/// // an integration test and we want to supress import warnings
+/// #[cfg_attr(dialog_test_wasm, allow(dead_code))]
+/// // Compile as test on native, except for wasm integration
+/// #[cfg_attr(all(not(dialog_test_wasm), not(target_arch = "wasm32")), tokio::test)]
+/// // Compile as bindgen test on wasm, expcept for wasm integration
+/// async fn it_works_async() {
+///     assert_eq!(2 + 2, 4);
+/// }
+/// ```
+fn generate_unit_test(source: &ItemFn) -> TokenStream {
+    let vis = &source.vis;
+    let name = &source.sig.ident;
+    let asyncness = &source.sig.asyncness;
+    let output = &source.sig.output;
+    let body = &source.block;
+    let user_attrs = &source.attrs;
 
-/// Generate a basic test without provisioning.
-fn generate_basic_test(input: &ItemFn, attrs: &TokenStream2) -> TokenStream {
-    let vis = &input.vis;
-    let name = &input.sig.ident;
-    let output = &input.sig.output;
-    let body = &input.block;
+    // Choose the right test attribute for native based on async vs sync
+    let native_test_attr = if source.sig.asyncness.is_some() {
+        quote! { tokio::test }
+    } else {
+        quote! { test }
+    };
 
     let expanded = quote! {
-        #attrs
-        #vis async fn #name() #output
+        // Compile during wasm integration test but as a dead code as it is not
+        // an integration test and we want to supress import warnings
+        #[cfg_attr(dialog_test_wasm, allow(dead_code))]
+        // Compile as test on native, except for wasm integration
+        #[cfg_attr(all(not(dialog_test_wasm), not(target_arch = "wasm32")), #native_test_attr)]
+        // Compile as bindgen test on wasm, expcept for wasm integration
+        #[cfg_attr(all(not(dialog_test_wasm), target_arch = "wasm32"), wasm_bindgen_test::wasm_bindgen_test)]
+        #(#user_attrs)*
+        #vis #asyncness fn #name() #output
             #body
     };
 
     TokenStream::from(expanded)
 }
 
-/// Generate a provisioned test with provider/test setup for cross-target testing.
+/// Generate an integration test with service provisioning.
 ///
-/// The provider module (native only):
-/// 1. Starts the provider
-/// 2. Serializes resource to env var
-/// 3. Spawns the test via cargo (with same features)
-/// 4. Stops the provider
+/// Given:
+/// ```rs
+/// #[dialog_common::test]
+/// async fn it_connects(server: ServerAddress) -> anyhow::Result<()> {
+///     assert!(!server.endpoint.is_empty());
+///     Ok(())
+/// }
+/// ```
 ///
-/// The test function (any target):
-/// 1. Reads resource from env var
-/// 2. Runs test body
-fn generate_provisioned_test(
-    input: &ItemFn,
-    attrs: &TokenStream2,
-    settings: &ProviderSettings,
-) -> TokenStream {
-    let name = &input.sig.ident;
-    let vis = &input.vis;
-    let body = &input.block;
-    let output = &input.sig.output;
-    // Provider module only gets non-test attrs (doc comments, cfg, etc.)
-    // Test framework attrs (tokio::test, etc.) only apply to the inner test function
-    let module_attrs = filter_non_test_attrs(&input.attrs);
-
-    // Extract the resource type from the function parameter
-    let (param_name, resource_type) = match extract_resource_param(input) {
-        Ok(result) => result,
+/// Generates (simplified, with hash `abc123`):
+/// ```rs
+/// // 1. Integration logic - the actual test body (allow dead_code when dialog_test_wasm)
+/// #[cfg_attr(dialog_test_wasm, allow(dead_code))]
+/// async fn it_connects_logic_abc123(server: ServerAddress) -> anyhow::Result<()> {
+///     assert!(!server.endpoint.is_empty());
+///     Ok(())
+/// }
+///
+/// // 2. Native test - runs when `cargo test` (no flags)
+/// #[cfg(all(not(dialog_test_wasm), not(target_arch = "wasm32")))]
+/// #[tokio::test]
+/// async fn it_connects() -> anyhow::Result<()> {
+///     let service = ServerAddress::start(Default::default()).await?;
+///     let result = tokio::spawn(it_connects_logic_abc123(service.address.clone())).await;
+///     service.stop().await?;
+///     result?;
+///     Ok(())
+/// }
+///
+/// // 3. Wasm integration test - runs when `RUSTFLAGS="--cfg dialog_test_wasm" cargo test`
+/// #[cfg(all(dialog_test_wasm, not(target_arch = "wasm32")))]
+/// #[tokio::test]
+/// async fn it_connects() -> anyhow::Result<()> {
+///     let service = ServerAddress::start(Default::default()).await?;
+///     let json = serde_json::to_string(&service.address)?;
+///     // Spawns: RUSTFLAGS="--cfg dialog_test_wasm_inner" \
+///     //         PROVISIONED_SERVICE_ADDRESS='...' \
+///     //         cargo test --target wasm32-unknown-unknown it_connects_abc123
+///     // ... spawn cargo test for wasm target ...
+///     service.stop().await?;
+/// }
+///
+/// // 4. Wasm test - compiled into wasm, receives address via compile-time env var
+/// #[cfg(all(dialog_test_wasm_inner, target_arch = "wasm32", target_os = "unknown"))]
+/// #[wasm_bindgen_test::wasm_bindgen_test]
+/// async fn it_connects_abc123() -> Result<(), wasm_bindgen::JsValue> {
+///     let json = option_env!("PROVISIONED_SERVICE_ADDRESS").unwrap();
+///     let server: ServerAddress = serde_json::from_str(json)?;
+///     it_connects_logic_abc123(server).await?;
+/// }
+/// ```
+///
+/// The blake3 hash ensures unique test names so the wasm provider can target
+/// exactly the intended test when spawning `cargo test`.
+fn generate_integration_test(source: &ItemFn, settings: &ProviderSettings) -> TokenStream {
+    let test = match IntegrationTest::new(source, settings) {
+        Ok(test) => test,
         Err(e) => return e.to_compile_error().into(),
     };
 
-    let provider = generate_provider(name, vis, &module_attrs, &resource_type, settings);
-
-    // Generate the test function - skips if env var not set (not invoked by provider)
-    let test = quote! {
-        #attrs
-        #vis async fn #name() #output {
-            // Skip if not invoked by provider (env var not set)
-            let Ok(json) = ::std::env::var(::dialog_common::helpers::PROVISIONED_ENV_VAR) else {
-                println!("skipped (run via provider)");
-                return Ok(());
-            };
-            let #param_name: #resource_type = ::serde_json::from_str(&json)
-                .expect("Failed to deserialize resource");
-
-            #body
-        }
-    };
-
-    let expanded = quote! {
-        #provider
-        #test
-    };
-
-    TokenStream::from(expanded)
+    test.generate()
 }
 
-/// Generate the provider module that starts resources and invokes the test.
-///
-/// The provider is a module with the same name as the test, gated to native-only.
-/// It contains a test function that starts the resource provider, serializes
-/// the resource state, and invokes the actual test in a subprocess.
-fn generate_provider(
-    name: &Ident,
-    vis: &syn::Visibility,
-    module_attrs: &[&syn::Attribute],
-    resource_type: &Type,
-    settings: &ProviderSettings,
-) -> TokenStream2 {
-    let name_str = name.to_string();
+/// Context shared by all integration test generator functions.
+struct IntegrationTest<'a> {
+    /// Visibility of the test function
+    vis: &'a syn::Visibility,
+    /// Original test function identifier
+    ident: &'a Ident,
+    /// Test name as string
+    name: String,
+    /// Function body
+    body: &'a syn::Block,
+    /// Return type
+    output: &'a syn::ReturnType,
+    /// User-defined attributes
+    user_attrs: &'a [syn::Attribute],
+    /// Parameter name for the address
+    param_name: Ident,
+    /// Address type
+    address_type: Type,
+    /// Identifier for the integration logic function (e.g., `test_logic_abc123`)
+    integration_ident: Ident,
+    /// Identifier for the wasm test (e.g., `test_abc123`)
+    wasm_test_ident: Ident,
+    /// Name of the wasm test as string (for cargo test targeting)
+    wasm_test_name: String,
+    /// Token stream for setting up provider settings
+    settings_setup: proc_macro2::TokenStream,
+    /// Token stream for feature checks (used by wasm integration test)
+    feature_checks: Vec<proc_macro2::TokenStream>,
+}
 
-    // Build settings field assignments
-    let field_names: Vec<_> = settings.0.iter().map(|(name, _)| name).collect();
-    let field_values: Vec<_> = settings.0.iter().map(|(_, value)| value).collect();
+impl<'a> IntegrationTest<'a> {
+    fn new(source: &'a ItemFn, settings: &ProviderSettings) -> syn::Result<Self> {
+        let ident = &source.sig.ident;
+        let name = ident.to_string();
+        let hash = source_hash(source);
 
-    let settings_setup = quote! {
-        let mut settings = <#resource_type as ::dialog_common::helpers::Resource>::Settings::default();
-        #(settings.#field_names = (#field_values).into();)*
-    };
+        let (param_name, address_type) = extract_address_param(source)?;
 
-    // Generate cfg!() checks for each feature in Cargo.toml
-    let checks: Vec<_> = read_crate_features()
-        .iter()
-        .map(|f| {
-            let name = f.as_str();
-            quote! { if cfg!(feature = #name) { f.push(#name); } }
+        let field_names: Vec<_> = settings.0.iter().map(|(name, _)| name).collect();
+        let field_values: Vec<_> = settings.0.iter().map(|(_, value)| value).collect();
+
+        let settings_setup = quote! {
+            let mut settings = <#address_type as ::dialog_common::helpers::Provisionable>::Settings::default();
+            #(settings.#field_names = (#field_values).into();)*
+        };
+
+        let feature_checks: Vec<_> = read_crate_features()
+            .iter()
+            .map(|f| {
+                let name = f.as_str();
+                quote! { if cfg!(feature = #name) { features.push(#name); } }
+            })
+            .collect();
+
+        Ok(Self {
+            vis: &source.vis,
+            ident,
+            name: name.clone(),
+            body: &source.block,
+            output: &source.sig.output,
+            user_attrs: &source.attrs,
+            param_name,
+            address_type,
+            integration_ident: Ident::new(&format!("{}_logic_{}", name, hash), ident.span()),
+            wasm_test_ident: Ident::new(&format!("{}_{}", name, hash), ident.span()),
+            wasm_test_name: format!("{}_{}", name, hash),
+            settings_setup,
+            feature_checks,
         })
-        .collect();
+    }
 
-    quote! {
-        #(#module_attrs)*
-        #[cfg(all(test, not(target_arch = "wasm32")))]
-        #vis mod #name {
-            use super::*;
+    fn generate(&self) -> TokenStream {
+        let logic = self.integration_logic();
+        let native = self.native_test();
+        let wasm_integration = self.wasm_integration_test();
+        let wasm = self.wasm_test();
 
+        TokenStream::from(quote! {
+            #logic
+            #native
+            #wasm_integration
+            #wasm
+        })
+    }
+
+    /// Generate the integration logic function containing the actual test body.
+    ///
+    /// This function is called by the native test or wasm test.
+    /// When `dialog_test_wasm` is set, the wasm integration test spawns a subprocess
+    /// instead of calling this directly, so we add `allow(dead_code)`.
+    fn integration_logic(&self) -> proc_macro2::TokenStream {
+        let IntegrationTest {
+            vis,
+            user_attrs,
+            integration_ident,
+            param_name,
+            address_type,
+            output,
+            body,
+            ..
+        } = self;
+
+        quote! {
+            // Integration logic - called by native test or wasm test.
+            // When dialog_test_wasm is set, wasm integration test spawns a subprocess
+            // instead of calling this directly, so allow dead_code to silence warnings.
+            #[cfg_attr(dialog_test_wasm, allow(dead_code))]
+            #(#user_attrs)*
+            #vis async fn #integration_ident(#param_name: #address_type) #output
+                #body
+        }
+    }
+
+    /// Generate the native test.
+    ///
+    /// Runs with `cargo test` (no flags). Starts service, runs test, stops service
+    /// all in the same process.
+    fn native_test(&self) -> proc_macro2::TokenStream {
+        let IntegrationTest {
+            vis,
+            ident,
+            address_type,
+            integration_ident,
+            settings_setup,
+            ..
+        } = self;
+
+        quote! {
+            // Native test: runs with `cargo test` (no flags)
+            // Starts service, runs test, stops service - all in same process
+            #[cfg(all(not(dialog_test_wasm), not(target_arch = "wasm32")))]
             #[tokio::test]
-            pub async fn test() -> ::anyhow::Result<()> {
-                use ::dialog_common::helpers::{Resource, Provider, PROVISIONED_ENV_VAR};
-                use ::std::process::Command;
+            #vis async fn #ident() -> ::anyhow::Result<()> {
+                use ::dialog_common::helpers::Provisionable;
 
                 #settings_setup
 
-                // Start the provider and get the resource
-                let provider = <#resource_type as Resource>::start(settings)
+                // Start the service
+                let service = <#address_type as Provisionable>::start(settings)
                     .await
-                    .expect("Failed to start provider");
-                let resource: #resource_type = provider.provide();
+                    .expect("Failed to start service");
+                let address: #address_type = service.address.clone();
 
-                // Serialize resource for test
-                let state_json = ::serde_json::to_string(&resource)
-                    .expect("Failed to serialize resource");
+                // Run the test in a spawned task so panics don't prevent cleanup
+                let result = ::tokio::spawn(#integration_ident(address)).await;
+
+                // Always stop the service
+                service.stop().await?;
+
+                // Propagate the result
+                match result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(e),
+                    Err(e) => {
+                        if e.is_panic() {
+                            ::std::panic::resume_unwind(e.into_panic());
+                        }
+                        Err(::anyhow::anyhow!("Task failed: {}", e))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Generate the wasm integration test.
+    ///
+    /// Runs with `RUSTFLAGS="--cfg dialog_test_wasm" cargo test`. Starts service on native,
+    /// spawns wasm subprocess for test, stops service.
+    fn wasm_integration_test(&self) -> proc_macro2::TokenStream {
+        let IntegrationTest {
+            vis,
+            ident,
+            name,
+            address_type,
+            settings_setup,
+            wasm_test_name,
+            feature_checks,
+            ..
+        } = self;
+
+        quote! {
+            // Wasm integration test: runs with `RUSTFLAGS="--cfg dialog_test_wasm" cargo test`
+            // Starts service on native, spawns wasm subprocess for test, stops service
+            #[cfg(all(dialog_test_wasm, not(target_arch = "wasm32")))]
+            #[tokio::test]
+            #vis async fn #ident() -> ::anyhow::Result<()> {
+                use ::dialog_common::helpers::{Provisionable, PROVISIONED_SERVICE_ADDRESS};
+                use ::std::process::Stdio;
+
+                #settings_setup
+
+                // Start the service
+                let service = <#address_type as Provisionable>::start(settings)
+                    .await
+                    .expect("Failed to start service");
+
+                // Serialize address for the wasm test
+                let address = ::serde_json::to_string(&service.address)
+                    .expect("Failed to serialize address");
 
                 // Check if --nocapture was passed
                 let show_output = ::std::env::var("RUST_TEST_NOCAPTURE").is_ok()
@@ -283,82 +450,83 @@ fn generate_provider(
                 // Check if --color=always was passed
                 let color_always = ::std::env::args().any(|arg| arg == "--color=always");
 
-                // Capture combined stdout+stderr to preserve natural output ordering
-                use ::std::process::Stdio;
-
-                // Add package (CARGO_PKG_NAME is set during compilation)
                 let pkg_name = env!("CARGO_PKG_NAME");
 
-                // Build feature list using cfg!() checks
-                let mut f: Vec<&str> = Vec::new();
-                #(#checks)*
-                let features_str = f.join(",");
+                // Build feature list using cfg!() to forward same features in the subprocess
+                let mut features: Vec<&str> = Vec::new();
+                #(#feature_checks)*
+                let features_str = features.join(",");
 
-                // Build the cargo command string
-                // Use --exact with full module path to match only the inner test,
-                // not this provider module's __run__ function
-                let color_flag = if color_always { "--color=always" } else { "" };
-                // module_path!() gives us "crate_name::path::to::test_name" (provider module).
-                // Test harness uses "path::to::test_name" (without crate, same as provider module).
-                // We strip "crate_name::" prefix to get the test filter.
-                let test_path = &module_path!()[pkg_name.len() + 2..];
-                let test_cmd = if features_str.is_empty() {
-                    format!(
-                        "cargo test {} -p {} --lib -- --exact {} --nocapture",
-                        color_flag, pkg_name, test_path
-                    )
-                } else {
-                    format!(
-                        "cargo test {} -p {} --features {} --lib -- --exact {} --nocapture",
-                        color_flag, pkg_name, features_str, test_path
-                    )
-                };
+                // Build RUSTFLAGS with dialog_test_wasm_inner cfg so that only wasm
+                // integration tests will run.
+                let existing_rustflags = ::std::env::var("RUSTFLAGS").unwrap_or_default();
+                let rustflags = format!("{} --cfg dialog_test_wasm_inner", existing_rustflags);
 
-                // Use sh -c to run the command with stderr merged into stdout (2>&1)
-                let mut cmd = Command::new("sh");
-                cmd.arg("-c")
-                    .arg(format!("{} 2>&1", test_cmd))
-                    .env(PROVISIONED_ENV_VAR, &state_json)
+                // Build cargo command args
+                let mut args = vec![
+                    "test".to_string(),
+                    "-p".to_string(), pkg_name.to_string(),
+                    "--target".to_string(), "wasm32-unknown-unknown".to_string(),
+                    "--lib".to_string(),
+                ];
+                if color_always {
+                    args.push("--color=always".to_string());
+                }
+                if !features_str.is_empty() {
+                    args.push("--features".to_string());
+                    args.push(features_str);
+                }
+                args.push(#wasm_test_name.to_string());
+                args.push("--".to_string());
+                args.push("--nocapture".to_string());
+
+                // Spawn cargo test directly with env vars
+                let mut cmd = ::std::process::Command::new("cargo");
+                cmd.args(&args)
+                    .env("RUSTFLAGS", &rustflags)
+                    .env(PROVISIONED_SERVICE_ADDRESS, &address)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
 
-                // Spawn the subprocess and wait for it in a blocking thread
-                // This allows the tokio runtime to continue processing (e.g., the server)
                 let output = ::tokio::task::spawn_blocking(move || {
                     cmd.output().expect("Failed to execute cargo test")
                 }).await.expect("Failed to join blocking task");
 
-                // stdout now contains both stdout and stderr in natural order
-                let combined = String::from_utf8_lossy(&output.stdout);
+                // Combine stdout and stderr for display
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
 
                 // Show output on failure or when --nocapture was passed
-                if (show_output || !output.status.success()) && !combined.is_empty() {
+                if show_output || !output.status.success() {
                     use ::std::fmt::Write;
                     use ::std::io::Write as IoWrite;
                     let mut buf = String::new();
-                    let _ = writeln!(buf, "\n  ┌─ {}", test_cmd);
-                    for line in combined.lines() {
+                    let _ = writeln!(buf, "\n  ┌─ cargo {}", args.join(" "));
+                    for line in stderr.lines().chain(stdout.lines()) {
                         let _ = writeln!(buf, "  │ {}", line);
                     }
                     let _ = writeln!(buf, "  └─");
-                    // Write atomically to stderr
-                    let stderr = ::std::io::stderr();
-                    let mut handle = stderr.lock();
+                    let out = ::std::io::stderr();
+                    let mut handle = out.lock();
                     let _ = handle.write_all(buf.as_bytes());
                     let _ = handle.flush();
                 }
 
+                // Stop the service
+                service.stop().await?;
+
                 if !output.status.success() {
-                    panic!("Test '{}' failed", #name_str);
+                    panic!("Test '{}' failed in wasm", #name);
                 }
 
-                // Verify the test actually ran (not "running 0 tests")
-                // This catches cases where the test wasn't compiled (e.g., cfg mismatch)
-                if combined.contains("running 0 tests") {
+                // Check if tests were actually run (not skipped)
+                let combined = format!("{}{}", stdout, stderr);
+                if combined.contains("no tests to run") ||
+                   combined.contains("0 passed; 0 failed") {
                     panic!(
-                        "Test '{}' was not found. This usually means the test \
-                         wasn't compiled (check cfg attributes match).",
-                        #name_str
+                        "Test '{}' was skipped in wasm. \
+                         This usually means the test wasn't compiled with the right cfg flags.",
+                        #name
                     );
                 }
 
@@ -366,38 +534,91 @@ fn generate_provider(
             }
         }
     }
+
+    /// Generate the wasm test.
+    ///
+    /// Compiled into wasm, invoked by the wasm integration test. Uses `option_env!`
+    /// (compile-time) instead of `std::env::var` (runtime) because wasm32-unknown-unknown
+    /// has no access to host environment variables at runtime.
+    fn wasm_test(&self) -> proc_macro2::TokenStream {
+        let IntegrationTest {
+            vis,
+            address_type,
+            integration_ident,
+            wasm_test_ident,
+            ..
+        } = self;
+
+        quote! {
+            // Wasm test: compiled into wasm, invoked by wasm integration test
+            // Address is received via compile-time env var (option_env!) since wasm has no runtime env
+            #[cfg(all(dialog_test_wasm_inner, target_arch = "wasm32", target_os = "unknown"))]
+            #[wasm_bindgen_test::wasm_bindgen_test]
+            #vis async fn #wasm_test_ident() -> Result<(), ::wasm_bindgen::JsValue> {
+                // option_env! captures the env var at compile time and embeds it in the binary
+                let source = ::std::option_env!("PROVISIONED_SERVICE_ADDRESS")
+                    .ok_or_else(|| ::wasm_bindgen::JsValue::from_str(
+                        "Missing compile-time env var PROVISIONED_SERVICE_ADDRESS. \
+                         This test must be invoked via the wasm integration test."
+                    ))?;
+                let address: #address_type = ::serde_json::from_str(source)
+                    .map_err(|e| ::wasm_bindgen::JsValue::from_str(&format!("Failed to deserialize: {}", e)))?;
+
+                #integration_ident(address).await
+                    .map_err(|e| ::wasm_bindgen::JsValue::from_str(&format!("{}", e)))
+            }
+        }
+    }
 }
 
-/// Extract the parameter name and resource type from the function signature.
-fn extract_resource_param(func: &ItemFn) -> syn::Result<(Ident, Type)> {
-    let inputs = &func.sig.inputs;
+/// Extract the parameter name and address type from an integration test
+/// function so that associated service can be provisioned and test could
+/// be executed with the address.
+///
+/// Currently we only support integration tests with a sole parameter to
+/// represent a required service address.
+///
+/// This function extracts parameter name and its type identifier.
+///
+/// # Example
+///
+/// Given:
+/// ```rs
+/// async fn it_connects(server: ServerAddress) -> anyhow::Result<()> { ... }
+/// ```
+///
+/// Returns: `(Ident("server"), Type(ServerAddress))`
+///
+/// Errors if source function does not have exactly one paramater.
+fn extract_address_param(source: &ItemFn) -> syn::Result<(Ident, Type)> {
+    let inputs = &source.sig.inputs;
 
     if inputs.len() != 1 {
         return Err(syn::Error::new_spanned(
-            &func.sig,
-            "provisioned test must have exactly one resource parameter",
+            &source.sig,
+            "Integration test must have exactly one parameter",
         ));
     }
 
-    let arg = inputs.first().unwrap();
+    let parameter = inputs.first().unwrap();
 
-    match arg {
-        FnArg::Typed(pat_type) => {
-            let param_name = match pat_type.pat.as_ref() {
-                Pat::Ident(pat_ident) => pat_ident.ident.clone(),
+    match parameter {
+        FnArg::Typed(address) => {
+            let name = match address.pat.as_ref() {
+                Pat::Ident(pat) => pat.ident.clone(),
                 _ => {
                     return Err(syn::Error::new_spanned(
-                        &pat_type.pat,
+                        &address.pat,
                         "Expected a simple identifier for the parameter",
                     ));
                 }
             };
-            let param_type = (*pat_type.ty).clone();
-            Ok((param_name, param_type))
+            let address_type = (*address.ty).clone();
+            Ok((name, address_type))
         }
         FnArg::Receiver(_) => Err(syn::Error::new_spanned(
-            arg,
-            "test function cannot have self parameter",
+            parameter,
+            "Integration test must not take self parameter",
         )),
     }
 }
