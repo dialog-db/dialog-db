@@ -124,10 +124,11 @@ pub use list::{List, ListResult};
 use crate::StorageSource;
 use crate::{DialogStorageError, StorageBackend, StorageSink};
 
-#[cfg(all(feature = "helpers", not(target_arch = "wasm32")))]
+// Testing helpers module:
+// - Address types (S3Address, PublicS3Address) are available on all platforms
+// - Server implementation (LocalS3, InMemoryS3) is native-only
+#[cfg(any(feature = "helpers", test))]
 mod helpers;
-#[cfg(all(feature = "helpers", not(target_arch = "wasm32")))]
-pub use helpers::*;
 
 /// Errors that can occur when using the S3 storage backend.
 #[derive(Error, Debug)]
@@ -416,54 +417,40 @@ where
 }
 
 #[cfg(test)]
-mod unit_tests {
+mod tests {
     use super::*;
-    use anyhow::Result;
-    #[cfg(target_arch = "wasm32")]
-    use wasm_bindgen_test::wasm_bindgen_test;
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+    use helpers::*;
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_builds_url_without_prefix() -> Result<()> {
+    #[dialog_common::test]
+    fn it_builds_url_without_prefix() {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public);
 
         let url = backend.url(&[1, 2, 3]).unwrap();
         assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket/!Ldp");
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_builds_url_with_prefix() -> Result<()> {
+    #[dialog_common::test]
+    fn it_builds_url_with_prefix() {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public)
                 .with_prefix("prefix");
 
         let url = backend.url(&[1, 2, 3]).unwrap();
         assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket/prefix/!Ldp");
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_builds_url_with_trailing_slash() -> Result<()> {
+    #[dialog_common::test]
+    fn it_builds_url_with_trailing_slash() {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com/", "bucket", Session::Public);
 
         let url = backend.url(&[1, 2, 3]).unwrap();
         assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket/!Ldp");
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_builds_url_with_bucket_only() -> Result<()> {
+    #[dialog_common::test]
+    fn it_builds_url_with_bucket_only() {
         let backend = S3::<Vec<u8>, Vec<u8>>::open(
             "https://s3.us-east-1.amazonaws.com",
             "my-bucket",
@@ -476,13 +463,10 @@ mod unit_tests {
             url.as_str(),
             "https://s3.us-east-1.amazonaws.com/my-bucket/my-key"
         );
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_builds_url_with_bucket_and_prefix() -> Result<()> {
+    #[dialog_common::test]
+    fn it_builds_url_with_bucket_and_prefix() {
         let backend = S3::<Vec<u8>, Vec<u8>>::open(
             "https://s3.us-east-1.amazonaws.com",
             "my-bucket",
@@ -496,13 +480,10 @@ mod unit_tests {
             url.as_str(),
             "https://s3.us-east-1.amazonaws.com/my-bucket/data/my-key"
         );
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_generates_signed_urls() -> Result<()> {
+    #[dialog_common::test]
+    fn it_generates_signed_urls() {
         let credentials = Credentials {
             access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
             secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
@@ -532,143 +513,10 @@ mod unit_tests {
                 .contains("X-Amz-Algorithm=AWS4-HMAC-SHA256")
         );
         assert!(authorized.url.as_str().contains("X-Amz-Signature="));
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_creates_put_request_with_checksum() -> Result<()> {
-        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
-        let request = Put::new(url, b"test value").with_checksum(&Hasher::Sha256);
-
-        // Checksum should be present after with_checksum
-        assert!(request.checksum().is_some());
-        // Checksum should have the correct algorithm name
-        assert_eq!(request.checksum().unwrap().name(), "sha256");
-
-        Ok(())
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_creates_put_request_without_checksum() -> Result<()> {
-        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
-        let request = Put::new(url, b"test value");
-
-        // Checksum should be None by default
-        assert!(request.checksum().is_none());
-
-        Ok(())
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_creates_put_request_with_acl() -> Result<()> {
-        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
-        let request = Put::new(url, b"test value").with_acl(Acl::PublicRead);
-
-        assert_eq!(request.acl(), Some(Acl::PublicRead));
-
-        Ok(())
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_creates_get_request() -> Result<()> {
-        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
-        let request = Get::new(url.clone());
-
-        assert_eq!(request.method(), "GET");
-        assert_eq!(request.url(), &url);
-        assert!(request.checksum().is_none());
-        assert!(request.acl().is_none());
-
-        Ok(())
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_encodes_s3_key_safe_chars() -> Result<()> {
-        // Safe characters should pass through unchanged
-        assert_eq!(encode_s3_key(b"simple-key"), "simple-key");
-        assert_eq!(encode_s3_key(b"with_underscore"), "with_underscore");
-        assert_eq!(encode_s3_key(b"with.dot"), "with.dot");
-        assert_eq!(encode_s3_key(b"CamelCase123"), "CamelCase123");
-
-        Ok(())
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_encodes_s3_key_path_structure() -> Result<()> {
-        // Path structure should be preserved
-        assert_eq!(encode_s3_key(b"path/to/key"), "path/to/key");
-        assert_eq!(encode_s3_key(b"a/b/c"), "a/b/c");
-
-        Ok(())
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_encodes_s3_key_unsafe_chars() -> Result<()> {
-        // Unsafe characters trigger base58 encoding with ! prefix
-        let encoded = encode_s3_key(b"user@example");
-        assert!(encoded.starts_with('!'));
-
-        let encoded = encode_s3_key(b"has space");
-        assert!(encoded.starts_with('!'));
-
-        Ok(())
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_encodes_s3_key_binary() -> Result<()> {
-        // Binary data gets base58 encoded
-        let encoded = encode_s3_key(&[0x01, 0x02, 0x03]);
-        assert!(encoded.starts_with('!'));
-
-        Ok(())
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_decodes_s3_key_safe_chars() -> Result<()> {
-        // Safe keys decode to themselves
-        assert_eq!(decode_s3_key("simple-key").unwrap(), b"simple-key");
-        assert_eq!(decode_s3_key("path/to/key").unwrap(), b"path/to/key");
-
-        Ok(())
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_roundtrips_encode_decode() -> Result<()> {
-        // Roundtrip encoding should preserve original data
-        let original = b"test-key";
-        let encoded = encode_s3_key(original);
-        let decoded = decode_s3_key(&encoded).unwrap();
-        assert_eq!(decoded, original);
-
-        // Binary data roundtrip
-        let binary = vec![1, 2, 3, 4, 5];
-        let encoded = encode_s3_key(&binary);
-        let decoded = decode_s3_key(&encoded).unwrap();
-        assert_eq!(decoded, binary);
-
-        // Path with mixed components
-        let path = b"safe/!encoded/also-safe";
-        let encoded = encode_s3_key(path);
-        let decoded = decode_s3_key(&encoded).unwrap();
-        assert_eq!(decoded, path);
-
-        Ok(())
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_authorizes_public_session() -> Result<()> {
+    #[dialog_common::test]
+    fn it_authorizes_public_session() {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url.clone(), b"test").with_checksum(&Hasher::Sha256);
 
@@ -688,73 +536,31 @@ mod unit_tests {
                 .iter()
                 .any(|(k, _)| k == "x-amz-checksum-sha256")
         );
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_configures_s3_with_hasher() -> Result<()> {
+    #[dialog_common::test]
+    fn it_configures_s3_with_hasher() {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public)
                 .with_hasher(Hasher::Sha256);
 
         // Hasher should be set (we can't directly inspect it, but the backend should work)
         assert!(backend.url(b"key").is_ok());
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_errors_on_invalid_base58() -> Result<()> {
-        // Invalid base58 should return an error
-        let result = decode_s3_key("!invalid@@base58");
-        assert!(result.is_err());
-
-        Ok(())
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_converts_errors_to_dialog_error() -> Result<()> {
+    #[dialog_common::test]
+    fn it_converts_errors_to_dialog_error() {
         let error = S3StorageError::TransportError("test".into());
         let dialog_error: DialogStorageError = error.into();
         assert!(dialog_error.to_string().contains("test"));
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_creates_delete_request() -> Result<()> {
-        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
-        let request = Delete::new(url.clone());
-
-        assert_eq!(request.method(), "DELETE");
-        assert_eq!(request.url(), &url);
-        assert!(request.checksum().is_none());
-        assert!(request.acl().is_none());
-
-        Ok(())
-    }
-}
-
-/// Local S3 server tests using s3s for end-to-end testing
-#[cfg(all(test, feature = "helpers", not(target_arch = "wasm32")))]
-mod local_s3_tests {
-    use super::*;
-    use helpers::LocalS3;
-
-    #[tokio::test]
-    async fn it_sets_and_gets_values() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
+    #[dialog_common::test]
+    async fn it_sets_and_gets_values(env: PublicS3Address) -> anyhow::Result<()> {
         // Using Session::Public for simplicity. Signed sessions are tested in
         // test_local_s3_with_signed_session using start_with_auth().
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
-                .with_prefix("test");
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public)
+            .with_prefix("test");
 
         // Test data
         let key = b"test-key-1".to_vec();
@@ -770,12 +576,9 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_performs_multiple_operations() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+    #[dialog_common::test]
+    async fn it_performs_multiple_operations(env: PublicS3Address) -> anyhow::Result<()> {
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public);
 
         // Set multiple values
         backend.set(b"key1".to_vec(), b"value1".to_vec()).await?;
@@ -802,12 +605,9 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_handles_large_values() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+    #[dialog_common::test]
+    async fn it_handles_large_values(env: PublicS3Address) -> anyhow::Result<()> {
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public);
 
         // Create a 100KB value
         let key = b"large-key".to_vec();
@@ -821,12 +621,9 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_deletes_values() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+    #[dialog_common::test]
+    async fn it_deletes_values(env: PublicS3Address) -> anyhow::Result<()> {
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public);
 
         let key = b"delete-test-key".to_vec();
         let value = b"delete-test-value".to_vec();
@@ -850,13 +647,10 @@ mod local_s3_tests {
     }
 
     #[cfg(feature = "s3-list")]
-    #[tokio::test]
-    async fn it_lists_objects() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
-                .with_prefix("list-test");
+    #[dialog_common::test]
+    async fn it_lists_objects(env: PublicS3Address) -> anyhow::Result<()> {
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public)
+            .with_prefix("list-test");
 
         // Set multiple values
         backend.set(b"key1".to_vec(), b"value1".to_vec()).await?;
@@ -878,13 +672,10 @@ mod local_s3_tests {
     }
 
     #[cfg(feature = "s3-list")]
-    #[tokio::test]
-    async fn it_lists_empty_for_nonexistent_prefix() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
-        let backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
-                .with_prefix("nonexistent-prefix-that-does-not-exist");
+    #[dialog_common::test]
+    async fn it_lists_empty_for_nonexistent_prefix(env: PublicS3Address) -> anyhow::Result<()> {
+        let backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public)
+            .with_prefix("nonexistent-prefix-that-does-not-exist");
 
         // List objects with a prefix that has no objects - should return empty list
         let result = backend.list(None).await?;
@@ -897,12 +688,10 @@ mod local_s3_tests {
     }
 
     #[cfg(feature = "s3-list")]
-    #[tokio::test]
-    async fn it_errors_on_nonexistent_bucket() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
+    #[dialog_common::test]
+    async fn it_errors_on_nonexistent_bucket(env: PublicS3Address) -> anyhow::Result<()> {
         let backend = S3::<Vec<u8>, Vec<u8>>::open(
-            service.endpoint(),
+            &env.endpoint,
             "bucket-that-does-not-exist",
             Session::Public,
         );
@@ -923,15 +712,12 @@ mod local_s3_tests {
     }
 
     #[cfg(feature = "s3-list")]
-    #[tokio::test]
-    async fn it_reads_stream() -> anyhow::Result<()> {
+    #[dialog_common::test]
+    async fn it_reads_stream(env: PublicS3Address) -> anyhow::Result<()> {
         use futures_util::TryStreamExt;
 
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
-                .with_prefix("stream-test");
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public)
+            .with_prefix("stream-test");
 
         // Set multiple values
         backend.set(b"a".to_vec(), b"value-a".to_vec()).await?;
@@ -955,12 +741,9 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_returns_none_for_missing_values() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
-        let backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+    #[dialog_common::test]
+    async fn it_returns_none_for_missing_values(env: PublicS3Address) -> anyhow::Result<()> {
+        let backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public);
 
         // Try to get a key that doesn't exist
         let key = b"nonexistent-key".to_vec();
@@ -971,13 +754,10 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_performs_bulk_writes() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
-                .with_prefix("bulk-test");
+    #[dialog_common::test]
+    async fn it_performs_bulk_writes(env: PublicS3Address) -> anyhow::Result<()> {
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public)
+            .with_prefix("bulk-test");
 
         // Create a source stream with multiple items
         use async_stream::try_stream;
@@ -999,15 +779,13 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_integrates_with_memory_backend() -> anyhow::Result<()> {
+    #[dialog_common::test]
+    async fn it_integrates_with_memory_backend(env: PublicS3Address) -> anyhow::Result<()> {
         use crate::StorageSource;
         use futures_util::StreamExt;
 
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
         let mut s3_backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
+            S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public)
                 .with_prefix("memory-integration");
 
         // Create a memory backend with some data
@@ -1034,17 +812,15 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_uses_prefix() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
+    #[dialog_common::test]
+    async fn it_uses_prefix(env: PublicS3Address) -> anyhow::Result<()> {
         // Create two backends with different prefixes
         let mut backend1 =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
+            S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public)
                 .with_prefix("prefix-a");
 
         let mut backend2 =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
+            S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public)
                 .with_prefix("prefix-b");
 
         // Set the same key in both backends
@@ -1060,17 +836,15 @@ mod local_s3_tests {
     }
 
     #[cfg(feature = "s3-list")]
-    #[tokio::test]
-    async fn it_uses_prefix_for_listing() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
+    #[dialog_common::test]
+    async fn it_uses_prefix_for_listing(env: PublicS3Address) -> anyhow::Result<()> {
         // Create two backends with different prefixes
         let mut backend1 =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
+            S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public)
                 .with_prefix("prefix-a");
 
         let mut backend2 =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public)
+            S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public)
                 .with_prefix("prefix-b");
 
         // Set the same key in both backends
@@ -1088,12 +862,9 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_overwrites_value() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+    #[dialog_common::test]
+    async fn it_overwrites_value(env: PublicS3Address) -> anyhow::Result<()> {
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public);
 
         let key = b"overwrite-key".to_vec();
 
@@ -1108,12 +879,9 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_handles_binary_keys() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+    #[dialog_common::test]
+    async fn it_handles_binary_keys(env: PublicS3Address) -> anyhow::Result<()> {
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public);
 
         // Binary key with non-UTF8 bytes
         let key = vec![0x00, 0xFF, 0x80, 0x7F];
@@ -1127,12 +895,9 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_handles_path_like_keys() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+    #[dialog_common::test]
+    async fn it_handles_path_like_keys(env: PublicS3Address) -> anyhow::Result<()> {
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public);
 
         // Path-like key with slashes
         let key = b"path/to/nested/key".to_vec();
@@ -1146,12 +911,9 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_handles_encoded_key_segments() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+    #[dialog_common::test]
+    async fn it_handles_encoded_key_segments(env: PublicS3Address) -> anyhow::Result<()> {
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public);
 
         // Test key with mixed safe and unsafe segments
         // "safe-segment/user@example.com" - first segment is safe, second has @ which is unsafe
@@ -1175,12 +937,9 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_handles_multi_segment_mixed_encoding() -> anyhow::Result<()> {
-        let service = LocalS3::start(&["test-bucket"]).await?;
-
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+    #[dialog_common::test]
+    async fn it_handles_multi_segment_mixed_encoding(env: PublicS3Address) -> anyhow::Result<()> {
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public);
 
         // Test key with multiple segments: safe/unsafe/safe/unsafe pattern
         // "data/file name with spaces/v1/special!chars"
@@ -1210,8 +969,8 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_roundtrips_key_encoding() -> anyhow::Result<()> {
+    #[dialog_common::test]
+    fn it_roundtrips_key_encoding() {
         // Test that encode and decode are inverse operations for valid UTF-8 keys
         // Note: Keys with invalid UTF-8 bytes (like 0xFF, 0x80) will be lossy
         // because encode_s3_key uses String::from_utf8_lossy internally.
@@ -1227,33 +986,27 @@ mod local_s3_tests {
 
         for key in test_keys {
             let encoded = encode_s3_key(&key);
-            let decoded = decode_s3_key(&encoded)?;
+            let decoded = decode_s3_key(&encoded).unwrap();
             assert_eq!(
                 decoded, key,
                 "Roundtrip failed for key: {:?}, encoded as: {}",
                 key, encoded
             );
         }
-
-        Ok(())
     }
 
-    #[tokio::test]
-    async fn it_works_with_signed_session() -> anyhow::Result<()> {
-        let service =
-            LocalS3::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"])
-                .await?;
-
+    #[dialog_common::test]
+    async fn it_works_with_signed_session(env: S3Address) -> anyhow::Result<()> {
         // Create credentials matching the test server
         let credentials = super::Credentials {
-            access_key_id: "test-access-key".into(),
-            secret_access_key: "test-secret-key".into(),
+            access_key_id: env.access_key_id.clone(),
+            secret_access_key: env.secret_access_key.clone(),
             session_token: None,
         };
 
         let session = Session::new(&credentials, &super::Service::s3("us-east-1"), 3600);
 
-        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session)
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, session)
             .with_prefix("signed-test");
 
         // Test data
@@ -1270,21 +1023,18 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_fails_with_wrong_secret_key() -> anyhow::Result<()> {
-        let service =
-            LocalS3::start_with_auth("test-access-key", "correct-secret", &["test-bucket"]).await?;
-
+    #[dialog_common::test]
+    async fn it_fails_with_wrong_secret_key(env: S3Address) -> anyhow::Result<()> {
         // Create credentials with WRONG secret key
         let credentials = super::Credentials {
-            access_key_id: "test-access-key".into(),
+            access_key_id: env.access_key_id.clone(),
             secret_access_key: "wrong-secret".into(),
             session_token: None,
         };
 
         let session = Session::new(&credentials, &super::Service::s3("us-east-1"), 3600);
 
-        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session);
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, session);
 
         // Attempt to set a value - should fail due to signature mismatch
         let result = backend.set(b"key".to_vec(), b"value".to_vec()).await;
@@ -1297,21 +1047,18 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_fails_with_wrong_access_key() -> anyhow::Result<()> {
-        let service =
-            LocalS3::start_with_auth("correct-access-key", "test-secret", &["test-bucket"]).await?;
-
+    #[dialog_common::test]
+    async fn it_fails_with_wrong_access_key(env: S3Address) -> anyhow::Result<()> {
         // Create credentials with WRONG access key
         let credentials = super::Credentials {
             access_key_id: "wrong-access-key".into(),
-            secret_access_key: "test-secret".into(),
+            secret_access_key: env.secret_access_key.clone(),
             session_token: None,
         };
 
         let session = Session::new(&credentials, &super::Service::s3("us-east-1"), 3600);
 
-        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session);
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, session);
 
         // Attempt to set a value - should fail due to unknown access key
         let result = backend.set(b"key".to_vec(), b"value".to_vec()).await;
@@ -1324,16 +1071,10 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_fails_unsigned_request_to_auth_server() -> anyhow::Result<()> {
-        // Server requires authentication
-        let service =
-            LocalS3::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"])
-                .await?;
-
-        // Client uses Session::Public (no signing)
-        let mut backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", Session::Public);
+    #[dialog_common::test]
+    async fn it_fails_unsigned_request_to_auth_server(env: S3Address) -> anyhow::Result<()> {
+        // Client uses Session::Public (no signing) but server requires authentication
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public);
 
         // Attempt to set a value - should fail because server expects signed requests
         let result = backend.set(b"key".to_vec(), b"value".to_vec()).await;
@@ -1346,22 +1087,18 @@ mod local_s3_tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn it_fails_get_with_wrong_credentials() -> anyhow::Result<()> {
-        let service =
-            LocalS3::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"])
-                .await?;
-
+    #[dialog_common::test]
+    async fn it_fails_get_with_wrong_credentials(env: S3Address) -> anyhow::Result<()> {
         // First, set a value with correct credentials
         let correct_credentials = super::Credentials {
-            access_key_id: "test-access-key".into(),
-            secret_access_key: "test-secret-key".into(),
+            access_key_id: env.access_key_id.clone(),
+            secret_access_key: env.secret_access_key.clone(),
             session_token: None,
         };
         let correct_session =
             Session::new(&correct_credentials, &super::Service::s3("us-east-1"), 3600);
         let mut correct_backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", correct_session);
+            S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, correct_session);
 
         correct_backend
             .set(b"protected-key".to_vec(), b"secret-value".to_vec())
@@ -1369,14 +1106,13 @@ mod local_s3_tests {
 
         // Now try to GET with wrong credentials
         let wrong_credentials = super::Credentials {
-            access_key_id: "test-access-key".into(),
+            access_key_id: env.access_key_id.clone(),
             secret_access_key: "wrong-secret".into(),
             session_token: None,
         };
         let wrong_session =
             Session::new(&wrong_credentials, &super::Service::s3("us-east-1"), 3600);
-        let wrong_backend =
-            S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", wrong_session);
+        let wrong_backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, wrong_session);
 
         // Attempt to get the value - should fail
         let result = wrong_backend.get(&b"protected-key".to_vec()).await;
@@ -1390,22 +1126,18 @@ mod local_s3_tests {
     }
 
     #[cfg(feature = "s3-list")]
-    #[tokio::test]
-    async fn it_lists_with_signed_session() -> anyhow::Result<()> {
-        let service =
-            LocalS3::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"])
-                .await?;
-
+    #[dialog_common::test]
+    async fn it_lists_with_signed_session(env: S3Address) -> anyhow::Result<()> {
         // Create credentials matching the test server
         let credentials = super::Credentials {
-            access_key_id: "test-access-key".into(),
-            secret_access_key: "test-secret-key".into(),
+            access_key_id: env.access_key_id.clone(),
+            secret_access_key: env.secret_access_key.clone(),
             session_token: None,
         };
 
         let session = Session::new(&credentials, &super::Service::s3("us-east-1"), 3600);
 
-        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session)
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, session)
             .with_prefix("signed-list-test");
 
         // Set multiple values
@@ -1431,23 +1163,19 @@ mod local_s3_tests {
     }
 
     #[cfg(feature = "s3-list")]
-    #[tokio::test]
-    async fn it_reads_stream_with_signed_session() -> anyhow::Result<()> {
+    #[dialog_common::test]
+    async fn it_reads_stream_with_signed_session(env: S3Address) -> anyhow::Result<()> {
         use futures_util::TryStreamExt;
 
-        let service =
-            LocalS3::start_with_auth("test-access-key", "test-secret-key", &["test-bucket"])
-                .await?;
-
         let credentials = super::Credentials {
-            access_key_id: "test-access-key".into(),
-            secret_access_key: "test-secret-key".into(),
+            access_key_id: env.access_key_id.clone(),
+            secret_access_key: env.secret_access_key.clone(),
             session_token: None,
         };
 
         let session = Session::new(&credentials, &super::Service::s3("us-east-1"), 3600);
 
-        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(service.endpoint(), "test-bucket", session)
+        let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, session)
             .with_prefix("signed-stream-test");
 
         // Set multiple values

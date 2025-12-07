@@ -73,14 +73,14 @@ impl From<&Checksum> for String {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn it_computes_sha256_checksum() {
         let checksum = Hasher::Sha256.checksum(b"hello world");
         // SHA-256 of "hello world" should be 32 bytes
         assert_eq!(checksum.as_bytes().len(), 32);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_formats_checksum_as_base64() {
         let checksum = Hasher::Sha256.checksum(b"hello world");
         // SHA-256 of "hello world" base64 encoded
@@ -90,7 +90,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_returns_checksum_algorithm_name() {
         let checksum = Hasher::Sha256.checksum(b"test");
         assert_eq!(checksum.name(), "sha256");

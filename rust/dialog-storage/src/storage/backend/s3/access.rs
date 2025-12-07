@@ -249,12 +249,19 @@ impl Session {
 impl Authority {
     /// Authorize a request with AWS SigV4 signing.
     fn authorize<R: Invocation>(&self, request: &R) -> Result<Authorized, SigningError> {
-        // Extract host from request URL
-        let host = request
-            .url()
+        // Extract host from request URL, including port for non-standard ports.
+        // AWS SigV4 requires the Host header to include the port when it's not
+        // the default (80 for HTTP, 443 for HTTPS). Browsers send Host with port,
+        // so we must include it in the signature to match.
+        let url = request.url();
+        let host_str = url
             .host_str()
-            .ok_or_else(|| SigningError::InvalidEndpoint("URL missing host".into()))?
-            .to_string();
+            .ok_or_else(|| SigningError::InvalidEndpoint("URL missing host".into()))?;
+        let host = if let Some(port) = url.port() {
+            format!("{}:{}", host_str, port)
+        } else {
+            host_str.to_string()
+        };
 
         // Build signed headers
         let mut headers = vec![("host".to_string(), host.clone())];
@@ -467,6 +474,8 @@ fn percent_encode_path(path: &str) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     fn test_credentials() -> Credentials {
         Credentials {
@@ -579,7 +588,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_authorizes_s3_put_request() {
         let authority = Session::new_at_time(
             &test_credentials(),
@@ -599,7 +608,7 @@ mod tests {
         assert!(auth.url.as_str().contains("X-Amz-Signature="));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_authorizes_r2_put_request() {
         let authority = Session::new_at_time(
             &test_credentials(),
@@ -618,7 +627,7 @@ mod tests {
         assert!(auth.url.as_str().contains("X-Amz-Signature="));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_authorizes_get_request() {
         let authority = Session::new_at_time(
             &test_credentials(),
@@ -636,7 +645,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_authorizes_delete_request() {
         let authority = Session::new_at_time(
             &test_credentials(),
@@ -654,7 +663,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_includes_checksum_header_in_put_request() {
         let authority = Session::new_at_time(
             &test_credentials(),
@@ -674,7 +683,7 @@ mod tests {
         assert!(auth.url.as_str().contains("x-amz-checksum-sha256"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_includes_acl_in_put_request() {
         let authority = Session::new_at_time(
             &test_credentials(),
@@ -690,19 +699,19 @@ mod tests {
         assert!(auth.url.as_str().contains("x-amz-acl=public-read"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_hex_encodes_bytes() {
         assert_eq!(hex_encode(&[0x01, 0x02, 0x03, 0x0A, 0x0F]), "0102030a0f");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_percent_encodes_strings() {
         assert_eq!(percent_encode("abc123"), "abc123");
         assert_eq!(percent_encode("a b+c"), "a%20b%2Bc");
         assert_eq!(percent_encode("test/path"), "test%2Fpath");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_includes_host_and_checksum_headers() {
         let authority = Session::new_at_time(
             &test_credentials(),
@@ -719,5 +728,85 @@ mod tests {
                 .iter()
                 .any(|(k, _)| k == "x-amz-checksum-sha256")
         );
+    }
+
+    /// Test that current_time() returns a reasonable value on all platforms.
+    #[dialog_common::test]
+    async fn it_gets_reasonable_current_time() -> anyhow::Result<()> {
+        let now = current_time();
+        let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+
+        // Verify the time is reasonable (year should be 2024-2030)
+        let year = &timestamp[0..4];
+        let year_num: u32 = year.parse().unwrap();
+        assert!(
+            year_num >= 2024 && year_num <= 2030,
+            "Year out of range: {}",
+            timestamp
+        );
+
+        // Print for debugging
+        #[cfg(not(target_arch = "wasm32"))]
+        println!("Native current_time: {}", timestamp);
+
+        // The signature is deterministic for a given time
+        let credentials = test_credentials();
+        let service = test_service();
+        let session = Session::new_at_time(&credentials, &service, 3600, now);
+        let request = TestPutRequest::new(s3_url("test"), b"body");
+        let auth = session.authorize(&request).unwrap();
+
+        // Just verify it produces a valid signature
+        assert!(auth.url.to_string().contains("X-Amz-Signature="));
+
+        Ok(())
+    }
+
+    /// Cross-platform signature test - verifies native and wasm produce identical signatures.
+    ///
+    /// Uses fixed inputs to verify signature generation is identical across platforms.
+    /// If the signatures differ, it indicates a platform-specific bug in the signing code.
+    #[dialog_common::test]
+    async fn it_generates_identical_signatures_across_platforms() -> anyhow::Result<()> {
+        // Use the same fixed inputs as other tests
+        let authority = Session::new_at_time(
+            &test_credentials(),
+            &test_service(),
+            TEST_DURATION,
+            test_time(),
+        );
+        let request = TestPutRequest::new(s3_url("file/path"), b"test body");
+        let auth = authority.authorize(&request).unwrap();
+
+        // Extract the signature from the signed URL
+        let signed_url = auth.url.to_string();
+        let signature = signed_url
+            .split("X-Amz-Signature=")
+            .nth(1)
+            .and_then(|s| s.split('&').next())
+            .unwrap_or("");
+
+        // Print for debugging (only on native since wasm console isn't easily available here)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            println!("Native Signed URL: {}", signed_url);
+            println!("Native Signature: {}", signature);
+        }
+
+        // Expected signature - this is the reference value from native
+        // If this test fails on wasm, it means the wasm signature differs
+        const EXPECTED_SIGNATURE: &str =
+            "04b33a973b320c6aa27ab8e2f1821a563e80a032f6089b992070310de196bdff";
+
+        assert_eq!(
+            signature, EXPECTED_SIGNATURE,
+            "Signature mismatch! Native and WASM produce different signatures.\n\
+             Expected: {}\n\
+             Got: {}\n\
+             Full URL: {}",
+            EXPECTED_SIGNATURE, signature, signed_url
+        );
+
+        Ok(())
     }
 }

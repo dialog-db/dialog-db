@@ -170,3 +170,58 @@ pub trait Request: Invocation + Sized {
         Ok(builder.send().await?)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[dialog_common::test]
+    fn it_creates_put_request_with_checksum() {
+        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
+        let request = Put::new(url, b"test value").with_checksum(&Hasher::Sha256);
+
+        // Checksum should be present after with_checksum
+        assert!(request.checksum().is_some());
+        // Checksum should have the correct algorithm name
+        assert_eq!(request.checksum().unwrap().name(), "sha256");
+    }
+
+    #[dialog_common::test]
+    fn it_creates_put_request_without_checksum() {
+        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
+        let request = Put::new(url, b"test value");
+
+        // Checksum should be None by default
+        assert!(request.checksum().is_none());
+    }
+
+    #[dialog_common::test]
+    fn it_creates_put_request_with_acl() {
+        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
+        let request = Put::new(url, b"test value").with_acl(Acl::PublicRead);
+
+        assert_eq!(request.acl(), Some(Acl::PublicRead));
+    }
+
+    #[dialog_common::test]
+    fn it_creates_get_request() {
+        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
+        let request = Get::new(url.clone());
+
+        assert_eq!(request.method(), "GET");
+        assert_eq!(request.url(), &url);
+        assert!(request.checksum().is_none());
+        assert!(request.acl().is_none());
+    }
+
+    #[dialog_common::test]
+    fn it_creates_delete_request() {
+        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
+        let request = Delete::new(url.clone());
+
+        assert_eq!(request.method(), "DELETE");
+        assert_eq!(request.url(), &url);
+        assert!(request.checksum().is_none());
+        assert!(request.acl().is_none());
+    }
+}
