@@ -92,10 +92,21 @@ jobs:
     strategy:
       matrix:
         include:
+          # Native tests: run all tests (simple + provisioned inline)
           - flags: '--features s3,s3-list'
+            rustflags: ''
           - flags: '--features s3,s3-list --release'
+            rustflags: ''
+          # WASM tests: run simple tests only (no provisioning in wasm)
           - flags: '--features s3,s3-list --target wasm32-unknown-unknown'
+            rustflags: ''
           - flags: '--features s3,s3-list --target wasm32-unknown-unknown --release'
+            rustflags: ''
+          # WASM provisioned tests: native spawns wasm inner tests
+          - flags: '--features s3,s3-list'
+            rustflags: '--cfg dialog_test_wasm'
+          - flags: '--features s3,s3-list --release'
+            rustflags: '--cfg dialog_test_wasm'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -107,4 +118,4 @@ jobs:
           sudo apt-get remove google-chrome-stable -y
           sudo rm /usr/bin/chromium /usr/bin/chromium-browser
 
-          nix develop --command cargo test ${{ matrix.flags }}
+          RUSTFLAGS="${{ matrix.rustflags }}" nix develop --command cargo test ${{ matrix.flags }}
