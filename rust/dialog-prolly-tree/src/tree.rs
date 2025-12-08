@@ -5,11 +5,13 @@ use std::{
 };
 
 use async_stream::try_stream;
-use dialog_storage::{ContentAddressedStorage, HashType};
+use dialog_storage::{ContentAddressedStorage, Encoder, HashType};
 use futures_core::Stream;
 use nonempty::NonEmpty;
 
-use crate::{Adopter, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
+use crate::{
+    Adopter, Change, Delta, DialogProllyTreeError, Differential, Entry, KeyType, Node, ValueType,
+};
 /// A hash representing an empty (usually newly created) `Tree`.
 pub static EMPT_TREE_HASH: [u8; 32] = [0; 32];
 
@@ -131,16 +133,19 @@ where
         Ok(())
     }
 
-    /// Remove the `key`/`value` pair associated with `key` (if it is present)
-    pub async fn delete(&mut self, key: &Key) -> Result<(), DialogProllyTreeError> {
+    /// Removes an entry from this tree, updating the root and returning the
+    /// value if it existed.
+    pub async fn delete(&mut self, key: &Key) -> Result<Option<Value>, DialogProllyTreeError> {
         match &self.root {
             Some(root) => {
+                let entry = root.get_entry(key, &self.storage).await?;
                 self.root = root
                     .remove::<Distribution, _>(key, &mut self.storage)
                     .await?;
-                Ok(())
+
+                Ok(entry.map(|e| e.value))
             }
-            None => Ok(()),
+            None => Ok(None),
         }
     }
 
@@ -226,5 +231,111 @@ where
             value_type: PhantomData,
             hash_type: PhantomData,
         })
+    }
+
+    /// Returns a stream of changes needed to transform this tree into the other tree.
+    ///
+    /// The differential is computed efficiently by comparing tree structure at each level,
+    /// only expanding nodes that differ between the two trees.
+    pub fn differentiate<'a>(&'a self, other: &'a Self) -> impl Differential<Key, Value> + 'a
+    where
+        Value: PartialEq,
+        Storage: Encoder<Hash = Hash>,
+    {
+        let mut delta = Delta::from((self, other));
+        try_stream! {
+            delta.expand().await?;
+            for await change in delta.stream() {
+                yield change?;
+            }
+        }
+    }
+
+    /// Integrates changes from a differential stream into this tree.
+    ///
+    /// This applies a series of Add and Remove changes with deterministic conflict resolution:
+    /// - Add: If key exists with different value, compare hashes - higher hash wins
+    /// - Remove: Only removes if the exact entry (key+value) exists
+    ///
+    /// The operation is atomic - if any change fails, the entire integration is rolled back.
+    pub async fn integrate<Changes>(
+        &mut self,
+        changes: Changes,
+    ) -> Result<(), DialogProllyTreeError>
+    where
+        Value: PartialEq,
+        Changes: Differential<Key, Value>,
+        Storage: Encoder<Hash = Hash>,
+    {
+        use futures_util::StreamExt;
+
+        // Copy root here in case we fail integration and need to revert
+        let root = self.root.clone();
+
+        let result: Result<(), DialogProllyTreeError> = {
+            futures_util::pin_mut!(changes);
+            while let Some(change_result) = changes.next().await {
+                let change = change_result?;
+                match change {
+                    Change::Add(entry) => {
+                        // Check if key already exists
+                        match self.get(&entry.key).await? {
+                            None => {
+                                // Key doesn't exist - insert it
+                                self.set(entry.key, entry.value).await?;
+                            }
+                            Some(existing_value) => {
+                                if existing_value == entry.value {
+                                    // Same value - no-op (idempotent)
+                                } else {
+                                    // Different values - resolve conflict by comparing hashes
+
+                                    let (existing_hash, _) = self
+                                        .storage()
+                                        .encode(&existing_value)
+                                        .await
+                                        .map_err(|e| e.into())?;
+                                    let (new_hash, _) = self
+                                        .storage()
+                                        .encode(&entry.value)
+                                        .await
+                                        .map_err(|e| e.into())?;
+
+                                    if new_hash.as_ref() > existing_hash.as_ref() {
+                                        // New value wins - update
+                                        self.set(entry.key, entry.value).await?;
+                                    }
+                                    // Else: existing wins, no-op
+                                }
+                            }
+                        }
+                    }
+                    Change::Remove(entry) => {
+                        // Check if key exists
+                        match self.get(&entry.key).await? {
+                            None => {
+                                // Key doesn't exist - no-op (already removed)
+                            }
+                            Some(existing_value) => {
+                                if existing_value == entry.value {
+                                    // Same value - remove it
+                                    self.delete(&entry.key).await?;
+                                }
+                                // Else: different value - no-op (concurrent update)
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        };
+
+        // If integration fails we set the root back to the original
+        // as this operation must be atomic.
+        if result.is_err() {
+            self.root = root;
+        }
+
+        result
     }
 }

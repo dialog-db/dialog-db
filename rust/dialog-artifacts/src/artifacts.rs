@@ -59,13 +59,8 @@ use crate::{
 
 /// An alias type that describes the [`Tree`]-based prolly tree that is
 /// used for each index in [`Artifacts`]
-pub type Index<Key, Value, Backend> = Tree<
-    GeometricDistribution,
-    Key,
-    State<Value>,
-    Blake3Hash,
-    Storage<CborEncoder, Backend>,
->;
+pub type Index<Key, Value, Backend> =
+    Tree<GeometricDistribution, Key, State<Value>, Blake3Hash, Storage<CborEncoder, Backend>>;
 
 /// [`Artifacts`] is an implementor of [`ArtifactStore`] and [`ArtifactStoreMut`].
 /// Internally, [`Artifacts`] maintains indexes built from [`Tree`]s (that is,

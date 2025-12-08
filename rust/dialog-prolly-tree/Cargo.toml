@@ -7,6 +7,7 @@ license.workspace = true
 
 [features]
 default = []
+helpers = []
 
 [dependencies]
 dialog-common = { workspace = true }
@@ -23,6 +24,7 @@ serde = { workspace = true }
 
 nonempty = { workspace = true, features = ["serialize"] }
 thiserror = { workspace = true }
+futures-util = { workspace = true }
 
 [dev-dependencies]
 dialog-storage = { workspace = true, features = ["helpers"] }
