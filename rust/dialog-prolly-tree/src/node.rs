@@ -8,9 +8,9 @@ use nonempty::NonEmpty;
 
 use crate::{Block, DialogProllyTreeError, Entry, KeyType, Rank, Reference, ValueType};
 
-type BranchStack<const HASH_SIZE: usize, Key, Hash> = Vec<(
-    Option<NonEmpty<Reference<HASH_SIZE, Key, Hash>>>,
-    Option<NonEmpty<Reference<HASH_SIZE, Key, Hash>>>,
+type BranchStack<Key, Hash> = Vec<(
+    Option<NonEmpty<Reference<Key, Hash>>>,
+    Option<NonEmpty<Reference<Key, Hash>>>,
 )>;
 
 // Chosen arbitrarily
@@ -23,23 +23,22 @@ const MAXIMUM_TREE_DEPTH: usize = 4096;
 /// collection of children references as [`References`], and segments (leaf
 /// nodes) store their key-value [`Entry`] inline.
 #[derive(Clone, Debug)]
-pub struct Node<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Value, Hash>
+pub struct Node<Key, Value, Hash>
 where
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<HASH_SIZE>,
+    Hash: HashType,
 {
-    block: Block<HASH_SIZE, Key, Value, Hash>,
+    block: Block<Key, Value, Hash>,
     /// A [`Reference`] that points to this [`Node`]s own [`Block`]
-    reference: Reference<HASH_SIZE, Key, Hash>,
+    reference: Reference<Key, Hash>,
 }
 
-impl<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Value, Hash>
-    Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>
+impl<Key, Value, Hash> Node<Key, Value, Hash>
 where
     Key: KeyType,
     Value: ValueType,
-    Hash: HashType<HASH_SIZE>,
+    Hash: HashType,
 {
     /// Whether this node is a branch.
     pub fn is_branch(&self) -> bool {
@@ -54,11 +53,11 @@ where
     /// Create a new branch [`Node`] given [`Reference`] children, storing
     /// the new [`Node`] in the provided [`ContentAddressedStorage`]
     pub async fn branch<Storage>(
-        children: NonEmpty<Reference<HASH_SIZE, Key, Hash>>,
+        children: NonEmpty<Reference<Key, Hash>>,
         storage: &mut Storage,
     ) -> Result<Self, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let block = Block::branch(children);
         let bound = block.upper_bound().clone();
@@ -75,7 +74,7 @@ where
         storage: &mut Storage,
     ) -> Result<Self, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let block = Block::segment(children);
         let bound = block.upper_bound().clone();
@@ -87,11 +86,11 @@ where
 
     /// Hydrates a [`Node`] from [`ContentAddressedStorage`] given a [`Reference`].
     pub async fn from_reference<Storage>(
-        reference: Reference<HASH_SIZE, Key, Hash>,
+        reference: Reference<Key, Hash>,
         storage: &Storage,
     ) -> Result<Self, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let Some(block) = storage
             .read(reference.hash())
@@ -113,16 +112,16 @@ where
         storage: &Storage,
     ) -> Result<Self, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let Some(block) = storage
-            .read::<Block<HASH_SIZE, Key, Value, Hash>>(&hash)
+            .read::<Block<Key, Value, Hash>>(&hash)
             .await
             .map_err(|error| error.into())?
         else {
             return Err(DialogProllyTreeError::MissingBlock(format!(
                 "#{}",
-                hash.bytes().to_base58()
+                hash.as_ref().to_base58()
             )));
         };
         let reference = Reference::new(block.upper_bound().clone(), hash);
@@ -131,8 +130,13 @@ where
     }
 
     /// Returns a [`Reference`] for this node.
-    pub fn reference(&self) -> &Reference<HASH_SIZE, Key, Hash> {
+    pub fn reference(&self) -> &Reference<Key, Hash> {
         &self.reference
+    }
+
+    /// Returns the upper bound key of this node.
+    pub fn upper_bound(&self) -> &Key {
+        self.reference.upper_bound()
     }
 
     /// Returns the [`Hash`] for this [`Node`] used to retrieve from
@@ -154,6 +158,13 @@ where
         self.block.into_entries()
     }
 
+    /// Get children data as  [`Reference`]s.
+    ///
+    /// The result is an error if this [`Node`] is a segment.
+    pub fn references(&self) -> Result<&NonEmpty<Reference<Key, Hash>>, DialogProllyTreeError> {
+        self.block.references()
+    }
+
     /// Load all the child references of this [`Node`] from storage as [`Node`]s
     /// and return them
     pub async fn load_children<Storage>(
@@ -161,7 +172,7 @@ where
         storage: &Storage,
     ) -> Result<NonEmpty<Self>, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         if !self.is_branch() {
             return Err(DialogProllyTreeError::IncorrectTreeAccess(
@@ -196,7 +207,7 @@ where
         storage: &Storage,
     ) -> Result<Option<Entry<Key, Value>>, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let mut current_node_holder: Option<Self>;
         let mut current_node = self;
@@ -225,8 +236,8 @@ where
         storage: &mut Storage,
     ) -> Result<Option<Self>, DialogProllyTreeError>
     where
-        Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash>,
-        Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+        Distribution: crate::Distribution<Key, Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let key_clone = key.to_owned();
         let (node, mut branch_stack) = self.bisect(&key_clone, storage).await?;
@@ -319,8 +330,8 @@ where
         storage: &mut Storage,
     ) -> Result<Self, DialogProllyTreeError>
     where
-        Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash>,
-        Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+        Distribution: crate::Distribution<Key, Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let key = new_entry.key.to_owned();
         let (node, branch_stack) = self.bisect(&key, storage).await?;
@@ -364,7 +375,7 @@ where
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogProllyTreeError>> + 'a
     where
         R: RangeBounds<Key> + 'a,
-        Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let get_child_index_by_key =
             async |node: &Self,
@@ -487,7 +498,7 @@ where
         storage: &Storage,
     ) -> Result<Option<Self>, DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         if !self.is_branch() {
             return Err(DialogProllyTreeError::IncorrectTreeAccess(
@@ -529,10 +540,10 @@ where
         storage: &mut Storage,
     ) -> Result<NonEmpty<(Self, Rank)>, DialogProllyTreeError>
     where
-        Adopter: crate::Adopter<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>,
-        Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+        Adopter: crate::Adopter<Key, Value, Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
-        let mut output: Vec<(Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>, u32)> = vec![];
+        let mut output: Vec<(Node<Key, Value, Hash>, u32)> = vec![];
         let mut pending = vec![];
         for (node, rank) in nodes {
             pending.push(node);
@@ -563,9 +574,9 @@ where
         &self,
         key: &Key,
         storage: &Storage,
-    ) -> Result<(Self, BranchStack<HASH_SIZE, Key, Hash>), DialogProllyTreeError>
+    ) -> Result<(Self, BranchStack<Key, Hash>), DialogProllyTreeError>
     where
-        Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let mut node = self.to_owned();
         let mut branch_stack = vec![];
@@ -613,13 +624,13 @@ where
 
     async fn rejoin<Distribution, Storage>(
         &self,
-        mut nodes: NonEmpty<(Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>, u32)>,
-        mut branch_stack: BranchStack<HASH_SIZE, Key, Hash>,
+        mut nodes: NonEmpty<(Node<Key, Value, Hash>, u32)>,
+        mut branch_stack: BranchStack<Key, Hash>,
         storage: &mut Storage,
     ) -> Result<Self, DialogProllyTreeError>
     where
-        Distribution: crate::Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash>,
-        Storage: ContentAddressedStorage<HASH_SIZE, Hash = Hash>,
+        Distribution: crate::Distribution<Key, Hash>,
+        Storage: ContentAddressedStorage<Hash = Hash>,
     {
         let mut minimum_rank = 2;
 
@@ -670,13 +681,13 @@ where
     }
 }
 
-struct TreeLocation<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Value, Hash>
+struct TreeLocation<Key, Value, Hash>
 where
     Key: KeyType + 'static,
     Value: ValueType,
-    Hash: HashType<HASH_SIZE>,
+    Hash: HashType,
 {
-    pub node: Node<BRANCH_FACTOR, HASH_SIZE, Key, Value, Hash>,
+    pub node: Node<Key, Value, Hash>,
     pub index: Option<usize>,
 }
 

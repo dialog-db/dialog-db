@@ -27,6 +27,8 @@
 //! The prepared `storage` will automatically implement
 //! [ContentAddressedStorage] for bounds-matching encoders and storage backends.
 
+extern crate self as dialog_storage;
+
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub mod web;
 

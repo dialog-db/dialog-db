@@ -7,16 +7,16 @@ use serde::{Deserialize, Serialize};
 use crate::KeyType;
 
 /// A serializable reference to a [`Node`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Reference<const HASH_SIZE: usize, Key, Hash> {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reference<Key, Hash> {
     upper_bound: Key,
     hash: Hash,
 }
 
-impl<const HASH_SIZE: usize, Key, Hash> Reference<HASH_SIZE, Key, Hash>
+impl<Key, Hash> Reference<Key, Hash>
 where
     Key: KeyType,
-    Hash: HashType<HASH_SIZE>,
+    Hash: HashType,
 {
     /// Create a new [`Reference`].
     pub fn new(upper_bound: Key, hash: Hash) -> Self {
@@ -34,12 +34,12 @@ where
     }
 }
 
-impl<const HASH_SIZE: usize, Key, Hash> Display for Reference<HASH_SIZE, Key, Hash>
+impl<Key, Hash> Display for Reference<Key, Hash>
 where
     Key: KeyType,
-    Hash: HashType<HASH_SIZE>,
+    Hash: HashType,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "#{}", self.hash().bytes().to_base58())
+        write!(f, "#{}", self.hash().as_ref().to_base58())
     }
 }

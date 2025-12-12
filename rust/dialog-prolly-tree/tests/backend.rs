@@ -22,7 +22,7 @@ async fn platform_specific_storage() -> Result<()> {
         backend,
         encoder: CborEncoder,
     };
-    let mut tree = Tree::<32, 32, GeometricDistribution, _, _, _, _>::new(storage);
+    let mut tree = Tree::<GeometricDistribution, _, _, _, _>::new(storage);
 
     let mut ledger = vec![];
     for _ in 1..1024 {
