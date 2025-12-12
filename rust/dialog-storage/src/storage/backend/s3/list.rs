@@ -8,7 +8,7 @@
 use serde::Deserialize;
 use url::Url;
 
-use super::{Invocation, Request, S3, S3StorageError};
+use super::{Bucket, Invocation, Request, S3StorageError};
 use dialog_common::ConditionalSync;
 
 /// A GET request to list objects in a bucket.
@@ -19,6 +19,7 @@ use dialog_common::ConditionalSync;
 #[derive(Debug, Clone)]
 pub struct List {
     url: Url,
+    region: String,
 }
 
 impl List {
@@ -26,7 +27,12 @@ impl List {
     ///
     /// The URL should be the bucket root (e.g., `https://s3.amazonaws.com/bucket`)
     /// with query parameters for `list-type=2` and optionally `prefix`.
-    pub fn new(mut url: Url, prefix: Option<&str>, continuation_token: Option<&str>) -> Self {
+    pub fn new(
+        mut url: Url,
+        region: &str,
+        prefix: Option<&str>,
+        continuation_token: Option<&str>,
+    ) -> Self {
         url.query_pairs_mut().append_pair("list-type", "2");
         if let Some(prefix) = prefix {
             url.query_pairs_mut().append_pair("prefix", prefix);
@@ -35,7 +41,10 @@ impl List {
             url.query_pairs_mut()
                 .append_pair("continuation-token", token);
         }
-        Self { url }
+        Self {
+            url,
+            region: region.to_string(),
+        }
     }
 }
 
@@ -46,6 +55,10 @@ impl Invocation for List {
 
     fn url(&self) -> &Url {
         &self.url
+    }
+
+    fn region(&self) -> &str {
+        &self.region
     }
 }
 impl Request for List {}
@@ -94,19 +107,11 @@ struct S3Error {
     message: Option<String>,
 }
 
-impl<Key, Value> S3<Key, Value>
+impl<Key, Value> Bucket<Key, Value>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
 {
-    /// Build the bucket URL (for listing operations).
-    fn bucket_url(&self) -> Result<Url, S3StorageError> {
-        let base = self.endpoint.trim_end_matches('/');
-        let url = format!("{base}/{}", self.bucket);
-
-        Url::parse(&url).map_err(|e| S3StorageError::ServiceError(format!("Invalid URL: {}", e)))
-    }
-
     /// List objects in the bucket with the configured prefix.
     ///
     /// Returns an iterator over object keys (encoded S3 keys, not decoded).
@@ -121,8 +126,8 @@ where
         &self,
         continuation_token: Option<&str>,
     ) -> Result<ListResult, S3StorageError> {
-        let bucket_url = self.bucket_url()?;
-        let list_request = List::new(bucket_url, self.prefix.as_deref(), continuation_token);
+        let bucket_url = self.base_url()?;
+        let list_request = List::new(bucket_url, self.region(), self.prefix(), continuation_token);
         let response = list_request.perform(self).await?;
 
         let status = response.status();
@@ -169,9 +174,9 @@ where
         // Check that we have the expected root element.
         // quick-xml is lenient and will parse any XML as defaults, so we need to validate.
         if !xml.contains("<ListBucketResult") {
-            return Err(S3StorageError::SerializationError(format!(
-                "Unexpected XML response: missing ListBucketResult element"
-            )));
+            return Err(S3StorageError::SerializationError(
+                "Unexpected XML response: missing ListBucketResult element".into(),
+            ));
         }
 
         // Parse as ListBucketResult
@@ -190,15 +195,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::super::access::Invocation;
-    use super::super::{S3, S3StorageError, Session};
+    use super::super::{Bucket, S3StorageError};
     use super::*;
+
+    const TEST_REGION: &str = "us-east-1";
 
     #[dialog_common::test]
     fn it_builds_list_request_with_prefix() {
         let url = Url::parse("https://s3.amazonaws.com/bucket").unwrap();
-        let request = List::new(url.clone(), Some("prefix/"), None);
+        let request = List::new(url.clone(), TEST_REGION, Some("prefix/"), None);
 
         assert_eq!(request.method(), "GET");
+        assert_eq!(request.region(), TEST_REGION);
         assert!(request.url().as_str().contains("list-type=2"));
         assert!(request.url().as_str().contains("prefix=prefix%2F"));
     }
@@ -206,7 +214,7 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_list_request_with_continuation_token() {
         let url = Url::parse("https://s3.amazonaws.com/bucket").unwrap();
-        let request = List::new(url.clone(), None, Some("token123"));
+        let request = List::new(url.clone(), TEST_REGION, None, Some("token123"));
 
         assert!(
             request
@@ -223,7 +231,7 @@ mod tests {
                 <IsTruncated>false</IsTruncated>
             </ListBucketResult>"#;
 
-        let result = S3::<Vec<u8>, Vec<u8>>::parse_list_response(xml).unwrap();
+        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml).unwrap();
         assert!(result.keys.is_empty());
         assert!(!result.is_truncated);
         assert!(result.next_continuation_token.is_none());
@@ -244,7 +252,7 @@ mod tests {
                 </Contents>
             </ListBucketResult>"#;
 
-        let result = S3::<Vec<u8>, Vec<u8>>::parse_list_response(xml).unwrap();
+        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml).unwrap();
         assert_eq!(result.keys.len(), 2);
         assert_eq!(result.keys[0], "prefix/key1");
         assert_eq!(result.keys[1], "prefix/key2");
@@ -262,19 +270,32 @@ mod tests {
                 </Contents>
             </ListBucketResult>"#;
 
-        let result = S3::<Vec<u8>, Vec<u8>>::parse_list_response(xml).unwrap();
+        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml).unwrap();
         assert_eq!(result.keys.len(), 1);
         assert!(result.is_truncated);
         assert_eq!(result.next_continuation_token, Some("abc123".to_string()));
     }
 
     #[dialog_common::test]
-    fn it_builds_bucket_url() {
-        let backend =
-            S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public);
+    fn it_builds_virtual_hosted_bucket_url() {
+        // Non-IP endpoints use virtual-hosted style by default
+        use super::super::Address;
+        let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None).unwrap();
 
-        let url = backend.bucket_url().unwrap();
-        assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket");
+        let url = backend.base_url().unwrap();
+        assert_eq!(url.as_str(), "https://bucket.s3.amazonaws.com/");
+    }
+
+    #[dialog_common::test]
+    fn it_builds_path_style_bucket_url() {
+        // IP/localhost endpoints use path style by default
+        use super::super::Address;
+        let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None).unwrap();
+
+        let url = backend.base_url().unwrap();
+        assert_eq!(url.as_str(), "http://localhost:9000/bucket/");
     }
 
     #[dialog_common::test]
@@ -286,7 +307,7 @@ mod tests {
                     <Key>key1</Key>
                 <!-- missing closing tags -->"#;
 
-        let result = S3::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
+        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, S3StorageError::SerializationError(_)));
@@ -300,7 +321,7 @@ mod tests {
                 <Foo>bar</Foo>
             </SomeUnknownElement>"#;
 
-        let result = S3::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
+        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -321,7 +342,7 @@ mod tests {
                 </Contents>
             </WrongRootElement>"#;
 
-        let result = S3::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
+        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -336,7 +357,7 @@ mod tests {
         // Not XML at all - should error
         let xml = "this is not xml at all { json: maybe? }";
 
-        let result = S3::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
+        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, S3StorageError::SerializationError(_)));
@@ -354,7 +375,7 @@ mod tests {
                 <HostId>xyz</HostId>
             </Error>"#;
 
-        let result = S3::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
+        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -375,7 +396,7 @@ mod tests {
                 <HostId>xyz</HostId>
             </Error>"#;
 
-        let result = S3::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
+        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(

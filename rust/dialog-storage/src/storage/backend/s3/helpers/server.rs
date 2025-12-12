@@ -48,13 +48,12 @@ pub struct InMemoryS3 {
 
 /// A running local S3 test server instance.
 ///
-/// Holds the server endpoint, shutdown channel, and storage backend.
+/// Holds the server endpoint and shutdown channel.
 /// When dropped or stopped, the server is shut down gracefully.
 pub struct LocalS3 {
     /// The endpoint URL where the server is listening (e.g., "http://127.0.0.1:9000")
     pub endpoint: String,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
-    storage: InMemoryS3,
 }
 
 impl LocalS3 {
@@ -134,18 +133,7 @@ impl LocalS3 {
         Ok(LocalS3 {
             endpoint,
             shutdown_tx,
-            storage,
         })
-    }
-
-    /// Returns the endpoint URL of the running server.
-    pub fn endpoint(&self) -> &str {
-        &self.endpoint
-    }
-
-    /// Returns a reference to the in-memory storage.
-    pub fn storage(&self) -> &InMemoryS3 {
-        &self.storage
     }
 }
 

@@ -20,7 +20,7 @@
 //! Use [`S3Address`] for tests that require AWS credentials:
 //!
 //! ```rs
-//! use dialog_storage::s3::{S3Address, S3, Session, Service, Credentials};
+//! use dialog_storage::s3::{Address, Bucket, Credentials};
 //! use dialog_storage::StorageBackend;
 //!
 //! #[dialog_common::test]
@@ -28,10 +28,10 @@
 //!     let credentials = Credentials {
 //!         access_key_id: env.access_key_id.clone(),
 //!         secret_access_key: env.secret_access_key.clone(),
-//!         session_token: None,
 //!     };
-//!     let session = Session::new(&credentials, &Service::s3("us-east-1"), 3600);
-//!     let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, session);
+//!     let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
+//!     let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Some(credentials))?
+//!         .with_path_style(true);
 //!     backend.set(b"key".to_vec(), b"value".to_vec()).await?;
 //!     Ok(())
 //! }
@@ -42,12 +42,14 @@
 //! Use [`PublicS3Address`] for tests against publicly accessible buckets:
 //!
 //! ```rs
-//! use dialog_storage::s3::{PublicS3Address, S3, Session};
+//! use dialog_storage::s3::{Address, Bucket};
 //! use dialog_storage::StorageBackend;
 //!
 //! #[dialog_common::test]
 //! async fn it_stores_publicly(env: PublicS3Address) -> anyhow::Result<()> {
-//!     let mut backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public);
+//!     let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
+//!     let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?
+//!         .with_path_style(true);
 //!     backend.set(b"key".to_vec(), b"value".to_vec()).await?;
 //!     Ok(())
 //! }
@@ -76,14 +78,17 @@ use serde::{Deserialize, Serialize};
 /// Use with `#[dialog_common::test]` by taking it as a parameter:
 ///
 /// ```rs
+/// use dialog_storage::s3::{Address, Bucket, Credentials};
+///
 /// #[dialog_common::test]
 /// async fn my_test(env: S3Address) -> anyhow::Result<()> {
 ///     let credentials = Credentials {
 ///         access_key_id: env.access_key_id.clone(),
 ///         secret_access_key: env.secret_access_key.clone(),
-///         session_token: None,
 ///     };
-///     // ... use credentials to create session
+///     let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
+///     let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Some(credentials))?
+///         .with_path_style(true);
 ///     Ok(())
 /// }
 /// ```
@@ -138,9 +143,13 @@ impl Default for S3Settings {
 /// Use with `#[dialog_common::test]` by taking it as a parameter:
 ///
 /// ```rs
+/// use dialog_storage::s3::{Address, Bucket};
+///
 /// #[dialog_common::test]
 /// async fn my_test(env: PublicS3Address) -> anyhow::Result<()> {
-///     let backend = S3::<Vec<u8>, Vec<u8>>::open(&env.endpoint, &env.bucket, Session::Public);
+///     let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
+///     let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?
+///         .with_path_style(true);
 ///     Ok(())
 /// }
 /// ```
@@ -171,6 +180,3 @@ pub struct PublicS3Settings {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod server;
-
-#[cfg(not(target_arch = "wasm32"))]
-pub use server::{InMemoryS3, LocalS3};
