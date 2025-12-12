@@ -1,10 +1,11 @@
-//! Provider macro implementation for dialog-db testing.
+//! Provider macro implementation for dialog testing.
 //!
 //! This module provides the `#[provider]` attribute macro that generates
 //! the `Provisionable` trait implementation for address types.
 //!
 //! The macro transforms an async function returning `Service<Address, Provider>`
-//! into a provisionable address that works with the `#[dialog_common::test]` macro.
+//! into a provisionable address that works with the `#[dialog_common::test]` macro
+//! (or `#[dialog_macros::test]` if used directly).
 
 use proc_macro::TokenStream;
 use quote::quote;

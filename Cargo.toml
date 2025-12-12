@@ -18,7 +18,7 @@ strip = "debuginfo"
 members = [
     "rust/dialog-artifacts",
     "rust/dialog-common",
-    "rust/dialog-common-macros",
+    "rust/dialog-macros",
     "rust/dialog-diagnose",
     "rust/dialog-dbsp",
     "rust/dialog-encoding",
@@ -102,8 +102,8 @@ path = "./rust/dialog-prolly-tree"
 [workspace.dependencies.dialog-storage]
 path = "./rust/dialog-storage"
 
-[workspace.dependencies.dialog-common-macros]
-path = "./rust/dialog-common-macros"
+[workspace.dependencies.dialog-macros]
+path = "./rust/dialog-macros"
 
 # [patch.crates-io]
 # # TODO: https://github.com/gwierzchowski/csv-async/issues/27

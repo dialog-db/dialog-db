@@ -1,4 +1,4 @@
-//! Test macro implementation for dialog-db testing.
+//! Test macro implementation for dialog testing.
 //!
 //! This module provides the implementation for cross-platform test macros
 //! that handle service provisioning and multi-target testing.

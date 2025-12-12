@@ -709,22 +709,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "blake3",
- "dialog-common-macros",
+ "dialog-macros",
  "serde",
  "serde_json",
  "tokio",
  "wasm-bindgen",
  "wasm-bindgen-test",
-]
-
-[[package]]
-name = "dialog-common-macros"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "proc-macro2",
- "quote",
- "syn 2.0.111",
 ]
 
 [[package]]
@@ -767,6 +757,16 @@ dependencies = [
  "serde_ipld_dagcbor",
  "thiserror 2.0.17",
  "zerocopy",
+]
+
+[[package]]
+name = "dialog-macros"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
 ]
 
 [[package]]

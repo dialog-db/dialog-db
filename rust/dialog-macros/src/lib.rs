@@ -1,10 +1,13 @@
 #![warn(missing_docs)]
 
-//! Procedural macros for [`dialog_common`].
+//! Procedural macros for the dialog project.
 //!
-//! This crate provides the procedural macro implementations that are re-exported
-//! by `dialog_common`. It exists as a separate crate because procedural macros
-//! must be defined in their own crate.
+//! This crate provides procedural macro implementations for testing and service
+//! provisioning across dialog crates. Macros are re-exported through `dialog_common`
+//! (with the `helpers` feature) for convenient access.
+//!
+//! Procedural macros must be defined in their own crate, which is why these live
+//! here rather than in the crates that use them.
 
 use proc_macro::TokenStream;
 mod provider;

@@ -57,7 +57,7 @@ pub mod helpers;
 ///
 /// See the macro documentation for the full CI test matrix.
 #[cfg(feature = "helpers")]
-pub use dialog_common_macros::test;
+pub use dialog_macros::test;
 
 /// Provider macro for defining service providers for integration tests.
 ///
@@ -87,4 +87,4 @@ pub use dialog_common_macros::test;
 ///
 /// See the macro documentation for details.
 #[cfg(feature = "helpers")]
-pub use dialog_common_macros::provider;
+pub use dialog_macros::provider;

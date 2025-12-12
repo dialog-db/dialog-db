@@ -1,6 +1,6 @@
 [package]
-name = "dialog-common-macros"
-description = "Procedural macros for dialog-common"
+name = "dialog-macros"
+description = "Procedural macros for dialog"
 edition = "2024"
 version.workspace = true
 authors.workspace = true
