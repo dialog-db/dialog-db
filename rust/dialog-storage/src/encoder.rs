@@ -10,11 +10,11 @@ pub use cbor::*;
 /// An [Encoder] converts to and from content-addressable bytes
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait Encoder<const HASH_SIZE: usize>: Clone {
+pub trait Encoder: Clone {
     /// The encoded byte representation of a block
     type Bytes: AsRef<[u8]> + 'static + ConditionalSync;
     /// The hash type produced by this [Encoder]
-    type Hash: HashType<HASH_SIZE> + ConditionalSync;
+    type Hash: HashType + ConditionalSync;
     /// The error type produced by this [Encoder]
     type Error: Into<DialogStorageError>;
 

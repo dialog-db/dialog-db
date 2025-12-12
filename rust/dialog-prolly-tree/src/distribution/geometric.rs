@@ -9,25 +9,26 @@ use super::{Distribution, Rank};
 /// to 256 independent trials.
 ///
 /// https://textile.notion.site/Flipping-bits-and-coins-with-hashes-205770b56418498fba4fef8cb037412d
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GeometricDistribution;
 
-impl<const BRANCH_FACTOR: u32, const HASH_SIZE: usize, Key, Hash>
-    Distribution<BRANCH_FACTOR, HASH_SIZE, Key, Hash> for GeometricDistribution
+impl<Key, Hash> Distribution<Key, Hash> for GeometricDistribution
 where
     Key: KeyType,
-    Hash: HashType<HASH_SIZE>,
+    Hash: HashType,
 {
+    const BRANCH_FACTOR: u32 = 254;
+
     fn rank(key: &Key) -> Rank {
         let key_hash = blake3::hash(key.bytes());
-        compute_geometric_rank(key_hash.as_bytes(), BRANCH_FACTOR)
+        compute_geometric_rank(
+            key_hash.as_bytes(),
+            <GeometricDistribution as Distribution<Key, Hash>>::BRANCH_FACTOR,
+        )
     }
 }
 
-pub(crate) fn compute_geometric_rank<const HASH_SIZE: usize>(
-    bytes: &[u8; HASH_SIZE],
-    m: u32,
-) -> Rank {
+pub(crate) fn compute_geometric_rank(bytes: &[u8], m: u32) -> Rank {
     // Convert the series of fair trials into a series with desired probability
     // Since we start with a random 256-bit slice (which can be thought of as a
     // series of 256 fair Bernoulli trials), we need to group these trials with
