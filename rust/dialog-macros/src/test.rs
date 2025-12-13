@@ -7,22 +7,23 @@
 //!
 //! The macro is designed to support this CI workflow:
 //!
-//! 1. `cargo test` - Run all tests natively (unit tests + integration tests inline)
+//! 1. `cargo test` - Run unit tests natively
 //! 2. `cargo test --target wasm32-unknown-unknown` - Run unit tests in wasm
-//! 3. `RUSTFLAGS="--cfg dialog_test_wasm" cargo test` - Run integration tests in wasm
-//!    (native provider spawns wasm inner tests)
+//! 3. `cargo test --features integration-tests` - Run unit tests + integration tests natively
+//! 4. `cargo test --features web-integration-tests` - Run integration tests in wasm
+//!    (unit tests skipped, native provider spawns wasm inner tests)
 //!
 //! # Generated Code
 //!
 //! For unit tests (no parameters):
-//! - Gated with `not(dialog_test_wasm)` so they don't run during wasm integration runs
+//! - Gated with `not(feature = "web-integration-tests")` so they don't run during wasm integration runs
 //! - Uses `tokio::test` on native, `wasm_bindgen_test` on wasm
 //!
 //! For integration tests (with address parameter):
 //! - Tests that require external services (S3, databases, etc.) that need provisioning
-//! - Native inline provider: starts service, runs test via tokio::spawn, stops service
-//! - Native wasm-spawn provider: starts service, spawns `cargo test --target wasm32...`
-//! - Wasm inner: deserializes address from env var, runs test
+//! - Native integration test (`integration-tests` feature): starts service, runs test, stops service
+//! - Web integration test (`web-integration-tests` feature): starts service, spawns wasm subprocess, stops service
+//! - Wasm inner (`dialog_test_wasm_integration` cfg): deserializes address from env var, runs test
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -126,23 +127,21 @@ pub fn generate(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// Generates:
 /// ```rs
-/// // Compile during wasm integration test but as a dead code as it is not
-/// // an integration test and we want to supress import warnings
-/// #[cfg_attr(dialog_test_wasm, allow(dead_code))]
-/// // Compile as test on native, except for wasm integration
-/// #[cfg_attr(all(not(dialog_test_wasm), not(target_arch = "wasm32")), test)]
-/// // Compile as bindgen test on wasm, expcept for wasm integration
-/// #[cfg_attr(all(not(dialog_test_wasm), target_arch = "wasm32"), wasm_bindgen_test::wasm_bindgen_test)]
+/// // Compile during web integration test but as dead code (not an integration test)
+/// #[cfg_attr(feature = "web-integration-tests", allow(dead_code))]
+/// // Compile as test on native, except during web integration tests
+/// #[cfg_attr(all(not(feature = "web-integration-tests"), not(target_arch = "wasm32")), test)]
+/// // Compile as bindgen test on wasm, except during web integration tests
+/// #[cfg_attr(all(not(feature = "web-integration-tests"), target_arch = "wasm32"), wasm_bindgen_test::wasm_bindgen_test)]
 /// fn it_works() {
 ///     assert_eq!(2 + 2, 4);
 /// }
 ///
-/// // Compile during wasm integration test but as a dead code as it is not
-/// // an integration test and we want to supress import warnings
-/// #[cfg_attr(dialog_test_wasm, allow(dead_code))]
-/// // Compile as test on native, except for wasm integration
-/// #[cfg_attr(all(not(dialog_test_wasm), not(target_arch = "wasm32")), tokio::test)]
-/// // Compile as bindgen test on wasm, expcept for wasm integration
+/// // Compile during web integration test but as dead code (not an integration test)
+/// #[cfg_attr(feature = "web-integration-tests", allow(dead_code))]
+/// // Compile as test on native, except during web integration tests
+/// #[cfg_attr(all(not(feature = "web-integration-tests"), not(target_arch = "wasm32")), tokio::test)]
+/// // Compile as bindgen test on wasm, except during web integration tests
 /// async fn it_works_async() {
 ///     assert_eq!(2 + 2, 4);
 /// }
@@ -163,13 +162,12 @@ fn generate_unit_test(source: &ItemFn) -> TokenStream {
     };
 
     let expanded = quote! {
-        // Compile during wasm integration test but as a dead code as it is not
-        // an integration test and we want to supress import warnings
-        #[cfg_attr(dialog_test_wasm, allow(dead_code))]
-        // Compile as test on native, except for wasm integration
-        #[cfg_attr(all(not(dialog_test_wasm), not(target_arch = "wasm32")), #native_test_attr)]
-        // Compile as bindgen test on wasm, expcept for wasm integration
-        #[cfg_attr(all(not(dialog_test_wasm), target_arch = "wasm32"), wasm_bindgen_test::wasm_bindgen_test)]
+        // Compile during web integration test but as dead code (not an integration test)
+        #[cfg_attr(feature = "web-integration-tests", allow(dead_code))]
+        // Compile as test on native, except during web integration tests
+        #[cfg_attr(all(not(feature = "web-integration-tests"), not(target_arch = "wasm32")), #native_test_attr)]
+        // Compile as bindgen test on wasm, except during web integration tests
+        #[cfg_attr(all(not(feature = "web-integration-tests"), target_arch = "wasm32"), wasm_bindgen_test::wasm_bindgen_test)]
         #(#user_attrs)*
         #vis #asyncness fn #name() #output
             #body
@@ -191,15 +189,18 @@ fn generate_unit_test(source: &ItemFn) -> TokenStream {
 ///
 /// Generates (simplified, with hash `abc123`):
 /// ```rs
-/// // 1. Integration logic - the actual test body (allow dead_code when dialog_test_wasm)
-/// #[cfg_attr(dialog_test_wasm, allow(dead_code))]
+/// // 1. Integration logic - the actual test body
+/// // Gated behind integration-tests OR web-integration-tests features
+/// // Allow dead_code during web-integration-tests (logic called via subprocess)
+/// #[cfg(any(feature = "integration-tests", feature = "web-integration-tests"))]
+/// #[cfg_attr(feature = "web-integration-tests", allow(dead_code))]
 /// async fn it_connects_logic_abc123(server: ServerAddress) -> anyhow::Result<()> {
 ///     assert!(!server.endpoint.is_empty());
 ///     Ok(())
 /// }
 ///
-/// // 2. Native test - runs when `cargo test` (no flags)
-/// #[cfg(all(not(dialog_test_wasm), not(target_arch = "wasm32")))]
+/// // 2. Native integration test - runs with `cargo test --features integration-tests`
+/// #[cfg(all(feature = "integration-tests", not(feature = "web-integration-tests"), not(target_arch = "wasm32")))]
 /// #[tokio::test]
 /// async fn it_connects() -> anyhow::Result<()> {
 ///     let service = ServerAddress::start(Default::default()).await?;
@@ -209,13 +210,13 @@ fn generate_unit_test(source: &ItemFn) -> TokenStream {
 ///     Ok(())
 /// }
 ///
-/// // 3. Wasm integration test - runs when `RUSTFLAGS="--cfg dialog_test_wasm" cargo test`
-/// #[cfg(all(dialog_test_wasm, not(target_arch = "wasm32")))]
+/// // 3. Web integration test - runs with `cargo test --features web-integration-tests`
+/// #[cfg(all(feature = "web-integration-tests", not(target_arch = "wasm32")))]
 /// #[tokio::test]
 /// async fn it_connects() -> anyhow::Result<()> {
 ///     let service = ServerAddress::start(Default::default()).await?;
 ///     let json = serde_json::to_string(&service.address)?;
-///     // Spawns: RUSTFLAGS="--cfg dialog_test_wasm_inner" \
+///     // Spawns: RUSTFLAGS="--cfg dialog_test_wasm_integration" \
 ///     //         PROVISIONED_SERVICE_ADDRESS='...' \
 ///     //         cargo test --target wasm32-unknown-unknown it_connects_abc123
 ///     // ... spawn cargo test for wasm target ...
@@ -223,7 +224,7 @@ fn generate_unit_test(source: &ItemFn) -> TokenStream {
 /// }
 ///
 /// // 4. Wasm test - compiled into wasm, receives address via compile-time env var
-/// #[cfg(all(dialog_test_wasm_inner, target_arch = "wasm32", target_os = "unknown"))]
+/// #[cfg(all(dialog_test_wasm_integration, target_arch = "wasm32", target_os = "unknown"))]
 /// #[wasm_bindgen_test::wasm_bindgen_test]
 /// async fn it_connects_abc123() -> Result<(), wasm_bindgen::JsValue> {
 ///     let json = option_env!("PROVISIONED_SERVICE_ADDRESS").unwrap();
@@ -331,8 +332,10 @@ impl<'a> IntegrationTest<'a> {
     /// Generate the integration logic function containing the actual test body.
     ///
     /// This function is called by the native test or wasm test.
-    /// When `dialog_test_wasm` is set, the wasm integration test spawns a subprocess
-    /// instead of calling this directly, so we add `allow(dead_code)`.
+    /// Gated behind `integration_tests` OR `web_integration_tests`.
+    /// When `web_integration_tests` is set, we add `allow(dead_code)` since
+    /// the logic is called via subprocess rather than directly allowing us
+    /// to suppress unused code warnings
     fn integration_logic(&self) -> proc_macro2::TokenStream {
         let IntegrationTest {
             vis,
@@ -347,19 +350,21 @@ impl<'a> IntegrationTest<'a> {
 
         quote! {
             // Integration logic - called by native test or wasm test.
-            // When dialog_test_wasm is set, wasm integration test spawns a subprocess
-            // instead of calling this directly, so allow dead_code to silence warnings.
-            #[cfg_attr(dialog_test_wasm, allow(dead_code))]
+            // Gated behind integration-tests OR web-integration-tests features.
+            // When web-integration-tests is set, logic is called via subprocess,
+            // so allow dead_code to silence warnings.
+            #[cfg(any(feature = "integration-tests", feature = "web-integration-tests"))]
+            #[cfg_attr(feature = "web-integration-tests", allow(dead_code))]
             #(#user_attrs)*
             #vis async fn #integration_ident(#param_name: #address_type) #output
                 #body
         }
     }
 
-    /// Generate the native test.
+    /// Generate the native integration test.
     ///
-    /// Runs with `cargo test` (no flags). Starts service, runs test, stops service
-    /// all in the same process.
+    /// Runs with `cargo test --features integration-tests`.
+    /// Starts service, runs test, stops service - all in same process.
     fn native_test(&self) -> proc_macro2::TokenStream {
         let IntegrationTest {
             vis,
@@ -371,9 +376,9 @@ impl<'a> IntegrationTest<'a> {
         } = self;
 
         quote! {
-            // Native test: runs with `cargo test` (no flags)
+            // Native integration test: runs with `--features integration-tests`
             // Starts service, runs test, stops service - all in same process
-            #[cfg(all(not(dialog_test_wasm), not(target_arch = "wasm32")))]
+            #[cfg(all(feature = "integration-tests", not(feature = "web-integration-tests"), not(target_arch = "wasm32")))]
             #[tokio::test]
             #vis async fn #ident() -> ::anyhow::Result<()> {
                 use ::dialog_common::helpers::Provisionable;
@@ -407,9 +412,9 @@ impl<'a> IntegrationTest<'a> {
         }
     }
 
-    /// Generate the wasm integration test.
+    /// Generate the web integration test.
     ///
-    /// Runs with `RUSTFLAGS="--cfg dialog_test_wasm" cargo test`. Starts service on native,
+    /// Runs with `cargo test --features web-integration-tests`. Starts service on native,
     /// spawns wasm subprocess for test, stops service.
     fn wasm_integration_test(&self) -> proc_macro2::TokenStream {
         let IntegrationTest {
@@ -424,9 +429,9 @@ impl<'a> IntegrationTest<'a> {
         } = self;
 
         quote! {
-            // Wasm integration test: runs with `RUSTFLAGS="--cfg dialog_test_wasm" cargo test`
+            // Web integration test: runs with `cargo test --features web-integration-tests`
             // Starts service on native, spawns wasm subprocess for test, stops service
-            #[cfg(all(dialog_test_wasm, not(target_arch = "wasm32")))]
+            #[cfg(all(feature = "web-integration-tests", not(target_arch = "wasm32")))]
             #[tokio::test]
             #vis async fn #ident() -> ::anyhow::Result<()> {
                 use ::dialog_common::helpers::{Provisionable, PROVISIONED_SERVICE_ADDRESS};
@@ -457,10 +462,10 @@ impl<'a> IntegrationTest<'a> {
                 #(#feature_checks)*
                 let features_str = features.join(",");
 
-                // Build RUSTFLAGS with dialog_test_wasm_inner cfg so that only wasm
+                // Build RUSTFLAGS with dialog_test_wasm_integration cfg so that only wasm
                 // integration tests will run.
                 let existing_rustflags = ::std::env::var("RUSTFLAGS").unwrap_or_default();
-                let rustflags = format!("{} --cfg dialog_test_wasm_inner", existing_rustflags);
+                let rustflags = format!("{} --cfg dialog_test_wasm_integration", existing_rustflags);
 
                 // Build cargo command args
                 let mut args = vec![
@@ -550,16 +555,16 @@ impl<'a> IntegrationTest<'a> {
         } = self;
 
         quote! {
-            // Wasm test: compiled into wasm, invoked by wasm integration test
+            // Wasm test: compiled into wasm, invoked by web integration test
             // Address is received via compile-time env var (option_env!) since wasm has no runtime env
-            #[cfg(all(dialog_test_wasm_inner, target_arch = "wasm32", target_os = "unknown"))]
+            #[cfg(all(dialog_test_wasm_integration, target_arch = "wasm32", target_os = "unknown"))]
             #[wasm_bindgen_test::wasm_bindgen_test]
             #vis async fn #wasm_test_ident() -> Result<(), ::wasm_bindgen::JsValue> {
                 // option_env! captures the env var at compile time and embeds it in the binary
                 let source = ::std::option_env!("PROVISIONED_SERVICE_ADDRESS")
                     .ok_or_else(|| ::wasm_bindgen::JsValue::from_str(
                         "Missing compile-time env var PROVISIONED_SERVICE_ADDRESS. \
-                         This test must be invoked via the wasm integration test."
+                         This test must be invoked via the web integration test."
                     ))?;
                 let address: #address_type = ::serde_json::from_str(source)
                     .map_err(|e| ::wasm_bindgen::JsValue::from_str(&format!("Failed to deserialize: {}", e)))?;

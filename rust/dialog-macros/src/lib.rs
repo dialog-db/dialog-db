@@ -21,10 +21,11 @@ mod test;
 ///
 /// The macro generates code that supports these CI configurations:
 ///
-/// 1. `cargo test` - All tests run natively (unit tests + integration tests inline)
+/// 1. `cargo test` - Unit tests run natively
 /// 2. `cargo test --target wasm32-unknown-unknown` - Unit tests run in wasm
-/// 3. `RUSTFLAGS="--cfg dialog_test_wasm" cargo test` - Integration tests run in wasm
-///    (native provider spawns wasm inner tests)
+/// 3. `cargo test --features integration-tests` - Unit tests + integration tests run natively
+/// 4. `cargo test --features web-integration-tests` - Integration tests run in wasm
+///    (unit tests skipped, native provider spawns wasm inner tests)
 ///
 /// # Usage
 ///
@@ -47,8 +48,8 @@ mod test;
 /// }
 /// ```
 ///
-/// Unit tests are gated with `#[cfg(not(dialog_test_wasm))]` so they don't
-/// run during wasm integration test runs (case 3 above).
+/// Unit tests are gated with `#[cfg(not(feature = "web-integration-tests"))]` so they don't
+/// run during web integration test runs (case 4 above).
 ///
 /// ## Integration tests
 ///
@@ -98,9 +99,9 @@ mod test;
 ///
 /// When a function takes an address parameter, the macro generates:
 ///
-/// - **Native inline provider**: Starts service, runs test via `tokio::spawn`, stops service
-/// - **Native wasm-spawn provider**: Starts service, spawns `cargo test --target wasm32...`
-/// - **Wasm inner**: Deserializes address from env var, runs test
+/// - **Native integration test** (`integration-tests` feature): Starts service, runs test, stops service
+/// - **Web integration test** (`web-integration-tests` feature): Starts service, spawns wasm test, stops service
+/// - **Wasm inner** (`dialog_test_wasm_integration` cfg): Deserializes address from env var, runs test
 ///
 /// ```rs
 /// #[dialog_common::test]

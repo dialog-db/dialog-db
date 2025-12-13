@@ -49,8 +49,8 @@
 //!
 //! # How It Works
 //!
-//! - **Native mode**: Provider starts, test runs, provider stops
-//! - **Wasm mode** (`--cfg dialog_test_wasm`): Native outer test starts provider,
+//! - **Native mode** (`--features integration-tests`): Provider starts, test runs, provider stops
+//! - **Wasm mode** (`--features web-integration-tests`): Native outer test starts provider,
 //!   serializes address to env var, spawns wasm inner test which deserializes and runs
 
 use async_trait::async_trait;
@@ -286,11 +286,11 @@ mod tests {
 
     // --- Tests with actual native provider ---
     // These tests are native-only because TcpServer can't run in wasm.
-    // They're also skipped in wasm integration mode (dialog_test_wasm) since
+    // They're also skipped in web integration mode (web-integration-tests feature) since
     // there's no wasm inner test to spawn.
 
     /// Tests a real TCP server provider (native only)
-    #[cfg(all(not(target_arch = "wasm32"), not(dialog_test_wasm)))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "web-integration-tests")))]
     #[dialog_common::test]
     async fn it_starts_tcp_server(addr: ServerAddress) -> anyhow::Result<()> {
         assert!(addr.port > 0);
@@ -300,7 +300,7 @@ mod tests {
     }
 
     /// Tests TCP server with specific port setting
-    #[cfg(all(not(target_arch = "wasm32"), not(dialog_test_wasm)))]
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "web-integration-tests")))]
     #[dialog_common::test(port = 0u16)]
     async fn it_starts_tcp_server_on_random_port(addr: ServerAddress) -> anyhow::Result<()> {
         assert!(addr.port > 0);

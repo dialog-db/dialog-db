@@ -10,6 +10,10 @@ license.workspace = true
 default = []
 # Testing utilities (Provision, Provider traits, EnvGuard)
 helpers = ["dep:anyhow", "dep:serde", "dep:serde_json", "dep:dialog-macros", "dep:async-trait"]
+# Enable integration tests (tests with service provisioning)
+integration-tests = ["helpers"]
+# Enable web integration tests (implies integration-tests behavior)
+web-integration-tests = ["helpers"]
 
 [dependencies]
 blake3 = { workspace = true }
@@ -25,5 +29,5 @@ wasm-bindgen = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 
 [lints.rust]
-# These cfgs are used by the dialog_common::test proc macro for wasm testing
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm)", "cfg(dialog_test_wasm_inner)"] }
+# This cfg is used by the dialog_common::test proc macro for wasm inner tests
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)"] }
