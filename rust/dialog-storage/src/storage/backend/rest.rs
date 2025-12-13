@@ -2427,14 +2427,14 @@ pub mod s3 {
             if let Some(existing) = bucket.get(key) {
                 // Check If-Match
                 if let Some(ref cond) = req.input.if_match {
-                    if existing.e_tag != cond.value() {
+                    if &existing.e_tag != cond {
                         return Err(s3_error!(PreconditionFailed));
                     }
                 }
 
                 // Check If-None-Match
                 if let Some(ref cond) = req.input.if_none_match {
-                    if cond.value() == "*" || existing.e_tag == cond.value() {
+                    if cond == "*" || &existing.e_tag == cond {
                         return Err(s3_error!(PreconditionFailed));
                     }
                 }
