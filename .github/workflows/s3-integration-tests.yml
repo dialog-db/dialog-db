@@ -1,0 +1,106 @@
+name: 'S3 Integration Tests'
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: 'Storage provider to test'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - r2
+          - s3
+          - both
+  push:
+    branches:
+      - main
+      - patches/*
+    paths:
+      - 'rust/dialog-storage/src/storage/backend/s3.rs'
+      - 'rust/dialog-storage/src/storage/backend/s3/**'
+  pull_request:
+    paths:
+      - 'rust/dialog-storage/src/storage/backend/s3.rs'
+      - 'rust/dialog-storage/src/storage/backend/s3/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.provider || 'auto' }}
+  cancel-in-progress: true
+
+jobs:
+  integration-tests:
+    name: '${{ matrix.provider }} (${{ matrix.name }})'
+    runs-on: 'ubuntu-latest'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: r2
+            name: native
+            target: ''
+            endpoint_var: R2_ENDPOINT
+            region_var: R2_REGION
+            bucket_var: R2_BUCKET
+            access_key_var: R2_ACCESS_KEY_ID
+            secret_key: R2_SECRET_ACCESS_KEY
+          - provider: r2
+            name: wasm
+            target: '--target wasm32-unknown-unknown'
+            endpoint_var: R2_ENDPOINT
+            region_var: R2_REGION
+            bucket_var: R2_BUCKET
+            access_key_var: R2_ACCESS_KEY_ID
+            secret_key: R2_SECRET_ACCESS_KEY
+          - provider: s3
+            name: native
+            target: ''
+            endpoint_var: S3_ENDPOINT
+            region_var: S3_REGION
+            bucket_var: S3_BUCKET
+            access_key_var: S3_ACCESS_KEY_ID
+            secret_key: S3_SECRET_ACCESS_KEY
+          - provider: s3
+            name: wasm
+            target: '--target wasm32-unknown-unknown'
+            endpoint_var: S3_ENDPOINT
+            region_var: S3_REGION
+            bucket_var: S3_BUCKET
+            access_key_var: S3_ACCESS_KEY_ID
+            secret_key: S3_SECRET_ACCESS_KEY
+    steps:
+      - name: 'Check if should run'
+        id: should-run
+        run: |
+          if [[ "${{ github.event_name }}" != "workflow_dispatch" ]]; then
+            echo "run=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.inputs.provider }}" == "both" ]]; then
+            echo "run=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.inputs.provider }}" == "${{ matrix.provider }}" ]]; then
+            echo "run=true" >> $GITHUB_OUTPUT
+          else
+            echo "run=false" >> $GITHUB_OUTPUT
+          fi
+      - uses: actions/checkout@v4
+        if: steps.should-run.outputs.run == 'true'
+      - uses: ./.github/actions/setup-nix
+        if: steps.should-run.outputs.run == 'true'
+      - name: 'Remove system Chrome (for wasm tests)'
+        if: steps.should-run.outputs.run == 'true' && matrix.target != ''
+        run: |
+          sudo apt-get remove google-chrome-stable -y || true
+          sudo rm -f /usr/bin/chromium /usr/bin/chromium-browser
+      - name: 'Run integration tests'
+        if: steps.should-run.outputs.run == 'true'
+        env:
+          R2S3_ENDPOINT: ${{ vars[matrix.endpoint_var] }}
+          R2S3_REGION: ${{ vars[matrix.region_var] }}
+          R2S3_BUCKET: ${{ vars[matrix.bucket_var] }}
+          R2S3_ACCESS_KEY_ID: ${{ vars[matrix.access_key_var] }}
+          R2S3_SECRET_ACCESS_KEY: ${{ secrets[matrix.secret_key] }}
+        shell: bash
+        run: |
+          nix develop --command cargo test \
+            --test s3_integration_tests \
+            --features s3-integration-tests \
+            ${{ matrix.target }}
