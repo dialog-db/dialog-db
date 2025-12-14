@@ -28,9 +28,6 @@ use dialog_storage::{StorageBackend, StorageSink, StorageSource};
 use futures_util::TryStreamExt;
 
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen_test::wasm_bindgen_test;
-
-#[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 /// Generate a globally unique test prefix using timestamp
@@ -55,27 +52,33 @@ fn unique_prefix(base: &str) -> String {
 }
 
 /// Helper to create an S3 backend from environment variables.
-fn create_s3_backend_from_env() -> Result<S3<Vec<u8>, Vec<u8>>> {
+///
+/// Uses `option_env!` instead of `env!` so that `cargo check --tests --all-features`
+/// doesn't fail when the R2S3_* environment variables aren't set at compile time.
+fn create_s3_backend_from_env() -> S3<Vec<u8>, Vec<u8>> {
     let credentials = Credentials {
-        access_key_id: env!("R2S3_ACCESS_KEY_ID").into(),
-        secret_access_key: env!("R2S3_SECRET_ACCESS_KEY").into(),
-        session_token: option_env!("R2S3_SESSION_TOKEN").map(|v| v.into()),
+        access_key_id: option_env!("R2S3_ACCESS_KEY_ID")
+            .expect("R2S3_ACCESS_KEY_ID not set")
+            .into(),
+        secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
+            .expect("R2S3_SECRET_ACCESS_KEY not set")
+            .into(),
+        session_token: option_env!("R2S3_SESSION_TOKEN").map(Into::into),
     };
 
-    let region = env!("R2S3_REGION");
+    let region = option_env!("R2S3_REGION").expect("R2S3_REGION not set");
     let service = Service::s3(region);
     let session = Session::new(&credentials, &service, 3600);
 
-    let endpoint = env!("R2S3_HOST");
-    let bucket = env!("R2S3_BUCKET");
+    let endpoint = option_env!("R2S3_HOST").expect("R2S3_HOST not set");
+    let bucket = option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set");
 
-    Ok(S3::open(endpoint, bucket, session).with_prefix("test-prefix"))
+    S3::open(endpoint, bucket, session).with_prefix("test-prefix")
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_sets_and_gets_values() -> Result<()> {
-    let mut backend = create_s3_backend_from_env()?;
+    let mut backend = create_s3_backend_from_env();
 
     // Test data
     let key = b"test-key-1".to_vec();
@@ -91,10 +94,9 @@ async fn it_sets_and_gets_values() -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_returns_none_for_missing_key() -> Result<()> {
-    let backend = create_s3_backend_from_env()?;
+    let backend = create_s3_backend_from_env();
 
     // Try to get a key that doesn't exist
     let key = b"nonexistent-key-12345".to_vec();
@@ -105,10 +107,9 @@ async fn it_returns_none_for_missing_key() -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_overwrites_values() -> Result<()> {
-    let mut backend = create_s3_backend_from_env()?;
+    let mut backend = create_s3_backend_from_env();
 
     let key = b"test-key-overwrite".to_vec();
     let value1 = b"original-value".to_vec();
@@ -131,10 +132,9 @@ async fn it_overwrites_values() -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_handles_large_values() -> Result<()> {
-    let mut backend = create_s3_backend_from_env()?;
+    let mut backend = create_s3_backend_from_env();
 
     let key = b"test-key-large".to_vec();
     // Create a 1MB value
@@ -150,10 +150,9 @@ async fn it_handles_large_values() -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_handles_multiple_keys() -> Result<()> {
-    let mut backend = create_s3_backend_from_env()?;
+    let mut backend = create_s3_backend_from_env();
 
     // Set multiple key-value pairs
     let pairs = vec![
@@ -175,10 +174,9 @@ async fn it_handles_multiple_keys() -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_handles_binary_data() -> Result<()> {
-    let mut backend = create_s3_backend_from_env()?;
+    let mut backend = create_s3_backend_from_env();
 
     let key = b"test-key-binary".to_vec();
     // Create binary data with all possible byte values
@@ -194,10 +192,9 @@ async fn it_handles_binary_data() -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_performs_bulk_operations() -> Result<()> {
-    let mut backend = create_s3_backend_from_env()?;
+    let mut backend = create_s3_backend_from_env();
 
     // Create a stream of test data
 
@@ -227,28 +224,31 @@ async fn it_performs_bulk_operations() -> Result<()> {
 }
 
 /// Helper to create an S3 backend without prefix from environment variables.
-fn create_s3_backend_without_prefix_from_env() -> Result<S3<Vec<u8>, Vec<u8>>> {
+fn create_s3_backend_without_prefix_from_env() -> S3<Vec<u8>, Vec<u8>> {
     let credentials = Credentials {
-        access_key_id: env!("R2S3_ACCESS_KEY_ID").into(),
-        secret_access_key: env!("R2S3_SECRET_ACCESS_KEY").into(),
-        session_token: option_env!("R2S3_SESSION_TOKEN").map(|v| v.into()),
+        access_key_id: option_env!("R2S3_ACCESS_KEY_ID")
+            .expect("R2S3_ACCESS_KEY_ID not set")
+            .into(),
+        secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
+            .expect("R2S3_SECRET_ACCESS_KEY not set")
+            .into(),
+        session_token: option_env!("R2S3_SESSION_TOKEN").map(Into::into),
     };
 
-    let region = env!("R2S3_REGION");
+    let region = option_env!("R2S3_REGION").expect("R2S3_REGION not set");
     let service = Service::s3(region);
     let session = Session::new(&credentials, &service, 3600);
 
-    let endpoint = env!("R2S3_HOST");
-    let bucket = env!("R2S3_BUCKET");
+    let endpoint = option_env!("R2S3_HOST").expect("R2S3_HOST not set");
+    let bucket = option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set");
 
     // No prefix - keys go directly into the bucket root
-    Ok(S3::open(endpoint, bucket, session))
+    S3::open(endpoint, bucket, session)
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_works_without_prefix() -> Result<()> {
-    let mut backend = create_s3_backend_without_prefix_from_env()?;
+    let mut backend = create_s3_backend_without_prefix_from_env();
 
     // Test data - use unique key to avoid conflicts
     let key = b"no-prefix-test-key".to_vec();
@@ -264,10 +264,9 @@ async fn it_works_without_prefix() -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_handles_encoded_key_segments() -> Result<()> {
-    let mut backend = create_s3_backend_from_env()?;
+    let mut backend = create_s3_backend_from_env();
 
     // Test key with path structure where one segment is safe and another needs encoding
     // "safe-segment/user@example.com" - first segment is safe, second has @ which is unsafe
@@ -291,10 +290,9 @@ async fn it_handles_encoded_key_segments() -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_handles_fully_encoded_key() -> Result<()> {
-    let mut backend = create_s3_backend_from_env()?;
+    let mut backend = create_s3_backend_from_env();
 
     // Test key that is fully binary (all segments need encoding)
     let key_binary = vec![0x01, 0x02, 0xFF, 0xFE];
@@ -318,10 +316,9 @@ async fn it_handles_fully_encoded_key() -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_handles_multi_segment_mixed_encoding() -> Result<()> {
-    let mut backend = create_s3_backend_from_env()?;
+    let mut backend = create_s3_backend_from_env();
 
     // Test key with multiple segments: safe/unsafe/safe/unsafe pattern
     // "data/file name with spaces/v1/special!chars"
@@ -351,10 +348,9 @@ async fn it_handles_multi_segment_mixed_encoding() -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_handles_encoded_key_without_prefix() -> Result<()> {
-    let mut backend = create_s3_backend_without_prefix_from_env()?;
+    let mut backend = create_s3_backend_without_prefix_from_env();
 
     // Test encoded key without prefix
     let key = b"path/with spaces/data".to_vec();
@@ -378,10 +374,9 @@ async fn it_handles_encoded_key_without_prefix() -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_deletes_values() -> Result<()> {
-    let mut backend = create_s3_backend_from_env()?;
+    let mut backend = create_s3_backend_from_env();
 
     let key = b"delete-integration-test".to_vec();
     let value = b"value-to-delete".to_vec();
@@ -403,23 +398,26 @@ async fn it_deletes_values() -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_lists_objects() -> Result<()> {
     // Use a unique prefix for this test
     let test_prefix = unique_prefix("list-test");
 
     // Create a backend with the unique prefix
     let credentials = Credentials {
-        access_key_id: env!("R2S3_ACCESS_KEY_ID").into(),
-        secret_access_key: env!("R2S3_SECRET_ACCESS_KEY").into(),
-        session_token: option_env!("R2S3_SESSION_TOKEN").map(|v| v.into()),
+        access_key_id: option_env!("R2S3_ACCESS_KEY_ID")
+            .expect("R2S3_ACCESS_KEY_ID not set")
+            .into(),
+        secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
+            .expect("R2S3_SECRET_ACCESS_KEY not set")
+            .into(),
+        session_token: option_env!("R2S3_SESSION_TOKEN").map(Into::into),
     };
-    let region = env!("R2S3_REGION");
+    let region = option_env!("R2S3_REGION").expect("R2S3_REGION not set");
     let service = Service::s3(region);
     let session = Session::new(&credentials, &service, 3600);
-    let endpoint = env!("R2S3_HOST");
-    let bucket = env!("R2S3_BUCKET");
+    let endpoint = option_env!("R2S3_HOST").expect("R2S3_HOST not set");
+    let bucket = option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set");
 
     let mut backend = S3::open(endpoint, bucket, session).with_prefix(&test_prefix);
 
@@ -454,22 +452,25 @@ async fn it_lists_objects() -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_reads_stream() -> Result<()> {
     // Use a unique prefix for this test
     let test_prefix = unique_prefix("stream-test");
 
     let credentials = Credentials {
-        access_key_id: env!("R2S3_ACCESS_KEY_ID").into(),
-        secret_access_key: env!("R2S3_SECRET_ACCESS_KEY").into(),
-        session_token: option_env!("R2S3_SESSION_TOKEN").map(|v| v.into()),
+        access_key_id: option_env!("R2S3_ACCESS_KEY_ID")
+            .expect("R2S3_ACCESS_KEY_ID not set")
+            .into(),
+        secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
+            .expect("R2S3_SECRET_ACCESS_KEY not set")
+            .into(),
+        session_token: option_env!("R2S3_SESSION_TOKEN").map(Into::into),
     };
-    let region = env!("R2S3_REGION");
+    let region = option_env!("R2S3_REGION").expect("R2S3_REGION not set");
     let service = Service::s3(region);
     let session = Session::new(&credentials, &service, 3600);
-    let endpoint = env!("R2S3_HOST");
-    let bucket = env!("R2S3_BUCKET");
+    let endpoint = option_env!("R2S3_HOST").expect("R2S3_HOST not set");
+    let bucket = option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set");
 
     let mut backend = S3::open(endpoint, bucket, session).with_prefix(&test_prefix);
 
@@ -502,21 +503,24 @@ async fn it_reads_stream() -> Result<()> {
 /// Test that listing with a nonexistent prefix returns an empty list (not an error).
 ///
 /// This verifies real S3/R2 behavior: a prefix is just a filter, not a path that must exist.
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[dialog_common::test]
 async fn it_lists_empty_for_nonexistent_prefix() -> Result<()> {
     let credentials = Credentials {
-        access_key_id: env!("R2S3_ACCESS_KEY_ID").into(),
-        secret_access_key: env!("R2S3_SECRET_ACCESS_KEY").into(),
-        session_token: option_env!("R2S3_SESSION_TOKEN").map(|v| v.into()),
+        access_key_id: option_env!("R2S3_ACCESS_KEY_ID")
+            .expect("R2S3_ACCESS_KEY_ID not set")
+            .into(),
+        secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
+            .expect("R2S3_SECRET_ACCESS_KEY not set")
+            .into(),
+        session_token: option_env!("R2S3_SESSION_TOKEN").map(Into::into),
     };
 
-    let region = env!("R2S3_REGION");
+    let region = option_env!("R2S3_REGION").expect("R2S3_REGION not set");
     let service = Service::s3(region);
     let session = Session::new(&credentials, &service, 3600);
 
-    let endpoint = env!("R2S3_HOST");
-    let bucket = env!("R2S3_BUCKET");
+    let endpoint = option_env!("R2S3_HOST").expect("R2S3_HOST not set");
+    let bucket = option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set");
 
     // Use a prefix that definitely doesn't exist
     let backend = S3::<Vec<u8>, Vec<u8>>::open(endpoint, bucket, session)

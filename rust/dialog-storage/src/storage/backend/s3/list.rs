@@ -192,7 +192,7 @@ mod tests {
     use super::*;
     use crate::s3::Session;
 
-    #[test]
+    #[dialog_common::test]
     fn it_builds_list_request_with_prefix() {
         let url = Url::parse("https://s3.amazonaws.com/bucket").unwrap();
         let request = List::new(url.clone(), Some("prefix/"), None);
@@ -202,7 +202,7 @@ mod tests {
         assert!(request.url().as_str().contains("prefix=prefix%2F"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_builds_list_request_with_continuation_token() {
         let url = Url::parse("https://s3.amazonaws.com/bucket").unwrap();
         let request = List::new(url.clone(), None, Some("token123"));
@@ -215,7 +215,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_parses_empty_list_response() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <ListBucketResult>
@@ -228,7 +228,7 @@ mod tests {
         assert!(result.next_continuation_token.is_none());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_parses_list_response_with_keys() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <ListBucketResult>
@@ -250,7 +250,7 @@ mod tests {
         assert!(!result.is_truncated);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_parses_truncated_list_response() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <ListBucketResult>
@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(result.next_continuation_token, Some("abc123".to_string()));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_builds_bucket_url() {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public);
@@ -276,7 +276,7 @@ mod tests {
         assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_errors_on_malformed_xml() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <ListBucketResult>
@@ -291,7 +291,7 @@ mod tests {
         assert!(matches!(err, S3StorageError::SerializationError(_)));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_errors_on_unexpected_xml_structure() {
         // XML is valid but doesn't have the expected ListBucketResult root element.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -309,7 +309,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_errors_on_wrong_root_element() {
         // Valid XML structure but wrong root element name - should error.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -330,7 +330,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_errors_on_non_xml_input() {
         // Not XML at all - should error
         let xml = "this is not xml at all { json: maybe? }";
@@ -341,7 +341,7 @@ mod tests {
         assert!(matches!(err, S3StorageError::SerializationError(_)));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_parses_no_such_bucket_error() {
         // S3 returns an Error XML when bucket doesn't exist.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -363,7 +363,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_parses_access_denied_error() {
         // S3 returns an Error XML when access is denied.
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>

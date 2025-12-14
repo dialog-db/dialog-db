@@ -75,6 +75,7 @@ web-time = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 blake3 = { workspace = true }
+dialog-common = { workspace = true, features = ["helpers"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0"
 rand = { workspace = true }
