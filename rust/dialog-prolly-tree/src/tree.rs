@@ -5,7 +5,7 @@ use std::{
 };
 
 use super::differential::Change;
-use crate::{Adopter, Delta, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
+use crate::{Adopter, DialogProllyTreeError, Entry, KeyType, Node, TreeDifference, ValueType};
 use async_stream::try_stream;
 use dialog_storage::{ContentAddressedStorage, Encoder, HashType};
 use futures_core::Stream;
@@ -152,10 +152,9 @@ where
         &'a self,
         other: &'a Self,
     ) -> impl crate::differential::Differential<Key, Value> + 'a {
-        let mut delta = Delta::from((self, other));
         try_stream! {
-            delta.expand().await?;
-            for await change in delta.stream() {
+            let delta = TreeDifference::compute(self, other).await?;
+            for await change in delta.changes() {
                 yield change?;
             }
         }

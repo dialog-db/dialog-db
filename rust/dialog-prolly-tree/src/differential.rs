@@ -435,87 +435,75 @@ where
     }
 }
 
-/// Convenient way to not have to repeat complex type twice
-type Pair<T> = (T, T);
-
-/// Represents a differential computation between two trees (source, target).
+/// Represents a difference computed between two trees (source, target).
 ///
-/// Delta contains sparse representations of both trees and provides methods to
-/// efficiently compute the changes needed to transform the source tree into the target tree.
+/// TreeDifference contains sparse representations of both trees and can be used
+/// to produce either:
 ///
-/// The tuple structure is `(source_sparse_tree, target_sparse_tree)`.
-pub(crate) struct Delta<'a, Key, Value, Hash, Storage>(
-    SparseTree<'a, Key, Value, Hash, Storage>,
-    SparseTree<'a, Key, Value, Hash, Storage>,
-)
+/// - Entry-level changes via [`changes()`](Self::changes) - transforms source into target
+/// - Node-level novelty via [`novel_nodes()`](Self::novel_nodes) - nodes in target abscent in source
+///
+/// # Usage
+///
+/// ```no_run
+/// # use dialog_prolly_tree::{TreeDifference, Tree, GeometricDistribution};
+/// # use dialog_storage::{Blake3Hash, CborEncoder, MemoryStorageBackend, Storage};
+/// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash,
+/// #     Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
+/// # async fn example(source: &TestTree, target: &TestTree) -> Result<(), Box<dyn std::error::Error>> {
+/// // Compute the difference (includes expansion)
+/// let delta = TreeDifference::compute(&source, &target).await?;
+///
+/// // Option 1: Get entry-level changes (for replication/sync)
+/// let changes = delta.changes();
+///
+/// // Option 2: Get novel nodes (for pushing to a remote storage)
+/// let nodes = delta.novel_nodes();
+/// # Ok(())
+/// # }
+/// ```
+pub struct TreeDifference<'a, Key, Value, Hash, Storage>
 where
     Key: KeyType + 'static,
     Value: ValueType,
     Hash: HashType,
-    Storage: ContentAddressedStorage<Hash = Hash>;
+    Storage: ContentAddressedStorage<Hash = Hash>,
+{
+    /// Sparse tree representing the source state (what we're diffing from)
+    source: SparseTree<'a, Key, Value, Hash, Storage>,
+    /// Sparse tree representing the target state (what we're diffing to)
+    target: SparseTree<'a, Key, Value, Hash, Storage>,
+}
 
-impl<'a, Key, Value, Hash, Storage> Delta<'a, Key, Value, Hash, Storage>
+impl<'a, Key, Value, Hash, Storage> TreeDifference<'a, Key, Value, Hash, Storage>
 where
     Key: KeyType + 'static,
     Value: ValueType + PartialEq,
     Hash: HashType,
     Storage: ContentAddressedStorage<Hash = Hash>,
 {
-    /// Creates a new Delta from a pair of trees `(source, target)`.
+    /// Computes the difference between two trees.
     ///
-    /// The resulting Delta contains sparse representations of both trees that can be
-    /// expanded to compute the changes needed to transform `source` into `target`.
+    /// Derives sparse representations of both trees and eliminates nodes that are
+    /// identical between them (same boundary and hash). Only nodes that differ are
+    /// retained, making it possible to efficiently compute entry-level changes via
+    /// [`changes()`](Self::changes) or node-level novelty via [`novel_nodes()`](Self::novel_nodes).
     ///
-    /// # Parameters
-    /// - `(left, right)`: A tuple of tree references where `left` is the source tree
-    ///   and `right` is the target tree
-    ///
-    /// # Example
-    /// ```ignore
-    /// let delta = Delta::from((old_tree, new_tree));
-    /// // This delta can produce changes to transform old_tree → new_tree
-    /// ```
-    pub fn from<Distription: crate::Distribution<Key, Hash>>(
-        (left, right): Pair<&'a Tree<Distription, Key, Value, Hash, Storage>>,
-    ) -> Self {
-        Self(
-            SparseTree {
-                storage: left.storage(),
-                nodes: left
-                    .root()
-                    .map(|root| vec![SparseTreeNode::Node(root.clone())])
-                    .unwrap_or(vec![]),
-            },
-            SparseTree {
-                storage: right.storage(),
-                nodes: right
-                    .root()
-                    .map(|root| vec![SparseTreeNode::Node(root.clone())])
-                    .unwrap_or(vec![]),
-            },
-        )
-    }
-
-    /// Expands the difference by intelligently expanding only the nodes that need
-    /// exploration based on boundary comparisons.
-    ///
-    /// ## Algorithm Strategy
+    /// # Algorithm
     ///
     /// The key insight is that if two trees share nodes, they will share boundaries
     /// for those nodes. By comparing boundaries at each level, we can determine:
     ///
     /// 1. **Same boundary, same hash** → Nodes are identical, prune both
     /// 2. **Same boundary, different hash** → Nodes differ in structure below, expand both
-    /// 3. **Different boundaries** → Nodes cover disjoint ranges, no need to expand
+    /// 3. **Different boundaries** → Nodes cover disjoint ranges, expand the larger one
     ///
     /// At each level, ranges grow larger (parent covers more than children). If one
     /// node's boundary is greater than another's, it means that node covers a larger
     /// range and might need expansion to reveal boundaries that match the other side's
     /// granularity.
     ///
-    /// ## Example
-    ///
-    /// ```ignore
+    /// ```text
     /// Tree A:                Tree B:
     /// [          ..z]       [         ..z]
     /// [..f, ..m, ..z]       [    ..m, ..z]
@@ -524,19 +512,55 @@ where
     /// Both roots have boundary 'z' and different hashes → expand both.
     /// After expansion, A has boundaries {f, m, z} while B has {m, z}.
     /// Now we compare:
-    /// - 'f' only in A → A covers [MIN..f], B starts after 'f' → disjoint
+    /// - 'f' only in A → A covers \[MIN..f\], B starts after 'f' → disjoint
     /// - 'm' in both → compare, if hashes differ expand both
     /// - 'z' in both → compare, if hashes differ expand both
     ///
     /// This avoids expanding B's subtrees unnecessarily when looking for 'f'.
-    pub async fn expand(&mut self) -> Result<(), DialogProllyTreeError> {
+    ///
+    /// # Parameters
+    /// - `source`: The source tree (base state, e.g., what remote has)
+    /// - `target`: The target tree (novel state, e.g., what we have locally)
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use dialog_prolly_tree::{TreeDifference, Tree, GeometricDistribution};
+    /// # use dialog_storage::{Blake3Hash, CborEncoder, MemoryStorageBackend, Storage};
+    /// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash,
+    /// #     Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
+    /// # async fn example(remote_tree: &TestTree, local_tree: &TestTree) -> Result<(), Box<dyn std::error::Error>> {
+    /// let diff = TreeDifference::compute(&remote_tree, &local_tree).await?;
+    /// // changes() produces transforms remote → local
+    /// // novel_nodes() yields nodes local has that remote doesn't
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn compute<Distribution: crate::Distribution<Key, Hash>>(
+        source: &'a Tree<Distribution, Key, Value, Hash, Storage>,
+        target: &'a Tree<Distribution, Key, Value, Hash, Storage>,
+    ) -> Result<Self, DialogProllyTreeError> {
         use std::cmp::Ordering;
 
-        let Self(source, target) = self;
+        let mut source = SparseTree {
+            storage: source.storage(),
+            nodes: source
+                .root()
+                .map(|root| vec![SparseTreeNode::Node(root.clone())])
+                .unwrap_or(vec![]),
+        };
+        let mut target = SparseTree {
+            storage: target.storage(),
+            nodes: target
+                .root()
+                .map(|root| vec![SparseTreeNode::Node(root.clone())])
+                .unwrap_or(vec![]),
+        };
 
+        // Iteratively expand and prune until only differing leaf nodes remain
         loop {
             // First, prune any nodes with matching boundaries and hashes
-            source.prune(target);
+            // First, prune any nodes with matching boundaries and hashes
+            source.prune(&mut target);
 
             // Compare boundaries and expand strategically
             // Use two-finger walk to compare sorted node lists
@@ -551,8 +575,8 @@ where
                 match source_bound.cmp(&target_bound) {
                     Ordering::Less => {
                         // Source node has smaller boundary
-                        // Expand ONLY the TARGET node (larger boundary) to see if it contains
-                        // something matching the source node
+                        // Expand ONLY the `target` node (larger boundary) to
+                        // see if it contains something matching the source node
                         // Use exact range to expand only this specific node
                         if target
                             .expand(target_bound.clone()..=target_bound.clone())
@@ -566,8 +590,8 @@ where
                     }
                     Ordering::Greater => {
                         // Target node has smaller boundary
-                        // Expand ONLY the SOURCE node (larger boundary) to see if it contains
-                        // something matching the target node
+                        // Expand ONLY the `source` node (larger boundary) to
+                        // see if it contains something matching the target node
                         // Use exact range to expand only this specific node
                         if source
                             .expand(source_bound.clone()..=source_bound.clone())
@@ -608,8 +632,9 @@ where
                 }
             }
 
-            // Don't expand remaining nodes - they are pure adds/removes that don't need expansion
-            // The comparison loop has already expanded everything that needs comparing
+            // Don't expand remaining nodes - they are pure adds/removes that
+            // don't need expansion. The comparison loop has already expanded
+            // everything that needs comparing
 
             // If nothing was expanded, we've reached a fixed point
             if !expanded {
@@ -617,17 +642,38 @@ where
             }
         }
 
-        Ok(())
+        Ok(Self { source, target })
     }
 
-    /// Returns a stream of changes between the two trees.
+    /// Returns a stream of entry-level changes between the two trees.
     ///
-    /// This performs a two-cursor walk over the entry streams from both sparse trees,
-    /// yielding Add and Remove changes as appropriate.
-    pub fn stream(&'a self) -> impl Differential<Key, Value> + 'a {
-        let Self(source, target) = self;
-        let source_stream = source.stream();
-        let target_stream = target.stream();
+    /// This performs a two-cursor walk over the entry streams from both sparse
+    /// trees, yielding Add and Remove changes as appropriate.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use dialog_prolly_tree::{TreeDifference, Tree, GeometricDistribution, Change};
+    /// # use dialog_storage::{Blake3Hash, CborEncoder, MemoryStorageBackend, Storage};
+    /// # use futures_util::{pin_mut, StreamExt};
+    /// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash,
+    /// #     Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
+    /// # async fn example(old_tree: &TestTree, new_tree: &TestTree) -> Result<(), Box<dyn std::error::Error>> {
+    /// let changes = TreeDifference::compute(&old_tree, &new_tree)
+    ///     .await?
+    ///     .changes();
+    /// pin_mut!(changes);
+    /// while let Some(change) = changes.next().await {
+    ///     match change? {
+    ///         Change::Add(entry) => println!("Added: {:?}", entry),
+    ///         Change::Remove(entry) => println!("Removed: {:?}", entry),
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn changes(&'a self) -> impl Differential<Key, Value> + 'a {
+        let source_stream = self.source.stream();
+        let target_stream = self.target.stream();
 
         try_stream! {
             futures_util::pin_mut!(source_stream);
@@ -692,6 +738,84 @@ where
                 }
             }
         }
+    }
+
+    /// Returns a stream of all novel nodes that exist in `target` but not in `source`.
+    ///
+    /// Unlike [`changes()`](Self::changes) which streams entry-level changes,
+    /// this method yields entire tree nodes. When a subtree is entirely novel
+    /// (no corresponding node in source), it yield all nodes in that subtree.
+    ///
+    /// This is useful for sync/replication scenarios where you need to push all
+    /// nodes to a remote storage that doesn't have them.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use dialog_prolly_tree::{TreeDifference, Tree, GeometricDistribution};
+    /// # use dialog_storage::{Blake3Hash, CborEncoder, MemoryStorageBackend, Storage};
+    /// # use futures_util::{pin_mut, StreamExt};
+    /// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash,
+    /// #     Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
+    /// # async fn example(remote_tree: &TestTree, local_tree: &TestTree) -> Result<(), Box<dyn std::error::Error>> {
+    /// let nodes = TreeDifference::compute(&remote_tree, &local_tree)
+    ///     .await?
+    //      .novel_nodes();
+    /// pin_mut!(nodes);
+    /// while let Some(node) = nodes.next().await {
+    ///     let node = node?;
+    ///     // Push node to remote storage
+    ///     // remote_storage.put(node.hash(), node.encode()).await?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn novel_nodes(
+        &self,
+    ) -> impl Stream<Item = Result<Node<Key, Value, Hash>, DialogProllyTreeError>> + '_ {
+        try_stream! {
+            for sparse_node in &self.target.nodes {
+                // Load the node
+                let node = sparse_node.clone().load(self.target.storage).await?;
+
+                // Yield this node
+                yield node.clone();
+
+                // If it's a branch, recursively yield all descendants
+                if node.is_branch() {
+                    for await descendant in self.stream_descendants(&node) {
+                        yield descendant?;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Recursively streams all descendants of a branch node.
+    fn stream_descendants(
+        &self,
+        node: &Node<Key, Value, Hash>,
+    ) -> std::pin::Pin<
+        Box<dyn Stream<Item = Result<Node<Key, Value, Hash>, DialogProllyTreeError>> + '_>,
+    > {
+        let node = node.clone();
+        Box::pin(try_stream! {
+            if let Ok(refs) = node.references() {
+                for reference in refs.iter() {
+                    // Load child node
+                    let child = Node::from_reference(reference.clone(), self.target.storage).await?;
+
+                    // Yield the child
+                    yield child.clone();
+
+                    // If child is a branch, recurse
+                    if child.is_branch() {
+                        for await descendant in self.stream_descendants(&child) {
+                            yield descendant?;
+                        }
+                    }
+                }
+            }
+        })
     }
 }
 
@@ -1829,5 +1953,238 @@ mod tests {
         spec_a.assert();
 
         Ok(())
+    }
+
+    // ========================================================================
+    // Novel nodes tests: Verify novel_nodes() returns correct tree nodes
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_novel_nodes_empty_source() {
+        // When source is empty, all nodes in target are novel
+        let backend = MemoryStorageBackend::default();
+        let source = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        target.set(vec![1], vec![10]).await.unwrap();
+        target.set(vec![2], vec![20]).await.unwrap();
+        target.set(vec![3], vec![30]).await.unwrap();
+
+        let diff = TreeDifference::compute(&source, &target).await.unwrap();
+        let nodes = diff.novel_nodes();
+        pin_mut!(nodes);
+
+        let mut node_count = 0;
+        while let Some(result) = nodes.next().await {
+            result.unwrap();
+            node_count += 1;
+        }
+
+        // Should have at least 1 node (the root/leaf)
+        assert!(node_count >= 1, "Should have novel nodes");
+    }
+
+    #[tokio::test]
+    async fn test_novel_nodes_identical_trees() {
+        // When trees are identical, no nodes are novel
+        let backend = MemoryStorageBackend::default();
+        let mut source = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        source.set(vec![1], vec![10]).await.unwrap();
+        source.set(vec![2], vec![20]).await.unwrap();
+        target.set(vec![1], vec![10]).await.unwrap();
+        target.set(vec![2], vec![20]).await.unwrap();
+
+        let diff = TreeDifference::compute(&source, &target).await.unwrap();
+        let nodes = diff.novel_nodes();
+        pin_mut!(nodes);
+
+        let mut node_count = 0;
+        while let Some(result) = nodes.next().await {
+            result.unwrap();
+            node_count += 1;
+        }
+
+        assert_eq!(node_count, 0, "Identical trees should have no novel nodes");
+    }
+
+    #[tokio::test]
+    async fn test_novel_nodes_added_entries() {
+        // When target has additional entries, those new nodes are novel
+        let backend = MemoryStorageBackend::default();
+        let mut source = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Source has 2 entries
+        source.set(vec![1], vec![10]).await.unwrap();
+        source.set(vec![2], vec![20]).await.unwrap();
+
+        // Target has same 2 plus 1 more
+        target.set(vec![1], vec![10]).await.unwrap();
+        target.set(vec![2], vec![20]).await.unwrap();
+        target.set(vec![3], vec![30]).await.unwrap();
+
+        let diff = TreeDifference::compute(&source, &target).await.unwrap();
+        let nodes = diff.novel_nodes();
+        pin_mut!(nodes);
+
+        let mut node_count = 0;
+        while let Some(result) = nodes.next().await {
+            result.unwrap();
+            node_count += 1;
+        }
+
+        // Should have at least 1 novel node
+        assert!(node_count >= 1, "Should have novel nodes for added entries");
+    }
+
+    #[tokio::test]
+    async fn test_novel_nodes_large_tree() {
+        // Test with a larger tree that has branches
+        let backend = MemoryStorageBackend::default();
+        let mut source = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Source has entries 0-49
+        for i in 0..50u8 {
+            source.set(vec![i], vec![i]).await.unwrap();
+        }
+
+        // Target has entries 0-99
+        for i in 0..100u8 {
+            target.set(vec![i], vec![i]).await.unwrap();
+        }
+
+        let diff = TreeDifference::compute(&source, &target).await.unwrap();
+        let nodes = diff.novel_nodes();
+        pin_mut!(nodes);
+
+        let mut node_count = 0;
+        let mut hashes = std::collections::HashSet::new();
+        while let Some(result) = nodes.next().await {
+            let node = result.unwrap();
+            hashes.insert(node.hash().clone());
+            node_count += 1;
+        }
+
+        // Should have novel nodes and all should be unique
+        assert!(node_count >= 1, "Should have novel nodes");
+        assert_eq!(node_count, hashes.len(), "All nodes should be unique");
+    }
+
+    #[tokio::test]
+    async fn test_novel_nodes_modified_entries() {
+        // When target has modified entries, the leaf nodes containing them are novel
+        let backend = MemoryStorageBackend::default();
+        let mut source = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let mut target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        // Source has key 1 with value 10
+        source.set(vec![1], vec![10]).await.unwrap();
+
+        // Target has key 1 with different value 20
+        target.set(vec![1], vec![20]).await.unwrap();
+
+        let diff = TreeDifference::compute(&source, &target).await.unwrap();
+        let nodes = diff.novel_nodes();
+        pin_mut!(nodes);
+
+        let mut node_count = 0;
+        while let Some(result) = nodes.next().await {
+            result.unwrap();
+            node_count += 1;
+        }
+
+        // Should have at least 1 novel node (the modified leaf)
+        assert!(
+            node_count >= 1,
+            "Should have novel nodes for modified entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_novel_nodes_empty_target() {
+        // When target is empty, there are no novel nodes
+        let backend = MemoryStorageBackend::default();
+        let mut source = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        source.set(vec![1], vec![10]).await.unwrap();
+        source.set(vec![2], vec![20]).await.unwrap();
+
+        let diff = TreeDifference::compute(&source, &target).await.unwrap();
+        let nodes = diff.novel_nodes();
+        pin_mut!(nodes);
+
+        let mut node_count = 0;
+        while let Some(result) = nodes.next().await {
+            result.unwrap();
+            node_count += 1;
+        }
+
+        assert_eq!(node_count, 0, "Empty target should have no novel nodes");
+    }
+
+    #[tokio::test]
+    async fn test_novel_nodes_both_empty() {
+        // When both are empty, there are no novel nodes
+        let backend = MemoryStorageBackend::default();
+        let source = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+        let target = TestTree::new(Storage {
+            encoder: CborEncoder,
+            backend: backend.clone(),
+        });
+
+        let diff = TreeDifference::compute(&source, &target).await.unwrap();
+        let nodes = diff.novel_nodes();
+        pin_mut!(nodes);
+
+        let mut node_count = 0;
+        while let Some(result) = nodes.next().await {
+            result.unwrap();
+            node_count += 1;
+        }
+
+        assert_eq!(node_count, 0, "Both empty should have no novel nodes");
     }
 }
