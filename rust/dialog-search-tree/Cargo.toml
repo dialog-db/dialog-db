@@ -1,0 +1,63 @@
+[package]
+name = "dialog-search-tree"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+dialog-common = { workspace = true }
+dialog-macros = { workspace = true }
+dialog-storage = { workspace = true }
+anyhow = { workspace = true }
+
+async-trait = { workspace = true }
+async-stream = { workspace = true }
+base58 = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+dashmap = { workspace = true }
+futures-core = { workspace = true }
+hashbrown = { workspace = true }
+nonempty = { workspace = true, features = ["serialize"] }
+parking_lot = { workspace = true }
+rand = { workspace = true }
+rkyv = { workspace = true }
+serde = { workspace = true }
+sieve-cache = { workspace = true }
+stable_deref_trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+
+[dev-dependencies]
+dialog-common = { workspace = true, features = ["helpers"] }
+dialog-storage = { workspace = true, features = ["helpers"] }
+futures-util = { workspace = true }
+tokio-test = { workspace = true }
+
+[[bench]]
+name = "insert"
+harness = false
+
+[[bench]]
+name = "get"
+harness = false
+
+[[bench]]
+name = "delete"
+harness = false
+
+[[bench]]
+name = "range_query"
+harness = false
+
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+getrandom = { workspace = true, features = ["js"] }
+wasm-bindgen-test = { workspace = true }

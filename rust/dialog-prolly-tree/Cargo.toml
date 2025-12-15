@@ -29,15 +29,38 @@ nonempty = { workspace = true, features = ["serialize"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+dialog-common = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 futures-util = { workspace = true }
+
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+criterion = { version = "0.5", features = ["async_tokio"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 # getrandom = { workspace = true, features = ["wasm_js"] }
 getrandom = { workspace = true, features = ["js"] }
 wasm-bindgen-test = { workspace = true }
 
+[[bench]]
+name = "insert"
+harness = false
+
+[[bench]]
+name = "get"
+harness = false
+
+[[bench]]
+name = "delete"
+harness = false
+
+[[bench]]
+name = "range_query"
+harness = false
+
 [lints.rust]
 # This cfg is used by the dialog_common::test proc macro for wasm inner tests
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)"] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(dialog_test_wasm_integration)",
+] }

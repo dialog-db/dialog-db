@@ -548,11 +548,10 @@ where
         for (node, rank) in nodes {
             pending.push(node);
             if rank > minimum_rank {
-                let children = NonEmpty::from_vec(std::mem::take(&mut pending)).ok_or(
-                    DialogProllyTreeError::InvalidConstruction(
+                let children: NonEmpty<Adopter> = NonEmpty::from_vec(std::mem::take(&mut pending))
+                    .ok_or(DialogProllyTreeError::InvalidConstruction(
                         "Cannot adopt an empty child list".into(),
-                    ),
-                )?;
+                    ))?;
                 let node = Adopter::adopt(children, storage).await?;
                 output.push((node, rank));
             }

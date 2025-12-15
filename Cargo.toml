@@ -23,6 +23,7 @@ members = [
     "rust/dialog-dbsp",
     "rust/dialog-encoding",
     "rust/dialog-prolly-tree",
+    "rust/dialog-search-tree",
     "rust/dialog-storage",
 ]
 resolver = "2"
@@ -31,6 +32,7 @@ resolver = "2"
 version = "0.1.0"
 authors = ["The Meiosys Project Authors"]
 license = "MIT OR Apache-2.0"
+edition = "2024"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -41,14 +43,19 @@ base58 = "0.2"
 base64 = "0.22"
 blake3 = "1"
 brotli = "8"
+bytes = "1"
 clap = "4"
 clap_derive = "4"
 console_error_panic_hook = "0.1"
 csv-async = { version = "1", features = ["tokio"] }
+dashmap = "6"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+elsa = "1"
 futures-core = "0.3"
 futures-util = "0.3"
+hashbrown = "0.16"
 # getrandom = "0.3"
+stable_deref_trait = "1"
 getrandom = "0.2"
 itertools = "0.14"
 js-sys = "0.3"
@@ -56,7 +63,8 @@ leb128 = "0.2"
 leptos = "0.8"
 leptos_meta = "0.8"
 leptos_router = "0.8"
-nonempty = "0.11"
+nonempty = "0.12"
+parking_lot = "0.12"
 ptree = "0.5"
 rand = "0.8"
 rand_core = "0.6"
@@ -78,6 +86,7 @@ tempfile = "3"
 thiserror = "2"
 throbber-widgets-tui = "0.8"
 tokio = "1"
+tokio-test = "0.4"
 ulid = "1"
 url = "2"
 wasm-bindgen = "=0.2.100"
@@ -86,6 +95,7 @@ wasm-bindgen-test = "0.3"
 web-sys = "0.3"
 web-time = "1"
 zerocopy = "0.8"
+zerocopy-derive = "0.8"
 
 [workspace.dependencies.dialog-artifacts]
 path = "./rust/dialog-artifacts"
@@ -98,6 +108,9 @@ path = "./rust/dialog-encoding"
 
 [workspace.dependencies.dialog-prolly-tree]
 path = "./rust/dialog-prolly-tree"
+
+[workspace.dependencies.dialog-search-tree]
+path = "./rust/dialog-search-tree"
 
 [workspace.dependencies.dialog-storage]
 path = "./rust/dialog-storage"

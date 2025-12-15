@@ -43,11 +43,7 @@
             pname = "wasm-bindgen-cli";
             version = "0.2.100";
             buildInputs =
-              [ rust-bin.stable.latest.default ]
-              ++ lib.optionals stdenv.isDarwin [
-                darwin.apple_sdk.frameworks.SystemConfiguration
-                darwin.apple_sdk.frameworks.Security
-              ];
+              [ rust-bin.stable.latest.default ];
 
             src = fetchCrate {
               inherit pname version;
@@ -74,10 +70,6 @@
               trunk
               wasm-bindgen-cli
               wasm-pack
-            ]
-            ++ lib.optionals stdenv.isDarwin [
-              darwin.apple_sdk.frameworks.SystemConfiguration
-              darwin.apple_sdk.frameworks.Security
             ];
 
         common-dev-tools = with pkgs; [
