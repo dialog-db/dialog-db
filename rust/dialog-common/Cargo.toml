@@ -7,4 +7,6 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+base58 = { workspace = true }
 blake3 = { workspace = true }
+rkyv = { workspace = true }
