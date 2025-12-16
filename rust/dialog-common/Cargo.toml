@@ -6,5 +6,28 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Testing utilities (Provision, Provider traits, EnvGuard)
+helpers = ["dep:anyhow", "dep:serde", "dep:serde_json", "dep:dialog-macros", "dep:async-trait"]
+# Enable integration tests (tests with service provisioning)
+integration-tests = ["helpers"]
+# Enable web integration tests (implies integration-tests behavior)
+web-integration-tests = ["helpers"]
+
 [dependencies]
 blake3 = { workspace = true }
+anyhow = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
+dialog-macros = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-test = { workspace = true }
+
+[lints.rust]
+# This cfg is used by the dialog_common::test proc macro for wasm inner tests
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)"] }

@@ -18,6 +18,7 @@ strip = "debuginfo"
 members = [
     "rust/dialog-artifacts",
     "rust/dialog-common",
+    "rust/dialog-macros",
     "rust/dialog-diagnose",
     "rust/dialog-dbsp",
     "rust/dialog-encoding",
@@ -37,6 +38,7 @@ arrayref = "0.3"
 async-stream = "0.3"
 async-trait = "0.1"
 base58 = "0.2"
+base64 = "0.22"
 blake3 = "1"
 brotli = "8"
 clap = "4"
@@ -82,6 +84,7 @@ wasm-bindgen = "=0.2.100"
 wasm-bindgen-futures = "0.4"
 wasm-bindgen-test = "0.3"
 web-sys = "0.3"
+web-time = "1"
 zerocopy = "0.8"
 
 [workspace.dependencies.dialog-artifacts]
@@ -98,6 +101,9 @@ path = "./rust/dialog-prolly-tree"
 
 [workspace.dependencies.dialog-storage]
 path = "./rust/dialog-storage"
+
+[workspace.dependencies.dialog-macros]
+path = "./rust/dialog-macros"
 
 # [patch.crates-io]
 # # TODO: https://github.com/gwierzchowski/csv-async/issues/27

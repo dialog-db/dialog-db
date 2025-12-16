@@ -7,6 +7,10 @@ license.workspace = true
 
 [features]
 default = []
+# Enable integration tests (tests with service provisioning)
+integration-tests = ["dialog-common/integration-tests"]
+# Enable web integration tests
+web-integration-tests = ["dialog-common/web-integration-tests"]
 
 [dependencies]
 dialog-common = { workspace = true }
@@ -23,3 +27,7 @@ zerocopy = { workspace = true }
 base58 = { workspace = true }
 brotli = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
+
+[lints.rust]
+# This cfg is used by the dialog_common::test proc macro for wasm inner tests
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)"] }
