@@ -157,6 +157,8 @@ where
 {
     storage: &'a Storage,
     nodes: Vec<SparseTreeNode<Key, Value, Hash>>,
+    /// Nodes that were loaded during expansion (novel nodes that differ from source)
+    expanded: Vec<Node<Key, Value, Hash>>,
 }
 
 impl<Key, Value, Hash, Storage> SparseTree<'_, Key, Value, Hash, Storage>
@@ -227,9 +229,12 @@ where
                     let node: Node<Key, Value, Hash> =
                         Node::from_hash(reference.hash().clone(), self.storage).await?;
 
-                    // If it's a branch, expand it
+                    // If it's a branch (index node), expand it
                     if node.is_branch() {
                         if let Ok(refs) = node.references() {
+                            // Track this loaded node (only for branches that we splice out)
+                            self.expanded.push(node.clone());
+
                             // Convert references to SparseTreeNode::Ref
                             let children: Vec<SparseTreeNode<Key, Value, Hash>> = refs
                                 .iter()
@@ -244,7 +249,7 @@ where
                             continue;
                         }
                     }
-                    // If it's a leaf, just leave it as a Ref
+                    // If it's a leaf (segment node), leave it in nodes
                     offset += 1;
                 }
                 SparseTreeNode::Node(node) => {
@@ -546,14 +551,16 @@ where
             nodes: source
                 .root()
                 .map(|root| vec![SparseTreeNode::Node(root.clone())])
-                .unwrap_or(vec![]),
+                .unwrap_or_default(),
+            expanded: vec![],
         };
         let mut target = SparseTree {
             storage: target.storage(),
             nodes: target
                 .root()
                 .map(|root| vec![SparseTreeNode::Node(root.clone())])
-                .unwrap_or(vec![]),
+                .unwrap_or_default(),
+            expanded: vec![],
         };
 
         // Iteratively expand and prune until only differing leaf nodes remain
@@ -658,9 +665,8 @@ where
     /// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash,
     /// #     Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
     /// # async fn example(old_tree: &TestTree, new_tree: &TestTree) -> Result<(), Box<dyn std::error::Error>> {
-    /// let changes = TreeDifference::compute(&old_tree, &new_tree)
-    ///     .await?
-    ///     .changes();
+    /// let diff = TreeDifference::compute(&old_tree, &new_tree).await?;
+    /// let changes = diff.changes();
     /// pin_mut!(changes);
     /// while let Some(change) = changes.next().await {
     ///     match change? {
@@ -740,14 +746,15 @@ where
         }
     }
 
-    /// Returns a stream of all novel nodes that exist in `target` but not in `source`.
+    /// Returns a stream of novel nodes, which are nodes that are in the
+    /// `target` tree but not in `source` tree.
     ///
     /// Unlike [`changes()`](Self::changes) which streams entry-level changes,
-    /// this method yields entire tree nodes. When a subtree is entirely novel
-    /// (no corresponding node in source), it yield all nodes in that subtree.
+    /// this method yields tree nodes. If a subtree is entirely novel (no
+    /// corresponding node in source), it yield all nodes in that subtree.
     ///
-    /// This is useful for sync/replication scenarios where you need to push all
-    /// nodes to a remote storage that doesn't have them.
+    /// This is used during sync/replication where we need to send all new
+    /// nodes to a remote that doesn't have them.
     ///
     /// # Example
     /// ```no_run
@@ -757,9 +764,8 @@ where
     /// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash,
     /// #     Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
     /// # async fn example(remote_tree: &TestTree, local_tree: &TestTree) -> Result<(), Box<dyn std::error::Error>> {
-    /// let nodes = TreeDifference::compute(&remote_tree, &local_tree)
-    ///     .await?
-    //      .novel_nodes();
+    /// let diff = TreeDifference::compute(&remote_tree, &local_tree).await?;
+    /// let nodes = diff.novel_nodes();
     /// pin_mut!(nodes);
     /// while let Some(node) = nodes.next().await {
     ///     let node = node?;
@@ -773,49 +779,19 @@ where
         &self,
     ) -> impl Stream<Item = Result<Node<Key, Value, Hash>, DialogProllyTreeError>> + '_ {
         try_stream! {
-            for sparse_node in &self.target.nodes {
-                // Load the node
-                let node = sparse_node.clone().load(self.target.storage).await?;
-
-                // Yield this node
+            // First, yield all (index) nodes that were expanded during
+            // comparison.
+            for node in &self.target.expanded {
                 yield node.clone();
+            }
 
-                // If it's a branch, recursively yield all descendants
-                if node.is_branch() {
-                    for await descendant in self.stream_descendants(&node) {
-                        yield descendant?;
-                    }
-                }
+            // Then, yield all the remaining (segment) nodes. They will be
+            // segmentns because all index nodes are either pruned when found
+            // in source tree or expanded otherwise.
+            for node in &self.target.nodes {
+                yield node.clone().load(self.target.storage).await?;
             }
         }
-    }
-
-    /// Recursively streams all descendants of a branch node.
-    fn stream_descendants(
-        &self,
-        node: &Node<Key, Value, Hash>,
-    ) -> std::pin::Pin<
-        Box<dyn Stream<Item = Result<Node<Key, Value, Hash>, DialogProllyTreeError>> + '_>,
-    > {
-        let node = node.clone();
-        Box::pin(try_stream! {
-            if let Ok(refs) = node.references() {
-                for reference in refs.iter() {
-                    // Load child node
-                    let child = Node::from_reference(reference.clone(), self.target.storage).await?;
-
-                    // Yield the child
-                    yield child.clone();
-
-                    // If child is a branch, recurse
-                    if child.is_branch() {
-                        for await descendant in self.stream_descendants(&child) {
-                            yield descendant?;
-                        }
-                    }
-                }
-            }
-        })
     }
 }
 
@@ -1954,10 +1930,6 @@ mod tests {
 
         Ok(())
     }
-
-    // ========================================================================
-    // Novel nodes tests: Verify novel_nodes() returns correct tree nodes
-    // ========================================================================
 
     #[tokio::test]
     async fn test_novel_nodes_empty_source() {
