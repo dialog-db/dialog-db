@@ -416,54 +416,39 @@ where
 }
 
 #[cfg(test)]
-mod unit_tests {
+mod tests {
     use super::*;
-    use anyhow::Result;
-    #[cfg(target_arch = "wasm32")]
-    use wasm_bindgen_test::wasm_bindgen_test;
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_builds_url_without_prefix() -> Result<()> {
+    #[dialog_common::test]
+    fn it_builds_url_without_prefix() {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public);
 
         let url = backend.url(&[1, 2, 3]).unwrap();
         assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket/!Ldp");
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_builds_url_with_prefix() -> Result<()> {
+    #[dialog_common::test]
+    fn it_builds_url_with_prefix() {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public)
                 .with_prefix("prefix");
 
         let url = backend.url(&[1, 2, 3]).unwrap();
         assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket/prefix/!Ldp");
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_builds_url_with_trailing_slash() -> Result<()> {
+    #[dialog_common::test]
+    fn it_builds_url_with_trailing_slash() {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com/", "bucket", Session::Public);
 
         let url = backend.url(&[1, 2, 3]).unwrap();
         assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket/!Ldp");
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_builds_url_with_bucket_only() -> Result<()> {
+    #[dialog_common::test]
+    fn it_builds_url_with_bucket_only() {
         let backend = S3::<Vec<u8>, Vec<u8>>::open(
             "https://s3.us-east-1.amazonaws.com",
             "my-bucket",
@@ -476,13 +461,10 @@ mod unit_tests {
             url.as_str(),
             "https://s3.us-east-1.amazonaws.com/my-bucket/my-key"
         );
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_builds_url_with_bucket_and_prefix() -> Result<()> {
+    #[dialog_common::test]
+    fn it_builds_url_with_bucket_and_prefix() {
         let backend = S3::<Vec<u8>, Vec<u8>>::open(
             "https://s3.us-east-1.amazonaws.com",
             "my-bucket",
@@ -496,13 +478,10 @@ mod unit_tests {
             url.as_str(),
             "https://s3.us-east-1.amazonaws.com/my-bucket/data/my-key"
         );
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_generates_signed_urls() -> Result<()> {
+    #[dialog_common::test]
+    fn it_generates_signed_urls() {
         let credentials = Credentials {
             access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
             secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
@@ -532,13 +511,10 @@ mod unit_tests {
                 .contains("X-Amz-Algorithm=AWS4-HMAC-SHA256")
         );
         assert!(authorized.url.as_str().contains("X-Amz-Signature="));
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_creates_put_request_with_checksum() -> Result<()> {
+    #[dialog_common::test]
+    fn it_creates_put_request_with_checksum() {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url, b"test value").with_checksum(&Hasher::Sha256);
 
@@ -546,36 +522,27 @@ mod unit_tests {
         assert!(request.checksum().is_some());
         // Checksum should have the correct algorithm name
         assert_eq!(request.checksum().unwrap().name(), "sha256");
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_creates_put_request_without_checksum() -> Result<()> {
+    #[dialog_common::test]
+    fn it_creates_put_request_without_checksum() {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url, b"test value");
 
         // Checksum should be None by default
         assert!(request.checksum().is_none());
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_creates_put_request_with_acl() -> Result<()> {
+    #[dialog_common::test]
+    fn it_creates_put_request_with_acl() {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url, b"test value").with_acl(Acl::PublicRead);
 
         assert_eq!(request.acl(), Some(Acl::PublicRead));
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_creates_get_request() -> Result<()> {
+    #[dialog_common::test]
+    fn it_creates_get_request() {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Get::new(url.clone());
 
@@ -583,68 +550,50 @@ mod unit_tests {
         assert_eq!(request.url(), &url);
         assert!(request.checksum().is_none());
         assert!(request.acl().is_none());
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_encodes_s3_key_safe_chars() -> Result<()> {
+    #[dialog_common::test]
+    fn it_encodes_s3_key_safe_chars() {
         // Safe characters should pass through unchanged
         assert_eq!(encode_s3_key(b"simple-key"), "simple-key");
         assert_eq!(encode_s3_key(b"with_underscore"), "with_underscore");
         assert_eq!(encode_s3_key(b"with.dot"), "with.dot");
         assert_eq!(encode_s3_key(b"CamelCase123"), "CamelCase123");
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_encodes_s3_key_path_structure() -> Result<()> {
+    #[dialog_common::test]
+    fn it_encodes_s3_key_path_structure() {
         // Path structure should be preserved
         assert_eq!(encode_s3_key(b"path/to/key"), "path/to/key");
         assert_eq!(encode_s3_key(b"a/b/c"), "a/b/c");
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_encodes_s3_key_unsafe_chars() -> Result<()> {
+    #[dialog_common::test]
+    fn it_encodes_s3_key_unsafe_chars() {
         // Unsafe characters trigger base58 encoding with ! prefix
         let encoded = encode_s3_key(b"user@example");
         assert!(encoded.starts_with('!'));
 
         let encoded = encode_s3_key(b"has space");
         assert!(encoded.starts_with('!'));
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_encodes_s3_key_binary() -> Result<()> {
+    #[dialog_common::test]
+    fn it_encodes_s3_key_binary() {
         // Binary data gets base58 encoded
         let encoded = encode_s3_key(&[0x01, 0x02, 0x03]);
         assert!(encoded.starts_with('!'));
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_decodes_s3_key_safe_chars() -> Result<()> {
+    #[dialog_common::test]
+    fn it_decodes_s3_key_safe_chars() {
         // Safe keys decode to themselves
         assert_eq!(decode_s3_key("simple-key").unwrap(), b"simple-key");
         assert_eq!(decode_s3_key("path/to/key").unwrap(), b"path/to/key");
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_roundtrips_encode_decode() -> Result<()> {
+    #[dialog_common::test]
+    fn it_roundtrips_encode_decode() {
         // Roundtrip encoding should preserve original data
         let original = b"test-key";
         let encoded = encode_s3_key(original);
@@ -662,13 +611,10 @@ mod unit_tests {
         let encoded = encode_s3_key(path);
         let decoded = decode_s3_key(&encoded).unwrap();
         assert_eq!(decoded, path);
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_authorizes_public_session() -> Result<()> {
+    #[dialog_common::test]
+    fn it_authorizes_public_session() {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url.clone(), b"test").with_checksum(&Hasher::Sha256);
 
@@ -688,46 +634,34 @@ mod unit_tests {
                 .iter()
                 .any(|(k, _)| k == "x-amz-checksum-sha256")
         );
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_configures_s3_with_hasher() -> Result<()> {
+    #[dialog_common::test]
+    fn it_configures_s3_with_hasher() {
         let backend =
             S3::<Vec<u8>, Vec<u8>>::open("https://s3.amazonaws.com", "bucket", Session::Public)
                 .with_hasher(Hasher::Sha256);
 
         // Hasher should be set (we can't directly inspect it, but the backend should work)
         assert!(backend.url(b"key").is_ok());
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_errors_on_invalid_base58() -> Result<()> {
+    #[dialog_common::test]
+    fn it_errors_on_invalid_base58() {
         // Invalid base58 should return an error
         let result = decode_s3_key("!invalid@@base58");
         assert!(result.is_err());
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_converts_errors_to_dialog_error() -> Result<()> {
+    #[dialog_common::test]
+    fn it_converts_errors_to_dialog_error() {
         let error = S3StorageError::TransportError("test".into());
         let dialog_error: DialogStorageError = error.into();
         assert!(dialog_error.to_string().contains("test"));
-
-        Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_creates_delete_request() -> Result<()> {
+    #[dialog_common::test]
+    fn it_creates_delete_request() {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Delete::new(url.clone());
 
@@ -735,8 +669,6 @@ mod unit_tests {
         assert_eq!(request.url(), &url);
         assert!(request.checksum().is_none());
         assert!(request.acl().is_none());
-
-        Ok(())
     }
 }
 
