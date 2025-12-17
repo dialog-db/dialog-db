@@ -107,8 +107,9 @@ pub struct TreeDescriptor(pub Vec<Vec<NodeDescriptor>>);
 impl TreeDescriptor {
     /// Validate the tree structure
     fn validate(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Empty tree is valid - nothing to validate
         if self.0.is_empty() {
-            return Err("TreeDescriptor must have at least one level".into());
+            return Ok(());
         }
 
         // Extract upper bounds from each level
@@ -178,6 +179,22 @@ impl TreeDescriptor {
 
         // Validate the tree structure first
         self.validate()?;
+
+        // Handle empty tree case
+        if self.0.is_empty() {
+            let tree = crate::Tree::<
+                DistributionSimulator,
+                Vec<u8>,
+                Vec<u8>,
+                dialog_storage::Blake3Hash,
+                _,
+            >::new(storage.clone());
+            return Ok(TreeSpec {
+                spec: Vec::new(),
+                tree,
+                storage,
+            });
+        }
 
         // Disable journaling during tree building to avoid polluting with build reads
         storage.backend.disable_journal();
@@ -418,6 +435,16 @@ pub struct TreeSpec {
 }
 
 impl TreeSpec {
+    /// Disable journaling for this spec's storage
+    pub fn disable_journal(&self) {
+        self.storage.backend.disable_journal();
+    }
+
+    /// Enable journaling for this spec's storage
+    pub fn enable_journal(&self) {
+        self.storage.backend.enable_journal();
+    }
+
     /// Get a reference to the compiled tree
     pub fn tree(
         &self,

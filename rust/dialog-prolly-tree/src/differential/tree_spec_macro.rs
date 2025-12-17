@@ -118,6 +118,12 @@
 /// The `tree_spec!` macro - see module documentation for usage
 #[macro_export]
 macro_rules! tree_spec {
+    // Empty tree case: tree_spec![]
+    () => {{
+        use $crate::differential::tree_spec::*;
+        TreeDescriptor(Vec::new())
+    }};
+
     // Match the bracket-based tree format with range syntax
     // Segments can be: ..x (inferred start) or a..b (explicit range)
     // Parentheses indicate pruned nodes: (..x) or (a..b)
