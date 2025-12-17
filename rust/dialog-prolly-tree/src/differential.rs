@@ -814,7 +814,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GeometricDistribution, Tree};
+    use crate::{GeometricDistribution, Traversable, TraversalOrder, Tree, TreeNodes, tree_spec};
     use anyhow::Result;
     use dialog_storage::{
         Blake3Hash, CborEncoder, JournaledStorage, MemoryStorageBackend, Storage,
@@ -1674,8 +1674,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_diff_shared_left_subtree() -> Result<()> {
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
 
         let storage_a = Storage {
@@ -1721,8 +1719,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_diff_fully_disjoint_trees() -> Result<()> {
-        use crate::tree_spec;
-
         let backend = JournaledStorage::new(MemoryStorageBackend::default());
         let storage = Storage {
             encoder: CborEncoder,
@@ -1760,8 +1756,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_diff_subset_superset() -> Result<()> {
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
 
         let storage_a = Storage {
@@ -1807,8 +1801,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_diff_single_key_change() -> Result<()> {
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
 
         let storage_a = Storage {
@@ -1855,8 +1847,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_diff_different_heights() -> Result<()> {
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
 
         let storage_a = Storage {
@@ -1901,8 +1891,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_diff_different_heights_reverse() -> Result<()> {
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
 
         let storage_a = Storage {
@@ -1955,77 +1943,9 @@ mod tests {
     // 1. Read patterns match expectations (via spec.assert())
     // 2. Novel nodes = target nodes - shared nodes with source
 
-    type SpecTree = crate::Tree<
-        tree_spec::DistributionSimulator,
-        Vec<u8>,
-        Vec<u8>,
-        Blake3Hash,
-        Storage<CborEncoder, JournaledStorage<MemoryStorageBackend<[u8; 32], Vec<u8>>>>,
-    >;
-
-    type SpecDiff<'a> = TreeDifference<
-        'a,
-        Vec<u8>,
-        Vec<u8>,
-        Blake3Hash,
-        Storage<CborEncoder, JournaledStorage<MemoryStorageBackend<[u8; 32], Vec<u8>>>>,
-    >;
-
-    /// Helper to collect novel node hashes from a TreeDifference
-    async fn collect_novel_hashes(diff: &SpecDiff<'_>) -> std::collections::HashSet<[u8; 32]> {
-        let nodes = diff.novel_nodes();
-        pin_mut!(nodes);
-
-        let mut hashes = std::collections::HashSet::new();
-        while let Some(result) = nodes.next().await {
-            let node = result.unwrap();
-            hashes.insert(*node.hash());
-        }
-        hashes
-    }
-
-    /// Helper to collect all node hashes from a tree by recursive traversal
-    async fn collect_all_tree_hashes(tree: &SpecTree) -> std::collections::HashSet<[u8; 32]> {
-        let mut hashes = std::collections::HashSet::new();
-
-        if let Some(root) = tree.root() {
-            collect_node_hashes_recursive(root, tree.storage(), &mut hashes).await;
-        }
-
-        hashes
-    }
-
-    /// Recursively collect node hashes
-    fn collect_node_hashes_recursive<'a, S>(
-        node: &'a crate::Node<Vec<u8>, Vec<u8>, Blake3Hash>,
-        storage: &'a S,
-        hashes: &'a mut std::collections::HashSet<[u8; 32]>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>
-    where
-        S: ContentAddressedStorage<Hash = Blake3Hash>,
-    {
-        Box::pin(async move {
-            hashes.insert(*node.hash());
-
-            if node.is_branch() {
-                if let Ok(refs) = node.references() {
-                    for reference in refs {
-                        if let Ok(child) =
-                            crate::Node::from_hash(reference.hash().clone(), storage).await
-                        {
-                            collect_node_hashes_recursive(&child, storage, hashes).await;
-                        }
-                    }
-                }
-            }
-        })
-    }
-
     #[tokio::test]
     async fn test_novel_nodes_empty_source() -> Result<()> {
         // When source is empty, all target nodes are novel
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
         let storage_source = Storage {
             encoder: CborEncoder,
@@ -2039,7 +1959,7 @@ mod tests {
         // Empty source tree
         let spec_source = tree_spec![].build(storage_source).await.unwrap();
 
-        // Target has some structure - all nodes should be loaded since source is empty
+        // Target has some structure - all nodes loaded since source is empty
         let spec_target = tree_spec![
             [     ..e]
             [..a, ..e]
@@ -2051,14 +1971,17 @@ mod tests {
         let diff = TreeDifference::compute(spec_source.tree(), spec_target.tree())
             .await
             .unwrap();
-        let novel_hashes = collect_novel_hashes(&diff).await;
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         // Verify that all target nodes were loaded (since source is empty)
         spec_target.assert();
 
         // All target nodes should be novel - traverse target tree to get all hashes
-        spec_target.disable_journal();
-        let target_hashes = collect_all_tree_hashes(spec_target.tree()).await;
+        let target_hashes = spec_target
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
         assert_eq!(
             novel_hashes, target_hashes,
             "All target nodes should be novel when source is empty"
@@ -2070,8 +1993,6 @@ mod tests {
     #[tokio::test]
     async fn test_novel_nodes_empty_target() -> Result<()> {
         // When target is empty, no nodes are novel
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
         let storage_source = Storage {
             encoder: CborEncoder,
@@ -2082,7 +2003,7 @@ mod tests {
             backend: JournaledStorage::new(backend.clone()),
         };
 
-        // Source has structure - root is loaded but children are skipped since target is empty
+        // Source has structure - root is loaded, children skipped since target is empty
         let spec_source = tree_spec![
             [       ..e]
             [(..a), (..e)]
@@ -2097,7 +2018,7 @@ mod tests {
         let diff = TreeDifference::compute(spec_source.tree(), spec_target.tree())
             .await
             .unwrap();
-        let novel_hashes = collect_novel_hashes(&diff).await;
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         // Verify that no source nodes were loaded (since target is empty)
         spec_source.assert();
@@ -2112,8 +2033,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_novel_nodes_both_empty() -> Result<()> {
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
         let storage_source = Storage {
             encoder: CborEncoder,
@@ -2130,7 +2049,7 @@ mod tests {
         let diff = TreeDifference::compute(spec_source.tree(), spec_target.tree())
             .await
             .unwrap();
-        let novel_hashes = collect_novel_hashes(&diff).await;
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         assert!(
             novel_hashes.is_empty(),
@@ -2143,8 +2062,6 @@ mod tests {
     #[tokio::test]
     async fn test_novel_nodes_identical_trees() -> Result<()> {
         // When trees are identical, no nodes are novel (all are shared)
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
         let storage_source = Storage {
             encoder: CborEncoder,
@@ -2175,7 +2092,7 @@ mod tests {
         let diff = TreeDifference::compute(spec_source.tree(), spec_target.tree())
             .await
             .unwrap();
-        let novel_hashes = collect_novel_hashes(&diff).await;
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         assert!(
             novel_hashes.is_empty(),
@@ -2188,8 +2105,6 @@ mod tests {
     #[tokio::test]
     async fn test_novel_nodes_shared_subtree() -> Result<()> {
         // When trees share a subtree (same hash), that subtree is NOT novel
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
         let storage_source = Storage {
             encoder: CborEncoder,
@@ -2200,8 +2115,7 @@ mod tests {
             backend: JournaledStorage::new(backend.clone()),
         };
 
-        // Source: segments a, e
-        // Both segments are skipped: 'a' is shared, 'e' only needs boundary comparison
+        // Source: segments a, e - root loaded, both segments skipped (shared or no match)
         let spec_source = tree_spec![
             [        ..e]
             [(..a), (..e)]
@@ -2210,8 +2124,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Target: segments a (shared), f, k (novel)
-        // Segment 'a' is shared (skipped), 'f' and 'k' are loaded for novel_nodes
+        // Target: root loaded, segment 'a' is shared (skipped), 'f' and 'k' are loaded
         let spec_target = tree_spec![
             [            ..k]
             [(..a), ..f, ..k]
@@ -2223,7 +2136,7 @@ mod tests {
         let diff = TreeDifference::compute(spec_source.tree(), spec_target.tree())
             .await
             .unwrap();
-        let novel_hashes = collect_novel_hashes(&diff).await;
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         // Verify read patterns:
         // - Source: only index loaded (segments compared by boundary only)
@@ -2231,13 +2144,17 @@ mod tests {
         spec_source.assert();
         spec_target.assert();
 
-        // Disable journaling while collecting all hashes for comparison
-        spec_source.disable_journal();
-        spec_target.disable_journal();
-
         // Novel nodes should be: target nodes - nodes shared with source
-        let target_hashes = collect_all_tree_hashes(spec_target.tree()).await;
-        let source_hashes = collect_all_tree_hashes(spec_source.tree()).await;
+        let target_hashes = spec_target
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
+        let source_hashes = spec_source
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
         let expected_novel: std::collections::HashSet<_> =
             target_hashes.difference(&source_hashes).copied().collect();
 
@@ -2252,8 +2169,6 @@ mod tests {
     #[tokio::test]
     async fn test_novel_nodes_different_heights() -> Result<()> {
         // Target taller than source
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
         let storage_source = Storage {
             encoder: CborEncoder,
@@ -2264,10 +2179,9 @@ mod tests {
             backend: JournaledStorage::new(backend.clone()),
         };
 
-        // Shallow source (height 1)
-        // Source segment 'e' only needs boundary comparison, not loaded
+        // Shallow source (height 1) - root loaded, segments skipped
         let spec_source = tree_spec![
-            [        ..e]
+            [         ..e]
             [(..a), (..e)]
         ]
         .build(storage_source)
@@ -2275,10 +2189,10 @@ mod tests {
         .unwrap();
 
         // Taller target (height 2) with shared segment 'a'
-        // All target nodes loaded except shared 'a'
+        // Root and intermediate nodes loaded, segment 'a' shared (skipped)
         let spec_target = tree_spec![
             [                           ..z]
-            [       ..f,        ..p,    ..z]
+            [       ..f,      ..p,      ..z]
             [(..a), ..f, ..k, ..p, ..t, ..z]
         ]
         .build(storage_target)
@@ -2288,19 +2202,23 @@ mod tests {
         let diff = TreeDifference::compute(spec_source.tree(), spec_target.tree())
             .await
             .unwrap();
-        let novel_hashes = collect_novel_hashes(&diff).await;
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         // Verify read patterns - shared segment 'a' should NOT be loaded
         spec_source.assert();
         spec_target.assert();
 
-        // Disable journaling while collecting all hashes for comparison
-        spec_source.disable_journal();
-        spec_target.disable_journal();
-
         // Novel = target - shared
-        let target_hashes = collect_all_tree_hashes(spec_target.tree()).await;
-        let source_hashes = collect_all_tree_hashes(spec_source.tree()).await;
+        let target_hashes = spec_target
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
+        let source_hashes = spec_source
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
         let expected_novel: std::collections::HashSet<_> =
             target_hashes.difference(&source_hashes).copied().collect();
 
@@ -2309,14 +2227,10 @@ mod tests {
             "Novel nodes should be target nodes minus shared nodes"
         );
 
-        // Re-enable for uniqueness check
-        spec_source.enable_journal();
-        spec_target.enable_journal();
-
         // Verify uniqueness
         assert_eq!(
             novel_hashes.len(),
-            collect_novel_hashes(&diff).await.len(),
+            diff.novel_nodes().into_hash_set().await.len(),
             "All novel nodes should be unique"
         );
 
@@ -2330,8 +2244,6 @@ mod tests {
         //
         // IMPORTANT: Both trees must share the same backend so that identical
         // content produces identical hashes (content-addressed storage).
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
         let storage_source = Storage {
             encoder: CborEncoder,
@@ -2345,7 +2257,7 @@ mod tests {
         // Source: 3 segments at height 0, 1 index at height 1
         // Segment 'a' contains entries [a..a]
         let spec_source = tree_spec![
-            [       ..k]
+            [            ..k]
             [(..a), ..f, ..k]
         ]
         .build(storage_source)
@@ -2359,15 +2271,19 @@ mod tests {
         let diff = TreeDifference::compute(spec_source.tree(), spec_target.tree())
             .await
             .unwrap();
-        let novel_hashes = collect_novel_hashes(&diff).await;
-
-        // Disable journaling while collecting hashes for comparison
-        spec_source.disable_journal();
-        spec_target.disable_journal();
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         // Target's 'a' segment should match source's 'a' segment (same hash)
-        let target_hashes = collect_all_tree_hashes(spec_target.tree()).await;
-        let source_hashes = collect_all_tree_hashes(spec_source.tree()).await;
+        let target_hashes = spec_target
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
+        let source_hashes = spec_source
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
         let expected_novel: std::collections::HashSet<_> =
             target_hashes.difference(&source_hashes).copied().collect();
 
@@ -2382,8 +2298,6 @@ mod tests {
     #[tokio::test]
     async fn test_novel_nodes_disjoint_trees() -> Result<()> {
         // Trees with completely different content - all target nodes are novel
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
         let storage_source = Storage {
             encoder: CborEncoder,
@@ -2394,7 +2308,7 @@ mod tests {
             backend: JournaledStorage::new(backend.clone()),
         };
 
-        // Source: keys a-e - only index loaded, segments compared by boundary only
+        // Source: root loaded, segments skipped (disjoint so no match possible)
         let spec_source = tree_spec![
             [        ..e]
             [(..a), (..e)]
@@ -2403,10 +2317,10 @@ mod tests {
         .await
         .unwrap();
 
-        // Target: keys p-z (completely disjoint) - all nodes loaded for novel_nodes
+        // Target: root loaded, children loaded for novel_nodes
         let spec_target = tree_spec![
             [      ..z]
-            [..p, ..z]
+            [..p,  ..z]
         ]
         .build(storage_target)
         .await
@@ -2415,7 +2329,7 @@ mod tests {
         let diff = TreeDifference::compute(spec_source.tree(), spec_target.tree())
             .await
             .unwrap();
-        let novel_hashes = collect_novel_hashes(&diff).await;
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
 
         // Verify read patterns:
         // - Source: only index loaded (segments compared by boundary, no match)
@@ -2423,11 +2337,12 @@ mod tests {
         spec_source.assert();
         spec_target.assert();
 
-        // Disable journaling while collecting all hashes for comparison
-        spec_target.disable_journal();
-
         // All target nodes should be novel (no overlap)
-        let target_hashes = collect_all_tree_hashes(spec_target.tree()).await;
+        let target_hashes = spec_target
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
         assert_eq!(
             novel_hashes, target_hashes,
             "Disjoint trees should have all target nodes as novel"
@@ -2439,8 +2354,6 @@ mod tests {
     #[tokio::test]
     async fn test_novel_nodes_uniqueness() -> Result<()> {
         // Verify that novel_nodes() never returns duplicates
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
         let storage_source = Storage {
             encoder: CborEncoder,
@@ -2463,7 +2376,7 @@ mod tests {
         // Target with more structure
         let spec_target = tree_spec![
             [                           ..z]
-            [       ..f,        ..p,    ..z]
+            [       ..f,      ..p,      ..z]
             [(..a), ..f, ..k, ..p, ..t, ..z]
         ]
         .build(storage_target)

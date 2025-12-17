@@ -435,16 +435,6 @@ pub struct TreeSpec {
 }
 
 impl TreeSpec {
-    /// Disable journaling for this spec's storage
-    pub fn disable_journal(&self) {
-        self.storage.backend.disable_journal();
-    }
-
-    /// Enable journaling for this spec's storage
-    pub fn enable_journal(&self) {
-        self.storage.backend.enable_journal();
-    }
-
     /// Get a reference to the compiled tree
     pub fn tree(
         &self,
