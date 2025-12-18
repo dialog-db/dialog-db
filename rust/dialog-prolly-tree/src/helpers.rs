@@ -172,9 +172,7 @@ where
     /// Collects all node hashes into a `HashSet`, ignoring errors.
     ///
     /// This is useful for comparing sets of nodes between trees.
-    fn into_hash_set(
-        self,
-    ) -> impl std::future::Future<Output = std::collections::HashSet<Hash>>;
+    fn into_hash_set(self) -> impl std::future::Future<Output = std::collections::HashSet<Hash>>;
 }
 
 impl<Key, Value, Hash, S> TreeNodes<Key, Value, Hash> for S
@@ -184,9 +182,7 @@ where
     Hash: HashType + std::hash::Hash + Eq,
     S: Stream<Item = Result<Node<Key, Value, Hash>, DialogProllyTreeError>>,
 {
-    fn into_hash_set(
-        self,
-    ) -> impl std::future::Future<Output = std::collections::HashSet<Hash>> {
+    fn into_hash_set(self) -> impl std::future::Future<Output = std::collections::HashSet<Hash>> {
         use futures_util::StreamExt;
         self.filter_map(|r| async { r.ok().map(|n| n.hash().clone()) })
             .collect()
