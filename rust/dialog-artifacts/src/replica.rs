@@ -15,8 +15,7 @@ use base58::ToBase58;
 use blake3;
 use dialog_common::{ConditionalSend, DialogAsyncError, SharedCell, TaskQueue};
 use dialog_prolly_tree::{
-    Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Node, Tree,
-    TreeDifference,
+    Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Node, Tree, TreeDifference,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use futures_util::future::BoxFuture;
