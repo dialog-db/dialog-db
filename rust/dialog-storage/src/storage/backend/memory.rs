@@ -1,5 +1,5 @@
-use std::{collections::HashMap, ops::DerefMut, sync::Arc};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::{collections::HashMap, ops::DerefMut, sync::Arc};
 
 use async_stream::try_stream;
 use async_trait::async_trait;
