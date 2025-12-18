@@ -8,3 +8,12 @@ license.workspace = true
 
 [dependencies]
 blake3 = { workspace = true }
+futures-util = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { workspace = true, features = ["sync"] }
+wasm-bindgen-futures = { workspace = true }

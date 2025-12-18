@@ -9,3 +9,7 @@ pub use sync::*;
 
 mod hash;
 pub use hash::*;
+
+/// Async utilities for cross-platform task management.
+pub mod r#async;
+pub use r#async::*;

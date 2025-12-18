@@ -145,6 +145,11 @@ where
         self.reference.hash()
     }
 
+    /// Returns a reference to the underlying [`Block`] for this [`Node`].
+    pub fn block(&self) -> &Block<Key, Value, Hash> {
+        &self.block
+    }
+
     /// Return all [`Entry`]s from this [`Node`] into a [`Entry`] collection.
     ///
     /// The result is an error if this is not a segment [`Node`].

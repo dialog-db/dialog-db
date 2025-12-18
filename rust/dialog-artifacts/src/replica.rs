@@ -13,8 +13,11 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use base58::ToBase58;
 use blake3;
-use dialog_common::{ConditionalSend, SharedCell};
-use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Tree};
+use dialog_common::{ConditionalSend, DialogAsyncError, SharedCell, TaskQueue};
+use dialog_prolly_tree::{
+    Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Node, Tree,
+    TreeDifference,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use futures_util::future::BoxFuture;
 #[cfg(target_arch = "wasm32")]
@@ -312,18 +315,11 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
         let mut key = b"index/".to_vec();
         key.extend_from_slice(&hash);
 
-        // Write to local always - clone to get mutable copy
+        // Write to local storage only - remote sync happens during push()
+        // and that is when new blocks will be propagated to the remote.
         {
             let mut local = (*self.local).clone();
-            local.set(key.clone(), bytes.clone()).await.map_err(|e| {
-                dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
-            })?;
-        }
-
-        // Write to remote if available
-        let mut remote_guard = self.remote.write().await;
-        if let Some(remote) = remote_guard.as_mut() {
-            remote.set(key, bytes).await.map_err(|e| {
+            local.set(key, bytes).await.map_err(|e| {
                 dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
             })?;
         }
@@ -470,11 +466,15 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         Ok(branch)
     }
 
-    /// Advances the branch to a given revision. The base tree is set to the
-    /// revision's tree, representing that the branch is now "in sync" at this
-    /// revision (no divergence from the synced state).
-    pub async fn reset(&mut self, revision: Revision) -> Result<(), ReplicaError> {
-        // Update local state
+    /// Advances the branch to a given revision with an explicit base tree.
+    /// Use this after merge operations where base should be set to upstream's tree
+    /// (what we synced from) while revision is the merged result.
+    async fn advance(
+        &mut self,
+        revision: Revision,
+        base: NodeReference,
+    ) -> Result<(), ReplicaError> {
+        // Update local state with explicit base
         self.memory
             .replace_with(
                 |source| {
@@ -484,7 +484,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                             id: self.id.clone(),
                             description: state.description.clone(),
                             upstream: state.upstream.clone(),
-                            base: revision.tree.clone(),
+                            base: base.clone(),
                         })
                     } else {
                         Some(BranchState {
@@ -492,7 +492,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                             id: self.id.clone(),
                             description: "".into(),
                             upstream: None,
-                            base: revision.tree.clone(),
+                            base: base.clone(),
                         })
                     }
                 },
@@ -501,26 +501,27 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             .await
             .map_err(|_| ReplicaError::StorageError("Updating branch failed".into()))?;
 
-        // If memory update worked we also reset the tree
+        // Update the tree to match the new revision
         let mut tree = self.tree.write().await;
-
-        // Only set the hash if it's not the empty tree (all zeros)
-        // Empty tree doesn't exist in storage and doesn't need to be loaded
         if revision.tree().hash() != &EMPT_TREE_HASH {
             #[allow(clippy::clone_on_copy)]
             tree.set_hash(Some(revision.tree().hash().clone()))
                 .await
-                .map_err(|e| {
-                    ReplicaError::StorageError(format!("Failed to set tree hash: {:?}", e))
-                })?;
+                .map_err(|_| ReplicaError::StorageError("Failed to update tree".into()))?;
         } else {
-            // For empty tree, set hash to None
-            tree.set_hash(None).await.map_err(|e| {
-                ReplicaError::StorageError(format!("Failed to set tree hash: {:?}", e))
-            })?;
+            tree.set_hash(None)
+                .await
+                .map_err(|_| ReplicaError::StorageError("Failed to reset tree".into()))?;
         }
 
         Ok(())
+    }
+
+    /// Advances the branch to a given revision. The base tree is set to the
+    /// revision's tree, representing that the branch is now "in sync" at this
+    /// revision (no divergence from the synced state).
+    pub async fn reset(&mut self, revision: Revision) -> Result<(), ReplicaError> {
+        self.advance(revision.clone(), revision.tree.clone()).await
     }
 
     /// Lazily initializes and returns a mutable reference to the upstream.
@@ -581,6 +582,50 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         self.state().description().into()
     }
 
+    /// Returns a stream of novel nodes representing local changes since the last sync.
+    /// These are tree nodes that exist in the current tree but not in the base tree.
+    fn novelty(
+        &self,
+    ) -> impl Stream<Item = Result<Node<Key, State<Datum>, Blake3Hash>, ReplicaError>> + '_ {
+        try_stream! {
+            // Load base tree (state at last sync)
+            let base: Index<Backend> = Tree::from_hash(self.base().hash(), self.archive.clone())
+                .await
+                .map_err(|e| ReplicaError::StorageError(format!("Failed to load base tree: {:?}", e)))?;
+
+            // Get current tree
+            let current = self.tree.read().await.clone();
+
+            // Compute diff to find novel nodes
+            let difference = TreeDifference::compute(&base, &current)
+                .await
+                .map_err(|e| ReplicaError::StorageError(format!("Failed to compute diff: {:?}", e)))?;
+
+            // Yield all novel nodes
+            for await node in difference.novel_nodes() {
+                yield node.map_err(|e| ReplicaError::StorageError(format!("Failed to load node: {:?}", e)))?;
+            }
+        }
+    }
+
+    /// Returns a stream of changes representing local modifications since the last sync.
+    /// This computes the differential between the base tree (last sync point) and
+    /// the current tree, yielding Add/Remove operations.
+    fn changes(&self) -> impl Differential<Key, State<Datum>> + '_ {
+        try_stream! {
+            // Load base tree (state at last sync)
+            let base: Index<Backend> = Tree::from_hash(self.base().hash(), self.archive.clone()).await?;
+
+            // Get current tree
+            let current = self.tree.read().await.clone();
+
+            // Yield all changes from base to current
+            for await change in base.differentiate(&current) {
+                yield change?
+            }
+        }
+    }
+
     /// Pushes the current revision to the upstream branch.
     /// If upstream is local, it updates that branch directly.
     /// If upstream is remote, it publishes to the remote and updates local cache.
@@ -607,10 +652,12 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                     }
                 }
                 Upstream::Remote(target) => {
-                    // update a memory with the latest branch state
                     let before = target.revision();
                     let after = self.revision().clone();
                     if before.as_ref() != Some(&after) {
+                        // Replicate novel blocks to a remote target
+                        target.import(self.novelty()).await?;
+                        // Now that all blocks are synced, publish the revision
                         target.publish(after.clone()).await?;
                         self.reset(after).await?;
                     }
@@ -653,32 +700,9 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                                 ))
                             })?;
 
-                    // Load current tree (base tree) to compute local changes
-                    let source: Index<Backend> =
-                        Tree::from_hash(self.base().hash(), self.archive.clone())
-                            .await
-                            .map_err(|e| {
-                                ReplicaError::StorageError(format!(
-                                    "Failed to load base tree: {:?}",
-                                    e
-                                ))
-                            })?;
-
-                    // TODO: Maybe use local tree instead of loading a new one
-                    // Load our current tree to differentiate
-                    let current =
-                        Tree::from_hash(self.revision().tree.hash(), self.archive.clone())
-                            .await
-                            .map_err(|e| {
-                                ReplicaError::StorageError(format!(
-                                    "Failed to load current tree: {:?}",
-                                    e
-                                ))
-                            })?;
-
                     // Compute local changes: what operations transform base into current
                     // This gives us the changes we made locally
-                    let changes = source.differentiate(&current);
+                    let changes = self.changes();
 
                     // Integrate local changes into upstream tree
                     target.integrate(changes).await.map_err(|e| {
@@ -708,8 +732,10 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                             moment: 0,
                         };
 
-                        // Reset branch to the new revision
-                        self.reset(new_revision.clone()).await?;
+                        // Advance branch to merged revision with upstream's tree as base.
+                        // This way novelty() will find merged nodes when we push.
+                        self.advance(new_revision.clone(), revision.tree.clone())
+                            .await?;
 
                         Ok(Some(new_revision))
                     }
@@ -1283,6 +1309,67 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
                 .await
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
         }
+
+        Ok(())
+    }
+
+    /// Imports novel nodes from a stream into remote storage.
+    ///
+    /// This method takes a stream of tree nodes (typically from `TreeDifference::novel_nodes()`)
+    /// and pushes them concurrently to the remote storage. Use this before publishing a new
+    /// revision to ensure all tree blocks are available on the remote.
+    ///
+    /// # Arguments
+    /// * `nodes` - A stream of nodes to import
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// // After computing a TreeDifference, import novel nodes:
+    /// remote.import(diff.novel_nodes()).await?;
+    /// ```
+    pub async fn import<Key, Value, E, S>(&mut self, nodes: S) -> Result<(), ReplicaError>
+    where
+        Key: KeyType + 'static,
+        Value: dialog_prolly_tree::ValueType,
+        E: std::fmt::Debug,
+        S: Stream<Item = Result<Node<Key, Value, Blake3Hash>, E>>,
+    {
+        use futures_util::pin_mut;
+
+        let mut queue = TaskQueue::default();
+        pin_mut!(nodes);
+
+        while let Some(result) = nodes.next().await {
+            let node = result.map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+
+            // Build the key for this block
+            let hash = node.hash();
+            let mut key = b"index/".to_vec();
+            key.extend_from_slice(hash);
+
+            // Encode the block using the standard encoder
+            let (_hash, bytes) = CborEncoder.encode(node.block()).await.map_err(|e| {
+                ReplicaError::StorageError(format!("Failed to encode block: {:?}", e))
+            })?;
+
+            // Clone what we need for the spawned task
+            let mut remote = self.remote_storage.clone();
+
+            // Spawn concurrent upload task
+            queue.spawn(async move {
+                remote
+                    .set(key, bytes)
+                    .await
+                    .map_err(|_| DialogAsyncError::JoinError)
+            });
+        }
+
+        // Wait for all uploads to complete
+        queue
+            .join()
+            .await
+            .map_err(|e| ReplicaError::StorageError(format!("Import failed: {:?}", e)))?;
 
         Ok(())
     }
@@ -2204,23 +2291,8 @@ mod tests {
             tree_hash
         );
 
-        // Verify that tree nodes were also written to the S3 remote storage
-        // The key in S3 uses base64url encoding
-        let s3_storage = s3_service.storage();
-        let s3_keys = s3_storage.list_keys("test-bucket").await;
-
-        // Tree nodes should be written under the test/index/ prefix with base64url encoded hashes
-        let tree_nodes_in_s3 = s3_keys
-            .iter()
-            .filter(|key| key.starts_with("test/index/") && key.len() > "test/index/".len())
-            .count();
-
-        assert!(
-            tree_nodes_in_s3 > 0,
-            "Tree nodes should be written to S3 remote storage during commit. Found {} keys in S3: {:?}",
-            s3_keys.len(),
-            s3_keys
-        );
+        // Note: Tree nodes are NOT written to remote during commit.
+        // They are synced to remote during push() using novel_nodes differential.
 
         // Step 9: Push changes to the main branch
         // Should create records for the local branch and corresponding remote branch
@@ -2228,6 +2300,20 @@ mod tests {
         // Record should be written for the branch in the remote store
         let push_result = main_branch.push().await;
         assert!(push_result.is_ok(), "Push failed: {:?}", push_result.err());
+
+        // Verify tree nodes were written to S3 during push (via novel_nodes sync)
+        let s3_storage = s3_service.storage();
+        let s3_keys = s3_storage.list_keys("test-bucket").await;
+        let tree_nodes_in_s3 = s3_keys
+            .iter()
+            .filter(|key| key.starts_with("test/index/") && key.len() > "test/index/".len())
+            .count();
+        assert!(
+            tree_nodes_in_s3 > 0,
+            "Tree nodes should be written to S3 during push. Found {} keys in S3: {:?}",
+            s3_keys.len(),
+            s3_keys
+        );
 
         // The push result might be None if the upstream is already up to date
         // In our case, this is expected since we're pushing to a newly created remote branch
@@ -2269,19 +2355,12 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        // Verify that after push, the branch state was written to S3
-        let s3_keys_after_push = s3_storage.list_keys("test-bucket").await;
-        assert_eq!(
-            s3_keys.len() + 1,
-            s3_keys_after_push.len(),
-            "Push should write branch state to S3. Keys after push: {:?}",
-            s3_keys_after_push
-        );
-
+        // Verify that the branch state was written to S3 during push
         let expected_branch_key = "test/local/main".to_string();
         assert!(
-            s3_keys_after_push.contains(&expected_branch_key),
-            "Branch state key should exist in S3 after push"
+            s3_keys.contains(&expected_branch_key),
+            "Branch state key should exist in S3 after push. Keys: {:?}",
+            s3_keys
         );
 
         // Reload the main branch and verify the changes persisted
