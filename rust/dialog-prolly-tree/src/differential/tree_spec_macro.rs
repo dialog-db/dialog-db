@@ -114,8 +114,6 @@
 /// - **Visual**: Easy to see the tree shape at a glance
 /// - **Testable**: Reference specific nodes in test assertions
 /// - **Clear**: Documentation and test spec are the same thing
-
-/// The `tree_spec!` macro - see module documentation for usage
 #[macro_export]
 macro_rules! tree_spec {
     // Empty tree case: tree_spec![]

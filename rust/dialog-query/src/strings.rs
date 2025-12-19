@@ -113,9 +113,9 @@ mod tests {
     #[test]
     fn test_concatenate_formula() {
         let mut terms = Parameters::new();
-        terms.insert("first".to_string(), Term::var("x").into());
-        terms.insert("second".to_string(), Term::var("y").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("first".to_string(), Term::var("x"));
+        terms.insert("second".to_string(), Term::var("y"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), "Hello".to_string())
@@ -140,8 +140,8 @@ mod tests {
     #[test]
     fn test_length_formula() {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("text").into());
-        terms.insert("is".to_string(), Term::var("len").into());
+        terms.insert("of".to_string(), Term::var("text"));
+        terms.insert("is".to_string(), Term::var("len"));
 
         let input = Answer::new()
             .set(Term::var("text"), "Hello".to_string())
@@ -164,8 +164,8 @@ mod tests {
     #[test]
     fn test_uppercase_formula() {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("text").into());
-        terms.insert("is".to_string(), Term::var("upper").into());
+        terms.insert("of".to_string(), Term::var("text"));
+        terms.insert("is".to_string(), Term::var("upper"));
 
         let input = Answer::new()
             .set(Term::var("text"), "hello world".to_string())
@@ -188,8 +188,8 @@ mod tests {
     #[test]
     fn test_lowercase_formula() {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("text").into());
-        terms.insert("is".to_string(), Term::var("lower").into());
+        terms.insert("of".to_string(), Term::var("text"));
+        terms.insert("is".to_string(), Term::var("lower"));
 
         let input = Answer::new()
             .set(Term::var("text"), "HELLO WORLD".to_string())
@@ -212,8 +212,8 @@ mod tests {
     #[test]
     fn test_empty_string_length() {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("text").into());
-        terms.insert("is".to_string(), Term::var("len").into());
+        terms.insert("of".to_string(), Term::var("text"));
+        terms.insert("is".to_string(), Term::var("len"));
 
         let input = Answer::new()
             .set(Term::var("text"), "".to_string())
@@ -236,9 +236,9 @@ mod tests {
     #[test]
     fn test_concatenate_empty_strings() {
         let mut terms = Parameters::new();
-        terms.insert("first".to_string(), Term::var("x").into());
-        terms.insert("second".to_string(), Term::var("y").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("first".to_string(), Term::var("x"));
+        terms.insert("second".to_string(), Term::var("y"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), "".to_string())

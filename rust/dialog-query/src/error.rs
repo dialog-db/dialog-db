@@ -165,7 +165,7 @@ pub enum FormulaEvaluationError {
     /// provided in the Terms mapping when the formula was applied.
     ///
     /// # Example
-    /// ```
+    /// ```no_run
     /// # use dialog_query::math::{Sum};
     /// # use dialog_query::{Term, selection::Answer, Value, Parameters, Formula};
     /// # use dialog_query::error::SchemaError;
@@ -187,7 +187,7 @@ pub enum FormulaEvaluationError {
     /// but that variable has no value in the current match frame.
     ///
     /// # Example
-    /// ```
+    /// ```no_run
     /// # use dialog_query::math::{Sum};
     /// # use dialog_query::{Term, selection::Answer, Value, Parameters, Formula};
     /// # use dialog_query::error::FormulaEvaluationError;

@@ -1255,9 +1255,6 @@ mod unit_tests {
 
         // We can't directly test the request builder, so we just verify that the code runs
         let _prepared = backend.prepare_request(req_builder, None);
-
-        // This is a simple test to ensure the code path is covered
-        assert!(true);
     }
 }
 
@@ -1339,7 +1336,7 @@ mod tests {
         let get_mock = server
             .mock("GET", "/!Ldp")
             .with_status(200)
-            .with_body(&[4, 5, 6])
+            .with_body([4, 5, 6])
             .create();
 
         // Test set operation
@@ -1471,14 +1468,14 @@ mod tests {
         let get_mock1 = server
             .mock("GET", "/!Ldp")
             .with_status(200)
-            .with_body(&[4, 5, 6])
+            .with_body([4, 5, 6])
             .create();
 
         // Mock the GET for second key
         let get_mock2 = server
             .mock("GET", "/!6xdze")
             .with_status(200)
-            .with_body(&[8, 9, 10])
+            .with_body([8, 9, 10])
             .create();
 
         use futures_util::TryStreamExt;
@@ -1519,14 +1516,14 @@ mod tests {
         let get_mock1 = server
             .mock("GET", mockito::Matcher::Any)
             .with_status(200)
-            .with_body(&[4, 5, 6])
+            .with_body([4, 5, 6])
             .create();
 
         // Mock the GET for second key
         let get_mock2 = server
             .mock("GET", mockito::Matcher::Any)
             .with_status(200)
-            .with_body(&[8, 9, 10])
+            .with_body([8, 9, 10])
             .create();
 
         use futures_util::TryStreamExt;
@@ -1654,7 +1651,6 @@ mod local_s3_tests {
     use crate::CborEncoder;
     use hyper::server::conn::http1;
     use hyper_util::rt::TokioIo;
-    use s3;
     use s3s::dto::*;
     use s3s::{S3, S3Request, S3Response, S3Result};
     use serde::{Deserialize, Serialize};
@@ -2269,6 +2265,7 @@ pub mod s3 {
     }
     impl Service {
         /// Stops the test server.
+        #[allow(clippy::result_unit_err)]
         pub fn stop(self) -> Result<(), ()> {
             self.shutdown_tx.send(())
         }

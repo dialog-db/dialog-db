@@ -53,9 +53,9 @@ async fn test_formula_integration_math_operations() -> Result<()> {
 
     // Test Sum formula
     let mut sum_terms = Parameters::new();
-    sum_terms.insert("of".to_string(), Term::var("x").into());
-    sum_terms.insert("with".to_string(), Term::var("y").into());
-    sum_terms.insert("is".to_string(), Term::var("sum_result").into());
+    sum_terms.insert("of".to_string(), Term::var("x"));
+    sum_terms.insert("with".to_string(), Term::var("y"));
+    sum_terms.insert("is".to_string(), Term::var("sum_result"));
 
     let sum_formula = Sum::apply(sum_terms)?;
 
@@ -75,9 +75,9 @@ async fn test_formula_integration_math_operations() -> Result<()> {
 
     // Test Difference formula
     let mut diff_terms = Parameters::new();
-    diff_terms.insert("of".to_string(), Term::var("a").into());
-    diff_terms.insert("subtract".to_string(), Term::var("b").into());
-    diff_terms.insert("is".to_string(), Term::var("diff_result").into());
+    diff_terms.insert("of".to_string(), Term::var("a"));
+    diff_terms.insert("subtract".to_string(), Term::var("b"));
+    diff_terms.insert("is".to_string(), Term::var("diff_result"));
 
     let diff_formula = Difference::apply(diff_terms)?;
 
@@ -97,9 +97,9 @@ async fn test_formula_integration_math_operations() -> Result<()> {
 
     // Test Product formula: 6 * 7
     let mut prod_terms = Parameters::new();
-    prod_terms.insert("of".to_string(), Term::var("p").into());
-    prod_terms.insert("times".to_string(), Term::var("q").into());
-    prod_terms.insert("is".to_string(), Term::var("product").into());
+    prod_terms.insert("of".to_string(), Term::var("p"));
+    prod_terms.insert("times".to_string(), Term::var("q"));
+    prod_terms.insert("is".to_string(), Term::var("product"));
 
     let product_formula = Product::apply(prod_terms)?;
 
@@ -157,9 +157,9 @@ async fn test_formula_integration_string_operations() -> Result<()> {
 
     // Test Concatenate formula to build full names
     let mut concat_terms = Parameters::new();
-    concat_terms.insert("first".to_string(), Term::var("fname").into());
-    concat_terms.insert("second".to_string(), Term::var("lname").into());
-    concat_terms.insert("is".to_string(), Term::var("full_name").into());
+    concat_terms.insert("first".to_string(), Term::var("fname"));
+    concat_terms.insert("second".to_string(), Term::var("lname"));
+    concat_terms.insert("is".to_string(), Term::var("full_name"));
 
     let concat_formula = Concatenate::apply(concat_terms)?;
 
@@ -181,8 +181,8 @@ async fn test_formula_integration_string_operations() -> Result<()> {
 
     // Test Length formula
     let mut length_terms = Parameters::new();
-    length_terms.insert("of".to_string(), Term::var("text").into());
-    length_terms.insert("is".to_string(), Term::var("length").into());
+    length_terms.insert("of".to_string(), Term::var("text"));
+    length_terms.insert("is".to_string(), Term::var("length"));
 
     let length_formula = Length::apply(length_terms)?;
 
@@ -199,8 +199,8 @@ async fn test_formula_integration_string_operations() -> Result<()> {
 
     // Test case conversion formulas
     let mut upper_terms = Parameters::new();
-    upper_terms.insert("of".to_string(), Term::var("input").into());
-    upper_terms.insert("is".to_string(), Term::var("output").into());
+    upper_terms.insert("of".to_string(), Term::var("input"));
+    upper_terms.insert("is".to_string(), Term::var("output"));
 
     let upper_formula = Uppercase::apply(upper_terms)?;
 
@@ -222,8 +222,8 @@ async fn test_formula_integration_string_operations() -> Result<()> {
 async fn test_formula_integration_type_conversions() -> Result<()> {
     // Test ToString formula with different types
     let mut to_string_terms = Parameters::new();
-    to_string_terms.insert("value".to_string(), Term::var("input").into());
-    to_string_terms.insert("is".to_string(), Term::var("str_result").into());
+    to_string_terms.insert("value".to_string(), Term::var("input"));
+    to_string_terms.insert("is".to_string(), Term::var("str_result"));
 
     let to_string_formula = ToString::apply(to_string_terms)?;
 
@@ -253,8 +253,8 @@ async fn test_formula_integration_type_conversions() -> Result<()> {
 
     // Test ParseNumber formula
     let mut parse_terms = Parameters::new();
-    parse_terms.insert("text".to_string(), Term::var("str_input").into());
-    parse_terms.insert("is".to_string(), Term::var("num_result").into());
+    parse_terms.insert("text".to_string(), Term::var("str_input"));
+    parse_terms.insert("is".to_string(), Term::var("num_result"));
 
     let parse_formula = ParseNumber::apply(parse_terms)?;
 
@@ -287,9 +287,9 @@ async fn test_formula_integration_boolean_logic() -> Result<()> {
 
     // Test And formula
     let mut and_terms = Parameters::new();
-    and_terms.insert("left".to_string(), Term::var("a").into());
-    and_terms.insert("right".to_string(), Term::var("b").into());
-    and_terms.insert("is".to_string(), Term::var("and_result").into());
+    and_terms.insert("left".to_string(), Term::var("a"));
+    and_terms.insert("right".to_string(), Term::var("b"));
+    and_terms.insert("is".to_string(), Term::var("and_result"));
 
     let and_formula = And::apply(and_terms)?;
 
@@ -309,9 +309,9 @@ async fn test_formula_integration_boolean_logic() -> Result<()> {
 
     // Test Or formula
     let mut or_terms = Parameters::new();
-    or_terms.insert("left".to_string(), Term::var("x").into());
-    or_terms.insert("right".to_string(), Term::var("y").into());
-    or_terms.insert("is".to_string(), Term::var("or_result").into());
+    or_terms.insert("left".to_string(), Term::var("x"));
+    or_terms.insert("right".to_string(), Term::var("y"));
+    or_terms.insert("is".to_string(), Term::var("or_result"));
 
     let or_formula = Or::apply(or_terms)?;
 
@@ -331,8 +331,8 @@ async fn test_formula_integration_boolean_logic() -> Result<()> {
 
     // Test Not formula
     let mut not_terms = Parameters::new();
-    not_terms.insert("value".to_string(), Term::var("input").into());
-    not_terms.insert("is".to_string(), Term::var("not_result").into());
+    not_terms.insert("value".to_string(), Term::var("input"));
+    not_terms.insert("is".to_string(), Term::var("not_result"));
 
     let not_formula = Not::apply(not_terms)?;
 
@@ -355,8 +355,8 @@ async fn test_formula_chaining_integration() -> Result<()> {
 
     // First: Parse a number from string
     let mut parse_terms = Parameters::new();
-    parse_terms.insert("text".to_string(), Term::var("str_input").into());
-    parse_terms.insert("is".to_string(), Term::var("parsed_num").into());
+    parse_terms.insert("text".to_string(), Term::var("str_input"));
+    parse_terms.insert("is".to_string(), Term::var("parsed_num"));
 
     let parse_formula = ParseNumber::apply(parse_terms)?;
 
@@ -370,9 +370,9 @@ async fn test_formula_chaining_integration() -> Result<()> {
 
     // Second: Add 5 to the parsed number
     let mut sum_terms = Parameters::new();
-    sum_terms.insert("of".to_string(), Term::var("parsed_num").into());
-    sum_terms.insert("with".to_string(), Term::var("addend").into());
-    sum_terms.insert("is".to_string(), Term::var("final_sum").into());
+    sum_terms.insert("of".to_string(), Term::var("parsed_num"));
+    sum_terms.insert("with".to_string(), Term::var("addend"));
+    sum_terms.insert("is".to_string(), Term::var("final_sum"));
 
     let sum_formula = Sum::apply(sum_terms)?;
 
@@ -391,8 +391,8 @@ async fn test_formula_chaining_integration() -> Result<()> {
 
     // Third: Convert the result back to string
     let mut to_string_terms = Parameters::new();
-    to_string_terms.insert("value".to_string(), Term::var("final_sum").into());
-    to_string_terms.insert("is".to_string(), Term::var("final_string").into());
+    to_string_terms.insert("value".to_string(), Term::var("final_sum"));
+    to_string_terms.insert("is".to_string(), Term::var("final_string"));
 
     let to_string_formula = ToString::apply(to_string_terms)?;
 
@@ -414,9 +414,9 @@ async fn test_formula_error_handling() -> Result<()> {
 
     // Test division by zero in Quotient formula
     let mut quotient_terms = Parameters::new();
-    quotient_terms.insert("of".to_string(), Term::var("dividend").into());
-    quotient_terms.insert("by".to_string(), Term::var("divisor").into());
-    quotient_terms.insert("is".to_string(), Term::var("quotient").into());
+    quotient_terms.insert("of".to_string(), Term::var("dividend"));
+    quotient_terms.insert("by".to_string(), Term::var("divisor"));
+    quotient_terms.insert("is".to_string(), Term::var("quotient"));
 
     let quotient_formula = Quotient::apply(quotient_terms)?;
 
@@ -432,9 +432,9 @@ async fn test_formula_error_handling() -> Result<()> {
 
     // Test modulo by zero
     let mut modulo_terms = Parameters::new();
-    modulo_terms.insert("of".to_string(), Term::var("dividend").into());
-    modulo_terms.insert("by".to_string(), Term::var("divisor").into());
-    modulo_terms.insert("is".to_string(), Term::var("remainder").into());
+    modulo_terms.insert("of".to_string(), Term::var("dividend"));
+    modulo_terms.insert("by".to_string(), Term::var("divisor"));
+    modulo_terms.insert("is".to_string(), Term::var("remainder"));
 
     let modulo_formula = Modulo::apply(modulo_terms)?;
 

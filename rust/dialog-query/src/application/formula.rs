@@ -15,7 +15,7 @@ pub const PARAM_COST: usize = 10;
 /// This struct represents a formula that has been bound to specific term mappings.
 /// Unlike the previous generic version, this can be stored alongside other applications
 /// in the deductive rule system, allowing formulas to be used as premises in rules.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct FormulaApplication {
     /// Formula identifier being applied
     pub name: &'static str,
@@ -30,6 +30,17 @@ pub struct FormulaApplication {
 
     /// Function pointer to the formula's computation logic
     pub compute: fn(&mut Cursor) -> Result<Vec<Answer>, FormulaEvaluationError>,
+}
+
+impl PartialEq for FormulaApplication {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare all fields except the function pointer, which doesn't have meaningful equality
+        self.name == other.name
+            && self.cells == other.cells
+            && self.parameters == other.parameters
+            && self.cost == other.cost
+            && std::ptr::addr_eq(self.compute as *const (), other.compute as *const ())
+    }
 }
 
 impl FormulaApplication {

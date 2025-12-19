@@ -1,32 +1,36 @@
-//! Test that type aliases work correctly with IntoType trait-based type detection
+use dialog_query::{artifact::Entity, Attribute, Concept, Type};
 
-use dialog_query::{artifact::Entity, Concept};
+mod person_with_aliases {
+    use dialog_query::Attribute;
+    type PersonName = String;
+    type Years = u32;
 
-// Type alias - with trait-based detection, this should properly resolve to String's type
-type PersonName = String;
-type Age = u32;
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Name(pub PersonName);
+
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Age(pub Years);
+}
 
 #[derive(Concept, Debug, Clone)]
 pub struct PersonWithAliases {
     pub this: Entity,
-    pub name: PersonName,
-    pub age: Age,
+    pub name: person_with_aliases::Name,
+    pub age: person_with_aliases::Age,
 }
 
 #[test]
-fn test_type_aliases_resolve_correctly() {
-    use dialog_query::types::IntoType;
-
-    // Type aliases should resolve to their underlying type's IntoType::TYPE
+fn test_attribute_types_resolve_correctly() {
+    // Attribute types should have their wrapped type available via IntoType
     assert_eq!(
-        <PersonName as IntoType>::TYPE,
-        Some(dialog_query::artifact::Type::String),
-        "PersonName (alias for String) should have Type::String"
+        person_with_aliases::Age::content_type(),
+        Some(Type::UnsignedInt),
+        "u32 should have Type::UnsignedInt"
     );
 
     assert_eq!(
-        <Age as IntoType>::TYPE,
-        Some(dialog_query::artifact::Type::UnsignedInt),
-        "Age (alias for u32) should have Type::UnsignedInt"
+        person_with_aliases::Name::content_type(),
+        Some(Type::String),
+        "String should have Type::String"
     );
 }

@@ -1,11 +1,11 @@
 use crate::application::ConceptApplication;
-use crate::attribute::Attribution;
+use crate::attribute::{AttributeSchema, Attribution};
 use crate::claim::Revert;
 use crate::error::SchemaError;
 use crate::types::Scalar;
 use crate::{
-    Application, Attribute, Cardinality, Claim, Entity, Field, Parameters, Relation, Requirement,
-    Schema, Type, Value,
+    Application, Cardinality, Claim, Entity, Field, Parameters, Relation, Requirement, Schema,
+    Type, Value,
 };
 
 use serde::{Deserialize, Serialize};
@@ -15,19 +15,19 @@ use std::ops::Not;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attributes {
     /// Static attributes from compile-time generated code (const-compatible)
-    Static(&'static [(&'static str, Attribute<Value>)]),
+    Static(&'static [(&'static str, AttributeSchema<Value>)]),
     /// Dynamic attributes from runtime construction
-    Dynamic(Vec<(String, Attribute<Value>)>),
+    Dynamic(Vec<(String, AttributeSchema<Value>)>),
 }
 
 /// Iterator over attribute (name, value) pairs
 pub enum AttributesIter<'a> {
-    Static(std::slice::Iter<'a, (&'static str, Attribute<Value>)>),
-    Dynamic(std::slice::Iter<'a, (String, Attribute<Value>)>),
+    Static(std::slice::Iter<'a, (&'static str, AttributeSchema<Value>)>),
+    Dynamic(std::slice::Iter<'a, (String, AttributeSchema<Value>)>),
 }
 
 impl<'a> Iterator for AttributesIter<'a> {
-    type Item = (&'a str, &'a Attribute<Value>);
+    type Item = (&'a str, &'a AttributeSchema<Value>);
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
@@ -96,8 +96,8 @@ impl Attributes {
     }
 }
 
-impl<const N: usize> From<[(&str, Attribute<Value>); N]> for Attributes {
-    fn from(arr: [(&str, Attribute<Value>); N]) -> Self {
+impl<const N: usize> From<[(&str, AttributeSchema<Value>); N]> for Attributes {
+    fn from(arr: [(&str, AttributeSchema<Value>); N]) -> Self {
         Attributes::Dynamic(
             arr.into_iter()
                 .map(|(name, attr)| (name.to_string(), attr))
@@ -106,14 +106,14 @@ impl<const N: usize> From<[(&str, Attribute<Value>); N]> for Attributes {
     }
 }
 
-impl<const N: usize> From<[(String, Attribute<Value>); N]> for Attributes {
-    fn from(arr: [(String, Attribute<Value>); N]) -> Self {
+impl<const N: usize> From<[(String, AttributeSchema<Value>); N]> for Attributes {
+    fn from(arr: [(String, AttributeSchema<Value>); N]) -> Self {
         Attributes::Dynamic(arr.into_iter().collect())
     }
 }
 
-impl From<Vec<(&str, Attribute<Value>)>> for Attributes {
-    fn from(vec: Vec<(&str, Attribute<Value>)>) -> Self {
+impl From<Vec<(&str, AttributeSchema<Value>)>> for Attributes {
+    fn from(vec: Vec<(&str, AttributeSchema<Value>)>) -> Self {
         Attributes::Dynamic(
             vec.into_iter()
                 .map(|(name, attr)| (name.to_string(), attr))
@@ -122,21 +122,21 @@ impl From<Vec<(&str, Attribute<Value>)>> for Attributes {
     }
 }
 
-impl From<Vec<(String, Attribute<Value>)>> for Attributes {
-    fn from(vec: Vec<(String, Attribute<Value>)>) -> Self {
+impl From<Vec<(String, AttributeSchema<Value>)>> for Attributes {
+    fn from(vec: Vec<(String, AttributeSchema<Value>)>) -> Self {
         Attributes::Dynamic(vec)
     }
 }
 
-impl From<HashMap<String, Attribute<Value>>> for Attributes {
-    fn from(map: HashMap<String, Attribute<Value>>) -> Self {
+impl From<HashMap<String, AttributeSchema<Value>>> for Attributes {
+    fn from(map: HashMap<String, AttributeSchema<Value>>) -> Self {
         Attributes::Dynamic(map.into_iter().collect())
     }
 }
 
 // From static slice - creates const-compatible Static variant
-impl From<&'static [(&'static str, Attribute<Value>)]> for Attributes {
-    fn from(slice: &'static [(&'static str, Attribute<Value>)]) -> Self {
+impl From<&'static [(&'static str, AttributeSchema<Value>)]> for Attributes {
+    fn from(slice: &'static [(&'static str, AttributeSchema<Value>)]) -> Self {
         Attributes::Static(slice)
     }
 }
@@ -147,7 +147,7 @@ impl Serialize for Attributes {
     where
         S: serde::Serializer,
     {
-        let map: HashMap<&str, &Attribute<Value>> = self.iter().collect();
+        let map: HashMap<&str, &AttributeSchema<Value>> = self.iter().collect();
         map.serialize(serializer)
     }
 }
@@ -158,7 +158,7 @@ impl<'de> Deserialize<'de> for Attributes {
     where
         D: serde::Deserializer<'de>,
     {
-        let map = HashMap::<String, Attribute<Value>>::deserialize(deserializer)?;
+        let map = HashMap::<String, AttributeSchema<Value>>::deserialize(deserializer)?;
         Ok(Attributes::from(map))
     }
 }
@@ -198,15 +198,18 @@ impl From<&Attributes> for Schema {
 /// Represents a concept which is a set of attributes that define an entity type.
 /// Concepts are similar to tables in relational databases but are more flexible
 /// as they can be derived from rules rather than just stored directly.
+///
+/// Concepts are identified by a blake3 hash of their attribute set, encoded
+/// as a URI in the format `concept:{hash}`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Concept {
     Dynamic {
-        operator: String,
+        description: String,
         attributes: Attributes,
     },
     Static {
-        operator: &'static str,
+        description: &'static str,
         attributes: &'static Attributes,
     },
 }
@@ -219,13 +222,14 @@ impl<'de> Deserialize<'de> for Concept {
     {
         #[derive(Deserialize)]
         struct DynamicConcept {
-            operator: String,
+            #[serde(default)]
+            description: String,
             attributes: Attributes,
         }
 
         let dynamic = DynamicConcept::deserialize(deserializer)?;
         Ok(Concept::Dynamic {
-            operator: dynamic.operator,
+            description: dynamic.description,
             attributes: dynamic.attributes,
         })
     }
@@ -297,10 +301,11 @@ impl Not for Conception {
 }
 
 impl Concept {
-    pub fn new(operator: String) -> Self {
+    /// Creates a new dynamic concept with the given attributes.
+    pub fn new(attributes: Attributes) -> Self {
         Concept::Dynamic {
-            operator,
-            attributes: Attributes::new(),
+            description: String::new(),
+            attributes,
         }
     }
 
@@ -311,11 +316,15 @@ impl Concept {
         }
     }
 
-    pub fn operator(&self) -> &str {
-        match self {
-            Self::Dynamic { operator, .. } => operator,
-            Self::Static { operator, .. } => operator,
-        }
+    /// Returns the concept identifier as a URI.
+    ///
+    /// This is a computed value based on the blake3 hash of the concept's
+    /// attribute set, in the format `concept:{hash}`.
+    ///
+    /// Note: This method returns a String (not &str) because the identifier
+    /// is computed on-demand rather than stored.
+    pub fn operator(&self) -> String {
+        self.to_uri()
     }
 
     pub fn operands(&self) -> impl Iterator<Item = &str> {
@@ -324,6 +333,54 @@ impl Concept {
 
     pub fn schema(&self) -> Schema {
         self.attributes().into()
+    }
+
+    /// Encode this concept as CBOR for hashing
+    ///
+    /// Creates a CBOR-encoded representation as a map where:
+    /// - Keys are attribute URIs (the:{hash}) in sorted order
+    /// - Values are empty objects {}
+    pub fn to_cbor_bytes(&self) -> Vec<u8> {
+        use serde::Serialize;
+        use std::collections::BTreeMap;
+
+        #[derive(Serialize)]
+        struct EmptyObject {}
+
+        // Collect attribute URIs
+        let mut attr_map: BTreeMap<String, EmptyObject> = BTreeMap::new();
+
+        for (_name, schema) in self.attributes().iter() {
+            let uri = schema.to_uri();
+            // Use empty object as value
+            attr_map.insert(uri, EmptyObject {});
+        }
+
+        serde_ipld_dagcbor::to_vec(&attr_map).expect("CBOR encoding should not fail")
+    }
+
+    /// Compute blake3 hash of this concept
+    ///
+    /// Returns a 32-byte blake3 hash of the CBOR-encoded concept
+    pub fn hash(&self) -> blake3::Hash {
+        let cbor_bytes = self.to_cbor_bytes();
+        blake3::hash(&cbor_bytes)
+    }
+
+    /// Format this concept's hash as a URI
+    ///
+    /// Returns a string in the format: `concept:{blake3_hash_hex}`
+    pub fn to_uri(&self) -> String {
+        format!("concept:{}", self.hash().to_hex())
+    }
+
+    /// Parse a concept URI and extract the hash
+    ///
+    /// Expects format: `concept:{blake3_hash_hex}`
+    /// Returns None if the format is invalid
+    pub fn parse_uri(uri: &str) -> Option<blake3::Hash> {
+        let uri = uri.strip_prefix("concept:")?;
+        blake3::Hash::from_hex(uri).ok()
     }
 
     /// Creates an application for this concept.
@@ -378,7 +435,7 @@ impl Concept {
     ///
     /// # Returns
     /// A builder that can be used to set attribute values for the entity
-    pub fn edit(&self, entity: Entity) -> Builder {
+    pub fn edit(&'_ self, entity: Entity) -> Builder<'_> {
         Builder::edit(entity, self)
     }
 
@@ -387,7 +444,7 @@ impl Concept {
     /// # Returns
     /// * `Ok(Builder)` - A builder for the new entity
     /// * `Err(DialogArtifactsError)` - If entity creation fails
-    pub fn create(&self) -> Builder {
+    pub fn create(&'_ self) -> Builder<'_> {
         Builder::new(self)
     }
 }
@@ -478,16 +535,16 @@ mod tests {
         let attributes = <Attributes as From<_>>::from([
             (
                 "name",
-                Attribute::<Value>::new("user", "name", "User's name", Type::String),
+                AttributeSchema::<Value>::new("user", "name", "User's name", Type::String),
             ),
             (
                 "age",
-                Attribute::<Value>::new("user", "age", "User's age", Type::UnsignedInt),
+                AttributeSchema::<Value>::new("user", "age", "User's age", Type::UnsignedInt),
             ),
         ]);
 
         let concept = Concept::Dynamic {
-            operator: "user".to_string(),
+            description: String::new(),
             attributes,
         };
 
@@ -497,9 +554,6 @@ mod tests {
         // Parse the JSON to verify structure (since HashMap order isn't guaranteed)
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
         let obj = parsed.as_object().expect("Should be object");
-
-        // Check operator
-        assert_eq!(obj["operator"], "user");
 
         // Check attributes structure
         let attributes_obj = obj["attributes"]
@@ -548,7 +602,10 @@ mod tests {
 
         let concept: Concept = serde_json::from_str(json).expect("Should deserialize");
 
-        assert_eq!(concept.operator(), "person");
+        assert!(
+            concept.operator().starts_with("concept:"),
+            "Operator should be a concept URI"
+        );
         assert_eq!(concept.attributes().count(), 2);
 
         let email_attr = concept
@@ -577,10 +634,10 @@ mod tests {
     #[test]
     fn test_concept_round_trip_serialization() {
         let original = Concept::Dynamic {
-            operator: "game".to_string(),
+            description: String::new(),
             attributes: [(
                 "score",
-                Attribute::<Value>::new("game", "score", "Game score", Type::UnsignedInt),
+                AttributeSchema::<Value>::new("game", "score", "Game score", Type::UnsignedInt),
             )]
             .into(),
         };

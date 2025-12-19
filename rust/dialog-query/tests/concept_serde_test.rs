@@ -1,20 +1,20 @@
 use dialog_query::artifact::Type;
-use dialog_query::attribute::Attribute;
+use dialog_query::attribute::AttributeSchema;
 use dialog_query::predicate::concept::Attributes;
 use dialog_query::predicate::Concept;
 
 #[test]
 fn test_concept_serialization_to_specific_json() {
     let concept = Concept::Dynamic {
-        operator: "user".to_string(),
+        description: "A user in the system".to_string(),
         attributes: Attributes::from(vec![
             (
                 "name".to_string(),
-                Attribute::new("user", "name", "User's name", Type::String),
+                AttributeSchema::new("user", "name", "User's name", Type::String),
             ),
             (
                 "age".to_string(),
-                Attribute::new("user", "age", "User's age", Type::UnsignedInt),
+                AttributeSchema::new("user", "age", "User's age", Type::UnsignedInt),
             ),
         ]),
     };
@@ -26,8 +26,15 @@ fn test_concept_serialization_to_specific_json() {
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
     let obj = parsed.as_object().expect("Should be object");
 
-    // Check operator
-    assert_eq!(obj["operator"], "user");
+    // Verify description is serialized
+    assert!(
+        obj.contains_key("description"),
+        "Serialized concept should contain description field"
+    );
+    assert_eq!(
+        obj["description"], "A user in the system",
+        "Description should match"
+    );
 
     // Check attributes structure
     let attributes_obj = obj["attributes"]
@@ -57,7 +64,6 @@ fn test_concept_serialization_to_specific_json() {
 #[test]
 fn test_concept_deserialization_from_specific_json() {
     let json = r#"{
-        "operator": "person",
         "attributes": {
             "email": {
                 "namespace": "person",
@@ -76,7 +82,11 @@ fn test_concept_deserialization_from_specific_json() {
 
     let concept: Concept = serde_json::from_str(json).expect("Should deserialize");
 
-    assert_eq!(concept.operator(), "person");
+    // Operator is now a computed URI
+    assert!(
+        concept.operator().starts_with("concept:"),
+        "Operator should be a concept URI"
+    );
     assert_eq!(concept.attributes().count(), 2);
 
     let email_attr = concept
@@ -105,10 +115,10 @@ fn test_concept_deserialization_from_specific_json() {
 #[test]
 fn test_concept_round_trip_serialization() {
     let original = Concept::Dynamic {
-        operator: "game".to_string(),
+        description: String::new(),
         attributes: Attributes::from(vec![(
             "score".to_string(),
-            Attribute::new("game", "score", "Game score", Type::UnsignedInt),
+            AttributeSchema::new("game", "score", "Game score", Type::UnsignedInt),
         )]),
     };
 
@@ -145,18 +155,19 @@ fn test_concept_round_trip_serialization() {
 fn test_expected_json_structure() {
     // Test that we get exactly the JSON structure we expect
     let concept = Concept::Dynamic {
-        operator: "product".to_string(),
+        description: String::new(),
         attributes: Attributes::from(vec![(
             "id".to_string(),
-            Attribute::new("product", "id", "Product ID", Type::UnsignedInt),
+            AttributeSchema::new("product", "id", "Product ID", Type::UnsignedInt),
         )]),
     };
 
     let json = serde_json::to_string_pretty(&concept).expect("Should serialize");
 
     // Parse and check exact structure
+    // Note: operator is no longer serialized as it's a computed value
     let expected_structure = r#"{
-  "operator": "product",
+  "description": "",
   "attributes": {
     "id": {
       "namespace": "product",
@@ -175,4 +186,48 @@ fn test_expected_json_structure() {
         actual, expected,
         "JSON structure should match expected format"
     );
+}
+
+#[test]
+fn test_description_serialization_and_deserialization() {
+    // Test that description field is properly serialized and deserialized
+    let original_description = "A comprehensive product catalog item";
+
+    let concept = Concept::Dynamic {
+        description: original_description.to_string(),
+        attributes: Attributes::from(vec![(
+            "sku".to_string(),
+            AttributeSchema::new("product", "sku", "Stock Keeping Unit", Type::String),
+        )]),
+    };
+
+    // Serialize
+    let json = serde_json::to_string_pretty(&concept).expect("Should serialize");
+
+    // Verify description is in the JSON
+    assert!(
+        json.contains(original_description),
+        "Serialized JSON should contain the description"
+    );
+
+    // Parse to verify structure
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
+    assert_eq!(
+        parsed["description"], original_description,
+        "Description field should be serialized correctly"
+    );
+
+    // Deserialize
+    let deserialized: Concept = serde_json::from_str(&json).expect("Should deserialize");
+
+    // Verify description is preserved
+    match deserialized {
+        Concept::Dynamic { description, .. } => {
+            assert_eq!(
+                description, original_description,
+                "Description should be preserved through round-trip"
+            );
+        }
+        _ => panic!("Expected Dynamic concept"),
+    }
 }

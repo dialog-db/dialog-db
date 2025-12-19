@@ -1,16 +1,28 @@
 use dialog_query::rule::Match;
 use dialog_query::{Concept, Entity, Term, Type};
 
+mod person {
+    use dialog_query::Attribute;
+
+    /// Name of the person
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Name(pub String);
+
+    /// Birthday of the person
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Birthday(pub u32);
+}
+
 #[derive(Concept, Debug, Clone)]
 pub struct Person {
     /// Person entity
     pub this: Entity,
 
     /// Name of the person
-    pub name: String,
+    pub name: person::Name,
 
     /// Birthday of the person
-    pub birthday: u32,
+    pub birthday: person::Birthday,
 }
 
 #[test]
@@ -31,7 +43,11 @@ fn test_derive_rule_generates_types() {
 
     // Test that Person implements Concept
     let concept = Person::CONCEPT;
-    assert_eq!(concept.operator(), "person");
+    // Operator is now a computed URI
+    assert!(
+        concept.operator().starts_with("concept:"),
+        "Operator should be a concept URI"
+    );
 
     // Test the attributes() method
     let attrs = concept.attributes().iter().collect::<Vec<_>>();

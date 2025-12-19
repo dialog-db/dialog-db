@@ -72,8 +72,8 @@ mod tests {
     #[test]
     fn test_to_string_number() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("num").into());
-        terms.insert("is".to_string(), Term::var("str").into());
+        terms.insert("value".to_string(), Term::var("num"));
+        terms.insert("is".to_string(), Term::var("str"));
 
         let input = Answer::new().set(Term::var("num"), 42u32).unwrap();
 
@@ -95,8 +95,8 @@ mod tests {
     #[test]
     fn test_to_string_boolean() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("bool").into());
-        terms.insert("is".to_string(), Term::var("str").into());
+        terms.insert("value".to_string(), Term::var("bool"));
+        terms.insert("is".to_string(), Term::var("str"));
 
         let input = Answer::new().set(Term::var("bool"), true).unwrap();
 
@@ -118,8 +118,8 @@ mod tests {
     #[test]
     fn test_to_string_string() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("text").into());
-        terms.insert("is".to_string(), Term::var("str").into());
+        terms.insert("value".to_string(), Term::var("text"));
+        terms.insert("is".to_string(), Term::var("str"));
 
         let input = Answer::new()
             .set(Term::var("text"), "hello".to_string())
@@ -143,8 +143,8 @@ mod tests {
     #[test]
     fn test_to_string_entity() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("entity").into());
-        terms.insert("is".to_string(), Term::var("str").into());
+        terms.insert("value".to_string(), Term::var("entity"));
+        terms.insert("is".to_string(), Term::var("str"));
 
         let entity = Entity::new().unwrap();
         let input = Answer::new()
@@ -166,8 +166,8 @@ mod tests {
     #[test]
     fn test_parse_number_valid() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Term::var("str").into());
-        terms.insert("is".to_string(), Term::var("num").into());
+        terms.insert("text".to_string(), Term::var("str"));
+        terms.insert("is".to_string(), Term::var("num"));
 
         let input = Answer::new()
             .set(Term::var("str"), "123".to_string())
@@ -191,8 +191,8 @@ mod tests {
     #[test]
     fn test_parse_number_with_whitespace() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Term::var("str").into());
-        terms.insert("is".to_string(), Term::var("num").into());
+        terms.insert("text".to_string(), Term::var("str"));
+        terms.insert("is".to_string(), Term::var("num"));
 
         let input = Answer::new()
             .set(Term::var("str"), "  456  ".to_string())
@@ -216,8 +216,8 @@ mod tests {
     #[test]
     fn test_parse_number_invalid() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Term::var("str").into());
-        terms.insert("is".to_string(), Term::var("num").into());
+        terms.insert("text".to_string(), Term::var("str"));
+        terms.insert("is".to_string(), Term::var("num"));
 
         let input = Answer::new()
             .set(Term::var("str"), "not a number".to_string())
@@ -236,8 +236,8 @@ mod tests {
     #[test]
     fn test_parse_number_empty_string() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Term::var("str").into());
-        terms.insert("is".to_string(), Term::var("num").into());
+        terms.insert("text".to_string(), Term::var("str"));
+        terms.insert("is".to_string(), Term::var("num"));
 
         let input = Answer::new().set(Term::var("str"), "".to_string()).unwrap();
 
@@ -254,8 +254,8 @@ mod tests {
     #[test]
     fn test_parse_number_negative() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("text".to_string(), Term::var("str").into());
-        terms.insert("is".to_string(), Term::var("num").into());
+        terms.insert("text".to_string(), Term::var("str"));
+        terms.insert("is".to_string(), Term::var("num"));
 
         let input = Answer::new()
             .set(Term::var("str"), "-123".to_string())

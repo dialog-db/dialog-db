@@ -709,7 +709,7 @@ mod tests {
         use crate::artifact::Cause;
 
         // Create a dummy cause for testing - Cause is a newtype around a 32-byte hash
-        let cause = Cause([0u8; 32].into());
+        let cause = Cause([0u8; 32]);
 
         Fact::Assertion {
             the: attr,
@@ -894,7 +894,7 @@ mod tests {
             .resolve(&active_term)
             .and_then(|v| bool::try_from(v).map_err(InconsistencyError::TypeConversion));
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     #[test]
@@ -1105,7 +1105,7 @@ mod tests {
 
         assert_eq!(name_result, "Bob");
         assert_eq!(age_result, 30);
-        assert_eq!(active_result, true);
+        assert!(active_result);
     }
 
     #[test]

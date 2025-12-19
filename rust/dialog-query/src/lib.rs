@@ -51,12 +51,12 @@ pub mod term;
 pub mod types;
 
 pub use application::Application;
-pub use artifact::{Entity, Type, Value};
-pub use attribute::{Attribute, Cardinality};
+pub use artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
+pub use attribute::{Attribute, AttributeSchema, Cardinality, With};
 pub use claim::Claim;
 pub use concept::Concept;
 pub use context::{EvaluationContext, EvaluationPlan};
-pub use dialog_query_macros::{Concept, Formula};
+pub use dialog_query_macros::{Attribute, Concept, Formula};
 pub use dsl::{Input, Match};
 pub use error::{InconsistencyError, QueryError};
 pub use fact::Fact;

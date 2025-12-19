@@ -18,7 +18,7 @@ impl Cells {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Dependencies;
 impl Dependencies {
     pub fn new() -> Self {
