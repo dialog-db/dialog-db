@@ -21,10 +21,10 @@ where
 {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     return Ok((
-        IndexedDbStorageBackend::<K, Vec<u8>>::new(
-            &format!("test_db_{}", rand::random::<[u8; 8]>().to_base58()),
-            &format!("test_store_{}", rand::random::<[u8; 8]>().to_base58()),
-        )
+        IndexedDbStorageBackend::<K, Vec<u8>>::new(&format!(
+            "test_db_{}",
+            rand::random::<[u8; 8]>().to_base58()
+        ))
         .await?,
         (),
     ));

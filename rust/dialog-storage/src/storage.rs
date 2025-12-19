@@ -23,6 +23,9 @@ pub use transfer::*;
 mod content_addressed;
 pub use content_addressed::*;
 
+mod transactional_memory;
+pub use transactional_memory::*;
+
 /// A universal envelope for all compatible combinations of [Encoder] and
 /// [StorageBackend] implementations. See the crate documentation for
 /// a practical example of usage.

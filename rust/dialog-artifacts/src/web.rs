@@ -218,7 +218,7 @@ impl ArtifactsBinding {
     #[wasm_bindgen]
     pub async fn open(identifier: String) -> Result<Self, JsError> {
         let storage_backend = StorageCache::new(
-            IndexedDbStorageBackend::new(&identifier, "dialog-artifact-blocks")
+            IndexedDbStorageBackend::new(&identifier)
                 .await
                 .map_err(|error| DialogArtifactsError::from(error))?,
             STORAGE_CACHE_CAPACITY,

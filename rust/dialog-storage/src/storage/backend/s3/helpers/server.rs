@@ -179,6 +179,8 @@ impl S3 for InMemoryS3 {
         let bucket = req.input.bucket.clone();
         let key = req.input.key.clone();
         let content_type = req.input.content_type.clone();
+        let if_match = req.input.if_match.clone();
+        let if_none_match = req.input.if_none_match.clone();
 
         let data = if let Some(mut body) = req.input.body {
             // Collect stream data chunk by chunk using Stream trait
@@ -206,6 +208,32 @@ impl S3 for InMemoryS3 {
 
         let mut buckets = self.get_or_create_bucket(&bucket).await;
         if let Some(bucket_contents) = buckets.get_mut(&bucket) {
+            // Handle If-Match precondition (CAS: only update if ETag matches)
+            if let Some(ref expected_etag) = if_match {
+                let expected = expected_etag.as_str();
+                match bucket_contents.get(&key) {
+                    Some(existing) => {
+                        // Compare ETags (strip quotes if present)
+                        let existing_etag = existing.e_tag.trim_matches('"');
+                        let expected_clean = expected.trim_matches('"');
+                        if existing_etag != expected_clean {
+                            return Err(s3_error!(PreconditionFailed));
+                        }
+                    }
+                    None => {
+                        // Object doesn't exist but If-Match was specified
+                        return Err(s3_error!(PreconditionFailed));
+                    }
+                }
+            }
+
+            // Handle If-None-Match precondition (only create if doesn't exist)
+            if if_none_match.is_some() {
+                if bucket_contents.contains_key(&key) {
+                    return Err(s3_error!(PreconditionFailed));
+                }
+            }
+
             bucket_contents.insert(key, stored);
         }
 
