@@ -57,3 +57,21 @@ pub use reference::*;
 
 mod adopter;
 pub use adopter::*;
+
+/// Differential synchronization module for computing and applying tree differences.
+///
+/// This module provides functionality for:
+/// - Computing the difference between two trees (`differentiate`)
+/// - Applying changes to a tree (`integrate`)
+/// - Deterministic conflict resolution for concurrent changes.
+pub mod differential;
+pub use differential::*;
+
+/// Helpers for testing and development.
+///
+/// This module provides utilities for creating deterministic tree structures
+/// for testing, including the `tree_spec!` macro and `DistributionSimulator`.
+#[cfg(any(test, feature = "helpers"))]
+mod helpers;
+#[cfg(any(test, feature = "helpers"))]
+pub use helpers::*;
