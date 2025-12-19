@@ -7,11 +7,12 @@ use std::{
 use async_stream::try_stream;
 use dialog_storage::{ContentAddressedStorage, Encoder, HashType};
 use futures_core::Stream;
+use futures_util::StreamExt;
 use nonempty::NonEmpty;
 
-use crate::{
-    Adopter, Change, Delta, DialogProllyTreeError, Differential, Entry, KeyType, Node, ValueType,
-};
+use super::differential::Change;
+use crate::{Adopter, DialogProllyTreeError, Entry, KeyType, Node, TreeDifference, ValueType};
+
 /// A hash representing an empty (usually newly created) `Tree`.
 pub static EMPT_TREE_HASH: [u8; 32] = [0; 32];
 
@@ -97,7 +98,7 @@ where
         Ok(())
     }
 
-    /// Returns the [`Hash`] representing the root of this tree.
+    /// Returns the [`HashType`] representing the root of this tree.
     ///
     /// Returns `None` if the tree is empty.
     pub fn hash(&self) -> Option<&Hash> {
@@ -133,19 +134,16 @@ where
         Ok(())
     }
 
-    /// Removes an entry from this tree, updating the root and returning the
-    /// value if it existed.
-    pub async fn delete(&mut self, key: &Key) -> Result<Option<Value>, DialogProllyTreeError> {
+    /// Remove the `key`/`value` pair associated with `key` (if it is present)
+    pub async fn delete(&mut self, key: &Key) -> Result<(), DialogProllyTreeError> {
         match &self.root {
             Some(root) => {
-                let entry = root.get_entry(key, &self.storage).await?;
                 self.root = root
                     .remove::<Distribution, _>(key, &mut self.storage)
                     .await?;
-
-                Ok(entry.map(|e| e.value))
+                Ok(())
             }
-            None => Ok(None),
+            None => Ok(()),
         }
     }
 
@@ -232,30 +230,51 @@ where
             hash_type: PhantomData,
         })
     }
+}
 
-    /// Returns a stream of changes needed to transform this tree into the other tree.
+// Impl block for methods that require Value: PartialEq
+impl<Distribution, Key, Value, Hash, Storage> Tree<Distribution, Key, Value, Hash, Storage>
+where
+    Distribution: crate::Distribution<Key, Hash>,
+    Key: KeyType,
+    Value: ValueType + PartialEq,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash>,
+{
+    /// Returns a differential that produces changes to transform `self` into `other`.
     ///
-    /// The differential is computed efficiently by comparing tree structure at each level,
-    /// only expanding nodes that differ between the two trees.
-    pub fn differentiate<'a>(&'a self, other: &'a Self) -> impl Differential<Key, Value> + 'a
-    where
-        Value: PartialEq,
-        Storage: Encoder<Hash = Hash>,
-    {
-        let mut delta = Delta::from((self, other));
+    /// Usage: `self.integrate(self.differentiate(other))` will result in `other`.
+    pub fn differentiate<'a>(
+        &'a self,
+        other: &'a Self,
+    ) -> impl crate::differential::Differential<Key, Value> + 'a {
         try_stream! {
-            delta.expand().await?;
-            for await change in delta.stream() {
+            let delta = TreeDifference::compute(self, other).await?;
+            for await change in delta.changes() {
                 yield change?;
             }
         }
     }
+}
 
-    /// Integrates changes from a differential stream into this tree.
+// Impl block for methods that require Encoder
+impl<Distribution, Key, Value, Hash, Storage> Tree<Distribution, Key, Value, Hash, Storage>
+where
+    Distribution: crate::Distribution<Key, Hash>,
+    Key: KeyType,
+    Value: ValueType + PartialEq,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash> + Encoder,
+{
+    /// Integrates changes into this tree with deterministic conflict resolution.
     ///
-    /// This applies a series of Add and Remove changes with deterministic conflict resolution:
-    /// - Add: If key exists with different value, compare hashes - higher hash wins
-    /// - Remove: Only removes if the exact entry (key+value) exists
+    /// Applies a differential (stream of changes) with Last-Write-Wins conflict resolution
+    /// based on value hashes. This ensures eventual consistency across replicas.
+    ///
+    /// # Conflict Resolution
+    ///
+    /// - **Add**: If key exists with different value, compare hashes - higher hash wins
+    /// - **Remove**: Only removes if the exact entry (key+value) exists
     ///
     /// The operation is atomic - if any change fails, the entire integration is rolled back.
     pub async fn integrate<Changes>(
@@ -263,12 +282,8 @@ where
         changes: Changes,
     ) -> Result<(), DialogProllyTreeError>
     where
-        Value: PartialEq,
-        Changes: Differential<Key, Value>,
-        Storage: Encoder<Hash = Hash>,
+        Changes: crate::differential::Differential<Key, Value>,
     {
-        use futures_util::StreamExt;
-
         // Copy root here in case we fail integration and need to revert
         let root = self.root.clone();
 

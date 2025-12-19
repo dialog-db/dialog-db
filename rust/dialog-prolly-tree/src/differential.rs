@@ -9,7 +9,11 @@
 //!
 //! - [`Change`]: Represents an addition or removal of an entry
 //! - [`Differential`]: A stream of changes between two trees
-//! - [`Delta`]: Internal structure for computing differences
+//! - [`VecDifferential`]: Helper to convert a `Vec<Change>` into a [`Differential`] stream
+//! - [`TreeDifference`]: Computes differences between trees with three key methods:
+//!   - [`compute()`](TreeDifference::compute): Builds the difference structure
+//!   - [`changes()`](TreeDifference::changes): Streams entry-level Add/Remove changes
+//!   - [`novel_nodes()`](TreeDifference::novel_nodes): Streams nodes in target but not in source
 //!
 //! # Usage
 //!
@@ -25,17 +29,29 @@
 //! tree_c.integrate(changes).await?;
 //! ```
 //!
+//! For sync/replication scenarios where you need to push novel nodes to a remote:
+//!
+//! ```text
+//! // Find nodes that local has but remote doesn't
+//! let diff = TreeDifference::compute(&remote_tree, &local_tree).await?;
+//! let novel = diff.novel_nodes();
+//! // Push each novel node to remote storage
+//! ```
+//!
 //! # Conflict Resolution
 //!
 //! When integrating changes, conflicts are resolved deterministically:
 //! - For additions with conflicting values, the value with the higher hash wins
 //! - For removals, only exact matches (same key and value) are removed
 
-use crate::{DialogProllyTreeError, Entry, KeyType, Node, Reference, Tree, ValueType};
+use std::cmp::Ordering;
+
 use async_stream::try_stream;
 use dialog_storage::{ContentAddressedStorage, HashType};
 use futures_core::Stream;
-use std::cmp::Ordering;
+use futures_util::StreamExt;
+
+use crate::{DialogProllyTreeError, Entry, KeyType, Node, Reference, Tree, ValueType};
 
 /// Represents a change in the key-value store.
 #[derive(Clone)]
@@ -123,8 +139,28 @@ where
     }
 }
 
-/// Represents either a loaded node or an unloaded reference.
-/// This allows us to defer loading nodes from storage until we actually need them.
+/// Represents either a loaded node or an unloaded reference in a sparse tree.
+///
+/// During tree differentiation, we don't want to eagerly load all nodes from storage.
+/// Instead, we maintain a "sparse" representation where nodes can be either:
+///
+/// - **Loaded (`Node`)**: The full node data is in memory, either because it was
+///   the root (already available) or because we needed to inspect its children.
+/// - **Unloaded (`Ref`)**: We only have the hash and upper bound (from a parent's
+///   child reference list). The actual node data remains in storage until needed.
+///
+/// This lazy loading is crucial for efficiency: when comparing two trees that share
+/// large subtrees, we can detect equality by comparing hashes without ever loading
+/// the shared nodes. Only nodes that differ need to be loaded and expanded.
+///
+/// # Lifecycle
+///
+/// 1. Roots start as `Node` (already in memory from the `Tree`)
+/// 2. When a branch node is expanded, its children become `Ref` entries
+/// 3. If a `Ref` needs expansion (it's a branch with differing content), it's
+///    loaded from storage, becoming a `Node`, then immediately expanded
+/// 4. Leaf nodes (`Ref` or `Node`) remain in the sparse tree until pruning
+///    removes shared ones or streaming reads their entries
 #[derive(Debug, Clone)]
 pub(crate) enum SparseTreeNode<Key, Value, Hash>
 where
@@ -175,7 +211,52 @@ where
     }
 }
 
-/// A sparse view of a tree containing only the nodes that differ between two trees.
+/// A sparse, lazily-loaded view of a tree used for efficient differentiation.
+///
+/// `SparseTree` represents a tree as a flat list of [`SparseTreeNode`] entries,
+/// sorted by their upper bounds. This structure enables efficient comparison
+/// between two trees by:
+///
+/// 1. **Lazy loading**: Nodes start as references and are only loaded when needed
+/// 2. **Level-by-level expansion**: Branch nodes can be "expanded" to reveal their
+///    children, replacing one entry with multiple child entries
+/// 3. **In-place pruning**: Shared nodes (same boundary + same hash) can be removed
+///    from both trees simultaneously, leaving only differing nodes
+///
+/// # Fields
+///
+/// - `nodes`: The current "frontier" of the sparse tree. Initially contains just
+///   the root. After expansion and pruning, contains only nodes that differ from
+///   the other tree being compared against.
+/// - `expanded`: Tracks branch nodes that were loaded and expanded during
+///   comparison. These are "novel" nodes that exist in this tree but not in the
+///   source tree (used by [`TreeDifference::novel_nodes`]).
+///
+/// # Algorithm Overview
+///
+/// When comparing trees A (source) and B (target):
+///
+/// ```text
+/// Initial state:
+///   A.nodes = [root_a]
+///   B.nodes = [root_b]
+///
+/// After expansion (if roots differ):
+///   A.nodes = [child_a1, child_a2, child_a3]  (refs to A's children)
+///   B.nodes = [child_b1, child_b2]            (refs to B's children)
+///   B.expanded = [root_b]                     (B's root is novel)
+///
+/// After pruning (remove shared nodes):
+///   A.nodes = [child_a1]                      (only differing nodes remain)
+///   B.nodes = [child_b2]
+///
+/// Continue until both are empty or contain only leaf segments...
+/// ```
+///
+/// The `expanded` field accumulates all branch nodes from the target tree that
+/// were loaded during this process. Combined with the remaining `nodes` (which
+/// are leaf segments after full expansion), this gives the complete set of
+/// novel nodes in the target tree.
 #[derive(Debug, Clone)]
 pub(crate) struct SparseTree<'a, Key, Value, Hash, Storage>
 where
@@ -184,8 +265,14 @@ where
     Hash: HashType,
     Storage: ContentAddressedStorage<Hash = Hash>,
 {
+    /// Reference to the storage backend for loading nodes on demand.
     storage: &'a Storage,
+    /// Current frontier of sparse tree nodes, sorted by upper bound.
+    /// Contains a mix of loaded nodes and unloaded references.
     nodes: Vec<SparseTreeNode<Key, Value, Hash>>,
+    /// Branch nodes that were loaded and expanded during comparison.
+    /// These represent novel index nodes in this tree.
+    expanded: Vec<Node<Key, Value, Hash>>,
 }
 
 impl<Key, Value, Hash, Storage> SparseTree<'_, Key, Value, Hash, Storage>
@@ -195,12 +282,10 @@ where
     Hash: HashType,
     Storage: ContentAddressedStorage<Hash = Hash>,
 {
-    /// Expands loaded branch nodes and Refs whose upper bound falls within the
-    /// given range.
+    /// Expands loaded branch nodes and Refs whose upper bound falls within the given range.
     ///
     /// For loaded branch nodes, this extracts their child references.
-    /// For Refs, this loads them from storage and then extracts their child
-    /// references if they're branches.
+    /// For Refs, this loads them from storage and then extracts their child references if they're branches.
     ///
     /// Returns true if any expansion happened.
     pub async fn expand<R>(&mut self, range: R) -> Result<bool, DialogProllyTreeError>
@@ -259,9 +344,12 @@ where
                     let node: Node<Key, Value, Hash> =
                         Node::from_hash(reference.hash().clone(), self.storage).await?;
 
-                    // If it's an index node, expand it
+                    // If it's a branch (index node), expand it
                     if node.is_branch() {
                         if let Ok(refs) = node.references() {
+                            // Track this loaded node (only for branches that we splice out)
+                            self.expanded.push(node.clone());
+
                             // Convert references to SparseTreeNode::Ref
                             let children: Vec<SparseTreeNode<Key, Value, Hash>> = refs
                                 .iter()
@@ -276,12 +364,15 @@ where
                             continue;
                         }
                     }
-                    // If it's a leaf, just leave it as a Ref
+                    // If it's a leaf (segment node), leave it in nodes
                     offset += 1;
                 }
                 SparseTreeNode::Node(node) => {
                     if node.is_branch() {
                         if let Ok(refs) = node.references() {
+                            // Track this branch node before splicing out
+                            self.expanded.push(node.clone());
+
                             // Convert references to SparseTreeNode::Ref
                             let children: Vec<SparseTreeNode<Key, Value, Hash>> = refs
                                 .iter()
@@ -353,16 +444,15 @@ where
     ///
     /// # Example
     ///
+    /// Conceptually, if we have two sorted lists with some shared elements:
+    ///
     /// ```text
-    /// // Pseudocode – assumes appropriate Node types exist
-    /// let mut before = SparseTree::from(vec![A, B, C]);
-    /// let mut after  = SparseTree::from(vec![A, C, D]);
+    /// before: [A, B, C]  (nodes with upper bounds A, B, C)
+    /// after:  [A, C, D]  (nodes with upper bounds A, C, D)
     ///
-    /// before.prune(&mut after);
-    ///
-    /// // Result:
-    /// // before = [B]  (A removed - shared, C removed - shared)
-    /// // after  = [D]  (A removed - shared, C removed - shared)
+    /// After prune():
+    /// before: [B]        (A and C were shared, so removed)
+    /// after:  [D]        (A and C were shared, so removed)
     /// ```
     pub fn prune(&mut self, other: &mut Self) {
         let left = &mut self.nodes;
@@ -470,94 +560,73 @@ where
     }
 }
 
-/// Convenient way to not have to repeat complex type twice
-type Pair<T> = (T, T);
-
-/// Represents a differential computation between two trees (source, target).
+/// Represents a difference computed between two trees (source, target).
 ///
-/// Delta contains sparse representations of both trees and provides methods to
-/// efficiently compute the changes needed to transform the source tree into the
-/// target tree.
+/// TreeDifference contains sparse representations of both trees and can be used
+/// to produce either:
 ///
-/// The tuple structure is `(source_sparse_tree, target_sparse_tree)`.
-pub(crate) struct Delta<'a, Key, Value, Hash, Storage>(
-    SparseTree<'a, Key, Value, Hash, Storage>,
-    SparseTree<'a, Key, Value, Hash, Storage>,
-)
+/// - Entry-level changes via [`changes()`](Self::changes) - transforms source into target
+/// - Node-level novelty via [`novel_nodes()`](Self::novel_nodes) - nodes in target abscent in source
+///
+/// # Usage
+///
+/// ```no_run
+/// # use dialog_prolly_tree::{TreeDifference, Tree, GeometricDistribution};
+/// # use dialog_storage::{Blake3Hash, CborEncoder, MemoryStorageBackend, Storage};
+/// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash,
+/// #     Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
+/// # async fn example(source: &TestTree, target: &TestTree) -> Result<(), Box<dyn std::error::Error>> {
+/// // Compute the difference (includes expansion)
+/// let delta = TreeDifference::compute(&source, &target).await?;
+///
+/// // Option 1: Get entry-level changes (for replication/sync)
+/// let changes = delta.changes();
+///
+/// // Option 2: Get novel nodes (for pushing to a remote storage)
+/// let nodes = delta.novel_nodes();
+/// # Ok(())
+/// # }
+/// ```
+pub struct TreeDifference<'a, Key, Value, Hash, Storage>
 where
     Key: KeyType + 'static,
     Value: ValueType,
     Hash: HashType,
-    Storage: ContentAddressedStorage<Hash = Hash>;
+    Storage: ContentAddressedStorage<Hash = Hash>,
+{
+    /// Sparse tree representing the source state (what we're diffing from)
+    source: SparseTree<'a, Key, Value, Hash, Storage>,
+    /// Sparse tree representing the target state (what we're diffing to)
+    target: SparseTree<'a, Key, Value, Hash, Storage>,
+}
 
-impl<'a, Key, Value, Hash, Storage> Delta<'a, Key, Value, Hash, Storage>
+impl<'a, Key, Value, Hash, Storage> TreeDifference<'a, Key, Value, Hash, Storage>
 where
     Key: KeyType + 'static,
     Value: ValueType + PartialEq,
     Hash: HashType,
     Storage: ContentAddressedStorage<Hash = Hash>,
 {
-    /// Creates a new Delta from a pair of trees `(source, target)`.
+    /// Computes the difference between two trees.
     ///
-    /// The resulting Delta contains sparse representations of both trees that
-    /// can be expanded to compute the changes needed to transform `source`
-    /// into `target`.
+    /// Derives sparse representations of both trees and eliminates nodes that are
+    /// identical between them (same boundary and hash). Only nodes that differ are
+    /// retained, making it possible to efficiently compute entry-level changes via
+    /// [`changes()`](Self::changes) or node-level novelty via [`novel_nodes()`](Self::novel_nodes).
     ///
-    /// # Parameters
-    /// - `(left, right)`: A tuple of tree references where `left` is the source
-    ///   tree and `right` is the target tree
+    /// # Algorithm
     ///
-    /// # Example
-    ///
-    /// ```text
-    /// let delta = Delta::from((&source_tree, &target_tree));
-    /// // delta can now be expanded and streamed to get changes
-    /// ```
-    pub fn from<Distription: crate::Distribution<Key, Hash>>(
-        (left, right): Pair<&'a Tree<Distription, Key, Value, Hash, Storage>>,
-    ) -> Self
-    where
-        Storage: dialog_storage::Encoder<Hash = Hash>,
-    {
-        Self(
-            SparseTree {
-                storage: left.storage(),
-                nodes: left
-                    .root()
-                    .map(|root| vec![SparseTreeNode::Node(root.clone())])
-                    .unwrap_or(vec![]),
-            },
-            SparseTree {
-                storage: right.storage(),
-                nodes: right
-                    .root()
-                    .map(|root| vec![SparseTreeNode::Node(root.clone())])
-                    .unwrap_or(vec![]),
-            },
-        )
-    }
-
-    /// Expands the difference by intelligently expanding only the nodes that
-    /// need exploration based on boundary comparisons.
-    ///
-    /// ## Algorithm Strategy
-    ///
-    /// The key insight is that if two trees share nodes, they will share
-    /// boundaries for those nodes. By comparing boundaries at each level,
-    /// we can determine:
+    /// The key insight is that if two trees share nodes, they will share boundaries
+    /// for those nodes. By comparing boundaries at each level, we can determine:
     ///
     /// 1. **Same boundary, same hash** → Nodes are identical, prune both
-    /// 2. **Same boundary, different hash** → Nodes differ in structure below,
-    ///    expand both
-    /// 3. **Different boundaries** → Nodes cover disjoint ranges, no need to
-    ///    expand
+    /// 2. **Same boundary, different hash** → Nodes differ in structure below, expand both
+    /// 3. **Different boundaries** → Nodes cover disjoint ranges, expand the larger one
     ///
-    /// At each level, ranges grow larger (parent covers more than children).
-    /// If one node's boundary is greater than another's, it means that node
-    /// covers a larger range and might need expansion to reveal boundaries
-    /// that match the other side's granularity.
-    ///
-    /// ## Example
+    /// At each level, ranges grow larger (parent covers more than children). If one
+    /// node's boundary is greater than another's, it means that node covers a larger
+    /// range and might need expansion to reveal boundaries that match the other side's
+    /// granularity.
     ///
     /// ```text
     /// Tree A:                Tree B:
@@ -568,19 +637,55 @@ where
     /// Both roots have boundary 'z' and different hashes → expand both.
     /// After expansion, A has boundaries {f, m, z} while B has {m, z}.
     /// Now we compare:
-    /// - 'f' only in A: A covers [MIN..f], B starts after 'f' → disjoint
-    /// - 'm' in both: compare, if hashes differ expand both
-    /// - 'z' in both: compare, if hashes differ expand both
+    /// - 'f' only in A → A covers \[MIN..f\], B starts after 'f' → disjoint
+    /// - 'm' in both → compare, if hashes differ expand both
+    /// - 'z' in both → compare, if hashes differ expand both
     ///
     /// This avoids expanding B's subtrees unnecessarily when looking for 'f'.
-    pub async fn expand(&mut self) -> Result<(), DialogProllyTreeError> {
-        use std::cmp::Ordering;
+    ///
+    /// # Parameters
+    /// - `source`: The source tree (base state, e.g., what remote has)
+    /// - `target`: The target tree (novel state, e.g., what we have locally)
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use dialog_prolly_tree::{TreeDifference, Tree, GeometricDistribution};
+    /// # use dialog_storage::{Blake3Hash, CborEncoder, MemoryStorageBackend, Storage};
+    /// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash,
+    /// #     Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
+    /// # async fn example(remote_tree: &TestTree, local_tree: &TestTree) -> Result<(), Box<dyn std::error::Error>> {
+    /// let diff = TreeDifference::compute(&remote_tree, &local_tree).await?;
+    /// // changes() produces transforms remote → local
+    /// // novel_nodes() yields nodes local has that remote doesn't
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn compute<Distribution: crate::Distribution<Key, Hash>>(
+        source: &'a Tree<Distribution, Key, Value, Hash, Storage>,
+        target: &'a Tree<Distribution, Key, Value, Hash, Storage>,
+    ) -> Result<Self, DialogProllyTreeError> {
+        let mut source = SparseTree {
+            storage: source.storage(),
+            nodes: source
+                .root()
+                .map(|root| vec![SparseTreeNode::Node(root.clone())])
+                .unwrap_or_default(),
+            expanded: vec![],
+        };
+        let mut target = SparseTree {
+            storage: target.storage(),
+            nodes: target
+                .root()
+                .map(|root| vec![SparseTreeNode::Node(root.clone())])
+                .unwrap_or_default(),
+            expanded: vec![],
+        };
 
-        let Self(source, target) = self;
-
+        // Iteratively expand and prune until only differing leaf nodes remain
         loop {
             // First, prune any nodes with matching boundaries and hashes
-            source.prune(target);
+            // First, prune any nodes with matching boundaries and hashes
+            source.prune(&mut target);
 
             // Compare boundaries and expand strategically
             // Use two-finger walk to compare sorted node lists
@@ -595,8 +700,8 @@ where
                 match source_bound.cmp(&target_bound) {
                     Ordering::Less => {
                         // Source node has smaller boundary
-                        // Expand ONLY the TARGET node (larger boundary) to see
-                        // if it contains something matching the source node
+                        // Expand ONLY the `target` node (larger boundary) to
+                        // see if it contains something matching the source node
                         // Use exact range to expand only this specific node
                         if target
                             .expand(target_bound.clone()..=target_bound.clone())
@@ -655,33 +760,64 @@ where
                 }
             }
 
-            // Don't expand remaining nodes - they are pure adds/removes that
-            // don't need expansion. The comparison loop has already expanded
-            // everything that needs comparing
-
             // If nothing was expanded, we've reached a fixed point
             if !expanded {
                 break;
             }
         }
 
-        Ok(())
+        // After comparison is done, expand any remaining target branch nodes.
+        // This is needed for novel_nodes() to return all novel nodes, not just
+        // the unexpanded branch references.
+        loop {
+            let mut expanded = false;
+            for idx in 0..target.nodes.len() {
+                let bound = target.nodes[idx].upper_bound().clone();
+                if target.expand(bound.clone()..=bound).await? {
+                    expanded = true;
+                    break; // Restart after expansion changes the vec
+                }
+            }
+            if !expanded {
+                break;
+            }
+        }
+
+        Ok(Self { source, target })
     }
 
-    /// Returns a stream of changes between the two trees.
+    /// Returns a stream of entry-level changes between the two trees.
     ///
     /// This performs a two-cursor walk over the entry streams from both sparse
     /// trees, yielding Add and Remove changes as appropriate.
-    pub fn stream(&'a self) -> impl Differential<Key, Value> + 'a {
-        let Self(source, target) = self;
-        let source_stream = source.stream();
-        let target_stream = target.stream();
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use dialog_prolly_tree::{TreeDifference, Tree, GeometricDistribution, Change};
+    /// # use dialog_storage::{Blake3Hash, CborEncoder, MemoryStorageBackend, Storage};
+    /// # use futures_util::{pin_mut, StreamExt};
+    /// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash,
+    /// #     Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
+    /// # async fn example(old_tree: &TestTree, new_tree: &TestTree) -> Result<(), Box<dyn std::error::Error>> {
+    /// let diff = TreeDifference::compute(&old_tree, &new_tree).await?;
+    /// let changes = diff.changes();
+    /// pin_mut!(changes);
+    /// while let Some(change) = changes.next().await {
+    ///     match change? {
+    ///         Change::Add(entry) => println!("Added: {:?}", entry),
+    ///         Change::Remove(entry) => println!("Removed: {:?}", entry),
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn changes(&'a self) -> impl Differential<Key, Value> + 'a {
+        let source_stream = self.source.stream();
+        let target_stream = self.target.stream();
 
         try_stream! {
             futures_util::pin_mut!(source_stream);
             futures_util::pin_mut!(target_stream);
-
-            use futures_util::StreamExt;
 
             let mut source_next = source_stream.next().await;
             let mut target_next = target_stream.next().await;
@@ -712,7 +848,6 @@ where
                         }
                     }
                     (Some(Ok(source_entry)), Some(Ok(target_entry))) => {
-                        use std::cmp::Ordering;
                         match source_entry.key.cmp(&target_entry.key) {
                             Ordering::Less => {
                                 // Source key is smaller - it was removed
@@ -741,19 +876,65 @@ where
             }
         }
     }
+
+    /// Returns a stream of novel nodes, which are nodes that are in the
+    /// `target` tree but not in `source` tree.
+    ///
+    /// Unlike [`changes()`](Self::changes) which streams entry-level changes,
+    /// this method yields tree nodes. If a subtree is entirely novel (no
+    /// corresponding node in source), it yield all nodes in that subtree.
+    ///
+    /// This is used during sync/replication where we need to send all new
+    /// nodes to a remote that doesn't have them.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use dialog_prolly_tree::{TreeDifference, Tree, GeometricDistribution};
+    /// # use dialog_storage::{Blake3Hash, CborEncoder, MemoryStorageBackend, Storage};
+    /// # use futures_util::{pin_mut, StreamExt};
+    /// # type TestTree = Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash,
+    /// #     Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>>;
+    /// # async fn example(remote_tree: &TestTree, local_tree: &TestTree) -> Result<(), Box<dyn std::error::Error>> {
+    /// let diff = TreeDifference::compute(&remote_tree, &local_tree).await?;
+    /// let nodes = diff.novel_nodes();
+    /// pin_mut!(nodes);
+    /// while let Some(node) = nodes.next().await {
+    ///     let node = node?;
+    ///     // Push node to remote storage
+    ///     // remote_storage.put(node.hash(), node.encode()).await?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn novel_nodes(
+        &self,
+    ) -> impl Stream<Item = Result<Node<Key, Value, Hash>, DialogProllyTreeError>> + '_ {
+        try_stream! {
+            // First, yield all (index) nodes that were expanded during
+            // comparison.
+            for node in &self.target.expanded {
+                yield node.clone();
+            }
+
+            // Then, yield all the remaining (segment) nodes. They will be
+            // segmentns because all index nodes are either pruned when found
+            // in source tree or expanded otherwise.
+            for node in &self.target.nodes {
+                yield node.clone().load(self.target.storage).await?;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GeometricDistribution, Tree};
+    use crate::{GeometricDistribution, Traversable, TraversalOrder, Tree, TreeNodes, tree_spec};
     use anyhow::Result;
     use dialog_storage::{
         Blake3Hash, CborEncoder, JournaledStorage, MemoryStorageBackend, Storage,
     };
-    use futures_util::{StreamExt, pin_mut};
-    #[cfg(target_arch = "wasm32")]
-    use wasm_bindgen_test::wasm_bindgen_test;
+    use futures_util::{StreamExt, TryStreamExt, pin_mut};
 
     type TestTree = Tree<
         GeometricDistribution,
@@ -763,8 +944,7 @@ mod tests {
         Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
     >;
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_differentiate_identical_trees() {
         let backend = MemoryStorageBackend::default();
         let mut tree1 = TestTree::new(Storage {
@@ -784,15 +964,14 @@ mod tests {
         let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut count = 0;
-        while (changes.next().await).is_some() {
+        while let Some(_) = changes.next().await {
             count += 1;
         }
 
         assert_eq!(count, 0, "Identical trees should have no changes");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_differentiate_added_entry() {
         let backend = MemoryStorageBackend::default();
         let mut tree1 = TestTree::new(Storage {
@@ -826,8 +1005,7 @@ mod tests {
         assert_eq!(removes.len(), 0);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_differentiate_removed_entry() {
         let backend = MemoryStorageBackend::default();
         let mut tree1 = TestTree::new(Storage {
@@ -861,8 +1039,7 @@ mod tests {
         assert_eq!(removes[0].value, vec![20]);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_differentiate_modified_entry() {
         let backend = MemoryStorageBackend::default();
         let mut tree1 = TestTree::new(Storage {
@@ -899,8 +1076,7 @@ mod tests {
         assert_eq!(removes[0].value, vec![20]);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_differentiate_empty_to_populated() {
         let backend = MemoryStorageBackend::default();
         let mut tree1 = TestTree::new(Storage {
@@ -929,8 +1105,7 @@ mod tests {
         assert_eq!(adds.len(), 2);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_differentiate_populated_to_empty() {
         let backend = MemoryStorageBackend::default();
         let tree1 = TestTree::new(Storage {
@@ -959,8 +1134,7 @@ mod tests {
         assert_eq!(removes.len(), 2);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_differentiate_large_tree() {
         let backend = MemoryStorageBackend::default();
         let mut tree1 = TestTree::new(Storage {
@@ -998,8 +1172,7 @@ mod tests {
         assert_eq!(removes.len(), 0);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_integrate_add_new_entry() {
         let backend = MemoryStorageBackend::default();
         let mut tree = TestTree::new(Storage {
@@ -1022,8 +1195,7 @@ mod tests {
         assert_eq!(tree.get(&vec![2]).await.unwrap(), Some(vec![20]));
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_integrate_add_idempotent() {
         let backend = MemoryStorageBackend::default();
         let mut tree = TestTree::new(Storage {
@@ -1046,8 +1218,7 @@ mod tests {
         assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(vec![10]));
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_integrate_add_conflict_resolution() {
         let backend = MemoryStorageBackend::default();
         let mut tree = TestTree::new(Storage {
@@ -1084,8 +1255,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_integrate_remove_existing() {
         let backend = MemoryStorageBackend::default();
         let mut tree = TestTree::new(Storage {
@@ -1109,8 +1279,7 @@ mod tests {
         assert_eq!(tree.get(&vec![2]).await.unwrap(), Some(vec![20]));
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_integrate_remove_nonexistent() {
         let backend = MemoryStorageBackend::default();
         let mut tree = TestTree::new(Storage {
@@ -1134,8 +1303,7 @@ mod tests {
         assert_eq!(tree.get(&vec![2]).await.unwrap(), None);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_integrate_remove_wrong_value() {
         let backend = MemoryStorageBackend::default();
         let mut tree = TestTree::new(Storage {
@@ -1159,8 +1327,7 @@ mod tests {
         assert_eq!(tree.get(&vec![1]).await.unwrap(), Some(vec![10]));
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_integrate_concurrent_updates() {
         let backend = MemoryStorageBackend::default();
 
@@ -1217,10 +1384,11 @@ mod tests {
         }
     }
 
+    // ========================================================================
     // Roundtrip tests: Verify differentiate + integrate produces original tree
+    // ========================================================================
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_roundtrip_empty_to_populated() {
         let backend = MemoryStorageBackend::default();
         let mut target = TestTree::new(Storage {
@@ -1260,8 +1428,7 @@ mod tests {
         assert_eq!(start.get(&vec![3]).await.unwrap(), Some(vec![30]));
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_roundtrip_populated_to_empty() {
         let backend = MemoryStorageBackend::default();
         let target = TestTree::new(Storage {
@@ -1301,8 +1468,7 @@ mod tests {
         assert_eq!(start.get(&vec![3]).await.unwrap(), None);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_roundtrip_mixed_changes() {
         let backend = MemoryStorageBackend::default();
         let mut target = TestTree::new(Storage {
@@ -1349,8 +1515,7 @@ mod tests {
         assert_eq!(start.get(&vec![4]).await.unwrap(), Some(vec![40]));
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_roundtrip_large_tree() {
         let backend = MemoryStorageBackend::default();
         let mut target = TestTree::new(Storage {
@@ -1406,10 +1571,11 @@ mod tests {
         }
     }
 
+    // ========================================================================
     // Edge case tests
+    // ========================================================================
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_differentiate_both_empty() {
         let backend = MemoryStorageBackend::default();
         let tree1 = TestTree::new(Storage {
@@ -1424,15 +1590,14 @@ mod tests {
         let changes = tree2.differentiate(&tree1);
         pin_mut!(changes);
         let mut count = 0;
-        while (changes.next().await).is_some() {
+        while let Some(_) = changes.next().await {
             count += 1;
         }
 
         assert_eq!(count, 0, "Both empty trees should have no changes");
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_differentiate_single_entry_trees() {
         let backend = MemoryStorageBackend::default();
         let mut tree1 = TestTree::new(Storage {
@@ -1466,8 +1631,7 @@ mod tests {
         assert_eq!(adds[0].value, vec![10]);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_differentiate_disjoint_trees() {
         let backend = MemoryStorageBackend::default();
         let mut tree1 = TestTree::new(Storage {
@@ -1505,8 +1669,7 @@ mod tests {
         assert_eq!(adds.len(), 3);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_differentiate_subset_superset() {
         let backend = MemoryStorageBackend::default();
         let mut superset = TestTree::new(Storage {
@@ -1545,8 +1708,7 @@ mod tests {
         assert_eq!(removes.len(), 0);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_differentiate_all_modified() {
         let backend = MemoryStorageBackend::default();
         let mut tree1 = TestTree::new(Storage {
@@ -1577,8 +1739,7 @@ mod tests {
         assert_eq!(count, 18);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_roundtrip_preserves_hash() {
         let backend = MemoryStorageBackend::default();
         let mut target = TestTree::new(Storage {
@@ -1594,7 +1755,7 @@ mod tests {
         for i in 0..20 {
             target.set(vec![i], vec![i * 3]).await.unwrap();
         }
-        let target_hash = *target.hash().unwrap();
+        let target_hash = target.hash().unwrap().clone();
 
         // Set up different start state
         for i in 10..30 {
@@ -1622,13 +1783,12 @@ mod tests {
         assert_eq!(start.hash().unwrap(), &target_hash);
     }
 
-    // Verify access patterns
+    // ========================================================================
+    // Performance tests using JournaledStorage
+    // ========================================================================
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_diff_shared_left_subtree() -> Result<()> {
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
 
         let storage_a = Storage {
@@ -1672,11 +1832,8 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_diff_fully_disjoint_trees() -> Result<()> {
-        use crate::tree_spec;
-
         let backend = JournaledStorage::new(MemoryStorageBackend::default());
         let storage = Storage {
             encoder: CborEncoder,
@@ -1712,11 +1869,8 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_diff_subset_superset() -> Result<()> {
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
 
         let storage_a = Storage {
@@ -1760,11 +1914,8 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_diff_single_key_change() -> Result<()> {
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
 
         let storage_a = Storage {
@@ -1809,11 +1960,8 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_diff_different_heights() -> Result<()> {
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
 
         let storage_a = Storage {
@@ -1856,11 +2004,8 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn test_diff_different_heights_reverse() -> Result<()> {
-        use crate::tree_spec;
-
         let backend = MemoryStorageBackend::default();
 
         let storage_a = Storage {
@@ -1901,6 +2046,587 @@ mod tests {
 
         spec_b.assert();
         spec_a.assert();
+
+        Ok(())
+    }
+
+    // Novel Nodes Tests
+    //
+    // These tests verify that novel_nodes() returns exactly the set of nodes
+    // that exist in target but not in source. We use tree_spec! to define
+    // deterministic tree structures and verify:
+    // 1. Read patterns match expectations (via spec.assert())
+    // 2. Novel nodes = target nodes - shared nodes with source
+
+    #[dialog_common::test]
+    async fn it_returns_all_target_nodes_when_source_is_empty() -> Result<()> {
+        // When source is empty, all target nodes are novel
+        let backend = MemoryStorageBackend::default();
+        let storage_source = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+        let storage_target = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Empty source tree
+        let source = tree_spec![].build(storage_source).await.unwrap();
+
+        // Target has some structure - all nodes loaded since source is empty
+        let target = tree_spec![
+            [     ..e]
+            [..a, ..e]
+        ]
+        .build(storage_target)
+        .await
+        .unwrap();
+
+        let diff = TreeDifference::compute(source.tree(), target.tree())
+            .await
+            .unwrap();
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
+
+        // Verify that all target nodes were loaded (since source is empty)
+        target.assert();
+
+        // All target nodes should be novel - traverse target tree to get all hashes
+        let target_hashes = target
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
+        assert_eq!(
+            novel_hashes, target_hashes,
+            "All target nodes should be novel when source is empty"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_returns_no_nodes_when_target_is_empty() -> Result<()> {
+        // When target is empty, no nodes are novel
+        let backend = MemoryStorageBackend::default();
+        let storage_source = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+        let storage_target = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Source has structure - root is loaded, children skipped since target is empty
+        let source = tree_spec![
+            [       ..e]
+            [(..a), (..e)]
+        ]
+        .build(storage_source)
+        .await
+        .unwrap();
+
+        // Empty target tree
+        let target = tree_spec![].build(storage_target).await.unwrap();
+
+        let diff = TreeDifference::compute(source.tree(), target.tree())
+            .await
+            .unwrap();
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
+
+        // Verify that no source nodes were loaded (since target is empty)
+        source.assert();
+
+        assert!(
+            novel_hashes.is_empty(),
+            "No nodes should be novel when target is empty"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_returns_no_nodes_when_both_trees_are_empty() -> Result<()> {
+        let backend = MemoryStorageBackend::default();
+        let storage_source = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+        let storage_target = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        let source = tree_spec![].build(storage_source).await.unwrap();
+        let target = tree_spec![].build(storage_target).await.unwrap();
+
+        let diff = TreeDifference::compute(source.tree(), target.tree())
+            .await
+            .unwrap();
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
+
+        assert!(
+            novel_hashes.is_empty(),
+            "No nodes should be novel when both trees are empty"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_returns_no_nodes_for_identical_trees() -> Result<()> {
+        // When trees are identical, no nodes are novel (all are shared)
+        // and no child nodes should be loaded - identical roots are pruned immediately
+        // Note: roots are always read during Tree::from_hash() in build(), so we mark them as ..e
+        let backend = MemoryStorageBackend::default();
+        let storage_source = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+        let storage_target = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Both trees have identical structure
+        // Root (..e at height 1) is read during build, but children should NOT be loaded
+        let source = tree_spec![
+            [              ..e]
+            [(..a), (..c), (..e)]
+        ]
+        .build(storage_source)
+        .await
+        .unwrap();
+
+        let target = tree_spec![
+            [              ..e]
+            [(..a), (..c), (..e)]
+        ]
+        .build(storage_target)
+        .await
+        .unwrap();
+
+        let diff = TreeDifference::compute(source.tree(), target.tree())
+            .await
+            .unwrap();
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
+
+        // Verify no child nodes were loaded (identical trees detected at root)
+        source.assert();
+        target.assert();
+
+        assert!(
+            novel_hashes.is_empty(),
+            "Identical trees should have no novel nodes"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_excludes_shared_subtrees_from_novel_nodes() -> Result<()> {
+        // When trees share a subtree (same hash), that subtree is NOT novel
+        let backend = MemoryStorageBackend::default();
+        let storage_source = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+        let storage_target = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Source: segments a, e - root loaded, both segments skipped (shared or no match)
+        let source = tree_spec![
+            [        ..e]
+            [(..a), (..e)]
+        ]
+        .build(storage_source)
+        .await
+        .unwrap();
+
+        // Target: root loaded, segment 'a' is shared (skipped), 'f' and 'k' are loaded
+        let target = tree_spec![
+            [            ..k]
+            [(..a), ..f, ..k]
+        ]
+        .build(storage_target)
+        .await
+        .unwrap();
+
+        let diff = TreeDifference::compute(source.tree(), target.tree())
+            .await
+            .unwrap();
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
+
+        // Verify read patterns:
+        // - Source: only index loaded (segments compared by boundary only)
+        // - Target: shared 'a' skipped, novel 'f','k' loaded
+        source.assert();
+        target.assert();
+
+        // Novel nodes should be: target nodes - nodes shared with source
+        let target_hashes = target
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
+        let source_hashes = source
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
+        let expected_novel: std::collections::HashSet<_> =
+            target_hashes.difference(&source_hashes).copied().collect();
+
+        assert_eq!(
+            novel_hashes, expected_novel,
+            "Novel nodes should be target nodes minus shared nodes"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_handles_trees_with_different_heights() -> Result<()> {
+        // Target taller than source
+        let backend = MemoryStorageBackend::default();
+        let storage_source = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+        let storage_target = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Shallow source (height 1) - root loaded, segments skipped
+        let source = tree_spec![
+            [         ..e]
+            [(..a), (..e)]
+        ]
+        .build(storage_source)
+        .await
+        .unwrap();
+
+        // Taller target (height 2) with shared segment 'a'
+        // Root and intermediate nodes loaded, segment 'a' shared (skipped)
+        let target = tree_spec![
+            [                           ..z]
+            [       ..f,      ..p,      ..z]
+            [(..a), ..f, ..k, ..p, ..t, ..z]
+        ]
+        .build(storage_target)
+        .await
+        .unwrap();
+
+        let diff = TreeDifference::compute(source.tree(), target.tree())
+            .await
+            .unwrap();
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
+
+        // Verify read patterns - shared segment 'a' should NOT be loaded
+        source.assert();
+        target.assert();
+
+        // Novel = target - shared
+        let target_hashes = target
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
+        let source_hashes = source
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
+        let expected_novel: std::collections::HashSet<_> =
+            target_hashes.difference(&source_hashes).copied().collect();
+
+        assert_eq!(
+            novel_hashes, expected_novel,
+            "Novel nodes should be target nodes minus shared nodes"
+        );
+
+        // Verify uniqueness
+        assert_eq!(
+            novel_hashes.len(),
+            diff.novel_nodes().into_hash_set().await.len(),
+            "All novel nodes should be unique"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_returns_no_nodes_when_target_is_subset_of_source() -> Result<()> {
+        // Target is a subset of source - should have no novel nodes since
+        // all target nodes exist in source.
+        //
+        // IMPORTANT: Both trees must share the same backend so that identical
+        // content produces identical hashes (content-addressed storage).
+        let backend = MemoryStorageBackend::default();
+        let storage_source = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+        let storage_target = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Source: 3 segments at height 0, 1 index at height 1
+        // Segment 'a' contains entries [a..a]
+        let source = tree_spec![
+            [            ..k]
+            [(..a), ..f, ..k]
+        ]
+        .build(storage_source)
+        .await
+        .unwrap();
+
+        // Target: single segment 'a' with same entries as source's segment 'a'
+        // Because they share the same backend, identical content = identical hash
+        let target = tree_spec![[(..a)]].build(storage_target).await.unwrap();
+
+        let diff = TreeDifference::compute(source.tree(), target.tree())
+            .await
+            .unwrap();
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
+
+        // Target's 'a' segment should match source's 'a' segment (same hash)
+        let target_hashes = target
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
+        let source_hashes = source
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
+        let expected_novel: std::collections::HashSet<_> =
+            target_hashes.difference(&source_hashes).copied().collect();
+
+        assert_eq!(
+            novel_hashes, expected_novel,
+            "Novel nodes should be target - source (empty if target is subset)"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_returns_all_target_nodes_for_disjoint_trees() -> Result<()> {
+        // Trees with completely different content - all target nodes are novel
+        let backend = MemoryStorageBackend::default();
+        let storage_source = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+        let storage_target = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Source: root loaded, segments skipped (disjoint so no match possible)
+        let source = tree_spec![
+            [        ..e]
+            [(..a), (..e)]
+        ]
+        .build(storage_source)
+        .await
+        .unwrap();
+
+        // Target: root loaded, children loaded for novel_nodes
+        let target = tree_spec![
+            [      ..z]
+            [..p,  ..z]
+        ]
+        .build(storage_target)
+        .await
+        .unwrap();
+
+        let diff = TreeDifference::compute(source.tree(), target.tree())
+            .await
+            .unwrap();
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
+
+        // Verify read patterns:
+        // - Source: only index loaded (segments compared by boundary, no match)
+        // - Target: all nodes loaded (all are novel)
+        source.assert();
+        target.assert();
+
+        // All target nodes should be novel (no overlap)
+        let target_hashes = target
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
+        assert_eq!(
+            novel_hashes, target_hashes,
+            "Disjoint trees should have all target nodes as novel"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_returns_unique_novel_nodes() -> Result<()> {
+        // Verify that novel_nodes() never returns duplicates
+        let backend = MemoryStorageBackend::default();
+        let storage_source = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+        let storage_target = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Source with some structure
+        let source = tree_spec![
+            [       ..e]
+            [(..a), ..e]
+        ]
+        .build(storage_source)
+        .await
+        .unwrap();
+
+        // Target with more structure
+        let target = tree_spec![
+            [                           ..z]
+            [       ..f,      ..p,      ..z]
+            [(..a), ..f, ..k, ..p, ..t, ..z]
+        ]
+        .build(storage_target)
+        .await
+        .unwrap();
+
+        let diff = TreeDifference::compute(source.tree(), target.tree())
+            .await
+            .unwrap();
+
+        // Collect twice - as Vec (preserves duplicates) and HashSet (deduplicates)
+        let all_nodes: Vec<_> = diff.novel_nodes().try_collect().await?;
+        let unique_hashes = diff.novel_nodes().into_hash_set().await;
+
+        assert_eq!(
+            all_nodes.len(),
+            unique_hashes.len(),
+            "novel_nodes() should not return duplicates"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_returns_novel_nodes_for_different_segments() -> Result<()> {
+        // Simplest case: single segment trees with different content
+        let backend = MemoryStorageBackend::default();
+        let storage_source = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+        let storage_target = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Source: single segment 'a' (contains key 'a')
+        // Marked as read because segment nodes are always loaded during diff
+        let source = tree_spec![[..a]].build(storage_source).await.unwrap();
+
+        // Target: single segment 'b' (contains keys 'a', 'b' - different content)
+        let target = tree_spec![[..b]].build(storage_target).await.unwrap();
+
+        let diff = TreeDifference::compute(source.tree(), target.tree())
+            .await
+            .unwrap();
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
+
+        // All target nodes should be novel (no overlap)
+        let target_hashes = target
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
+
+        assert_eq!(
+            novel_hashes, target_hashes,
+            "Different segment should produce novel nodes"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_prunes_shared_deep_subtrees() -> Result<()> {
+        // 3-level trees where the left subtree is shared but right differs
+        let backend = MemoryStorageBackend::default();
+        let storage_source = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+        let storage_target = Storage {
+            encoder: CborEncoder,
+            backend: JournaledStorage::new(backend.clone()),
+        };
+
+        // Source: 3-level tree with segments under two index nodes
+        // Left subtree (..f, ..m) should be shared, so pruned
+        // Right subtree (..t, ..z) differs - but source segments don't need loading
+        // for novel_nodes (we only care about target nodes)
+        let source = tree_spec![
+            [                     ..z]
+            [       (..m),        ..z]
+            [(..f), (..m), (..t), ..z]
+        ]
+        .build(storage_source)
+        .await
+        .unwrap();
+
+        // Target: same left subtree structure, different right subtree
+        // Left (..f, ..m) should be pruned (identical to source)
+        // Right (..w, ..z) is novel
+        let target = tree_spec![
+            [                   ..z]
+            [       (..m),      ..z]
+            [(..f), (..m), ..w, ..z]
+        ]
+        .build(storage_target)
+        .await
+        .unwrap();
+
+        let diff = TreeDifference::compute(source.tree(), target.tree())
+            .await
+            .unwrap();
+        let novel_hashes = diff.novel_nodes().into_hash_set().await;
+
+        // Verify left subtree was pruned (not loaded)
+        source.assert();
+        target.assert();
+
+        // Novel nodes should be target - source (right subtree differs)
+        let target_hashes = target
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
+        let source_hashes = source
+            .tree()
+            .traverse(TraversalOrder::default())
+            .into_hash_set()
+            .await;
+        let expected_novel: std::collections::HashSet<_> =
+            target_hashes.difference(&source_hashes).copied().collect();
+
+        assert_eq!(
+            novel_hashes, expected_novel,
+            "Novel nodes should be target nodes minus shared nodes"
+        );
 
         Ok(())
     }
