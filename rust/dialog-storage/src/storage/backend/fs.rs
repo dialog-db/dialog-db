@@ -70,11 +70,15 @@ where
     where
         Key: AsRef<[u8]>,
     {
-        let key_str = std::str::from_utf8(key.as_ref())
+        let path = std::str::from_utf8(key.as_ref())
             .map_err(|e| DialogStorageError::StorageBackend(format!("Invalid address: {e}")))?;
-        Ok(self.root_dir.join(key_str))
+        Ok(self.root_dir.join(path))
     }
 
+    /// Returns the path to the lock file for a given key.
+    ///
+    /// Lock files are used to coordinate concurrent access during CAS operations.
+    /// The lock path is derived from the key path with a `.lock` extension.
     fn make_lock_path(&self, key: &Key) -> Result<PathBuf, DialogStorageError>
     where
         Key: AsRef<[u8]>,
@@ -84,6 +88,11 @@ where
         Ok(path)
     }
 
+    /// Returns a unique temporary file path for atomic writes.
+    ///
+    /// The temp path includes the content hash to ensure uniqueness across
+    /// concurrent writers. This enables atomic rename-based updates where
+    /// the temp file is written first, then renamed to the final path.
     fn make_temp_path(&self, key: &Key, hash: &ContentHash) -> Result<PathBuf, DialogStorageError>
     where
         Key: AsRef<[u8]>,
