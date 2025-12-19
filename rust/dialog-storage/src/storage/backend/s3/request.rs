@@ -7,26 +7,28 @@ use async_trait::async_trait;
 use dialog_common::ConditionalSync;
 use url::Url;
 
-use super::access::{Acl, Invocation};
+use super::access::{Acl, Invocation, unauthorized};
 use super::checksum::{Checksum, Hasher};
-use super::{S3, S3StorageError};
+use super::{Bucket, S3StorageError};
 
 /// A PUT request to upload data.
 #[derive(Debug)]
 pub struct Put {
     url: Url,
+    region: String,
     body: Vec<u8>,
     checksum: Option<Checksum>,
     acl: Option<Acl>,
 }
 
 impl Put {
-    /// Create a new PUT request with the given URL and body.
+    /// Create a new PUT request with the given URL, body, and region.
     ///
     /// Use [`with_checksum`](Self::with_checksum) to add integrity verification.
-    pub fn new(url: Url, body: impl AsRef<[u8]>) -> Self {
+    pub fn new(url: Url, body: impl AsRef<[u8]>, region: &str) -> Self {
         Self {
             url,
+            region: region.to_string(),
             body: body.as_ref().to_vec(),
             checksum: None,
             acl: None,
@@ -55,6 +57,10 @@ impl Invocation for Put {
         &self.url
     }
 
+    fn region(&self) -> &str {
+        &self.region
+    }
+
     fn checksum(&self) -> Option<&Checksum> {
         self.checksum.as_ref()
     }
@@ -74,12 +80,16 @@ impl Request for Put {
 #[derive(Debug, Clone)]
 pub struct Get {
     url: Url,
+    region: String,
 }
 
 impl Get {
-    /// Create a new GET request for the given URL.
-    pub fn new(url: Url) -> Self {
-        Self { url }
+    /// Create a new GET request for the given URL and region.
+    pub fn new(url: Url, region: &str) -> Self {
+        Self {
+            url,
+            region: region.to_string(),
+        }
     }
 }
 
@@ -91,6 +101,10 @@ impl Invocation for Get {
     fn url(&self) -> &Url {
         &self.url
     }
+
+    fn region(&self) -> &str {
+        &self.region
+    }
 }
 
 impl Request for Get {}
@@ -99,12 +113,16 @@ impl Request for Get {}
 #[derive(Debug, Clone)]
 pub struct Delete {
     url: Url,
+    region: String,
 }
 
 impl Delete {
-    /// Create a new DELETE request for the given URL.
-    pub fn new(url: Url) -> Self {
-        Self { url }
+    /// Create a new DELETE request for the given URL and region.
+    pub fn new(url: Url, region: &str) -> Self {
+        Self {
+            url,
+            region: region.to_string(),
+        }
     }
 }
 
@@ -115,6 +133,10 @@ impl Invocation for Delete {
 
     fn url(&self) -> &Url {
         &self.url
+    }
+
+    fn region(&self) -> &str {
+        &self.region
     }
 }
 
@@ -135,25 +157,29 @@ pub trait Request: Invocation + Sized {
         None
     }
 
-    /// Perform this request against the given S3 backend.
+    /// Perform this request against the given bucket.
     async fn perform<Key, Value>(
         &self,
-        s3: &S3<Key, Value>,
+        bucket: &Bucket<Key, Value>,
     ) -> Result<reqwest::Response, S3StorageError>
     where
         Key: AsRef<[u8]> + Clone + ConditionalSync,
         Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
     {
-        let authorized = s3
-            .session
-            .authorize(self)
-            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
+        let authorized = match &bucket.credentials {
+            Some(creds) => creds
+                .authorize(self)
+                .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?,
+            None => {
+                unauthorized(self).map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?
+            }
+        };
 
         let mut builder = match self.method() {
-            "GET" => s3.client.get(authorized.url),
-            "PUT" => s3.client.put(authorized.url),
-            "DELETE" => s3.client.delete(authorized.url),
-            method => s3.client.request(
+            "GET" => bucket.client.get(authorized.url),
+            "PUT" => bucket.client.put(authorized.url),
+            "DELETE" => bucket.client.delete(authorized.url),
+            method => bucket.client.request(
                 reqwest::Method::from_bytes(method.as_bytes()).unwrap(),
                 authorized.url,
             ),
@@ -168,5 +194,64 @@ pub trait Request: Invocation + Sized {
         }
 
         Ok(builder.send().await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_REGION: &str = "us-east-1";
+
+    #[dialog_common::test]
+    fn it_creates_put_request_with_checksum() {
+        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
+        let request = Put::new(url, b"test value", TEST_REGION).with_checksum(&Hasher::Sha256);
+
+        // Checksum should be present after with_checksum
+        assert!(request.checksum().is_some());
+        // Checksum should have the correct algorithm name
+        assert_eq!(request.checksum().unwrap().name(), "sha256");
+    }
+
+    #[dialog_common::test]
+    fn it_creates_put_request_without_checksum() {
+        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
+        let request = Put::new(url, b"test value", TEST_REGION);
+
+        // Checksum should be None by default
+        assert!(request.checksum().is_none());
+    }
+
+    #[dialog_common::test]
+    fn it_creates_put_request_with_acl() {
+        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
+        let request = Put::new(url, b"test value", TEST_REGION).with_acl(Acl::PublicRead);
+
+        assert_eq!(request.acl(), Some(Acl::PublicRead));
+    }
+
+    #[dialog_common::test]
+    fn it_creates_get_request() {
+        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
+        let request = Get::new(url.clone(), TEST_REGION);
+
+        assert_eq!(request.method(), "GET");
+        assert_eq!(request.url(), &url);
+        assert_eq!(request.region(), TEST_REGION);
+        assert!(request.checksum().is_none());
+        assert!(request.acl().is_none());
+    }
+
+    #[dialog_common::test]
+    fn it_creates_delete_request() {
+        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
+        let request = Delete::new(url.clone(), TEST_REGION);
+
+        assert_eq!(request.method(), "DELETE");
+        assert_eq!(request.url(), &url);
+        assert_eq!(request.region(), TEST_REGION);
+        assert!(request.checksum().is_none());
+        assert!(request.acl().is_none());
     }
 }

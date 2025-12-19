@@ -20,6 +20,9 @@ use std::time::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use web_time::{SystemTime, web::SystemTimeExt};
 
+/// Default URL expiration: 1 hours.
+pub const DEFAULT_EXPIRES: u64 = 3600;
+
 /// AWS S3 credentials for signing requests.
 #[derive(Debug, Clone)]
 pub struct Credentials {
@@ -27,237 +30,46 @@ pub struct Credentials {
     pub access_key_id: String,
     /// AWS Secret Access Key
     pub secret_access_key: String,
-    /// Optional AWS session token (for temporary credentials)
-    pub session_token: Option<String>,
 }
 
-/// Cloud storage service configuration for request signing.
-///
-/// Contains the signing parameters for different cloud storage services.
-/// Does NOT include bucket, endpoint, or session duration - those are
-/// specified when creating a session.
-#[derive(Debug, Clone)]
-pub enum Service {
-    /// AWS S3 or S3-compatible service (including Cloudflare R2).
-    S3 {
-        /// AWS region (e.g., "us-east-1", "auto" for R2)
-        region: String,
-    },
-}
-
-impl Service {
-    /// Create S3 service configuration.
-    pub fn s3(region: impl Into<String>) -> Self {
-        Self::S3 {
-            region: region.into(),
-        }
-    }
-
-    /// Get the region for this service.
-    fn region(&self) -> &str {
-        match self {
-            Self::S3 { region } => region,
-        }
-    }
-
-    /// Get the service name for signing.
-    fn name(&self) -> &str {
-        match self {
-            Self::S3 { .. } => "s3",
-        }
-    }
-}
-
-/// S3 Access Control List (ACL) settings.
-///
-/// These are canned ACLs supported by S3 and S3-compatible services.
-/// See: https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html#canned-acl
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Acl {
-    /// Owner gets FULL_CONTROL. No one else has access rights.
-    Private,
-    /// Owner gets FULL_CONTROL. The AllUsers group gets READ access.
-    PublicRead,
-    /// Owner gets FULL_CONTROL. The AllUsers group gets READ and WRITE access.
-    PublicReadWrite,
-    /// Owner gets FULL_CONTROL. The AuthenticatedUsers group gets READ access.
-    AuthenticatedRead,
-    /// Object owner gets FULL_CONTROL. Bucket owner gets READ access.
-    BucketOwnerRead,
-    /// Both the object owner and the bucket owner get FULL_CONTROL.
-    BucketOwnerFullControl,
-}
-
-impl Acl {
-    /// Get the S3 ACL header value.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Private => "private",
-            Self::PublicRead => "public-read",
-            Self::PublicReadWrite => "public-read-write",
-            Self::AuthenticatedRead => "authenticated-read",
-            Self::BucketOwnerRead => "bucket-owner-read",
-            Self::BucketOwnerFullControl => "bucket-owner-full-control",
-        }
-    }
-}
-
-/// Pre-derived signing key for request signing.
-#[derive(Debug, Clone)]
-struct SessionKey(Vec<u8>);
-
-impl SessionKey {
-    /// Derive a signing key from credentials using the AWS4 key derivation algorithm.
+impl Credentials {
+    /// Authorize a request with AWS SigV4 presigned URL.
     ///
-    /// The key is derived through an HMAC chain:
-    /// `HMAC(HMAC(HMAC(HMAC("AWS4" + secret, date), region), service), "aws4_request")`
-    fn new(credentials: &Credentials, service: &Service, date: &[u8]) -> Self {
-        let secret = format!("AWS4{}", credentials.secret_access_key);
-        // Derive signing key: HMAC chain of date -> region -> service -> "aws4_request"
-        let k_date = Self::hmac(secret.as_bytes(), date);
-        let k_region = Self::hmac(&k_date, service.region().as_bytes());
-        let k_service = Self::hmac(&k_region, service.name().as_bytes());
-        Self(Self::hmac(&k_service, b"aws4_request"))
-    }
-
-    /// Compute HMAC-SHA256.
-    fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
-        // # Why `.expect()` cannot panic
-        //
-        // The `Mac::new_from_slice` method returns `Result<Self, InvalidLength>` because
-        // the [`KeyInit`] trait in `crypto-common` defines it that way for the general case
-        // where some algorithms have key size restrictions.
-        //
-        // However, `Hmac<Sha256>` **overrides** `new_from_slice` in [`hmac::optim`] to accept
-        // keys of any length by using an internal `get_der_key` function that:
-        // - Pads keys shorter than 64 bytes (SHA-256 block size) with zeros
-        // - Hashes keys longer than 64 bytes, then pads the result
-        //
-        // The overridden implementation **always returns `Ok(...)`** - see:
-        // <https://docs.rs/hmac/0.12.1/src/hmac/optim.rs.html#152-173>
-        //
-        // Even `KeyInit::new()` in the hmac crate internally calls `new_from_slice().unwrap()`:
-        // <https://docs.rs/hmac/0.12.1/src/hmac/optim.rs.html#147-149>
-        //
-        // [`KeyInit`]: https://docs.rs/digest/latest/digest/trait.KeyInit.html
-        // [`hmac::optim`]: https://docs.rs/hmac/0.12.1/src/hmac/optim.rs.html
-        let mut mac = Hmac::<Sha256>::new_from_slice(key)
-            .expect("HMAC-SHA256 accepts keys of any size; see doc comment");
-        mac.update(data);
-        mac.finalize().into_bytes().to_vec()
-    }
-
-    /// Sign data using this key.
-    fn sign(&self, data: &[u8]) -> Signature {
-        Signature(Self::hmac(&self.0, data))
-    }
-}
-
-/// An authorization session for S3 requests.
-///
-/// This enum supports both authorized (authenticated) and public (unsigned) access.
-#[derive(Debug, Clone)]
-pub enum Session {
-    /// AWS SigV4 authorized requests with credentials.
-    Authorized(Authority),
-    /// Unsigned/public requests (no authentication).
-    Public,
-}
-
-/// An authorized session that uses AWS SigV4 signing.
-///
-/// Contains the pre-derived signing key and can be reused
-/// to sign multiple requests efficiently within its duration.
-#[derive(Debug, Clone)]
-pub struct Authority {
-    access_key_id: String,
-    session_token: Option<String>,
-    scope: String,
-    timestamp: String,
-    key: SessionKey,
-    duration: u64,
-}
-
-impl Session {
-    /// Create a new authorized session from credentials, service, and duration.
-    ///
-    /// The signing key is derived for the current time.
-    ///
-    /// # Arguments
-    /// * `credentials` - AWS credentials for signing
-    /// * `service` - The cloud storage service configuration
-    /// * `duration` - URL signature expiration in seconds (e.g., 86400 = 24 hours)
-    pub fn new(credentials: &Credentials, service: &Service, duration: u64) -> Self {
-        Self::new_at_time(credentials, service, duration, current_time())
-    }
-
-    /// Create a new authorized session with a specific timestamp (useful for testing).
-    pub fn new_at_time(
-        credentials: &Credentials,
-        service: &Service,
-        duration: u64,
-        time: DateTime<Utc>,
-    ) -> Self {
+    /// Derives the signing key on demand using the request's time.
+    /// The request provides all signing parameters (region, service, expires, time).
+    pub fn authorize<I: Invocation>(
+        &self,
+        request: &I,
+    ) -> Result<Authorization, AuthorizationError> {
+        let time = request.time();
         let timestamp = time.format("%Y%m%dT%H%M%SZ").to_string();
         let date = &timestamp[0..8];
 
-        Session::Authorized(Authority {
-            access_key_id: credentials.access_key_id.clone(),
-            session_token: credentials.session_token.clone(),
-            scope: format!(
-                "{}/{}/{}/aws4_request",
-                date,
-                service.region(),
-                service.name()
-            ),
-            timestamp: timestamp.to_string(),
-            key: SessionKey::new(credentials, service, date.as_bytes()),
-            duration,
-        })
-    }
+        let region = request.region();
+        let service = request.service();
+        let expires = request.expires();
 
-    /// Authorize a request for sending.
-    ///
-    /// For authorized sessions, returns a presigned URL with AWS SigV4.
-    /// For public sessions, returns the original URL with headers.
-    pub fn authorize<R: Invocation>(&self, request: &R) -> Result<Authorized, SigningError> {
-        match self {
-            Session::Authorized(session) => session.authorize(request),
-            Session::Public => {
-                // For public access, just pass through with minimal headers
-                let host = request
-                    .url()
-                    .host_str()
-                    .ok_or_else(|| SigningError::InvalidEndpoint("URL missing host".into()))?
-                    .to_string();
+        // Derive signing key on demand
+        let key = SigningKey::derive(&self.secret_access_key, date, region, service);
+        let scope = format!("{}/{}/{}/aws4_request", date, region, service);
 
-                let mut headers = vec![("host".to_string(), host)];
-                if let Some(checksum) = request.checksum() {
-                    let header_name = format!("x-amz-checksum-{}", checksum.name());
-                    headers.push((header_name, checksum.to_string()));
-                }
-
-                Ok(Authorized {
-                    url: request.url().clone(),
-                    headers,
-                })
-            }
-        }
-    }
-}
-
-impl Authority {
-    /// Authorize a request with AWS SigV4 signing.
-    fn authorize<R: Invocation>(&self, request: &R) -> Result<Authorized, SigningError> {
-        // Extract host from request URL
-        let host = request
-            .url()
+        // Extract host from request URL, including port for non-standard ports.
+        let url = request.url();
+        // hostname does not include port, so we check if there is port in the
+        // host and include it if present
+        let hostname = url
             .host_str()
-            .ok_or_else(|| SigningError::InvalidEndpoint("URL missing host".into()))?
-            .to_string();
+            .ok_or_else(|| AuthorizationError::InvalidEndpoint("URL missing host".into()))?;
+        let host = if let Some(port) = url.port() {
+            format!("{}:{}", hostname, port)
+        } else {
+            hostname.to_string()
+        };
 
         // Build signed headers
         let mut headers = vec![("host".to_string(), host.clone())];
+        // If request has a checksum, we add it to the headers so that S3 will
+        // will perform integrity checks on the data.
         if let Some(checksum) = request.checksum() {
             let header_name = format!("x-amz-checksum-{}", checksum.name());
             headers.push((header_name, checksum.to_string()));
@@ -270,22 +82,17 @@ impl Authority {
             .collect::<Vec<_>>()
             .join(";");
 
-        // Build query parameters (using String for both key and value to accommodate
-        // both static signing params and dynamic URL params)
+        // Build query parameters
         let mut query_params: Vec<(String, String)> = vec![
             ("X-Amz-Algorithm".into(), "AWS4-HMAC-SHA256".into()),
             ("X-Amz-Content-Sha256".into(), "UNSIGNED-PAYLOAD".into()),
             (
                 "X-Amz-Credential".into(),
-                format!("{}/{}", self.access_key_id, self.scope),
+                format!("{}/{}", self.access_key_id, scope),
             ),
-            ("X-Amz-Date".into(), self.timestamp.clone()),
-            ("X-Amz-Expires".into(), self.duration.to_string()),
+            ("X-Amz-Date".into(), timestamp.clone()),
+            ("X-Amz-Expires".into(), expires.to_string()),
         ];
-
-        if let Some(token) = &self.session_token {
-            query_params.push(("X-Amz-Security-Token".into(), token.clone()));
-        }
 
         // Include ACL if specified by the request
         if let Some(acl) = request.acl() {
@@ -331,15 +138,15 @@ impl Authority {
         let digest = Sha256::digest(canonical_request.as_bytes());
         let payload = format!(
             "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-            self.timestamp,
-            self.scope,
+            timestamp,
+            scope,
             hex_encode(&digest)
         );
 
         // Compute signature
-        let signature = self.key.sign(payload.as_bytes());
+        let signature = key.sign(payload.as_bytes());
 
-        // Build final URL with all query parameters (original + signing + signature)
+        // Build final URL with all query parameters
         let mut url = request.url().clone();
         url.set_query(None); // Clear existing query params (we'll add them all back)
         {
@@ -350,15 +157,107 @@ impl Authority {
             query.append_pair("X-Amz-Signature", &signature.to_string());
         }
 
-        Ok(Authorized { url, headers })
+        Ok(Authorization { url, headers })
     }
+}
+
+/// S3 Access Control List (ACL) settings.
+///
+/// These are canned ACLs supported by S3 and S3-compatible services.
+/// See: https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html#canned-acl
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acl {
+    /// Owner gets FULL_CONTROL. No one else has access rights.
+    Private,
+    /// Owner gets FULL_CONTROL. The AllUsers group gets READ access.
+    PublicRead,
+    /// Owner gets FULL_CONTROL. The AllUsers group gets READ and WRITE access.
+    PublicReadWrite,
+    /// Owner gets FULL_CONTROL. The AuthenticatedUsers group gets READ access.
+    AuthenticatedRead,
+    /// Object owner gets FULL_CONTROL. Bucket owner gets READ access.
+    BucketOwnerRead,
+    /// Both the object owner and the bucket owner get FULL_CONTROL.
+    BucketOwnerFullControl,
+}
+
+impl Acl {
+    /// Get the S3 ACL header value.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::PublicRead => "public-read",
+            Self::PublicReadWrite => "public-read-write",
+            Self::AuthenticatedRead => "authenticated-read",
+            Self::BucketOwnerRead => "bucket-owner-read",
+            Self::BucketOwnerFullControl => "bucket-owner-full-control",
+        }
+    }
+}
+
+/// AWS SigV4 signing key derived from credentials.
+///
+/// The key is derived through an HMAC chain:
+/// `HMAC(HMAC(HMAC(HMAC("AWS4" + secret, date), region), service), "aws4_request")`
+#[derive(Debug, Clone)]
+struct SigningKey(Vec<u8>);
+
+impl SigningKey {
+    /// Derive a signing key using the AWS4 key derivation algorithm.
+    fn derive(secret: &str, date: &str, region: &str, service: &str) -> Self {
+        let secret = format!("AWS4{}", secret);
+        let k_date = Self::hmac(secret.as_bytes(), date.as_bytes());
+        let k_region = Self::hmac(&k_date, region.as_bytes());
+        let k_service = Self::hmac(&k_region, service.as_bytes());
+        Self(Self::hmac(&k_service, b"aws4_request"))
+    }
+
+    /// Compute HMAC-SHA256.
+    fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
+        // HMAC-SHA256 accepts keys of any length - see detailed comment in original code
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts keys of any size");
+        mac.update(data);
+        mac.finalize().into_bytes().to_vec()
+    }
+
+    /// Sign data using this key.
+    fn sign(&self, data: &[u8]) -> Signature {
+        Signature(Self::hmac(&self.0, data))
+    }
+}
+
+/// Authorize a public request.
+///
+/// Adds required headers (host, checksum) without signing.
+pub fn unauthorized<I: Invocation>(request: &I) -> Result<Authorization, AuthorizationError> {
+    let url = request.url();
+    let host_str = url
+        .host_str()
+        .ok_or_else(|| AuthorizationError::InvalidEndpoint("URL missing host".into()))?;
+    let host = if let Some(port) = url.port() {
+        format!("{}:{}", host_str, port)
+    } else {
+        host_str.to_string()
+    };
+
+    let mut headers = vec![("host".to_string(), host)];
+    if let Some(checksum) = request.checksum() {
+        let header_name = format!("x-amz-checksum-{}", checksum.name());
+        headers.push((header_name, checksum.to_string()));
+    }
+
+    Ok(Authorization {
+        url: request.url().clone(),
+        headers,
+    })
 }
 
 /// Request metadata required for S3 authorization.
 ///
-/// This trait captures the information needed to sign an S3 request: the HTTP
-/// method, URL, and optional checksum/ACL. It intentionally excludes the request
-/// body since authorization only needs metadata, not the payload itself.
+/// This trait captures all information needed to sign an S3 request:
+/// - HTTP method, URL, checksum, ACL (request-specific)
+/// - Region, service, expires, time (signing parameters)
 ///
 /// The [`Request`](super::Request) trait extends this with the body and execution
 /// capability.
@@ -369,6 +268,9 @@ pub trait Invocation {
     /// The URL for this request.
     fn url(&self) -> &Url;
 
+    /// The AWS region for signing (e.g., "us-east-1", "auto").
+    fn region(&self) -> &str;
+
     /// The checksum of the body, if any.
     fn checksum(&self) -> Option<&Checksum> {
         None
@@ -378,11 +280,26 @@ pub trait Invocation {
     fn acl(&self) -> Option<Acl> {
         None
     }
+
+    /// The service name for signing. Defaults to "s3".
+    fn service(&self) -> &str {
+        "s3"
+    }
+
+    /// URL signature expiration in seconds. Defaults to 24 hours.
+    fn expires(&self) -> u64 {
+        DEFAULT_EXPIRES
+    }
+
+    /// The timestamp for signing. Defaults to current time.
+    fn time(&self) -> DateTime<Utc> {
+        current_time()
+    }
 }
 
-/// An authorized request ready to be sent.
+/// An authorization of the request
 #[derive(Debug)]
-pub struct Authorized {
+pub struct Authorization {
     /// The presigned URL
     pub url: Url,
     /// Headers that must be included in the HTTP request
@@ -402,7 +319,7 @@ impl std::fmt::Display for Signature {
 
 /// Errors that can occur during signing.
 #[derive(Error, Debug)]
-pub enum SigningError {
+pub enum AuthorizationError {
     /// The endpoint URL is invalid (e.g., missing host).
     #[error("invalid endpoint: {0}")]
     InvalidEndpoint(String),
@@ -467,12 +384,13 @@ fn percent_encode_path(path: &str) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     fn test_credentials() -> Credentials {
         Credentials {
             access_key_id: "my-id".into(),
             secret_access_key: "top secret".into(),
-            session_token: None,
         }
     }
 
@@ -480,11 +398,7 @@ mod tests {
         Utc.with_ymd_and_hms(2025, 5, 7, 5, 48, 59).unwrap()
     }
 
-    fn test_service() -> Service {
-        Service::s3("auto")
-    }
-
-    const TEST_DURATION: u64 = 86400;
+    const TEST_REGION: &str = "auto";
 
     fn s3_url(path: &str) -> Url {
         Url::parse(&format!("https://pale.s3.auto.amazonaws.com/{}", path)).unwrap()
@@ -503,20 +417,36 @@ mod tests {
         url: Url,
         checksum: Checksum,
         acl: Option<Acl>,
+        region: String,
+        time: Option<DateTime<Utc>>,
+        expires: Option<u64>,
     }
 
     impl TestPutRequest {
-        fn new(url: Url, body: &[u8]) -> Self {
+        fn new(url: Url, body: &[u8], region: &str) -> Self {
             use super::super::Hasher;
             Self {
                 url,
                 checksum: Hasher::Sha256.checksum(body),
                 acl: None,
+                region: region.to_string(),
+                time: None,
+                expires: None,
             }
         }
 
         fn with_acl(mut self, acl: Acl) -> Self {
             self.acl = Some(acl);
+            self
+        }
+
+        fn with_time(mut self, time: DateTime<Utc>) -> Self {
+            self.time = Some(time);
+            self
+        }
+
+        fn with_expires(mut self, expires: u64) -> Self {
+            self.expires = Some(expires);
             self
         }
     }
@@ -530,6 +460,10 @@ mod tests {
             &self.url
         }
 
+        fn region(&self) -> &str {
+            &self.region
+        }
+
         fn checksum(&self) -> Option<&Checksum> {
             Some(&self.checksum)
         }
@@ -537,15 +471,34 @@ mod tests {
         fn acl(&self) -> Option<Acl> {
             self.acl
         }
+
+        fn time(&self) -> DateTime<Utc> {
+            self.time.unwrap_or_else(current_time)
+        }
+
+        fn expires(&self) -> u64 {
+            self.expires.unwrap_or(DEFAULT_EXPIRES)
+        }
     }
 
     struct TestGetRequest {
         url: Url,
+        region: String,
+        time: Option<DateTime<Utc>>,
     }
 
     impl TestGetRequest {
-        fn new(url: Url) -> Self {
-            Self { url }
+        fn new(url: Url, region: &str) -> Self {
+            Self {
+                url,
+                region: region.to_string(),
+                time: None,
+            }
+        }
+
+        fn with_time(mut self, time: DateTime<Utc>) -> Self {
+            self.time = Some(time);
+            self
         }
     }
 
@@ -557,15 +510,34 @@ mod tests {
         fn url(&self) -> &Url {
             &self.url
         }
+
+        fn region(&self) -> &str {
+            &self.region
+        }
+
+        fn time(&self) -> DateTime<Utc> {
+            self.time.unwrap_or_else(current_time)
+        }
     }
 
     struct TestDeleteRequest {
         url: Url,
+        region: String,
+        time: Option<DateTime<Utc>>,
     }
 
     impl TestDeleteRequest {
-        fn new(url: Url) -> Self {
-            Self { url }
+        fn new(url: Url, region: &str) -> Self {
+            Self {
+                url,
+                region: region.to_string(),
+                time: None,
+            }
+        }
+
+        fn with_time(mut self, time: DateTime<Utc>) -> Self {
+            self.time = Some(time);
+            self
         }
     }
 
@@ -577,18 +549,22 @@ mod tests {
         fn url(&self) -> &Url {
             &self.url
         }
+
+        fn region(&self) -> &str {
+            &self.region
+        }
+
+        fn time(&self) -> DateTime<Utc> {
+            self.time.unwrap_or_else(current_time)
+        }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_authorizes_s3_put_request() {
-        let authority = Session::new_at_time(
-            &test_credentials(),
-            &test_service(),
-            TEST_DURATION,
-            test_time(),
-        );
-        let request = TestPutRequest::new(s3_url("file/path"), b"test body");
-        let auth = authority.authorize(&request).unwrap();
+        let credentials = test_credentials();
+        let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
+            .with_time(test_time());
+        let auth = credentials.authorize(&request).unwrap();
 
         // URL should contain signing parameters
         assert!(
@@ -599,16 +575,12 @@ mod tests {
         assert!(auth.url.as_str().contains("X-Amz-Signature="));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_authorizes_r2_put_request() {
-        let authority = Session::new_at_time(
-            &test_credentials(),
-            &test_service(),
-            TEST_DURATION,
-            test_time(),
-        );
-        let request = TestPutRequest::new(r2_url("file/path"), b"test body");
-        let auth = authority.authorize(&request).unwrap();
+        let credentials = test_credentials();
+        let request = TestPutRequest::new(r2_url("file/path"), b"test body", TEST_REGION)
+            .with_time(test_time());
+        let auth = credentials.authorize(&request).unwrap();
 
         assert!(
             auth.url
@@ -618,16 +590,11 @@ mod tests {
         assert!(auth.url.as_str().contains("X-Amz-Signature="));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_authorizes_get_request() {
-        let authority = Session::new_at_time(
-            &test_credentials(),
-            &test_service(),
-            TEST_DURATION,
-            test_time(),
-        );
-        let request = TestGetRequest::new(s3_url("file/path"));
-        let auth = authority.authorize(&request).unwrap();
+        let credentials = test_credentials();
+        let request = TestGetRequest::new(s3_url("file/path"), TEST_REGION).with_time(test_time());
+        let auth = credentials.authorize(&request).unwrap();
 
         assert!(
             auth.url
@@ -636,16 +603,12 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_authorizes_delete_request() {
-        let authority = Session::new_at_time(
-            &test_credentials(),
-            &test_service(),
-            TEST_DURATION,
-            test_time(),
-        );
-        let request = TestDeleteRequest::new(s3_url("file/path"));
-        let auth = authority.authorize(&request).unwrap();
+        let credentials = test_credentials();
+        let request =
+            TestDeleteRequest::new(s3_url("file/path"), TEST_REGION).with_time(test_time());
+        let auth = credentials.authorize(&request).unwrap();
 
         assert!(
             auth.url
@@ -654,16 +617,12 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_includes_checksum_header_in_put_request() {
-        let authority = Session::new_at_time(
-            &test_credentials(),
-            &test_service(),
-            TEST_DURATION,
-            test_time(),
-        );
-        let request = TestPutRequest::new(s3_url("file/path"), b"test body");
-        let auth = authority.authorize(&request).unwrap();
+        let credentials = test_credentials();
+        let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
+            .with_time(test_time());
+        let auth = credentials.authorize(&request).unwrap();
 
         // Should have checksum header
         assert!(
@@ -674,44 +633,36 @@ mod tests {
         assert!(auth.url.as_str().contains("x-amz-checksum-sha256"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_includes_acl_in_put_request() {
-        let authority = Session::new_at_time(
-            &test_credentials(),
-            &test_service(),
-            TEST_DURATION,
-            test_time(),
-        );
-        let request =
-            TestPutRequest::new(s3_url("file/path"), b"test body").with_acl(Acl::PublicRead);
-        let auth = authority.authorize(&request).unwrap();
+        let credentials = test_credentials();
+        let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
+            .with_acl(Acl::PublicRead)
+            .with_time(test_time());
+        let auth = credentials.authorize(&request).unwrap();
 
         // Should have ACL in query params
         assert!(auth.url.as_str().contains("x-amz-acl=public-read"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_hex_encodes_bytes() {
         assert_eq!(hex_encode(&[0x01, 0x02, 0x03, 0x0A, 0x0F]), "0102030a0f");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_percent_encodes_strings() {
         assert_eq!(percent_encode("abc123"), "abc123");
         assert_eq!(percent_encode("a b+c"), "a%20b%2Bc");
         assert_eq!(percent_encode("test/path"), "test%2Fpath");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_includes_host_and_checksum_headers() {
-        let authority = Session::new_at_time(
-            &test_credentials(),
-            &test_service(),
-            TEST_DURATION,
-            test_time(),
-        );
-        let request = TestPutRequest::new(s3_url("file/path"), b"test");
-        let auth = authority.authorize(&request).unwrap();
+        let credentials = test_credentials();
+        let request =
+            TestPutRequest::new(s3_url("file/path"), b"test", TEST_REGION).with_time(test_time());
+        let auth = credentials.authorize(&request).unwrap();
 
         assert!(auth.headers.iter().any(|(k, _)| k == "host"));
         assert!(
@@ -719,5 +670,63 @@ mod tests {
                 .iter()
                 .any(|(k, _)| k == "x-amz-checksum-sha256")
         );
+    }
+
+    /// Test that current_time() returns a reasonable value on all platforms.
+    #[dialog_common::test]
+    async fn it_gets_reasonable_current_time() -> anyhow::Result<()> {
+        let now = current_time();
+        let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+
+        // Verify the time is reasonable (year should be 2024-2030)
+        let year = &timestamp[0..4];
+        let year_num: u32 = year.parse().unwrap();
+        assert!(
+            year_num >= 2024 && year_num <= 2030,
+            "Year out of range: {}",
+            timestamp
+        );
+
+        // Print for debugging
+        #[cfg(not(target_arch = "wasm32"))]
+        println!("Native current_time: {}", timestamp);
+
+        // The signature is deterministic for a given time
+        let credentials = test_credentials();
+        let request = TestPutRequest::new(s3_url("test"), b"body", TEST_REGION).with_time(now);
+        let auth = credentials.authorize(&request).unwrap();
+
+        // Just verify it produces a valid signature
+        assert!(auth.url.to_string().contains("X-Amz-Signature="));
+
+        Ok(())
+    }
+
+    /// Uses fixed inputs to verify signature generation is identical across platforms.
+    /// If the signatures differ, it indicates a platform-specific bug in the signing code.
+    #[dialog_common::test]
+    async fn it_generates_identical_signatures_across_platforms() -> anyhow::Result<()> {
+        // Use the same fixed inputs as other tests
+        // Note: expires = 86400 (24 hours) to match the original test configuration
+        let credentials = test_credentials();
+        let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
+            .with_time(test_time())
+            .with_expires(86400);
+        let auth = credentials.authorize(&request).unwrap();
+
+        // Extract the signature from the signed URL
+        let signed_url = auth.url.to_string();
+        let signature = signed_url
+            .split("X-Amz-Signature=")
+            .nth(1)
+            .and_then(|s| s.split('&').next())
+            .unwrap_or("");
+
+        const EXPECTED_SIGNATURE: &str =
+            "04b33a973b320c6aa27ab8e2f1821a563e80a032f6089b992070310de196bdff";
+
+        assert_eq!(signature, EXPECTED_SIGNATURE,);
+
+        Ok(())
     }
 }

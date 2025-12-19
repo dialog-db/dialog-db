@@ -3,7 +3,7 @@
 //! ## Environment Variables
 //!
 //! These tests require the following environment variables:
-//! - R2S3_HOST: The S3-compatible endpoint (e.g., "https://s3.amazonaws.com" or "https://xxx.r2.cloudflarestorage.com")
+//! - R2S3_ENDPOINT: The S3-compatible endpoint (e.g., "https://s3.amazonaws.com" or "https://xxx.r2.cloudflarestorage.com")
 //! - R2S3_REGION: AWS region (e.g., "us-east-1" or "auto" for R2)
 //! - R2S3_BUCKET: Bucket name
 //! - R2S3_ACCESS_KEY_ID: Access key ID
@@ -11,19 +11,19 @@
 //!
 //! Run these tests with:
 //! ```bash
-//! R2S3_HOST=https://2fc7ca2f9584223662c5a882977b89ac.r2.cloudflarestorage.com \
+//! R2S3_ENDPOINT=https://2fc7ca2f9584223662c5a882977b89ac.r2.cloudflarestorage.com \
 //!   R2S3_REGION=auto \
 //!   R2S3_BUCKET=dialog-test \
 //!   R2S3_ACCESS_KEY_ID=access_key \
 //!   R2S3_SECRET_ACCESS_KEY=secret \
-//!   cargo test s3_integration_tests --features s3-integration-tests
+//!   cargo test s3_integration_test --features s3-integration-tests
 //! ```
 
 #![cfg(feature = "s3-integration-tests")]
 
 use anyhow::Result;
 use async_stream::try_stream;
-use dialog_storage::s3::{Credentials, S3, Service, Session, encode_s3_key};
+use dialog_storage::s3::{Address, Bucket, Credentials, encode_s3_key};
 use dialog_storage::{StorageBackend, StorageSink, StorageSource};
 use futures_util::TryStreamExt;
 
@@ -55,7 +55,7 @@ fn unique_prefix(base: &str) -> String {
 ///
 /// Uses `option_env!` instead of `env!` so that `cargo check --tests --all-features`
 /// doesn't fail when the R2S3_* environment variables aren't set at compile time.
-fn create_s3_backend_from_env() -> S3<Vec<u8>, Vec<u8>> {
+fn create_s3_backend_from_env() -> Bucket<Vec<u8>, Vec<u8>> {
     let credentials = Credentials {
         access_key_id: option_env!("R2S3_ACCESS_KEY_ID")
             .expect("R2S3_ACCESS_KEY_ID not set")
@@ -63,17 +63,17 @@ fn create_s3_backend_from_env() -> S3<Vec<u8>, Vec<u8>> {
         secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
             .expect("R2S3_SECRET_ACCESS_KEY not set")
             .into(),
-        session_token: option_env!("R2S3_SESSION_TOKEN").map(Into::into),
     };
 
-    let region = option_env!("R2S3_REGION").expect("R2S3_REGION not set");
-    let service = Service::s3(region);
-    let session = Session::new(&credentials, &service, 3600);
+    let address = Address::new(
+        option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
+        option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
+        option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
+    );
 
-    let endpoint = option_env!("R2S3_HOST").expect("R2S3_HOST not set");
-    let bucket = option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set");
-
-    S3::open(endpoint, bucket, session).with_prefix("test-prefix")
+    Bucket::open(address, Some(credentials))
+        .expect("Failed to open bucket")
+        .at("test-prefix")
 }
 
 #[dialog_common::test]
@@ -224,7 +224,7 @@ async fn it_performs_bulk_operations() -> Result<()> {
 }
 
 /// Helper to create an S3 backend without prefix from environment variables.
-fn create_s3_backend_without_prefix_from_env() -> S3<Vec<u8>, Vec<u8>> {
+fn create_s3_backend_without_prefix_from_env() -> Bucket<Vec<u8>, Vec<u8>> {
     let credentials = Credentials {
         access_key_id: option_env!("R2S3_ACCESS_KEY_ID")
             .expect("R2S3_ACCESS_KEY_ID not set")
@@ -232,18 +232,16 @@ fn create_s3_backend_without_prefix_from_env() -> S3<Vec<u8>, Vec<u8>> {
         secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
             .expect("R2S3_SECRET_ACCESS_KEY not set")
             .into(),
-        session_token: option_env!("R2S3_SESSION_TOKEN").map(Into::into),
     };
 
-    let region = option_env!("R2S3_REGION").expect("R2S3_REGION not set");
-    let service = Service::s3(region);
-    let session = Session::new(&credentials, &service, 3600);
-
-    let endpoint = option_env!("R2S3_HOST").expect("R2S3_HOST not set");
-    let bucket = option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set");
+    let address = Address::new(
+        option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
+        option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
+        option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
+    );
 
     // No prefix - keys go directly into the bucket root
-    S3::open(endpoint, bucket, session)
+    Bucket::open(address, Some(credentials)).expect("Failed to open bucket")
 }
 
 #[dialog_common::test]
@@ -403,7 +401,6 @@ async fn it_lists_objects() -> Result<()> {
     // Use a unique prefix for this test
     let test_prefix = unique_prefix("list-test");
 
-    // Create a backend with the unique prefix
     let credentials = Credentials {
         access_key_id: option_env!("R2S3_ACCESS_KEY_ID")
             .expect("R2S3_ACCESS_KEY_ID not set")
@@ -411,15 +408,17 @@ async fn it_lists_objects() -> Result<()> {
         secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
             .expect("R2S3_SECRET_ACCESS_KEY not set")
             .into(),
-        session_token: option_env!("R2S3_SESSION_TOKEN").map(Into::into),
     };
-    let region = option_env!("R2S3_REGION").expect("R2S3_REGION not set");
-    let service = Service::s3(region);
-    let session = Session::new(&credentials, &service, 3600);
-    let endpoint = option_env!("R2S3_HOST").expect("R2S3_HOST not set");
-    let bucket = option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set");
 
-    let mut backend = S3::open(endpoint, bucket, session).with_prefix(&test_prefix);
+    let address = Address::new(
+        option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
+        option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
+        option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
+    );
+
+    let mut backend = Bucket::open(address, Some(credentials))
+        .expect("Failed to open bucket")
+        .at(&test_prefix);
 
     // Set a few values
     backend
@@ -464,15 +463,17 @@ async fn it_reads_stream() -> Result<()> {
         secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
             .expect("R2S3_SECRET_ACCESS_KEY not set")
             .into(),
-        session_token: option_env!("R2S3_SESSION_TOKEN").map(Into::into),
     };
-    let region = option_env!("R2S3_REGION").expect("R2S3_REGION not set");
-    let service = Service::s3(region);
-    let session = Session::new(&credentials, &service, 3600);
-    let endpoint = option_env!("R2S3_HOST").expect("R2S3_HOST not set");
-    let bucket = option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set");
 
-    let mut backend = S3::open(endpoint, bucket, session).with_prefix(&test_prefix);
+    let address = Address::new(
+        option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
+        option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
+        option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
+    );
+
+    let mut backend = Bucket::open(address, Some(credentials))
+        .expect("Failed to open bucket")
+        .at(&test_prefix);
 
     // Set a few values
     backend
@@ -512,19 +513,18 @@ async fn it_lists_empty_for_nonexistent_prefix() -> Result<()> {
         secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
             .expect("R2S3_SECRET_ACCESS_KEY not set")
             .into(),
-        session_token: option_env!("R2S3_SESSION_TOKEN").map(Into::into),
     };
 
-    let region = option_env!("R2S3_REGION").expect("R2S3_REGION not set");
-    let service = Service::s3(region);
-    let session = Session::new(&credentials, &service, 3600);
-
-    let endpoint = option_env!("R2S3_HOST").expect("R2S3_HOST not set");
-    let bucket = option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set");
+    let address = Address::new(
+        option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
+        option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
+        option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
+    );
 
     // Use a prefix that definitely doesn't exist
-    let backend = S3::<Vec<u8>, Vec<u8>>::open(endpoint, bucket, session)
-        .with_prefix("nonexistent-prefix-that-should-not-exist-12345");
+    let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Some(credentials))
+        .expect("Failed to open bucket")
+        .at("nonexistent-prefix-that-should-not-exist-12345");
 
     // Listing should return empty result, not an error
     let result = backend.list(None).await?;

@@ -827,6 +827,8 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tokio-test",
+ "tower",
+ "tower-http",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-test",
