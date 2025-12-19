@@ -1,10 +1,11 @@
-use crate::application::{Application, FactApplication};
+use crate::application::FactApplication;
 pub use crate::artifact::{Attribute as ArtifactsAttribute, Cause, Entity, Value};
+use crate::claim::Claim;
 use crate::error::{SchemaError, TypeError};
 pub use crate::predicate::Fact;
 pub use crate::schema::Cardinality;
 pub use crate::types::{IntoType, Scalar, Type};
-use crate::Parameters;
+use crate::{Application, Parameters, Relation, Transaction};
 pub use crate::{Premise, Term};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use std::marker::PhantomData;
@@ -18,7 +19,7 @@ pub struct Attribution {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Attribute<T: Scalar> {
+pub struct AttributeSchema<T: Scalar> {
     pub namespace: &'static str,
     pub name: &'static str,
     pub description: &'static str,
@@ -27,7 +28,7 @@ pub struct Attribute<T: Scalar> {
     pub marker: PhantomData<T>,
 }
 
-impl<T: Scalar> Attribute<T> {
+impl<T: Scalar> AttributeSchema<T> {
     pub fn new(
         namespace: &'static str,
         name: &'static str,
@@ -173,9 +174,64 @@ impl<T: Scalar> Attribute<T> {
 
         Ok(FactApplication::new(the, of, is, cause, self.cardinality))
     }
+
+    /// Encode this attribute schema as CBOR for hashing
+    ///
+    /// Creates a CBOR-encoded representation with fields:
+    /// - domain: namespace
+    /// - name: name
+    /// - cardinality: cardinality
+    /// - type: content_type
+    ///
+    /// Description is excluded from the encoding.
+    pub fn to_cbor_bytes(&self) -> Vec<u8> {
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        struct CborAttributeSchema<'a> {
+            domain: &'a str,
+            name: &'a str,
+            cardinality: &'a Cardinality,
+            #[serde(rename = "type")]
+            content_type: &'a Option<Type>,
+        }
+
+        let schema = CborAttributeSchema {
+            domain: self.namespace,
+            name: self.name,
+            cardinality: &self.cardinality,
+            content_type: &self.content_type,
+        };
+
+        serde_ipld_dagcbor::to_vec(&schema).expect("CBOR encoding should not fail")
+    }
+
+    /// Compute blake3 hash of this attribute schema
+    ///
+    /// Returns a 32-byte blake3 hash of the CBOR-encoded schema
+    pub fn hash(&self) -> blake3::Hash {
+        let cbor_bytes = self.to_cbor_bytes();
+        blake3::hash(&cbor_bytes)
+    }
+
+    /// Format this attribute's hash as a URI
+    ///
+    /// Returns a string in the format: `the:{blake3_hash_hex}`
+    pub fn to_uri(&self) -> String {
+        format!("the:{}", self.hash().to_hex())
+    }
+
+    /// Parse an attribute URI and extract the hash
+    ///
+    /// Expects format: `the:{blake3_hash_hex}`
+    /// Returns None if the format is invalid
+    pub fn parse_uri(uri: &str) -> Option<blake3::Hash> {
+        let uri = uri.strip_prefix("the:")?;
+        blake3::Hash::from_hex(uri).ok()
+    }
 }
 
-impl<T: Scalar> Serialize for Attribute<T> {
+impl<T: Scalar> Serialize for AttributeSchema<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -190,7 +246,7 @@ impl<T: Scalar> Serialize for Attribute<T> {
     }
 }
 
-impl<'de, T: Scalar> Deserialize<'de> for Attribute<T> {
+impl<'de, T: Scalar> Deserialize<'de> for AttributeSchema<T> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -211,13 +267,13 @@ impl<'de, T: Scalar> Deserialize<'de> for Attribute<T> {
         struct AttributeVisitor<T>(PhantomData<T>);
 
         impl<'de, T: Scalar> Visitor<'de> for AttributeVisitor<T> {
-            type Value = Attribute<T>;
+            type Value = AttributeSchema<T>;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("struct Attribute")
             }
 
-            fn visit_map<V>(self, mut map: V) -> Result<Attribute<T>, V::Error>
+            fn visit_map<V>(self, mut map: V) -> Result<AttributeSchema<T>, V::Error>
             where
                 V: MapAccess<'de>,
             {
@@ -267,7 +323,7 @@ impl<'de, T: Scalar> Deserialize<'de> for Attribute<T> {
                 let name: &'static str = Box::leak(name.into_boxed_str());
                 let description: &'static str = Box::leak(description.into_boxed_str());
 
-                Ok(Attribute {
+                Ok(AttributeSchema {
                     namespace,
                     name,
                     description,
@@ -288,7 +344,7 @@ impl<'de, T: Scalar> Deserialize<'de> for Attribute<T> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Match<T: Scalar> {
-    pub attribute: Attribute<T>,
+    pub attribute: AttributeSchema<T>,
     pub of: Term<Entity>,
 }
 
@@ -301,7 +357,7 @@ impl<T: Scalar> Match<T> {
         of: Term<Entity>,
     ) -> Self {
         Self {
-            attribute: Attribute::new(namespace, name, description, content_type),
+            attribute: AttributeSchema::new(namespace, name, description, content_type),
             of,
         }
     }
@@ -322,5 +378,409 @@ impl<T: Scalar> Match<T> {
     }
     pub fn not<Is: Into<Term<T>>>(self, term: Is) -> Premise {
         Application::Fact(self.is(term)).not()
+    }
+}
+
+pub trait Attribute: Sized {
+    type Type: Scalar;
+
+    // Associated types for Concept implementation
+    type Match;
+    type Instance;
+    type Term;
+
+    const NAMESPACE: &'static str;
+    const NAME: &'static str;
+    const DESCRIPTION: &'static str;
+    const CARDINALITY: Cardinality;
+    const SCHEMA: AttributeSchema<Self::Type>;
+    const CONCEPT: crate::predicate::concept::Concept;
+
+    fn value(&self) -> &Self::Type;
+
+    /// Construct an attribute from its inner value
+    fn new(value: Self::Type) -> Self;
+
+    fn namespace() -> String {
+        Self::NAMESPACE.into()
+    }
+    fn name() -> String {
+        Self::NAME.into()
+    }
+    fn description() -> String {
+        Self::DESCRIPTION.into()
+    }
+    fn cardinality() -> Cardinality {
+        Self::CARDINALITY
+    }
+    fn selector() -> crate::artifact::Attribute {
+        format!("{}/{}", Self::NAMESPACE, Self::NAME)
+            .parse()
+            .expect("Failed to parse attribute")
+    }
+
+    /// Compute blake3 hash of this attribute's schema
+    ///
+    /// Returns a 32-byte blake3 hash of the CBOR-encoded attribute schema
+    /// (namespace, name, cardinality, content_type - excluding description)
+    fn hash() -> blake3::Hash {
+        let cbor_bytes = Self::SCHEMA.to_cbor_bytes();
+        blake3::hash(&cbor_bytes)
+    }
+
+    /// Format this attribute's hash as a URI
+    ///
+    /// Returns a string in the format: `the:{blake3_hash_hex}`
+    fn to_uri() -> String {
+        Self::SCHEMA.to_uri()
+    }
+
+    /// Create a query builder for a specific entity
+    fn of<E: Into<Term<Entity>>>(entity: E) -> AttributeQueryBuilder<Self::Type> {
+        AttributeQueryBuilder {
+            schema: &Self::SCHEMA,
+            entity: entity.into(),
+            content_type: PhantomData,
+        }
+    }
+
+    fn content_type() -> Option<Type> {
+        <Self::Type as IntoType>::TYPE
+    }
+}
+
+/// Query builder for attribute queries
+pub struct AttributeQueryBuilder<T: Scalar> {
+    schema: &'static AttributeSchema<T>,
+    entity: Term<Entity>,
+    content_type: PhantomData<T>,
+}
+
+impl<T: Scalar> AttributeQueryBuilder<T> {
+    pub fn is<V: Into<Term<T>>>(self, _value: V) -> Match<T> {
+        Match {
+            attribute: self.schema.clone(),
+            of: self.entity,
+        }
+    }
+}
+
+/// Query pattern for attributes - enables Match::<AttributeType> { of, is } syntax
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttributeMatch<A: Attribute> {
+    pub of: Term<Entity>,
+    pub is: Term<A::Type>,
+    pub content_type: PhantomData<A>,
+}
+
+impl<A: Attribute> AttributeMatch<A> {
+    /// Create a new attribute match pattern
+    pub fn new(of: Term<Entity>, is: Term<A::Type>) -> Self {
+        Self {
+            of,
+            is,
+            content_type: PhantomData,
+        }
+    }
+}
+
+impl<A: Attribute> Default for AttributeMatch<A> {
+    fn default() -> Self {
+        Self {
+            of: Term::var("of"),
+            is: Term::var("is"),
+            content_type: PhantomData,
+        }
+    }
+}
+
+/// Represents an entity with a single attribute.
+///
+/// Used to assert, retract, and query entities by their attributes.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Assertion
+/// tr.assert(With {
+///     this: alice,
+///     has: person::Name("Alice".into())
+/// });
+///
+/// // Retraction
+/// tr.retract(With {
+///     this: alice,
+///     has: person::Name("Alice".into())
+/// });
+///
+/// // Query
+/// Match::<With<person::Name>> {
+///     this: Term::var("entity"),
+///     has: Term::var("name")
+/// }
+/// ```
+#[derive(Clone, Debug, PartialEq)]
+pub struct With<A: Attribute> {
+    pub this: Entity,
+    pub has: A,
+}
+
+/// Query pattern for entities with a specific attribute.
+///
+/// Use with the `Match` type alias to query for entities that have an attribute.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WithMatch<A: Attribute> {
+    pub this: Term<Entity>,
+    pub has: Term<A::Type>,
+}
+
+impl<A: Attribute> Default for WithMatch<A> {
+    fn default() -> Self {
+        Self {
+            this: Term::var("this"),
+            has: Term::var("has"),
+        }
+    }
+}
+
+/// Helper methods for constructing term variables in queries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WithTerms<A: Attribute> {
+    _marker: PhantomData<A>,
+}
+
+impl<A: Attribute> WithTerms<A> {
+    pub fn this() -> Term<Entity> {
+        Term::var("this")
+    }
+
+    pub fn has() -> Term<A::Type> {
+        Term::var("has")
+    }
+}
+
+// Implement Concept for With<A>
+impl<A: Attribute> crate::concept::Concept for With<A>
+where
+    A: Clone + std::fmt::Debug + Send + 'static,
+{
+    type Instance = With<A>;
+    type Match = WithMatch<A>;
+    type Term = WithTerms<A>;
+
+    const CONCEPT: crate::predicate::concept::Concept = A::CONCEPT;
+}
+
+// Implement Quarriable for With<A>
+impl<A: Attribute> crate::dsl::Quarriable for With<A>
+where
+    A: Clone + std::fmt::Debug + Send + 'static,
+{
+    type Query = WithMatch<A>;
+}
+
+// Implement Instance trait for With<A>
+impl<A: Attribute> crate::concept::Instance for With<A>
+where
+    A: Clone + Send,
+{
+    fn this(&self) -> Entity {
+        self.this.clone()
+    }
+}
+
+// Implement Claim trait for With<A>
+impl<A: Attribute> crate::claim::Claim for With<A>
+where
+    A: Clone,
+{
+    fn assert(self, transaction: &mut Transaction) {
+        use crate::types::Scalar;
+        crate::Relation::new(A::selector(), self.this, self.has.value().as_value())
+            .assert(transaction);
+    }
+
+    fn retract(self, transaction: &mut Transaction) {
+        use crate::types::Scalar;
+        crate::Relation::new(A::selector(), self.this, self.has.value().as_value())
+            .retract(transaction);
+    }
+}
+
+// Implement Not operator for With<A> to support retractions with `!`
+impl<A: Attribute> std::ops::Not for With<A>
+where
+    A: Clone,
+{
+    type Output = crate::claim::Revert<With<A>>;
+
+    fn not(self) -> Self::Output {
+        self.revert()
+    }
+}
+
+// Implement IntoIterator for With<A>
+impl<A: Attribute> IntoIterator for With<A>
+where
+    A: Clone,
+{
+    type Item = Relation;
+    type IntoIter = std::iter::Once<Relation>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        use crate::types::Scalar;
+        std::iter::once(crate::Relation::new(
+            A::selector(),
+            self.this,
+            self.has.value().as_value(),
+        ))
+    }
+}
+
+// Implement Match trait for WithMatch<A>
+impl<A: Attribute> crate::concept::Match for WithMatch<A>
+where
+    A: Clone + std::fmt::Debug + Send + 'static,
+{
+    type Concept = With<A>;
+    type Instance = With<A>;
+
+    fn realize(
+        &self,
+        source: crate::selection::Answer,
+    ) -> Result<Self::Instance, crate::QueryError> {
+        Ok(With {
+            this: source.get(&self.this)?,
+            has: A::new(source.get(&self.has)?),
+        })
+    }
+}
+
+// Implement Not operator for WithMatch<A> to support negations in pattern matching
+impl<A: Attribute> std::ops::Not for WithMatch<A>
+where
+    A: Clone + std::fmt::Debug + Send + 'static,
+{
+    type Output = crate::Premise;
+
+    fn not(self) -> Self::Output {
+        // Convert to Application, then wrap in Negation
+        let application: Application = self.into();
+        crate::Premise::Exclude(crate::negation::Negation::not(application))
+    }
+}
+
+// Implement From<WithMatch<A>> for Parameters
+impl<A: Attribute> From<WithMatch<A>> for Parameters
+where
+    A: Clone,
+{
+    fn from(source: WithMatch<A>) -> Self {
+        let mut params = Self::new();
+        params.insert("this".to_string(), source.this.as_unknown());
+        params.insert("has".to_string(), source.has.as_unknown());
+        params
+    }
+}
+
+// Implement From<WithMatch<A>> for ConceptApplication
+impl<A: Attribute> From<WithMatch<A>> for crate::application::ConceptApplication
+where
+    A: Clone,
+{
+    fn from(source: WithMatch<A>) -> Self {
+        crate::application::ConceptApplication {
+            terms: source.into(),
+            concept: A::CONCEPT,
+        }
+    }
+}
+
+// Implement From<WithMatch<A>> for Application
+impl<A: Attribute> From<WithMatch<A>> for Application
+where
+    A: Clone,
+{
+    fn from(source: WithMatch<A>) -> Self {
+        Application::Concept(source.into())
+    }
+}
+
+// Implement From<WithMatch<A>> for Premise
+impl<A: Attribute> From<WithMatch<A>> for Premise
+where
+    A: Clone,
+{
+    fn from(source: WithMatch<A>) -> Self {
+        Premise::Apply(source.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::attribute::Attribute;
+
+    mod person {
+        use crate::attribute::Attribute;
+        use crate::Cardinality;
+
+        pub struct Name(pub String);
+
+        const NAME_CONCEPT: crate::predicate::concept::Concept = {
+            const ATTRS: crate::predicate::concept::Attributes =
+                crate::predicate::concept::Attributes::Static(&[(
+                    "name",
+                    crate::attribute::AttributeSchema {
+                        namespace: "person",
+                        name: "name",
+                        description: "The name of the person",
+                        cardinality: Cardinality::One,
+                        content_type: <String as crate::types::IntoType>::TYPE,
+                        marker: std::marker::PhantomData,
+                    },
+                )]);
+            crate::predicate::concept::Concept::Static {
+                description: "",
+                attributes: &ATTRS,
+            }
+        };
+
+        impl Attribute for Name {
+            type Type = String;
+            type Match = crate::attribute::WithMatch<Self>;
+            type Instance = crate::attribute::With<Self>;
+            type Term = crate::attribute::WithTerms<Self>;
+
+            const NAMESPACE: &'static str = "person";
+            const NAME: &'static str = "name";
+            const DESCRIPTION: &'static str = "The name of the person";
+            const CARDINALITY: Cardinality = Cardinality::One;
+            const SCHEMA: crate::attribute::AttributeSchema<Self::Type> =
+                crate::attribute::AttributeSchema {
+                    namespace: Self::NAMESPACE,
+                    name: Self::NAME,
+                    description: Self::DESCRIPTION,
+                    cardinality: Self::CARDINALITY,
+                    content_type: <String as crate::types::IntoType>::TYPE,
+                    marker: std::marker::PhantomData,
+                };
+            const CONCEPT: crate::predicate::concept::Concept = NAME_CONCEPT;
+
+            fn value(&self) -> &Self::Type {
+                &self.0
+            }
+
+            fn new(value: Self::Type) -> Self {
+                Self(value)
+            }
+        }
+    }
+
+    #[test]
+    fn test_person_name() {
+        let _name = person::Name("hello".into());
+        // Basic test that Attribute trait is implemented
+        assert_eq!(person::Name::NAMESPACE, "person");
+        assert_eq!(person::Name::NAME, "name");
     }
 }

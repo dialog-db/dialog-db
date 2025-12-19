@@ -1,6 +1,6 @@
 use dialog_query::application::ConceptApplication;
 use dialog_query::artifact::Type;
-use dialog_query::attribute::Attribute;
+use dialog_query::attribute::AttributeSchema;
 use dialog_query::error::{AnalyzerError, PlanError, QueryError};
 use dialog_query::predicate::concept::Attributes;
 use dialog_query::predicate::fact::Fact;
@@ -13,15 +13,15 @@ use std::collections::HashSet;
 #[test]
 fn test_concept_as_conclusion_operations() {
     let concept = Concept::Dynamic {
-        operator: "person".to_string(),
+        description: String::new(),
         attributes: Attributes::from(vec![
             (
                 "name",
-                Attribute::<Value>::new("person", "name", "Person name", Type::String),
+                AttributeSchema::<Value>::new("person", "name", "Person name", Type::String),
             ),
             (
                 "age",
-                Attribute::<Value>::new("person", "age", "Person age", Type::UnsignedInt),
+                AttributeSchema::<Value>::new("person", "age", "Person age", Type::UnsignedInt),
             ),
         ]),
     };
@@ -37,14 +37,18 @@ fn test_concept_as_conclusion_operations() {
 #[test]
 fn test_concept_creation() {
     let concept = Concept::Dynamic {
-        operator: "person".to_string(),
+        description: String::new(),
         attributes: Attributes::from(vec![(
             "name".to_string(),
-            Attribute::<Value>::new("person", "name", "Person name", Type::String),
+            AttributeSchema::<Value>::new("person", "name", "Person name", Type::String),
         )]),
     };
 
-    assert_eq!(concept.operator(), "person");
+    // Operator is now a computed URI
+    assert!(
+        concept.operator().starts_with("concept:"),
+        "Operator should be a concept URI"
+    );
     assert_eq!(concept.attributes().count(), 1);
     assert!(concept.attributes().keys().any(|k| k == "name"));
 }
@@ -52,15 +56,15 @@ fn test_concept_creation() {
 #[test]
 fn test_concept_application_analysis() {
     let concept = Concept::Dynamic {
-        operator: "person".to_string(),
+        description: String::new(),
         attributes: Attributes::from(vec![
             (
                 "name".to_string(),
-                Attribute::<Value>::new("person", "name", "Person name", Type::String),
+                AttributeSchema::<Value>::new("person", "name", "Person name", Type::String),
             ),
             (
                 "age".to_string(),
-                Attribute::<Value>::new("person", "age", "Person age", Type::UnsignedInt),
+                AttributeSchema::<Value>::new("person", "age", "Person age", Type::UnsignedInt),
             ),
         ]),
     };
@@ -87,15 +91,15 @@ fn test_concept_application_analysis() {
 fn test_deductive_rule_parameters() {
     let rule = DeductiveRule {
         conclusion: Concept::Dynamic {
-            operator: "adult".into(),
+            description: String::new(),
             attributes: [
                 (
                     "name".to_string(),
-                    Attribute::new("person", "name", "Person name", Type::String),
+                    AttributeSchema::new("person", "name", "Person name", Type::String),
                 ),
                 (
                     "age".to_string(),
-                    Attribute::new("person", "age", "Person age", Type::UnsignedInt),
+                    AttributeSchema::new("person", "age", "Person age", Type::UnsignedInt),
                 ),
             ]
             .into(),
@@ -132,7 +136,7 @@ fn test_error_types() {
     // Test AnalyzerError creation
     let rule = DeductiveRule {
         conclusion: Concept::Dynamic {
-            operator: "test".to_string(),
+            description: String::new(),
             attributes: Attributes::new(),
         },
         premises: vec![],
@@ -147,7 +151,11 @@ fn test_error_types() {
     let plan_error: PlanError = analyzer_error.into();
     match &plan_error {
         PlanError::UnusedParameter { rule: r, parameter } => {
-            assert_eq!(r.conclusion.operator(), "test");
+            // Operator is now a computed URI
+            assert!(
+                r.conclusion.operator().starts_with("concept:"),
+                "Operator should be a concept URI"
+            );
             assert_eq!(parameter, "test_param");
         }
         _ => panic!("Expected UnusedParameter variant"),
@@ -180,7 +188,7 @@ fn test_application_variants() {
     let mut terms = Parameters::new();
     terms.insert("test".to_string(), Term::var("test_var"));
     let concept = Concept::Dynamic {
-        operator: "test".to_string(),
+        description: String::new(),
         attributes: Attributes::new(),
     };
     let concept_app = Application::Concept(ConceptApplication { terms, concept });

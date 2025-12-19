@@ -23,21 +23,21 @@ use transaction::Edit;
 ///
 /// # Examples
 ///
-/// ```ignore
-/// use dialog_query::{Session, Fact};
-///
-/// // Open a session
+/// ```no_run
+/// # use dialog_query::{Session, Attribute, Entity};
+/// # #[derive(Attribute, Clone)]
+/// # #[namespace(user)]
+/// # struct Name(String);
+/// # async fn example(store: impl dialog_query::Store) -> Result<(), Box<dyn std::error::Error>> {
+/// let entity = Entity::from(1);
 /// let mut session = Session::open(store);
 ///
-/// // Commit individual claims
-/// session.commit(Fact::assert("user/name".parse()?, entity, "Alice".to_string())).await?;
-///
-/// // Commit multiple claims at once
-/// session.commit(vec![
-///     Fact::assert("user/name".parse()?, entity1, "Alice".to_string()),
-///     Fact::assert("user/name".parse()?, entity2, "Bob".to_string()),
-///     Fact::retract("user/email".parse()?, entity1, "old@example.com".to_string()),
-/// ]).await?;
+/// // Commit changes using a transaction
+/// let mut edit = session.edit();
+/// edit.assert(Name("Alice".to_string()).of(entity));
+/// session.commit(edit).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Session<S: Store> {
@@ -52,10 +52,11 @@ impl<S: Store> Session<S> {
     ///
     /// # Examples
     ///
-    /// ```ignore
-    /// use dialog_query::Session;
-    ///
+    /// ```no_run
+    /// # use dialog_query::Session;
+    /// # fn example(artifacts_store: impl dialog_query::Store) {
     /// let session = Session::open(artifacts_store);
+    /// # }
     /// ```
     pub fn open(store: S) -> Self {
         Session {
@@ -66,13 +67,13 @@ impl<S: Store> Session<S> {
 
     /// Register a new rule into the session
     pub fn register(mut self, rule: DeductiveRule) -> Self {
-        if let Some(rules) = self.rules.get_mut(rule.conclusion.operator()) {
+        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator()) {
             if !rules.contains(&rule) {
                 rules.push(rule);
             }
         } else {
             self.rules
-                .insert(rule.conclusion.operator().into(), vec![rule.clone()]);
+                .insert(rule.conclusion.operator(), vec![rule.clone()]);
         }
 
         self
@@ -81,19 +82,31 @@ impl<S: Store> Session<S> {
     /// Install a rule from a function - concept inferred from function parameter.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// use dialog_query::{Session, Match, IntoWhen};
     ///
-    /// fn person_rule(person: Match<Person>) -> impl IntoWhen {
+    /// ```no_run
+    /// # use dialog_query::{Session, Attribute, Concept, Entity, Term};
+    /// # #[derive(Attribute, Clone)]
+    /// # #[namespace(person)]
+    /// # struct Name(String);
+    /// # #[derive(Concept, Clone)]
+    /// # #[namespace(demo)]
+    /// # struct Person { this: Term<Entity>, name: Term<String> }
+    /// # #[derive(Concept, Clone)]
+    /// # #[namespace(demo)]
+    /// # struct Employee { this: Term<Entity>, name: Term<String> }
+    /// # fn example(session: Session<impl dialog_query::Store>) -> Result<(), dialog_query::error::CompileError> {
+    /// fn person_rule(person: PersonMatch) -> (EmployeeMatch,) {
     ///     (
-    ///         Match::<Employee> {
+    ///         MaEmployeeMatch {
     ///             this: person.this,
-    ///             name: person.name
+    ///             name: person.name,
     ///         },
     ///     )
     /// }
     ///
-    /// session.install(person_rule)?;
+    /// let session = session.install(person_rule)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn install<M, W>(self, rule: impl Fn(M) -> W) -> Result<Self, crate::error::CompileError>
     where
@@ -114,18 +127,23 @@ impl<S: Store> Session<S> {
     ///
     /// # Examples
     ///
-    /// ```ignore
-    /// use dialog_query::{Session, Fact, Relation};
-    ///
+    /// ```no_run
+    /// # use dialog_query::{Session, Attribute, Entity};
+    /// # #[derive(Attribute, Clone)]
+    /// # #[namespace(user)]
+    /// # struct Name(String);
+    /// # async fn example(store: impl dialog_query::Store) -> Result<(), Box<dyn std::error::Error>> {
+    /// let entity = Entity::from(1);
     /// let mut session = Session::open(store);
     /// let mut transaction = session.edit();
     ///
     /// // Add operations to the transaction
-    /// transaction.assert(Relation::new(attr, entity, value));
-    /// transaction.retract(Relation::new(attr2, entity, old_value));
+    /// transaction.assert(Name("Alice".to_string()).of(entity));
     ///
     /// // Commit the transaction
     /// session.commit(transaction).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn edit(&self) -> Transaction {
         Transaction::new()
@@ -137,14 +155,20 @@ impl<S: Store> Session<S> {
     ///
     /// # Examples
     ///
-    /// ```ignore
-    /// use dialog_query::{Session, Relation};
-    ///
+    /// ```no_run
+    /// # use dialog_query::{Session, Attribute, Entity};
+    /// # #[derive(Attribute, Clone)]
+    /// # #[namespace(user)]
+    /// # struct Name(String);
+    /// # async fn example(store: impl dialog_query::Store) -> Result<(), Box<dyn std::error::Error>> {
+    /// let entity = Entity::from(1);
     /// let mut session = Session::open(store);
     /// let mut edit = session.edit();
     ///
-    /// edit.assert(Relation::new(attr, entity, value));
+    /// edit.assert(Name("Alice".to_string()).of(entity));
     /// session.commit(edit).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn commit(&mut self, transaction: Transaction) -> Result<(), TransactionError> {
         self.store.commit(transaction.into_stream()).await?;
@@ -158,16 +182,23 @@ impl<S: Store> Session<S> {
     ///
     /// # Examples
     ///
-    /// ```ignore
-    /// use dialog_query::{Session, Fact};
-    ///
+    /// ```no_run
+    /// # use dialog_query::{Session, Attribute, Entity};
+    /// # #[derive(Attribute, Clone)]
+    /// # #[namespace(user)]
+    /// # struct Name(String);
+    /// # async fn example(store: impl dialog_query::Store) -> Result<(), Box<dyn std::error::Error>> {
+    /// let alice = Entity::from(1);
+    /// let bob = Entity::from(2);
     /// let mut session = Session::open(store);
     ///
-    /// // Can pass any items that implement Into<Claim>
+    /// // Can pass any items that implement Edit
     /// session.transact([
-    ///     Employee { this: alice, name: "Alice".into(), role: "CEO".into() },
-    ///     Relation { the: "user/name".parse()?, of: bob, is: "Bob".to_string() }
+    ///     Name("Alice".to_string()).of(alice),
+    ///     Name("Bob".to_string()).of(bob),
     /// ]).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn transact<E, D>(&mut self, changes: D) -> Result<(), DialogArtifactsError>
     where
@@ -194,17 +225,15 @@ impl<S: Store> Session<S> {
 ///
 /// # Examples
 ///
-/// ```ignore
-/// use dialog_query::{QuerySession, Fact};
-///
+/// ```no_run
+/// # use dialog_query::{QuerySession, DeductiveRule};
+/// # fn example(artifacts: impl dialog_query::ArtifactStore + Clone + Send + Sync + 'static, adult_rule: DeductiveRule) {
 /// // Convert an artifact store to a query session
 /// let query_session: QuerySession<_> = artifacts.into();
 ///
-/// // Query with rule resolution
-/// let results = concept.query(&query_session)?;
-///
 /// // Install rules for more advanced querying
 /// let query_session = query_session.install(adult_rule);
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct QuerySession<S: ArtifactStore> {
@@ -221,10 +250,11 @@ impl<S: ArtifactStore> QuerySession<S> {
     ///
     /// # Examples
     ///
-    /// ```ignore
-    /// use dialog_query::QuerySession;
-    ///
+    /// ```no_run
+    /// # use dialog_query::QuerySession;
+    /// # fn example(artifacts: impl dialog_query::ArtifactStore) {
     /// let query_session = QuerySession::new(artifacts);
+    /// # }
     /// ```
     pub fn new(store: S) -> Self {
         Self {
@@ -240,19 +270,21 @@ impl<S: ArtifactStore> QuerySession<S> {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use dialog_query::{QuerySession, DeductiveRule};
+    /// # fn example(artifacts: impl dialog_query::ArtifactStore, adult_rule: DeductiveRule, senior_rule: DeductiveRule) {
     /// let query_session = QuerySession::new(artifacts)
     ///     .install(adult_rule)
     ///     .install(senior_rule);
+    /// # }
     /// ```
     pub fn install(mut self, rule: DeductiveRule) -> Self {
-        if let Some(rules) = self.rules.get_mut(rule.conclusion.operator()) {
+        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator()) {
             if !rules.contains(&rule) {
                 rules.push(rule);
             }
         } else {
-            self.rules
-                .insert(rule.conclusion.operator().into(), vec![rule]);
+            self.rules.insert(rule.conclusion.operator(), vec![rule]);
         }
         self
     }
@@ -325,7 +357,7 @@ mod tests {
 
     use crate::{
         predicate::{self, concept::Attributes, Fact},
-        Attribute, Parameters, Relation, Type,
+        AttributeSchema, Parameters, Relation, Type,
     };
 
     use super::*;
@@ -374,15 +406,15 @@ mod tests {
             .await?;
 
         let person = predicate::Concept::Dynamic {
-            operator: "person".into(),
+            description: String::new(),
             attributes: [
                 (
                     "name",
-                    Attribute::<Value>::new(&"person", &"name", &"person name", Type::String),
+                    AttributeSchema::<Value>::new("person", "name", "person name", Type::String),
                 ),
                 (
                     "age",
-                    Attribute::<Value>::new(&"person", &"age", &"person age", Type::UnsignedInt),
+                    AttributeSchema::<Value>::new("person", "age", "person age", Type::UnsignedInt),
                 ),
             ]
             .into(),
@@ -438,11 +470,21 @@ mod tests {
         let store = Artifacts::anonymous(backend).await?;
         let mut _session = Session::open(store);
 
+        mod person {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Name(pub String);
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Age(pub u32);
+        }
+
         #[derive(Debug, Clone, PartialEq, Concept)]
         pub struct Person {
             this: Entity,
-            name: String,
-            age: u32,
+            name: person::Name,
+            age: person::Age,
         }
 
         // let alice = Entity::new()?;
@@ -484,11 +526,11 @@ mod tests {
         //     attributes: [
         //         (
         //             "name",
-        //             Attribute::new(&"person", &"name", &"person name", Type::String),
+        //             AttributeSchema::new("person", "name", "person name", Type::String),
         //         ),
         //         (
         //             "age",
-        //             Attribute::new(&"person", &"age", &"person age", Type::UnsignedInt),
+        //             AttributeSchema::new("person", "age", "person age", Type::UnsignedInt),
         //         ),
         //     ]
         //     .into(),
@@ -537,15 +579,15 @@ mod tests {
         let mut attributes = HashMap::new();
         attributes.insert(
             "name".into(),
-            Attribute::new(&"person", &"name", &"person name", Type::String),
+            AttributeSchema::new("person", "name", "person name", Type::String),
         );
         attributes.insert(
             "age".into(),
-            Attribute::new(&"person", &"age", &"person age", Type::UnsignedInt),
+            AttributeSchema::new("person", "age", "person age", Type::UnsignedInt),
         );
 
         let person = predicate::Concept::Dynamic {
-            operator: "person".into(),
+            description: String::new(),
             attributes: Attributes::from(attributes),
         };
 
@@ -570,15 +612,15 @@ mod tests {
         let mut session = Session::open(store);
 
         let person = predicate::Concept::Dynamic {
-            operator: "person".into(),
+            description: String::new(),
             attributes: [
                 (
                     "name",
-                    Attribute::new(&"person", &"name", &"person name", Type::String),
+                    AttributeSchema::new("person", "name", "person name", Type::String),
                 ),
                 (
                     "age",
-                    Attribute::new(&"person", &"age", &"person age", Type::UnsignedInt),
+                    AttributeSchema::new("person", "age", "person age", Type::UnsignedInt),
                 ),
             ]
             .into(),
@@ -646,23 +688,43 @@ mod tests {
         use crate::{Concept, Fact, Term};
         use dialog_storage::MemoryStorageBackend;
 
+        mod employee {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Name(pub String);
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Job(pub String);
+        }
+
+        mod stuff {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Name(pub String);
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Role(pub String);
+        }
+
         #[derive(Clone, Debug, PartialEq, Concept)]
         pub struct Employee {
             /// Employee
             pub this: Entity,
             /// Employee Name
-            pub name: String,
+            pub name: employee::Name,
             /// The job title of the employee
-            pub job: String,
+            pub job: employee::Job,
         }
 
         #[derive(Clone, Debug, PartialEq, Concept)]
         pub struct Stuff {
             pub this: Entity,
             /// Name of the stuff member
-            pub name: String,
+            pub name: stuff::Name,
             /// Role of the stuff member
-            pub role: String,
+            pub role: stuff::Role,
         }
 
         // employee can be derived from the stuff concept
@@ -702,8 +764,8 @@ mod tests {
 
         let _mallory = Stuff {
             this: Entity::new()?,
-            name: "Mallory".into(),
-            role: "developer".into(),
+            name: stuff::Name("Mallory".into()),
+            role: stuff::Role("developer".into()),
         };
 
         session.transact(vec![alice, bob]).await?;
@@ -742,23 +804,43 @@ mod tests {
         use crate::{Concept, Match, Term};
         use dialog_storage::MemoryStorageBackend;
 
+        mod employee {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Name(pub String);
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Job(pub String);
+        }
+
+        mod stuff {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Name(pub String);
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Role(pub String);
+        }
+
         #[derive(Clone, Debug, PartialEq, Concept)]
         pub struct Employee {
             /// Employee
             pub this: Entity,
             /// Employee Name
-            pub name: String,
+            pub name: employee::Name,
             /// The job title of the employee
-            pub job: String,
+            pub job: employee::Job,
         }
 
         #[derive(Clone, Debug, PartialEq, Concept)]
         pub struct Stuff {
             pub this: Entity,
             /// Name of the stuff member
-            pub name: String,
+            pub name: stuff::Name,
             /// Role of the stuff member
-            pub role: String,
+            pub role: stuff::Role,
         }
 
         // Define a rule using the clean function API - no manual DeductiveRule construction!
@@ -838,13 +920,14 @@ mod tests {
         let mut found_bob = false;
 
         for employee in employees {
-            match employee.name.as_str() {
+            use crate::Attribute as _;
+            match employee.name.value().as_str() {
                 "Alice" => {
-                    assert_eq!(employee.job, "manager");
+                    assert_eq!(employee.job.value(), "manager");
                     found_alice = true;
                 }
                 "Bob" => {
-                    assert_eq!(employee.job, "developer");
+                    assert_eq!(employee.job.value(), "developer");
                     found_bob = true;
                 }
                 name => panic!("Unexpected employee: {}", name),
@@ -857,46 +940,41 @@ mod tests {
         Ok(())
     }
 
+    mod implicit_attr_test {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Name(pub String);
+
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Role(pub String);
+    }
+
     #[tokio::test]
     async fn test_implicit_attribute() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Entity};
         use crate::query::Output;
         use crate::rule::When;
-        use crate::{Concept, Fact, Match, Term};
+        use crate::{Attribute as _, Concept, Fact, Match, Term};
         use dialog_storage::MemoryStorageBackend;
+        use implicit_attr_test::{Name, Role};
 
         #[derive(Clone, Debug, PartialEq, Concept)]
         pub struct Employee {
             /// Employee
             pub this: Entity,
             /// Employee Name
-            pub name: String,
+            pub name: Name,
             /// The job title of the employee
-            pub role: String,
+            pub role: Role,
         }
 
-        mod without_role {
-            use crate::{Concept, Entity};
-
-            #[derive(Clone, Debug, PartialEq, Concept)]
-            pub struct Employee {
-                /// Employee
-                pub this: Entity,
-                /// Employee Name
-                pub name: String,
-            }
-        }
-
-        mod with_role {
-            use crate::{Concept, Entity};
-
-            #[derive(Clone, Debug, PartialEq, Concept)]
-            pub struct Employee {
-                /// Employee
-                pub this: Entity,
-                /// The job title of the employee
-                pub role: String,
-            }
+        #[derive(Clone, Debug, PartialEq, Concept)]
+        pub struct EmployeeWithoutRole {
+            /// Employee
+            pub this: Entity,
+            /// Employee Name
+            pub name: Name,
         }
 
         // Define a rule using the clean function API - no manual DeductiveRule construction!
@@ -904,17 +982,17 @@ mod tests {
             // This rule says: "An employee exists when there's stuff with matching attributes"
             // The premises check for stuff/name and stuff/role matching employee/name and employee/job
             (
-                employee.role.is("employee"),
+                employee.role.is(Role("employee".into())),
                 // employee has a name
                 Fact::<String>::select()
-                    .the("employee/name")
+                    .the("implicit-attr-test/name")
                     .of(employee.this.clone())
                     .is(employee.name.clone().as_unknown())
                     .compile()
                     .unwrap(),
                 // but does not have role (using ! operator)
                 !Fact::<String>::select()
-                    .the("employee/role")
+                    .the("implicit-attr-test/role")
                     .of(employee.this.clone())
                     .is(Term::blank())
                     .compile()
@@ -932,12 +1010,12 @@ mod tests {
         let mut transaction = session.edit();
         transaction.assert(Employee {
             this: Entity::new()?,
-            name: "Alice".into(),
-            role: "manager".into(),
+            name: Name("Alice".into()),
+            role: Role("manager".into()),
         });
-        transaction.assert(without_role::Employee {
+        transaction.assert(EmployeeWithoutRole {
             this: Entity::new()?,
-            name: "Bob".into(),
+            name: Name("Bob".into()),
         });
 
         // Create test data as Stuff
@@ -958,13 +1036,13 @@ mod tests {
         let mut found_bob = false;
 
         for employee in result {
-            match employee.name.as_str() {
+            match employee.name.value().as_str() {
                 "Alice" => {
-                    assert_eq!(employee.role, "manager");
+                    assert_eq!(employee.role.value(), "manager");
                     found_alice = true;
                 }
                 "Bob" => {
-                    assert_eq!(employee.role, "employee");
+                    assert_eq!(employee.role.value(), "employee");
                     found_bob = true;
                 }
                 name => panic!("Unexpected employee: {}", name),

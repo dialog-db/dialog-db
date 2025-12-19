@@ -2,25 +2,42 @@
 
 use anyhow::Result;
 use dialog_query::{
-    artifact::{Artifacts, Attribute, Entity, Value},
+    artifact::{Artifacts, Entity},
     query::Output,
     rule::Match,
     term::Term,
-    Concept, Relation, Session,
+    Attribute, Concept, Session,
 };
 use dialog_storage::MemoryStorageBackend;
+
+mod person {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Name(pub String);
+}
+
+mod employee {
+    use dialog_query::Attribute;
+
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Name(pub String);
+
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Department(pub String);
+}
 
 #[derive(Concept, Debug, Clone)]
 pub struct Person {
     pub this: Entity,
-    pub name: String,
+    pub name: person::Name,
 }
 
 #[derive(Concept, Debug, Clone, PartialEq)]
 pub struct Employee {
     pub this: Entity,
-    pub name: String,
-    pub department: String,
+    pub name: employee::Name,
+    pub department: employee::Department,
 }
 
 #[tokio::test]
@@ -31,36 +48,32 @@ async fn test_single_attribute_query_works() -> Result<()> {
     let alice = Entity::new()?;
     let bob = Entity::new()?;
 
-    let claims = vec![
-        Relation {
-            the: "person/name".parse::<Attribute>()?,
-            of: alice.clone(),
-            is: Value::String("Alice".into()),
-        },
-        Relation {
-            the: "person/name".parse::<Attribute>()?,
-            of: bob.clone(),
-            is: Value::String("Bob".into()),
-        },
-    ];
-
     let mut session = Session::open(artifacts.clone());
-    session.transact(claims).await?;
+    let mut transaction = session.edit();
+    transaction.assert(dialog_query::attribute::With {
+        this: alice,
+        has: person::Name("Alice".into()),
+    });
+    transaction.assert(dialog_query::attribute::With {
+        this: bob,
+        has: person::Name("Bob".into()),
+    });
+    session.commit(transaction).await?;
 
     // ✅ This works: Single attribute with constant
-    let alice_query = PersonMatch {
+    let alice_query = Match::<Person> {
         this: Term::var("person"),
-        name: "Alice".into(),
+        name: Term::from("Alice".to_string()),
     };
 
     let session = Session::open(artifacts.clone());
     let results = alice_query.query(session).try_vec().await?;
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].name, "Alice");
+    assert_eq!(results[0].name.value(), "Alice");
     println!("✅ Single-attribute constant query: WORKS");
 
     // ✅ This works: Single attribute with variable
-    let all_people_query = PersonMatch {
+    let all_people_query = Match::<Person> {
         this: Term::var("person"),
         name: Term::var("name"),
     };
@@ -81,45 +94,39 @@ async fn test_multi_attribute_constant_query_works() -> Result<()> {
     let alice = Entity::new()?;
     let bob = Entity::new()?;
 
-    let claims = vec![
-        Relation {
-            the: "employee/name".parse::<Attribute>()?,
-            of: alice.clone(),
-            is: Value::String("Alice".into()),
-        },
-        Relation {
-            the: "employee/department".parse::<Attribute>()?,
-            of: alice.clone(),
-            is: Value::String("Engineering".into()),
-        },
-        Relation {
-            the: "employee/name".parse::<Attribute>()?,
-            of: bob.clone(),
-            is: Value::String("Bob".into()),
-        },
-        Relation {
-            the: "employee/department".parse::<Attribute>()?,
-            of: bob.clone(),
-            is: Value::String("Sales".into()),
-        },
-    ];
-
     let mut session = Session::open(artifacts.clone());
-    session.transact(claims).await?;
+    let mut transaction = session.edit();
+    transaction.assert(dialog_query::attribute::With {
+        this: alice.clone(),
+        has: employee::Name("Alice".into()),
+    });
+    transaction.assert(dialog_query::attribute::With {
+        this: alice.clone(),
+        has: employee::Department("Engineering".into()),
+    });
+    transaction.assert(dialog_query::attribute::With {
+        this: bob.clone(),
+        has: employee::Name("Bob".into()),
+    });
+    transaction.assert(dialog_query::attribute::With {
+        this: bob,
+        has: employee::Department("Sales".into()),
+    });
+    session.commit(transaction).await?;
 
     // ✅ This works: Multi-attribute with all constants
     let alice_engineering_query = Match::<Employee> {
         this: Term::var("employee"),
-        name: "Alice".into(),
-        department: "Engineering".into(),
+        name: Term::from("Alice".to_string()),
+        department: Term::from("Engineering".to_string()),
     };
 
     let session = Session::open(artifacts);
 
     let results = alice_engineering_query.query(session).try_vec().await?;
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].name, "Alice");
-    assert_eq!(results[0].department, "Engineering");
+    assert_eq!(results[0].name.value(), "Alice");
+    assert_eq!(results[0].department.value(), "Engineering");
     // Note: We don't compare the full struct because we don't know the entity ID in advance
     assert_eq!(results[0].this, alice); // Verify it's Alice's entity
     println!("✅ Multi-attribute constant query: WORKS");
@@ -135,55 +142,42 @@ async fn test_multi_attribute_variable_query_limitation() -> Result<()> {
     let alice = Entity::new()?;
     let bob = Entity::new()?;
 
-    let claims = vec![
-        Relation {
-            the: "employee/name".parse::<Attribute>()?,
-            of: alice.clone(),
-            is: Value::String("Alice".into()),
-        },
-        Relation {
-            the: "employee/department".parse::<Attribute>()?,
-            of: alice.clone(),
-            is: Value::String("Engineering".into()),
-        },
-        Relation {
-            the: "employee/name".parse::<Attribute>()?,
-            of: bob.clone(),
-            is: Value::String("Bob".into()),
-        },
-        Relation {
-            the: "employee/department".parse::<Attribute>()?,
-            of: bob.clone(),
-            is: Value::String("Sales".into()),
-        },
-    ];
-
     let mut session = Session::open(artifacts.clone());
-    session.transact(claims).await?;
+    let mut transaction = session.edit();
+    transaction.assert(dialog_query::attribute::With {
+        this: alice.clone(),
+        has: employee::Name("Alice".into()),
+    });
+    transaction.assert(dialog_query::attribute::With {
+        this: alice.clone(),
+        has: employee::Department("Engineering".into()),
+    });
+    transaction.assert(dialog_query::attribute::With {
+        this: bob.clone(),
+        has: employee::Name("Bob".into()),
+    });
+    transaction.assert(dialog_query::attribute::With {
+        this: bob.clone(),
+        has: employee::Department("Sales".into()),
+    });
+    session.commit(transaction).await?;
 
-    // ⚠️ This has limitations: Multi-attribute with mixed constants and variables
-    let engineering_query = EmployeeMatch {
+    let engineering_query = Match::<Employee> {
         this: Term::var("employee"),
-        name: Term::var("name"),          // Variable to capture
-        department: "Engineering".into(), // Constant to filter
+        name: Term::var("name"), // Variable to capture
+        department: Term::from("Engineering".to_string()), // Constant to filter
     };
 
     let session = Session::open(artifacts);
-    match engineering_query.query(session).try_vec().await {
-        Ok(results) => {
-            // Currently this might return more results than expected
-            // because we only execute the first plan (probably the name plan)
-            // instead of properly joining all plans
-            println!(
-                "⚠️  Multi-attribute variable query returned {} results",
-                results.len()
-            );
-            println!("⚠️  This demonstrates the current limitation in plan joining");
-        }
-        Err(e) => {
-            println!("❌ Multi-attribute variable query failed: {}", e);
-        }
-    }
+    let results = engineering_query.query(session).try_vec().await?;
+    assert_eq!(
+        results,
+        vec![Employee {
+            this: alice.clone(),
+            name: employee::Name("Alice".into()),
+            department: employee::Department("Engineering".into())
+        }]
+    );
 
     Ok(())
 }

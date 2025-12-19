@@ -828,6 +828,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "blake3",
  "dialog-artifacts",
  "dialog-common",
  "dialog-query-macros",
@@ -837,6 +838,7 @@ dependencies = [
  "indexmap",
  "paste",
  "serde",
+ "serde_ipld_dagcbor",
  "serde_json",
  "thiserror 2.0.17",
  "tokio",

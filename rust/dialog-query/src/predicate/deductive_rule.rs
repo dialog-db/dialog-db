@@ -30,7 +30,7 @@ impl DeductiveRule {
         uncompiled.compile()
     }
 
-    pub fn operator(&self) -> &str {
+    pub fn operator(&self) -> String {
         self.conclusion.operator()
     }
     pub fn operands(&self) -> impl Iterator<Item = &str> {
@@ -137,15 +137,15 @@ fn test_rule_compiles_with_valid_premises() {
     use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
     // Rule: person(name, age) :- fact(user/name, ?user, name), fact(user/age, ?user, age)
     let conclusion = Concept::Dynamic {
-        operator: "person".to_string(),
+        description: String::new(),
         attributes: vec![
             (
                 "name",
-                crate::attribute::Attribute::new("person", "name", "", Type::String),
+                crate::attribute::AttributeSchema::new("person", "name", "", Type::String),
             ),
             (
                 "age",
-                crate::attribute::Attribute::new("person", "age", "", Type::UnsignedInt),
+                crate::attribute::AttributeSchema::new("person", "age", "", Type::UnsignedInt),
             ),
         ]
         .into(),
@@ -178,15 +178,15 @@ fn test_rule_fails_with_unconstrained_fact() {
     use crate::artifact::{Entity, Type};
     // Rule: person(key, value) :- fact(key, ?user, value) - all params unconstrained
     let conclusion = Concept::Dynamic {
-        operator: "person".to_string(),
+        description: String::new(),
         attributes: vec![
             (
                 "key",
-                crate::attribute::Attribute::new("person", "key", "", Type::String),
+                crate::attribute::AttributeSchema::new("person", "key", "", Type::String),
             ),
             (
                 "value",
-                crate::attribute::Attribute::new("person", "value", "", Type::String),
+                crate::attribute::AttributeSchema::new("person", "value", "", Type::String),
             ),
         ]
         .into(),
@@ -207,15 +207,15 @@ fn test_rule_fails_with_unused_parameter() {
     use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
     // Rule: person(name, age) :- fact(user/name, ?this, name) - 'age' unused
     let conclusion = Concept::Dynamic {
-        operator: "person".to_string(),
+        description: String::new(),
         attributes: vec![
             (
                 "name",
-                crate::attribute::Attribute::new("person", "name", "", Type::String),
+                crate::attribute::AttributeSchema::new("person", "name", "", Type::String),
             ),
             (
                 "age",
-                crate::attribute::Attribute::new("person", "age", "", Type::UnsignedInt),
+                crate::attribute::AttributeSchema::new("person", "age", "", Type::UnsignedInt),
             ),
         ]
         .into(),
@@ -240,15 +240,15 @@ fn test_rule_fails_with_no_premises() {
     use crate::artifact::Type;
     // Rule: person(name, age) :- (empty)
     let conclusion = Concept::Dynamic {
-        operator: "person".to_string(),
+        description: String::new(),
         attributes: vec![
             (
                 "name",
-                crate::attribute::Attribute::new("person", "name", "", Type::String),
+                crate::attribute::AttributeSchema::new("person", "name", "", Type::String),
             ),
             (
                 "age",
-                crate::attribute::Attribute::new("person", "age", "", Type::UnsignedInt),
+                crate::attribute::AttributeSchema::new("person", "age", "", Type::UnsignedInt),
             ),
         ]
         .into(),
@@ -262,15 +262,15 @@ fn test_rule_compiles_with_chained_dependencies() {
     // Rule: result(key, value) :- fact(user/name, ?user, "jack"), fact(key, ?user, value)
     // First fact constrains ?user, allowing second fact to be planned
     let conclusion = Concept::Dynamic {
-        operator: "result".to_string(),
+        description: String::new(),
         attributes: vec![
             (
                 "key",
-                crate::attribute::Attribute::new("result", "key", "", Type::String),
+                crate::attribute::AttributeSchema::new("result", "key", "", Type::String),
             ),
             (
                 "value",
-                crate::attribute::Attribute::new("result", "value", "", Type::String),
+                crate::attribute::AttributeSchema::new("result", "value", "", Type::String),
             ),
         ]
         .into(),
@@ -306,10 +306,10 @@ fn test_rule_parameter_name_vs_variable_name() {
     // Rule: result(key, value) :- fact(user/name, ?entity, key_var)
     // Parameter "is" maps to variable "key_var", not "key"
     let conclusion = Concept::Dynamic {
-        operator: "result".to_string(),
+        description: String::new(),
         attributes: vec![(
             "key",
-            crate::attribute::Attribute::new("result", "key", "", Type::String),
+            crate::attribute::AttributeSchema::new("result", "key", "", Type::String),
         )]
         .into(),
     };

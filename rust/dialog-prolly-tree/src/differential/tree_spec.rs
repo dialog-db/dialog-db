@@ -10,6 +10,24 @@ use std::{
     fmt::Debug,
 };
 
+/// Type alias for the test storage backend
+type TestStorageBackend = dialog_storage::MemoryStorageBackend<[u8; 32], Vec<u8>>;
+
+/// Type alias for the test journaled storage
+type TestJournaledStorage = dialog_storage::JournaledStorage<TestStorageBackend>;
+
+/// Type alias for the complete test storage
+type TestStorage = dialog_storage::Storage<dialog_storage::CborEncoder, TestJournaledStorage>;
+
+/// Type alias for a test tree
+type TestTree = crate::Tree<
+    DistributionSimulator,
+    Vec<u8>,
+    Vec<u8>,
+    [u8; 32],
+    dialog_storage::Storage<dialog_storage::CborEncoder, TestJournaledStorage>,
+>;
+
 /// A distribution that reads ranks directly from keys.
 /// Keys are encoded as: [actual_key_bytes, 0x00, rank_byte]
 /// This makes the distribution trivial - just read the last byte!
@@ -168,12 +186,7 @@ impl TreeDescriptor {
 
     pub async fn build(
         self,
-        storage: dialog_storage::Storage<
-            dialog_storage::CborEncoder,
-            dialog_storage::JournaledStorage<
-                dialog_storage::MemoryStorageBackend<[u8; 32], Vec<u8>>,
-            >,
-        >,
+        storage: TestStorage,
     ) -> Result<TreeSpec, Box<dyn std::error::Error + Send + Sync>> {
         use std::collections::BTreeMap;
 
@@ -329,12 +342,7 @@ impl TreeDescriptor {
     async fn build_spec_from_node(
         spec: &mut [Vec<NodeSpec>],
         node: &crate::Node<Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
-        storage: &dialog_storage::Storage<
-            dialog_storage::CborEncoder,
-            dialog_storage::JournaledStorage<
-                dialog_storage::MemoryStorageBackend<[u8; 32], Vec<u8>>,
-            >,
-        >,
+        storage: &TestStorage,
         height: usize,
         expected_ops: &HashMap<(Vec<u8>, usize), Expect>,
     ) {
@@ -416,40 +424,13 @@ fn decode_key(encoded: &[u8]) -> Vec<u8> {
 /// Compiled TreeSpec with tree built and hashes populated
 pub struct TreeSpec {
     pub spec: Vec<Vec<NodeSpec>>, // Node specs with hashes populated
-    tree: crate::Tree<
-        DistributionSimulator,
-        Vec<u8>,
-        Vec<u8>,
-        dialog_storage::Blake3Hash,
-        dialog_storage::Storage<
-            dialog_storage::CborEncoder,
-            dialog_storage::JournaledStorage<
-                dialog_storage::MemoryStorageBackend<[u8; 32], Vec<u8>>,
-            >,
-        >,
-    >,
-    storage: dialog_storage::Storage<
-        dialog_storage::CborEncoder,
-        dialog_storage::JournaledStorage<dialog_storage::MemoryStorageBackend<[u8; 32], Vec<u8>>>,
-    >,
+    tree: TestTree,
+    storage: TestStorage,
 }
 
 impl TreeSpec {
     /// Get a reference to the compiled tree
-    pub fn tree(
-        &self,
-    ) -> &crate::Tree<
-        DistributionSimulator,
-        Vec<u8>,
-        Vec<u8>,
-        dialog_storage::Blake3Hash,
-        dialog_storage::Storage<
-            dialog_storage::CborEncoder,
-            dialog_storage::JournaledStorage<
-                dialog_storage::MemoryStorageBackend<[u8; 32], Vec<u8>>,
-            >,
-        >,
-    > {
+    pub fn tree(&self) -> &TestTree {
         &self.tree
     }
 
@@ -478,12 +459,7 @@ impl TreeSpec {
     fn visualize_node<'a>(
         output: &'a mut String,
         node: &'a crate::Node<Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
-        storage: &'a dialog_storage::Storage<
-            dialog_storage::CborEncoder,
-            dialog_storage::JournaledStorage<
-                dialog_storage::MemoryStorageBackend<[u8; 32], Vec<u8>>,
-            >,
-        >,
+        storage: &'a TestStorage,
         prefix: &'a str,
         is_last: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {

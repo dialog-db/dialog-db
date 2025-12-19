@@ -2336,7 +2336,7 @@ mod tests {
 
         // Verify remote branch record was created with a cached revision
         // The key uses the branch ID as bytes
-        let remote_branch_key = format!("remote/{}/{}", remote.site(), main_id.to_string())
+        let remote_branch_key = format!("remote/{}/{}", remote.site(), main_id)
             .as_bytes()
             .to_vec();
 
@@ -2347,7 +2347,7 @@ mod tests {
             was_written,
             "Remote branch key 'remote/{}/{}' should have been written during push. All keys: {:?}",
             remote.site(),
-            main_id.to_string(),
+            main_id,
             all_written_keys
                 .iter()
                 .map(|k| String::from_utf8_lossy(k).to_string())
@@ -2588,7 +2588,7 @@ mod tests {
             .await
             .expect("Alice's commit failed");
 
-        let alice_tree_after_commit = alice_main.revision().tree().hash().clone();
+        let alice_tree_after_commit = *alice_main.revision().tree().hash();
         assert_ne!(alice_tree_after_commit, EMPT_TREE_HASH);
 
         // Alice pushes her changes
@@ -2648,7 +2648,7 @@ mod tests {
             .await
             .expect("Bob's commit failed");
 
-        let bob_tree_after_commit = bob_main.revision().tree().hash().clone();
+        let bob_tree_after_commit = *bob_main.revision().tree().hash();
         assert_ne!(bob_tree_after_commit, EMPT_TREE_HASH);
         assert_ne!(
             bob_tree_after_commit, alice_tree_after_commit,
@@ -2662,7 +2662,7 @@ mod tests {
             "Pull should return a revision after merging"
         );
 
-        let bob_tree_after_pull = bob_main.revision().tree().hash().clone();
+        let bob_tree_after_pull = *bob_main.revision().tree().hash();
         assert_ne!(
             bob_tree_after_pull, bob_tree_after_commit,
             "Bob's tree should change after pull"
@@ -2721,7 +2721,7 @@ mod tests {
             "Alice should receive updates from Bob's push"
         );
 
-        let alice_tree_after_pull = alice_main.revision().tree().hash().clone();
+        let alice_tree_after_pull = *alice_main.revision().tree().hash();
 
         // Step 12: Verify both Alice and Bob have the same final revision
         assert_eq!(

@@ -4,7 +4,7 @@ use dialog_query::{
     predicate::{concept::Attributes, Concept, DeductiveRule},
     query::Source,
     session::{QuerySession, Session},
-    Attribute,
+    AttributeSchema,
 };
 use dialog_storage::MemoryStorageBackend;
 
@@ -21,15 +21,15 @@ async fn test_session_source_rule_resolution() -> Result<()> {
     // Test 2: Install a rule and verify it can be resolved
 
     let adult_conclusion = Concept::Dynamic {
-        operator: "adult".into(),
+        description: String::new(),
         attributes: Attributes::from(vec![
             (
                 "name",
-                Attribute::new("adult", "name", "Adult name", Type::String),
+                AttributeSchema::new("adult", "name", "Adult name", Type::String),
             ),
             (
                 "age",
-                Attribute::new("adult", "age", "Adult age", Type::UnsignedInt),
+                AttributeSchema::new("adult", "age", "Adult age", Type::UnsignedInt),
             ),
         ]),
     };
@@ -45,12 +45,13 @@ async fn test_session_source_rule_resolution() -> Result<()> {
     let session_with_rule = session.register(rule.clone());
 
     // Test 3: Verify the rule can be resolved
-    let resolved_rules = session_with_rule.resolve_rules("adult");
+    let adult_operator = adult_conclusion.operator();
+    let resolved_rules = session_with_rule.resolve_rules(&adult_operator);
     assert_eq!(resolved_rules.len(), 1);
-    assert_eq!(resolved_rules[0].conclusion.operator(), "adult");
+    assert_eq!(resolved_rules[0].conclusion.operator(), adult_operator);
 
     // Test 4: Verify non-matching operator returns empty
-    assert_eq!(session_with_rule.resolve_rules("person"), Vec::new());
+    assert_eq!(session_with_rule.resolve_rules("nonexistent"), Vec::new());
 
     Ok(())
 }
@@ -68,23 +69,25 @@ async fn test_source_trait_compatibility() -> Result<()> {
 
     // Test with QuerySession
     let query_session: QuerySession<_> = artifacts.clone().into();
-    let concept = Concept::new("test".into());
+    let concept = Concept::new(Attributes::new());
     let rule = DeductiveRule {
-        conclusion: concept,
+        conclusion: concept.clone(),
         premises: vec![],
     };
 
     let query_session = query_session.install(rule.clone());
-    let rules = query_with_source(&query_session, "test").await;
+    // Query using the concept's actual operator (hash URI)
+    let operator = concept.operator();
+    let rules = query_with_source(&query_session, &operator).await;
     assert_eq!(rules.len(), 1);
-    assert_eq!(rules[0].conclusion.operator(), "test");
+    assert_eq!(rules[0].conclusion.operator(), concept.operator());
 
     // Test with Session
     let mut session = Session::open(artifacts);
     session = session.register(rule.clone());
-    let rules = query_with_source(&session, "test").await;
+    let rules = query_with_source(&session, &operator).await;
     assert_eq!(rules.len(), 1);
-    assert_eq!(rules[0].conclusion.operator(), "test");
+    assert_eq!(rules[0].conclusion.operator(), concept.operator());
 
     Ok(())
 }
@@ -99,45 +102,44 @@ async fn test_multiple_rules_same_operator() -> Result<()> {
     // Test with QuerySession
     let query_session: QuerySession<_> = artifacts.into();
 
-    // Create two different rules for the same concept
+    // Create two different rules for the same concept (same attributes = same hash)
+    let attributes: Attributes = [(
+        "name".to_string(),
+        AttributeSchema::new("person", "name", "Person name", Type::String),
+    )]
+    .into();
+
     let concept1 = Concept::Dynamic {
-        operator: "person".into(),
-        attributes: [(
-            "name".to_string(),
-            Attribute::new("person", "name", "Person name", Type::String),
-        )]
-        .into(),
+        description: "First rule".to_string(),
+        attributes: attributes.clone(),
     };
 
     let concept2 = Concept::Dynamic {
-        operator: "person".into(),
-        attributes: [(
-            "age".to_string(),
-            Attribute::new("person", "age", "Person age", Type::UnsignedInt),
-        )]
-        .into(),
+        description: "Second rule".to_string(),
+        attributes,
     };
 
     let rule1 = DeductiveRule {
-        conclusion: concept1,
+        conclusion: concept1.clone(),
         premises: vec![],
     };
 
     let rule2 = DeductiveRule {
-        conclusion: concept2,
+        conclusion: concept2.clone(),
         premises: vec![],
     };
 
     // Install both rules
     let query_session = query_session.install(rule1).install(rule2);
 
-    // Should resolve both rules for "person"
-    let rules = query_session.resolve_rules("person");
-    assert_eq!(rules.len(), 2);
+    // Should resolve both rules for the same concept operator (hash)
+    let operator = concept1.operator();
+    let rules = query_session.resolve_rules(&operator);
+    assert_eq!(rules.len(), 2, "Should have 2 rules for the same concept");
 
-    // Both rules should have the same operator but different attributes
+    // Both rules should have the same operator (hash)
     for rule in &rules {
-        assert_eq!(rule.conclusion.operator(), "person");
+        assert_eq!(rule.conclusion.operator(), operator);
     }
 
     Ok(())
@@ -157,28 +159,29 @@ async fn test_explicit_conversion_pattern() -> Result<()> {
 
     // Test 2: Conversion with rule installation
     let adult_concept = Concept::Dynamic {
-        operator: "adult".into(),
+        description: String::new(),
         attributes: [(
             "name".to_string(),
-            Attribute::new("person", "name", "Adult name", Type::String),
+            AttributeSchema::new("person", "name", "Adult name", Type::String),
         )]
         .into(),
     };
 
     let adult_rule = DeductiveRule {
-        conclusion: adult_concept,
+        conclusion: adult_concept.clone(),
         premises: vec![],
     };
 
     let query_session: QuerySession<_> = artifacts.into();
     let query_session = query_session.install(adult_rule.clone());
 
-    let resolved_rules = query_session.resolve_rules("adult");
+    let adult_operator = adult_concept.operator();
+    let resolved_rules = query_session.resolve_rules(&adult_operator);
     assert_eq!(resolved_rules.len(), 1);
-    assert_eq!(resolved_rules[0].conclusion.operator(), "adult");
+    assert_eq!(resolved_rules[0].conclusion.operator(), adult_operator);
 
     // Test 3: Verify store is still accessible
-    assert!(std::ptr::addr_of!(*query_session.store()) != std::ptr::null());
+    assert!(!std::ptr::addr_of!(*query_session.store()).is_null());
 
     Ok(())
 }

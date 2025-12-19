@@ -4,8 +4,10 @@ pub use crate::dsl::Quarriable;
 pub use crate::predicate::concept::Attributes;
 use crate::query::{Output, Source};
 use crate::selection::Answer;
+#[cfg(test)]
+use crate::Relation;
 use crate::{predicate, QueryError};
-use crate::{Entity, Parameters, Relation};
+use crate::{Entity, Parameters};
 use dialog_common::ConditionalSend;
 use futures_util::StreamExt;
 use std::fmt::Debug;
@@ -19,7 +21,11 @@ use std::fmt::Debug;
 /// Concepts are used to describe conclusions of the rules, providing a mapping
 /// between conclusions and facts. In that sense you concepts are on-demand
 /// cache of all the conclusions from the associated rules.
-pub trait Concept: Quarriable + IntoIterator<Item = Relation> + Clone + Debug {
+///
+/// Note: IntoIterator is not a bound on this trait to allow attributes to
+/// implement Concept by delegating to their instance types (e.g., Title
+/// delegates to WithTitle). Instance types still implement IntoIterator.
+pub trait Concept: Quarriable + Clone + Debug {
     type Instance: Instance;
     /// Type representing a query of this concept. It is a set of terms
     /// corresponding to the set of attributes defined by this concept.
@@ -27,17 +33,64 @@ pub trait Concept: Quarriable + IntoIterator<Item = Relation> + Clone + Debug {
     type Match: Match<Concept = Self, Instance = Self::Instance>;
 
     type Term;
-    /// Type representing an assertion of this concept. It is used in the
-    /// inductive rules that describe how state of the concept changes
-    /// (or persists) over time.
-    type Assert;
-    /// Type representing a retraction of this concept. It is used in the
-    /// inductive rules to describe conditions for the of the concepts lifecycle.
-    type Retract;
 
     /// The static concept definition for this type.
     /// This is typically defined by the macro as a Concept::Static variant.
     const CONCEPT: predicate::concept::Concept;
+
+    /// Convenience method to query for all instances of this concept.
+    ///
+    /// This creates a default Match pattern (all fields as variables) and queries it.
+    /// It's equivalent to calling `Match::<Self>::default().query(source)`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // These are equivalent:
+    /// let employees = Employee::query(session).try_collect::<Vec<_>>().await?;
+    ///
+    /// let employees = Match::<Employee>::default()
+    ///     .query(session)
+    ///     .try_collect::<Vec<_>>().await?;
+    /// ```
+    fn query<S: Source>(source: S) -> impl Output<Self::Instance>
+    where
+        ConceptApplication: From<Self::Match>,
+    {
+        // Create the default match pattern
+        let pattern = Self::Match::default();
+
+        // Inline the query logic to avoid lifetime issues with the temporary
+        let application: ConceptApplication = pattern.clone().into();
+        let cloned = pattern.clone();
+        application
+            .query(source)
+            .map(move |input| cloned.realize(input?))
+    }
+
+    /// Compute the blake3 hash of this concept's CBOR-encoded representation.
+    ///
+    /// The hash is computed from the CBOR encoding of the concept's attribute set,
+    /// ensuring that concepts with the same attributes (regardless of field names)
+    /// produce the same identifier.
+    fn hash() -> blake3::Hash {
+        Self::CONCEPT.hash()
+    }
+
+    /// Format this concept's identifier as a URI.
+    ///
+    /// Returns a URI in the format `concept:{blake3_hash_hex}`.
+    fn to_uri() -> String {
+        Self::CONCEPT.to_uri()
+    }
+
+    /// Parse a concept URI and extract its hash.
+    ///
+    /// Returns `Some(hash)` if the URI has the format `concept:{valid_hex}`,
+    /// or `None` if the URI is invalid.
+    fn parse_uri(uri: &str) -> Option<blake3::Hash> {
+        predicate::concept::Concept::parse_uri(uri)
+    }
 }
 
 /// Concepts can be matched and this trait describes an abstract match for the
@@ -141,39 +194,21 @@ mod tests {
         }
     }
 
-    // PersonAssert for assertions - uses typed Terms, no 'this' field
-    #[derive(Debug, Clone)]
-    #[allow(dead_code)]
-    struct PersonAssert {
-        pub name: Term<String>,
-        pub age: Term<u32>,
-    }
-
-    // PersonRetract for retractions - uses typed Terms, no 'this' field
-    #[derive(Debug, Clone)]
-    #[allow(dead_code)]
-    struct PersonRetract {
-        pub name: Term<String>,
-        pub age: Term<u32>,
-    }
-
     // Implement Concept for Person
     impl Concept for Person {
         type Instance = Person;
         type Match = PersonMatch;
-        type Assert = PersonAssert;
-        type Retract = PersonRetract;
         type Term = PersonTerms;
 
         const CONCEPT: predicate::concept::Concept = {
             use crate::artifact::{Type, Value};
-            use crate::attribute::{Attribute, Cardinality};
+            use crate::attribute::{AttributeSchema, Cardinality};
             use std::marker::PhantomData;
 
-            const ATTRIBUTE_TUPLES: &[(&str, Attribute<Value>)] = &[
+            const ATTRIBUTE_TUPLES: &[(&str, AttributeSchema<Value>)] = &[
                 (
                     "name",
-                    Attribute {
+                    AttributeSchema {
                         namespace: "person",
                         name: "name",
                         description: "Name of the person",
@@ -184,7 +219,7 @@ mod tests {
                 ),
                 (
                     "age",
-                    Attribute {
+                    AttributeSchema {
                         namespace: "person",
                         name: "age",
                         description: "Age of the person",
@@ -199,7 +234,7 @@ mod tests {
                 predicate::concept::Attributes::Static(ATTRIBUTE_TUPLES);
 
             predicate::concept::Concept::Static {
-                operator: "person",
+                description: "",
                 attributes: &ATTRS,
             }
         };
@@ -422,7 +457,11 @@ mod tests {
     fn test_person_concept_creation() {
         // Test that the Person concept has the expected properties
         let concept = Person::CONCEPT;
-        assert_eq!(concept.operator(), "person");
+        // Operator is now a URI based on the hash of the concept's attributes
+        assert!(
+            concept.operator().starts_with("concept:"),
+            "Operator should be a concept URI"
+        );
 
         // Test Person has 2 attributes (name and age)
         let attributes = concept.attributes();
@@ -510,9 +549,13 @@ mod tests {
 
     #[test]
     fn test_concept_name_consistency() {
-        // Test that concept name is consistent across different access patterns
+        // Test that concept identifier is consistent across different access patterns
         let concept = Person::CONCEPT;
-        assert_eq!(concept.operator(), "person");
+        // Operator is now a URI based on the hash of the concept's attributes
+        assert!(
+            concept.operator().starts_with("concept:"),
+            "Operator should be a concept URI"
+        );
 
         // The concept should have consistent naming
         let _person = Person {
@@ -521,9 +564,13 @@ mod tests {
             age: 1,
         };
 
-        // Instance should have the same concept name
+        // Instance should have the same concept identifier
         // (though our current Instance impl doesn't store concept info)
-        assert_eq!(concept.operator(), "person");
+        // Verify the identifier is still consistent
+        assert!(
+            concept.operator().starts_with("concept:"),
+            "Operator should be a concept URI"
+        );
     }
 
     #[test]
@@ -758,11 +805,21 @@ mod tests {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
+        mod employee {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            pub struct Name(pub String);
+
+            #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+            pub struct Role(pub String);
+        }
+
         #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
         pub struct Employee {
             this: Entity,
-            name: String,
-            role: String,
+            name: employee::Name,
+            role: employee::Role,
         }
 
         let alice = Entity::new()?;
@@ -777,13 +834,13 @@ mod tests {
         transaction
             .assert(Employee {
                 this: alice.clone(),
-                name: "Alice".to_string(),
-                role: "cryptographer".to_string(),
+                name: employee::Name("Alice".to_string()),
+                role: employee::Role("cryptographer".to_string()),
             })
             .assert(Employee {
                 this: bob.clone(),
-                name: "Bob".to_string(),
-                role: "janitor".to_string(),
+                name: employee::Name("Bob".to_string()),
+                role: employee::Role("janitor".to_string()),
             })
             .assert(Relation {
                 the: "employee/name".parse::<ArtifactAttribute>()?,
@@ -804,28 +861,27 @@ mod tests {
             role: Term::var("role"),
         };
 
-        let employees = employee.query(session).try_vec().await?;
-        assert_eq!(
-            employees.clone().sort(),
-            vec![
-                Employee {
-                    this: bob.clone(),
-                    name: "Bob".to_string(),
-                    role: "janitor".to_string(),
-                },
-                Employee {
-                    this: alice.clone(),
-                    name: "Alice".to_string(),
-                    role: "cryptographer".to_string(),
-                },
-                Employee {
-                    this: mallory.clone(),
-                    name: "Mallory".to_string(),
-                    role: "Hacker".to_string(),
-                },
-            ]
-            .sort()
-        );
+        let mut employees = employee.query(session).try_vec().await?;
+        employees.sort();
+        let mut expected = vec![
+            Employee {
+                this: bob.clone(),
+                name: employee::Name("Bob".to_string()),
+                role: employee::Role("janitor".to_string()),
+            },
+            Employee {
+                this: alice.clone(),
+                name: employee::Name("Alice".to_string()),
+                role: employee::Role("cryptographer".to_string()),
+            },
+            Employee {
+                this: mallory.clone(),
+                name: employee::Name("Mallory".to_string()),
+                role: employee::Role("Hacker".to_string()),
+            },
+        ];
+        expected.sort();
+        assert_eq!(employees, expected);
 
         Ok(())
     }
@@ -839,11 +895,21 @@ mod tests {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
+        mod person {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Name(pub String);
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Age(pub usize);
+        }
+
         #[derive(Concept, Debug, Clone, PartialEq)]
         pub struct Person {
             this: Entity,
-            name: String,
-            age: usize,
+            name: person::Name,
+            age: person::Age,
         }
 
         let alice = Entity::new()?;
@@ -852,8 +918,8 @@ mod tests {
         let mut session = Session::open(artifacts.clone());
         let alice_person = Person {
             this: alice.clone(),
-            name: "Alice".to_string(),
-            age: 25,
+            name: person::Name("Alice".to_string()),
+            age: person::Age(25),
         };
 
         session.transact(vec![alice_person.clone()]).await?;

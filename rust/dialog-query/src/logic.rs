@@ -81,9 +81,9 @@ mod tests {
     #[test]
     fn test_and_formula_true_true() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("left".to_string(), Term::var("a").into());
-        terms.insert("right".to_string(), Term::var("b").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("left".to_string(), Term::var("a"));
+        terms.insert("right".to_string(), Term::var("b"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("a"), true)
@@ -109,9 +109,9 @@ mod tests {
     #[test]
     fn test_and_formula_true_false() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("left".to_string(), Term::var("a").into());
-        terms.insert("right".to_string(), Term::var("b").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("left".to_string(), Term::var("a"));
+        terms.insert("right".to_string(), Term::var("b"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("a"), true)
@@ -137,9 +137,9 @@ mod tests {
     #[test]
     fn test_and_formula_false_false() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("left".to_string(), Term::var("a").into());
-        terms.insert("right".to_string(), Term::var("b").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("left".to_string(), Term::var("a"));
+        terms.insert("right".to_string(), Term::var("b"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("a"), false)
@@ -165,9 +165,9 @@ mod tests {
     #[test]
     fn test_or_formula_true_false() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("left".to_string(), Term::var("a").into());
-        terms.insert("right".to_string(), Term::var("b").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("left".to_string(), Term::var("a"));
+        terms.insert("right".to_string(), Term::var("b"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("a"), true)
@@ -193,9 +193,9 @@ mod tests {
     #[test]
     fn test_or_formula_false_false() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("left".to_string(), Term::var("a").into());
-        terms.insert("right".to_string(), Term::var("b").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("left".to_string(), Term::var("a"));
+        terms.insert("right".to_string(), Term::var("b"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("a"), false)
@@ -221,8 +221,8 @@ mod tests {
     #[test]
     fn test_not_formula_true() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("bool").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("value".to_string(), Term::var("bool"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new().set(Term::var("bool"), true).unwrap();
 
@@ -244,8 +244,8 @@ mod tests {
     #[test]
     fn test_not_formula_false() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("bool").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("value".to_string(), Term::var("bool"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new().set(Term::var("bool"), false).unwrap();
 
@@ -269,9 +269,9 @@ mod tests {
     fn test_chained_logic_operations() -> anyhow::Result<()> {
         // Test AND then NOT: !(true && false) = !false = true
         let mut and_terms = Parameters::new();
-        and_terms.insert("left".to_string(), Term::var("a").into());
-        and_terms.insert("right".to_string(), Term::var("b").into());
-        and_terms.insert("is".to_string(), Term::var("and_result").into());
+        and_terms.insert("left".to_string(), Term::var("a"));
+        and_terms.insert("right".to_string(), Term::var("b"));
+        and_terms.insert("is".to_string(), Term::var("and_result"));
 
         let input = Answer::new()
             .set(Term::var("a"), true)
@@ -285,8 +285,8 @@ mod tests {
 
         // Now apply NOT to the result
         let mut not_terms = Parameters::new();
-        not_terms.insert("value".to_string(), Term::var("and_result").into());
-        not_terms.insert("is".to_string(), Term::var("final_result").into());
+        not_terms.insert("value".to_string(), Term::var("and_result"));
+        not_terms.insert("is".to_string(), Term::var("final_result"));
 
         let not_app = Not::apply(not_terms)?;
         let not_results = not_app

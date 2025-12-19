@@ -1,18 +1,18 @@
-use dialog_query::attribute::Attribute;
+use dialog_query::attribute::AttributeSchema;
 use dialog_query::predicate::Concept;
 use dialog_query::Type;
 
 fn main() {
     let concept = Concept::Dynamic {
-        operator: "user".to_string(),
+        description: String::new(),
         attributes: [
             (
                 "name",
-                Attribute::new("user", "name", "User's name", Type::String),
+                AttributeSchema::new("user", "name", "User's name", Type::String),
             ),
             (
                 "age",
-                Attribute::new("user", "age", "User's age", Type::UnsignedInt),
+                AttributeSchema::new("user", "age", "User's age", Type::UnsignedInt),
             ),
         ]
         .into(),

@@ -230,7 +230,7 @@ mod tests {
     fn test_formula() -> crate::application::formula::FormulaApplication {
         use std::sync::OnceLock;
         static EMPTY_CELLS: OnceLock<crate::predicate::formula::Cells> = OnceLock::new();
-        let cells = EMPTY_CELLS.get_or_init(|| crate::predicate::formula::Cells::new());
+        let cells = EMPTY_CELLS.get_or_init(crate::predicate::formula::Cells::new);
 
         crate::application::formula::FormulaApplication {
             name: "test",
@@ -246,13 +246,13 @@ mod tests {
         use crate::selection::Answer;
 
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("test").into());
+        terms.insert("value".to_string(), Term::var("test"));
 
         let match_data = Answer::new()
             .set(Term::var("test"), 42u32)
             .expect("Failed to create test match");
 
-        let source = Answer::from(match_data);
+        let source = match_data;
         let formula = test_formula();
         let mut cursor = Cursor::new(Arc::new(formula.clone()), source, terms);
 
@@ -270,7 +270,7 @@ mod tests {
         use crate::selection::Answer;
 
         let terms = Parameters::new(); // Empty terms
-        let source = Answer::from(Answer::new());
+        let source = Answer::new();
         let formula = test_formula();
         let mut cursor = Cursor::new(Arc::new(formula.clone()), source, terms);
 
@@ -286,7 +286,7 @@ mod tests {
         use crate::selection::Answer;
 
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("unbound").into());
+        terms.insert("value".to_string(), Term::var("unbound"));
 
         let source = Answer::new(); // No bindings
         let formula = test_formula();
@@ -313,7 +313,7 @@ mod tests {
             .set(Term::var("input_y"), 20u32)
             .expect("set should succeed");
 
-        let source = Answer::from(match_data);
+        let source = match_data;
         let formula = test_formula();
         let mut cursor = Cursor::new(Arc::new(formula.clone()), source, params);
 
@@ -342,18 +342,18 @@ mod tests {
             .set(Term::var("test"), 42u32)
             .expect("set should succeed");
 
-        let mut answer = Answer::from(match_data);
+        let mut answer = match_data;
 
         // Try to assign a conflicting value
         use std::sync::OnceLock;
         static EMPTY_CELLS: OnceLock<crate::predicate::formula::Cells> = OnceLock::new();
-        let cells = EMPTY_CELLS.get_or_init(|| crate::predicate::formula::Cells::new());
+        let cells = EMPTY_CELLS.get_or_init(crate::predicate::formula::Cells::new);
 
         let conflicting_factor = Factor::Derived {
             value: Value::UnsignedInt(100),
             from: HashMap::new(),
             formula: Arc::new(crate::application::formula::FormulaApplication {
-                name: "test".into(),
+                name: "test",
                 compute: |_| Ok(vec![]),
                 cost: 0,
                 parameters: crate::Parameters::new(),
@@ -375,7 +375,7 @@ mod tests {
         use crate::selection::Answer;
 
         let mut terms = Parameters::new();
-        terms.insert("value".to_string(), Term::var("test").into());
+        terms.insert("value".to_string(), Term::var("test"));
 
         // Create cursor with initial value
         let source = Answer::new()
@@ -425,7 +425,7 @@ mod tests {
             .set(Term::var("input_y"), 20u32)
             .expect("set should succeed");
 
-        let source = Answer::from(match_data);
+        let source = match_data;
         let formula = test_formula();
         let mut cursor = Cursor::new(Arc::new(formula.clone()), source, params);
 

@@ -136,9 +136,9 @@ mod tests {
     fn test_sum_formula_basic() -> anyhow::Result<()> {
         // Create Terms mapping
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x").into());
-        terms.insert("with".to_string(), Term::var("y").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("of".to_string(), Term::var("x"));
+        terms.insert("with".to_string(), Term::var("y"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         // Create input match with x=5, y=3
         let input = Answer::new()
@@ -194,9 +194,9 @@ mod tests {
     #[test]
     fn test_sum_formula_missing_input() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x").into());
-        terms.insert("with".to_string(), Term::var("missing").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("of".to_string(), Term::var("x"));
+        terms.insert("with".to_string(), Term::var("missing"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), 5u32)
@@ -217,9 +217,9 @@ mod tests {
     fn test_sum_formula_multiple_expand() -> anyhow::Result<()> {
         // Test multiple expansions without the stream complexity
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("a").into());
-        terms.insert("with".to_string(), Term::var("b").into());
-        terms.insert("is".to_string(), Term::var("sum").into());
+        terms.insert("of".to_string(), Term::var("a"));
+        terms.insert("with".to_string(), Term::var("b"));
+        terms.insert("is".to_string(), Term::var("sum"));
 
         let app = Sum::apply(terms)?;
 
@@ -293,10 +293,10 @@ mod tests {
     fn test_multiple_try_from_types() -> anyhow::Result<()> {
         // Test various data types with standard TryFrom<Value>
         let bool_val = Value::Boolean(true);
-        assert_eq!(bool::try_from(bool_val).unwrap(), true);
+        assert!(bool::try_from(bool_val).unwrap());
 
-        let f64_val = Value::Float(3.14);
-        assert_eq!(f64::try_from(f64_val).unwrap(), 3.14);
+        let f64_val = Value::Float(2.5);
+        assert_eq!(f64::try_from(f64_val).unwrap(), 2.5);
 
         let string_val = Value::String("hello".to_string());
         assert_eq!(String::try_from(string_val).unwrap(), "hello");
@@ -312,9 +312,9 @@ mod tests {
     #[test]
     fn test_difference_formula() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x").into());
-        terms.insert("subtract".to_string(), Term::var("y").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("of".to_string(), Term::var("x"));
+        terms.insert("subtract".to_string(), Term::var("y"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), 10u32)
@@ -340,9 +340,9 @@ mod tests {
     #[test]
     fn test_difference_formula_underflow() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x").into());
-        terms.insert("subtract".to_string(), Term::var("y").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("of".to_string(), Term::var("x"));
+        terms.insert("subtract".to_string(), Term::var("y"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), 3u32)
@@ -371,9 +371,9 @@ mod tests {
     #[test]
     fn test_product_formula() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x").into());
-        terms.insert("times".to_string(), Term::var("y").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("of".to_string(), Term::var("x"));
+        terms.insert("times".to_string(), Term::var("y"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), 6u32)
@@ -399,9 +399,9 @@ mod tests {
     #[test]
     fn test_quotient_formula() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x").into());
-        terms.insert("by".to_string(), Term::var("y").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("of".to_string(), Term::var("x"));
+        terms.insert("by".to_string(), Term::var("y"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), 15u32)
@@ -427,9 +427,9 @@ mod tests {
     #[test]
     fn test_quotient_formula_division_by_zero() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x").into());
-        terms.insert("by".to_string(), Term::var("y").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("of".to_string(), Term::var("x"));
+        terms.insert("by".to_string(), Term::var("y"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let x = Term::var("x");
         print!("{:?}", &x);
@@ -452,9 +452,9 @@ mod tests {
     #[test]
     fn test_modulo_formula() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x").into());
-        terms.insert("by".to_string(), Term::var("y").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("of".to_string(), Term::var("x"));
+        terms.insert("by".to_string(), Term::var("y"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), 17u32)
@@ -480,9 +480,9 @@ mod tests {
     #[test]
     fn test_modulo_formula_by_zero() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
-        terms.insert("of".to_string(), Term::var("x").into());
-        terms.insert("by".to_string(), Term::var("y").into());
-        terms.insert("is".to_string(), Term::var("result").into());
+        terms.insert("of".to_string(), Term::var("x"));
+        terms.insert("by".to_string(), Term::var("y"));
+        terms.insert("is".to_string(), Term::var("result"));
 
         let input = Answer::new()
             .set(Term::var("x"), 17u32)
