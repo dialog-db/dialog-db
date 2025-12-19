@@ -710,10 +710,13 @@ dependencies = [
  "async-trait",
  "blake3",
  "dialog-macros",
+ "futures-util",
  "serde",
  "serde_json",
+ "thiserror 2.0.17",
  "tokio",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wasm-bindgen-test",
 ]
 

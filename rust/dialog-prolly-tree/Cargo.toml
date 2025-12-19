@@ -31,6 +31,7 @@ thiserror = { workspace = true }
 futures-util = { workspace = true }
 
 [dev-dependencies]
+dialog-common = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 futures-util = { workspace = true }
