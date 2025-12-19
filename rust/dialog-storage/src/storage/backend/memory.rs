@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::{collections::HashMap, ops::DerefMut, sync::Arc};
 
 use async_stream::try_stream;
@@ -11,11 +10,12 @@ use crate::{DialogStorageError, StorageSource};
 
 use super::{StorageBackend, TransactionalMemoryBackend};
 
-/// An entry with versioning for CAS operations.
-#[derive(Clone)]
-struct VersionedEntry<Value> {
-    value: Value,
-    version: u64,
+/// A 32-byte BLAKE3 content hash used as the edition for CAS operations.
+type ContentHash = [u8; 32];
+
+/// Compute BLAKE3 hash of content.
+fn content_hash(content: &[u8]) -> ContentHash {
+    blake3::hash(content).into()
 }
 
 /// A trivial implementation of [StorageBackend] - backed by a [HashMap] - where
@@ -26,8 +26,7 @@ where
     Key: Eq + std::hash::Hash,
     Value: Clone,
 {
-    entries: Arc<RwLock<HashMap<Key, VersionedEntry<Value>>>>,
-    next_version: Arc<AtomicU64>,
+    entries: Arc<RwLock<HashMap<Key, Value>>>,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -42,14 +41,13 @@ where
     type Error = DialogStorageError;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        let version = self.next_version.fetch_add(1, Ordering::SeqCst);
         let mut entries = self.entries.write().await;
-        entries.insert(key, VersionedEntry { value, version });
+        entries.insert(key, value);
         Ok(())
     }
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         let entries = self.entries.read().await;
-        Ok(entries.get(key).map(|entry| entry.value.clone()))
+        Ok(entries.get(key).cloned())
     }
 }
 
@@ -71,8 +69,8 @@ where
     > {
         try_stream! {
             let entries = self.entries.read().await;
-            for (key, entry) in entries.iter() {
-                yield (key.clone(), entry.value.clone());
+            for (key, value) in entries.iter() {
+                yield (key.clone(), value.clone());
             }
         }
     }
@@ -91,33 +89,46 @@ where
         try_stream! {
             let entries = std::mem::take(self.entries.write().await.deref_mut());
 
-            for (key, entry) in entries.into_iter() {
-                yield (key, entry.value);
+            for (key, value) in entries.into_iter() {
+                yield (key, value);
             }
         }
     }
 }
 
+/// Transactional memory backend using BLAKE3 content hashes for CAS.
+///
+/// This implementation computes a BLAKE3 hash of each value to use as its edition.
+/// The hash is computed on read, not stored separately. This provides content-addressable
+/// semantics - identical values have identical editions.
+///
+/// # Edition Strategy
+///
+/// Uses a 32-byte BLAKE3 hash as the edition. CAS succeeds when the hash of
+/// the current stored value matches the expected edition. If the stored value
+/// has the same content (and thus the same hash) as expected, the update proceeds
+/// even if a concurrent write occurred - this is safe because the content is identical.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Key, Value> TransactionalMemoryBackend for MemoryStorageBackend<Key, Value>
 where
     Key: Clone + Eq + std::hash::Hash + ConditionalSync,
-    Value: Clone + ConditionalSync,
+    Value: AsRef<[u8]> + Clone + ConditionalSync,
 {
     type Address = Key;
     type Value = Value;
     type Error = DialogStorageError;
-    type Edition = u64;
+    type Edition = ContentHash;
 
     async fn resolve(
         &self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
         let entries = self.entries.read().await;
-        Ok(entries
-            .get(address)
-            .map(|entry| (entry.value.clone(), entry.version)))
+        Ok(entries.get(address).map(|value| {
+            let hash = content_hash(value.as_ref());
+            (value.clone(), hash)
+        }))
     }
 
     async fn replace(
@@ -128,7 +139,7 @@ where
     ) -> Result<Option<Self::Edition>, Self::Error> {
         let mut entries = self.entries.write().await;
 
-        // Check CAS precondition
+        // Check CAS precondition by comparing content hashes
         match (edition, entries.get(address)) {
             // Creating new: require key doesn't exist
             (None, Some(_)) => {
@@ -136,11 +147,14 @@ where
                     "CAS conflict: key already exists".to_string(),
                 ));
             }
-            // Updating existing: require versions match
-            (Some(expected_version), Some(entry)) if entry.version != *expected_version => {
-                return Err(DialogStorageError::StorageBackend(
-                    "CAS conflict: version mismatch".to_string(),
-                ));
+            // Updating existing: require content hash matches
+            (Some(expected_hash), Some(existing_value)) => {
+                let current_hash = content_hash(existing_value.as_ref());
+                if &current_hash != expected_hash {
+                    return Err(DialogStorageError::StorageBackend(
+                        "CAS conflict: content hash mismatch".to_string(),
+                    ));
+                }
             }
             // Updating non-existent: fail
             (Some(_), None) => {
@@ -148,21 +162,15 @@ where
                     "CAS conflict: key does not exist".to_string(),
                 ));
             }
-            // All other cases are valid
-            _ => {}
+            // Creating new when key doesn't exist: valid
+            (None, None) => {}
         }
 
         match content {
             Some(value) => {
-                let new_version = self.next_version.fetch_add(1, Ordering::SeqCst);
-                entries.insert(
-                    address.clone(),
-                    VersionedEntry {
-                        value,
-                        version: new_version,
-                    },
-                );
-                Ok(Some(new_version))
+                let new_hash = content_hash(value.as_ref());
+                entries.insert(address.clone(), value);
+                Ok(Some(new_hash))
             }
             None => {
                 entries.remove(address);
