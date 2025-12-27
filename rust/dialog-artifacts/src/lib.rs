@@ -47,6 +47,13 @@ pub mod artifacts;
 pub use artifacts::*;
 
 mod platform;
+
+/// Environment and capability-based resource acquisition.
+pub mod environment;
+
+/// Site abstraction for storage resources.
+pub mod site;
+
 /// Replica abstraction for dialog
 pub mod replica;
 // #[allow(ambiguous_glob_reexports)]
