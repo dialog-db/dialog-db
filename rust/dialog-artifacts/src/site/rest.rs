@@ -3,7 +3,7 @@
 //! This module provides a site backed by REST storage, typically used
 //! for remote synchronization.
 
-use super::{Acquirable, Remote, TheSite};
+use super::{Capability, Remote, TheSite};
 use crate::platform::ErrorMappingBackend;
 use dialog_storage::{RestStorageBackend, RestStorageConfig};
 use std::hash::{Hash, Hasher};
@@ -54,7 +54,7 @@ impl std::fmt::Display for RestError {
 
 impl std::error::Error for RestError {}
 
-impl Acquirable<Remote> for RestSite {
+impl Capability<Remote> for RestSite {
     type Error = RestError;
 
     fn acquire(address: &Remote) -> Result<Self, Self::Error> {

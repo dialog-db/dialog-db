@@ -6,9 +6,10 @@
 //! # Design
 //!
 //! - [`Capability<A>`] - Trait for types that can be constructed from address `A`
-//! - [`Provider<A, R>`] - Caching wrapper that provides `R` from address `A`
+//! - [`CapabilityProvider<A, R>`] - Caching wrapper that provides `R` from address `A`
+//! - [`Provider<A>`] - Trait for types that can provide resources (with caching)
 //! - [`Site`] - Provides `store()` and `memory()` access to backends
-//! - Tuple `(A, B)` implements `Capability` by delegating to its elements
+//! - Tuple `(A, B)` implements `Provider` by delegating to its elements
 //!
 //! # Example
 //!
@@ -16,8 +17,11 @@
 //! use dialog_artifacts::site::*;
 //! use dialog_artifacts::site::memory::MemorySite;
 //!
-//! // Define environment as tuple of providers
-//! type TestEnv = (Provider<Local, MemorySite>, Provider<Remote, MemorySite>);
+//! // Define environment as tuple of capability providers
+//! type TestEnv = (
+//!     CapabilityProvider<Local, MemorySite>,
+//!     CapabilityProvider<Remote, MemorySite>,
+//! );
 //!
 //! let mut env: TestEnv = Default::default();
 //!
@@ -62,14 +66,25 @@ pub trait Site: Clone + Send + Sync + 'static {
     fn memory(&self) -> Self::Memory;
 }
 
-/// Capability to acquire a resource from an address.
+/// Capability to construct a resource from an address.
 ///
-/// Types implement this trait to describe how to produce a resource from an address.
-/// The address type parameter `A` determines which kind of address is accepted.
+/// Types implement this trait to describe how to construct themselves from an address.
+/// This is a pure construction trait with no caching.
+/// Use [`CapabilityProvider`] to wrap a `Capability` and add caching.
+pub trait Capability<A>: Sized {
+    /// Error type for acquisition failures.
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Construct a new instance from the given address.
+    fn acquire(address: &A) -> Result<Self, Self::Error>;
+}
+
+/// Provider trait for acquiring resources from addresses.
 ///
-/// For site types, implement this to describe how to construct a site from an address.
-/// For environment types (like tuples), this delegates to the appropriate provider.
-pub trait Capability<A> {
+/// Types implement this trait to provide resources with potential caching.
+/// Unlike [`Capability`], this takes `&mut self` allowing implementations
+/// to maintain state (like caches).
+pub trait Provider<A> {
     /// The resource type produced.
     type Resource;
     /// Error type for acquisition failures.
@@ -79,51 +94,39 @@ pub trait Capability<A> {
     fn acquire(&mut self, address: &A) -> Result<Self::Resource, Self::Error>;
 }
 
-/// Trait for types that can construct themselves from an address.
-///
-/// This is the "pure" construction trait - no caching, just creation.
-/// [`Provider`] wraps types implementing this to add caching.
-pub trait Acquirable<A>: Sized {
-    /// Error type for acquisition failures.
-    type Error: std::error::Error + Send + Sync + 'static;
-
-    /// Construct a new instance from the given address.
-    fn acquire(address: &A) -> Result<Self, Self::Error>;
-}
-
 /// Trait alias for environments that can provide both local and remote sites.
 pub trait Env:
-    Capability<Local, Resource: Site> + Capability<Remote, Resource: Site>
+    Provider<Local, Resource: Site> + Provider<Remote, Resource: Site>
 {
 }
 
 impl<T> Env for T where
-    T: Capability<Local> + Capability<Remote>,
-    <T as Capability<Local>>::Resource: Site,
-    <T as Capability<Remote>>::Resource: Site,
+    T: Provider<Local> + Provider<Remote>,
+    <T as Provider<Local>>::Resource: Site,
+    <T as Provider<Remote>>::Resource: Site,
 {
 }
 
 // =============================================================================
-// Provider - Caching Capability Wrapper
+// CapabilityProvider - Caching Provider Wrapper
 // =============================================================================
 
 /// A caching provider that produces resources from addresses.
 ///
-/// `Provider<A, R>` wraps a type `R` that implements [`Acquirable<A>`] and adds
-/// caching so that the same address always returns the same (cloned) resource.
+/// `CapabilityProvider<A, R>` wraps a type `R` that implements [`Capability<A>`]
+/// and adds caching so that the same address always returns the same (cloned) resource.
 #[derive(Debug)]
-pub struct Provider<A, R> {
+pub struct CapabilityProvider<A, R> {
     cache: HashMap<A, R>,
 }
 
-impl<A, R> Default for Provider<A, R> {
+impl<A, R> Default for CapabilityProvider<A, R> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<A, R> Clone for Provider<A, R>
+impl<A, R> Clone for CapabilityProvider<A, R>
 where
     A: Clone,
     R: Clone,
@@ -135,7 +138,7 @@ where
     }
 }
 
-impl<A, R> Provider<A, R> {
+impl<A, R> CapabilityProvider<A, R> {
     /// Create a new empty provider.
     pub fn new() -> Self {
         Self {
@@ -144,10 +147,10 @@ impl<A, R> Provider<A, R> {
     }
 }
 
-impl<A, R> Capability<A> for Provider<A, R>
+impl<A, R> Provider<A> for CapabilityProvider<A, R>
 where
     A: Hash + Eq + Clone,
-    R: Acquirable<A> + Clone,
+    R: Capability<A> + Clone,
 {
     type Resource = R;
     type Error = R::Error;
@@ -166,9 +169,9 @@ where
 // Tuple implementations for environments
 // =============================================================================
 
-impl<A, B> Capability<Local> for (A, B)
+impl<A, B> Provider<Local> for (A, B)
 where
-    A: Capability<Local>,
+    A: Provider<Local>,
 {
     type Resource = A::Resource;
     type Error = A::Error;
@@ -178,9 +181,9 @@ where
     }
 }
 
-impl<A, B> Capability<Remote> for (A, B)
+impl<A, B> Provider<Remote> for (A, B)
 where
-    B: Capability<Remote>,
+    B: Provider<Remote>,
 {
     type Resource = B::Resource;
     type Error = B::Error;
@@ -294,12 +297,12 @@ impl Remote {
 
 /// Test environment using memory storage for both local and remote.
 pub type TestEnv = (
-    Provider<Local, memory::MemorySite>,
-    Provider<Remote, memory::MemorySite>,
+    CapabilityProvider<Local, memory::MemorySite>,
+    CapabilityProvider<Remote, memory::MemorySite>,
 );
 
 /// Production environment using memory for local and REST for remote.
 pub type ProdEnv = (
-    Provider<Local, memory::MemorySite>,
-    Provider<Remote, rest::RestSite>,
+    CapabilityProvider<Local, memory::MemorySite>,
+    CapabilityProvider<Remote, rest::RestSite>,
 );

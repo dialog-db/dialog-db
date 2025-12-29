@@ -16,6 +16,7 @@ csv = ["dep:csv-async"]
 
 [dependencies]
 dialog-common = { workspace = true }
+dialog-macros = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-prolly-tree = { workspace = true }
 
@@ -28,6 +29,7 @@ blake3 = { workspace = true }
 csv-async = { workspace = true, optional = true, features = ["tokio"] }
 ed25519-dalek = { workspace = true }
 futures-util = { workspace = true }
+genawaiter = { workspace = true }
 leb128 = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }

@@ -13,3 +13,6 @@ pub use hash::*;
 /// Async utilities for cross-platform task management.
 pub mod r#async;
 pub use r#async::*;
+
+/// Algebraic effects system.
+pub mod fx;

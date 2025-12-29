@@ -54,6 +54,12 @@ pub mod environment;
 /// Site abstraction for storage resources.
 pub mod site;
 
+/// Capability-based effects system.
+pub mod capability;
+
+/// Algebraic effects system (experimental).
+pub mod fx;
+
 /// Replica abstraction for dialog
 pub mod replica;
 // #[allow(ambiguous_glob_reexports)]

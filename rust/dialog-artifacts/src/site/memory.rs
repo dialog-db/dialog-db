@@ -3,7 +3,7 @@
 //! This module provides a memory-backed site that's useful for testing
 //! without requiring real storage infrastructure.
 
-use super::{Acquirable, Local, Remote, TheSite};
+use super::{Capability, Local, Remote, TheSite};
 use dialog_storage::MemoryStorageBackend;
 use std::convert::Infallible;
 
@@ -11,10 +11,10 @@ use std::convert::Infallible;
 pub type MemorySite = TheSite<MemoryStorageBackend<Vec<u8>, Vec<u8>>>;
 
 // =============================================================================
-// Acquirable implementations for MemorySite
+// Capability implementations for MemorySite
 // =============================================================================
 
-impl Acquirable<Local> for MemorySite {
+impl Capability<Local> for MemorySite {
     type Error = Infallible;
 
     fn acquire(_address: &Local) -> Result<Self, Self::Error> {
@@ -22,7 +22,7 @@ impl Acquirable<Local> for MemorySite {
     }
 }
 
-impl Acquirable<Remote> for MemorySite {
+impl Capability<Remote> for MemorySite {
     type Error = Infallible;
 
     fn acquire(_address: &Remote) -> Result<Self, Self::Error> {
@@ -34,7 +34,7 @@ impl Acquirable<Remote> for MemorySite {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::site::{Capability, Provider, Site, TestEnv};
+    use crate::site::{CapabilityProvider, Provider, Site, TestEnv};
     use dialog_storage::StorageBackend;
 
     #[tokio::test]
@@ -152,7 +152,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_provider_directly() {
-        let mut provider: Provider<Local, MemorySite> = Provider::new();
+        let mut provider: CapabilityProvider<Local, MemorySite> = CapabilityProvider::new();
 
         let site = provider.acquire(&Local::repository("alice")).unwrap();
         let mut store = site.store();
