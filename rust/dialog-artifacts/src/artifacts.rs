@@ -347,11 +347,10 @@ where
                 for await item in stream {
                     let entry = item?;
 
-                    if entry.matches_selector(&selector) {
-                        if let Entry { value: State::Added(datum), .. } = entry {
+                    if entry.matches_selector(&selector)
+                        && let Entry { value: State::Added(datum), .. } = entry {
                             yield Artifact::try_from(datum)?;
                         }
-                    }
                 }
             } else if selector.value().is_some() {
                 let start = <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
@@ -364,11 +363,10 @@ where
                 for await item in stream {
                     let entry = item?;
 
-                    if entry.matches_selector(&selector) {
-                        if let Entry { value: State::Added(datum), .. } = entry {
+                    if entry.matches_selector(&selector)
+                        && let Entry { value: State::Added(datum), .. } = entry {
                             yield Artifact::try_from(datum)?;
                         }
-                    }
                 }
             } else if selector.attribute().is_some() {
                 let start = <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
@@ -381,11 +379,10 @@ where
                 for await item in stream {
                     let entry = item?;
 
-                    if entry.matches_selector(&selector) {
-                        if let Entry { value: State::Added(datum), .. } = entry {
+                    if entry.matches_selector(&selector)
+                        && let Entry { value: State::Added(datum), .. } = entry {
                             yield Artifact::try_from(datum)?;
                         }
-                    }
                 }
             } else {
                 unreachable!("ArtifactSelector will always have at least one field specified")
