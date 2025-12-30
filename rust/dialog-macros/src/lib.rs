@@ -15,23 +15,47 @@ pub fn effect(_attr: TokenStream, item: TokenStream) -> TokenStream {
     effect::effect_impl(trait_def)
 }
 
-/// Attribute macro that transforms a function with `yield` expressions into
-/// an effect-based computation returning a `Task`.
+/// Attribute macro that transforms functions and methods with `perform!`
+/// expressions into effect-based computations returning `Task`.
 ///
-/// # Example
+/// # On Functions
 ///
 /// ```ignore
 /// use dialog_macros::effectful;
 ///
 /// #[effectful(BlockStore)]
 /// pub fn copy(from: Vec<u8>, to: Vec<u8>) -> Result<(), Error> {
-///     let content = yield BlockStore::get(from)?;
-///     yield BlockStore::set(to, content.unwrap_or_default())
+///     let content = perform!(BlockStore::get(from))?;
+///     perform!(BlockStore::set(to, content.unwrap_or_default()))
 /// }
 /// ```
 ///
-/// This transforms `yield expr` into `expr.perform(&__co).await` and wraps
-/// the body in a `Task::new(|__co| async move { ... })`.
+/// # On Methods (inherent or trait impl)
+///
+/// ```ignore
+/// impl Cache {
+///     #[effectful(BlockStore)]
+///     fn get(&self, key: Vec<u8>) -> Option<Vec<u8>> {
+///         perform!(BlockStore::get(key))
+///     }
+/// }
+/// ```
+///
+/// # On Trait Definitions
+///
+/// ```ignore
+/// trait Storage {
+///     #[effectful(BlockStore)]
+///     fn load(&self, key: Vec<u8>) -> Option<Vec<u8>>;
+/// }
+///
+/// impl Storage for MyStorage {
+///     #[effectful(BlockStore)]
+///     fn load(&self, key: Vec<u8>) -> Option<Vec<u8>> {
+///         perform!(BlockStore::get(key))
+///     }
+/// }
+/// ```
 ///
 /// See the [`effectful`] module documentation for details.
 #[proc_macro_attribute]

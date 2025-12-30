@@ -551,4 +551,93 @@ mod tests {
             .unwrap();
         assert_eq!(raw, Some(b"value1".to_vec()));
     }
+
+    // =========================================================================
+    // Tests for #[effectful] on trait methods
+    // =========================================================================
+
+    /// A trait defining effectful storage operations
+    trait Storage {
+        #[effectful(BlockStore)]
+        fn load(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, DialogStorageError>;
+
+        #[effectful(BlockStore)]
+        fn save(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), DialogStorageError>;
+
+        /// A trait method with a default implementation
+        #[effectful(BlockStore)]
+        fn load_or_default(&self, key: Vec<u8>, default: Vec<u8>) -> Result<Vec<u8>, DialogStorageError> {
+            let value = perform!(BlockStore::get(key))?;
+            Ok(value.unwrap_or(default))
+        }
+    }
+
+    /// A concrete implementation of the Storage trait
+    struct PrefixedStorage {
+        prefix: Vec<u8>,
+    }
+
+    impl PrefixedStorage {
+        fn new(prefix: &[u8]) -> Self {
+            Self {
+                prefix: prefix.to_vec(),
+            }
+        }
+
+        fn prefixed(&self, key: &[u8]) -> Vec<u8> {
+            let mut result = self.prefix.clone();
+            result.extend_from_slice(key);
+            result
+        }
+    }
+
+    impl Storage for PrefixedStorage {
+        #[effectful(BlockStore)]
+        fn load(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, DialogStorageError> {
+            perform!(BlockStore::get(self.prefixed(&key)))
+        }
+
+        #[effectful(BlockStore)]
+        fn save(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), DialogStorageError> {
+            perform!(BlockStore::set(self.prefixed(&key), value))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_effectful_macro_on_trait() {
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let provider = BlockStoreProvider(Arc::new(Mutex::new(backend)));
+
+        let storage = PrefixedStorage::new(b"store:");
+
+        // Save using trait method
+        storage
+            .save(b"mykey".to_vec(), b"myvalue".to_vec())
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        // Load using trait method
+        let result = storage
+            .load(b"mykey".to_vec())
+            .perform(&provider)
+            .await
+            .unwrap();
+        assert_eq!(result, Some(b"myvalue".to_vec()));
+
+        // Test default implementation
+        let with_default = storage
+            .load_or_default(b"missing".to_vec(), b"default".to_vec())
+            .perform(&provider)
+            .await
+            .unwrap();
+        assert_eq!(with_default, b"default".to_vec());
+
+        // Verify prefix was applied
+        let raw = BlockStore::get(b"store:mykey".to_vec())
+            .perform(&provider)
+            .await
+            .unwrap();
+        assert_eq!(raw, Some(b"myvalue".to_vec()));
+    }
 }
