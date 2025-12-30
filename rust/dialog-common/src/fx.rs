@@ -158,3 +158,30 @@ impl<P: Provider + ?Sized> Provider for &P {
         (*self).provide(request).await
     }
 }
+
+/// Placeholder macro for use inside `#[effectful]` functions.
+///
+/// This macro is transformed by the `#[effectful]` attribute macro into
+/// `.perform(&__co).await` calls. It should never be invoked directly
+/// outside of `#[effectful]` functions.
+///
+/// # Example
+///
+/// ```ignore
+/// use dialog_macros::effectful;
+/// use dialog_common::fx::perform;
+///
+/// #[effectful(BlockStore)]
+/// fn get_value(key: Vec<u8>) -> Option<Vec<u8>> {
+///     perform!(BlockStore::get(key))
+/// }
+/// ```
+#[macro_export]
+macro_rules! perform {
+    ($e:expr) => {
+        compile_error!(
+            "perform! should only be used inside #[effectful] functions. \
+             Did you forget to add #[effectful(...)] to your function?"
+        )
+    };
+}

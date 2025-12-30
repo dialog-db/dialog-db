@@ -339,7 +339,8 @@ mod tests {
         type Capability = Env::Capability;
 
         async fn provide(&self, capability: Env::Capability) -> Env::Output {
-            Env::dispatch_composite(&(&self.block_store, &self.transactional_memory), capability).await
+            Env::dispatch_composite(&(&self.block_store, &self.transactional_memory), capability)
+                .await
         }
     }
 
@@ -383,5 +384,171 @@ mod tests {
 
         assert_eq!(block_val, Some(b"value".to_vec()));
         assert_eq!(tx_val, Some((b"data".to_vec(), b"data".to_vec())));
+    }
+
+    // =========================================================================
+    // Tests for #[effectful] macro
+    // =========================================================================
+
+    use dialog_macros::effectful;
+
+    /// A simple effectful function that copies data from one key to another
+    #[effectful(BlockStore)]
+    fn copy_data(from: Vec<u8>, to: Vec<u8>) -> Result<(), DialogStorageError> {
+        let content = perform!(BlockStore::get(from))?;
+        perform!(BlockStore::set(to, content.unwrap_or_default()))
+    }
+
+    #[tokio::test]
+    async fn test_effectful_macro_basic() {
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let provider = BlockStoreProvider(Arc::new(Mutex::new(backend)));
+
+        // Seed initial data
+        BlockStore::set(b"source".to_vec(), b"hello".to_vec())
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        // Use the effectful function
+        copy_data(b"source".to_vec(), b"dest".to_vec())
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        // Verify
+        let result = BlockStore::get(b"dest".to_vec())
+            .perform(&provider)
+            .await
+            .unwrap();
+        assert_eq!(result, Some(b"hello".to_vec()));
+    }
+
+    /// An effectful function using multiple capabilities
+    #[effectful(BlockStore, TransactionalMemory)]
+    fn store_and_track(
+        block_key: Vec<u8>,
+        tx_key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, DialogStorageError> {
+        // Store in block store
+        perform!(BlockStore::set(block_key, value.clone()))?;
+
+        // Track in transactional memory (using different key), returns the edition
+        perform!(TransactionalMemory::replace(tx_key, None, Some(value)))
+    }
+
+    #[tokio::test]
+    async fn test_effectful_macro_multi_capability() {
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let shared = Arc::new(Mutex::new(backend));
+        let provider = EnvProvider::new(shared);
+
+        // Use the effectful function with composite capability
+        // Use different keys for block store and transactional memory to avoid CAS conflicts
+        let edition = store_and_track(b"block_key".to_vec(), b"tx_key".to_vec(), b"value".to_vec())
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        assert!(edition.is_some());
+
+        // Verify block store has the value
+        let block_val = BlockStore::get(b"block_key".to_vec())
+            .perform(&provider)
+            .await
+            .unwrap();
+        assert_eq!(block_val, Some(b"value".to_vec()));
+
+        // Verify transactional memory has it tracked
+        let tx_val = TransactionalMemory::resolve(b"tx_key".to_vec())
+            .perform(&provider)
+            .await
+            .unwrap();
+        assert!(tx_val.is_some());
+    }
+
+    // =========================================================================
+    // Tests for #[effectful] on methods
+    // =========================================================================
+
+    /// A key-value cache that uses effects for storage operations
+    struct Cache {
+        prefix: Vec<u8>,
+    }
+
+    impl Cache {
+        fn new(prefix: &[u8]) -> Self {
+            Self {
+                prefix: prefix.to_vec(),
+            }
+        }
+
+        fn prefixed_key(&self, key: &[u8]) -> Vec<u8> {
+            let mut result = self.prefix.clone();
+            result.extend_from_slice(key);
+            result
+        }
+
+        /// Get a value from the cache
+        #[effectful(BlockStore)]
+        fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, DialogStorageError> {
+            let prefixed = self.prefixed_key(&key);
+            perform!(BlockStore::get(prefixed))
+        }
+
+        /// Set a value in the cache
+        #[effectful(BlockStore)]
+        fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), DialogStorageError> {
+            let prefixed = self.prefixed_key(&key);
+            perform!(BlockStore::set(prefixed, value))
+        }
+
+        /// Copy a value from one key to another
+        #[effectful(BlockStore)]
+        fn copy(&self, from: Vec<u8>, to: Vec<u8>) -> Result<(), DialogStorageError> {
+            let content = perform!(BlockStore::get(self.prefixed_key(&from)))?;
+            perform!(BlockStore::set(
+                self.prefixed_key(&to),
+                content.unwrap_or_default()
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_effectful_macro_on_methods() {
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let provider = BlockStoreProvider(Arc::new(Mutex::new(backend)));
+
+        let cache = Cache::new(b"cache:");
+
+        // Set a value using the effectful method
+        cache
+            .set(b"key1".to_vec(), b"value1".to_vec())
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        // Get the value back
+        let result = cache.get(b"key1".to_vec()).perform(&provider).await.unwrap();
+        assert_eq!(result, Some(b"value1".to_vec()));
+
+        // Copy to another key
+        cache
+            .copy(b"key1".to_vec(), b"key2".to_vec())
+            .perform(&provider)
+            .await
+            .unwrap();
+
+        // Verify the copy worked
+        let copied = cache.get(b"key2".to_vec()).perform(&provider).await.unwrap();
+        assert_eq!(copied, Some(b"value1".to_vec()));
+
+        // Verify the prefix was applied (check raw storage)
+        let raw = BlockStore::get(b"cache:key1".to_vec())
+            .perform(&provider)
+            .await
+            .unwrap();
+        assert_eq!(raw, Some(b"value1".to_vec()));
     }
 }
