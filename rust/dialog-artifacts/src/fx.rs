@@ -97,12 +97,11 @@ mod tests {
     where
         T: BlockStore::BlockStore + Send,
     {
-        type Request = BlockStore::Request;
-        type Response = BlockStore::Response;
+        type Capability = BlockStore::Capability;
 
-        async fn provide(&self, request: Self::Request) -> Self::Response {
+        async fn provide(&self, capability: Self::Capability) -> BlockStore::Output {
             let mut backend = self.0.lock().await;
-            BlockStore::dispatch(&mut *backend, request).await
+            BlockStore::dispatch(&mut *backend, capability).await
         }
     }
 
@@ -113,12 +112,11 @@ mod tests {
     where
         T: TransactionalMemory::TransactionalMemory + Send,
     {
-        type Request = TransactionalMemory::Request;
-        type Response = TransactionalMemory::Response;
+        type Capability = TransactionalMemory::Capability;
 
-        async fn provide(&self, request: Self::Request) -> Self::Response {
+        async fn provide(&self, capability: Self::Capability) -> TransactionalMemory::Output {
             let mut backend = self.0.lock().await;
-            TransactionalMemory::dispatch(&mut *backend, request).await
+            TransactionalMemory::dispatch(&mut *backend, capability).await
         }
     }
 
@@ -132,7 +130,7 @@ mod tests {
         let provider = BlockStoreProvider(Arc::new(Mutex::new(backend)));
 
         // Set a value
-        let set_task: Task<BlockStore::Command, _> = Task::new(|co| async move {
+        let set_task: Task<BlockStore::Capability, _> = Task::new(|co| async move {
             BlockStore::set(b"key".to_vec(), b"value".to_vec())
                 .perform(&co)
                 .await
@@ -140,7 +138,7 @@ mod tests {
         set_task.perform(&provider).await.unwrap();
 
         // Get the value
-        let get_task: Task<BlockStore::Command, _> =
+        let get_task: Task<BlockStore::Capability, _> =
             Task::new(|co| async move { BlockStore::get(b"key".to_vec()).perform(&co).await });
         let result = get_task.perform(&provider).await.unwrap();
 
@@ -177,7 +175,7 @@ mod tests {
             .unwrap();
 
         // Copy task - demonstrates composed effects
-        let copy_task: Task<BlockStore::Command, _> = Task::new(|env| async move {
+        let copy_task: Task<BlockStore::Capability, _> = Task::new(|env| async move {
             let content = BlockStore::get(b"source".to_vec())
                 .perform(&env)
                 .await
@@ -270,7 +268,7 @@ mod tests {
 
         // Helper to create a task that does read-modify-write with CAS
         fn make_increment_task() -> Task<
-            TransactionalMemory::Command,
+            TransactionalMemory::Capability,
             impl std::future::Future<Output = Result<Option<Vec<u8>>, DialogStorageError>>,
         > {
             Task::new(|env| async move {
@@ -338,11 +336,10 @@ mod tests {
     where
         T: BlockStore::BlockStore + TransactionalMemory::TransactionalMemory + Send,
     {
-        type Request = Env::Request;
-        type Response = Env::Response;
+        type Capability = Env::Capability;
 
-        async fn provide(&self, request: Env::Request) -> Self::Response {
-            Env::dispatch_composite(&(&self.block_store, &self.transactional_memory), request).await
+        async fn provide(&self, capability: Env::Capability) -> Env::Output {
+            Env::dispatch_composite(&(&self.block_store, &self.transactional_memory), capability).await
         }
     }
 
@@ -355,7 +352,7 @@ mod tests {
         let provider = EnvProvider::new(shared);
 
         // A task that uses BOTH capabilities
-        let task: Task<Env::Command, _> = Task::new(|env| async move {
+        let task: Task<Env::Capability, _> = Task::new(|env| async move {
             // Use BlockStore capability
             BlockStore::set(b"key".to_vec(), b"value".to_vec())
                 .perform(&env)
