@@ -117,7 +117,7 @@ impl VisitMut for PerformTransformer {
                     .expect("perform! macro should contain a valid expression");
 
                 *expr = syn::parse_quote! {
-                    #inner_expr.perform(&__co).await
+                    #inner_expr.perform(&mut &__co).await
                 };
             }
         }

@@ -5,6 +5,7 @@ use syn::{parse_macro_input, ItemTrait};
 
 mod effect;
 mod effectful;
+mod provider;
 
 /// Attribute macro that generates an algebraic effects system from a trait.
 ///
@@ -61,4 +62,33 @@ pub fn effect(_attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn effectful(attr: TokenStream, item: TokenStream) -> TokenStream {
     effectful::effectful_impl(attr, item)
+}
+
+/// Attribute macro that generates a `Provider` implementation for a struct.
+///
+/// # Example
+///
+/// ```ignore
+/// use dialog_macros::provider;
+///
+/// #[provider(BlockStore)]
+/// struct MyBackend {
+///     data: HashMap<Vec<u8>, Vec<u8>>,
+/// }
+///
+/// impl BlockStore::BlockStore for MyBackend {
+///     async fn get(&self, key: Vec<u8>) -> Option<Vec<u8>> {
+///         self.data.get(&key).cloned()
+///     }
+///     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) {
+///         self.data.insert(key, value);
+///     }
+/// }
+/// ```
+///
+/// This generates a `Provider` impl that dispatches capability requests
+/// to the trait methods.
+#[proc_macro_attribute]
+pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
+    provider::provider_impl(attr, item)
 }

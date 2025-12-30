@@ -16,6 +16,7 @@
 //! - `Get`, `Set` effect structs (implement `Effect` trait)
 //! - `Capability` enum (the capability type for this effect module)
 //! - `Output` enum (results of capability requests)
+//! - `Env<T>` wrapper struct that implements `Provider` for any `T: Trait`
 //! - `Effect` impls for each effect struct (using From/TryFrom for composition)
 //! - `From<Capability>` impl for composing capabilities
 //! - `TryFrom<Output>` for extracting outputs
@@ -31,12 +32,13 @@
 //! Usage:
 //! ```ignore
 //! // Implement the trait
-//! impl BlockStore for MyBackend {
+//! impl BlockStore::BlockStore for MyBackend {
 //!     async fn get(&self, key: Vec<u8>) -> Option<Vec<u8>> { ... }
 //!     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) { ... }
 //! }
 //!
-//! // Use effects
+//! // Use effects with the generated Env wrapper
+//! let provider = BlockStore::Env::new(my_backend);
 //! BlockStore::get(key).perform(&provider).await
 //! BlockStore::set(key, value).perform(&provider).await
 //! ```
@@ -96,8 +98,8 @@ fn generate_effect_system(trait_def: &ItemTrait) -> syn::Result<TokenStream2> {
     let from_impls = generate_from_impls(&methods, &supertraits);
     let capability_trait_impl = generate_capability_trait_impl();
     let effect_impls = methods.iter().map(generate_effect_impl);
-    let provider_impl = generate_provider_impl(&methods, trait_name, &supertraits);
-    let tuple_provider_impls = generate_tuple_provider_impls(&supertraits);
+    let into_provider_impl = generate_into_provider_impl(&methods, trait_name, &supertraits);
+    let dispatch_fn = generate_dispatch_fn(&methods, trait_name, &supertraits);
 
     Ok(quote! {
         #[allow(async_fn_in_trait)]
@@ -128,11 +130,11 @@ fn generate_effect_system(trait_def: &ItemTrait) -> syn::Result<TokenStream2> {
             // Effect impls
             #(#effect_impls)*
 
-            // Dispatch function for Provider impl
-            #provider_impl
+            // IntoProvider impl for &mut T
+            #into_provider_impl
 
-            // Dispatch function for composite providers
-            #tuple_provider_impls
+            // Dispatch function for implementing custom providers
+            #dispatch_fn
         }
     })
 }
@@ -142,6 +144,7 @@ struct MethodInfo {
     struct_name: Ident,
     params: Vec<(Ident, Type)>,
     output_type: Type,
+    #[allow(dead_code)]
     is_mut: bool,
 }
 
@@ -151,28 +154,35 @@ fn parse_method_info(method: &TraitItemFn) -> syn::Result<MethodInfo> {
     // Create struct name: MethodName in PascalCase (e.g., Get, Set)
     let struct_name = format_ident!("{}", to_pascal_case(&method_name.to_string()));
 
-    // Parse parameters (skip self)
-    let mut params = Vec::new();
-    let mut is_mut = false;
-
-    for arg in &method.sig.inputs {
-        match arg {
-            FnArg::Receiver(r) => {
-                is_mut = r.mutability.is_some();
-            }
-            FnArg::Typed(pat_type) => {
-                if let Pat::Ident(pat_ident) = &*pat_type.pat {
-                    params.push((pat_ident.ident.clone(), (*pat_type.ty).clone()));
+    // Extract parameters (skip self)
+    let params: Vec<_> = method
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|arg| {
+            if let FnArg::Typed(pat_type) = arg {
+                if let Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
+                    return Some((pat_ident.ident.clone(), (*pat_type.ty).clone()));
                 }
             }
-        }
-    }
+            None
+        })
+        .collect();
 
-    // Parse return type
+    // Extract return type
     let output_type = match &method.sig.output {
-        ReturnType::Default => syn::parse_quote!(()),
+        ReturnType::Default => syn::parse_quote! { () },
         ReturnType::Type(_, ty) => (**ty).clone(),
     };
+
+    // Check if &mut self
+    let is_mut = method.sig.inputs.first().map_or(false, |arg| {
+        if let FnArg::Receiver(receiver) = arg {
+            receiver.mutability.is_some()
+        } else {
+            false
+        }
+    });
 
     Ok(MethodInfo {
         method_name,
@@ -183,31 +193,32 @@ fn parse_method_info(method: &TraitItemFn) -> syn::Result<MethodInfo> {
     })
 }
 
+/// Generate the trait definition inside the module
 fn generate_provider_trait(
     trait_def: &ItemTrait,
     trait_name: &Ident,
     supertraits: &[syn::Path],
 ) -> TokenStream2 {
-    let trait_vis = &trait_def.vis;
-    let generics = &trait_def.generics;
+    let vis = &trait_def.vis;
+    let attrs = &trait_def.attrs;
     let items = &trait_def.items;
 
-    // Build supertraits: all effect supertraits (referencing their inner trait)
-    let supertrait_refs = supertraits.iter().map(|path| {
+    // Prepend supertraits with their module path (e.g., BlockStore -> BlockStore::BlockStore)
+    let supertrait_bounds = supertraits.iter().map(|path| {
         quote! { #path::#path }
     });
 
-    if supertraits.is_empty() {
-        quote! {
-            #trait_vis trait #trait_name #generics {
-                #(#items)*
-            }
-        }
+    // Add ConditionalSync as a supertrait for Send safety
+    let supertraits_with_sync = if supertraits.is_empty() {
+        quote! { dialog_common::ConditionalSync }
     } else {
-        quote! {
-            #trait_vis trait #trait_name #generics : #(#supertrait_refs)+* {
-                #(#items)*
-            }
+        quote! { #(#supertrait_bounds +)* dialog_common::ConditionalSync }
+    };
+
+    quote! {
+        #(#attrs)*
+        #vis trait #trait_name: #supertraits_with_sync {
+            #(#items)*
         }
     }
 }
@@ -220,13 +231,12 @@ fn generate_free_function(method: &MethodInfo) -> TokenStream2 {
         quote! { #name: #ty }
     });
 
-    let field_inits = method.params.iter().map(|(name, _)| {
-        quote! { #name }
-    });
+    let field_names: Vec<_> = method.params.iter().map(|(name, _)| name).collect();
 
     quote! {
+        /// Create an effect struct for the `#method_name` operation.
         pub fn #method_name(#(#params),*) -> #struct_name {
-            #struct_name { #(#field_inits),* }
+            #struct_name { #(#field_names),* }
         }
     }
 }
@@ -240,111 +250,79 @@ fn generate_effect_struct(method: &MethodInfo) -> TokenStream2 {
     });
 
     quote! {
-        #[derive(Debug, Clone)]
+        /// Effect struct representing a pending operation.
+        #[derive(Clone)]
         pub struct #struct_name {
             #(#fields),*
         }
 
         impl #struct_name {
-            /// Wrap the result in the appropriate Output variant.
+            /// Wrap a result value in the Output enum.
             pub fn output(result: #output_type) -> Output {
                 Output::#struct_name(result)
+            }
+        }
+
+        impl From<#struct_name> for Capability {
+            fn from(effect: #struct_name) -> Self {
+                Capability::#struct_name(effect)
             }
         }
     }
 }
 
 fn generate_capability_enum(methods: &[MethodInfo], supertraits: &[syn::Path]) -> TokenStream2 {
-    // Variants for this trait's own methods
+    // Variants for own methods
     let method_variants = methods.iter().map(|m| {
         let struct_name = &m.struct_name;
         quote! { #struct_name(#struct_name) }
     });
 
-    // Variants for supertrait capabilities
+    // Variants for supertraits (re-export their Capability)
     let supertrait_variants = supertraits.iter().map(|path| {
         let variant_name = path.segments.last().unwrap().ident.clone();
         quote! { #variant_name(#path::Capability) }
     });
 
     quote! {
-        #[derive(Debug, Clone)]
+        /// Enum of all capability requests for this effect module.
+        #[derive(Clone)]
         pub enum Capability {
             #(#method_variants,)*
-            #(#supertrait_variants),*
+            #(#supertrait_variants,)*
         }
     }
 }
 
 fn generate_output_enum(methods: &[MethodInfo], supertraits: &[syn::Path]) -> TokenStream2 {
-    // Variants for this trait's own methods
+    // Variants for own methods
     let method_variants = methods.iter().map(|m| {
         let struct_name = &m.struct_name;
-        let output_ty = &m.output_type;
-        quote! { #struct_name(#output_ty) }
+        let output_type = &m.output_type;
+        quote! { #struct_name(#output_type) }
     });
 
-    // Variants for supertrait outputs
+    // Variants for supertraits (re-export their Output)
     let supertrait_variants = supertraits.iter().map(|path| {
         let variant_name = path.segments.last().unwrap().ident.clone();
         quote! { #variant_name(#path::Output) }
     });
 
-    // Default impl - use Init if no supertraits, otherwise delegate to first supertrait
-    let default_impl = if supertraits.is_empty() {
-        quote! {
-            impl Default for Output {
-                fn default() -> Self {
-                    Output::Init
-                }
-            }
-        }
-    } else {
-        let first_supertrait = &supertraits[0];
-        let first_variant = first_supertrait.segments.last().unwrap().ident.clone();
-        quote! {
-            impl Default for Output {
-                fn default() -> Self {
-                    Output::#first_variant(#first_supertrait::Output::default())
-                }
-            }
-        }
-    };
-
-    // Only include Init variant if there are no supertraits
-    let init_variant = if supertraits.is_empty() {
-        quote! { Init, }
-    } else {
-        quote! {}
-    };
-
     quote! {
-        #[derive(Debug, Clone)]
+        /// Enum of all outputs from capability requests.
+        #[derive(Default)]
         pub enum Output {
-            #init_variant
+            #[default]
+            __Default,
             #(#method_variants,)*
-            #(#supertrait_variants),*
+            #(#supertrait_variants,)*
         }
-
-        #default_impl
     }
 }
 
 fn generate_from_impls(methods: &[MethodInfo], supertraits: &[syn::Path]) -> TokenStream2 {
-    // From<EffectStruct> for Capability (for own methods)
-    let own_capability_from_impls = methods.iter().map(|m| {
-        let struct_name = &m.struct_name;
-        quote! {
-            impl From<#struct_name> for Capability {
-                fn from(effect: #struct_name) -> Self {
-                    Capability::#struct_name(effect)
-                }
-            }
-        }
-    });
-
-    // From<Supertrait::Capability> for Capability
-    let supertrait_capability_from_impls = supertraits.iter().map(|path| {
+    // Generate From<Supertrait::Capability> for Capability
+    let from_capability_impls = supertraits.iter().map(|path| {
         let variant_name = path.segments.last().unwrap().ident.clone();
         quote! {
             impl From<#path::Capability> for Capability {
@@ -355,8 +333,20 @@ fn generate_from_impls(methods: &[MethodInfo], supertraits: &[syn::Path]) -> Tok
         }
     });
 
-    // TryFrom<Output> for Supertrait::Output
-    let supertrait_output_try_from_impls = supertraits.iter().map(|path| {
+    // Generate From<Supertrait::Output> for Output
+    let from_output_impls = supertraits.iter().map(|path| {
+        let variant_name = path.segments.last().unwrap().ident.clone();
+        quote! {
+            impl From<#path::Output> for Output {
+                fn from(out: #path::Output) -> Self {
+                    Output::#variant_name(out)
+                }
+            }
+        }
+    });
+
+    // Generate TryFrom<Output> for Supertrait::Output
+    let try_from_output_impls = supertraits.iter().map(|path| {
         let variant_name = path.segments.last().unwrap().ident.clone();
         quote! {
             impl TryFrom<Output> for #path::Output {
@@ -371,10 +361,28 @@ fn generate_from_impls(methods: &[MethodInfo], supertraits: &[syn::Path]) -> Tok
         }
     });
 
+    // Generate TryFrom<Output> for individual method output types
+    let try_from_method_output_impls = methods.iter().map(|m| {
+        let struct_name = &m.struct_name;
+        let output_type = &m.output_type;
+        quote! {
+            impl TryFrom<Output> for #output_type {
+                type Error = Output;
+                fn try_from(out: Output) -> Result<Self, Self::Error> {
+                    match out {
+                        Output::#struct_name(result) => Ok(result),
+                        other => Err(other),
+                    }
+                }
+            }
+        }
+    });
+
     quote! {
-        #(#own_capability_from_impls)*
-        #(#supertrait_capability_from_impls)*
-        #(#supertrait_output_try_from_impls)*
+        #(#from_capability_impls)*
+        #(#from_output_impls)*
+        #(#try_from_output_impls)*
+        #(#try_from_method_output_impls)*
     }
 }
 
@@ -400,7 +408,7 @@ fn generate_effect_impl(method: &MethodInfo) -> TokenStream2 {
             Cap: dialog_common::fx::Capability + From<Capability>,
             Cap::Output: TryInto<Output>,
         {
-            async fn perform<P>(self, provider: &P) -> #output_type
+            async fn perform<P>(self, provider: &mut P) -> #output_type
             where
                 P: dialog_common::fx::Provider<Capability = Cap>,
             {
@@ -417,97 +425,79 @@ fn generate_effect_impl(method: &MethodInfo) -> TokenStream2 {
     }
 }
 
-fn generate_provider_impl(
-    methods: &[MethodInfo],
-    trait_name: &Ident,
+/// Previously generated IntoProvider impl - now users use #[provider] macro instead
+fn generate_into_provider_impl(
+    _methods: &[MethodInfo],
+    _trait_name: &Ident,
     _supertraits: &[syn::Path],
 ) -> TokenStream2 {
-    // If there are no methods and only supertraits, don't generate a dispatch function
-    if methods.is_empty() {
-        return quote! {};
-    }
-
-    // Generate match arms for own methods
-    let method_arms = methods.iter().map(|m| {
-        let method_name = &m.method_name;
-        let struct_name = &m.struct_name;
-
-        let field_names: Vec<_> = m.params.iter().map(|(name, _)| name).collect();
-        let call_args = field_names.iter().map(|name| quote! { effect.#name });
-
-        if m.is_mut {
-            quote! {
-                Capability::#struct_name(effect) => {
-                    #struct_name::output(backend.#method_name(#(#call_args),*).await)
-                }
-            }
-        } else {
-            quote! {
-                Capability::#struct_name(effect) => {
-                    #struct_name::output(backend.#method_name(#(#call_args),*).await)
-                }
-            }
-        }
-    });
-
-    // Generate a dispatch function that users can call to implement their own Provider
-    quote! {
-        /// Dispatch a capability request to the backend. Used to implement Provider.
-        pub async fn dispatch<T>(backend: &mut T, capability: Capability) -> Output
-        where
-            T: #trait_name,
-        {
-            match capability {
-                #(#method_arms)*
-            }
-        }
-    }
+    // No generated code needed - users will use #[provider(Trait)] macro instead
+    quote! {}
 }
 
-fn generate_tuple_provider_impls(supertraits: &[syn::Path]) -> TokenStream2 {
-    if supertraits.is_empty() {
-        return quote! {};
-    }
+/// Generate the dispatch function for custom Provider implementations
+fn generate_dispatch_fn(
+    methods: &[MethodInfo],
+    trait_name: &Ident,
+    supertraits: &[syn::Path],
+) -> TokenStream2 {
+    // If there are no methods and only supertraits, we still generate dispatch
+    // for the composite case
 
-    // Generate a dispatch function for composite providers instead of implementing Provider for tuples
-    // (implementing Provider for tuples would violate the orphan rule)
-    let len = supertraits.len();
+    // Generate match arms for own methods
+    let method_arms: Vec<_> = methods
+        .iter()
+        .map(|m| {
+            let method_name = &m.method_name;
+            let struct_name = &m.struct_name;
 
-    // Type parameters: P0, P1, P2, ...
-    let type_params: Vec<_> = (0..len).map(|i| format_ident!("P{}", i)).collect();
+            let field_names: Vec<_> = m.params.iter().map(|(name, _)| name).collect();
+            let call_args = field_names.iter().map(|name| quote! { effect.#name });
 
-    // Where clauses: P0: Provider<Capability = S0::Capability>
-    let where_clauses = supertraits.iter().zip(type_params.iter()).map(|(path, param)| {
-        quote! {
-            #param: dialog_common::fx::Provider<Capability = #path::Capability>
-        }
-    });
-
-    // Match arms for each supertrait
-    let match_arms = supertraits.iter().enumerate().map(|(i, path)| {
-        let variant_name = path.segments.last().unwrap().ident.clone();
-        let idx = syn::Index::from(i);
-        quote! {
-            Capability::#variant_name(cap) => {
-                Output::#variant_name(providers.#idx.provide(cap).await)
+            quote! {
+                Capability::#struct_name(effect) => {
+                    #struct_name::output(backend.#method_name(#(#call_args),*).await)
+                }
             }
-        }
+        })
+        .collect();
+
+    // Generate match arms for supertrait capabilities
+    let supertrait_arms: Vec<_> = supertraits
+        .iter()
+        .map(|path| {
+            let variant_name = path.segments.last().unwrap().ident.clone();
+            quote! {
+                Capability::#variant_name(cap) => {
+                    Output::#variant_name(#path::dispatch(backend, cap).await)
+                }
+            }
+        })
+        .collect();
+
+    let all_arms = method_arms.iter().chain(supertrait_arms.iter());
+
+    // Build supertrait bounds
+    let supertrait_bounds = supertraits.iter().map(|path| {
+        quote! { #path::#path }
     });
 
-    let tuple_type = quote! { (#(#type_params),*) };
+    let trait_bounds = if supertraits.is_empty() {
+        quote! { #trait_name }
+    } else {
+        quote! { #trait_name + #(#supertrait_bounds)+* }
+    };
 
     quote! {
-        /// Dispatch a composite capability request to the appropriate provider.
-        /// Users should wrap this in their own Provider implementation.
-        pub async fn dispatch_composite<#(#type_params),*>(
-            providers: &#tuple_type,
-            capability: Capability,
-        ) -> Output
+        /// Dispatch a capability request to the backend.
+        ///
+        /// This function is useful for implementing custom Provider types.
+        pub async fn dispatch<T>(backend: &mut T, capability: Capability) -> Output
         where
-            #(#where_clauses),*
+            T: #trait_bounds,
         {
             match capability {
-                #(#match_arms)*
+                #(#all_arms)*
             }
         }
     }

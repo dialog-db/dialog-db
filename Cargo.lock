@@ -754,6 +754,7 @@ name = "dialog-common"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "dialog-macros",
  "futures-util",
  "genawaiter",
  "thiserror 2.0.17",

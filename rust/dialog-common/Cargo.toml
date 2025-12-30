@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 blake3 = { workspace = true }
+dialog-macros = { path = "../dialog-macros" }
 futures-util = { workspace = true }
 genawaiter = { workspace = true }
 thiserror = { workspace = true }
