@@ -137,7 +137,7 @@ fn generate_effect_system(args: &EffectArgs, trait_def: &ItemTrait) -> syn::Resu
     let dispatch_fn = generate_dispatch_fn(&methods, &supertraits, &module_name);
 
     Ok(quote! {
-        #[allow(async_fn_in_trait)]
+        #[allow(async_fn_in_trait, missing_docs)]
         #trait_vis mod #module_name {
             use super::*;
 
@@ -175,7 +175,7 @@ fn generate_effect_system(args: &EffectArgs, trait_def: &ItemTrait) -> syn::Resu
         #trait_vis use #module_name::Provider as #trait_name;
 
         // Const for BlobStore.get(key) syntax
-        #[allow(non_upper_case_globals)]
+        #[allow(non_upper_case_globals, missing_docs)]
         #trait_vis const #trait_name: #module_name::Consumer = #module_name::Consumer;
     })
 }

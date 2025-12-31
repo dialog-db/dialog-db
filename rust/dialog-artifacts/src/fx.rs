@@ -164,4 +164,3 @@ pub trait RemoteMemory {
 /// into a single environment that can handle all replica operations.
 #[effect]
 pub trait ReplicaEnv: LocalStore + LocalMemory + RemoteStore + RemoteMemory {}
-
