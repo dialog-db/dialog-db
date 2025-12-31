@@ -1,16 +1,16 @@
-//! The `#[provider(EffectModule)]` macro generates a `Provider` implementation for a struct.
+//! The `#[provider(TraitName)]` macro generates a `Provider` implementation for a struct.
 //!
 //! # Example
 //!
 //! ```ignore
 //! use dialog_macros::provider;
 //!
-//! #[provider(BlockStore)]
+//! #[provider(BlobStore)]
 //! struct MyBackend {
 //!     data: HashMap<Vec<u8>, Vec<u8>>,
 //! }
 //!
-//! impl BlockStore::BlockStore for MyBackend {
+//! impl BlobStore for MyBackend {
 //!     async fn get(&self, key: Vec<u8>) -> Option<Vec<u8>> {
 //!         self.data.get(&key).cloned()
 //!     }
@@ -23,17 +23,17 @@
 //! This generates:
 //! ```ignore
 //! impl dialog_common::fx::Provider for MyBackend {
-//!     type Capability = BlockStore::Capability;
+//!     type Capability = blob_store::Capability;
 //!
-//!     async fn provide(&mut self, capability: BlockStore::Capability) -> BlockStore::Output {
-//!         BlockStore::dispatch(self, capability).await
+//!     async fn provide(&mut self, capability: blob_store::Capability) -> blob_store::Output {
+//!         blob_store::dispatch(self, capability).await
 //!     }
 //! }
 //! ```
 //!
-//! # Multiple Effect Modules
+//! # Composite Effects
 //!
-//! You can derive from multiple effect modules:
+//! You can use composite effect traits:
 //!
 //! ```ignore
 //! #[provider(CompositeEnv)]
@@ -43,12 +43,12 @@
 //! Where `CompositeEnv` is defined as:
 //! ```ignore
 //! #[effect]
-//! trait CompositeEnv: BlockStore + TransactionalMemory {}
+//! trait CompositeEnv: BlobStore + TransactionalMemory {}
 //! ```
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{
     parse::{Parse, ParseStream},
     parse_macro_input, DeriveInput, Path, Token,
@@ -82,8 +82,12 @@ pub fn provider_impl(args: TokenStream, item: TokenStream) -> TokenStream {
 
 fn generate_provider_impl(args: &ProviderArgs, input: &DeriveInput) -> syn::Result<TokenStream2> {
     let struct_name = &input.ident;
-    let effect_module = &args.effect_module;
+    let trait_path = &args.effect_module;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    // Derive module name from trait name (e.g., BlobStore -> blob_store)
+    let trait_name = &trait_path.segments.last().unwrap().ident;
+    let module_name = format_ident!("{}", to_snake_case(&trait_name.to_string()));
 
     // Reproduce the original struct definition
     let vis = &input.vis;
@@ -120,11 +124,29 @@ fn generate_provider_impl(args: &ProviderArgs, input: &DeriveInput) -> syn::Resu
         #struct_def
 
         impl #impl_generics dialog_common::fx::Provider for #struct_name #ty_generics #where_clause {
-            type Capability = #effect_module::Capability;
+            type Capability = #module_name::Capability;
 
-            async fn provide(&mut self, capability: #effect_module::Capability) -> #effect_module::Output {
-                #effect_module::dispatch(self, capability).await
+            async fn provide(&mut self, capability: #module_name::Capability) -> #module_name::Output {
+                #module_name::dispatch(self, capability).await
             }
         }
     })
+}
+
+/// Convert PascalCase to snake_case
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                result.push('_');
+            }
+            result.extend(c.to_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
 }

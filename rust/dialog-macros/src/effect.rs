@@ -4,63 +4,98 @@
 //! use dialog_macros::effect;
 //!
 //! #[effect]
-//! pub trait BlockStore {
+//! pub trait BlobStore {
 //!     async fn get(&self, key: Vec<u8>) -> Option<Vec<u8>>;
 //!     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>);
 //! }
 //! ```
 //!
-//! This generates a module with the trait name containing:
-//! - The original trait (with ConditionalSync added)
-//! - Free functions `get()`, `set()` that return effect structs
-//! - `Get`, `Set` effect structs (implement `Effect` trait)
-//! - `Capability` enum (the capability type for this effect module)
-//! - `Output` enum (results of capability requests)
-//! - `Env<T>` wrapper struct that implements `Provider` for any `T: Trait`
-//! - `Effect` impls for each effect struct (using From/TryFrom for composition)
-//! - `From<Capability>` impl for composing capabilities
-//! - `TryFrom<Output>` for extracting outputs
+//! This generates:
+//! - A module `blob_store` (snake_case) containing:
+//!   - `Provider` trait (the original trait renamed, with ConditionalSync added)
+//!   - Free functions `get()`, `set()` that return effect structs
+//!   - `Get`, `Set` effect structs (implement `Effect` trait)
+//!   - `Capability` enum (the capability type for this effect module)
+//!   - `Output` enum (results of capability requests)
+//!   - `Consumer` struct for method-style effect creation
+//!   - `dispatch` function for implementing custom providers
+//! - Re-export: `pub use blob_store::Provider as BlobStore`
+//! - Const: `pub const BlobStore: blob_store::Consumer` for `BlobStore.get(key)` syntax
+//!
+//! You can specify a custom module name:
+//! ```ignore
+//! #[effect(store)]
+//! pub trait BlobStore { ... }
+//! // Generates module `store` instead of `blob_store`
+//! ```
 //!
 //! For traits with supertraits (composition):
 //! ```ignore
 //! #[effect]
-//! pub trait Env: BlockStore + TransactionalMemory {}
+//! pub trait Env: BlobStore + TransactionalMemory {}
 //! ```
-//! The macro combines Capability/Output enums from all supertraits and generates
-//! dispatch functions for composite providers.
 //!
 //! Usage:
 //! ```ignore
-//! // Implement the trait
-//! impl BlockStore::BlockStore for MyBackend {
+//! // Implement the trait directly (not BlobStore::BlobStore)
+//! impl BlobStore for MyBackend {
 //!     async fn get(&self, key: Vec<u8>) -> Option<Vec<u8>> { ... }
 //!     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) { ... }
 //! }
 //!
-//! // Use effects with the generated Env wrapper
-//! let provider = BlockStore::Env::new(my_backend);
-//! BlockStore::get(key).perform(&provider).await
-//! BlockStore::set(key, value).perform(&provider).await
+//! // Create effects using either syntax:
+//! blob_store::get(key).perform(&mut provider).await  // module function
+//! BlobStore.get(key).perform(&mut provider).await    // const method
 //! ```
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{FnArg, Ident, ItemTrait, Pat, ReturnType, TraitItem, TraitItemFn, Type, TypeParamBound};
+use syn::{
+    parse::{Parse, ParseStream},
+    FnArg, Ident, ItemTrait, Pat, ReturnType, TraitItem, TraitItemFn, Type, TypeParamBound,
+};
+
+/// Optional argument to the effect macro: a custom module name
+struct EffectArgs {
+    module_name: Option<Ident>,
+}
+
+impl Parse for EffectArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        if input.is_empty() {
+            Ok(EffectArgs { module_name: None })
+        } else {
+            let name: Ident = input.parse()?;
+            Ok(EffectArgs {
+                module_name: Some(name),
+            })
+        }
+    }
+}
 
 /// Attribute macro that generates an algebraic effects system from a trait.
 ///
 /// See the [module-level documentation](self) for details.
-pub fn effect_impl(item: ItemTrait) -> TokenStream {
-    match generate_effect_system(&item) {
+pub fn effect_impl(args: TokenStream, item: TokenStream) -> TokenStream {
+    let args = syn::parse_macro_input!(args as EffectArgs);
+    let item = syn::parse_macro_input!(item as ItemTrait);
+
+    match generate_effect_system(&args, &item) {
         Ok(tokens) => tokens.into(),
         Err(e) => e.to_compile_error().into(),
     }
 }
 
-fn generate_effect_system(trait_def: &ItemTrait) -> syn::Result<TokenStream2> {
+fn generate_effect_system(args: &EffectArgs, trait_def: &ItemTrait) -> syn::Result<TokenStream2> {
     let trait_name = &trait_def.ident;
     let trait_vis = &trait_def.vis;
+
+    // Determine module name: custom or derived from trait name (snake_case)
+    let module_name = args
+        .module_name
+        .clone()
+        .unwrap_or_else(|| format_ident!("{}", to_snake_case(&trait_name.to_string())));
 
     // Collect supertraits (these are assumed to be effect capabilities)
     let supertraits: Vec<_> = trait_def
@@ -68,7 +103,7 @@ fn generate_effect_system(trait_def: &ItemTrait) -> syn::Result<TokenStream2> {
         .iter()
         .filter_map(|bound| {
             if let TypeParamBound::Trait(trait_bound) = bound {
-                // Get the trait path (e.g., BlockStore)
+                // Get the trait path (e.g., BlobStore)
                 Some(trait_bound.path.clone())
             } else {
                 None
@@ -90,24 +125,26 @@ fn generate_effect_system(trait_def: &ItemTrait) -> syn::Result<TokenStream2> {
         .collect::<syn::Result<Vec<_>>>()?;
 
     // Generate the module contents
-    let provider_trait = generate_provider_trait(trait_def, trait_name, &supertraits);
+    let provider_trait = generate_provider_trait(trait_def, &supertraits);
     let free_functions = methods.iter().map(generate_free_function);
     let effect_structs = methods.iter().map(generate_effect_struct);
-    let capability_enum = generate_capability_enum(&methods, &supertraits);
-    let output_enum = generate_output_enum(&methods, &supertraits);
-    let from_impls = generate_from_impls(&methods, &supertraits);
+    let consumer_struct = generate_consumer_struct(&methods);
+    let capability_enum = generate_capability_enum(&methods, &supertraits, &module_name);
+    let output_enum = generate_output_enum(&methods, &supertraits, &module_name);
+    let from_impls = generate_from_impls(&methods, &supertraits, &module_name);
     let capability_trait_impl = generate_capability_trait_impl();
     let effect_impls = methods.iter().map(generate_effect_impl);
-    let into_provider_impl = generate_into_provider_impl(&methods, trait_name, &supertraits);
-    let dispatch_fn = generate_dispatch_fn(&methods, trait_name, &supertraits);
+    let dispatch_fn = generate_dispatch_fn(&methods, &supertraits, &module_name);
 
     Ok(quote! {
         #[allow(async_fn_in_trait)]
-        #[allow(non_snake_case)]
-        #trait_vis mod #trait_name {
+        #trait_vis mod #module_name {
             use super::*;
 
             #provider_trait
+
+            // Consumer struct for BlobStore.get(key) syntax
+            #consumer_struct
 
             // Free functions that return effect structs
             #(#free_functions)*
@@ -130,12 +167,16 @@ fn generate_effect_system(trait_def: &ItemTrait) -> syn::Result<TokenStream2> {
             // Effect impls
             #(#effect_impls)*
 
-            // IntoProvider impl for &mut T
-            #into_provider_impl
-
             // Dispatch function for implementing custom providers
             #dispatch_fn
         }
+
+        // Re-export the trait at the parent scope
+        #trait_vis use #module_name::Provider as #trait_name;
+
+        // Const for BlobStore.get(key) syntax
+        #[allow(non_upper_case_globals)]
+        #trait_vis const #trait_name: #module_name::Consumer = #module_name::Consumer;
     })
 }
 
@@ -193,19 +234,16 @@ fn parse_method_info(method: &TraitItemFn) -> syn::Result<MethodInfo> {
     })
 }
 
-/// Generate the trait definition inside the module
-fn generate_provider_trait(
-    trait_def: &ItemTrait,
-    trait_name: &Ident,
-    supertraits: &[syn::Path],
-) -> TokenStream2 {
+/// Generate the trait definition inside the module (named Provider)
+fn generate_provider_trait(trait_def: &ItemTrait, supertraits: &[syn::Path]) -> TokenStream2 {
     let vis = &trait_def.vis;
     let attrs = &trait_def.attrs;
     let items = &trait_def.items;
 
-    // Prepend supertraits with their module path (e.g., BlockStore -> BlockStore::BlockStore)
+    // Supertraits now reference re-exported traits directly (e.g., BlobStore, not blob_store::Provider)
+    // The re-export makes the trait available at the parent scope with the original name
     let supertrait_bounds = supertraits.iter().map(|path| {
-        quote! { #path::#path }
+        quote! { #path }
     });
 
     // Add ConditionalSync as a supertrait for Send safety
@@ -217,7 +255,7 @@ fn generate_provider_trait(
 
     quote! {
         #(#attrs)*
-        #vis trait #trait_name: #supertraits_with_sync {
+        #vis trait Provider: #supertraits_with_sync {
             #(#items)*
         }
     }
@@ -271,17 +309,56 @@ fn generate_effect_struct(method: &MethodInfo) -> TokenStream2 {
     }
 }
 
-fn generate_capability_enum(methods: &[MethodInfo], supertraits: &[syn::Path]) -> TokenStream2 {
+/// Generate the Consumer struct that enables BlobStore.get(key) syntax
+fn generate_consumer_struct(methods: &[MethodInfo]) -> TokenStream2 {
+    let fx_methods = methods.iter().map(|m| {
+        let method_name = &m.method_name;
+        let struct_name = &m.struct_name;
+
+        let params = m.params.iter().map(|(name, ty)| {
+            quote! { #name: #ty }
+        });
+
+        let field_names: Vec<_> = m.params.iter().map(|(name, _)| name).collect();
+
+        quote! {
+            pub fn #method_name(self, #(#params),*) -> #struct_name {
+                #struct_name { #(#field_names),* }
+            }
+        }
+    });
+
+    quote! {
+        /// Unit struct that provides method-style effect creation.
+        ///
+        /// Used with the const of the same name as the trait to enable
+        /// `BlobStore.get(key)` syntax.
+        #[derive(Clone, Copy)]
+        pub struct Consumer;
+
+        impl Consumer {
+            #(#fx_methods)*
+        }
+    }
+}
+
+fn generate_capability_enum(
+    methods: &[MethodInfo],
+    supertraits: &[syn::Path],
+    _module_name: &Ident,
+) -> TokenStream2 {
     // Variants for own methods
     let method_variants = methods.iter().map(|m| {
         let struct_name = &m.struct_name;
         quote! { #struct_name(#struct_name) }
     });
 
-    // Variants for supertraits (re-export their Capability)
+    // Variants for supertraits - derive module name from trait name
+    // e.g., BlobStore -> blob_store::Capability
     let supertrait_variants = supertraits.iter().map(|path| {
-        let variant_name = path.segments.last().unwrap().ident.clone();
-        quote! { #variant_name(#path::Capability) }
+        let trait_name = &path.segments.last().unwrap().ident;
+        let module_name = format_ident!("{}", to_snake_case(&trait_name.to_string()));
+        quote! { #trait_name(#module_name::Capability) }
     });
 
     quote! {
@@ -294,7 +371,11 @@ fn generate_capability_enum(methods: &[MethodInfo], supertraits: &[syn::Path]) -
     }
 }
 
-fn generate_output_enum(methods: &[MethodInfo], supertraits: &[syn::Path]) -> TokenStream2 {
+fn generate_output_enum(
+    methods: &[MethodInfo],
+    supertraits: &[syn::Path],
+    _module_name: &Ident,
+) -> TokenStream2 {
     // Variants for own methods
     let method_variants = methods.iter().map(|m| {
         let struct_name = &m.struct_name;
@@ -302,10 +383,11 @@ fn generate_output_enum(methods: &[MethodInfo], supertraits: &[syn::Path]) -> To
         quote! { #struct_name(#output_type) }
     });
 
-    // Variants for supertraits (re-export their Output)
+    // Variants for supertraits - derive module name from trait name
     let supertrait_variants = supertraits.iter().map(|path| {
-        let variant_name = path.segments.last().unwrap().ident.clone();
-        quote! { #variant_name(#path::Output) }
+        let trait_name = &path.segments.last().unwrap().ident;
+        let module_name = format_ident!("{}", to_snake_case(&trait_name.to_string()));
+        quote! { #trait_name(#module_name::Output) }
     });
 
     quote! {
@@ -320,40 +402,47 @@ fn generate_output_enum(methods: &[MethodInfo], supertraits: &[syn::Path]) -> To
     }
 }
 
-fn generate_from_impls(methods: &[MethodInfo], supertraits: &[syn::Path]) -> TokenStream2 {
-    // Generate From<Supertrait::Capability> for Capability
+fn generate_from_impls(
+    methods: &[MethodInfo],
+    supertraits: &[syn::Path],
+    _module_name: &Ident,
+) -> TokenStream2 {
+    // Generate From<supertrait_module::Capability> for Capability
     let from_capability_impls = supertraits.iter().map(|path| {
-        let variant_name = path.segments.last().unwrap().ident.clone();
+        let trait_name = &path.segments.last().unwrap().ident;
+        let supertrait_module = format_ident!("{}", to_snake_case(&trait_name.to_string()));
         quote! {
-            impl From<#path::Capability> for Capability {
-                fn from(cap: #path::Capability) -> Self {
-                    Capability::#variant_name(cap)
+            impl From<#supertrait_module::Capability> for Capability {
+                fn from(cap: #supertrait_module::Capability) -> Self {
+                    Capability::#trait_name(cap)
                 }
             }
         }
     });
 
-    // Generate From<Supertrait::Output> for Output
+    // Generate From<supertrait_module::Output> for Output
     let from_output_impls = supertraits.iter().map(|path| {
-        let variant_name = path.segments.last().unwrap().ident.clone();
+        let trait_name = &path.segments.last().unwrap().ident;
+        let supertrait_module = format_ident!("{}", to_snake_case(&trait_name.to_string()));
         quote! {
-            impl From<#path::Output> for Output {
-                fn from(out: #path::Output) -> Self {
-                    Output::#variant_name(out)
+            impl From<#supertrait_module::Output> for Output {
+                fn from(out: #supertrait_module::Output) -> Self {
+                    Output::#trait_name(out)
                 }
             }
         }
     });
 
-    // Generate TryFrom<Output> for Supertrait::Output
+    // Generate TryFrom<Output> for supertrait_module::Output
     let try_from_output_impls = supertraits.iter().map(|path| {
-        let variant_name = path.segments.last().unwrap().ident.clone();
+        let trait_name = &path.segments.last().unwrap().ident;
+        let supertrait_module = format_ident!("{}", to_snake_case(&trait_name.to_string()));
         quote! {
-            impl TryFrom<Output> for #path::Output {
+            impl TryFrom<Output> for #supertrait_module::Output {
                 type Error = Output;
                 fn try_from(out: Output) -> Result<Self, Self::Error> {
                     match out {
-                        Output::#variant_name(inner) => Ok(inner),
+                        Output::#trait_name(inner) => Ok(inner),
                         other => Err(other),
                     }
                 }
@@ -425,25 +514,12 @@ fn generate_effect_impl(method: &MethodInfo) -> TokenStream2 {
     }
 }
 
-/// Previously generated IntoProvider impl - now users use #[provider] macro instead
-fn generate_into_provider_impl(
-    _methods: &[MethodInfo],
-    _trait_name: &Ident,
-    _supertraits: &[syn::Path],
-) -> TokenStream2 {
-    // No generated code needed - users will use #[provider(Trait)] macro instead
-    quote! {}
-}
-
 /// Generate the dispatch function for custom Provider implementations
 fn generate_dispatch_fn(
     methods: &[MethodInfo],
-    trait_name: &Ident,
     supertraits: &[syn::Path],
+    _module_name: &Ident,
 ) -> TokenStream2 {
-    // If there are no methods and only supertraits, we still generate dispatch
-    // for the composite case
-
     // Generate match arms for own methods
     let method_arms: Vec<_> = methods
         .iter()
@@ -466,10 +542,11 @@ fn generate_dispatch_fn(
     let supertrait_arms: Vec<_> = supertraits
         .iter()
         .map(|path| {
-            let variant_name = path.segments.last().unwrap().ident.clone();
+            let trait_name = &path.segments.last().unwrap().ident;
+            let supertrait_module = format_ident!("{}", to_snake_case(&trait_name.to_string()));
             quote! {
-                Capability::#variant_name(cap) => {
-                    Output::#variant_name(#path::dispatch(backend, cap).await)
+                Capability::#trait_name(cap) => {
+                    Output::#trait_name(#supertrait_module::dispatch(backend, cap).await)
                 }
             }
         })
@@ -477,15 +554,15 @@ fn generate_dispatch_fn(
 
     let all_arms = method_arms.iter().chain(supertrait_arms.iter());
 
-    // Build supertrait bounds
+    // Build supertrait bounds - now reference the re-exported trait names directly
     let supertrait_bounds = supertraits.iter().map(|path| {
-        quote! { #path::#path }
+        quote! { #path }
     });
 
     let trait_bounds = if supertraits.is_empty() {
-        quote! { #trait_name }
+        quote! { Provider }
     } else {
-        quote! { #trait_name + #(#supertrait_bounds)+* }
+        quote! { Provider + #(#supertrait_bounds)+* }
     };
 
     quote! {
@@ -513,6 +590,25 @@ fn to_pascal_case(s: &str) -> String {
         } else if capitalize_next {
             result.extend(c.to_uppercase());
             capitalize_next = false;
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+/// Convert PascalCase to snake_case
+/// e.g., "BlobStore" -> "blob_store"
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                result.push('_');
+            }
+            result.extend(c.to_lowercase());
         } else {
             result.push(c);
         }

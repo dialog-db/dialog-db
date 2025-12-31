@@ -1,4 +1,4 @@
-//! The `#[effectful]` macro transforms functions with `perform!` macro calls into
+//! The `#[effectful]` macro transforms functions with `perform!(expr)` calls into
 //! effect-based computations that return `Task`.
 //!
 //! # On Functions and Methods
@@ -13,14 +13,17 @@
 //! }
 //! ```
 //!
+//! The macro accepts trait names (PascalCase) and automatically derives the module name
+//! (snake_case) for accessing `Capability` and `Output` types.
+//!
 //! This expands to:
 //! ```ignore
 //! pub fn copy<Cap>(from: Vec<u8>, to: Vec<u8>) -> dialog_common::fx::Task<Cap, impl std::future::Future<Output = Result<(), Error>>>
 //! where
 //!     Cap: dialog_common::fx::Capability
-//!         + From<BlockStore::Capability>
-//!         + From<TransactionalMemory::Capability>,
-//!     Cap::Output: TryInto<BlockStore::Output> + TryInto<TransactionalMemory::Output>,
+//!         + From<block_store::Capability>
+//!         + From<transactional_memory::Capability>,
+//!     Cap::Output: TryInto<block_store::Output> + TryInto<transactional_memory::Output>,
 //! {
 //!     dialog_common::fx::Task::new(|__co| async move {
 //!         let content = BlockStore::get(from).perform(&__co).await?;
@@ -77,13 +80,13 @@
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{
     parse::{discouraged::Speculative, Parse, ParseStream},
     parse_macro_input,
     punctuated::Punctuated,
     visit_mut::VisitMut,
-    Expr, ExprMacro, FnArg, ItemFn, Path, Receiver, ReturnType, Token, TraitItemFn,
+    Expr, ExprMacro, FnArg, Ident, ItemFn, Path, Receiver, ReturnType, Token, TraitItemFn,
 };
 
 /// Arguments to the effectful macro: a comma-separated list of capability paths
@@ -99,26 +102,71 @@ impl Parse for EffectfulArgs {
     }
 }
 
-/// Visitor that transforms `perform!(expr)` into `expr.perform(&__co).await`
+/// Derive the module name from a capability path.
+/// For a single ident like `Store`, derive `store` (snake_case).
+/// For a path like `my_module::Store`, use as-is but snake_case the final segment.
+fn derive_module_name(cap: &Path) -> Ident {
+    let last_segment = &cap.segments.last().unwrap().ident;
+    format_ident!("{}", to_snake_case(&last_segment.to_string()))
+}
+
+/// Convert PascalCase to snake_case
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                result.push('_');
+            }
+            result.extend(c.to_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Visitor that transforms `perform!(expr)` into `expr.perform(&mut &__co).await`
 struct PerformTransformer;
+
+impl PerformTransformer {
+    /// Transform a perform! macro invocation into .perform(&mut &__co).await
+    fn transform_macro(&self, mac: &syn::Macro) -> Option<Expr> {
+        if mac.path.is_ident("perform") {
+            let inner_tokens = &mac.tokens;
+            let inner_expr: Expr = syn::parse2(inner_tokens.clone())
+                .expect("perform! macro should contain a valid expression");
+            Some(syn::parse_quote! {
+                #inner_expr.perform(&mut &__co).await
+            })
+        } else {
+            None
+        }
+    }
+}
 
 impl VisitMut for PerformTransformer {
     fn visit_expr_mut(&mut self, expr: &mut Expr) {
         // First, recurse into child expressions
         syn::visit_mut::visit_expr_mut(self, expr);
 
-        // Then check if this is a perform! macro invocation
+        // Handle perform! macro invocations
         if let Expr::Macro(ExprMacro { mac, .. }) = expr {
-            // Check if the macro is named "perform"
-            if mac.path.is_ident("perform") {
-                // Parse the inner expression from the macro tokens
-                let inner_tokens = &mac.tokens;
-                let inner_expr: Expr = syn::parse2(inner_tokens.clone())
-                    .expect("perform! macro should contain a valid expression");
+            if let Some(transformed) = self.transform_macro(mac) {
+                *expr = transformed;
+            }
+        }
+    }
 
-                *expr = syn::parse_quote! {
-                    #inner_expr.perform(&mut &__co).await
-                };
+    fn visit_stmt_mut(&mut self, stmt: &mut syn::Stmt) {
+        // First, recurse into child statements
+        syn::visit_mut::visit_stmt_mut(self, stmt);
+
+        // Handle macro statements: `perform!(...);`
+        if let syn::Stmt::Macro(stmt_macro) = stmt {
+            if let Some(transformed) = self.transform_macro(&stmt_macro.mac) {
+                // Replace the macro statement with an expression statement
+                *stmt = syn::Stmt::Expr(transformed, stmt_macro.semi_token);
             }
         }
     }
@@ -198,16 +246,18 @@ fn generate_effectful_function(args: &EffectfulArgs, func: &mut ItemFn) -> syn::
     let existing_params = &existing_generics.params;
     let existing_where = existing_generics.where_clause.as_ref();
 
-    // Build capability bounds (collect into vectors so they can be used multiple times)
+    // Build capability bounds using derived module names (collect into vectors so they can be used multiple times)
     let from_bounds: Vec<_> = capabilities.iter().map(|cap| {
-        quote! { From<#cap::Capability> }
+        let module_name = derive_module_name(cap);
+        quote! { From<#module_name::Capability> }
     }).collect();
 
     let try_into_bounds: Vec<_> = capabilities.iter().map(|cap| {
-        quote! { TryInto<#cap::Output> }
+        let module_name = derive_module_name(cap);
+        quote! { TryInto<#module_name::Output> }
     }).collect();
 
-    // Transform the function body - replace perform! with .perform(&__co).await
+    // Transform the function body - replace perform! with .perform(&mut &__co).await
     let mut body = func.block.as_ref().clone();
     let mut transformer = PerformTransformer;
     transformer.visit_block_mut(&mut body);
@@ -342,13 +392,15 @@ fn generate_effectful_trait_method(args: &EffectfulArgs, method: &TraitItemFn) -
     let existing_params = &existing_generics.params;
     let existing_where = existing_generics.where_clause.as_ref();
 
-    // Build capability bounds (collect into vectors so they can be used multiple times)
+    // Build capability bounds using derived module names (collect into vectors so they can be used multiple times)
     let from_bounds: Vec<_> = capabilities.iter().map(|cap| {
-        quote! { From<#cap::Capability> }
+        let module_name = derive_module_name(cap);
+        quote! { From<#module_name::Capability> }
     }).collect();
 
     let try_into_bounds: Vec<_> = capabilities.iter().map(|cap| {
-        quote! { TryInto<#cap::Output> }
+        let module_name = derive_module_name(cap);
+        quote! { TryInto<#module_name::Output> }
     }).collect();
 
     // Handle async - if the method is marked async, we need to reject that

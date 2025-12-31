@@ -1,7 +1,6 @@
 //! Procedural macros for Dialog.
 
 use proc_macro::TokenStream;
-use syn::{parse_macro_input, ItemTrait};
 
 mod effect;
 mod effectful;
@@ -11,9 +10,8 @@ mod provider;
 ///
 /// See the [`effect`] module documentation for details.
 #[proc_macro_attribute]
-pub fn effect(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let trait_def = parse_macro_input!(item as ItemTrait);
-    effect::effect_impl(trait_def)
+pub fn effect(attr: TokenStream, item: TokenStream) -> TokenStream {
+    effect::effect_impl(attr, item)
 }
 
 /// Attribute macro that transforms functions and methods with `perform!`
@@ -71,12 +69,12 @@ pub fn effectful(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```ignore
 /// use dialog_macros::provider;
 ///
-/// #[provider(BlockStore)]
+/// #[provider(BlobStore)]
 /// struct MyBackend {
 ///     data: HashMap<Vec<u8>, Vec<u8>>,
 /// }
 ///
-/// impl BlockStore::BlockStore for MyBackend {
+/// impl BlobStore for MyBackend {
 ///     async fn get(&self, key: Vec<u8>) -> Option<Vec<u8>> {
 ///         self.data.get(&key).cloned()
 ///     }

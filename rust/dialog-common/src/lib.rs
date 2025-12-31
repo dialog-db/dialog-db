@@ -4,6 +4,10 @@
 //! across multiple other crates. Their chief quality is that they have
 //! virtually zero dependencies.
 
+// Allow the crate to refer to itself as `dialog_common`.
+// This is needed because the macros generate code that references `dialog_common::fx::*`.
+extern crate self as dialog_common;
+
 mod sync;
 pub use sync::*;
 

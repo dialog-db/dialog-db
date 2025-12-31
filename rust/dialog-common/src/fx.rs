@@ -32,11 +32,13 @@
 //! ```
 //!
 //! This generates:
-//! - A `BlockStore` module containing the trait and effect types
-//! - `BlockStore::get(key)` and `BlockStore::set(key, value)` functions returning effect structs
-//! - `BlockStore::Capability` enum representing all operations
-//! - `BlockStore::Output` enum representing all results
-//! - `BlockStore::dispatch()` function for implementing providers
+//! - A `block_store` module (snake_case) containing the `Provider` trait and effect types
+//! - Re-export: `pub use block_store::Provider as BlockStore` (so you can `impl BlockStore`)
+//! - Const: `pub const BlockStore: block_store::Consumer` (for `BlockStore.get(key)` syntax)
+//! - `BlockStore.get(key)` and `BlockStore.set(key, value)` methods returning effect structs
+//! - `block_store::Capability` enum representing all operations
+//! - `block_store::Output` enum representing all results
+//! - `block_store::dispatch()` function for implementing providers
 //!
 //! ## 2. Write effectful functions using `#[effectful]`
 //!
@@ -49,8 +51,8 @@
 //! # }
 //! #[effectful(BlockStore)]
 //! fn copy_value(from: Vec<u8>, to: Vec<u8>) -> Result<(), String> {
-//!     let value = perform!(BlockStore::get(from))?;
-//!     perform!(BlockStore::set(to, value.unwrap_or_default()))
+//!     let value = perform!(BlockStore.get(from))?;
+//!     perform!(BlockStore.set(to, value.unwrap_or_default()))
 //! }
 //! ```
 //!
@@ -59,7 +61,7 @@
 //!
 //! ## 3. Implement the trait
 //!
-//! The `#[effect]` macro generates a module with a trait of the same name inside:
+//! The `#[effect]` macro generates a module and re-exports the trait:
 //!
 //! ```no_run
 //! # use dialog_common::fx::effect;
@@ -73,8 +75,8 @@
 //!     data: HashMap<Vec<u8>, Vec<u8>>,
 //! }
 //!
-//! // The trait is at BlockStore::BlockStore
-//! impl BlockStore::BlockStore for MemoryStore {
+//! // The trait is re-exported as BlockStore (not BlockStore::BlockStore)
+//! impl BlockStore for MemoryStore {
 //!     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, String> {
 //!         Ok(self.data.get(&key).cloned())
 //!     }
@@ -103,7 +105,7 @@
 //!     data: HashMap<Vec<u8>, Vec<u8>>,
 //! }
 //!
-//! impl BlockStore::BlockStore for MemoryStore {
+//! impl BlockStore for MemoryStore {
 //!     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, String> {
 //!         Ok(self.data.get(&key).cloned())
 //!     }
@@ -115,8 +117,8 @@
 //!
 //! #[effectful(BlockStore)]
 //! fn copy_value(from: Vec<u8>, to: Vec<u8>) -> Result<(), String> {
-//!     let value = perform!(BlockStore::get(from))?;
-//!     perform!(BlockStore::set(to, value.unwrap_or_default()))
+//!     let value = perform!(BlockStore.get(from))?;
+//!     perform!(BlockStore.set(to, value.unwrap_or_default()))
 //! }
 //!
 //! # async fn example() -> Result<(), String> {
@@ -149,7 +151,7 @@
 //! // Compose capabilities using trait inheritance:
 //! // #[effect]
 //! // pub trait Env: BlockStore + Logger {}
-//! // This creates an Env::Capability that includes both BlockStore and Logger operations.
+//! // This creates an env::Capability that includes both BlockStore and Logger operations.
 //! ```
 //!
 //! Then use multiple capabilities in effectful functions:
@@ -167,9 +169,9 @@
 //! # }
 //! #[effectful(BlockStore, Logger)]
 //! fn logged_copy(from: Vec<u8>, to: Vec<u8>) -> Result<(), String> {
-//!     perform!(Logger::log(format!("Copying {:?} to {:?}", from, to)))?;
-//!     let value = perform!(BlockStore::get(from))?;
-//!     perform!(BlockStore::set(to, value.unwrap_or_default()))
+//!     perform!(Logger.log(format!("Copying {:?} to {:?}", from, to)))?;
+//!     let value = perform!(BlockStore.get(from))?;
+//!     perform!(BlockStore.set(to, value.unwrap_or_default()))
 //! }
 //! ```
 //!
@@ -282,7 +284,7 @@ pub trait Provider {
 /// #[provider(BlockStore)]
 /// struct MemoryStore { data: HashMap<Vec<u8>, Vec<u8>> }
 ///
-/// impl BlockStore::BlockStore for MemoryStore {
+/// impl BlockStore for MemoryStore {
 ///     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, String> {
 ///         Ok(self.data.get(&key).cloned())
 ///     }
@@ -294,7 +296,7 @@ pub trait Provider {
 ///
 /// # async fn example() -> Result<(), String> {
 /// let mut store = MemoryStore { data: HashMap::new() };
-/// let result: Result<Option<Vec<u8>>, String> = BlockStore::get(b"key".into())
+/// let result: Result<Option<Vec<u8>>, String> = BlockStore.get(b"key".into())
 ///     .perform(&mut store)
 ///     .await;
 /// # Ok(())
@@ -331,17 +333,16 @@ pub trait Effect<Output, Cap: Capability>: Sized {
 /// # Example
 ///
 /// ```no_run
-/// # use dialog_common::fx::effect;
-/// # use dialog_common::fx::{Effect, Task, Capability, Provider};
+/// # use dialog_common::fx::{effect, Effect, Task, Capability, Provider};
 /// # #[effect]
 /// # pub trait BlockStore {
 /// #     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, String>;
 /// #     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), String>;
 /// # }
 /// // Create a task manually
-/// let task: Task<BlockStore::Capability, _> = Task::new(|co| async move {
-///     let value = BlockStore::get(b"key".into()).perform(&mut &co).await?;
-///     BlockStore::set(b"other".into(), value.unwrap_or_default())
+/// let task: Task<block_store::Capability, _> = Task::new(|co| async move {
+///     let value = BlockStore.get(b"key".into()).perform(&mut &co).await?;
+///     BlockStore.set(b"other".into(), value.unwrap_or_default())
 ///         .perform(&mut &co)
 ///         .await
 /// });
@@ -358,8 +359,8 @@ pub trait Effect<Output, Cap: Capability>: Sized {
 /// # }
 /// #[effectful(BlockStore)]
 /// fn copy(from: Vec<u8>, to: Vec<u8>) -> Result<(), String> {
-///     let value = perform!(BlockStore::get(from))?;
-///     perform!(BlockStore::set(to, value.unwrap_or_default()))
+///     let value = perform!(BlockStore.get(from))?;
+///     perform!(BlockStore.set(to, value.unwrap_or_default()))
 /// }
 /// ```
 pub struct Task<Cap: Capability, F: Future> {
@@ -375,15 +376,14 @@ impl<Cap: Capability, F: Future> Task<Cap, F> {
     /// # Example
     ///
     /// ```no_run
-    /// # use dialog_common::fx::effect;
-    /// # use dialog_common::fx::{Effect, Task, Capability};
+    /// # use dialog_common::fx::{effect, Effect, Task, Capability};
     /// # #[effect]
     /// # pub trait BlockStore {
     /// #     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, String>;
     /// #     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), String>;
     /// # }
-    /// let task: Task<BlockStore::Capability, _> = Task::new(|co| async move {
-    ///     let value = BlockStore::get(b"key".into()).perform(&mut &co).await?;
+    /// let task: Task<block_store::Capability, _> = Task::new(|co| async move {
+    ///     let value = BlockStore.get(b"key".into()).perform(&mut &co).await?;
     ///     Ok::<_, String>(value.unwrap_or_default())
     /// });
     /// ```
@@ -460,7 +460,7 @@ impl<Cap: Capability> Provider for &Co<Cap, Cap::Output> {
 /// # }
 /// #[effectful(BlockStore)]
 /// fn get_or_default(key: Vec<u8>, default: Vec<u8>) -> Result<Vec<u8>, String> {
-///     Ok(perform!(BlockStore::get(key))?.unwrap_or(default))
+///     Ok(perform!(BlockStore.get(key))?.unwrap_or(default))
 /// }
 /// ```
 ///
@@ -484,3 +484,307 @@ macro_rules! perform {
 
 // Re-export perform at module level
 pub use perform;
+
+#[cfg(test)]
+mod tests {
+    use super::{Effect, Task, effect, effectful, provider};
+    use std::collections::HashMap;
+
+    // Basic effect with simple HashMap implementation
+    #[effect]
+    pub trait Store {
+        async fn get(&self, key: String) -> Option<String>;
+        async fn set(&mut self, key: String, value: String);
+    }
+
+    #[provider(Store)]
+    struct MemoryStore {
+        data: HashMap<String, String>,
+    }
+
+    impl Store for MemoryStore {
+        async fn get(&self, key: String) -> Option<String> {
+            self.data.get(&key).cloned()
+        }
+        async fn set(&mut self, key: String, value: String) {
+            self.data.insert(key, value);
+        }
+    }
+
+    #[tokio::test]
+    async fn it_performs_effect_directly_on_provider() {
+        let mut store = MemoryStore {
+            data: HashMap::new(),
+        };
+
+        Store
+            .set("key".into(), "value".into())
+            .perform(&mut store)
+            .await;
+
+        let result = Store.get("key".into()).perform(&mut store).await;
+        assert_eq!(result, Some("value".into()));
+    }
+
+    #[tokio::test]
+    async fn it_performs_effects_within_task() {
+        let mut store = MemoryStore {
+            data: HashMap::new(),
+        };
+
+        let task: Task<store::Capability, _> = Task::new(|co| async move {
+            Store
+                .set("key".into(), "value".into())
+                .perform(&mut &co)
+                .await;
+            Store.get("key".into()).perform(&mut &co).await
+        });
+
+        let result = task.perform(&mut store).await;
+        assert_eq!(result, Some("value".into()));
+    }
+
+    #[effectful(Store)]
+    fn copy_value(from: String, to: String) {
+        if let Some(value) = perform!(Store.get(from)) {
+            perform!(Store.set(to, value));
+        }
+    }
+
+    #[tokio::test]
+    async fn it_transforms_perform_macro_in_effectful_fn() {
+        let mut store = MemoryStore {
+            data: HashMap::new(),
+        };
+
+        Store
+            .set("source".into(), "hello".into())
+            .perform(&mut store)
+            .await;
+
+        copy_value("source".into(), "dest".into())
+            .perform(&mut store)
+            .await;
+
+        let result = Store.get("dest".into()).perform(&mut store).await;
+        assert_eq!(result, Some("hello".into()));
+    }
+
+    #[effect]
+    pub trait Logger {
+        async fn log(&self, msg: String);
+    }
+
+    #[effect]
+    pub trait Env: Store + Logger {}
+
+    #[provider(Env)]
+    struct TestEnv {
+        store: HashMap<String, String>,
+    }
+
+    impl Env for TestEnv {}
+
+    impl Store for TestEnv {
+        async fn get(&self, key: String) -> Option<String> {
+            self.store.get(&key).cloned()
+        }
+        async fn set(&mut self, key: String, value: String) {
+            self.store.insert(key, value);
+        }
+    }
+
+    impl Logger for TestEnv {
+        async fn log(&self, _msg: String) {}
+    }
+
+    #[effectful(Store, Logger)]
+    fn logged_copy(from: String, to: String) {
+        perform!(Logger.log("Copying".to_string()));
+        if let Some(value) = perform!(Store.get(from)) {
+            perform!(Store.set(to, value));
+        }
+    }
+
+    #[tokio::test]
+    async fn it_composes_multiple_effects() {
+        let mut env = TestEnv {
+            store: HashMap::new(),
+        };
+
+        Store
+            .set("src".into(), "data".into())
+            .perform(&mut env)
+            .await;
+
+        logged_copy("src".into(), "dst".into())
+            .perform(&mut env)
+            .await;
+
+        let result = Store.get("dst".into()).perform(&mut env).await;
+        assert_eq!(result, Some("data".into()));
+    }
+
+    struct Cache {
+        prefix: String,
+    }
+
+    impl Cache {
+        #[effectful(Store)]
+        fn get(&self, key: String) -> Option<String> {
+            perform!(Store.get(format!("{}{}", self.prefix, key)))
+        }
+
+        #[effectful(Store)]
+        fn set(&self, key: String, value: String) {
+            perform!(Store.set(format!("{}{}", self.prefix, key), value))
+        }
+
+        #[effectful(Store)]
+        fn copy(&self, from: String, to: String) {
+            if let Some(value) = perform!(self.get(from)) {
+                perform!(self.set(to, value));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn it_supports_effectful_on_struct_methods() {
+        let mut store = MemoryStore {
+            data: HashMap::new(),
+        };
+
+        let cache = Cache {
+            prefix: "cache:".into(),
+        };
+
+        cache
+            .set("key".into(), "value".into())
+            .perform(&mut store)
+            .await;
+
+        let result = cache.get("key".into()).perform(&mut store).await;
+        assert_eq!(result, Some("value".into()));
+
+        // Verify prefix was applied
+        let raw = Store.get("cache:key".into()).perform(&mut store).await;
+        assert_eq!(raw, Some("value".into()));
+    }
+
+    #[tokio::test]
+    async fn it_chains_effectful_method_calls() {
+        let mut store = MemoryStore {
+            data: HashMap::new(),
+        };
+
+        let cache = Cache {
+            prefix: "cache:".into(),
+        };
+
+        cache
+            .set("src".into(), "data".into())
+            .perform(&mut store)
+            .await;
+
+        cache
+            .copy("src".into(), "dst".into())
+            .perform(&mut store)
+            .await;
+
+        let result = cache.get("dst".into()).perform(&mut store).await;
+        assert_eq!(result, Some("data".into()));
+    }
+
+    trait Storage {
+        #[effectful(Store)]
+        fn load(&self, key: String) -> Option<String>;
+
+        #[effectful(Store)]
+        fn save(&self, key: String, value: String);
+    }
+
+    struct PrefixedStorage {
+        prefix: String,
+    }
+
+    impl Storage for PrefixedStorage {
+        #[effectful(Store)]
+        fn load(&self, key: String) -> Option<String> {
+            perform!(Store.get(format!("{}{}", self.prefix, key)))
+        }
+
+        #[effectful(Store)]
+        fn save(&self, key: String, value: String) {
+            perform!(Store.set(format!("{}{}", self.prefix, key), value))
+        }
+    }
+
+    #[tokio::test]
+    async fn it_supports_effectful_on_trait_definitions_and_impls() {
+        let mut store = MemoryStore {
+            data: HashMap::new(),
+        };
+
+        let storage = PrefixedStorage {
+            prefix: "storage:".into(),
+        };
+
+        storage
+            .save("mykey".into(), "myvalue".into())
+            .perform(&mut store)
+            .await;
+
+        let result = storage.load("mykey".into()).perform(&mut store).await;
+        assert_eq!(result, Some("myvalue".into()));
+    }
+
+    // Test effect with Result return type
+    #[effect]
+    pub trait Fallible {
+        async fn may_fail(&self, succeed: bool) -> Result<String, String>;
+    }
+
+    #[provider(Fallible)]
+    struct FallibleProvider;
+
+    impl Fallible for FallibleProvider {
+        async fn may_fail(&self, succeed: bool) -> Result<String, String> {
+            if succeed {
+                Ok("success".into())
+            } else {
+                Err("failure".into())
+            }
+        }
+    }
+
+    #[effectful(Fallible)]
+    fn try_operation(succeed: bool) -> Result<String, String> {
+        perform!(Fallible.may_fail(succeed))
+    }
+
+    #[tokio::test]
+    async fn it_propagates_results_through_effectful_fns() {
+        let mut provider = FallibleProvider;
+
+        let ok_result = try_operation(true).perform(&mut provider).await;
+        assert_eq!(ok_result, Ok("success".into()));
+
+        let err_result = try_operation(false).perform(&mut provider).await;
+        assert_eq!(err_result, Err("failure".into()));
+    }
+
+    #[effectful(Fallible)]
+    fn chain_fallible() -> Result<String, String> {
+        let first = perform!(Fallible.may_fail(true))?;
+        let second = perform!(Fallible.may_fail(true))?;
+        Ok(format!("{} and {}", first, second))
+    }
+
+    #[tokio::test]
+    async fn it_supports_question_mark_operator_in_effectful() {
+        let mut provider = FallibleProvider;
+
+        let result = chain_fallible().perform(&mut provider).await;
+        assert_eq!(result, Ok("success and success".into()));
+    }
+}
