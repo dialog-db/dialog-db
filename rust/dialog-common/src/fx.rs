@@ -438,8 +438,8 @@ impl<P: Provider> Provider for &mut P {
 impl<Cap: Capability> Provider for &Co<Cap, Cap::Output> {
     type Capability = Cap;
 
-    async fn provide(&mut self, request: Cap) -> Cap::Output {
-        self.yield_(request).await
+    async fn provide(&mut self, capability: Cap) -> Cap::Output {
+        self.yield_(capability).await
     }
 }
 
@@ -497,11 +497,11 @@ mod tests {
         async fn set(&mut self, key: String, value: String);
     }
 
-    #[provider(Store)]
     struct MemoryStore {
         data: HashMap<String, String>,
     }
 
+    #[provider(store::Capability)]
     impl Store for MemoryStore {
         async fn get(&self, key: String) -> Option<String> {
             self.data.get(&key).cloned()
@@ -578,11 +578,11 @@ mod tests {
     #[effect]
     pub trait Env: Store + Logger {}
 
-    #[provider(Env)]
     struct TestEnv {
         store: HashMap<String, String>,
     }
 
+    #[provider(env::Capability)]
     impl Env for TestEnv {}
 
     impl Store for TestEnv {
@@ -744,9 +744,9 @@ mod tests {
         async fn may_fail(&self, succeed: bool) -> Result<String, String>;
     }
 
-    #[provider(Fallible)]
     struct FallibleProvider;
 
+    #[provider(fallible::Capability)]
     impl Fallible for FallibleProvider {
         async fn may_fail(&self, succeed: bool) -> Result<String, String> {
             if succeed {

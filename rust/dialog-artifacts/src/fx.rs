@@ -11,156 +11,516 @@
 //!   These never touch the network.
 //!
 //! - **Remote effects** (`RemoteStore`, `RemoteMemory`) - For network operations.
-//!   These require a `Site` with connection information.
+//!   These require a remote address with connection information.
 //!
 //! The "archive" pattern (try local, fallback remote, cache locally) is implemented
 //! as explicit effectful code rather than hidden in providers.
+//!
+//! # Architecture
+//!
+//! - `Connection<Resource>` - Trait for opening connections to resources
+//! - `Site<S, M, SC, MC, A>` - Pool of storage/memory backends keyed by address
+//! - `Environment<L, R>` - Composes local and remote sites
+//! - `local::Address` - Address type for local storage (DID, path)
+//! - `remote::Address` - Address type for remote storage (REST config)
 
-pub use dialog_common::fx::{effect, effectful, provider};
-use dialog_storage::{DialogStorageError, RestStorageConfig};
-use thiserror::Error;
+mod connection;
+mod effects;
+mod environment;
+mod errors;
+pub mod local;
+pub mod memory;
+pub mod remote;
+mod site;
 
-/// Identifies a remote site with connection information.
-///
-/// Contains the information needed to establish a connection to a remote.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Site {
-    /// REST API endpoint.
-    Rest(RestStorageConfig),
-}
+// Re-export everything for convenience
+pub use connection::*;
+pub use effects::*;
+pub use environment::*;
+pub use errors::*;
+pub use site::*;
 
-impl Site {
-    /// Create a new REST site.
-    pub fn rest(config: RestStorageConfig) -> Self {
-        Site::Rest(config)
+#[cfg(test)]
+mod tests {
+    use super::{
+        effectful, env, local, local_memory, local_store, provider, remote, remote_store, Env,
+        LocalMemory, LocalStore, NetworkError, RemoteMemory, RemoteStore, StorageError,
+    };
+    use dialog_common::fx::Effect;
+    use dialog_storage::{AuthMethod, RestStorageConfig};
+    use std::collections::HashMap;
+
+    struct MemoryStore {
+        data: HashMap<Vec<u8>, Vec<u8>>,
     }
 
-    /// Get a display name for this site (for logging/errors).
-    pub fn name(&self) -> String {
-        match self {
-            Site::Rest(config) => config.endpoint.clone(),
+    #[provider(local_store::Capability)]
+    impl LocalStore for MemoryStore {
+        async fn get(&self, _did: local::Address, key: Vec<u8>) -> Result<Option<Vec<u8>>, StorageError> {
+            Ok(self.data.get(&key).cloned())
+        }
+        async fn set(&mut self, _did: local::Address, key: Vec<u8>, value: Vec<u8>) -> Result<(), StorageError> {
+            self.data.insert(key, value);
+            Ok(())
         }
     }
-}
 
-/// Error type for local storage operations.
-#[derive(Debug, Clone, Error)]
-pub enum StorageError {
-    /// Generic storage error.
-    #[error("Storage error: {0}")]
-    Storage(String),
-    /// Key not found.
-    #[error("Not found: {0}")]
-    NotFound(String),
-    /// Compare-and-swap conflict.
-    #[error("Conflict: {0}")]
-    Conflict(String),
-}
+    fn test_did() -> local::Address {
+        local::Address::did("did:test:123")
+    }
 
-impl From<DialogStorageError> for StorageError {
-    fn from(e: DialogStorageError) -> Self {
-        StorageError::Storage(format!("{:?}", e))
+    #[tokio::test]
+    async fn it_performs_local_store_effects() {
+        let mut store = MemoryStore {
+            data: HashMap::new(),
+        };
+
+        LocalStore
+            .set(test_did(), b"key".to_vec(), b"value".to_vec())
+            .perform(&mut store)
+            .await
+            .unwrap();
+
+        let result = LocalStore
+            .get(test_did(), b"key".to_vec())
+            .perform(&mut store)
+            .await
+            .unwrap();
+
+        assert_eq!(result, Some(b"value".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn it_returns_none_for_missing_key() {
+        let mut store = MemoryStore {
+            data: HashMap::new(),
+        };
+
+        let result = LocalStore
+            .get(test_did(), b"missing".to_vec())
+            .perform(&mut store)
+            .await
+            .unwrap();
+
+        assert_eq!(result, None);
+    }
+
+    struct MemoryState {
+        state: HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)>,
+        next_edition: u64,
+    }
+
+    #[provider(local_memory::Capability)]
+    impl LocalMemory for MemoryState {
+        async fn resolve(
+            &self,
+            _did: local::Address,
+            address: Vec<u8>,
+        ) -> Result<Option<(Vec<u8>, Vec<u8>)>, StorageError> {
+            Ok(self.state.get(&address).cloned())
+        }
+
+        async fn replace(
+            &mut self,
+            _did: local::Address,
+            address: Vec<u8>,
+            edition: Option<Vec<u8>>,
+            content: Option<Vec<u8>>,
+        ) -> Result<Option<Vec<u8>>, StorageError> {
+            let current = self.state.get(&address);
+
+            match (current, edition.as_ref()) {
+                (None, None) => {}
+                (Some((_, current_edition)), Some(expected)) if current_edition == expected => {}
+                _ => {
+                    return Err(StorageError::Conflict("Edition mismatch".to_string()))
+                }
+            }
+
+            match content {
+                Some(value) => {
+                    let new_edition = self.next_edition.to_be_bytes().to_vec();
+                    self.next_edition += 1;
+                    self.state.insert(address, (value, new_edition.clone()));
+                    Ok(Some(new_edition))
+                }
+                None => {
+                    self.state.remove(&address);
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn it_performs_local_memory_cas_operations() {
+        let mut state = MemoryState {
+            state: HashMap::new(),
+            next_edition: 1,
+        };
+
+        let edition = LocalMemory
+            .replace(test_did(), b"addr".to_vec(), None, Some(b"value1".to_vec()))
+            .perform(&mut state)
+            .await
+            .unwrap();
+
+        assert!(edition.is_some());
+        let edition = edition.unwrap();
+
+        let resolved = LocalMemory
+            .resolve(test_did(), b"addr".to_vec())
+            .perform(&mut state)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, Some((b"value1".to_vec(), edition.clone())));
+
+        let new_edition = LocalMemory
+            .replace(test_did(), b"addr".to_vec(), Some(edition), Some(b"value2".to_vec()))
+            .perform(&mut state)
+            .await
+            .unwrap();
+
+        assert!(new_edition.is_some());
+
+        let resolved = LocalMemory
+            .resolve(test_did(), b"addr".to_vec())
+            .perform(&mut state)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.map(|(v, _)| v), Some(b"value2".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn it_rejects_cas_on_edition_mismatch() {
+        let mut state = MemoryState {
+            state: HashMap::new(),
+            next_edition: 1,
+        };
+
+        LocalMemory
+            .replace(test_did(), b"addr".to_vec(), None, Some(b"value1".to_vec()))
+            .perform(&mut state)
+            .await
+            .unwrap();
+
+        let result = LocalMemory
+            .replace(
+                test_did(),
+                b"addr".to_vec(),
+                Some(b"wrong_edition".to_vec()),
+                Some(b"value2".to_vec()),
+            )
+            .perform(&mut state)
+            .await;
+
+        assert!(matches!(result, Err(StorageError::Conflict(_))));
+    }
+
+    struct MockRemote {
+        data: HashMap<(String, Vec<u8>), Vec<u8>>,
+    }
+
+    #[provider(remote_store::Capability)]
+    impl RemoteStore for MockRemote {
+        async fn get(
+            &self,
+            site: remote::Address,
+            key: Vec<u8>,
+        ) -> Result<Option<Vec<u8>>, NetworkError> {
+            Ok(self.data.get(&(site.name(), key)).cloned())
+        }
+
+        async fn import(
+            &mut self,
+            site: remote::Address,
+            blocks: Vec<(Vec<u8>, Vec<u8>)>,
+        ) -> Result<(), NetworkError> {
+            for (key, value) in blocks {
+                self.data.insert((site.name(), key), value);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn it_performs_remote_store_effects() {
+        let mut remote = MockRemote {
+            data: HashMap::new(),
+        };
+
+        let site = remote::Address::rest(RestStorageConfig {
+            endpoint: "https://example.com".to_string(),
+            auth_method: AuthMethod::None,
+            bucket: None,
+            key_prefix: None,
+            headers: vec![],
+            timeout_seconds: None,
+        });
+
+        RemoteStore
+            .import(site.clone(), vec![(b"key".to_vec(), b"value".to_vec())])
+            .perform(&mut remote)
+            .await
+            .unwrap();
+
+        let result = RemoteStore
+            .get(site, b"key".to_vec())
+            .perform(&mut remote)
+            .await
+            .unwrap();
+
+        assert_eq!(result, Some(b"value".to_vec()));
+    }
+
+    #[effectful(LocalStore)]
+    fn copy_block(did: local::Address, from: Vec<u8>, to: Vec<u8>) -> Result<(), StorageError> {
+        if let Some(value) = perform!(LocalStore.get(did.clone(), from))? {
+            perform!(LocalStore.set(did, to, value))?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn it_supports_effectful_functions_with_local_store() {
+        let mut store = MemoryStore {
+            data: HashMap::new(),
+        };
+
+        LocalStore
+            .set(test_did(), b"source".to_vec(), b"data".to_vec())
+            .perform(&mut store)
+            .await
+            .unwrap();
+
+        copy_block(test_did(), b"source".to_vec(), b"dest".to_vec())
+            .perform(&mut store)
+            .await
+            .unwrap();
+
+        let result = LocalStore
+            .get(test_did(), b"dest".to_vec())
+            .perform(&mut store)
+            .await
+            .unwrap();
+
+        assert_eq!(result, Some(b"data".to_vec()));
+    }
+
+    struct MockEnv {
+        local_store: HashMap<Vec<u8>, Vec<u8>>,
+        local_memory: HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)>,
+        remote_store: HashMap<(String, Vec<u8>), Vec<u8>>,
+        remote_memory: HashMap<(String, Vec<u8>), (Vec<u8>, Vec<u8>)>,
+        next_edition: u64,
+    }
+
+    #[provider(env::Capability)]
+    impl Env for MockEnv {}
+
+    impl LocalStore for MockEnv {
+        async fn get(&self, _did: local::Address, key: Vec<u8>) -> Result<Option<Vec<u8>>, StorageError> {
+            Ok(self.local_store.get(&key).cloned())
+        }
+        async fn set(&mut self, _did: local::Address, key: Vec<u8>, value: Vec<u8>) -> Result<(), StorageError> {
+            self.local_store.insert(key, value);
+            Ok(())
+        }
+    }
+
+    impl LocalMemory for MockEnv {
+        async fn resolve(
+            &self,
+            _did: local::Address,
+            address: Vec<u8>,
+        ) -> Result<Option<(Vec<u8>, Vec<u8>)>, StorageError> {
+            Ok(self.local_memory.get(&address).cloned())
+        }
+
+        async fn replace(
+            &mut self,
+            _did: local::Address,
+            address: Vec<u8>,
+            edition: Option<Vec<u8>>,
+            content: Option<Vec<u8>>,
+        ) -> Result<Option<Vec<u8>>, StorageError> {
+            let current = self.local_memory.get(&address);
+            match (current, edition.as_ref()) {
+                (None, None) => {}
+                (Some((_, e)), Some(expected)) if e == expected => {}
+                _ => return Err(StorageError::Conflict("Edition mismatch".to_string())),
+            }
+            match content {
+                Some(value) => {
+                    let new_edition = self.next_edition.to_be_bytes().to_vec();
+                    self.next_edition += 1;
+                    self.local_memory
+                        .insert(address, (value, new_edition.clone()));
+                    Ok(Some(new_edition))
+                }
+                None => {
+                    self.local_memory.remove(&address);
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    impl RemoteStore for MockEnv {
+        async fn get(
+            &self,
+            site: remote::Address,
+            key: Vec<u8>,
+        ) -> Result<Option<Vec<u8>>, NetworkError> {
+            Ok(self.remote_store.get(&(site.name(), key)).cloned())
+        }
+
+        async fn import(
+            &mut self,
+            site: remote::Address,
+            blocks: Vec<(Vec<u8>, Vec<u8>)>,
+        ) -> Result<(), NetworkError> {
+            for (key, value) in blocks {
+                self.remote_store.insert((site.name(), key), value);
+            }
+            Ok(())
+        }
+    }
+
+    impl RemoteMemory for MockEnv {
+        async fn resolve(
+            &self,
+            site: remote::Address,
+            address: Vec<u8>,
+        ) -> Result<Option<(Vec<u8>, Vec<u8>)>, NetworkError> {
+            Ok(self.remote_memory.get(&(site.name(), address)).cloned())
+        }
+
+        async fn replace(
+            &mut self,
+            site: remote::Address,
+            address: Vec<u8>,
+            edition: Option<Vec<u8>>,
+            content: Option<Vec<u8>>,
+        ) -> Result<Option<Vec<u8>>, NetworkError> {
+            let key = (site.name(), address);
+            let current = self.remote_memory.get(&key);
+            match (current, edition.as_ref()) {
+                (None, None) => {}
+                (Some((_, e)), Some(expected)) if e == expected => {}
+                _ => {
+                    return Err(NetworkError::Network("Edition mismatch".to_string()))
+                }
+            }
+            match content {
+                Some(value) => {
+                    let new_edition = self.next_edition.to_be_bytes().to_vec();
+                    self.next_edition += 1;
+                    self.remote_memory.insert(key, (value, new_edition.clone()));
+                    Ok(Some(new_edition))
+                }
+                None => {
+                    self.remote_memory.remove(&key);
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    #[effectful(LocalStore, RemoteStore)]
+    fn fetch_and_cache(
+        did: local::Address,
+        site: remote::Address,
+        key: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(value) = perform!(LocalStore.get(did.clone(), key.clone()))? {
+            return Ok(Some(value));
+        }
+
+        if let Some(value) = perform!(RemoteStore.get(site, key.clone()))? {
+            perform!(LocalStore.set(did, key, value.clone()))?;
+            return Ok(Some(value));
+        }
+
+        Ok(None)
+    }
+
+    #[tokio::test]
+    async fn it_composes_local_and_remote_effects() {
+        let mut env = MockEnv {
+            local_store: HashMap::new(),
+            local_memory: HashMap::new(),
+            remote_store: HashMap::new(),
+            remote_memory: HashMap::new(),
+            next_edition: 1,
+        };
+
+        let site = remote::Address::rest(RestStorageConfig {
+            endpoint: "https://example.com".to_string(),
+            auth_method: AuthMethod::None,
+            bucket: None,
+            key_prefix: None,
+            headers: vec![],
+            timeout_seconds: None,
+        });
+
+        RemoteStore
+            .import(
+                site.clone(),
+                vec![(b"key".to_vec(), b"remote_value".to_vec())],
+            )
+            .perform(&mut env)
+            .await
+            .unwrap();
+
+        let result = fetch_and_cache(test_did(), site.clone(), b"key".to_vec())
+            .perform(&mut env)
+            .await
+            .unwrap();
+
+        assert_eq!(result, Some(b"remote_value".to_vec()));
+
+        let cached = LocalStore
+            .get(test_did(), b"key".to_vec())
+            .perform(&mut env)
+            .await
+            .unwrap();
+
+        assert_eq!(cached, Some(b"remote_value".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn it_returns_cached_value_without_remote_fetch() {
+        let mut env = MockEnv {
+            local_store: HashMap::new(),
+            local_memory: HashMap::new(),
+            remote_store: HashMap::new(),
+            remote_memory: HashMap::new(),
+            next_edition: 1,
+        };
+
+        let site = remote::Address::rest(RestStorageConfig {
+            endpoint: "https://example.com".to_string(),
+            auth_method: AuthMethod::None,
+            bucket: None,
+            key_prefix: None,
+            headers: vec![],
+            timeout_seconds: None,
+        });
+
+        LocalStore
+            .set(test_did(), b"key".to_vec(), b"local_value".to_vec())
+            .perform(&mut env)
+            .await
+            .unwrap();
+
+        let result = fetch_and_cache(test_did(), site, b"key".to_vec())
+            .perform(&mut env)
+            .await
+            .unwrap();
+
+        assert_eq!(result, Some(b"local_value".to_vec()));
     }
 }
-
-/// Error type for network/remote operations.
-#[derive(Debug, Clone, Error)]
-pub enum NetworkError {
-    /// Generic network error.
-    #[error("Network error: {0}")]
-    Network(String),
-    /// Unknown site.
-    #[error("Unknown site: {0}")]
-    UnknownSite(String),
-    /// Connection failed.
-    #[error("Connection failed: {0}")]
-    ConnectionFailed(String),
-    /// Timeout.
-    #[error("Timeout: {0}")]
-    Timeout(String),
-}
-
-impl From<DialogStorageError> for NetworkError {
-    fn from(e: DialogStorageError) -> Self {
-        NetworkError::Network(format!("{:?}", e))
-    }
-}
-
-/// Local blob storage (content-addressed).
-///
-/// Provides get/set operations for content-addressed data stored locally.
-/// This effect never touches the network.
-#[effect]
-pub trait LocalStore {
-    /// Get a value by key from local storage.
-    async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, StorageError>;
-    /// Set a value by key in local storage.
-    async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), StorageError>;
-}
-
-/// Local transactional memory (CAS-based state).
-///
-/// Provides resolve/replace operations for atomic state updates.
-/// This effect is purely local - no network fallback.
-#[effect]
-pub trait LocalMemory {
-    /// Resolve the current value and edition at the given address.
-    /// Returns None if the address doesn't exist locally.
-    async fn resolve(&self, address: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>, StorageError>;
-
-    /// Replace the value at the given address with compare-and-swap semantics.
-    /// Returns the new edition on success, or error on conflict.
-    async fn replace(
-        &mut self,
-        address: Vec<u8>,
-        edition: Option<Vec<u8>>,
-        content: Option<Vec<u8>>,
-    ) -> Result<Option<Vec<u8>>, StorageError>;
-}
-
-/// Remote blob storage (network).
-///
-/// Provides get and import operations for content-addressed data on remote sites.
-/// The provider is responsible for managing connections to the sites.
-#[effect]
-pub trait RemoteStore {
-    /// Get a single block by key from a remote site.
-    async fn get(&self, site: Site, key: Vec<u8>) -> Result<Option<Vec<u8>>, NetworkError>;
-    /// Import multiple blocks to a remote site (used by push protocol).
-    /// Provider can upload concurrently using TaskQueue.
-    async fn import(
-        &mut self,
-        site: Site,
-        blocks: Vec<(Vec<u8>, Vec<u8>)>,
-    ) -> Result<(), NetworkError>;
-}
-
-/// Remote transactional memory (for branch state).
-///
-/// Provides resolve/replace operations for atomic state updates on remote sites.
-/// The provider is responsible for managing connections to the sites.
-#[effect]
-pub trait RemoteMemory {
-    /// Resolve the current value and edition at the given address on a remote site.
-    async fn resolve(
-        &self,
-        site: Site,
-        address: Vec<u8>,
-    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, NetworkError>;
-
-    /// Replace the value at the given address on a remote site with CAS semantics.
-    async fn replace(
-        &mut self,
-        site: Site,
-        address: Vec<u8>,
-        edition: Option<Vec<u8>>,
-        content: Option<Vec<u8>>,
-    ) -> Result<Option<Vec<u8>>, NetworkError>;
-}
-
-/// Composite environment that provides all replica effects.
-///
-/// This trait combines LocalStore, LocalMemory, RemoteStore, and RemoteMemory
-/// into a single environment that can handle all replica operations.
-#[effect]
-pub trait ReplicaEnv: LocalStore + LocalMemory + RemoteStore + RemoteMemory {}

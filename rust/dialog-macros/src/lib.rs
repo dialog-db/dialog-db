@@ -62,18 +62,14 @@ pub fn effectful(attr: TokenStream, item: TokenStream) -> TokenStream {
     effectful::effectful_impl(attr, item)
 }
 
-/// Attribute macro that generates a `Provider` implementation for a struct.
+/// Attribute macro that generates a `Provider` implementation from an impl block.
 ///
 /// # Example
 ///
 /// ```ignore
 /// use dialog_macros::provider;
 ///
-/// #[provider(BlobStore)]
-/// struct MyBackend {
-///     data: HashMap<Vec<u8>, Vec<u8>>,
-/// }
-///
+/// #[provider(blob_store::Capability)]
 /// impl BlobStore for MyBackend {
 ///     async fn get(&self, key: Vec<u8>) -> Option<Vec<u8>> {
 ///         self.data.get(&key).cloned()
@@ -84,8 +80,27 @@ pub fn effectful(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// This generates a `Provider` impl that dispatches capability requests
-/// to the trait methods.
+/// This generates both the original trait impl and a `Provider` impl that
+/// dispatches capability requests using `capability.perform(self)`.
+///
+/// # Complex Where Clauses
+///
+/// The macro preserves generic bounds from the impl block:
+///
+/// ```ignore
+/// #[provider(env::Capability)]
+/// impl<LS, LM, SC, MC> Env for Environment<Site<LS, LM, SC, MC>>
+/// where
+///     LS: StorageBackend + Clone,
+///     LM: MemoryBackend + Clone,
+///     SC: Connection<LS>,
+///     MC: Connection<LM>,
+/// {
+/// }
+/// ```
+///
+/// This generates both the original `impl Env` and an `impl Provider` with
+/// the same generics and where clause.
 #[proc_macro_attribute]
 pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
     provider::provider_impl(attr, item)
