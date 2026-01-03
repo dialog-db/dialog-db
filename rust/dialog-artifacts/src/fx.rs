@@ -43,8 +43,8 @@ pub use site::*;
 #[cfg(test)]
 mod tests {
     use super::{
-        effectful, env, local, local_memory, local_store, provider, remote, remote_store, Env,
-        LocalMemory, LocalStore, NetworkError, RemoteMemory, RemoteStore, StorageError,
+        effectful, local, remote, Env, LocalMemory, LocalStore, NetworkError, RemoteMemory,
+        RemoteStore, StorageError,
     };
     use dialog_common::fx::Effect;
     use dialog_storage::{AuthMethod, RestStorageConfig};
@@ -54,7 +54,8 @@ mod tests {
         data: HashMap<Vec<u8>, Vec<u8>>,
     }
 
-    #[provider(local_store::Capability)]
+    // In the new design, just implementing the trait is enough - the `#[effect]`
+    // macro generates blanket `Effect` implementations automatically.
     impl LocalStore for MemoryStore {
         async fn get(&self, _did: local::Address, key: Vec<u8>) -> Result<Option<Vec<u8>>, StorageError> {
             Ok(self.data.get(&key).cloned())
@@ -110,7 +111,6 @@ mod tests {
         next_edition: u64,
     }
 
-    #[provider(local_memory::Capability)]
     impl LocalMemory for MemoryState {
         async fn resolve(
             &self,
@@ -223,7 +223,6 @@ mod tests {
         data: HashMap<(String, Vec<u8>), Vec<u8>>,
     }
 
-    #[provider(remote_store::Capability)]
     impl RemoteStore for MockRemote {
         async fn get(
             &self,
@@ -317,7 +316,6 @@ mod tests {
         next_edition: u64,
     }
 
-    #[provider(env::Capability)]
     impl Env for MockEnv {}
 
     impl LocalStore for MockEnv {
@@ -429,7 +427,7 @@ mod tests {
         }
     }
 
-    #[effectful(LocalStore, RemoteStore)]
+    #[effectful(LocalStore + RemoteStore)]
     fn fetch_and_cache(
         did: local::Address,
         site: remote::Address,
@@ -475,7 +473,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = fetch_and_cache(test_did(), site.clone(), b"key".to_vec())
+        let result = fetch_and_cache::<MockEnv>(test_did(), site.clone(), b"key".to_vec())
             .perform(&mut env)
             .await
             .unwrap();
@@ -516,7 +514,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = fetch_and_cache(test_did(), site, b"key".to_vec())
+        let result = fetch_and_cache::<MockEnv>(test_did(), site, b"key".to_vec())
             .perform(&mut env)
             .await
             .unwrap();

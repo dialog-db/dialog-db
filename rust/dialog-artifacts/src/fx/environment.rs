@@ -1,12 +1,11 @@
 //! Environment implementation composing local and remote sites.
 
 use super::connection::Connection;
-use super::effects::{env, Env, LocalMemory, LocalStore, RemoteMemory, RemoteStore};
+use super::effects::{Env, LocalMemory, LocalStore, RemoteMemory, RemoteStore};
 use super::errors::{NetworkError, StorageError};
 use super::local::Address as LocalAddress;
 use super::remote::Address as RemoteAddress;
 use super::site::Site;
-use dialog_common::fx::provider;
 use dialog_common::{ConditionalSync, DialogAsyncError, TaskQueue};
 use dialog_storage::{DialogStorageError, StorageBackend, TransactionalMemoryBackend};
 
@@ -47,12 +46,13 @@ impl<L, R> Environment<L, R> {
 }
 
 // =============================================================================
-// Effect implementations for Environment
+// Trait implementations for Environment
 // =============================================================================
 
-/// The `#[provider(env::Capability)]` macro generates both the `impl Env` and
-/// `impl Provider` with the same where clause, eliminating duplication.
-#[provider(env::Capability)]
+// In the new design, just implementing the trait is enough - the `#[effect]`
+// macro generates blanket `Effect` implementations for any type implementing
+// the Provider trait.
+
 impl<LS, LM, LSC, LMC, RS, RM, RSC, RMC> Env
     for Environment<
         Site<LS, LM, LSC, LMC, LocalAddress>,

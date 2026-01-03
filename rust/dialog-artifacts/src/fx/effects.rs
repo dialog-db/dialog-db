@@ -3,7 +3,7 @@
 use super::errors::{NetworkError, StorageError};
 use super::local::Address as LocalAddress;
 use super::remote::Address as RemoteAddress;
-pub use dialog_common::fx::{effect, effectful, provider};
+pub use dialog_common::fx::{effect, effectful};
 
 /// Local blob storage (content-addressed).
 ///

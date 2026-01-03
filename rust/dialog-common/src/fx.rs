@@ -12,14 +12,12 @@
 //!
 //! | Concept | Description |
 //! |---------|-------------|
-//! | [`Capability`] | An abstract description of what can be done, with its output type |
-//! | [`Provider`] | Something that can fulfill capability requests |
-//! | [`Effect`] | A computation that produces a result when performed |
-//! | [`Task`] | A composed computation yielding multiple effects |
+//! | [`Effect`] | A computation that can be performed with a provider |
+//! | Provider traits | Traits that define what operations a provider supports |
 //!
 //! # Quick Start
 //!
-//! ## 1. Define a capability using `#[effect]`
+//! ## 1. Define an effect using `#[effect]`
 //!
 //! ```no_run
 //! use dialog_common::fx::effect;
@@ -35,10 +33,8 @@
 //! - A `block_store` module (snake_case) containing the `Provider` trait and effect types
 //! - Re-export: `pub use block_store::Provider as BlockStore` (so you can `impl BlockStore`)
 //! - Const: `pub const BlockStore: block_store::Consumer` (for `BlockStore.get(key)` syntax)
-//! - `BlockStore.get(key)` and `BlockStore.set(key, value)` methods returning effect structs
-//! - `block_store::Capability` enum representing all operations
-//! - `block_store::Output` enum representing all results
-//! - `block_store::dispatch()` function for implementing providers
+//! - `Get`, `Set` effect structs that implement `Effect`
+//! - Blanket `Effect` implementations for any type implementing `Provider`
 //!
 //! ## 2. Write effectful functions using `#[effectful]`
 //!
@@ -56,15 +52,13 @@
 //! }
 //! ```
 //!
-//! The `#[effectful]` macro transforms the function to return a [`Task`] that can
+//! The `#[effectful]` macro transforms the function to return an effect that can
 //! be performed with any compatible provider.
 //!
-//! ## 3. Implement the trait
-//!
-//! The `#[effect]` macro generates a module and re-exports the trait:
+//! ## 3. Implement the trait and use it
 //!
 //! ```no_run
-//! # use dialog_common::fx::effect;
+//! # use dialog_common::fx::{effect, effectful, perform, Effect};
 //! # use std::collections::HashMap;
 //! # #[effect]
 //! # pub trait BlockStore {
@@ -75,7 +69,7 @@
 //!     data: HashMap<Vec<u8>, Vec<u8>>,
 //! }
 //!
-//! // The trait is re-exported as BlockStore (not BlockStore::BlockStore)
+//! // Just implement the trait - no #[provider] needed!
 //! impl BlockStore for MemoryStore {
 //!     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, String> {
 //!         Ok(self.data.get(&key).cloned())
@@ -86,40 +80,12 @@
 //!         Ok(())
 //!     }
 //! }
-//! ```
 //!
-//! ## 4. Create a provider using `#[provider]`
-//!
-//! Use the `#[provider]` macro to generate a `Provider` implementation:
-//!
-//! ```no_run
-//! # use dialog_common::fx::{effect, effectful, perform, provider, Effect};
-//! # use std::collections::HashMap;
-//! # #[effect]
-//! # pub trait BlockStore {
-//! #     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, String>;
-//! #     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), String>;
+//! # #[effectful(BlockStore)]
+//! # fn copy_value(from: Vec<u8>, to: Vec<u8>) -> Result<(), String> {
+//! #     let value = perform!(BlockStore.get(from))?;
+//! #     perform!(BlockStore.set(to, value.unwrap_or_default()))
 //! # }
-//! #[provider(BlockStore)]
-//! struct MemoryStore {
-//!     data: HashMap<Vec<u8>, Vec<u8>>,
-//! }
-//!
-//! impl BlockStore for MemoryStore {
-//!     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, String> {
-//!         Ok(self.data.get(&key).cloned())
-//!     }
-//!     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), String> {
-//!         self.data.insert(key, value);
-//!         Ok(())
-//!     }
-//! }
-//!
-//! #[effectful(BlockStore)]
-//! fn copy_value(from: Vec<u8>, to: Vec<u8>) -> Result<(), String> {
-//!     let value = perform!(BlockStore.get(from))?;
-//!     perform!(BlockStore.set(to, value.unwrap_or_default()))
-//! }
 //!
 //! # async fn example() -> Result<(), String> {
 //! let mut store = MemoryStore { data: HashMap::new() };
@@ -149,9 +115,8 @@
 //! }
 //!
 //! // Compose capabilities using trait inheritance:
-//! // #[effect]
-//! // pub trait Env: BlockStore + Logger {}
-//! // This creates an env::Capability that includes both BlockStore and Logger operations.
+//! trait Env: BlockStore + Logger {}
+//! impl<T: BlockStore + Logger> Env for T {}
 //! ```
 //!
 //! Then use multiple capabilities in effectful functions:
@@ -167,7 +132,7 @@
 //! # pub trait Logger {
 //! #     async fn log(&self, message: String) -> Result<(), String>;
 //! # }
-//! #[effectful(BlockStore, Logger)]
+//! #[effectful(BlockStore + Logger)]
 //! fn logged_copy(from: Vec<u8>, to: Vec<u8>) -> Result<(), String> {
 //!     perform!(Logger.log(format!("Copying {:?} to {:?}", from, to)))?;
 //!     let value = perform!(BlockStore.get(from))?;
@@ -177,111 +142,65 @@
 //!
 //! # How It Works
 //!
-//! Under the hood, the effect system uses coroutines (via `genawaiter`) to suspend
-//! execution when an effect is performed and resume it when the provider returns
-//! a result:
+//! The effect system uses a simple trait-based approach:
+//!
+//! 1. Each effect operation (like `Get`, `Set`) is a struct implementing `Effect<Output, Provider>`
+//! 2. The `#[effect]` macro generates blanket `Effect` impls for any type implementing the Provider trait
+//! 3. The `#[effectful]` macro generates an inner struct implementing `Effect` that captures all arguments
+//! 4. Effects are composed using trait bounds: `P: Store + Logger`
 //!
 //! ```text
 //!     ┌─────────────────┐
 //!     │  Effectful Code │
 //!     └────────┬────────┘
-//!              │ yields Capability
+//!              │ returns Effect<Output, P>
+//!              ▼
+//!     ┌─────────────────┐
+//!     │   .perform()    │
+//!     └────────┬────────┘
+//!              │ calls provider methods
 //!              ▼
 //!     ┌─────────────────┐
 //!     │    Provider     │
-//!     └────────┬────────┘
-//!              │ returns Output
-//!              ▼
-//!     ┌─────────────────┐
-//!     │  Effectful Code │
-//!     │   (resumed)     │
+//!     │   (impl Trait)  │
 //!     └─────────────────┘
 //! ```
 //!
 //! # Benefits
 //!
 //! - **Testability**: Swap providers to test effectful code without real I/O
-//! - **Composability**: Combine multiple capabilities seamlessly
+//! - **Composability**: Combine multiple capabilities seamlessly via trait bounds
 //! - **Type Safety**: The compiler ensures all required capabilities are provided
 //! - **Separation of Concerns**: Business logic is separate from effect interpretation
+//! - **No genawaiter**: Pure async/await, stable Rust features only
+//! - **No `#[provider]` macro**: Blanket impls handle everything
 
 use std::future::Future;
-use std::pin::Pin;
-
-use genawaiter::GeneratorState;
-use genawaiter::sync::{Co, Gen};
 
 // Re-export macros for convenient access
-pub use dialog_macros::{effect, effectful, provider};
+pub use dialog_macros::{effect, effectful};
 
-/// A capability represents an abstract operation with its output type.
-///
-/// This trait is automatically implemented by capability types generated
-/// by the [`effect`] macro. Each capability represents a cohesive set of
-/// operations.
-///
-/// # Example
-///
-/// The `#[effect]` macro on a trait like:
-///
-/// ```no_run
-/// # use dialog_common::fx::effect;
-/// #[effect]
-/// pub trait BlockStore {
-///     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, String>;
-///     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), String>;
-/// }
-/// ```
-///
-/// Generates a `BlockStore::Capability` enum that implements this trait.
-pub trait Capability {
-    /// The output type returned when capability requests are fulfilled.
-    ///
-    /// This is typically an enum with variants for each operation's return type.
-    type Output: Default;
-}
-
-/// A provider supplies implementations for capability requests.
-///
-/// Providers bridge the gap between abstract effects and concrete implementations.
-/// When an effect is performed, the provider receives the request and returns
-/// the appropriate output.
-///
-/// The `#[effect]` macro generates `IntoProvider` implementations that allow
-/// `&mut T` to be used directly with `.perform()`.
-pub trait Provider {
-    /// The capability this provider can fulfill.
-    type Capability: Capability;
-
-    /// Fulfill a capability request and return its output.
-    fn provide(
-        &mut self,
-        request: Self::Capability,
-    ) -> impl Future<Output = <Self::Capability as Capability>::Output>;
-}
-
-/// An effectful computation that produces `Output` when performed.
+/// An effectful computation that produces `Output` when performed with a `Provider`.
 ///
 /// Types implementing this trait represent suspended computations that require
-/// a capability to complete. They can be performed using `.perform(&mut backend).await`.
+/// a provider to complete. They can be performed using `.perform(&mut provider).await`.
 ///
 /// # Type Parameters
 ///
 /// - `Output`: The result type produced when the effect is performed
-/// - `Cap`: The capability required to perform this effect
+/// - `Provider`: The type that can execute this effect (typically a trait bound)
 ///
 /// # Example
 ///
 /// ```no_run
 /// # use dialog_common::fx::effect;
-/// # use dialog_common::fx::{Effect, Capability, provider};
+/// # use dialog_common::fx::Effect;
 /// # use std::collections::HashMap;
 /// # #[effect]
 /// # pub trait BlockStore {
 /// #     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, String>;
 /// #     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), String>;
 /// # }
-/// #[provider(BlockStore)]
 /// struct MemoryStore { data: HashMap<Vec<u8>, Vec<u8>> }
 ///
 /// impl BlockStore for MemoryStore {
@@ -302,151 +221,15 @@ pub trait Provider {
 /// # Ok(())
 /// # }
 /// ```
-///
-/// Effects can work with any capability that includes their operations via
-/// `From`/`TryInto` conversions, enabling capability composition.
-pub trait Effect<Output, Cap: Capability>: Sized {
-    /// Perform this effect using a provider that supplies the required capability.
-    ///
-    /// The provider must implement [`Provider`] for the required capability.
-    /// Use the `#[provider(EffectModule)]` macro to easily implement `Provider`
-    /// for your types.
-    fn perform<P>(self, provider: &mut P) -> impl Future<Output = Output>
-    where
-        P: Provider<Capability = Cap>;
-}
-
-/// A composed effect computation that yields capability requests.
-///
-/// `Task` wraps a coroutine that can yield multiple effects and ultimately
-/// produce a final result. It implements [`Effect`], so tasks can be performed
-/// just like individual effects.
-///
-/// Tasks are created by the [`effectful`] macro when transforming functions
-/// that use `perform!`.
-///
-/// # Type Parameters
-///
-/// - `Cap`: The capability required by this task
-/// - `F`: The future type produced by the internal coroutine
-///
-/// # Example
-///
-/// ```no_run
-/// # use dialog_common::fx::{effect, Effect, Task, Capability, Provider};
-/// # #[effect]
-/// # pub trait BlockStore {
-/// #     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, String>;
-/// #     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), String>;
-/// # }
-/// // Create a task manually
-/// let task: Task<block_store::Capability, _> = Task::new(|co| async move {
-///     let value = BlockStore.get(b"key".into()).perform(&mut &co).await?;
-///     BlockStore.set(b"other".into(), value.unwrap_or_default())
-///         .perform(&mut &co)
-///         .await
-/// });
-/// ```
-///
-/// More commonly, tasks are created via the `#[effectful]` macro:
-///
-/// ```no_run
-/// # use dialog_common::fx::{effect, effectful, perform, Effect};
-/// # #[effect]
-/// # pub trait BlockStore {
-/// #     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, String>;
-/// #     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), String>;
-/// # }
-/// #[effectful(BlockStore)]
-/// fn copy(from: Vec<u8>, to: Vec<u8>) -> Result<(), String> {
-///     let value = perform!(BlockStore.get(from))?;
-///     perform!(BlockStore.set(to, value.unwrap_or_default()))
-/// }
-/// ```
-pub struct Task<Cap: Capability, F: Future> {
-    generator: Gen<Cap, Cap::Output, F>,
-}
-
-impl<Cap: Capability, F: Future> Task<Cap, F> {
-    /// Create a new task from a producer function.
-    ///
-    /// The producer receives a coroutine handle ([`Co`]) that can be used
-    /// to perform effects within the task using `.perform(&mut &co).await`.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use dialog_common::fx::{effect, Effect, Task, Capability};
-    /// # #[effect]
-    /// # pub trait BlockStore {
-    /// #     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, String>;
-    /// #     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<(), String>;
-    /// # }
-    /// let task: Task<block_store::Capability, _> = Task::new(|co| async move {
-    ///     let value = BlockStore.get(b"key".into()).perform(&mut &co).await?;
-    ///     Ok::<_, String>(value.unwrap_or_default())
-    /// });
-    /// ```
-    pub fn new<P>(producer: P) -> Self
-    where
-        P: FnOnce(Co<Cap, Cap::Output>) -> F,
-    {
-        Self {
-            generator: Gen::new(producer),
-        }
-    }
-}
-
-impl<Cap: Capability, F: Future> Effect<F::Output, Cap> for Task<Cap, F> {
-    async fn perform<P>(self, provider: &mut P) -> F::Output
-    where
-        P: Provider<Capability = Cap>,
-    {
-        let mut generator = self.generator;
-        let mut output = Cap::Output::default();
-
-        loop {
-            match Pin::new(&mut generator).resume_with(output) {
-                GeneratorState::Yielded(capability) => {
-                    output = provider.provide(capability).await;
-                }
-                GeneratorState::Complete(result) => {
-                    return result;
-                }
-            }
-        }
-    }
-}
-
-/// Implement Provider for mutable references to providers.
-///
-/// This allows `.perform(&mut provider)` to work naturally.
-impl<P: Provider> Provider for &mut P {
-    type Capability = P::Capability;
-
-    async fn provide(
-        &mut self,
-        request: Self::Capability,
-    ) -> <Self::Capability as Capability>::Output {
-        P::provide(*self, request).await
-    }
-}
-
-/// Implement Provider directly for coroutine handle references.
-///
-/// This allows `Co` to be used directly with `.perform(&mut &co)` in effectful functions.
-impl<Cap: Capability> Provider for &Co<Cap, Cap::Output> {
-    type Capability = Cap;
-
-    async fn provide(&mut self, capability: Cap) -> Cap::Output {
-        self.yield_(capability).await
-    }
+pub trait Effect<Output, Provider> {
+    /// Perform this effect using the given provider.
+    fn perform(self, provider: &mut Provider) -> impl Future<Output = Output>;
 }
 
 /// Performs an effect inside an `#[effectful]` function.
 ///
 /// This macro is a placeholder that gets transformed by the [`effectful`] macro
-/// into `.perform(&__co).await` calls. Using it outside an `#[effectful]` function
+/// into `.perform(provider).await` calls. Using it outside an `#[effectful]` function
 /// results in a compile error.
 ///
 /// # Example
@@ -485,9 +268,38 @@ macro_rules! perform {
 // Re-export perform at module level
 pub use perform;
 
+/// A wrapper that implements [`Effect`] for async closures.
+///
+/// This type is used internally by the `#[effectful]` macro to wrap function bodies
+/// as effects. It enables capturing values from the enclosing scope (including `self`
+/// for methods) while still implementing the `Effect` trait.
+///
+/// # Type Parameters
+///
+/// - `F`: The async closure type, typically `impl AsyncFnOnce(&mut Provider) -> Output`
+///
+/// # Example
+///
+/// ```no_run
+/// # use dialog_common::fx::{Effect, Task};
+/// fn create_effect<P>() -> impl Effect<i32, P> {
+///     Task(async move |_provider: &mut P| { 42 })
+/// }
+/// ```
+pub struct Task<F>(pub F);
+
+impl<F, Output, Provider> Effect<Output, Provider> for Task<F>
+where
+    F: AsyncFnOnce(&mut Provider) -> Output,
+{
+    fn perform(self, provider: &mut Provider) -> impl Future<Output = Output> {
+        (self.0)(provider)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Effect, Task, effect, effectful, provider};
+    use super::{effect, effectful, Effect};
     use std::collections::HashMap;
 
     // Basic effect with simple HashMap implementation
@@ -501,7 +313,7 @@ mod tests {
         data: HashMap<String, String>,
     }
 
-    #[provider(store::Capability)]
+    // No #[provider] needed - just implement the trait!
     impl Store for MemoryStore {
         async fn get(&self, key: String) -> Option<String> {
             self.data.get(&key).cloned()
@@ -523,24 +335,6 @@ mod tests {
             .await;
 
         let result = Store.get("key".into()).perform(&mut store).await;
-        assert_eq!(result, Some("value".into()));
-    }
-
-    #[tokio::test]
-    async fn it_performs_effects_within_task() {
-        let mut store = MemoryStore {
-            data: HashMap::new(),
-        };
-
-        let task: Task<store::Capability, _> = Task::new(|co| async move {
-            Store
-                .set("key".into(), "value".into())
-                .perform(&mut &co)
-                .await;
-            Store.get("key".into()).perform(&mut &co).await
-        });
-
-        let result = task.perform(&mut store).await;
         assert_eq!(result, Some("value".into()));
     }
 
@@ -575,15 +369,13 @@ mod tests {
         async fn log(&self, msg: String);
     }
 
-    #[effect]
-    pub trait Env: Store + Logger {}
+    // Compose capabilities using trait inheritance
+    trait Env: Store + Logger {}
+    impl<T: Store + Logger> Env for T {}
 
     struct TestEnv {
         store: HashMap<String, String>,
     }
-
-    #[provider(env::Capability)]
-    impl Env for TestEnv {}
 
     impl Store for TestEnv {
         async fn get(&self, key: String) -> Option<String> {
@@ -598,12 +390,22 @@ mod tests {
         async fn log(&self, _msg: String) {}
     }
 
-    #[effectful(Store, Logger)]
+    #[effectful(Store + Logger)]
     fn logged_copy(from: String, to: String) {
         perform!(Logger.log("Copying".to_string()));
         if let Some(value) = perform!(Store.get(from)) {
             perform!(Store.set(to, value));
         }
+    }
+
+    #[effectful(Store)]
+    fn setup_data(key: String, value: String) {
+        perform!(Store.set(key, value));
+    }
+
+    #[effectful(Store)]
+    fn get_data(key: String) -> Option<String> {
+        perform!(Store.get(key))
     }
 
     #[tokio::test]
@@ -612,16 +414,17 @@ mod tests {
             store: HashMap::new(),
         };
 
-        Store
-            .set("src".into(), "data".into())
+        // Use effectful functions
+        setup_data("src".into(), "data".into())
             .perform(&mut env)
             .await;
 
+        // Multi-capability effectful function
         logged_copy("src".into(), "dst".into())
             .perform(&mut env)
             .await;
 
-        let result = Store.get("dst".into()).perform(&mut env).await;
+        let result = get_data("dst".into()).perform(&mut env).await;
         assert_eq!(result, Some("data".into()));
     }
 
@@ -746,7 +549,6 @@ mod tests {
 
     struct FallibleProvider;
 
-    #[provider(fallible::Capability)]
     impl Fallible for FallibleProvider {
         async fn may_fail(&self, succeed: bool) -> Result<String, String> {
             if succeed {
