@@ -12,11 +12,11 @@
 //!
 //! This generates:
 //! - A module `blob_store` (snake_case) containing:
-//!   - `Provider` trait (the original trait renamed, with ConditionalSync added)
+//!   - `Capability` trait (the original trait renamed, with ConditionalSync added)
 //!   - `Get`, `Set` effect structs
-//!   - Blanket `Effect` impls for any `P: Provider`
+//!   - Blanket `Effect` impls for any `C: Capability`
 //!   - `Consumer` struct for method-style effect creation
-//! - Re-export: `pub use blob_store::Provider as BlobStore`
+//! - Re-export: `pub use blob_store::Capability as BlobStore`
 //! - Const: `pub const BlobStore: blob_store::Consumer` for `BlobStore.get(key)` syntax
 //!
 //! You can specify a custom module name:
@@ -34,15 +34,15 @@
 //!
 //! Usage:
 //! ```ignore
-//! // Implement the trait directly (not BlobStore::BlobStore)
+//! // Implement the trait directly
 //! impl BlobStore for MyBackend {
 //!     async fn get(&self, key: Vec<u8>) -> Option<Vec<u8>> { ... }
 //!     async fn set(&mut self, key: Vec<u8>, value: Vec<u8>) { ... }
 //! }
 //!
 //! // Create effects using either syntax:
-//! blob_store::get(key).perform(&mut provider).await  // module function
-//! BlobStore.get(key).perform(&mut provider).await    // const method
+//! blob_store::get(key).perform(&mut capability).await  // module function
+//! BlobStore.get(key).perform(&mut capability).await    // const method
 //! ```
 
 use proc_macro::TokenStream;
@@ -60,19 +60,19 @@ struct EffectArgs {
     module_name: Option<Ident>,
 }
 
-/// Visitor that transforms `Self::AssociatedType` to `P::AssociatedType` in types.
+/// Visitor that transforms `Self::AssociatedType` to `C::AssociatedType` in types.
 /// This is needed because in the Effect impl, `Self` refers to the effect struct,
-/// but we want to reference the provider's associated types.
-struct SelfToProviderTransformer;
+/// but we want to reference the capability's associated types.
+struct SelfToCapabilityTransformer;
 
-impl VisitMut for SelfToProviderTransformer {
+impl VisitMut for SelfToCapabilityTransformer {
     fn visit_type_path_mut(&mut self, type_path: &mut TypePath) {
         // Check if path starts with Self
         if type_path.qself.is_none() && !type_path.path.segments.is_empty() {
             let first_segment = &type_path.path.segments[0];
             if first_segment.ident == "Self" && type_path.path.segments.len() > 1 {
-                // Replace "Self" with "P" in paths like Self::Item
-                type_path.path.segments[0].ident = format_ident!("P");
+                // Replace "Self" with "C" in paths like Self::Item
+                type_path.path.segments[0].ident = format_ident!("C");
             }
         }
 
@@ -81,10 +81,10 @@ impl VisitMut for SelfToProviderTransformer {
     }
 }
 
-/// Transform a type by replacing `Self::X` with `P::X`
-fn transform_self_to_provider(ty: &Type) -> Type {
+/// Transform a type by replacing `Self::X` with `C::X`
+fn transform_self_to_capability(ty: &Type) -> Type {
     let mut ty = ty.clone();
-    let mut transformer = SelfToProviderTransformer;
+    let mut transformer = SelfToCapabilityTransformer;
     transformer.visit_type_mut(&mut ty);
     ty
 }
@@ -171,7 +171,7 @@ fn generate_effect_system(args: &EffectArgs, trait_def: &ItemTrait) -> syn::Resu
         .collect::<syn::Result<Vec<_>>>()?;
 
     // Generate the module contents
-    let provider_trait = generate_provider_trait(trait_def, &supertraits, &assoc_types);
+    let capability_trait = generate_capability_trait(trait_def, &supertraits, &assoc_types);
     let free_functions = methods
         .iter()
         .map(|m| generate_free_function(m, trait_generics));
@@ -207,7 +207,7 @@ fn generate_effect_system(args: &EffectArgs, trait_def: &ItemTrait) -> syn::Resu
         #trait_vis mod #module_name {
             use super::*;
 
-            #provider_trait
+            #capability_trait
 
             // Consumer struct for BlobStore.get(key) syntax
             #consumer_struct
@@ -218,12 +218,12 @@ fn generate_effect_system(args: &EffectArgs, trait_def: &ItemTrait) -> syn::Resu
             // Effect structs with blanket Effect impls
             #(#effect_structs)*
 
-            // Blanket Effect impls for any P: Provider
+            // Blanket Effect impls for any C: Capability
             #(#effect_impls)*
         }
 
         // Re-export the trait at the parent scope
-        #trait_vis use #module_name::Provider as #trait_name;
+        #trait_vis use #module_name::Capability as #trait_name;
 
         #const_or_fn
     })
@@ -283,8 +283,8 @@ fn parse_method_info(method: &TraitItemFn) -> syn::Result<MethodInfo> {
     })
 }
 
-/// Generate the trait definition inside the module (named Provider)
-fn generate_provider_trait(
+/// Generate the trait definition inside the module (named Capability)
+fn generate_capability_trait(
     trait_def: &ItemTrait,
     supertraits: &[syn::Path],
     _assoc_types: &[TraitItemType],
@@ -296,7 +296,7 @@ fn generate_provider_trait(
     // Filter items to only include methods and associated types (exclude other items if any)
     let items = &trait_def.items;
 
-    // Supertraits now reference re-exported traits directly (e.g., BlobStore, not blob_store::Provider)
+    // Supertraits now reference re-exported traits directly (e.g., BlobStore, not blob_store::Capability)
     // The re-export makes the trait available at the parent scope with the original name
     let supertrait_bounds = supertraits.iter().map(|path| {
         quote! { #path }
@@ -311,7 +311,7 @@ fn generate_provider_trait(
 
     quote! {
         #(#attrs)*
-        #vis trait Provider #generics: #supertraits_with_sync {
+        #vis trait Capability #generics: #supertraits_with_sync {
             #(#items)*
         }
     }
@@ -484,13 +484,13 @@ fn generate_consumer_struct(methods: &[MethodInfo], trait_generics: &Generics) -
 
 /// Generate blanket Effect impl for an effect struct.
 ///
-/// This generates `impl<P: Provider> Effect<P> for EffectStruct` with associated type Output.
-/// Any type implementing the Provider trait can be used as the provider.
+/// This generates `impl<C: Capability> Effect<C> for EffectStruct` with associated type Output.
+/// Any type implementing the Capability trait can be used to perform the effect.
 fn generate_effect_impl(method: &MethodInfo, trait_generics: &Generics) -> TokenStream2 {
     let struct_name = &method.struct_name;
     let method_name = &method.method_name;
-    // Transform Self::X to P::X so that associated types reference the provider
-    let output_type = transform_self_to_provider(&method.output_type);
+    // Transform Self::X to C::X so that associated types reference the capability
+    let output_type = transform_self_to_capability(&method.output_type);
     let has_generics = !trait_generics.params.is_empty();
 
     let field_names: Vec<_> = method.params.iter().map(|(name, _)| name).collect();
@@ -499,26 +499,26 @@ fn generate_effect_impl(method: &MethodInfo, trait_generics: &Generics) -> Token
     if has_generics {
         let (_impl_generics, ty_generics, where_clause) = trait_generics.split_for_impl();
 
-        // We need to combine the trait's generic params with P: Provider
-        // Extract just the type param idents for the Provider bound
+        // We need to combine the trait's generic params with C: Capability
+        // Extract just the type param idents for the Capability bound
         let generic_params = &trait_generics.params;
 
         quote! {
-            impl<#generic_params, P: Provider #ty_generics> dialog_common::fx::Effect<P> for #struct_name #ty_generics #where_clause {
+            impl<#generic_params, C: Capability #ty_generics> dialog_common::fx::Effect<C> for #struct_name #ty_generics #where_clause {
                 type Output = #output_type;
 
-                async fn perform(self, provider: &mut P) -> Self::Output {
-                    provider.#method_name(#(#call_args),*).await
+                async fn perform(self, capability: &mut C) -> Self::Output {
+                    capability.#method_name(#(#call_args),*).await
                 }
             }
         }
     } else {
         quote! {
-            impl<P: Provider> dialog_common::fx::Effect<P> for #struct_name {
+            impl<C: Capability> dialog_common::fx::Effect<C> for #struct_name {
                 type Output = #output_type;
 
-                async fn perform(self, provider: &mut P) -> Self::Output {
-                    provider.#method_name(#(#call_args),*).await
+                async fn perform(self, capability: &mut C) -> Self::Output {
+                    capability.#method_name(#(#call_args),*).await
                 }
             }
         }

@@ -18,9 +18,9 @@
 //! This expands to:
 //! ```ignore
 //! pub fn copy<__P: BlockStore + TransactionalMemory>(from: Vec<u8>, to: Vec<u8>) -> impl Effect<__P, Output = Result<(), Error>> {
-//!     Task::new(async move |__provider: &mut __P| {
-//!         let content = BlockStore.get(from).perform(__provider).await?;
-//!         BlockStore.set(to, content.unwrap_or_default()).perform(__provider).await
+//!     Task::new(async move |__capability: &mut __P| {
+//!         let content = BlockStore.get(from).perform(__capability).await?;
+//!         BlockStore.set(to, content.unwrap_or_default()).perform(__capability).await
 //!     })
 //! }
 //! ```
@@ -42,8 +42,8 @@
 //! ```ignore
 //! impl Cache {
 //!     fn get<__P: BlockStore>(&self, key: Vec<u8>) -> impl Effect<__P, Output = Option<Vec<u8>>> + '_ {
-//!         Task::new(async move |__provider: &mut __P| {
-//!             BlockStore.get(format!("{}{}", self.prefix, key)).perform(__provider).await
+//!         Task::new(async move |__capability: &mut __P| {
+//!             BlockStore.get(format!("{}{}", self.prefix, key)).perform(__capability).await
 //!         })
 //!     }
 //! }
@@ -92,7 +92,7 @@ impl Parse for EffectfulArgs {
 }
 
 /// Visitor that transforms function body for effectful methods:
-/// 1. Replaces `perform!(expr)` with `expr.perform(__provider).await`
+/// 1. Replaces `perform!(expr)` with `expr.perform(__capability).await`
 ///
 /// With the closure-based approach, `self` references work naturally since
 /// the closure captures `self` from the outer scope.
@@ -103,7 +103,7 @@ impl PerformTransformer {
         Self
     }
 
-    /// Transform a perform! macro invocation into .perform(__provider).await
+    /// Transform a perform! macro invocation into .perform(__capability).await
     fn transform_macro(&self, mac: &syn::Macro) -> Option<Expr> {
         if mac.path.is_ident("perform") {
             let inner_tokens = &mac.tokens;
@@ -111,7 +111,7 @@ impl PerformTransformer {
                 .expect("perform! macro should contain a valid expression");
 
             Some(syn::parse_quote! {
-                #inner_expr.perform(__provider).await
+                #inner_expr.perform(__capability).await
             })
         } else {
             None
@@ -266,7 +266,7 @@ fn generate_effectful_function(
             #vis fn #fn_name #generics (#inputs) -> impl dialog_common::fx::Effect<__P, Output = #output_type> + '_
             #where_clause
             {
-                dialog_common::fx::Task::new(async move |__provider: &mut __P| {
+                dialog_common::fx::Task::new(async move |__capability: &mut __P| {
                     #(#body_stmts)*
                 })
             }
@@ -293,7 +293,7 @@ fn generate_effectful_function(
             #vis fn #fn_name #generics (#inputs) -> impl dialog_common::fx::Effect<__P, Output = #output_type>
             #where_clause
             {
-                dialog_common::fx::Task::new(async move |__provider: &mut __P| {
+                dialog_common::fx::Task::new(async move |__capability: &mut __P| {
                     #(#body_stmts)*
                 })
             }

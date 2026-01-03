@@ -3,7 +3,7 @@
 //!
 //! This module provides a lightweight algebraic effects implementation that enables
 //! writing effectful code in a composable, testable, and type-safe manner. Effects
-//! are represented as data that can be interpreted by different handlers (providers),
+//! are represented as data that can be interpreted by different capabilities,
 //! allowing the same code to run against real implementations, mocks, or test doubles.
 //!
 //! # Overview
@@ -12,8 +12,8 @@
 //!
 //! | Concept | Description |
 //! |---------|-------------|
-//! | [`Effect`] | A computation that can be performed with a provider |
-//! | Provider traits | Traits that define what operations a provider supports |
+//! | [`Effect`] | A computation that can be performed given required capabilities |
+//! | Capability traits | Traits that define what operations are available |
 //!
 //! # Quick Start
 //!
@@ -30,11 +30,11 @@
 //! ```
 //!
 //! This generates:
-//! - A `block_store` module (snake_case) containing the `Provider` trait and effect types
-//! - Re-export: `pub use block_store::Provider as BlockStore` (so you can `impl BlockStore`)
+//! - A `block_store` module (snake_case) containing the capability trait and effect types
+//! - Re-export: `pub use block_store::Capability as BlockStore` (so you can `impl BlockStore`)
 //! - Const: `pub const BlockStore: block_store::Consumer` (for `BlockStore.get(key)` syntax)
 //! - `Get`, `Set` effect structs that implement `Effect`
-//! - Blanket `Effect` implementations for any type implementing `Provider`
+//! - Blanket `Effect` implementations for any type implementing the capability
 //!
 //! ## 2. Write effectful functions using `#[effectful]`
 //!
@@ -53,7 +53,7 @@
 //! ```
 //!
 //! The `#[effectful]` macro transforms the function to return an effect that can
-//! be performed with any compatible provider.
+//! be performed with any type providing the required capabilities.
 //!
 //! ## 3. Implement the trait and use it
 //!
@@ -69,7 +69,7 @@
 //!     data: HashMap<Vec<u8>, Vec<u8>>,
 //! }
 //!
-//! // Just implement the trait - no #[provider] needed!
+//! // Just implement the trait - no extra macros needed!
 //! impl BlockStore for MemoryStore {
 //!     async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, String> {
 //!         Ok(self.data.get(&key).cloned())
@@ -154,7 +154,7 @@
 //!     async fn set(&mut self, value: T);
 //! }
 //!
-//! // Provider implements State for a specific type
+//! // Capability implements State for a specific type
 //! struct Counter(i32);
 //!
 //! impl State<i32> for Counter {
@@ -179,7 +179,7 @@
 //! # Associated Types in Effect Traits
 //!
 //! Effect traits can have associated types. The associated type is determined
-//! by the provider implementation, not at the effect creation site:
+//! by the capability implementation, not at the effect creation site:
 //!
 //! ```no_run
 //! use dialog_common::fx::{effect, Effect};
@@ -190,7 +190,7 @@
 //!     async fn produce(&self) -> Self::Item;
 //! }
 //!
-//! // Provider determines what Item is
+//! // Capability determines what Item is
 //! struct NumberProducer(i32);
 //!
 //! impl Producer for NumberProducer {
@@ -204,7 +204,7 @@
 //! # async fn example() {
 //! let mut producer = NumberProducer(42);
 //!
-//! // No turbofish needed - Item type comes from the provider
+//! // No turbofish needed - Item type comes from the capability
 //! let value = Producer.produce().perform(&mut producer).await;
 //! assert_eq!(value, 42);
 //! # }
@@ -212,56 +212,56 @@
 //!
 //! The key difference:
 //! - **Generic params** (`State<T>`): Type specified at call site → `State::<i32>().get()`
-//! - **Associated types** (`type Item`): Type determined by provider → `Producer.produce()`
+//! - **Associated types** (`type Item`): Type determined by capability → `Producer.produce()`
 //!
 //! # How It Works
 //!
 //! The effect system uses a simple trait-based approach:
 //!
-//! 1. Each effect operation (like `Get`, `Set`) is a struct implementing `Effect<Provider>`
-//! 2. The `#[effect]` macro generates blanket `Effect` impls for any type implementing the Provider trait
+//! 1. Each effect operation (like `Get`, `Set`) is a struct implementing `Effect<Capability>`
+//! 2. The `#[effect]` macro generates blanket `Effect` impls for any type implementing the capability trait
 //! 3. The `#[effectful]` macro generates an inner struct implementing `Effect` that captures all arguments
-//! 4. Effects are composed using trait bounds: `P: Store + Logger`
+//! 4. Effects are composed using trait bounds: `C: Store + Logger`
 //!
 //! ```text
 //!     ┌─────────────────┐
 //!     │  Effectful Code │
 //!     └────────┬────────┘
-//!              │ returns impl Effect<P, Output = T>
+//!              │ returns impl Effect<C, Output = T>
 //!              ▼
 //!     ┌─────────────────┐
 //!     │   .perform()    │
 //!     └────────┬────────┘
-//!              │ calls provider methods
+//!              │ calls capability methods
 //!              ▼
 //!     ┌─────────────────┐
-//!     │    Provider     │
+//!     │   Capability    │
 //!     │   (impl Trait)  │
 //!     └─────────────────┘
 //! ```
 //!
 //! # Benefits
 //!
-//! - **Testability**: Swap providers to test effectful code without real I/O
+//! - **Testability**: Swap capability implementations to test effectful code without real I/O
 //! - **Composability**: Combine multiple capabilities seamlessly via trait bounds
 //! - **Type Safety**: The compiler ensures all required capabilities are provided
 //! - **Separation of Concerns**: Business logic is separate from effect interpretation
 //! - **No genawaiter**: Pure async/await, stable Rust features only
-//! - **No `#[provider]` macro**: Blanket impls handle everything
+//! - **No extra macros**: Just implement capability traits, blanket impls handle the rest
 
 use std::future::Future;
 
 // Re-export macros for convenient access
 pub use dialog_macros::{effect, effectful};
 
-/// An effectful computation that produces an output when performed with a `Provider`.
+/// An effectful computation that produces an output when performed with a capability.
 ///
 /// Types implementing this trait represent suspended computations that require
-/// a provider to complete. They can be performed using `.perform(&mut provider).await`.
+/// certain capabilities to complete. They can be performed using `.perform(&mut capability).await`.
 ///
 /// # Type Parameters
 ///
-/// - `Provider`: The type that can execute this effect (typically a trait bound)
+/// - `Capability`: The type that provides the required capabilities (typically a trait bound)
 ///
 /// # Associated Types
 ///
@@ -298,17 +298,17 @@ pub use dialog_macros::{effect, effectful};
 /// # Ok(())
 /// # }
 /// ```
-pub trait Effect<Provider> {
+pub trait Effect<Capability> {
     /// The output type produced when the effect is performed.
     type Output;
-    /// Perform this effect using the given provider.
-    fn perform(self, provider: &mut Provider) -> impl Future<Output = Self::Output>;
+    /// Perform this effect using the given capability.
+    fn perform(self, capability: &mut Capability) -> impl Future<Output = Self::Output>;
 }
 
 /// Performs an effect inside an `#[effectful]` function.
 ///
 /// This macro is a placeholder that gets transformed by the [`effectful`] macro
-/// into `.perform(provider).await` calls. Using it outside an `#[effectful]` function
+/// into `.perform(capability).await` calls. Using it outside an `#[effectful]` function
 /// results in a compile error.
 ///
 /// # Example
@@ -355,14 +355,14 @@ pub use perform;
 ///
 /// # Type Parameters
 ///
-/// - `F`: The async closure type, typically `impl AsyncFnOnce(&mut Provider) -> Output`
+/// - `F`: The async closure type, typically `impl AsyncFnOnce(&mut Capability) -> Output`
 ///
 /// # Example
 ///
 /// ```no_run
 /// # use dialog_common::fx::{Effect, Task};
-/// fn create_effect<P>() -> impl Effect<P, Output = i32> {
-///     Task::new(async move |_provider: &mut P| { 42 })
+/// fn create_effect<C>() -> impl Effect<C, Output = i32> {
+///     Task::new(async move |_capability: &mut C| { 42 })
 /// }
 /// ```
 pub struct Task<F, Output>(pub F, pub std::marker::PhantomData<Output>);
@@ -374,20 +374,20 @@ impl<F, Output> Task<F, Output> {
     }
 }
 
-impl<F, Output, Provider> Effect<Provider> for Task<F, Output>
+impl<F, Output, Capability> Effect<Capability> for Task<F, Output>
 where
-    F: AsyncFnOnce(&mut Provider) -> Output,
+    F: AsyncFnOnce(&mut Capability) -> Output,
 {
     type Output = Output;
 
-    fn perform(self, provider: &mut Provider) -> impl Future<Output = Self::Output> {
-        (self.0)(provider)
+    fn perform(self, capability: &mut Capability) -> impl Future<Output = Self::Output> {
+        (self.0)(capability)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{effect, effectful, Effect};
+    use super::{Effect, effect, effectful};
     use std::collections::HashMap;
 
     // Basic effect with simple HashMap implementation
@@ -401,7 +401,7 @@ mod tests {
         data: HashMap<String, String>,
     }
 
-    // No #[provider] needed - just implement the trait!
+    // No extra macros needed - just implement the trait!
     impl Store for MemoryStore {
         async fn get(&self, key: String) -> Option<String> {
             self.data.get(&key).cloned()
@@ -412,7 +412,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn it_performs_effect_directly_on_provider() {
+    async fn it_performs_effect_directly_on_capability() {
         let mut store = MemoryStore {
             data: HashMap::new(),
         };
@@ -635,9 +635,9 @@ mod tests {
         async fn may_fail(&self, succeed: bool) -> Result<String, String>;
     }
 
-    struct FallibleProvider;
+    struct FallibleCapability;
 
-    impl Fallible for FallibleProvider {
+    impl Fallible for FallibleCapability {
         async fn may_fail(&self, succeed: bool) -> Result<String, String> {
             if succeed {
                 Ok("success".into())
@@ -654,12 +654,12 @@ mod tests {
 
     #[tokio::test]
     async fn it_propagates_results_through_effectful_fns() {
-        let mut provider = FallibleProvider;
+        let mut capability = FallibleCapability;
 
-        let ok_result = try_operation(true).perform(&mut provider).await;
+        let ok_result = try_operation(true).perform(&mut capability).await;
         assert_eq!(ok_result, Ok("success".into()));
 
-        let err_result = try_operation(false).perform(&mut provider).await;
+        let err_result = try_operation(false).perform(&mut capability).await;
         assert_eq!(err_result, Err("failure".into()));
     }
 
@@ -672,9 +672,9 @@ mod tests {
 
     #[tokio::test]
     async fn it_supports_question_mark_operator_in_effectful() {
-        let mut provider = FallibleProvider;
+        let mut capability = FallibleCapability;
 
-        let result = chain_fallible().perform(&mut provider).await;
+        let result = chain_fallible().perform(&mut capability).await;
         assert_eq!(result, Ok("success and success".into()));
     }
 
@@ -689,7 +689,7 @@ mod tests {
         async fn take(&self) -> Option<T>;
     }
 
-    /// Provider that stores items of type T
+    /// Capability that stores items of type T
     struct ItemHolder<T> {
         item: Option<T>,
     }
@@ -780,7 +780,7 @@ mod tests {
     // ==========================================================================
     // Tests for associated types in effect traits
     // ==========================================================================
-    // With Effect<Provider> having associated type Output, the cycle issue is resolved.
+    // With Effect<Capability> having associated type Output, the cycle issue is resolved.
     // The macro now generates proper Effect impls that use P::Item as Output.
 
     #[effect]
