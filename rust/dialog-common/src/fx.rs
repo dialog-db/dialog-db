@@ -140,11 +140,85 @@
 //! }
 //! ```
 //!
+//! # Generic Effect Traits
+//!
+//! Effect traits can have generic type parameters. For generic traits, the macro
+//! generates a function instead of a const, requiring turbofish syntax:
+//!
+//! ```no_run
+//! use dialog_common::fx::{effect, Effect};
+//!
+//! #[effect]
+//! pub trait State<T: Clone + Send + Sync + 'static> {
+//!     async fn get(&self) -> T;
+//!     async fn set(&mut self, value: T);
+//! }
+//!
+//! // Provider implements State for a specific type
+//! struct Counter(i32);
+//!
+//! impl State<i32> for Counter {
+//!     async fn get(&self) -> i32 {
+//!         self.0
+//!     }
+//!     async fn set(&mut self, value: i32) {
+//!         self.0 = value;
+//!     }
+//! }
+//!
+//! # async fn example() {
+//! let mut counter = Counter(0);
+//!
+//! // Use turbofish syntax: State::<T>().method()
+//! State::<i32>().set(42).perform(&mut counter).await;
+//! let value = State::<i32>().get().perform(&mut counter).await;
+//! assert_eq!(value, 42);
+//! # }
+//! ```
+//!
+//! # Associated Types in Effect Traits
+//!
+//! Effect traits can have associated types. The associated type is determined
+//! by the provider implementation, not at the effect creation site:
+//!
+//! ```no_run
+//! use dialog_common::fx::{effect, Effect};
+//!
+//! #[effect]
+//! pub trait Producer {
+//!     type Item: Clone + Send + Sync;
+//!     async fn produce(&self) -> Self::Item;
+//! }
+//!
+//! // Provider determines what Item is
+//! struct NumberProducer(i32);
+//!
+//! impl Producer for NumberProducer {
+//!     type Item = i32;
+//!
+//!     async fn produce(&self) -> Self::Item {
+//!         self.0
+//!     }
+//! }
+//!
+//! # async fn example() {
+//! let mut producer = NumberProducer(42);
+//!
+//! // No turbofish needed - Item type comes from the provider
+//! let value = Producer.produce().perform(&mut producer).await;
+//! assert_eq!(value, 42);
+//! # }
+//! ```
+//!
+//! The key difference:
+//! - **Generic params** (`State<T>`): Type specified at call site → `State::<i32>().get()`
+//! - **Associated types** (`type Item`): Type determined by provider → `Producer.produce()`
+//!
 //! # How It Works
 //!
 //! The effect system uses a simple trait-based approach:
 //!
-//! 1. Each effect operation (like `Get`, `Set`) is a struct implementing `Effect<Output, Provider>`
+//! 1. Each effect operation (like `Get`, `Set`) is a struct implementing `Effect<Provider>`
 //! 2. The `#[effect]` macro generates blanket `Effect` impls for any type implementing the Provider trait
 //! 3. The `#[effectful]` macro generates an inner struct implementing `Effect` that captures all arguments
 //! 4. Effects are composed using trait bounds: `P: Store + Logger`
@@ -153,7 +227,7 @@
 //!     ┌─────────────────┐
 //!     │  Effectful Code │
 //!     └────────┬────────┘
-//!              │ returns Effect<Output, P>
+//!              │ returns impl Effect<P, Output = T>
 //!              ▼
 //!     ┌─────────────────┐
 //!     │   .perform()    │
@@ -180,15 +254,18 @@ use std::future::Future;
 // Re-export macros for convenient access
 pub use dialog_macros::{effect, effectful};
 
-/// An effectful computation that produces `Output` when performed with a `Provider`.
+/// An effectful computation that produces an output when performed with a `Provider`.
 ///
 /// Types implementing this trait represent suspended computations that require
 /// a provider to complete. They can be performed using `.perform(&mut provider).await`.
 ///
 /// # Type Parameters
 ///
-/// - `Output`: The result type produced when the effect is performed
 /// - `Provider`: The type that can execute this effect (typically a trait bound)
+///
+/// # Associated Types
+///
+/// - `Output`: The result type produced when the effect is performed
 ///
 /// # Example
 ///
@@ -221,9 +298,11 @@ pub use dialog_macros::{effect, effectful};
 /// # Ok(())
 /// # }
 /// ```
-pub trait Effect<Output, Provider> {
+pub trait Effect<Provider> {
+    /// The output type produced when the effect is performed.
+    type Output;
     /// Perform this effect using the given provider.
-    fn perform(self, provider: &mut Provider) -> impl Future<Output = Output>;
+    fn perform(self, provider: &mut Provider) -> impl Future<Output = Self::Output>;
 }
 
 /// Performs an effect inside an `#[effectful]` function.
@@ -282,17 +361,26 @@ pub use perform;
 ///
 /// ```no_run
 /// # use dialog_common::fx::{Effect, Task};
-/// fn create_effect<P>() -> impl Effect<i32, P> {
-///     Task(async move |_provider: &mut P| { 42 })
+/// fn create_effect<P>() -> impl Effect<P, Output = i32> {
+///     Task::new(async move |_provider: &mut P| { 42 })
 /// }
 /// ```
-pub struct Task<F>(pub F);
+pub struct Task<F, Output>(pub F, pub std::marker::PhantomData<Output>);
 
-impl<F, Output, Provider> Effect<Output, Provider> for Task<F>
+impl<F, Output> Task<F, Output> {
+    /// Create a new Task wrapping an async closure.
+    pub fn new(f: F) -> Self {
+        Task(f, std::marker::PhantomData)
+    }
+}
+
+impl<F, Output, Provider> Effect<Provider> for Task<F, Output>
 where
     F: AsyncFnOnce(&mut Provider) -> Output,
 {
-    fn perform(self, provider: &mut Provider) -> impl Future<Output = Output> {
+    type Output = Output;
+
+    fn perform(self, provider: &mut Provider) -> impl Future<Output = Self::Output> {
         (self.0)(provider)
     }
 }
@@ -588,5 +676,136 @@ mod tests {
 
         let result = chain_fallible().perform(&mut provider).await;
         assert_eq!(result, Ok("success and success".into()));
+    }
+
+    // ==========================================================================
+    // Tests for generic effect traits
+    // ==========================================================================
+
+    /// A generic effect trait that works with any item type T
+    #[effect]
+    pub trait Container<T: Clone + Send + Sync + 'static> {
+        async fn put(&mut self, item: T);
+        async fn take(&self) -> Option<T>;
+    }
+
+    /// Provider that stores items of type T
+    struct ItemHolder<T> {
+        item: Option<T>,
+    }
+
+    impl<T: Clone + Send + Sync + 'static> Container<T> for ItemHolder<T> {
+        async fn put(&mut self, item: T) {
+            self.item = Some(item);
+        }
+
+        async fn take(&self) -> Option<T> {
+            self.item.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn it_supports_generic_effect_traits_with_strings() {
+        let mut holder: ItemHolder<String> = ItemHolder { item: None };
+
+        // Use the Consumer function for generic traits
+        Container::<String>()
+            .put("hello".to_string())
+            .perform(&mut holder)
+            .await;
+
+        let result = Container::<String>().take().perform(&mut holder).await;
+        assert_eq!(result, Some("hello".to_string()));
+    }
+
+    #[tokio::test]
+    async fn it_supports_generic_effect_traits_with_integers() {
+        let mut holder: ItemHolder<i32> = ItemHolder { item: None };
+
+        Container::<i32>().put(42).perform(&mut holder).await;
+
+        let result = Container::<i32>().take().perform(&mut holder).await;
+        assert_eq!(result, Some(42));
+    }
+
+    /// A generic effect with multiple type parameters
+    #[effect]
+    pub trait Converter<From: Clone + Send + Sync + 'static, To: Clone + Send + Sync + 'static> {
+        async fn convert(&self, input: From) -> To;
+    }
+
+    struct StringToInt;
+
+    impl Converter<String, i32> for StringToInt {
+        async fn convert(&self, input: String) -> i32 {
+            input.parse().unwrap_or(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn it_supports_generic_effects_with_multiple_type_params() {
+        let mut converter = StringToInt;
+
+        let result = Converter::<String, i32>()
+            .convert("123".to_string())
+            .perform(&mut converter)
+            .await;
+
+        assert_eq!(result, 123);
+    }
+
+    /// Test effectful functions that use generic effects
+    #[effectful(Container<String>)]
+    fn store_greeting(name: String) {
+        perform!(Container::<String>().put(format!("Hello, {}!", name)));
+    }
+
+    #[effectful(Container<String>)]
+    fn get_greeting() -> Option<String> {
+        perform!(Container::<String>().take())
+    }
+
+    #[tokio::test]
+    async fn it_supports_effectful_functions_with_generic_effects() {
+        let mut holder: ItemHolder<String> = ItemHolder { item: None };
+
+        store_greeting("World".to_string())
+            .perform(&mut holder)
+            .await;
+
+        let result = get_greeting().perform(&mut holder).await;
+        assert_eq!(result, Some("Hello, World!".to_string()));
+    }
+
+    // ==========================================================================
+    // Tests for associated types in effect traits
+    // ==========================================================================
+    // With Effect<Provider> having associated type Output, the cycle issue is resolved.
+    // The macro now generates proper Effect impls that use P::Item as Output.
+
+    #[effect]
+    pub trait Producer {
+        type Item: Clone + Send + Sync;
+        async fn produce(&self) -> Self::Item;
+    }
+
+    struct NumberProducer {
+        value: i32,
+    }
+
+    impl Producer for NumberProducer {
+        type Item = i32;
+
+        async fn produce(&self) -> Self::Item {
+            self.value
+        }
+    }
+
+    #[tokio::test]
+    async fn it_supports_associated_types_in_effect_traits() {
+        let mut producer = NumberProducer { value: 42 };
+
+        let result = Producer.produce().perform(&mut producer).await;
+        assert_eq!(result, 42);
     }
 }

@@ -17,8 +17,8 @@
 //!
 //! This expands to:
 //! ```ignore
-//! pub fn copy<__P: BlockStore + TransactionalMemory>(from: Vec<u8>, to: Vec<u8>) -> impl Effect<Result<(), Error>, __P> {
-//!     Task(async move |__provider: &mut __P| {
+//! pub fn copy<__P: BlockStore + TransactionalMemory>(from: Vec<u8>, to: Vec<u8>) -> impl Effect<__P, Output = Result<(), Error>> {
+//!     Task::new(async move |__provider: &mut __P| {
 //!         let content = BlockStore.get(from).perform(__provider).await?;
 //!         BlockStore.set(to, content.unwrap_or_default()).perform(__provider).await
 //!     })
@@ -41,8 +41,8 @@
 //! Expands to:
 //! ```ignore
 //! impl Cache {
-//!     fn get<__P: BlockStore>(&self, key: Vec<u8>) -> impl Effect<Option<Vec<u8>>, __P> + '_ {
-//!         Task(async move |__provider: &mut __P| {
+//!     fn get<__P: BlockStore>(&self, key: Vec<u8>) -> impl Effect<__P, Output = Option<Vec<u8>>> + '_ {
+//!         Task::new(async move |__provider: &mut __P| {
 //!             BlockStore.get(format!("{}{}", self.prefix, key)).perform(__provider).await
 //!         })
 //!     }
@@ -263,10 +263,10 @@ fn generate_effectful_function(
         // For methods with &self, we use Task with an async closure that captures self
         // The async closure can access self directly since it's captured in the closure environment
         Ok(quote! {
-            #vis fn #fn_name #generics (#inputs) -> impl dialog_common::fx::Effect<#output_type, __P> + '_
+            #vis fn #fn_name #generics (#inputs) -> impl dialog_common::fx::Effect<__P, Output = #output_type> + '_
             #where_clause
             {
-                dialog_common::fx::Task(async move |__provider: &mut __P| {
+                dialog_common::fx::Task::new(async move |__provider: &mut __P| {
                     #(#body_stmts)*
                 })
             }
@@ -290,10 +290,10 @@ fn generate_effectful_function(
 
         // Use Task with an async closure that captures parameters
         Ok(quote! {
-            #vis fn #fn_name #generics (#inputs) -> impl dialog_common::fx::Effect<#output_type, __P>
+            #vis fn #fn_name #generics (#inputs) -> impl dialog_common::fx::Effect<__P, Output = #output_type>
             #where_clause
             {
-                dialog_common::fx::Task(async move |__provider: &mut __P| {
+                dialog_common::fx::Task::new(async move |__provider: &mut __P| {
                     #(#body_stmts)*
                 })
             }
@@ -354,9 +354,9 @@ fn generate_effectful_trait_method(
 
     // For methods with &self, add lifetime bound; otherwise just return the effect
     let return_type = if has_ref_self {
-        quote! { impl dialog_common::fx::Effect<#output_type, __P> + '_ }
+        quote! { impl dialog_common::fx::Effect<__P, Output = #output_type> + '_ }
     } else {
-        quote! { impl dialog_common::fx::Effect<#output_type, __P> }
+        quote! { impl dialog_common::fx::Effect<__P, Output = #output_type> }
     };
 
     Ok(quote! {
