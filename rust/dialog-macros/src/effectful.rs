@@ -17,8 +17,8 @@
 //!
 //! This expands to:
 //! ```ignore
-//! pub fn copy<__P: BlockStore + TransactionalMemory>(from: Vec<u8>, to: Vec<u8>) -> impl Effect<__P, Output = Result<(), Error>> {
-//!     Task::new(async move |__capability: &mut __P| {
+//! pub fn copy<Capability: BlockStore + TransactionalMemory>(from: Vec<u8>, to: Vec<u8>) -> impl Effect<Capability, Output = Result<(), Error>> {
+//!     Task::new(async move |__capability: &mut Capability| {
 //!         let content = BlockStore.get(from).perform(__capability).await?;
 //!         BlockStore.set(to, content.unwrap_or_default()).perform(__capability).await
 //!     })
@@ -41,8 +41,8 @@
 //! Expands to:
 //! ```ignore
 //! impl Cache {
-//!     fn get<__P: BlockStore>(&self, key: Vec<u8>) -> impl Effect<__P, Output = Option<Vec<u8>>> + '_ {
-//!         Task::new(async move |__capability: &mut __P| {
+//!     fn get<Capability: BlockStore>(&self, key: Vec<u8>) -> impl Effect<Capability, Output = Option<Vec<u8>>> + '_ {
+//!         Task::new(async move |__capability: &mut Capability| {
 //!             BlockStore.get(format!("{}{}", self.prefix, key)).perform(__capability).await
 //!         })
 //!     }
@@ -207,6 +207,7 @@ fn generate_effectful_function(
     let bounds = &args.bounds;
 
     // Extract function parts
+    let attrs = &func.attrs;
     let vis = &func.vis;
     let sig = &func.sig;
     let fn_name = &sig.ident;
@@ -246,9 +247,9 @@ fn generate_effectful_function(
     if has_ref_self {
         // Method with &self - use closure-based approach to capture self
         let generics = if existing_params.is_empty() {
-            quote! { <__P: #bounds_tokens> }
+            quote! { <Capability: #bounds_tokens> }
         } else {
-            quote! { <#existing_params, __P: #bounds_tokens> }
+            quote! { <#existing_params, Capability: #bounds_tokens> }
         };
 
         let where_clause = if let Some(existing) = existing_where {
@@ -263,10 +264,11 @@ fn generate_effectful_function(
         // For methods with &self, we use Task with an async closure that captures self
         // The async closure can access self directly since it's captured in the closure environment
         Ok(quote! {
-            #vis fn #fn_name #generics (#inputs) -> impl dialog_common::fx::Effect<__P, Output = #output_type> + '_
+            #(#attrs)*
+            #vis fn #fn_name #generics (#inputs) -> impl dialog_common::fx::Effect<Capability, Output = #output_type> + '_
             #where_clause
             {
-                dialog_common::fx::Task::new(async move |__capability: &mut __P| {
+                dialog_common::fx::Task::new(async move |__capability: &mut Capability| {
                     #(#body_stmts)*
                 })
             }
@@ -274,9 +276,9 @@ fn generate_effectful_function(
     } else {
         // Free function or method without &self - use closure approach for consistency
         let generics = if existing_params.is_empty() {
-            quote! { <__P: #bounds_tokens> }
+            quote! { <Capability: #bounds_tokens> }
         } else {
-            quote! { <#existing_params, __P: #bounds_tokens> }
+            quote! { <#existing_params, Capability: #bounds_tokens> }
         };
 
         let where_clause = if let Some(existing) = existing_where {
@@ -290,10 +292,11 @@ fn generate_effectful_function(
 
         // Use Task with an async closure that captures parameters
         Ok(quote! {
-            #vis fn #fn_name #generics (#inputs) -> impl dialog_common::fx::Effect<__P, Output = #output_type>
+            #(#attrs)*
+            #vis fn #fn_name #generics (#inputs) -> impl dialog_common::fx::Effect<Capability, Output = #output_type>
             #where_clause
             {
-                dialog_common::fx::Task::new(async move |__capability: &mut __P| {
+                dialog_common::fx::Task::new(async move |__capability: &mut Capability| {
                     #(#body_stmts)*
                 })
             }
@@ -340,9 +343,9 @@ fn generate_effectful_trait_method(
     let bounds_tokens = quote! { #(#trait_bounds)+* };
 
     let generics = if existing_params.is_empty() {
-        quote! { <__P: #bounds_tokens> }
+        quote! { <Capability: #bounds_tokens> }
     } else {
-        quote! { <#existing_params, __P: #bounds_tokens> }
+        quote! { <#existing_params, Capability: #bounds_tokens> }
     };
 
     let where_clause = if let Some(existing) = existing_where {
@@ -354,9 +357,9 @@ fn generate_effectful_trait_method(
 
     // For methods with &self, add lifetime bound; otherwise just return the effect
     let return_type = if has_ref_self {
-        quote! { impl dialog_common::fx::Effect<__P, Output = #output_type> + '_ }
+        quote! { impl dialog_common::fx::Effect<Capability, Output = #output_type> + '_ }
     } else {
-        quote! { impl dialog_common::fx::Effect<__P, Output = #output_type> }
+        quote! { impl dialog_common::fx::Effect<Capability, Output = #output_type> }
     };
 
     Ok(quote! {

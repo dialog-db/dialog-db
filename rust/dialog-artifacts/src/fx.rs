@@ -24,17 +24,27 @@
 //! - `local::Address` - Address type for local storage (DID, path)
 //! - `remote::Address` - Address type for remote storage (REST config)
 
+mod archive;
+mod archive_store;
+mod branch;
 mod connection;
+pub mod connectors;
 mod effects;
 mod environment;
 mod errors;
 pub mod local;
 pub mod memory;
 pub mod remote;
+pub mod replica;
 mod site;
+pub mod transactional_memory;
 
 // Re-export everything for convenience
+pub use archive::*;
+pub use archive_store::*;
+pub use branch::*;
 pub use connection::*;
+pub use connectors::*;
 pub use effects::*;
 pub use environment::*;
 pub use errors::*;
@@ -43,8 +53,7 @@ pub use site::*;
 #[cfg(test)]
 mod tests {
     use super::{
-        effectful, local, remote, Env, LocalMemory, LocalStore, NetworkError, RemoteMemory,
-        RemoteStore, StorageError,
+        effectful, local, remote, Env, Memory, Store, MemoryError,
     };
     use dialog_common::fx::Effect;
     use dialog_storage::{AuthMethod, RestStorageConfig};
@@ -56,12 +65,18 @@ mod tests {
 
     // In the new design, just implementing the trait is enough - the `#[effect]`
     // macro generates blanket `Effect` implementations automatically.
-    impl LocalStore for MemoryStore {
-        async fn get(&self, _did: local::Address, key: Vec<u8>) -> Result<Option<Vec<u8>>, StorageError> {
+    impl Store<local::Address> for MemoryStore {
+        async fn get(&self, _did: local::Address, key: Vec<u8>) -> Result<Option<Vec<u8>>, MemoryError> {
             Ok(self.data.get(&key).cloned())
         }
-        async fn set(&mut self, _did: local::Address, key: Vec<u8>, value: Vec<u8>) -> Result<(), StorageError> {
+        async fn set(&mut self, _did: local::Address, key: Vec<u8>, value: Vec<u8>) -> Result<(), MemoryError> {
             self.data.insert(key, value);
+            Ok(())
+        }
+        async fn import(&mut self, _did: local::Address, blocks: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), MemoryError> {
+            for (key, value) in blocks {
+                self.data.insert(key, value);
+            }
             Ok(())
         }
     }
@@ -76,13 +91,13 @@ mod tests {
             data: HashMap::new(),
         };
 
-        LocalStore
+        Store::<local::Address>()
             .set(test_did(), b"key".to_vec(), b"value".to_vec())
             .perform(&mut store)
             .await
             .unwrap();
 
-        let result = LocalStore
+        let result = Store::<local::Address>()
             .get(test_did(), b"key".to_vec())
             .perform(&mut store)
             .await
@@ -97,7 +112,7 @@ mod tests {
             data: HashMap::new(),
         };
 
-        let result = LocalStore
+        let result = Store::<local::Address>()
             .get(test_did(), b"missing".to_vec())
             .perform(&mut store)
             .await
@@ -111,12 +126,12 @@ mod tests {
         next_edition: u64,
     }
 
-    impl LocalMemory for MemoryState {
+    impl Memory<local::Address> for MemoryState {
         async fn resolve(
             &self,
             _did: local::Address,
             address: Vec<u8>,
-        ) -> Result<Option<(Vec<u8>, Vec<u8>)>, StorageError> {
+        ) -> Result<Option<(Vec<u8>, Vec<u8>)>, MemoryError> {
             Ok(self.state.get(&address).cloned())
         }
 
@@ -126,14 +141,14 @@ mod tests {
             address: Vec<u8>,
             edition: Option<Vec<u8>>,
             content: Option<Vec<u8>>,
-        ) -> Result<Option<Vec<u8>>, StorageError> {
+        ) -> Result<Option<Vec<u8>>, MemoryError> {
             let current = self.state.get(&address);
 
             match (current, edition.as_ref()) {
                 (None, None) => {}
                 (Some((_, current_edition)), Some(expected)) if current_edition == expected => {}
                 _ => {
-                    return Err(StorageError::Conflict("Edition mismatch".to_string()))
+                    return Err(MemoryError::Conflict("Edition mismatch".to_string()))
                 }
             }
 
@@ -159,7 +174,7 @@ mod tests {
             next_edition: 1,
         };
 
-        let edition = LocalMemory
+        let edition = Memory::<local::Address>()
             .replace(test_did(), b"addr".to_vec(), None, Some(b"value1".to_vec()))
             .perform(&mut state)
             .await
@@ -168,7 +183,7 @@ mod tests {
         assert!(edition.is_some());
         let edition = edition.unwrap();
 
-        let resolved = LocalMemory
+        let resolved = Memory::<local::Address>()
             .resolve(test_did(), b"addr".to_vec())
             .perform(&mut state)
             .await
@@ -176,7 +191,7 @@ mod tests {
 
         assert_eq!(resolved, Some((b"value1".to_vec(), edition.clone())));
 
-        let new_edition = LocalMemory
+        let new_edition = Memory::<local::Address>()
             .replace(test_did(), b"addr".to_vec(), Some(edition), Some(b"value2".to_vec()))
             .perform(&mut state)
             .await
@@ -184,7 +199,7 @@ mod tests {
 
         assert!(new_edition.is_some());
 
-        let resolved = LocalMemory
+        let resolved = Memory::<local::Address>()
             .resolve(test_did(), b"addr".to_vec())
             .perform(&mut state)
             .await
@@ -200,13 +215,13 @@ mod tests {
             next_edition: 1,
         };
 
-        LocalMemory
+        Memory::<local::Address>()
             .replace(test_did(), b"addr".to_vec(), None, Some(b"value1".to_vec()))
             .perform(&mut state)
             .await
             .unwrap();
 
-        let result = LocalMemory
+        let result = Memory::<local::Address>()
             .replace(
                 test_did(),
                 b"addr".to_vec(),
@@ -216,27 +231,37 @@ mod tests {
             .perform(&mut state)
             .await;
 
-        assert!(matches!(result, Err(StorageError::Conflict(_))));
+        assert!(matches!(result, Err(MemoryError::Conflict(_))));
     }
 
     struct MockRemote {
         data: HashMap<(String, Vec<u8>), Vec<u8>>,
     }
 
-    impl RemoteStore for MockRemote {
+    impl Store<remote::Address> for MockRemote {
         async fn get(
             &self,
             site: remote::Address,
             key: Vec<u8>,
-        ) -> Result<Option<Vec<u8>>, NetworkError> {
+        ) -> Result<Option<Vec<u8>>, MemoryError> {
             Ok(self.data.get(&(site.name(), key)).cloned())
+        }
+
+        async fn set(
+            &mut self,
+            site: remote::Address,
+            key: Vec<u8>,
+            value: Vec<u8>,
+        ) -> Result<(), MemoryError> {
+            self.data.insert((site.name(), key), value);
+            Ok(())
         }
 
         async fn import(
             &mut self,
             site: remote::Address,
             blocks: Vec<(Vec<u8>, Vec<u8>)>,
-        ) -> Result<(), NetworkError> {
+        ) -> Result<(), MemoryError> {
             for (key, value) in blocks {
                 self.data.insert((site.name(), key), value);
             }
@@ -259,13 +284,13 @@ mod tests {
             timeout_seconds: None,
         });
 
-        RemoteStore
+        Store::<remote::Address>()
             .import(site.clone(), vec![(b"key".to_vec(), b"value".to_vec())])
             .perform(&mut remote)
             .await
             .unwrap();
 
-        let result = RemoteStore
+        let result = Store::<remote::Address>()
             .get(site, b"key".to_vec())
             .perform(&mut remote)
             .await
@@ -274,10 +299,13 @@ mod tests {
         assert_eq!(result, Some(b"value".to_vec()));
     }
 
-    #[effectful(LocalStore)]
-    fn copy_block(did: local::Address, from: Vec<u8>, to: Vec<u8>) -> Result<(), StorageError> {
-        if let Some(value) = perform!(LocalStore.get(did.clone(), from))? {
-            perform!(LocalStore.set(did, to, value))?;
+    #[effectful(Store<local::Address>)]
+    fn copy_block(did: local::Address, from: Vec<u8>, to: Vec<u8>) -> Result<(), MemoryError>
+    where
+        Capability: Store<local::Address>,
+    {
+        if let Some(value) = perform!(Store::<local::Address>().get(did.clone(), from))? {
+            perform!(Store::<local::Address>().set(did, to, value))?;
         }
         Ok(())
     }
@@ -288,7 +316,7 @@ mod tests {
             data: HashMap::new(),
         };
 
-        LocalStore
+        Store::<local::Address>()
             .set(test_did(), b"source".to_vec(), b"data".to_vec())
             .perform(&mut store)
             .await
@@ -299,7 +327,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = LocalStore
+        let result = Store::<local::Address>()
             .get(test_did(), b"dest".to_vec())
             .perform(&mut store)
             .await
@@ -318,22 +346,28 @@ mod tests {
 
     impl Env for MockEnv {}
 
-    impl LocalStore for MockEnv {
-        async fn get(&self, _did: local::Address, key: Vec<u8>) -> Result<Option<Vec<u8>>, StorageError> {
+    impl Store<local::Address> for MockEnv {
+        async fn get(&self, _did: local::Address, key: Vec<u8>) -> Result<Option<Vec<u8>>, MemoryError> {
             Ok(self.local_store.get(&key).cloned())
         }
-        async fn set(&mut self, _did: local::Address, key: Vec<u8>, value: Vec<u8>) -> Result<(), StorageError> {
+        async fn set(&mut self, _did: local::Address, key: Vec<u8>, value: Vec<u8>) -> Result<(), MemoryError> {
             self.local_store.insert(key, value);
+            Ok(())
+        }
+        async fn import(&mut self, _did: local::Address, blocks: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), MemoryError> {
+            for (key, value) in blocks {
+                self.local_store.insert(key, value);
+            }
             Ok(())
         }
     }
 
-    impl LocalMemory for MockEnv {
+    impl Memory<local::Address> for MockEnv {
         async fn resolve(
             &self,
             _did: local::Address,
             address: Vec<u8>,
-        ) -> Result<Option<(Vec<u8>, Vec<u8>)>, StorageError> {
+        ) -> Result<Option<(Vec<u8>, Vec<u8>)>, MemoryError> {
             Ok(self.local_memory.get(&address).cloned())
         }
 
@@ -343,12 +377,12 @@ mod tests {
             address: Vec<u8>,
             edition: Option<Vec<u8>>,
             content: Option<Vec<u8>>,
-        ) -> Result<Option<Vec<u8>>, StorageError> {
+        ) -> Result<Option<Vec<u8>>, MemoryError> {
             let current = self.local_memory.get(&address);
             match (current, edition.as_ref()) {
                 (None, None) => {}
                 (Some((_, e)), Some(expected)) if e == expected => {}
-                _ => return Err(StorageError::Conflict("Edition mismatch".to_string())),
+                _ => return Err(MemoryError::Conflict("Edition mismatch".to_string())),
             }
             match content {
                 Some(value) => {
@@ -366,20 +400,30 @@ mod tests {
         }
     }
 
-    impl RemoteStore for MockEnv {
+    impl Store<remote::Address> for MockEnv {
         async fn get(
             &self,
             site: remote::Address,
             key: Vec<u8>,
-        ) -> Result<Option<Vec<u8>>, NetworkError> {
+        ) -> Result<Option<Vec<u8>>, MemoryError> {
             Ok(self.remote_store.get(&(site.name(), key)).cloned())
+        }
+
+        async fn set(
+            &mut self,
+            site: remote::Address,
+            key: Vec<u8>,
+            value: Vec<u8>,
+        ) -> Result<(), MemoryError> {
+            self.remote_store.insert((site.name(), key), value);
+            Ok(())
         }
 
         async fn import(
             &mut self,
             site: remote::Address,
             blocks: Vec<(Vec<u8>, Vec<u8>)>,
-        ) -> Result<(), NetworkError> {
+        ) -> Result<(), MemoryError> {
             for (key, value) in blocks {
                 self.remote_store.insert((site.name(), key), value);
             }
@@ -387,12 +431,12 @@ mod tests {
         }
     }
 
-    impl RemoteMemory for MockEnv {
+    impl Memory<remote::Address> for MockEnv {
         async fn resolve(
             &self,
             site: remote::Address,
             address: Vec<u8>,
-        ) -> Result<Option<(Vec<u8>, Vec<u8>)>, NetworkError> {
+        ) -> Result<Option<(Vec<u8>, Vec<u8>)>, MemoryError> {
             Ok(self.remote_memory.get(&(site.name(), address)).cloned())
         }
 
@@ -402,14 +446,14 @@ mod tests {
             address: Vec<u8>,
             edition: Option<Vec<u8>>,
             content: Option<Vec<u8>>,
-        ) -> Result<Option<Vec<u8>>, NetworkError> {
+        ) -> Result<Option<Vec<u8>>, MemoryError> {
             let key = (site.name(), address);
             let current = self.remote_memory.get(&key);
             match (current, edition.as_ref()) {
                 (None, None) => {}
                 (Some((_, e)), Some(expected)) if e == expected => {}
                 _ => {
-                    return Err(NetworkError::Network("Edition mismatch".to_string()))
+                    return Err(MemoryError::Network("Edition mismatch".to_string()))
                 }
             }
             match content {
@@ -427,18 +471,21 @@ mod tests {
         }
     }
 
-    #[effectful(LocalStore + RemoteStore)]
+    #[effectful(Store<local::Address> + Store<remote::Address>)]
     fn fetch_and_cache(
         did: local::Address,
         site: remote::Address,
         key: Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(value) = perform!(LocalStore.get(did.clone(), key.clone()))? {
+    ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>>
+    where
+        Capability: Store<local::Address> + Store<remote::Address>,
+    {
+        if let Some(value) = perform!(Store::<local::Address>().get(did.clone(), key.clone()))? {
             return Ok(Some(value));
         }
 
-        if let Some(value) = perform!(RemoteStore.get(site, key.clone()))? {
-            perform!(LocalStore.set(did, key, value.clone()))?;
+        if let Some(value) = perform!(Store::<remote::Address>().get(site, key.clone()))? {
+            perform!(Store::<local::Address>().set(did, key, value.clone()))?;
             return Ok(Some(value));
         }
 
@@ -464,7 +511,7 @@ mod tests {
             timeout_seconds: None,
         });
 
-        RemoteStore
+        Store::<remote::Address>()
             .import(
                 site.clone(),
                 vec![(b"key".to_vec(), b"remote_value".to_vec())],
@@ -480,7 +527,7 @@ mod tests {
 
         assert_eq!(result, Some(b"remote_value".to_vec()));
 
-        let cached = LocalStore
+        let cached = Store::<local::Address>()
             .get(test_did(), b"key".to_vec())
             .perform(&mut env)
             .await
@@ -508,7 +555,7 @@ mod tests {
             timeout_seconds: None,
         });
 
-        LocalStore
+        Store::<local::Address>()
             .set(test_did(), b"key".to_vec(), b"local_value".to_vec())
             .perform(&mut env)
             .await

@@ -128,7 +128,7 @@ impl Default for TestEnv {
 mod tests {
     use super::*;
     use crate::fx::{
-        local, remote, Env, LocalMemory, LocalStore, RemoteMemory, RemoteStore,
+        local, remote, Env, Memory, Store,
     };
     use dialog_common::fx::Effect;
     use dialog_storage::{AuthMethod, RestStorageConfig};
@@ -154,14 +154,14 @@ mod tests {
         let did = test_did();
 
         // Set a value
-        LocalStore
+        Store::<local::Address>()
             .set(did.clone(), b"key".to_vec(), b"value".to_vec())
             .perform(&mut env)
             .await
             .unwrap();
 
         // Get it back
-        let result = LocalStore
+        let result = Store::<local::Address>()
             .get(did, b"key".to_vec())
             .perform(&mut env)
             .await
@@ -176,7 +176,7 @@ mod tests {
         let did = test_did();
 
         // Create a new entry
-        let edition = LocalMemory
+        let edition = Memory::<local::Address>()
             .replace(did.clone(), b"addr".to_vec(), None, Some(b"value1".to_vec()))
             .perform(&mut env)
             .await
@@ -185,7 +185,7 @@ mod tests {
         assert!(edition.is_some());
 
         // Resolve it
-        let resolved = LocalMemory
+        let resolved = Memory::<local::Address>()
             .resolve(did, b"addr".to_vec())
             .perform(&mut env)
             .await
@@ -202,7 +202,7 @@ mod tests {
         let site = test_remote();
 
         // Import some blocks
-        RemoteStore
+        Store::<remote::Address>()
             .import(
                 site.clone(),
                 vec![(b"key".to_vec(), b"remote_value".to_vec())],
@@ -212,7 +212,7 @@ mod tests {
             .unwrap();
 
         // Get it back
-        let result = RemoteStore
+        let result = Store::<remote::Address>()
             .get(site, b"key".to_vec())
             .perform(&mut env)
             .await
@@ -227,7 +227,7 @@ mod tests {
         let site = test_remote();
 
         // Create a new entry
-        let edition = RemoteMemory
+        let edition = Memory::<remote::Address>()
             .replace(site.clone(), b"addr".to_vec(), None, Some(b"value1".to_vec()))
             .perform(&mut env)
             .await
@@ -236,7 +236,7 @@ mod tests {
         assert!(edition.is_some());
 
         // Resolve it
-        let resolved = RemoteMemory
+        let resolved = Memory::<remote::Address>()
             .resolve(site, b"addr".to_vec())
             .perform(&mut env)
             .await
@@ -254,26 +254,26 @@ mod tests {
         let site = test_remote();
 
         // Set local value
-        LocalStore
+        Store::<local::Address>()
             .set(did.clone(), b"key".to_vec(), b"local".to_vec())
             .perform(&mut env)
             .await
             .unwrap();
 
         // Import remote value with same key
-        RemoteStore
+        Store::<remote::Address>()
             .import(site.clone(), vec![(b"key".to_vec(), b"remote".to_vec())])
             .perform(&mut env)
             .await
             .unwrap();
 
         // Both should be independent
-        let local_val = LocalStore
+        let local_val = Store::<local::Address>()
             .get(did, b"key".to_vec())
             .perform(&mut env)
             .await
             .unwrap();
-        let remote_val = RemoteStore
+        let remote_val = Store::<remote::Address>()
             .get(site, b"key".to_vec())
             .perform(&mut env)
             .await
@@ -290,14 +290,14 @@ mod tests {
         let bob = local::Address::did("did:test:bob");
 
         // Set value for alice
-        LocalStore
+        Store::<local::Address>()
             .set(alice.clone(), b"key".to_vec(), b"alice-value".to_vec())
             .perform(&mut env)
             .await
             .unwrap();
 
         // Bob doesn't see it
-        let bob_val = LocalStore
+        let bob_val = Store::<local::Address>()
             .get(bob, b"key".to_vec())
             .perform(&mut env)
             .await
@@ -312,7 +312,7 @@ mod tests {
         let did = test_did();
 
         // Set value in env1
-        LocalStore
+        Store::<local::Address>()
             .set(did.clone(), b"key".to_vec(), b"shared".to_vec())
             .perform(&mut env1)
             .await
@@ -320,7 +320,7 @@ mod tests {
 
         // Clone and read from env2
         let mut env2 = env1.clone();
-        let result = LocalStore
+        let result = Store::<local::Address>()
             .get(did, b"key".to_vec())
             .perform(&mut env2)
             .await

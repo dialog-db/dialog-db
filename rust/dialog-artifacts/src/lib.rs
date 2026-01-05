@@ -60,7 +60,11 @@ pub mod capability;
 /// Algebraic effects system (experimental).
 pub mod fx;
 
-/// Replica abstraction for dialog
+/// Replica abstraction for dialog (legacy - being migrated to module structure)
+#[path = "replica_old.rs"]
+pub mod replica_old;
+
+/// Replica types (new module structure)
 pub mod replica;
 // #[allow(ambiguous_glob_reexports)]
 pub use platform::*;

@@ -280,7 +280,7 @@ pub mod memory {
             let mut sites = self.sites.write().unwrap();
             let backend = sites
                 .entry(parameter.namespace.clone())
-                .or_insert_with(MemoryStorageBackend::default)
+                .or_default()
                 .clone();
 
             Ok(MemorySite { backend })

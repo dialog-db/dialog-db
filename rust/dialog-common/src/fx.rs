@@ -305,6 +305,8 @@ pub trait Effect<Capability> {
     fn perform(self, capability: &mut Capability) -> impl Future<Output = Self::Output>;
 }
 
+
+
 /// Performs an effect inside an `#[effectful]` function.
 ///
 /// This macro is a placeholder that gets transformed by the [`effectful`] macro
