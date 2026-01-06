@@ -1,6 +1,6 @@
 # Dialog DB
 
-![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue?label=License)
+![License](https://img.shields.io/badge/license-MPL--2.0-blue?label=License)
 [![Tests](https://img.shields.io/github/checks-status/dialog-db/dialog-db/main)](https://github.com/dialog-db/dialog-db/actions/workflows/run_test_suite.yaml?query=branch%3Amain)
 
 <div align="center">
@@ -49,10 +49,9 @@ From a suitable development environment, you can build using standard Rust and N
 
 ## License
 
-This project is dual licensed under [MIT] and [Apache-2.0].
+This project is licensed under the [Mozilla Public License 2.0].
 
-[MIT]: https://www.opensource.org/licenses/mit  
-[Apache-2.0]: https://www.apache.org/licenses/license-2.0
+[Mozilla Public License 2.0]: https://www.mozilla.org/en-US/MPL/2.0/
 [Datalog]: https://en.wikipedia.org/wiki/Datalog
 [Web Assembly]: https://webassembly.org/
 [Visionary lays into the web]: http://news.bbc.co.uk/2/hi/science/nature/1581891.stm
