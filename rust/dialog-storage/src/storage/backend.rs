@@ -14,15 +14,11 @@ mod indexeddb;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub use indexeddb::*;
 
-mod rest;
-pub use rest::*;
-
-// Export s3 test module for integration testing
-#[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
-pub use rest::s3;
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod r2_tests;
+/// S3/R2-compatible storage backend.
+#[cfg(feature = "s3")]
+pub mod s3;
+#[cfg(feature = "s3")]
+pub use s3::{Bucket, S3StorageError};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod fs;

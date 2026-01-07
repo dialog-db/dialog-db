@@ -6,18 +6,25 @@ authors.workspace = true
 license.workspace = true
 
 [features]
-helpers = ["tempfile", "anyhow", "rand"]
-http_tests = []
-r2_tests = []
-s3_integration_tests = []
-test-utils = [
+helpers = [
+  "tempfile",
+  "anyhow",
+  "rand",
   "dep:s3s",
   "dep:hyper",
   "dep:hyper-util",
   "dep:http-body-util",
   "dep:bytes",
   "dep:tokio-test",
+  "dep:tower",
+  "dep:tower-http",
 ]
+# Enables the S3/R2-compatible storage backend
+s3 = ["dep:chrono", "dep:hmac", "dep:reqwest", "dep:sha2", "dep:url"]
+# Enables S3 list operations (ListObjectsV2) with XML parsing
+s3-list = ["s3", "dep:quick-xml"]
+# Enables real S3/R2 integration tests (requires R2S3_* environment variables)
+s3-integration-tests = ["s3-list"]
 
 [dependencies]
 dialog-common = { workspace = true }
@@ -26,35 +33,40 @@ anyhow = { workspace = true, optional = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
+base64 = { workspace = true }
 blake3 = { workspace = true }
 brotli = { workspace = true }
-base64 = { workspace = true }
+chrono = { version = "0.4", optional = true }
 futures-util = { workspace = true }
-hmac = "0.12"
-reqwest = { workspace = true, features = ["json"] }
-sha2 = "0.10"
+hmac = { version = "0.12", optional = true }
+md5 = "0.8.0"
+reqwest = { workspace = true, features = ["json"], optional = true }
+sha2 = { version = "0.10", optional = true }
+quick-xml = { version = "0.37", features = ["serde", "serialize"], optional = true }
 sieve-cache = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }
 rand = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
-url = "2.5"
-chrono = "0.4"
-md5 = "0.8.0"
+url = { version = "2.5", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pidlock = "0.1"
 tempfile = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["sync", "fs"] }
-s3s = { version = "=0.12.0-rc.3", optional = true }
+tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net"] }
+s3s = { version = "0.12.0-rc.3", optional = true }
 hyper = { version = "1.0", optional = true }
 hyper-util = { version = "0.1", features = [
   "server",
   "tokio",
+  "service",
 ], optional = true }
 http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1.0", optional = true }
 tokio-test = { version = "0.4", optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 js-sys = { workspace = true }
@@ -65,6 +77,7 @@ web-time = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 blake3 = { workspace = true }
+dialog-common = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0"
 rand = { workspace = true }
@@ -73,10 +86,9 @@ rand = { workspace = true }
 bytes = "1.0"
 chrono = "0.4"
 tokio-test = "0.4"
-mockito = "1.2"
-s3s = "=0.12.0-rc.3"
+s3s = "0.12.0-rc.3"
 hyper = "1.0"
-hyper-util = { version = "0.1", features = ["server", "tokio"] }
+hyper-util = { version = "0.1", features = ["server", "tokio", "service"] }
 http-body-util = "0.1"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = [
@@ -86,8 +98,14 @@ tokio = { workspace = true, features = [
   "fs",
   "rt-multi-thread",
 ] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 # getrandom = { workspace = true, features = ["wasm_js"] }
 getrandom = { workspace = true, features = ["js"] }
 wasm-bindgen-test = { workspace = true }
+
+[lints.rust]
+# This cfg is used by the dialog_common::test proc macro for wasm inner tests
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)"] }

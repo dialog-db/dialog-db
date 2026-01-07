@@ -9,10 +9,11 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["csv"]
+default = ["csv", "s3"]
 debug = []
 helpers = ["dep:anyhow"]
 csv = ["dep:csv-async"]
+s3 = ["dialog-storage/s3"]
 
 [dependencies]
 dialog-common = { workspace = true }
@@ -42,7 +43,7 @@ tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
 url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
-dialog-storage = { workspace = true, features = ["helpers", "test-utils"] }
+dialog-storage = { workspace = true, features = ["helpers"] }
 anyhow = { workspace = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
