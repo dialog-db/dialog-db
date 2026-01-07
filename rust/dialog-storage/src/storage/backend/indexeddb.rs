@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use base58::ToBase58;
+use dialog_common::Blake3Hash;
 use futures_util::{Stream, TryStreamExt};
 use js_sys::Uint8Array;
 use rexie::{ObjectStore, Rexie, RexieBuilder, TransactionMode};
@@ -9,9 +10,6 @@ use wasm_bindgen::{JsCast, JsValue};
 use crate::{DialogStorageError, StorageSink};
 
 use super::{StorageBackend, TransactionalMemoryBackend};
-
-/// A 32-byte BLAKE3 content hash used as the edition for CAS operations.
-pub type ContentHash = [u8; 32];
 
 const INDEXEDDB_STORAGE_VERSION: u32 = 3;
 
@@ -166,7 +164,7 @@ where
     type Address = Key;
     type Value = Value;
     type Error = DialogStorageError;
-    type Edition = ContentHash;
+    type Edition = Blake3Hash;
 
     async fn resolve(
         &self,
@@ -196,7 +194,7 @@ where
             .map_err(|_| DialogStorageError::StorageBackend("Value is not Uint8Array".to_string()))?
             .to_vec();
 
-        let hash = content_hash(&bytes);
+        let hash = Blake3Hash::hash(&bytes);
         Ok(Some((Value::from(bytes), hash)))
     }
 
@@ -231,7 +229,7 @@ where
                     DialogStorageError::StorageBackend("Value is not Uint8Array".to_string())
                 })?
                 .to_vec();
-            Some(content_hash(&bytes))
+            Some(Blake3Hash::hash(&bytes))
         } else {
             None
         };
@@ -240,7 +238,7 @@ where
         match content {
             Some(value) => {
                 let bytes = value.as_ref();
-                let hash = content_hash(bytes);
+                let hash = Blake3Hash::hash(bytes);
 
                 // If current value already matches desired value, succeed without writing
                 if current_hash.as_ref() == Some(&hash) {
@@ -360,11 +358,6 @@ fn address_to_string<Key: AsRef<[u8]>>(address: &Key) -> Result<JsValue, DialogS
     let s = std::str::from_utf8(address.as_ref())
         .map_err(|e| DialogStorageError::StorageBackend(format!("Invalid UTF-8 address: {e}")))?;
     Ok(JsValue::from_str(s))
-}
-
-/// Compute BLAKE3 hash of content.
-fn content_hash(content: &[u8]) -> ContentHash {
-    blake3::hash(content).into()
 }
 
 #[cfg(test)]
@@ -577,7 +570,7 @@ mod tests {
             .await?;
 
         // Try to update with wrong edition
-        let wrong_edition = content_hash(b"wrong");
+        let wrong_edition = Blake3Hash::hash(b"wrong");
         let result = backend
             .replace(
                 &"test-key".to_string(),
@@ -712,7 +705,7 @@ mod tests {
             .await?;
 
         // Try to replace with wrong edition but same value - should succeed
-        let wrong_edition = content_hash(b"wrong");
+        let wrong_edition = Blake3Hash::hash(b"wrong");
         let result = backend
             .replace(
                 &"test-key".to_string(),
@@ -723,7 +716,7 @@ mod tests {
 
         assert!(result.is_ok());
         // Should return the hash of the content
-        assert_eq!(result.unwrap(), Some(content_hash(&content)));
+        assert_eq!(result.unwrap(), Some(Blake3Hash::hash(&content)));
         Ok(())
     }
 
@@ -734,7 +727,7 @@ mod tests {
             IndexedDbStorageBackend::new(&db_name).await?;
 
         // Try to delete non-existent key with wrong edition - should succeed
-        let wrong_edition = content_hash(b"wrong");
+        let wrong_edition = Blake3Hash::hash(b"wrong");
         let result = backend
             .replace(&"test-key".to_string(), Some(&wrong_edition), None)
             .await;
