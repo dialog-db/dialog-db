@@ -2,21 +2,13 @@ use std::{collections::HashMap, ops::DerefMut, sync::Arc};
 
 use async_stream::try_stream;
 use async_trait::async_trait;
-use dialog_common::ConditionalSync;
+use dialog_common::{Blake3Hash, ConditionalSync};
 use futures_util::Stream;
 use tokio::sync::RwLock;
 
 use crate::{DialogStorageError, StorageSource};
 
 use super::{StorageBackend, TransactionalMemoryBackend};
-
-/// A 32-byte BLAKE3 content hash used as the edition for CAS operations.
-type ContentHash = [u8; 32];
-
-/// Compute BLAKE3 hash of content.
-fn content_hash(content: &[u8]) -> ContentHash {
-    blake3::hash(content).into()
-}
 
 /// A trivial implementation of [StorageBackend] - backed by a [HashMap] - where
 /// all values are kept in memory and never persisted.
@@ -118,7 +110,7 @@ where
     type Address = Key;
     type Value = Value;
     type Error = DialogStorageError;
-    type Edition = ContentHash;
+    type Edition = Blake3Hash;
 
     async fn resolve(
         &self,
@@ -126,7 +118,7 @@ where
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
         let entries = self.entries.read().await;
         Ok(entries.get(address).map(|value| {
-            let hash = content_hash(value.as_ref());
+            let hash = Blake3Hash::hash(value.as_ref());
             (value.clone(), hash)
         }))
     }
@@ -149,7 +141,7 @@ where
             }
             // Updating existing: require content hash matches
             (Some(expected_hash), Some(existing_value)) => {
-                let current_hash = content_hash(existing_value.as_ref());
+                let current_hash = Blake3Hash::hash(existing_value.as_ref());
                 if &current_hash != expected_hash {
                     return Err(DialogStorageError::StorageBackend(
                         "CAS conflict: content hash mismatch".to_string(),
@@ -168,7 +160,7 @@ where
 
         match content {
             Some(value) => {
-                let new_hash = content_hash(value.as_ref());
+                let new_hash = Blake3Hash::hash(value.as_ref());
                 entries.insert(address.clone(), value);
                 Ok(Some(new_hash))
             }
