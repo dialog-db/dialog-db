@@ -7,6 +7,7 @@
 
 #![cfg(feature = "s3-integration-tests")]
 
+use super::bucket;
 use dialog_storage::TransactionalMemory;
 use dialog_storage::s3::{Address, Bucket, Credentials};
 use serde::{Deserialize, Serialize};
@@ -20,34 +21,9 @@ struct TestData {
     value: u32,
 }
 
-/// Helper to create an S3 backend from environment variables.
-///
-/// Uses `option_env!` instead of `env!` so that `cargo check --tests --all-features`
-/// doesn't fail when the R2S3_* environment variables aren't set at compile time.
-fn create_s3_backend_from_env() -> Bucket<Vec<u8>, Vec<u8>> {
-    let credentials = Credentials {
-        access_key_id: option_env!("R2S3_ACCESS_KEY_ID")
-            .expect("R2S3_ACCESS_KEY_ID not set")
-            .into(),
-        secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
-            .expect("R2S3_SECRET_ACCESS_KEY not set")
-            .into(),
-    };
-
-    let address = Address::new(
-        option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
-        option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
-        option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
-    );
-
-    Bucket::open(address, Some(credentials))
-        .expect("Failed to open bucket")
-        .at("test-prefix")
-}
-
 #[dialog_common::test]
 async fn it_opens_non_existent_memory() -> anyhow::Result<()> {
-    let backend = create_s3_backend_from_env();
+    let backend = bucket::open().at("test-prefix");
     let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
     let cell = memory.open(b"test-key".to_vec(), &backend).await?;
@@ -58,10 +34,10 @@ async fn it_opens_non_existent_memory() -> anyhow::Result<()> {
 
 #[dialog_common::test]
 async fn it_writes_and_reads_value() -> anyhow::Result<()> {
-    let backend = create_s3_backend_from_env();
+    let backend = bucket::open().at("test-prefix");
     let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
-    let cell = memory.open(b"test-key".to_vec(), &backend).await?;
+    let cell = memory.open(b"test-key-rw".to_vec(), &backend).await?;
 
     let data = TestData {
         name: "test".to_string(),
@@ -73,14 +49,14 @@ async fn it_writes_and_reads_value() -> anyhow::Result<()> {
     assert_eq!(cell.read(), Some(data.clone()));
 
     // Open again to verify persistence
-    let cell2 = memory.open(b"test-key".to_vec(), &backend).await?;
+    let cell2 = memory.open(b"test-key-rw".to_vec(), &backend).await?;
     assert_eq!(cell2.read(), Some(data));
     Ok(())
 }
 
 #[dialog_common::test]
 async fn it_updates_existing_value() -> anyhow::Result<()> {
-    let backend = create_s3_backend_from_env();
+    let backend = bucket::open().at("test-prefix");
     let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
     let cell = memory.open(b"test-update-key".to_vec(), &backend).await?;
@@ -109,7 +85,7 @@ async fn it_updates_existing_value() -> anyhow::Result<()> {
 
 #[dialog_common::test]
 async fn it_detects_cas_conflict() -> anyhow::Result<()> {
-    let backend = create_s3_backend_from_env();
+    let backend = bucket::open().at("test-prefix");
     let memory1: TransactionalMemory<TestData, _> = TransactionalMemory::new();
     let memory2: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
