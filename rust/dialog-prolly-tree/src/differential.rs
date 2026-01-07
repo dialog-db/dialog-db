@@ -557,7 +557,7 @@ where
 /// to produce either:
 ///
 /// - Entry-level changes via [`changes()`](Self::changes) - can be applied to
-/// transform source into target
+///   transform source into target
 /// - Node-level novelty via [`novel_nodes()`](Self::novel_nodes) - nodes in target abscent in source
 ///
 /// # Usage
