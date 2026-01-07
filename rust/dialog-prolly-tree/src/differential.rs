@@ -9,7 +9,6 @@
 //!
 //! - [`Change`]: Represents an addition or removal of an entry
 //! - [`Differential`]: A stream of changes between two trees
-//! - [`VecDifferential`]: Helper to convert a `Vec<Change>` into a [`Differential`] stream
 //! - [`TreeDifference`]: Computes differences between trees with three key methods:
 //!   - [`compute()`](TreeDifference::compute): Builds the difference structure
 //!   - [`changes()`](TreeDifference::changes): Streams entry-level Add/Remove changes
@@ -84,61 +83,6 @@ where
 {
 }
 
-/// Helper struct to convert Vec<Change<Key, Value>> into a Differential stream.
-///
-/// This allows using a pre-computed vector of changes as a differential.
-pub struct VecDifferential<Key, Value>
-where
-    Key: KeyType + 'static,
-    Value: ValueType,
-{
-    changes: Vec<Change<Key, Value>>,
-    index: usize,
-}
-
-impl<Key, Value> VecDifferential<Key, Value>
-where
-    Key: KeyType + 'static,
-    Value: ValueType,
-{
-    /// Create a new VecDifferential from a vector of changes
-    pub fn new(changes: Vec<Change<Key, Value>>) -> Self {
-        Self { changes, index: 0 }
-    }
-}
-
-impl<Key, Value> From<Vec<Change<Key, Value>>> for VecDifferential<Key, Value>
-where
-    Key: KeyType + 'static,
-    Value: ValueType,
-{
-    fn from(changes: Vec<Change<Key, Value>>) -> Self {
-        Self::new(changes)
-    }
-}
-
-impl<Key, Value> Stream for VecDifferential<Key, Value>
-where
-    Key: KeyType + 'static + Unpin,
-    Value: ValueType + Unpin,
-{
-    type Item = Result<Change<Key, Value>, DialogProllyTreeError>;
-
-    fn poll_next(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        if this.index < this.changes.len() {
-            let change = this.changes[this.index].clone();
-            this.index += 1;
-            std::task::Poll::Ready(Some(Ok(change)))
-        } else {
-            std::task::Poll::Ready(None)
-        }
-    }
-}
-
 /// Represents either a loaded node or an unloaded reference in a sparse tree.
 ///
 /// During tree differentiation, we don't want to eagerly load all nodes from storage.
@@ -184,7 +128,7 @@ where
     fn upper_bound(&self) -> &Key {
         match self {
             SparseTreeNode::Node(node) => node.upper_bound(),
-            SparseTreeNode::Ref(ref_) => ref_.upper_bound(),
+            SparseTreeNode::Ref(reference) => reference.upper_bound(),
         }
     }
 
@@ -192,12 +136,12 @@ where
     fn hash(&self) -> &Hash {
         match self {
             SparseTreeNode::Node(node) => node.hash(),
-            SparseTreeNode::Ref(ref_) => ref_.hash(),
+            SparseTreeNode::Ref(referrence) => referrence.hash(),
         }
     }
 
     /// Load this as a node (returns the node if already loaded, or loads from storage)
-    async fn load<Storage>(
+    async fn ensure_loaded<Storage>(
         self,
         storage: &Storage,
     ) -> Result<Node<Key, Value, Hash>, DialogProllyTreeError>
@@ -206,7 +150,7 @@ where
     {
         match self {
             SparseTreeNode::Node(node) => Ok(node),
-            SparseTreeNode::Ref(ref_) => Node::from_reference(ref_, storage).await,
+            SparseTreeNode::Ref(reference) => Node::from_reference(reference, storage).await,
         }
     }
 }
@@ -273,10 +217,12 @@ where
     Hash: HashType,
     Storage: ContentAddressedStorage<Hash = Hash>,
 {
-    /// Expands loaded branch nodes and Refs whose upper bound falls within the given range.
+    /// Expands loaded branch nodes and references whose upper bound falls
+    /// within the given range.
     ///
     /// For loaded branch nodes, this extracts their child references.
-    /// For Refs, this loads them from storage and then extracts their child references if they're branches.
+    /// For references, this loads them from storage and then extracts their
+    /// child references if they're branches.
     ///
     /// Returns true if any expansion happened.
     pub async fn expand<R>(&mut self, range: R) -> Result<bool, DialogProllyTreeError>
@@ -537,7 +483,7 @@ where
         try_stream! {
             for sparse_node in &self.nodes {
                 // Load the node if it's a reference
-                let node = sparse_node.clone().load(self.storage).await?;
+                let node = sparse_node.clone().ensure_loaded(self.storage).await?;
 
                 let range = node.get_range(.., self.storage);
                 for await entry in range {
@@ -912,7 +858,7 @@ where
             // segmentns because all index nodes are either pruned when found
             // in source tree or expanded otherwise.
             for node in &self.target.nodes {
-                yield node.clone().load(self.target.storage).await?;
+                yield node.clone().ensure_loaded(self.target.storage).await?;
             }
         }
     }
@@ -926,7 +872,7 @@ mod tests {
     use dialog_storage::{
         Blake3Hash, CborEncoder, JournaledStorage, MemoryStorageBackend, Storage,
     };
-    use futures_util::{StreamExt, TryStreamExt, pin_mut};
+    use futures_util::{StreamExt, TryStreamExt, pin_mut, stream::iter};
 
     type TestTree = Tree<
         GeometricDistribution,
@@ -1179,7 +1125,7 @@ mod tests {
             value: vec![20],
         })];
 
-        tree.integrate(VecDifferential::from(changes))
+        tree.integrate(iter(changes.into_iter().map(Ok)))
             .await
             .unwrap();
 
@@ -1203,7 +1149,7 @@ mod tests {
             value: vec![10],
         })];
 
-        tree.integrate(VecDifferential::from(changes))
+        tree.integrate(iter(changes.into_iter().map(Ok)))
             .await
             .unwrap();
 
@@ -1230,7 +1176,7 @@ mod tests {
             value: new_value.clone(),
         })];
 
-        tree.integrate(VecDifferential::from(changes))
+        tree.integrate(iter(changes.into_iter().map(Ok)))
             .await
             .unwrap();
 
@@ -1263,7 +1209,7 @@ mod tests {
             value: vec![10],
         })];
 
-        tree.integrate(VecDifferential::from(changes))
+        tree.integrate(iter(changes.into_iter().map(Ok)))
             .await
             .unwrap();
 
@@ -1287,7 +1233,7 @@ mod tests {
             value: vec![20],
         })];
 
-        tree.integrate(VecDifferential::from(changes))
+        tree.integrate(iter(changes.into_iter().map(Ok)))
             .await
             .unwrap();
 
@@ -1311,7 +1257,7 @@ mod tests {
             value: vec![20], // Wrong value
         })];
 
-        tree.integrate(VecDifferential::from(changes))
+        tree.integrate(iter(changes.into_iter().map(Ok)))
             .await
             .unwrap();
 
@@ -1376,10 +1322,7 @@ mod tests {
         }
     }
 
-    // ========================================================================
     // Roundtrip tests: Verify differentiate + integrate produces original tree
-    // ========================================================================
-
     #[dialog_common::test]
     async fn test_roundtrip_empty_to_populated() {
         let backend = MemoryStorageBackend::default();
@@ -1410,7 +1353,7 @@ mod tests {
             changes
         };
         start
-            .integrate(VecDifferential::from(changes))
+            .integrate(iter(changes.into_iter().map(Ok)))
             .await
             .unwrap();
 
@@ -1450,7 +1393,7 @@ mod tests {
             changes
         };
         start
-            .integrate(VecDifferential::from(changes))
+            .integrate(iter(changes.into_iter().map(Ok)))
             .await
             .unwrap();
 
@@ -1496,7 +1439,7 @@ mod tests {
             changes
         };
         start
-            .integrate(VecDifferential::from(changes))
+            .integrate(iter(changes.into_iter().map(Ok)))
             .await
             .unwrap();
 
@@ -1547,7 +1490,7 @@ mod tests {
             changes
         };
         start
-            .integrate(VecDifferential::from(changes))
+            .integrate(iter(changes.into_iter().map(Ok)))
             .await
             .unwrap();
 
@@ -1765,7 +1708,7 @@ mod tests {
             changes
         };
         start
-            .integrate(VecDifferential::from(changes))
+            .integrate(iter(changes.into_iter().map(Ok)))
             .await
             .unwrap();
 
