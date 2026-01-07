@@ -3,13 +3,16 @@
 //! These tests verify that TransactionalMemory works correctly with the S3 backend,
 //! including CAS (Compare-And-Swap) semantics and conflict detection.
 //!
-//! Run with: `cargo test -p dialog-storage --features s3,helpers,integration-tests`
+//! Run with: `cargo test -p dialog-storage --features s3-integration-tests --test s3_integration_tests`
 
-#![cfg(feature = "integration-tests")]
+#![cfg(feature = "s3-integration-tests")]
 
 use dialog_storage::TransactionalMemory;
-use dialog_storage::s3::{Address, Bucket, PublicS3Address};
+use dialog_storage::s3::{Address, Bucket, Credentials};
 use serde::{Deserialize, Serialize};
+
+#[cfg(target_arch = "wasm32")]
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct TestData {
@@ -17,10 +20,34 @@ struct TestData {
     value: u32,
 }
 
+/// Helper to create an S3 backend from environment variables.
+///
+/// Uses `option_env!` instead of `env!` so that `cargo check --tests --all-features`
+/// doesn't fail when the R2S3_* environment variables aren't set at compile time.
+fn create_s3_backend_from_env() -> Bucket<Vec<u8>, Vec<u8>> {
+    let credentials = Credentials {
+        access_key_id: option_env!("R2S3_ACCESS_KEY_ID")
+            .expect("R2S3_ACCESS_KEY_ID not set")
+            .into(),
+        secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
+            .expect("R2S3_SECRET_ACCESS_KEY not set")
+            .into(),
+    };
+
+    let address = Address::new(
+        option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
+        option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
+        option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
+    );
+
+    Bucket::open(address, Some(credentials))
+        .expect("Failed to open bucket")
+        .at("test-prefix")
+}
+
 #[dialog_common::test]
-async fn it_opens_non_existent_memory(env: PublicS3Address) -> anyhow::Result<()> {
-    let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-    let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?;
+async fn it_opens_non_existent_memory() -> anyhow::Result<()> {
+    let backend = create_s3_backend_from_env();
     let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
     let cell = memory.open(b"test-key".to_vec(), &backend).await?;
@@ -30,9 +57,8 @@ async fn it_opens_non_existent_memory(env: PublicS3Address) -> anyhow::Result<()
 }
 
 #[dialog_common::test]
-async fn it_writes_and_reads_value(env: PublicS3Address) -> anyhow::Result<()> {
-    let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-    let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?;
+async fn it_writes_and_reads_value() -> anyhow::Result<()> {
+    let backend = create_s3_backend_from_env();
     let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
     let cell = memory.open(b"test-key".to_vec(), &backend).await?;
@@ -53,9 +79,8 @@ async fn it_writes_and_reads_value(env: PublicS3Address) -> anyhow::Result<()> {
 }
 
 #[dialog_common::test]
-async fn it_updates_existing_value(env: PublicS3Address) -> anyhow::Result<()> {
-    let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-    let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?;
+async fn it_updates_existing_value() -> anyhow::Result<()> {
+    let backend = create_s3_backend_from_env();
     let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
     let cell = memory.open(b"test-update-key".to_vec(), &backend).await?;
@@ -83,9 +108,8 @@ async fn it_updates_existing_value(env: PublicS3Address) -> anyhow::Result<()> {
 }
 
 #[dialog_common::test]
-async fn it_detects_cas_conflict(env: PublicS3Address) -> anyhow::Result<()> {
-    let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-    let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?;
+async fn it_detects_cas_conflict() -> anyhow::Result<()> {
+    let backend = create_s3_backend_from_env();
     let memory1: TransactionalMemory<TestData, _> = TransactionalMemory::new();
     let memory2: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 

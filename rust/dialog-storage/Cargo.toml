@@ -25,7 +25,7 @@ s3 = ["dep:chrono", "dep:hmac", "dep:reqwest", "dep:sha2", "dep:url"]
 # Enables S3 list operations (ListObjectsV2) with XML parsing
 s3-list = ["s3", "dep:quick-xml"]
 # Enables real S3/R2 integration tests (requires R2S3_* environment variables)
-s3-integration-tests = ["s3-list"]
+s3-integration-tests = ["s3-list", "helpers"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests

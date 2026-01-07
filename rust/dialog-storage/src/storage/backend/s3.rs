@@ -146,7 +146,7 @@ use crate::{DialogStorageError, StorageBackend, StorageSink, TransactionalMemory
 // - Server implementation is native-only (internal to the helpers module)
 #[cfg(any(feature = "helpers", test))]
 mod helpers;
-#[cfg(feature = "helpers")]
+#[cfg(any(feature = "helpers", test))]
 pub use helpers::{PublicS3Address, S3Address};
 
 /// Errors that can occur when using the S3 storage backend.
