@@ -43,3 +43,7 @@ pub fn open() -> Bucket<Vec<u8>, Vec<u8>> {
 
     Bucket::open(address, Some(credentials)).expect("Failed to open bucket")
 }
+
+pub fn open_unque_at(base: &str) -> Bucket<Vec<u8>, Vec<u8>> {
+    open().at(unique_prefix(base))
+}

@@ -9,7 +9,6 @@
 
 use super::bucket;
 use dialog_storage::TransactionalMemory;
-use dialog_storage::s3::{Address, Bucket, Credentials};
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_arch = "wasm32")]
@@ -23,7 +22,7 @@ struct TestData {
 
 #[dialog_common::test]
 async fn it_opens_non_existent_memory() -> anyhow::Result<()> {
-    let backend = bucket::open().at("test-prefix");
+    let backend = bucket::open_unque_at("it_opens_non_existent_memory");
     let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
     let cell = memory.open(b"test-key".to_vec(), &backend).await?;
@@ -34,7 +33,7 @@ async fn it_opens_non_existent_memory() -> anyhow::Result<()> {
 
 #[dialog_common::test]
 async fn it_writes_and_reads_value() -> anyhow::Result<()> {
-    let backend = bucket::open().at("test-prefix");
+    let backend = bucket::open_unque_at("it_writes_and_reads_value");
     let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
     let cell = memory.open(b"test-key-rw".to_vec(), &backend).await?;
@@ -56,7 +55,7 @@ async fn it_writes_and_reads_value() -> anyhow::Result<()> {
 
 #[dialog_common::test]
 async fn it_updates_existing_value() -> anyhow::Result<()> {
-    let backend = bucket::open().at("test-prefix");
+    let backend = bucket::open_unque_at("it_updates_existing_value");
     let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
     let cell = memory.open(b"test-update-key".to_vec(), &backend).await?;
@@ -85,7 +84,7 @@ async fn it_updates_existing_value() -> anyhow::Result<()> {
 
 #[dialog_common::test]
 async fn it_detects_cas_conflict() -> anyhow::Result<()> {
-    let backend = bucket::open().at("test-prefix");
+    let backend = bucket::open_unque_at("it_detects_cas_conflict");
     let memory1: TransactionalMemory<TestData, _> = TransactionalMemory::new();
     let memory2: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
