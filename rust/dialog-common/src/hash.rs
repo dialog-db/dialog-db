@@ -17,7 +17,7 @@ pub const BLAKE3_HASH_SIZE: usize = 32;
 /// let data = b"hello world";
 /// let hash = Blake3Hash::hash(data);
 /// ```
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Blake3Hash([u8; 32]);
 

@@ -3,13 +3,23 @@
 //! This module contains the request types (`Put`, `Get`, `Delete`) and the `Request` trait
 //! for executing requests against an S3 backend.
 
+use super::access::{Acl, Invocation, Public};
+use super::checksum::{Checksum, Hasher};
+use super::{Bucket, S3StorageError};
 use async_trait::async_trait;
 use dialog_common::ConditionalSync;
 use url::Url;
 
-use super::access::{Acl, Invocation, Public};
-use super::checksum::{Checksum, Hasher};
-use super::{Bucket, S3StorageError};
+/// Precondition for PUT operations to enable compare-and-swap semantics.
+#[derive(Debug, Clone)]
+pub enum Precondition {
+    /// No precondition - unconditional write
+    None,
+    /// Update only if current ETag matches (If-Match: <etag>)
+    IfMatch(String),
+    /// Update only if key doesn't exist (If-None-Match: *)
+    IfNoneMatch,
+}
 
 /// A PUT request to upload data.
 #[derive(Debug)]
@@ -19,6 +29,7 @@ pub struct Put {
     body: Vec<u8>,
     checksum: Option<Checksum>,
     acl: Option<Acl>,
+    precondition: Precondition,
 }
 
 impl Put {
@@ -32,6 +43,7 @@ impl Put {
             body: body.as_ref().to_vec(),
             checksum: None,
             acl: None,
+            precondition: Precondition::None,
         }
     }
 
@@ -45,6 +57,17 @@ impl Put {
     pub fn with_acl(mut self, acl: Acl) -> Self {
         self.acl = Some(acl);
         self
+    }
+
+    /// Set the precondition for this request.
+    pub fn with_precondition(mut self, precondition: Precondition) -> Self {
+        self.precondition = precondition;
+        self
+    }
+
+    /// Get the precondition for this request.
+    pub fn precondition(&self) -> &Precondition {
+        &self.precondition
     }
 }
 
@@ -73,6 +96,14 @@ impl Invocation for Put {
 impl Request for Put {
     fn body(&self) -> Option<&[u8]> {
         Some(&self.body)
+    }
+
+    fn precondition_headers(&self) -> Vec<(&'static str, String)> {
+        match &self.precondition {
+            Precondition::None => Vec::new(),
+            Precondition::IfMatch(etag) => vec![("If-Match", format!("\"{}\"", etag))],
+            Precondition::IfNoneMatch => vec![("If-None-Match", "*".to_string())],
+        }
     }
 }
 
@@ -114,6 +145,7 @@ impl Request for Get {}
 pub struct Delete {
     url: Url,
     region: String,
+    precondition: Option<String>,
 }
 
 impl Delete {
@@ -122,7 +154,19 @@ impl Delete {
         Self {
             url,
             region: region.to_string(),
+            precondition: None,
         }
+    }
+
+    /// Set the precondition (If-Match ETag) for this delete request.
+    pub fn with_if_match(mut self, etag: String) -> Self {
+        self.precondition = Some(etag);
+        self
+    }
+
+    /// Get the precondition for this request.
+    pub fn precondition(&self) -> Option<&str> {
+        self.precondition.as_deref()
     }
 }
 
@@ -140,7 +184,14 @@ impl Invocation for Delete {
     }
 }
 
-impl Request for Delete {}
+impl Request for Delete {
+    fn precondition_headers(&self) -> Vec<(&'static str, String)> {
+        match &self.precondition {
+            Some(etag) => vec![("If-Match", format!("\"{}\"", etag))],
+            None => Vec::new(),
+        }
+    }
+}
 
 /// Executable S3 request with an optional body.
 ///
@@ -155,6 +206,16 @@ pub trait Request: Invocation + Sized {
     /// The request body, if any.
     fn body(&self) -> Option<&[u8]> {
         None
+    }
+
+    /// Precondition headers for conditional requests (CAS semantics).
+    ///
+    /// Returns a list of (header-name, header-value) pairs to add to the request.
+    /// Common preconditions include:
+    /// - `If-Match: <etag>` - Only proceed if current ETag matches
+    /// - `If-None-Match: *` - Only proceed if object doesn't exist
+    fn precondition_headers(&self) -> Vec<(&'static str, String)> {
+        Vec::new()
     }
 
     /// Perform this request against the given bucket.
@@ -186,6 +247,11 @@ pub trait Request: Invocation + Sized {
         };
 
         for (key, value) in authorized.headers {
+            builder = builder.header(key, value);
+        }
+
+        // Add precondition headers for CAS semantics
+        for (key, value) in self.precondition_headers() {
             builder = builder.header(key, value);
         }
 

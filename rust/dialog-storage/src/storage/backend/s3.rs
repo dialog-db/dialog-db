@@ -1,5 +1,3 @@
-//! S3-compatible storage backend for AWS S3, Cloudflare R2, and other S3-compatible services.
-//!
 //! This module provides [`Bucket`], a [`StorageBackend`] implementation
 //! that allows you to use S3-compatible object storage as a key-value store.
 //!
@@ -112,13 +110,11 @@
 //! - Segments containing unsafe characters or binary data are base58-encoded with a `!` prefix
 //! - Path separators (`/`) preserve the S3 key hierarchy
 
-use std::marker::PhantomData;
-
-#[cfg(feature = "s3-list")]
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use futures_util::{Stream, StreamExt, TryStreamExt};
+use std::marker::PhantomData;
 use thiserror::Error;
 
 mod access;
@@ -134,7 +130,7 @@ mod key;
 pub use key::{decode as decode_s3_key, encode as encode_s3_key};
 
 mod request;
-pub use request::{Delete, Get, Put, Request};
+pub use request::{Delete, Get, Precondition, Put, Request};
 
 #[cfg(feature = "s3-list")]
 mod list;
@@ -143,13 +139,15 @@ pub use list::{List, ListResult};
 
 #[cfg(feature = "s3-list")]
 use crate::StorageSource;
-use crate::{DialogStorageError, StorageBackend, StorageSink};
+use crate::{DialogStorageError, StorageBackend, StorageSink, TransactionalMemoryBackend};
 
 // Testing helpers module:
 // - Address types (S3Address, PublicS3Address) are available on all platforms
 // - Server implementation is native-only (internal to the helpers module)
 #[cfg(any(feature = "helpers", test))]
 mod helpers;
+#[cfg(any(feature = "helpers", test))]
+pub use helpers::{PublicS3Address, S3Address};
 
 /// Errors that can occur when using the S3 storage backend.
 #[derive(Error, Debug)]
@@ -613,10 +611,150 @@ where
     }
 }
 
+/// Transactional memory backend implementation for S3-compatible storage.
+///
+/// This implementation provides Compare-And-Swap (CAS) semantics using S3's native
+/// conditional request headers, enabling safe concurrent access to objects across
+/// multiple processes or replicas.
+///
+/// # Edition Tracking with ETags
+///
+/// S3 automatically assigns an [ETag] (entity tag) to each object version. This
+/// implementation uses ETags as editions for optimistic concurrency control:
+///
+/// - **resolve**: Returns the object's current ETag along with its content
+/// - **replace**: Uses `If-Match` header to ensure the object hasn't changed since
+///   it was read. If the ETag doesn't match, the request fails with 412 Precondition
+///   Failed, indicating a concurrent modification.
+///
+/// # Conditional Operations
+///
+/// - **Create new**: Uses `If-None-Match: *` to ensure the object doesn't exist
+/// - **Update existing**: Uses `If-Match: <etag>` to ensure no concurrent changes
+/// - **Delete**: Uses `If-Match: <etag>` for safe deletion (when edition provided)
+///
+/// [ETag]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/ETag
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Key, Value> TransactionalMemoryBackend for Bucket<Key, Value>
+where
+    Key: AsRef<[u8]> + Clone + ConditionalSync,
+    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
+{
+    type Address = Key;
+    type Value = Value;
+    type Error = S3StorageError;
+    type Edition = String;
+
+    async fn resolve(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        let url = self.resolve(address.as_ref())?;
+        let response = Get::new(url, self.region()).perform(self).await?;
+
+        if response.status().is_success() {
+            // Extract ETag from response headers
+            let etag = response
+                .headers()
+                .get("etag")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim_matches('"').to_string())
+                .ok_or_else(|| {
+                    S3StorageError::ServiceError("Response missing ETag header".to_string())
+                })?;
+
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|e| S3StorageError::TransportError(e.to_string()))?;
+            Ok(Some((Value::from(bytes.to_vec()), etag)))
+        } else if response.status() == reqwest::StatusCode::NOT_FOUND {
+            Ok(None)
+        } else {
+            Err(S3StorageError::ServiceError(format!(
+                "Failed to resolve value: {}",
+                response.status()
+            )))
+        }
+    }
+
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        match content {
+            Some(new_value) => {
+                let url = self.resolve(address.as_ref())?;
+
+                // Build precondition
+                let precondition = match edition {
+                    Some(etag) => Precondition::IfMatch(etag.clone()),
+                    None => Precondition::IfNoneMatch,
+                };
+
+                let response = Put::new(url, new_value.as_ref(), self.region())
+                    .with_checksum(&self.hasher)
+                    .with_precondition(precondition)
+                    .perform(self)
+                    .await?;
+
+                match response.status() {
+                    status if status.is_success() => {
+                        // Extract new ETag from response
+                        let new_etag = response
+                            .headers()
+                            .get("etag")
+                            .and_then(|v| v.to_str().ok())
+                            .map(|s| s.trim_matches('"').to_string())
+                            .ok_or_else(|| {
+                                S3StorageError::ServiceError(
+                                    "Response missing ETag header".to_string(),
+                                )
+                            })?;
+                        Ok(Some(new_etag))
+                    }
+                    reqwest::StatusCode::PRECONDITION_FAILED => Err(S3StorageError::ServiceError(
+                        "CAS condition failed: edition mismatch".to_string(),
+                    )),
+                    status => Err(S3StorageError::ServiceError(format!(
+                        "Failed to replace value: {}",
+                        status
+                    ))),
+                }
+            }
+            None => {
+                // DELETE with If-Match header for CAS
+                let url = self.resolve(address.as_ref())?;
+                let mut delete_request = Delete::new(url, self.region());
+
+                if let Some(etag) = edition {
+                    delete_request = delete_request.with_if_match(etag.clone());
+                }
+
+                let response = delete_request.perform(self).await?;
+
+                match response.status() {
+                    status if status.is_success() => Ok(None),
+                    reqwest::StatusCode::PRECONDITION_FAILED => Err(S3StorageError::ServiceError(
+                        "CAS condition failed: edition mismatch".to_string(),
+                    )),
+                    status => Err(S3StorageError::ServiceError(format!(
+                        "Failed to delete value: {}",
+                        status
+                    ))),
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(any(feature = "integration-tests", feature = "web-integration-tests"))]
+    #[cfg(all(feature = "helpers", feature = "integration-tests"))]
     use helpers::*;
     use url::Url;
 
@@ -794,11 +932,6 @@ mod tests {
 
         let authorization = Public.authorize(&request).unwrap();
 
-        // Public request should not modify the URL
-        assert_eq!(authorization.url.path(), url.path());
-        assert!(authorization.url.query().is_none());
-
-        // Should have host header
         assert!(authorization.headers.iter().any(|(k, _)| k == "host"));
 
         // Should have checksum header

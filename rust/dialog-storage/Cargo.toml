@@ -10,6 +10,7 @@ helpers = [
   "tempfile",
   "anyhow",
   "rand",
+  "dialog-common/helpers",
   "dep:s3s",
   "dep:hyper",
   "dep:hyper-util",
@@ -24,7 +25,7 @@ s3 = ["dep:chrono", "dep:hmac", "dep:reqwest", "dep:sha2", "dep:url"]
 # Enables S3 list operations (ListObjectsV2) with XML parsing
 s3-list = ["s3", "dep:quick-xml"]
 # Enables real S3/R2 integration tests (requires R2S3_* environment variables)
-s3-integration-tests = ["s3-list"]
+s3-integration-tests = ["s3-list", "helpers"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
@@ -56,6 +57,7 @@ tokio = { workspace = true, features = ["sync"] }
 url = { version = "2.5", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pidlock = "0.1"
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net"] }
 s3s = { version = "0.12.0-rc.3", optional = true }
