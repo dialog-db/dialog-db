@@ -5,11 +5,14 @@ use std::{
 };
 
 use async_stream::try_stream;
-use dialog_storage::{ContentAddressedStorage, HashType};
+use dialog_storage::{ContentAddressedStorage, Encoder, HashType};
 use futures_core::Stream;
+use futures_util::StreamExt;
 use nonempty::NonEmpty;
 
-use crate::{Adopter, DialogProllyTreeError, Entry, KeyType, Node, ValueType};
+use super::differential::Change;
+use crate::{Adopter, DialogProllyTreeError, Entry, KeyType, Node, TreeDifference, ValueType};
+
 /// A hash representing an empty (usually newly created) `Tree`.
 pub static EMPT_TREE_HASH: [u8; 32] = [0; 32];
 
@@ -95,7 +98,7 @@ where
         Ok(())
     }
 
-    /// Returns the [`Hash`] representing the root of this tree.
+    /// Returns the [`HashType`] representing the root of this tree.
     ///
     /// Returns `None` if the tree is empty.
     pub fn hash(&self) -> Option<&Hash> {
@@ -226,5 +229,128 @@ where
             value_type: PhantomData,
             hash_type: PhantomData,
         })
+    }
+}
+
+// Impl block for methods that require Value: PartialEq
+impl<Distribution, Key, Value, Hash, Storage> Tree<Distribution, Key, Value, Hash, Storage>
+where
+    Distribution: crate::Distribution<Key, Hash>,
+    Key: KeyType,
+    Value: ValueType + PartialEq,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash>,
+{
+    /// Returns a differential that produces changes to transform `self` into `other`.
+    ///
+    /// Usage: `self.integrate(self.differentiate(other))` will result in `other`.
+    pub fn differentiate<'a>(
+        &'a self,
+        other: &'a Self,
+    ) -> impl crate::differential::Differential<Key, Value> + 'a {
+        try_stream! {
+            let delta = TreeDifference::compute(self, other).await?;
+            for await change in delta.changes() {
+                yield change?;
+            }
+        }
+    }
+}
+
+// Impl block for methods that require Encoder
+impl<Distribution, Key, Value, Hash, Storage> Tree<Distribution, Key, Value, Hash, Storage>
+where
+    Distribution: crate::Distribution<Key, Hash>,
+    Key: KeyType,
+    Value: ValueType + PartialEq,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash> + Encoder,
+{
+    /// Integrates changes into this tree with deterministic conflict resolution.
+    ///
+    /// Applies a differential (stream of changes) with Last-Write-Wins conflict resolution
+    /// based on value hashes. This ensures eventual consistency across replicas.
+    ///
+    /// # Conflict Resolution
+    ///
+    /// - **Add**: If key exists with different value, compare hashes - higher hash wins
+    /// - **Remove**: Only removes if the exact entry (key+value) exists
+    ///
+    /// The operation is atomic - if any change fails, the entire integration is rolled back.
+    pub async fn integrate<Changes>(
+        &mut self,
+        changes: Changes,
+    ) -> Result<(), DialogProllyTreeError>
+    where
+        Changes: crate::differential::Differential<Key, Value>,
+    {
+        // Copy root here in case we fail integration and need to revert
+        let root = self.root.clone();
+
+        let result: Result<(), DialogProllyTreeError> = {
+            futures_util::pin_mut!(changes);
+            while let Some(change_result) = changes.next().await {
+                let change = change_result?;
+                match change {
+                    Change::Add(entry) => {
+                        // Check if key already exists
+                        match self.get(&entry.key).await? {
+                            None => {
+                                // Key doesn't exist - insert it
+                                self.set(entry.key, entry.value).await?;
+                            }
+                            Some(existing_value) => {
+                                if existing_value == entry.value {
+                                    // Same value - no-op (idempotent)
+                                } else {
+                                    // Different values - resolve conflict by comparing hashes
+
+                                    let (existing_hash, _) = self
+                                        .storage()
+                                        .encode(&existing_value)
+                                        .await
+                                        .map_err(|e| e.into())?;
+                                    let (new_hash, _) = self
+                                        .storage()
+                                        .encode(&entry.value)
+                                        .await
+                                        .map_err(|e| e.into())?;
+
+                                    if new_hash.as_ref() > existing_hash.as_ref() {
+                                        // New value wins - update
+                                        self.set(entry.key, entry.value).await?;
+                                    }
+                                    // Else: existing wins, no-op
+                                }
+                            }
+                        }
+                    }
+                    Change::Remove(entry) => {
+                        // Check if key exists
+                        match self.get(&entry.key).await? {
+                            None => {
+                                // Key doesn't exist - no-op (already removed)
+                            }
+                            Some(existing_value) => {
+                                if existing_value == entry.value {
+                                    // Same value - remove it
+                                    self.delete(&entry.key).await?;
+                                }
+                                // Else: different value - no-op (concurrent update)
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        };
+
+        // If integration fails we set the root back to the original
+        // as this operation must be atomic.
+        if result.is_err() {
+            self.root = root;
+        }
+
+        result
     }
 }

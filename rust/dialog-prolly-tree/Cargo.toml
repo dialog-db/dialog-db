@@ -7,6 +7,7 @@ license.workspace = true
 
 [features]
 default = []
+helpers = []
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
@@ -27,8 +28,10 @@ serde = { workspace = true }
 
 nonempty = { workspace = true, features = ["serialize"] }
 thiserror = { workspace = true }
+futures-util = { workspace = true }
 
 [dev-dependencies]
+dialog-common = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 futures-util = { workspace = true }
