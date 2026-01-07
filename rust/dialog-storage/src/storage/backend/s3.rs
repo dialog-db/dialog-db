@@ -110,11 +110,16 @@
 //! - Segments containing unsafe characters or binary data are base58-encoded with a `!` prefix
 //! - Path separators (`/`) preserve the S3 key hierarchy
 
-pub use access::{Acl, AuthorizationError, Credentials, Invocation, Public};
-#[cfg(feature = "s3-list")]
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
+use futures_util::{Stream, StreamExt, TryStreamExt};
+use std::marker::PhantomData;
+use thiserror::Error;
+
+mod access;
+pub use access::{Acl, AuthorizationError, Credentials, Invocation, Public};
+
 mod address;
 pub use address::Address;
 
@@ -220,6 +225,10 @@ where
     /// Defaults to true for IP addresses and localhost, false otherwise.
     path_style: bool,
     /// Credentials for authorizing requests (None for public access)
+    credentials: Option<Credentials>,
+    /// Hasher for computing checksums
+    hasher: Hasher,
+    /// HTTP client
     client: reqwest::Client,
     key_type: PhantomData<Key>,
     value_type: PhantomData<Value>,

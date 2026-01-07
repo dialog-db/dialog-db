@@ -5,7 +5,7 @@
 //!
 //! Run with: `cargo test -p dialog-storage --features s3,helpers,integration-tests`
 
-#![cfg(all(feature = "s3", feature = "helpers", feature = "integration-tests"))]
+#![cfg(feature = "integration-tests")]
 
 use dialog_storage::TransactionalMemory;
 use dialog_storage::s3::{Address, Bucket, PublicS3Address};

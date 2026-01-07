@@ -223,7 +223,11 @@ impl SigningKey {
 
     /// Sign data using this key.
     fn sign(&self, data: &[u8]) -> Signature {
-    /// AWS S3 credential used for accessing public buckets
+        Signature(Self::hmac(&self.0, data))
+    }
+}
+
+/// AWS S3 credential used for accessing public buckets
 #[derive(Debug, Clone)]
 pub struct Public;
 

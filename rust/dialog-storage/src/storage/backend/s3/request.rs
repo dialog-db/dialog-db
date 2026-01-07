@@ -6,6 +6,9 @@
 use super::access::{Acl, Invocation, Public};
 use super::checksum::{Checksum, Hasher};
 use super::{Bucket, S3StorageError};
+use async_trait::async_trait;
+use dialog_common::ConditionalSync;
+use url::Url;
 
 /// Precondition for PUT operations to enable compare-and-swap semantics.
 #[derive(Debug, Clone)]
@@ -224,7 +227,11 @@ pub trait Request: Invocation + Sized {
         Key: AsRef<[u8]> + Clone + ConditionalSync,
         Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
     {
-        None => Public
+        let authorized = match &bucket.credentials {
+            Some(creds) => creds
+                .authorize(self)
+                .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?,
+            None => Public
                 .authorize(self)
                 .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?,
         };
