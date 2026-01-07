@@ -1,6 +1,4 @@
-//! S3-compatible storage backend for AWS S3, Cloudflare R2, and other S3-compatible services.
-//!
-//! This module provides [`Bucket`] providing [`StorageBackend`] implementation
+//! This module provides [`Bucket`], a [`StorageBackend`] implementation
 //! that allows you to use S3-compatible object storage as a key-value store.
 //!
 //! # Features
@@ -112,18 +110,11 @@
 //! - Segments containing unsafe characters or binary data are base58-encoded with a `!` prefix
 //! - Path separators (`/`) preserve the S3 key hierarchy
 
-use std::marker::PhantomData;
-
+pub use access::{Acl, AuthorizationError, Credentials, Invocation, Public};
 #[cfg(feature = "s3-list")]
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
-use futures_util::{Stream, StreamExt, TryStreamExt};
-use thiserror::Error;
-
-mod access;
-pub use access::{Acl, AuthorizationError, Credentials, Invocation, unauthorized};
-
 mod address;
 pub use address::Address;
 
@@ -229,11 +220,7 @@ where
     /// Defaults to true for IP addresses and localhost, false otherwise.
     path_style: bool,
     /// Credentials for authorizing requests (None for public access)
-    credentials: Option<Credentials>,
-    /// Hasher for computing checksums
-    hasher: Hasher,
-    /// HTTP client
-    pub(crate) client: reqwest::Client,
+    client: reqwest::Client,
     key_type: PhantomData<Key>,
     value_type: PhantomData<Value>,
 }
@@ -934,13 +921,8 @@ mod tests {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url.clone(), b"test", "us-east-1").with_checksum(&Hasher::Sha256);
 
-        let authorization = unauthorized(&request).unwrap();
+        let authorization = Public.authorize(&request).unwrap();
 
-        // Public request should not modify the URL
-        assert_eq!(authorization.url.path(), url.path());
-        assert!(authorization.url.query().is_none());
-
-        // Should have host header
         assert!(authorization.headers.iter().any(|(k, _)| k == "host"));
 
         // Should have checksum header

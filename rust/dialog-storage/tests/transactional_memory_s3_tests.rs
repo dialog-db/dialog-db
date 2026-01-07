@@ -1,128 +1,537 @@
-//! Integration tests for TransactionalMemory with S3 backend using local mock server.
+//! Integration tests that run against a real S3/R2/MinIO endpoint.
 //!
-//! These tests verify that TransactionalMemory works correctly with the S3 backend,
-//! including CAS (Compare-And-Swap) semantics and conflict detection.
+//! ## Environment Variables
 //!
-//! Run with: `cargo test -p dialog-storage --features s3,helpers,integration-tests`
+//! These tests require the following environment variables:
+//! - R2S3_ENDPOINT: The S3-compatible endpoint (e.g., "https://s3.amazonaws.com" or "https://xxx.r2.cloudflarestorage.com")
+//! - R2S3_REGION: AWS region (e.g., "us-east-1" or "auto" for R2)
+//! - R2S3_BUCKET: Bucket name
+//! - R2S3_ACCESS_KEY_ID: Access key ID
+//! - R2S3_SECRET_ACCESS_KEY: Secret access key
+//!
+//! Run these tests with:
+//! ```bash
+//! R2S3_ENDPOINT=https://2fc7ca2f9584223662c5a882977b89ac.r2.cloudflarestorage.com \
+//!   R2S3_REGION=auto \
+//!   R2S3_BUCKET=dialog-test \
+//!   R2S3_ACCESS_KEY_ID=access_key \
+//!   R2S3_SECRET_ACCESS_KEY=secret \
+//!   cargo test s3_integration_test --features s3-integration-tests
+//! ```
 
-#![cfg(all(feature = "s3", feature = "helpers", feature = "integration-tests"))]
+#![cfg(feature = "s3-integration-tests")]
 
-use dialog_storage::TransactionalMemory;
-use dialog_storage::s3::{Address, Bucket, PublicS3Address};
-use serde::{Deserialize, Serialize};
+use anyhow::Result;
+use async_stream::try_stream;
+use dialog_storage::s3::{Address, Bucket, Credentials, encode_s3_key};
+use dialog_storage::{StorageBackend, StorageSink, StorageSource};
+use futures_util::TryStreamExt;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct TestData {
-    name: String,
-    value: u32,
+#[cfg(target_arch = "wasm32")]
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+/// Generate a globally unique test prefix using timestamp
+fn unique_prefix(base: &str) -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+
+    #[cfg(target_arch = "wasm32")]
+    let millis = {
+        use web_time::web::SystemTimeExt;
+        web_time::SystemTime::now()
+            .to_std()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    };
+
+    format!("{}-{}", base, millis)
+}
+
+/// Helper to create an S3 backend from environment variables.
+///
+/// Uses `option_env!` instead of `env!` so that `cargo check --tests --all-features`
+/// doesn't fail when the R2S3_* environment variables aren't set at compile time.
+fn create_s3_backend_from_env() -> Bucket<Vec<u8>, Vec<u8>> {
+    let credentials = Credentials {
+        access_key_id: option_env!("R2S3_ACCESS_KEY_ID")
+            .expect("R2S3_ACCESS_KEY_ID not set")
+            .into(),
+        secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
+            .expect("R2S3_SECRET_ACCESS_KEY not set")
+            .into(),
+    };
+
+    let address = Address::new(
+        option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
+        option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
+        option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
+    );
+
+    Bucket::open(address, Some(credentials))
+        .expect("Failed to open bucket")
+        .at("test-prefix")
 }
 
 #[dialog_common::test]
-async fn it_opens_non_existent_memory(env: PublicS3Address) -> anyhow::Result<()> {
-    let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-    let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?;
-    let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
+async fn it_sets_and_gets_values() -> Result<()> {
+    let mut backend = create_s3_backend_from_env();
 
-    let cell = memory.open(b"test-key".to_vec(), &backend).await?;
+    // Test data
+    let key = b"test-key-1".to_vec();
+    let value = b"test-value-1".to_vec();
 
-    assert!(cell.read().is_none());
+    // Set the value
+    backend.set(key.clone(), value.clone()).await?;
+
+    // Get the value back
+    let retrieved = backend.get(&key).await?;
+    assert_eq!(retrieved, Some(value));
+
     Ok(())
 }
 
 #[dialog_common::test]
-async fn it_writes_and_reads_value(env: PublicS3Address) -> anyhow::Result<()> {
-    let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-    let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?;
-    let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
+async fn it_returns_none_for_missing_key() -> Result<()> {
+    let backend = create_s3_backend_from_env();
 
-    let cell = memory.open(b"test-key".to_vec(), &backend).await?;
+    // Try to get a key that doesn't exist
+    let key = b"nonexistent-key-12345".to_vec();
+    let retrieved = backend.get(&key).await?;
 
-    let data = TestData {
-        name: "test".to_string(),
-        value: 42,
-    };
+    assert_eq!(retrieved, None);
 
-    cell.replace(Some(data.clone()), &backend).await?;
-
-    assert_eq!(cell.read(), Some(data.clone()));
-
-    // Open again to verify persistence
-    let cell2 = memory.open(b"test-key".to_vec(), &backend).await?;
-    assert_eq!(cell2.read(), Some(data));
     Ok(())
 }
 
 #[dialog_common::test]
-async fn it_updates_existing_value(env: PublicS3Address) -> anyhow::Result<()> {
-    let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-    let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?;
-    let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
+async fn it_overwrites_values() -> Result<()> {
+    let mut backend = create_s3_backend_from_env();
 
-    let cell = memory.open(b"test-update-key".to_vec(), &backend).await?;
+    let key = b"test-key-overwrite".to_vec();
+    let value1 = b"original-value".to_vec();
+    let value2 = b"updated-value".to_vec();
 
-    let initial_data = TestData {
-        name: "initial".to_string(),
-        value: 1,
-    };
+    // Set initial value
+    backend.set(key.clone(), value1.clone()).await?;
 
-    cell.replace(Some(initial_data), &backend).await?;
+    // Verify it was set
+    let retrieved = backend.get(&key).await?;
+    assert_eq!(retrieved, Some(value1));
 
-    let updated_data = TestData {
-        name: "updated".to_string(),
-        value: 2,
-    };
+    // Overwrite with new value
+    backend.set(key.clone(), value2.clone()).await?;
 
-    cell.replace(Some(updated_data.clone()), &backend).await?;
+    // Verify it was updated
+    let retrieved = backend.get(&key).await?;
+    assert_eq!(retrieved, Some(value2));
 
-    assert_eq!(cell.read(), Some(updated_data.clone()));
-
-    // Open again to verify the update persisted
-    let cell2 = memory.open(b"test-update-key".to_vec(), &backend).await?;
-    assert_eq!(cell2.read(), Some(updated_data));
     Ok(())
 }
 
 #[dialog_common::test]
-async fn it_detects_cas_conflict(env: PublicS3Address) -> anyhow::Result<()> {
-    let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-    let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?;
-    let memory1: TransactionalMemory<TestData, _> = TransactionalMemory::new();
-    let memory2: TransactionalMemory<TestData, _> = TransactionalMemory::new();
+async fn it_handles_large_values() -> Result<()> {
+    let mut backend = create_s3_backend_from_env();
 
-    // Create initial value with cell1
-    let cell1 = memory1.open(b"test-cas-key".to_vec(), &backend).await?;
+    let key = b"test-key-large".to_vec();
+    // Create a 1MB value
+    let value: Vec<u8> = (0..1_000_000).map(|i| (i % 256) as u8).collect();
 
-    let initial_data = TestData {
-        name: "initial".to_string(),
-        value: 1,
+    // Set the large value
+    backend.set(key.clone(), value.clone()).await?;
+
+    // Get it back and verify
+    let retrieved = backend.get(&key).await?;
+    assert_eq!(retrieved, Some(value));
+
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_handles_multiple_keys() -> Result<()> {
+    let mut backend = create_s3_backend_from_env();
+
+    // Set multiple key-value pairs
+    let pairs = vec![
+        (b"key1".to_vec(), b"value1".to_vec()),
+        (b"key2".to_vec(), b"value2".to_vec()),
+        (b"key3".to_vec(), b"value3".to_vec()),
+    ];
+
+    for (key, value) in &pairs {
+        backend.set(key.clone(), value.clone()).await?;
+    }
+
+    // Verify all keys can be retrieved
+    for (key, expected_value) in &pairs {
+        let retrieved = backend.get(key).await?;
+        assert_eq!(retrieved.as_ref(), Some(expected_value));
+    }
+
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_handles_binary_data() -> Result<()> {
+    let mut backend = create_s3_backend_from_env();
+
+    let key = b"test-key-binary".to_vec();
+    // Create binary data with all possible byte values
+    let value: Vec<u8> = (0..=255).collect();
+
+    // Set the binary value
+    backend.set(key.clone(), value.clone()).await?;
+
+    // Get it back and verify
+    let retrieved = backend.get(&key).await?;
+    assert_eq!(retrieved, Some(value));
+
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_performs_bulk_operations() -> Result<()> {
+    let mut backend = create_s3_backend_from_env();
+
+    // Create a stream of test data
+
+    let test_data = vec![
+        (b"bulk1".to_vec(), b"value1".to_vec()),
+        (b"bulk2".to_vec(), b"value2".to_vec()),
+        (b"bulk3".to_vec(), b"value3".to_vec()),
+    ];
+
+    let data_clone = test_data.clone();
+    let source_stream = try_stream! {
+        for (key, value) in data_clone {
+            yield (key, value);
+        }
     };
 
-    cell1.replace(Some(initial_data.clone()), &backend).await?;
+    // Write all data
+    backend.write(source_stream).await?;
 
-    // Open cell2 from different memory - gets the current state
-    let cell2 = memory2.open(b"test-cas-key".to_vec(), &backend).await?;
+    // Verify all items were written
+    for (key, expected_value) in test_data {
+        let retrieved = backend.get(&key).await?;
+        assert_eq!(retrieved, Some(expected_value));
+    }
 
-    // cell1 updates the value
-    let updated_by_cell1 = TestData {
-        name: "updated_by_cell1".to_string(),
-        value: 10,
+    Ok(())
+}
+
+/// Helper to create an S3 backend without prefix from environment variables.
+fn create_s3_backend_without_prefix_from_env() -> Bucket<Vec<u8>, Vec<u8>> {
+    let credentials = Credentials {
+        access_key_id: option_env!("R2S3_ACCESS_KEY_ID")
+            .expect("R2S3_ACCESS_KEY_ID not set")
+            .into(),
+        secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
+            .expect("R2S3_SECRET_ACCESS_KEY not set")
+            .into(),
     };
-    cell1
-        .replace(Some(updated_by_cell1.clone()), &backend)
+
+    let address = Address::new(
+        option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
+        option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
+        option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
+    );
+
+    // No prefix - keys go directly into the bucket root
+    Bucket::open(address, Some(credentials)).expect("Failed to open bucket")
+}
+
+#[dialog_common::test]
+async fn it_works_without_prefix() -> Result<()> {
+    let mut backend = create_s3_backend_without_prefix_from_env();
+
+    // Test data - use unique key to avoid conflicts
+    let key = b"no-prefix-test-key".to_vec();
+    let value = b"no-prefix-test-value".to_vec();
+
+    // Set the value
+    backend.set(key.clone(), value.clone()).await?;
+
+    // Get the value back
+    let retrieved = backend.get(&key).await?;
+    assert_eq!(retrieved, Some(value));
+
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_handles_encoded_key_segments() -> Result<()> {
+    let mut backend = create_s3_backend_from_env();
+
+    // Test key with path structure where one segment is safe and another needs encoding
+    // "safe-segment/user@example.com" - first segment is safe, second has @ which is unsafe
+    let key_mixed = b"safe-segment/user@example.com".to_vec();
+    let value_mixed = b"value-for-mixed-key".to_vec();
+
+    // Verify encoding behavior
+    let encoded = encode_s3_key(&key_mixed);
+    // Should be "safe-segment/!<base58>" where first part is unchanged and second is encoded
+    assert!(
+        encoded.starts_with("safe-segment/!"),
+        "First segment should be safe, second should be encoded with ! prefix: {}",
+        encoded
+    );
+
+    // Write and read back
+    backend.set(key_mixed.clone(), value_mixed.clone()).await?;
+    let retrieved = backend.get(&key_mixed).await?;
+    assert_eq!(retrieved, Some(value_mixed));
+
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_handles_fully_encoded_key() -> Result<()> {
+    let mut backend = create_s3_backend_from_env();
+
+    // Test key that is fully binary (all segments need encoding)
+    let key_binary = vec![0x01, 0x02, 0xFF, 0xFE];
+    let value_binary = b"value-for-binary-key".to_vec();
+
+    // Verify encoding behavior - binary data should be encoded
+    let encoded = encode_s3_key(&key_binary);
+    assert!(
+        encoded.starts_with('!'),
+        "Binary key should be encoded with ! prefix: {}",
+        encoded
+    );
+
+    // Write and read back
+    backend
+        .set(key_binary.clone(), value_binary.clone())
+        .await?;
+    let retrieved = backend.get(&key_binary).await?;
+    assert_eq!(retrieved, Some(value_binary));
+
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_handles_multi_segment_mixed_encoding() -> Result<()> {
+    let mut backend = create_s3_backend_from_env();
+
+    // Test key with multiple segments: safe/unsafe/safe/unsafe pattern
+    // "data/file name with spaces/v1/special!chars"
+    let key = b"data/file name with spaces/v1/special!chars".to_vec();
+    let value = b"value-for-complex-path".to_vec();
+
+    // Verify encoding behavior
+    let encoded = encode_s3_key(&key);
+    let segments: Vec<&str> = encoded.split('/').collect();
+    assert_eq!(segments.len(), 4, "Should have 4 segments");
+    assert_eq!(segments[0], "data", "First segment should be safe");
+    assert!(
+        segments[1].starts_with('!'),
+        "Second segment should be encoded (has spaces)"
+    );
+    assert_eq!(segments[2], "v1", "Third segment should be safe");
+    assert!(
+        segments[3].starts_with('!'),
+        "Fourth segment should be encoded (has !)"
+    );
+
+    // Write and read back
+    backend.set(key.clone(), value.clone()).await?;
+    let retrieved = backend.get(&key).await?;
+    assert_eq!(retrieved, Some(value));
+
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_handles_encoded_key_without_prefix() -> Result<()> {
+    let mut backend = create_s3_backend_without_prefix_from_env();
+
+    // Test encoded key without prefix
+    let key = b"path/with spaces/data".to_vec();
+    let value = b"value-for-encoded-no-prefix".to_vec();
+
+    // Verify encoding
+    let encoded = encode_s3_key(&key);
+    let segments: Vec<&str> = encoded.split('/').collect();
+    assert_eq!(segments[0], "path", "First segment should be safe");
+    assert!(
+        segments[1].starts_with('!'),
+        "Second segment should be encoded"
+    );
+    assert_eq!(segments[2], "data", "Third segment should be safe");
+
+    // Write and read back without prefix
+    backend.set(key.clone(), value.clone()).await?;
+    let retrieved = backend.get(&key).await?;
+    assert_eq!(retrieved, Some(value));
+
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_deletes_values() -> Result<()> {
+    let mut backend = create_s3_backend_from_env();
+
+    let key = b"delete-integration-test".to_vec();
+    let value = b"value-to-delete".to_vec();
+
+    // Set the value
+    backend.set(key.clone(), value.clone()).await?;
+
+    // Verify it exists
+    let retrieved = backend.get(&key).await?;
+    assert_eq!(retrieved, Some(value));
+
+    // Delete it
+    backend.delete(&key).await?;
+
+    // Verify it's gone
+    let retrieved = backend.get(&key).await?;
+    assert_eq!(retrieved, None);
+
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_lists_objects() -> Result<()> {
+    // Use a unique prefix for this test
+    let test_prefix = unique_prefix("list-test");
+
+    let credentials = Credentials {
+        access_key_id: option_env!("R2S3_ACCESS_KEY_ID")
+            .expect("R2S3_ACCESS_KEY_ID not set")
+            .into(),
+        secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
+            .expect("R2S3_SECRET_ACCESS_KEY not set")
+            .into(),
+    };
+
+    let address = Address::new(
+        option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
+        option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
+        option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
+    );
+
+    let mut backend = Bucket::open(address, Some(credentials))
+        .expect("Failed to open bucket")
+        .at(&test_prefix);
+
+    // Set a few values
+    backend
+        .set(b"list-key1".to_vec(), b"value1".to_vec())
+        .await?;
+    backend
+        .set(b"list-key2".to_vec(), b"value2".to_vec())
         .await?;
 
-    // cell2 tries to update with stale edition - should fail
-    let updated_by_cell2 = TestData {
-        name: "updated_by_cell2".to_string(),
-        value: 20,
+    // List objects
+    let result = backend.list(None).await?;
+
+    // Should have at least 2 keys (may have more if other tests ran)
+    assert!(
+        result.keys.len() >= 2,
+        "Expected at least 2 keys, got {}",
+        result.keys.len()
+    );
+
+    // All keys should have our prefix
+    for key in &result.keys {
+        assert!(
+            key.starts_with(&test_prefix),
+            "Key {} should start with prefix {}",
+            key,
+            test_prefix
+        );
+    }
+
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn it_reads_stream() -> Result<()> {
+    // Use a unique prefix for this test
+    let test_prefix = unique_prefix("stream-test");
+
+    let credentials = Credentials {
+        access_key_id: option_env!("R2S3_ACCESS_KEY_ID")
+            .expect("R2S3_ACCESS_KEY_ID not set")
+            .into(),
+        secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
+            .expect("R2S3_SECRET_ACCESS_KEY not set")
+            .into(),
     };
-    let result = cell2.replace(Some(updated_by_cell2), &backend).await;
 
-    assert!(result.is_err(), "CAS should fail due to edition mismatch");
+    let address = Address::new(
+        option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
+        option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
+        option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
+    );
 
-    // Verify the value is still what cell1 set
-    let cell3 = memory1.open(b"test-cas-key".to_vec(), &backend).await?;
-    assert_eq!(cell3.read(), Some(updated_by_cell1));
+    let mut backend = Bucket::open(address, Some(credentials))
+        .expect("Failed to open bucket")
+        .at(&test_prefix);
+
+    // Set a few values
+    backend
+        .set(b"stream-a".to_vec(), b"value-a".to_vec())
+        .await?;
+    backend
+        .set(b"stream-b".to_vec(), b"value-b".to_vec())
+        .await?;
+
+    // Read all items via StorageSource
+    let mut items: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut stream = Box::pin(backend.read());
+
+    while let Some((key, value)) = stream.try_next().await? {
+        items.push((key, value));
+    }
+
+    assert_eq!(items.len(), 2);
+
+    // Verify the items (order may vary)
+    let keys: Vec<&[u8]> = items.iter().map(|(k, _)| k.as_slice()).collect();
+    assert!(keys.contains(&b"stream-a".as_slice()));
+    assert!(keys.contains(&b"stream-b".as_slice()));
+
+    Ok(())
+}
+
+/// Test that listing with a nonexistent prefix returns an empty list (not an error).
+///
+/// This verifies real S3/R2 behavior: a prefix is just a filter, not a path that must exist.
+#[dialog_common::test]
+async fn it_lists_empty_for_nonexistent_prefix() -> Result<()> {
+    let credentials = Credentials {
+        access_key_id: option_env!("R2S3_ACCESS_KEY_ID")
+            .expect("R2S3_ACCESS_KEY_ID not set")
+            .into(),
+        secret_access_key: option_env!("R2S3_SECRET_ACCESS_KEY")
+            .expect("R2S3_SECRET_ACCESS_KEY not set")
+            .into(),
+    };
+
+    let address = Address::new(
+        option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
+        option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
+        option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
+    );
+
+    // Use a prefix that definitely doesn't exist
+    let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Some(credentials))
+        .expect("Failed to open bucket")
+        .at("nonexistent-prefix-that-should-not-exist-12345");
+
+    // Listing should return empty result, not an error
+    let result = backend.list(None).await?;
+
+    assert!(result.keys.is_empty());
+    assert!(!result.is_truncated);
+    assert!(result.next_continuation_token.is_none());
 
     Ok(())
 }

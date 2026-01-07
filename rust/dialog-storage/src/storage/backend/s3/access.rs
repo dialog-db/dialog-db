@@ -223,34 +223,39 @@ impl SigningKey {
 
     /// Sign data using this key.
     fn sign(&self, data: &[u8]) -> Signature {
-        Signature(Self::hmac(&self.0, data))
+    /// AWS S3 credential used for accessing public buckets
+#[derive(Debug, Clone)]
+pub struct Public;
+
+impl Public {
+    /// Authorize a public request.
+    ///
+    /// Adds required headers (host, checksum) without signing.
+    pub fn authorize<I: Invocation>(
+        &self,
+        request: &I,
+    ) -> Result<Authorization, AuthorizationError> {
+        let url = request.url();
+        let host_str = url
+            .host_str()
+            .ok_or_else(|| AuthorizationError::InvalidEndpoint("URL missing host".into()))?;
+        let host = if let Some(port) = url.port() {
+            format!("{}:{}", host_str, port)
+        } else {
+            host_str.to_string()
+        };
+
+        let mut headers = vec![("host".to_string(), host)];
+        if let Some(checksum) = request.checksum() {
+            let header_name = format!("x-amz-checksum-{}", checksum.name());
+            headers.push((header_name, checksum.to_string()));
+        }
+
+        Ok(Authorization {
+            url: request.url().clone(),
+            headers,
+        })
     }
-}
-
-/// Authorize a public request.
-///
-/// Adds required headers (host, checksum) without signing.
-pub fn unauthorized<I: Invocation>(request: &I) -> Result<Authorization, AuthorizationError> {
-    let url = request.url();
-    let host_str = url
-        .host_str()
-        .ok_or_else(|| AuthorizationError::InvalidEndpoint("URL missing host".into()))?;
-    let host = if let Some(port) = url.port() {
-        format!("{}:{}", host_str, port)
-    } else {
-        host_str.to_string()
-    };
-
-    let mut headers = vec![("host".to_string(), host)];
-    if let Some(checksum) = request.checksum() {
-        let header_name = format!("x-amz-checksum-{}", checksum.name());
-        headers.push((header_name, checksum.to_string()));
-    }
-
-    Ok(Authorization {
-        url: request.url().clone(),
-        headers,
-    })
 }
 
 /// Request metadata required for S3 authorization.
