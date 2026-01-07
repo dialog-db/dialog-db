@@ -1,6 +1,7 @@
 {
     "name": "@dialogdb/javascript-tests",
     "version": "0.1.0",
+    "license": "MPL-2.0",
     "private": true,
     "scripts": {
         "test": "web-test-runner *.test.ts --node-resolve"

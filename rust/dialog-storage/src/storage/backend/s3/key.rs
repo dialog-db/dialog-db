@@ -80,7 +80,7 @@ pub fn decode(encoded: &str) -> Result<Vec<u8>, S3StorageError> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn it_encodes_safe_chars() {
         assert_eq!(encode(b"simple-key"), "simple-key");
         assert_eq!(encode(b"with_underscore"), "with_underscore");
@@ -88,13 +88,13 @@ mod tests {
         assert_eq!(encode(b"CamelCase123"), "CamelCase123");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_encodes_path_structure() {
         assert_eq!(encode(b"path/to/key"), "path/to/key");
         assert_eq!(encode(b"a/b/c"), "a/b/c");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_encodes_unsafe_chars() {
         let encoded = encode(b"user@example");
         assert!(encoded.starts_with('!'));
@@ -103,19 +103,19 @@ mod tests {
         assert!(encoded.starts_with('!'));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_encodes_binary() {
         let encoded = encode(&[0x01, 0x02, 0x03]);
         assert!(encoded.starts_with('!'));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_decodes_safe_chars() {
         assert_eq!(decode("simple-key").unwrap(), b"simple-key");
         assert_eq!(decode("path/to/key").unwrap(), b"path/to/key");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_roundtrips() {
         let original = b"test-key";
         let encoded = encode(original);
@@ -133,7 +133,7 @@ mod tests {
         assert_eq!(decoded, path);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_errors_on_invalid_base58() {
         let result = decode("!invalid@@base58");
         assert!(result.is_err());
