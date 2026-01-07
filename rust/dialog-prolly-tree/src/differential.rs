@@ -223,15 +223,6 @@ where
 /// 3. **In-place pruning**: Shared nodes (same boundary + same hash) can be removed
 ///    from both trees simultaneously, leaving only differing nodes
 ///
-/// # Fields
-///
-/// - `nodes`: The current "frontier" of the sparse tree. Initially contains just
-///   the root. After expansion and pruning, contains only nodes that differ from
-///   the other tree being compared against.
-/// - `expanded`: Tracks branch nodes that were loaded and expanded during
-///   comparison. These are "novel" nodes that exist in this tree but not in the
-///   source tree (used by [`TreeDifference::novel_nodes`]).
-///
 /// # Algorithm Overview
 ///
 /// When comparing trees A (source) and B (target):
@@ -565,7 +556,8 @@ where
 /// TreeDifference contains sparse representations of both trees and can be used
 /// to produce either:
 ///
-/// - Entry-level changes via [`changes()`](Self::changes) - transforms source into target
+/// - Entry-level changes via [`changes()`](Self::changes) - can be applied to
+/// transform source into target
 /// - Node-level novelty via [`novel_nodes()`](Self::novel_nodes) - nodes in target abscent in source
 ///
 /// # Usage
@@ -1571,9 +1563,7 @@ mod tests {
         }
     }
 
-    // ========================================================================
     // Edge case tests
-    // ========================================================================
 
     #[dialog_common::test]
     async fn test_differentiate_both_empty() {
