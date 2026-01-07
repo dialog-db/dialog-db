@@ -1,6 +1,6 @@
 //! S3-compatible storage backend for AWS S3, Cloudflare R2, and other S3-compatible services.
 //!
-//! This module provides [`Bucket`] providing [`StorageBackend`] implementation
+//! This module provides [`Bucket`], a [`StorageBackend`] implementation
 //! that allows you to use S3-compatible object storage as a key-value store.
 //!
 //! # Features
@@ -122,7 +122,7 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 use thiserror::Error;
 
 mod access;
-pub use access::{Acl, AuthorizationError, Credentials, Invocation, unauthorized};
+pub use access::{Acl, AuthorizationError, Credentials, Invocation, Public};
 
 mod address;
 pub use address::Address;
@@ -231,7 +231,7 @@ where
     /// Hasher for computing checksums
     hasher: Hasher,
     /// HTTP client
-    pub(crate) client: reqwest::Client,
+    client: reqwest::Client,
     key_type: PhantomData<Key>,
     value_type: PhantomData<Value>,
 }
@@ -792,7 +792,7 @@ mod tests {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url.clone(), b"test", "us-east-1").with_checksum(&Hasher::Sha256);
 
-        let authorization = unauthorized(&request).unwrap();
+        let authorization = Public.authorize(&request).unwrap();
 
         // Public request should not modify the URL
         assert_eq!(authorization.url.path(), url.path());

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use dialog_common::ConditionalSync;
 use url::Url;
 
-use super::access::{Acl, Invocation, unauthorized};
+use super::access::{Acl, Invocation, Public};
 use super::checksum::{Checksum, Hasher};
 use super::{Bucket, S3StorageError};
 
@@ -170,9 +170,9 @@ pub trait Request: Invocation + Sized {
             Some(creds) => creds
                 .authorize(self)
                 .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?,
-            None => {
-                unauthorized(self).map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?
-            }
+            None => Public
+                .authorize(self)
+                .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?,
         };
 
         let mut builder = match self.method() {
