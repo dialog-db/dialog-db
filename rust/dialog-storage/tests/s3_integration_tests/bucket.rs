@@ -1,7 +1,7 @@
 use dialog_storage::s3::{Address, Bucket, Credentials};
 
-/// Generate a globally unique test prefix using timestamp
-pub fn unique_prefix(base: &str) -> String {
+/// Adds timestamp to the given string to make it unique
+pub fn unique(base: &str) -> String {
     #[cfg(not(target_arch = "wasm32"))]
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -45,5 +45,5 @@ pub fn open() -> Bucket<Vec<u8>, Vec<u8>> {
 }
 
 pub fn open_unque_at(base: &str) -> Bucket<Vec<u8>, Vec<u8>> {
-    open().at(unique_prefix(base))
+    open().at(unique(base))
 }
