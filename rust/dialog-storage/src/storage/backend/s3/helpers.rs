@@ -32,6 +32,3 @@ pub struct PublicS3Address {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod server;
-
-#[cfg(not(target_arch = "wasm32"))]
-pub use server::{start, start_public, LocalS3, S3Settings, PublicS3Settings};

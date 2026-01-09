@@ -1,9 +1,38 @@
+//! Journaled storage backend for tracking read/write operations.
+//!
+//! This module provides [`JournaledStorage`], a wrapper around any [`StorageBackend`]
+//! that records all storage operations for later inspection. This is primarily useful
+//! for testing and debugging, particularly for verifying that differential algorithms
+//! only read the expected nodes.
+//!
+//! # Features
+//!
+//! - Records all `get` and `set` operations with their keys
+//! - Can be enabled/disabled at runtime to avoid tracking during setup phases
+//! - Provides methods to retrieve and clear the journal
+//! - Thread-safe via internal `RwLock`
+//!
+//! # Example
+//!
+//! ```text
+//! let backend = MemoryStorageBackend::default();
+//! let journaled = JournaledStorage::new(backend);
+//!
+//! // Perform operations
+//! journaled.set(key, value).await?;
+//! let _ = journaled.get(&key).await?;
+//!
+//! // Check what was read
+//! let reads = journaled.get_reads();
+//! assert!(reads.contains(&key));
+//! ```
+
 use async_trait::async_trait;
 use dialog_common::ConditionalSync;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use super::{StorageBackend, TransactionalMemoryBackend};
+use super::StorageBackend;
 
 /// The type of storage operation that was journaled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +55,7 @@ pub struct JournalEntry<Key> {
 /// Internal state for the journal including the log and indices.
 #[derive(Debug, Clone)]
 struct JournalState<Key> {
-    /// Sequential log of all operations in order.
+    /// Sequential log of all operations in order of occurence.
     log: Vec<JournalEntry<Key>>,
     /// Index mapping keys to offsets of read operations in the log.
     read_index: HashMap<Key, Vec<usize>>,
@@ -79,13 +108,13 @@ where
 
 /// A storage wrapper that journals both read and write operations with indexed access.
 ///
-/// This allows performance testing to verify that optimizations work correctly
-/// by tracking exactly which keys are read and written, how many times, and
-/// in what order. The journal maintains indices for O(1) lookup of operations by key.
+/// This allows tests to check exactly which keys are read and written, how
+/// many times, and in what order. The journal maintains indices for lookup
+/// of operations by key.
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rs
 /// let backend = MemoryStorageBackend::default();
 /// let mut journaled = JournaledStorage::new(backend);
 ///
@@ -98,8 +127,8 @@ where
 /// let reads = journaled.get_reads();
 /// let writes = journaled.get_writes();
 ///
-/// // Get operations for specific key (O(1) lookup)
-/// let key1_reads = journaled.get_reads_for_key&key1;
+/// // Get operations for specific key
+/// let key1_reads = journaled.get_reads_for_key(&key1);
 /// assert_eq!(key1_reads.len(), 2);
 ///
 /// // Get which keys were accessed
@@ -119,13 +148,10 @@ where
 impl<Backend> JournaledStorage<Backend>
 where
     Backend: StorageBackend,
-    Backend::Key: Clone,
+    Backend::Key: Clone + std::hash::Hash + Eq,
 {
     /// Create a new journaled storage wrapper that records all operations.
-    pub fn new(backend: Backend) -> Self
-    where
-        Backend::Key: std::hash::Hash + Eq,
-    {
+    pub fn new(backend: Backend) -> Self {
         Self {
             backend,
             state: Arc::new(RwLock::new(JournalState::new())),
@@ -162,10 +188,7 @@ where
     }
 
     /// Clear the journal, typically before starting a new operation to measure.
-    pub fn clear_journal(&self)
-    where
-        Backend::Key: std::hash::Hash + Eq,
-    {
+    pub fn clear_journal(&self) {
         self.state.write().unwrap().clear();
     }
 
@@ -207,10 +230,7 @@ where
     }
 
     /// Get a map of how many times each key was read.
-    pub fn get_read_counts(&self) -> HashMap<Backend::Key, usize>
-    where
-        Backend::Key: std::hash::Hash + Eq,
-    {
+    pub fn get_read_counts(&self) -> HashMap<Backend::Key, usize> {
         let state = self.state.read().unwrap();
         state
             .read_index
@@ -220,10 +240,7 @@ where
     }
 
     /// Get a map of how many times each key was written.
-    pub fn get_write_counts(&self) -> HashMap<Backend::Key, usize>
-    where
-        Backend::Key: std::hash::Hash + Eq,
-    {
+    pub fn get_write_counts(&self) -> HashMap<Backend::Key, usize> {
         let state = self.state.read().unwrap();
         state
             .write_index
@@ -233,10 +250,7 @@ where
     }
 
     /// Get a map of total operations (reads + writes) per key.
-    pub fn get_operation_counts(&self) -> HashMap<Backend::Key, usize>
-    where
-        Backend::Key: std::hash::Hash + Eq,
-    {
+    pub fn get_operation_counts(&self) -> HashMap<Backend::Key, usize> {
         let state = self.state.read().unwrap();
         let mut counts = HashMap::new();
 
@@ -255,10 +269,7 @@ where
 
     /// Get all read operations for a specific key in the order they occurred.
     /// Returns references to the journal entries via their offsets.
-    pub fn get_reads_for_key(&self, key: &Backend::Key) -> Vec<JournalEntry<Backend::Key>>
-    where
-        Backend::Key: std::hash::Hash + Eq,
-    {
+    pub fn get_reads_for_key(&self, key: &Backend::Key) -> Vec<JournalEntry<Backend::Key>> {
         let state = self.state.read().unwrap();
         if let Some(offsets) = state.read_index.get(key) {
             offsets
@@ -272,10 +283,7 @@ where
 
     /// Get all write operations for a specific key in the order they occurred.
     /// Returns references to the journal entries via their offsets.
-    pub fn get_writes_for_key(&self, key: &Backend::Key) -> Vec<JournalEntry<Backend::Key>>
-    where
-        Backend::Key: std::hash::Hash + Eq,
-    {
+    pub fn get_writes_for_key(&self, key: &Backend::Key) -> Vec<JournalEntry<Backend::Key>> {
         let state = self.state.read().unwrap();
         if let Some(offsets) = state.write_index.get(key) {
             offsets
@@ -288,10 +296,7 @@ where
     }
 
     /// Get all operations (both reads and writes) for a specific key in the order they occurred.
-    pub fn get_operations_for_key(&self, key: &Backend::Key) -> Vec<JournalEntry<Backend::Key>>
-    where
-        Backend::Key: std::hash::Hash + Eq,
-    {
+    pub fn get_operations_for_key(&self, key: &Backend::Key) -> Vec<JournalEntry<Backend::Key>> {
         let state = self.state.read().unwrap();
         let mut offsets: Vec<usize> = Vec::new();
 
@@ -313,36 +318,24 @@ where
     }
 
     /// Get all keys that have been read.
-    pub fn keys_read(&self) -> Vec<Backend::Key>
-    where
-        Backend::Key: std::hash::Hash + Eq,
-    {
+    pub fn keys_read(&self) -> Vec<Backend::Key> {
         let state = self.state.read().unwrap();
         state.read_index.keys().cloned().collect()
     }
 
     /// Get all keys that have been written.
-    pub fn keys_written(&self) -> Vec<Backend::Key>
-    where
-        Backend::Key: std::hash::Hash + Eq,
-    {
+    pub fn keys_written(&self) -> Vec<Backend::Key> {
         let state = self.state.read().unwrap();
         state.write_index.keys().cloned().collect()
     }
 
     /// Get the number of unique keys that have been read.
-    pub fn unique_keys_read_count(&self) -> usize
-    where
-        Backend::Key: std::hash::Hash + Eq,
-    {
+    pub fn unique_keys_read_count(&self) -> usize {
         self.state.read().unwrap().read_index.len()
     }
 
     /// Get the number of unique keys that have been written.
-    pub fn unique_keys_written_count(&self) -> usize
-    where
-        Backend::Key: std::hash::Hash + Eq,
-    {
+    pub fn unique_keys_written_count(&self) -> usize {
         self.state.read().unwrap().write_index.len()
     }
 }
@@ -376,50 +369,6 @@ where
             key: key.clone(),
         });
         self.backend.get(key).await
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Backend> TransactionalMemoryBackend for JournaledStorage<Backend>
-where
-    Backend: StorageBackend
-        + TransactionalMemoryBackend<Address = <Backend as StorageBackend>::Key>
-        + ConditionalSync,
-    Backend::Key: Clone + ConditionalSync + std::hash::Hash + Eq,
-    <Backend as TransactionalMemoryBackend>::Value: ConditionalSync,
-    <Backend as TransactionalMemoryBackend>::Edition: ConditionalSync,
-    <Backend as TransactionalMemoryBackend>::Error: ConditionalSync,
-{
-    type Address = Backend::Address;
-    type Value = <Backend as TransactionalMemoryBackend>::Value;
-    type Edition = <Backend as TransactionalMemoryBackend>::Edition;
-    type Error = <Backend as TransactionalMemoryBackend>::Error;
-
-    async fn resolve(
-        &self,
-        address: &Self::Address,
-    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
-        // Record the read operation
-        self.state.write().unwrap().push(JournalEntry {
-            operation: Operation::Read,
-            key: address.clone(),
-        });
-        self.backend.resolve(address).await
-    }
-
-    async fn replace(
-        &self,
-        address: &Self::Address,
-        edition: Option<&Self::Edition>,
-        content: Option<Self::Value>,
-    ) -> Result<Option<Self::Edition>, Self::Error> {
-        // Record the write operation
-        self.state.write().unwrap().push(JournalEntry {
-            operation: Operation::Write,
-            key: address.clone(),
-        });
-        self.backend.replace(address, edition, content).await
     }
 }
 
@@ -474,16 +423,16 @@ mod tests {
 
         // Check per-key counts
         let read_counts = storage.get_read_counts();
-        assert_eq!(read_counts.get("key1"), Some(&2));
-        assert_eq!(read_counts.get("key2"), Some(&1));
+        assert_eq!(read_counts.get(&"key1".to_string()), Some(&2));
+        assert_eq!(read_counts.get(&"key2".to_string()), Some(&1));
 
         let write_counts = storage.get_write_counts();
-        assert_eq!(write_counts.get("key1"), Some(&1));
-        assert_eq!(write_counts.get("key2"), Some(&1));
+        assert_eq!(write_counts.get(&"key1".to_string()), Some(&1));
+        assert_eq!(write_counts.get(&"key2".to_string()), Some(&1));
 
         let op_counts = storage.get_operation_counts();
-        assert_eq!(op_counts.get("key1"), Some(&3)); // 1 write + 2 reads
-        assert_eq!(op_counts.get("key2"), Some(&2)); // 1 write + 1 read
+        assert_eq!(op_counts.get(&"key1".to_string()), Some(&3)); // 1 write + 2 reads
+        assert_eq!(op_counts.get(&"key2".to_string()), Some(&2)); // 1 write + 1 read
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]

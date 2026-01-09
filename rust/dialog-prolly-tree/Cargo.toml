@@ -8,6 +8,10 @@ license.workspace = true
 [features]
 default = []
 helpers = []
+# Enable integration tests (tests with service provisioning)
+integration-tests = ["dialog-common/integration-tests"]
+# Enable web integration tests
+web-integration-tests = ["dialog-common/web-integration-tests"]
 
 [dependencies]
 dialog-common = { workspace = true }
@@ -25,8 +29,10 @@ serde = { workspace = true }
 
 nonempty = { workspace = true, features = ["serialize"] }
 thiserror = { workspace = true }
+futures-util = { workspace = true }
 
 [dev-dependencies]
+dialog-common = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 futures-util = { workspace = true }
@@ -35,3 +41,7 @@ futures-util = { workspace = true }
 # getrandom = { workspace = true, features = ["wasm_js"] }
 getrandom = { workspace = true, features = ["js"] }
 wasm-bindgen-test = { workspace = true }
+
+[lints.rust]
+# This cfg is used by the dialog_common::test proc macro for wasm inner tests
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)"] }

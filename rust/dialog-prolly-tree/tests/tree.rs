@@ -231,7 +231,7 @@ async fn lru_store_caches() -> Result<()> {
     {
         let tracking = tracking.lock().await;
         assert_eq!(tracking.writes(), 0);
-        assert_eq!(tracking.reads(), 4); // Updated for BRANCH_FACTOR=254
+        assert_eq!(tracking.reads(), 4);
     }
 
     let _ = tree.get(&key).await?;
@@ -239,13 +239,13 @@ async fn lru_store_caches() -> Result<()> {
     {
         let tracking = tracking.lock().await;
         assert_eq!(tracking.writes(), 0);
-        assert_eq!(tracking.reads(), 4); // reads cached (same as before)
+        assert_eq!(tracking.reads(), 4); // reads cached
     }
 
     tree.set(key.to_vec(), vec![1]).await?;
 
     let tracking = tracking.lock().await;
-    assert_eq!(tracking.writes(), 4); // 4 writes on insertion (BRANCH_FACTOR=254)
+    assert_eq!(tracking.writes(), 4); // writes on insertion
     assert_eq!(tracking.reads(), 4); // reads cached
 
     Ok(())

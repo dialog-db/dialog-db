@@ -2,7 +2,7 @@ use std::{collections::HashMap, ops::DerefMut, sync::Arc};
 
 use async_stream::try_stream;
 use async_trait::async_trait;
-use dialog_common::ConditionalSync;
+use dialog_common::{Blake3Hash, ConditionalSync};
 use futures_util::Stream;
 use tokio::sync::RwLock;
 
@@ -146,339 +146,86 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::CborEncoder;
-    use serde::{Deserialize, Serialize};
+/// Transactional memory backend using BLAKE3 content hashes for CAS.
+///
+/// This implementation computes a BLAKE3 hash of each value to use as its edition.
+/// The hash is computed on read, not stored separately. This provides content-addressable
+/// semantics - identical values have identical editions.
+///
+/// # Edition Strategy
+///
+/// Uses a 32-byte BLAKE3 hash as the edition. CAS succeeds when the hash of
+/// the current stored value matches the expected edition. If the stored value
+/// has the same content (and thus the same hash) as expected, the update proceeds
+/// even if a concurrent write occurred - this is safe because the content is identical.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Key, Value> TransactionalMemoryBackend for MemoryStorageBackend<Key, Value>
+where
+    Key: Clone + Eq + std::hash::Hash + ConditionalSync,
+    Value: AsRef<[u8]> + Clone + ConditionalSync,
+{
+    type Address = Key;
+    type Value = Value;
+    type Error = DialogStorageError;
+    type Edition = Blake3Hash;
 
-    #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-    struct TestValue {
-        data: String,
+    async fn resolve(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        let entries = self.entries.read().await;
+        Ok(entries.get(address).map(|value| {
+            let hash = Blake3Hash::hash(value.as_ref());
+            (value.clone(), hash)
+        }))
     }
 
-    impl TestValue {
-        fn new(data: impl Into<String>) -> Self {
-            Self { data: data.into() }
-        }
-    }
-    use crate::storage::transactional_memory::TransactionalMemory;
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        let mut entries = self.entries.write().await;
 
-    #[cfg(target_arch = "wasm32")]
-    use wasm_bindgen_test::*;
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_memory_swap_create() {
-        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
-        let key = b"test_key".to_vec();
-        let value = TestValue::new("test_value");
-
-        // Open TransactionalMemory for non-existent key
-        let mut memory =
-            TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
-                .await
-                .unwrap();
-        assert_eq!(memory.read(), None, "Memory should start with None");
-
-        // Create new entry
-        let result = memory.replace(Some(value.clone()), &backend).await;
-        assert!(result.is_ok(), "Should create new entry");
-
-        // Verify it was stored
-        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder)
-            .await
-            .unwrap();
-        assert_eq!(stored.read(), Some(value));
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_memory_swap_update() {
-        let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
-        let key = b"test_key".to_vec();
-        let value1 = TestValue::new("value1");
-        let value2 = TestValue::new("value2");
-
-        // Create initial value
-        {
-            use crate::Encoder;
-            let encoded = CborEncoder.encode(&value1).await.unwrap().1;
-            backend.set(key.clone(), encoded).await.unwrap();
+        // Check CAS precondition by comparing content hashes
+        match (edition, entries.get(address)) {
+            // Creating new: require key doesn't exist
+            (None, Some(_)) => {
+                return Err(DialogStorageError::StorageBackend(
+                    "CAS conflict: key already exists".to_string(),
+                ));
+            }
+            // Updating existing: require content hash matches
+            (Some(expected_hash), Some(existing_value)) => {
+                let current_hash = Blake3Hash::hash(existing_value.as_ref());
+                if &current_hash != expected_hash {
+                    return Err(DialogStorageError::StorageBackend(
+                        "CAS conflict: content hash mismatch".to_string(),
+                    ));
+                }
+            }
+            // Updating non-existent: fail
+            (Some(_), None) => {
+                return Err(DialogStorageError::StorageBackend(
+                    "CAS conflict: key does not exist".to_string(),
+                ));
+            }
+            // Creating new when key doesn't exist: valid
+            (None, None) => {}
         }
 
-        // Open TransactionalMemory with existing value
-        let mut memory =
-            TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
-                .await
-                .unwrap();
-        assert_eq!(
-            memory.read(),
-            Some(value1.clone()),
-            "Memory should have value1"
-        );
-
-        // Update with CAS condition (memory already has value1 loaded)
-        let result = memory.replace(Some(value2.clone()), &backend).await;
-        assert!(result.is_ok(), "Should update with correct CAS condition");
-
-        // Verify updated value
-        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder)
-            .await
-            .unwrap();
-        assert_eq!(stored.read(), Some(value2));
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_memory_swap_cas_failure_value_mismatch() {
-        let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
-        let key = b"test_key".to_vec();
-        let value1 = TestValue::new("value1");
-        let value2 = TestValue::new("value2");
-
-        // Create initial value
-        {
-            use crate::Encoder;
-            let encoded = CborEncoder.encode(&value1).await.unwrap().1;
-            backend.set(key.clone(), encoded).await.unwrap();
+        match content {
+            Some(value) => {
+                let new_hash = Blake3Hash::hash(value.as_ref());
+                entries.insert(address.clone(), value);
+                Ok(Some(new_hash))
+            }
+            None => {
+                entries.remove(address);
+                Ok(None)
+            }
         }
-
-        // Open TransactionalMemory (captures value1)
-        let mut memory =
-            TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
-                .await
-                .unwrap();
-
-        // Simulate concurrent modification: backend gets updated
-        let wrong_value = TestValue::new("wrong");
-        {
-            use crate::Encoder;
-            let encoded = CborEncoder.encode(&wrong_value).await.unwrap().1;
-            backend.set(key.clone(), encoded).await.unwrap();
-        }
-
-        // Try to update based on stale value1 (should fail)
-        let result = memory.replace(Some(value2.clone()), &backend).await;
-        assert!(result.is_err(), "Should fail with wrong CAS condition");
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("CAS condition failed"),
-            "Error should mention CAS failure"
-        );
-
-        // Verify value is the concurrent modification
-        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder)
-            .await
-            .unwrap();
-        assert_eq!(stored.read(), Some(wrong_value));
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_memory_swap_cas_failure_key_not_exist() {
-        let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
-        let key = b"test_key".to_vec();
-        let value = TestValue::new("new_value");
-        let expected_old = TestValue::new("old_value");
-
-        // Create initial value
-        {
-            use crate::Encoder;
-            let encoded = CborEncoder.encode(&expected_old).await.unwrap().1;
-            backend.set(key.clone(), encoded).await.unwrap();
-        }
-
-        // Open TransactionalMemory (captures expected_old)
-        let mut memory =
-            TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
-                .await
-                .unwrap();
-
-        // Simulate concurrent deletion
-        {
-            use crate::Encoder;
-            let encoded = CborEncoder.encode(&expected_old).await.unwrap().1;
-            backend.set(key.clone(), encoded).await.unwrap(); // Reset to force entry removal on next line
-        }
-        let mut entries = backend.entries.write().await;
-        entries.remove(&key);
-        drop(entries);
-
-        // Try to update - should fail because key was deleted
-        let result = memory.replace(Some(value), &backend).await;
-        assert!(
-            result.is_err(),
-            "Should fail when key was concurrently deleted"
-        );
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("CAS condition failed"),
-            "Error should mention CAS failure"
-        );
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_memory_swap_cas_failure_key_exists() {
-        let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
-        let key = b"existing_key".to_vec();
-        let value1 = TestValue::new("value1");
-        let value2 = TestValue::new("value2");
-
-        // Open TransactionalMemory for non-existent key (captures None)
-        let mut memory =
-            TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
-                .await
-                .unwrap();
-
-        // Simulate concurrent creation: someone else creates the key
-        {
-            use crate::Encoder;
-            let encoded = CborEncoder.encode(&value1).await.unwrap().1;
-            backend.set(key.clone(), encoded).await.unwrap();
-        }
-
-        // Try to create with CAS condition "must not exist" (should fail because key now exists)
-        let result = memory.replace(Some(value2), &backend).await;
-        assert!(
-            result.is_err(),
-            "Should fail when key exists but CAS expects it not to"
-        );
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("CAS condition failed"),
-            "Error should mention CAS failure"
-        );
-
-        // Verify value unchanged
-        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder)
-            .await
-            .unwrap();
-        assert_eq!(stored.read(), Some(value1));
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_memory_swap_delete() {
-        let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
-        let key = b"test_key".to_vec();
-        let value = TestValue::new("test_value");
-
-        // Create entry
-        {
-            use crate::Encoder;
-            let encoded = CborEncoder.encode(&value).await.unwrap().1;
-            backend.set(key.clone(), encoded).await.unwrap();
-        }
-
-        // Open TransactionalMemory and delete with CAS condition
-        let mut memory =
-            TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
-                .await
-                .unwrap();
-        assert_eq!(memory.read(), Some(value), "Memory should have value");
-
-        let result = memory.replace(None, &backend).await;
-        assert!(result.is_ok(), "Should delete with correct CAS condition");
-
-        // Verify deleted
-        let stored = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder)
-            .await
-            .unwrap();
-        assert_eq!(stored.read(), None);
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_memory_resolve_nonexistent() {
-        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
-        let key = b"nonexistent".to_vec();
-        let result = TransactionalMemory::<TestValue, _, _>::open(key, &backend, CborEncoder)
-            .await
-            .unwrap();
-        assert_eq!(
-            result.read(),
-            None,
-            "Should return None for non-existent key"
-        );
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn test_memory_shared_state() {
-        let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
-        let key = b"shared_key".to_vec();
-        let value1 = TestValue::new("value1");
-        let value2 = TestValue::new("value2");
-
-        // Create initial value
-        {
-            use crate::Encoder;
-            let encoded = CborEncoder.encode(&value1).await.unwrap().1;
-            backend.set(key.clone(), encoded).await.unwrap();
-        }
-
-        // Open first TransactionalMemory
-        let mut memory1 =
-            TransactionalMemory::<TestValue, _, _>::open(key.clone(), &backend, CborEncoder)
-                .await
-                .unwrap();
-        assert_eq!(
-            memory1.read(),
-            Some(value1.clone()),
-            "memory1 should have value1"
-        );
-
-        // Clone to create memory2 - shares the same state
-        let mut memory2 = memory1.clone();
-        assert_eq!(
-            memory2.read(),
-            Some(value1.clone()),
-            "memory2 should have value1"
-        );
-
-        // Update through memory1
-        memory1
-            .replace(Some(value2.clone()), &backend)
-            .await
-            .unwrap();
-
-        // Verify both memory1 and memory2 see the update
-        assert_eq!(
-            memory1.read(),
-            Some(value2.clone()),
-            "memory1 should see value2"
-        );
-        assert_eq!(
-            memory2.read(),
-            Some(value2.clone()),
-            "memory2 should see value2 (shared state)"
-        );
-
-        // Update through memory2
-        let value3 = TestValue::new("value3");
-        memory2
-            .replace(Some(value3.clone()), &backend)
-            .await
-            .unwrap();
-
-        // Verify both see the update
-        assert_eq!(
-            memory1.read(),
-            Some(value3.clone()),
-            "memory1 should see value3 (shared state)"
-        );
-        assert_eq!(
-            memory2.read(),
-            Some(value3.clone()),
-            "memory2 should see value3"
-        );
     }
 }

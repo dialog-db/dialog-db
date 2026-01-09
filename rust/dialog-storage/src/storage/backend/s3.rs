@@ -1,6 +1,4 @@
-//! S3-compatible storage backend for AWS S3, Cloudflare R2, and other S3-compatible services.
-//!
-//! This module provides [`Bucket`] providing [`StorageBackend`] implementation
+//! This module provides [`Bucket`], a [`StorageBackend`] implementation
 //! that allows you to use S3-compatible object storage as a key-value store.
 //!
 //! # Features
@@ -112,17 +110,15 @@
 //! - Segments containing unsafe characters or binary data are base58-encoded with a `!` prefix
 //! - Path separators (`/`) preserve the S3 key hierarchy
 
-use std::marker::PhantomData;
-
-#[cfg(feature = "s3-list")]
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use futures_util::{Stream, StreamExt, TryStreamExt};
+use std::marker::PhantomData;
 use thiserror::Error;
 
 mod access;
-pub use access::{Acl, AuthorizationError, Credentials, Invocation, unauthorized};
+pub use access::{Acl, AuthorizationError, Credentials, Invocation, Public};
 
 mod address;
 pub use address::Address;
@@ -149,9 +145,9 @@ use crate::{DialogStorageError, StorageBackend, StorageSink, TransactionalMemory
 // - Address types (S3Address, PublicS3Address) are available on all platforms
 // - Server implementation is native-only (internal to the helpers module)
 #[cfg(any(feature = "helpers", test))]
-pub mod helpers;
-#[cfg(all(feature = "helpers", not(target_arch = "wasm32")))]
-pub use helpers::{PublicS3Address, S3Address, start, start_public, LocalS3, S3Settings, PublicS3Settings};
+mod helpers;
+#[cfg(any(feature = "helpers", test))]
+pub use helpers::{PublicS3Address, S3Address};
 
 /// Errors that can occur when using the S3 storage backend.
 #[derive(Error, Debug)]
@@ -233,7 +229,7 @@ where
     /// Hasher for computing checksums
     hasher: Hasher,
     /// HTTP client
-    pub(crate) client: reqwest::Client,
+    client: reqwest::Client,
     key_type: PhantomData<Key>,
     value_type: PhantomData<Value>,
 }
@@ -758,9 +754,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(feature = "helpers", feature = "integration-tests"))]
+    use helpers::*;
     use url::Url;
 
-    #[test]
+    #[dialog_common::test]
     fn it_builds_virtual_hosted_url_without_prefix() {
         // Virtual-hosted style: {bucket}.{endpoint}/{key}
         let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
@@ -770,7 +768,7 @@ mod tests {
         assert_eq!(url.as_str(), "https://bucket.s3.amazonaws.com/!Ldp");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_builds_virtual_hosted_url_with_prefix() {
         // Virtual-hosted style with prefix: {bucket}.{endpoint}/{prefix}/{key}
         let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
@@ -782,7 +780,7 @@ mod tests {
         assert_eq!(url.as_str(), "https://bucket.s3.amazonaws.com/prefix/!Ldp");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_builds_virtual_hosted_url_with_key() {
         // Virtual-hosted style with text key
         let address = Address::new("https://s3.amazonaws.com", "us-east-1", "my-bucket");
@@ -793,7 +791,7 @@ mod tests {
         assert_eq!(url.as_str(), "https://my-bucket.s3.amazonaws.com/my-key");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_builds_path_style_url() {
         // Path-style: {endpoint}/{bucket}/{key}
         let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
@@ -804,7 +802,7 @@ mod tests {
         assert_eq!(url.as_str(), "http://localhost:9000/bucket/my-key");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_builds_path_style_url_with_prefix() {
         // Path-style with prefix: {endpoint}/{bucket}/{prefix}/{key}
         let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
@@ -816,7 +814,7 @@ mod tests {
         assert_eq!(url.as_str(), "http://localhost:9000/bucket/prefix/my-key");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_forces_path_style() {
         // Force path-style on a non-localhost endpoint
         let address = Address::new("https://custom-s3.example.com", "us-east-1", "bucket");
@@ -828,7 +826,7 @@ mod tests {
         assert_eq!(url.as_str(), "https://custom-s3.example.com/bucket/key");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_forces_virtual_hosted_on_localhost() {
         // Force virtual-hosted on localhost (not typical, but supported)
         let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
@@ -840,7 +838,7 @@ mod tests {
         assert_eq!(url.as_str(), "http://bucket.localhost:9000/key");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_builds_r2_url() {
         // R2 uses virtual-hosted style by default (non-localhost)
         let address = Address::new("https://abc123.r2.cloudflarestorage.com", "auto", "bucket");
@@ -853,7 +851,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_nests_open_calls() {
         let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
         let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)
@@ -865,7 +863,7 @@ mod tests {
         assert_eq!(url.as_str(), "https://bucket.s3.amazonaws.com/data/v1/key");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_creates_address() {
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
@@ -878,7 +876,7 @@ mod tests {
         assert_eq!(address.bucket(), "my-bucket");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_detects_path_style_default() {
         // localhost should use path-style (auto-detected by Bucket::open)
         let localhost = Url::parse("http://localhost:9000").unwrap();
@@ -900,7 +898,7 @@ mod tests {
         assert!(!Bucket::<Vec<u8>, Vec<u8>>::is_path_style_default(&remote));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_generates_signed_urls() {
         let credentials = Credentials {
             access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
@@ -927,18 +925,13 @@ mod tests {
         assert!(authorized.url.as_str().contains("X-Amz-Signature="));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_authorizes_public_request() {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url.clone(), b"test", "us-east-1").with_checksum(&Hasher::Sha256);
 
-        let authorization = unauthorized(&request).unwrap();
+        let authorization = Public.authorize(&request).unwrap();
 
-        // Public request should not modify the URL
-        assert_eq!(authorization.url.path(), url.path());
-        assert!(authorization.url.query().is_none());
-
-        // Should have host header
         assert!(authorization.headers.iter().any(|(k, _)| k == "host"));
 
         // Should have checksum header
@@ -950,7 +943,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_configures_bucket_with_hasher() {
         let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
         let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)
@@ -962,24 +955,14 @@ mod tests {
         assert!(url.as_str().contains("bucket"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_converts_errors_to_dialog_error() {
         let error = S3StorageError::TransportError("test".into());
         let dialog_error: DialogStorageError = error.into();
         assert!(dialog_error.to_string().contains("test"));
     }
-}
 
-// Integration tests that require the test harness (dialog_common::test provider).
-// These tests are gated behind the s3-integration-tests feature and require the
-// test harness to be ported from the transactional-memory branch.
-#[cfg(all(test, feature = "s3-integration-tests"))]
-mod integration_tests {
-    use super::*;
-    use helpers::{PublicS3Address, S3Address};
-
-    #[ignore]
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_sets_and_gets_values(env: PublicS3Address) -> anyhow::Result<()> {
         // Using public access for simplicity. Signed sessions are tested separately.
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
@@ -1001,7 +984,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_performs_multiple_operations(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?.with_path_style(true);
@@ -1031,7 +1014,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_handles_large_values(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?.with_path_style(true);
@@ -1048,7 +1031,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_deletes_values(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?.with_path_style(true);
@@ -1075,7 +1058,7 @@ mod integration_tests {
     }
 
     #[cfg(feature = "s3-list")]
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_lists_objects(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?
@@ -1102,7 +1085,7 @@ mod integration_tests {
     }
 
     #[cfg(feature = "s3-list")]
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_lists_empty_for_nonexistent_prefix(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?
@@ -1120,7 +1103,7 @@ mod integration_tests {
     }
 
     #[cfg(feature = "s3-list")]
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_errors_on_nonexistent_bucket(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", "bucket-that-does-not-exist");
         let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?.with_path_style(true);
@@ -1141,7 +1124,7 @@ mod integration_tests {
     }
 
     #[cfg(feature = "s3-list")]
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_reads_stream(env: PublicS3Address) -> anyhow::Result<()> {
         use futures_util::TryStreamExt;
 
@@ -1172,7 +1155,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_returns_none_for_missing_values(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?.with_path_style(true);
@@ -1186,7 +1169,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_performs_bulk_writes(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?
@@ -1213,7 +1196,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_integrates_with_memory_backend(env: PublicS3Address) -> anyhow::Result<()> {
         use crate::StorageSource;
         use futures_util::StreamExt;
@@ -1247,7 +1230,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_uses_prefix(env: PublicS3Address) -> anyhow::Result<()> {
         // Create two backends with different prefixes
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
@@ -1268,7 +1251,7 @@ mod integration_tests {
     }
 
     #[cfg(feature = "s3-list")]
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_uses_prefix_for_listing(env: PublicS3Address) -> anyhow::Result<()> {
         // Create two backends with different prefixes
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
@@ -1291,7 +1274,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_overwrites_value(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?.with_path_style(true);
@@ -1309,7 +1292,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_handles_binary_keys(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?.with_path_style(true);
@@ -1326,7 +1309,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_handles_path_like_keys(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?.with_path_style(true);
@@ -1343,7 +1326,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_handles_encoded_key_segments(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?.with_path_style(true);
@@ -1370,7 +1353,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_handles_multi_segment_mixed_encoding(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None)?.with_path_style(true);
@@ -1403,7 +1386,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_roundtrips_key_encoding() {
         // Test that encode and decode are inverse operations for valid UTF-8 keys
         // Note: Keys with invalid UTF-8 bytes (like 0xFF, 0x80) will be lossy
@@ -1429,7 +1412,7 @@ mod integration_tests {
         }
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_works_with_signed_session(env: S3Address) -> anyhow::Result<()> {
         // Create credentials matching the test server
         let credentials = Credentials {
@@ -1456,7 +1439,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_fails_with_wrong_secret_key(env: S3Address) -> anyhow::Result<()> {
         // Create credentials with WRONG secret key
         let credentials = Credentials {
@@ -1479,7 +1462,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_fails_with_wrong_access_key(env: S3Address) -> anyhow::Result<()> {
         // Create credentials with WRONG access key
         let credentials = Credentials {
@@ -1502,7 +1485,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_fails_unsigned_request_to_auth_server(env: S3Address) -> anyhow::Result<()> {
         // Client uses no credentials but server requires authentication
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
@@ -1519,7 +1502,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_fails_get_with_wrong_credentials(env: S3Address) -> anyhow::Result<()> {
         // First, set a value with correct credentials
         let correct_credentials = Credentials {
@@ -1556,7 +1539,7 @@ mod integration_tests {
     }
 
     #[cfg(feature = "s3-list")]
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_lists_with_signed_session(env: S3Address) -> anyhow::Result<()> {
         // Create credentials matching the test server
         let credentials = Credentials {
@@ -1592,7 +1575,7 @@ mod integration_tests {
     }
 
     #[cfg(feature = "s3-list")]
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_reads_stream_with_signed_session(env: S3Address) -> anyhow::Result<()> {
         use futures_util::TryStreamExt;
 

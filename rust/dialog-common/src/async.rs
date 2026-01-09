@@ -1,55 +1,108 @@
+//! Cross-platform async utilities for task spawning and aggregation.
+//!
+//! This module provides async primitives that work on both native platforms
+//! (using tokio) and WebAssembly (using wasm-bindgen-futures). The main
+//! abstractions are:
+//!
+//! - [`spawn`]: Spawn a future and await its result
+//! - [`TaskQueue`]: Aggregate multiple fire-and-forget tasks and join them
+//!
+//! # Platform Differences
+//!
+//! On native platforms, tasks are spawned via `tokio::spawn` which requires
+//! `Send` bounds. On wasm32, tasks are spawned via `wasm_bindgen_futures::spawn_local`
+//! which does not require `Send` (since wasm is single-threaded).
+//!
+//! # Example
+//!
+//! ```ignore
+//! use dialog_common::r#async::{spawn, TaskQueue, DialogAsyncError};
+//!
+//! // Spawn a single task
+//! let result = spawn(async { 42 }).await?;
+//!
+//! // Aggregate multiple tasks
+//! let mut queue = TaskQueue::default();
+//! queue.spawn(async { Ok(()) });
+//! queue.spawn(async { Ok(()) });
+//! queue.join().await?;
+//! ```
+
 use std::future::Future;
-use thiserror::Error;
 
 #[cfg(target_arch = "wasm32")]
 use std::pin::Pin;
 
+#[cfg(target_arch = "wasm32")]
+use futures_util::future::try_join_all;
 #[cfg(target_arch = "wasm32")]
 use tokio::sync::oneshot::channel;
 
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinSet;
 
-/// Async module errors
-#[derive(Error, Debug)]
+use thiserror::Error;
+
+use crate::ConditionalSend;
+
+/// Errors that can occur during async task execution.
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum DialogAsyncError {
-    /// Generic join error
+    /// The spawned task failed to rejoin (e.g., task panicked or was cancelled).
     #[error("Unable to rejoin pending future")]
     JoinError,
 }
 
-/// Spawn a future by scheduling it with the local executor. The returned
-/// future will be pending until the spawned future completes.
-#[cfg(target_arch = "wasm32")]
+/// Spawns a future on the executor and returns its output.
+///
+/// This function schedules the given future to run on the async executor and
+/// returns a future that resolves to the spawned future's output. The caller
+/// can await the result to get the value produced by the spawned task.
+///
+/// # Platform Behavior
+///
+/// - **Native (tokio)**: Uses `tokio::spawn`, which runs the task on the
+///   tokio runtime's thread pool. Requires `F: Send`.
+/// - **WebAssembly**: Uses `wasm_bindgen_futures::spawn_local`, which runs
+///   the task on the single-threaded wasm executor. Does not require `Send`.
+///
+/// # Errors
+///
+/// Returns [`DialogAsyncError::JoinError`] if:
+/// - The spawned task panics
+/// - The task is cancelled before completion
+/// - (wasm) The receiver is dropped before the task completes
+///
+/// # Example
+///
+/// ```ignore
+/// let result = spawn(async {
+///     expensive_computation().await
+/// }).await?;
+/// ```
 pub async fn spawn<F>(future: F) -> Result<F::Output, DialogAsyncError>
 where
-    F: Future + 'static,
+    F: Future + ConditionalSend + 'static,
     F::Output: Send + 'static,
 {
-    let (tx, rx) = channel();
+    #[cfg(target_arch = "wasm32")]
+    {
+        let (tx, rx) = channel();
 
-    wasm_bindgen_futures::spawn_local(async move {
-        if let Err(_) = tx.send(future.await) {
-            // Receiver dropped before spawned task completed
-            return;
-        }
-    });
+        wasm_bindgen_futures::spawn_local(async move {
+            // Send the result back; ignore error if receiver was dropped
+            let _ = tx.send(future.await);
+        });
 
-    // TODO: We should have some accomodation of error outputs here...
-    rx.await.map_err(|_| DialogAsyncError::JoinError)
-}
+        rx.await.map_err(|_| DialogAsyncError::JoinError)
+    }
 
-/// Spawn a future by scheduling it with the local executor. The returned
-/// future will be pending until the spawned future completes.
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn spawn<F>(future: F) -> Result<F::Output, DialogAsyncError>
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    tokio::spawn(future)
-        .await
-        .map_err(|_| DialogAsyncError::JoinError)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tokio::spawn(future)
+            .await
+            .map_err(|_| DialogAsyncError::JoinError)
+    }
 }
 
 /// An aggregator of async work that can be used to observe the moment when all
@@ -76,12 +129,26 @@ pub struct TaskQueue {
     tasks: Vec<SendSyncDoNotApply>,
 }
 
+/// Wrapper to make non-Send futures usable in contexts requiring Send+Sync.
+///
+/// # Safety
+///
+/// This is safe on wasm32 because:
+/// 1. WebAssembly is single-threaded, so Send/Sync are vacuously satisfied
+/// 2. The futures are only ever polled from the same thread that created them
+/// 3. This wrapper is only compiled on wasm32 targets
+///
+/// This pattern allows `TaskQueue` to have a uniform API across platforms
+/// while respecting that wasm futures don't need Send bounds.
 #[cfg(target_arch = "wasm32")]
 struct SendSyncDoNotApply(Pin<Box<dyn Future<Output = Result<(), DialogAsyncError>>>>);
 
 #[cfg(target_arch = "wasm32")]
+// SAFETY: wasm32 is single-threaded, so Send is vacuously satisfied
 unsafe impl Send for SendSyncDoNotApply {}
+
 #[cfg(target_arch = "wasm32")]
+// SAFETY: wasm32 is single-threaded, so Sync is vacuously satisfied
 unsafe impl Sync for SendSyncDoNotApply {}
 
 #[cfg(target_arch = "wasm32")]
@@ -92,62 +159,70 @@ impl Future for SendSyncDoNotApply {
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
+        // SAFETY: We're not moving the inner future, just getting a mutable reference
+        // to poll it. The Pin projection is safe because we maintain the pin invariant.
         let inner = unsafe { &mut self.get_unchecked_mut().0 };
         inner.as_mut().poll(cx)
-        // let m = Pin::get_mut(self);
-        // let f = &mut m.0;
-        // f.poll_unpin(cx)
-        // let pin = pin!(self.as_mut().0);
-        // F::poll(pin, cx)
     }
 }
 
 impl TaskQueue {
-    #[cfg(not(target_arch = "wasm32"))]
-    /// Queue a future to be spawned in the local executor. All queued futures will be polled
-    /// to completion before the [TaskQueue] can be joined.
+    /// Queues a future to be executed when [`join`](Self::join) is called.
+    ///
+    /// The future must return `Result<(), DialogAsyncError>`. All queued futures
+    /// will be polled to completion before `join` returns.
+    ///
+    /// # Platform Differences
+    ///
+    /// - **Native**: Requires `F: Send + 'static`
+    /// - **WebAssembly**: Only requires `F: 'static` (no Send bound)
     pub fn spawn<F>(&mut self, future: F)
     where
-        F: Future<Output = Result<(), DialogAsyncError>> + Send + 'static,
+        F: Future<Output = Result<(), DialogAsyncError>> + ConditionalSend + 'static,
     {
-        self.tasks.spawn(future);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    /// Returns a future that finishes when all queued futures have finished.
-    pub async fn join(&mut self) -> Result<(), DialogAsyncError> {
-        while let Some(result) = self.tasks.join_next().await {
-            // trace!("Task completed, {} remaining in queue...", self.tasks.len());
-            result.map_err(|_| DialogAsyncError::JoinError)??;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.tasks.spawn(future);
         }
-        Ok(())
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.tasks.push(SendSyncDoNotApply(Box::pin(
+                async move { spawn(future).await? },
+            )));
+        }
     }
 
-    #[cfg(target_arch = "wasm32")]
-    /// Queue a future to be spawned in the local executor. All queued futures will be polled
-    /// to completion before the [TaskQueue] can be joined.
-    pub fn spawn<F>(&mut self, future: F)
-    where
-        F: Future<Output = Result<(), DialogAsyncError>> + 'static,
-    {
-        self.tasks.push(SendSyncDoNotApply(Box::pin(
-            async move { spawn(future).await? },
-        )));
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    /// Returns a future that finishes when all queued futures have finished.
+    /// Waits for all queued tasks to complete.
+    ///
+    /// Returns `Ok(())` if all tasks completed successfully, or the first
+    /// error encountered. After `join` returns, the queue is empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Any spawned task returns an error
+    /// - Any spawned task panics ([`DialogAsyncError::JoinError`])
     pub async fn join(&mut self) -> Result<(), DialogAsyncError> {
-        use futures_util::future::try_join_all;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            while let Some(result) = self.tasks.join_next().await {
+                result.map_err(|_| DialogAsyncError::JoinError)??;
+            }
+            Ok(())
+        }
 
-        let tasks = std::mem::replace(&mut self.tasks, Vec::new());
-
-        try_join_all(tasks).await?;
-
-        Ok(())
+        #[cfg(target_arch = "wasm32")]
+        {
+            let tasks = std::mem::take(&mut self.tasks);
+            try_join_all(tasks).await?;
+            Ok(())
+        }
     }
 
-    /// The number of queued tasks
+    /// Returns the number of tasks currently queued.
+    ///
+    /// This count decreases as tasks complete during [`join`](Self::join).
     pub fn count(&self) -> usize {
         self.tasks.len()
     }
@@ -158,5 +233,119 @@ impl std::fmt::Debug for TaskQueue {
         f.debug_struct("TaskQueue")
             .field("tasks", &self.tasks.len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[dialog_macros::test]
+    async fn spawn_returns_future_output() {
+        let result = spawn(async { 42 }).await.unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[dialog_macros::test]
+    async fn spawn_propagates_async_result() {
+        let result: Result<i32, &str> = spawn(async { Ok(123) }).await.unwrap();
+        assert_eq!(result, Ok(123));
+    }
+
+    #[dialog_macros::test]
+    async fn task_queue_empty_join_succeeds() {
+        let mut queue = TaskQueue::default();
+        assert_eq!(queue.count(), 0);
+        queue.join().await.unwrap();
+    }
+
+    #[dialog_macros::test]
+    async fn task_queue_executes_single_task() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        let mut queue = TaskQueue::default();
+        queue.spawn(async move {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+
+        assert_eq!(queue.count(), 1);
+        queue.join().await.unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[dialog_macros::test]
+    async fn task_queue_executes_multiple_tasks() {
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        let mut queue = TaskQueue::default();
+        for _ in 0..10 {
+            let counter_clone = counter.clone();
+            queue.spawn(async move {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+        }
+
+        assert_eq!(queue.count(), 10);
+        queue.join().await.unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 10);
+    }
+
+    #[dialog_macros::test]
+    async fn task_queue_propagates_error() {
+        let mut queue = TaskQueue::default();
+        queue.spawn(async { Err(DialogAsyncError::JoinError) });
+
+        let result = queue.join().await;
+        assert!(result.is_err());
+    }
+
+    #[dialog_macros::test]
+    async fn task_queue_is_empty_after_join() {
+        let mut queue = TaskQueue::default();
+        queue.spawn(async { Ok(()) });
+        queue.spawn(async { Ok(()) });
+
+        queue.join().await.unwrap();
+        assert_eq!(queue.count(), 0);
+    }
+
+    #[dialog_macros::test]
+    async fn task_queue_can_be_reused() {
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        let mut queue = TaskQueue::default();
+
+        // First batch
+        for _ in 0..3 {
+            let counter_clone = counter.clone();
+            queue.spawn(async move {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+        }
+        queue.join().await.unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+
+        // Second batch
+        for _ in 0..2 {
+            let counter_clone = counter.clone();
+            queue.spawn(async move {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+        }
+        queue.join().await.unwrap();
+        assert_eq!(counter.load(Ordering::SeqCst), 5);
+    }
+
+    #[dialog_macros::test]
+    fn task_queue_debug_shows_count() {
+        let queue = TaskQueue::default();
+        assert!(format!("{:?}", queue).contains("tasks: 0"));
     }
 }

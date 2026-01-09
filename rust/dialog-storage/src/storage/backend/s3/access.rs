@@ -227,30 +227,39 @@ impl SigningKey {
     }
 }
 
-/// Authorize a public request.
-///
-/// Adds required headers (host, checksum) without signing.
-pub fn unauthorized<I: Invocation>(request: &I) -> Result<Authorization, AuthorizationError> {
-    let url = request.url();
-    let host_str = url
-        .host_str()
-        .ok_or_else(|| AuthorizationError::InvalidEndpoint("URL missing host".into()))?;
-    let host = if let Some(port) = url.port() {
-        format!("{}:{}", host_str, port)
-    } else {
-        host_str.to_string()
-    };
+/// AWS S3 credential used for accessing public buckets
+#[derive(Debug, Clone)]
+pub struct Public;
 
-    let mut headers = vec![("host".to_string(), host)];
-    if let Some(checksum) = request.checksum() {
-        let header_name = format!("x-amz-checksum-{}", checksum.name());
-        headers.push((header_name, checksum.to_string()));
+impl Public {
+    /// Authorize a public request.
+    ///
+    /// Adds required headers (host, checksum) without signing.
+    pub fn authorize<I: Invocation>(
+        &self,
+        request: &I,
+    ) -> Result<Authorization, AuthorizationError> {
+        let url = request.url();
+        let host_str = url
+            .host_str()
+            .ok_or_else(|| AuthorizationError::InvalidEndpoint("URL missing host".into()))?;
+        let host = if let Some(port) = url.port() {
+            format!("{}:{}", host_str, port)
+        } else {
+            host_str.to_string()
+        };
+
+        let mut headers = vec![("host".to_string(), host)];
+        if let Some(checksum) = request.checksum() {
+            let header_name = format!("x-amz-checksum-{}", checksum.name());
+            headers.push((header_name, checksum.to_string()));
+        }
+
+        Ok(Authorization {
+            url: request.url().clone(),
+            headers,
+        })
     }
-
-    Ok(Authorization {
-        url: request.url().clone(),
-        headers,
-    })
 }
 
 /// Request metadata required for S3 authorization.
@@ -559,7 +568,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_authorizes_s3_put_request() {
         let credentials = test_credentials();
         let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
@@ -575,7 +584,7 @@ mod tests {
         assert!(auth.url.as_str().contains("X-Amz-Signature="));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_authorizes_r2_put_request() {
         let credentials = test_credentials();
         let request = TestPutRequest::new(r2_url("file/path"), b"test body", TEST_REGION)
@@ -590,7 +599,7 @@ mod tests {
         assert!(auth.url.as_str().contains("X-Amz-Signature="));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_authorizes_get_request() {
         let credentials = test_credentials();
         let request = TestGetRequest::new(s3_url("file/path"), TEST_REGION).with_time(test_time());
@@ -603,7 +612,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_authorizes_delete_request() {
         let credentials = test_credentials();
         let request =
@@ -617,7 +626,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_includes_checksum_header_in_put_request() {
         let credentials = test_credentials();
         let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
@@ -633,7 +642,7 @@ mod tests {
         assert!(auth.url.as_str().contains("x-amz-checksum-sha256"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_includes_acl_in_put_request() {
         let credentials = test_credentials();
         let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
@@ -645,19 +654,19 @@ mod tests {
         assert!(auth.url.as_str().contains("x-amz-acl=public-read"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_hex_encodes_bytes() {
         assert_eq!(hex_encode(&[0x01, 0x02, 0x03, 0x0A, 0x0F]), "0102030a0f");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_percent_encodes_strings() {
         assert_eq!(percent_encode("abc123"), "abc123");
         assert_eq!(percent_encode("a b+c"), "a%20b%2Bc");
         assert_eq!(percent_encode("test/path"), "test%2Fpath");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_includes_host_and_checksum_headers() {
         let credentials = test_credentials();
         let request =
@@ -673,7 +682,7 @@ mod tests {
     }
 
     /// Test that current_time() returns a reasonable value on all platforms.
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_gets_reasonable_current_time() -> anyhow::Result<()> {
         let now = current_time();
         let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -704,7 +713,7 @@ mod tests {
 
     /// Uses fixed inputs to verify signature generation is identical across platforms.
     /// If the signatures differ, it indicates a platform-specific bug in the signing code.
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_generates_identical_signatures_across_platforms() -> anyhow::Result<()> {
         // Use the same fixed inputs as other tests
         // Note: expires = 86400 (24 hours) to match the original test configuration

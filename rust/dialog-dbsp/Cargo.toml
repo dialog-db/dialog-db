@@ -5,7 +5,17 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+# Enable integration tests (tests with service provisioning)
+integration-tests = ["dialog-common/integration-tests"]
+# Enable web integration tests
+web-integration-tests = ["dialog-common/web-integration-tests"]
+
 [dependencies]
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 dialog-common = { workspace = true }
+
+[lints.rust]
+# This cfg is used by the dialog_common::test proc macro for wasm inner tests
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)"] }

@@ -5,6 +5,7 @@
 use super::{PublicS3Address, S3Address};
 use async_trait::async_trait;
 use bytes::Bytes;
+use dialog_common::helpers::{Provider, Service};
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
@@ -113,11 +114,6 @@ impl LocalS3 {
             shutdown_tx,
         })
     }
-
-    /// Stop the server.
-    pub fn stop(self) {
-        let _ = self.shutdown_tx.send(());
-    }
 }
 
 #[derive(Clone)]
@@ -162,14 +158,10 @@ impl S3 for InMemoryS3 {
         if let Some(bucket_contents) = buckets.get(bucket) {
             if let Some(obj) = bucket_contents.get(key) {
                 let body = s3s::Body::from(Bytes::from(obj.data.clone()));
-                let content_type = obj
-                    .content_type
-                    .as_ref()
-                    .and_then(|s| s.parse().ok());
                 let output = GetObjectOutput {
                     body: Some(StreamingBlob::from(body)),
                     content_length: Some(obj.data.len() as i64),
-                    content_type,
+                    content_type: obj.content_type.clone(),
                     e_tag: Some(ETag::Strong(obj.e_tag.clone())),
                     last_modified: Some(obj.last_modified.clone()),
                     ..Default::default()
@@ -186,7 +178,7 @@ impl S3 for InMemoryS3 {
     ) -> S3Result<S3Response<PutObjectOutput>> {
         let bucket = req.input.bucket.clone();
         let key = req.input.key.clone();
-        let content_type = req.input.content_type.as_ref().map(|m| m.to_string());
+        let content_type = req.input.content_type.clone();
         let if_match = req.input.if_match.clone();
         let if_none_match = req.input.if_none_match.clone();
 
@@ -277,13 +269,9 @@ impl S3 for InMemoryS3 {
         let buckets = self.buckets.read().await;
         if let Some(bucket_contents) = buckets.get(bucket) {
             if let Some(obj) = bucket_contents.get(key) {
-                let content_type = obj
-                    .content_type
-                    .as_ref()
-                    .and_then(|s| s.parse().ok());
                 let output = HeadObjectOutput {
                     content_length: Some(obj.data.len() as i64),
-                    content_type,
+                    content_type: obj.content_type.clone(),
                     e_tag: Some(ETag::Strong(obj.e_tag.clone())),
                     last_modified: Some(obj.last_modified.clone()),
                     ..Default::default()
@@ -334,6 +322,14 @@ impl S3 for InMemoryS3 {
     }
 }
 
+#[async_trait::async_trait]
+impl Provider for LocalS3 {
+    async fn stop(self) -> anyhow::Result<()> {
+        let _ = self.shutdown_tx.send(());
+        Ok(())
+    }
+}
+
 /// Settings for configuring the authenticated S3 test server.
 #[derive(Debug, Clone)]
 pub struct S3Settings {
@@ -362,8 +358,9 @@ pub struct PublicS3Settings {
     pub bucket: String,
 }
 
-/// Start an authenticated local S3 server.
-pub async fn start(settings: S3Settings) -> anyhow::Result<(S3Address, LocalS3)> {
+/// Provider function for S3Address (authenticated server)
+#[dialog_common::provider]
+pub async fn local_s3(settings: S3Settings) -> anyhow::Result<Service<S3Address, LocalS3>> {
     let bucket = if settings.bucket.is_empty() {
         "test-bucket"
     } else {
@@ -381,11 +378,14 @@ pub async fn start(settings: S3Settings) -> anyhow::Result<(S3Address, LocalS3)>
         access_key_id: settings.access_key_id,
         secret_access_key: settings.secret_access_key,
     };
-    Ok((address, server))
+    Ok(Service::new(address, server))
 }
 
-/// Start a public (no auth) local S3 server.
-pub async fn start_public(settings: PublicS3Settings) -> anyhow::Result<(PublicS3Address, LocalS3)> {
+/// Provider function for PublicS3Address (public server, no auth)
+#[dialog_common::provider]
+pub async fn public_local_s3(
+    settings: PublicS3Settings,
+) -> anyhow::Result<Service<PublicS3Address, LocalS3>> {
     let bucket = if settings.bucket.is_empty() {
         "test-bucket"
     } else {
@@ -396,5 +396,5 @@ pub async fn start_public(settings: PublicS3Settings) -> anyhow::Result<(PublicS
         endpoint: server.endpoint.clone(),
         bucket: bucket.to_string(),
     };
-    Ok((address, server))
+    Ok(Service::new(address, server))
 }

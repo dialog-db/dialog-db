@@ -3,13 +3,12 @@
 //! This module contains the request types (`Put`, `Get`, `Delete`) and the `Request` trait
 //! for executing requests against an S3 backend.
 
+use super::access::{Acl, Invocation, Public};
+use super::checksum::{Checksum, Hasher};
+use super::{Bucket, S3StorageError};
 use async_trait::async_trait;
 use dialog_common::ConditionalSync;
 use url::Url;
-
-use super::access::{Acl, Invocation, unauthorized};
-use super::checksum::{Checksum, Hasher};
-use super::{Bucket, S3StorageError};
 
 /// Precondition for PUT operations to enable compare-and-swap semantics.
 #[derive(Debug, Clone)]
@@ -232,9 +231,9 @@ pub trait Request: Invocation + Sized {
             Some(creds) => creds
                 .authorize(self)
                 .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?,
-            None => {
-                unauthorized(self).map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?
-            }
+            None => Public
+                .authorize(self)
+                .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?,
         };
 
         let mut builder = match self.method() {
@@ -270,7 +269,7 @@ mod tests {
 
     const TEST_REGION: &str = "us-east-1";
 
-    #[test]
+    #[dialog_common::test]
     fn it_creates_put_request_with_checksum() {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url, b"test value", TEST_REGION).with_checksum(&Hasher::Sha256);
@@ -281,7 +280,7 @@ mod tests {
         assert_eq!(request.checksum().unwrap().name(), "sha256");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_creates_put_request_without_checksum() {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url, b"test value", TEST_REGION);
@@ -290,7 +289,7 @@ mod tests {
         assert!(request.checksum().is_none());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_creates_put_request_with_acl() {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Put::new(url, b"test value", TEST_REGION).with_acl(Acl::PublicRead);
@@ -298,7 +297,7 @@ mod tests {
         assert_eq!(request.acl(), Some(Acl::PublicRead));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_creates_get_request() {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Get::new(url.clone(), TEST_REGION);
@@ -310,7 +309,7 @@ mod tests {
         assert!(request.acl().is_none());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_creates_delete_request() {
         let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
         let request = Delete::new(url.clone(), TEST_REGION);

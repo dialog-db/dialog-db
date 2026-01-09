@@ -10,6 +10,7 @@ helpers = [
   "tempfile",
   "anyhow",
   "rand",
+  "dialog-common/helpers",
   "dep:s3s",
   "dep:hyper",
   "dep:hyper-util",
@@ -24,7 +25,11 @@ s3 = ["dep:chrono", "dep:hmac", "dep:reqwest", "dep:sha2", "dep:url"]
 # Enables S3 list operations (ListObjectsV2) with XML parsing
 s3-list = ["s3", "dep:quick-xml"]
 # Enables real S3/R2 integration tests (requires R2S3_* environment variables)
-s3-integration-tests = ["s3-list"]
+s3-integration-tests = ["s3-list", "helpers"]
+# Enable integration tests (tests with service provisioning)
+integration-tests = ["dialog-common/integration-tests"]
+# Enable web integration tests
+web-integration-tests = ["dialog-common/web-integration-tests"]
 
 [dependencies]
 dialog-common = { workspace = true }
@@ -77,7 +82,7 @@ web-time = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 blake3 = { workspace = true }
-dialog-common = { workspace = true }
+dialog-common = { workspace = true, features = ["helpers"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0"
 rand = { workspace = true }

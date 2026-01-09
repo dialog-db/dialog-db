@@ -7,9 +7,7 @@ use serde::{Serialize, de::DeserializeOwned};
 /// [`HashType`] for [`Encoder`]s.
 pub type Blake3Hash = [u8; 32];
 
-/// A trait that can be implemented for types that represent a hash. A blanket
-/// "unchecked" implementation is provided for any type that matches
-/// `AsRef<[u8]>` (this might be an antipattern; more investigation required).
+/// A trait that can be implemented for types that represent a hash.
 pub trait HashType:
     Clone + AsRef<[u8]> + ConditionalSync + Serialize + DeserializeOwned + std::fmt::Debug + PartialEq
 {
@@ -18,13 +16,11 @@ pub trait HashType:
 
     /// Format the hash as a display string
     fn display(&self) -> String {
-        let bytes = self.as_ref();
-        let prefix_len = 6.min(bytes.len());
-        format!("#{}...", &bytes[..prefix_len].to_base58())
+        format!("#{}...", self.as_ref()[0..6].to_base58())
     }
 }
 
-// Implement HashType for common fixed-size arrays
+// Implement HashType for blake3 or any 32 byte hash
 impl HashType for [u8; 32] {
     const SIZE: usize = 32;
 }

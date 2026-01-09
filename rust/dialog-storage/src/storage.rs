@@ -26,6 +26,9 @@ pub use transfer::*;
 mod content_addressed;
 pub use content_addressed::*;
 
+mod journal;
+pub use journal::*;
+
 mod transactional_memory;
 pub use transactional_memory::*;
 

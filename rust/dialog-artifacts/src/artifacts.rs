@@ -53,8 +53,9 @@ use futures_util::TryStreamExt;
 use async_stream::stream;
 
 use crate::{
-    AttributeKey, DialogArtifactsError, EntityKey, FromKey, Key, KeyView, KeyViewConstruct,
-    KeyViewMut, State, ValueKey, artifacts::selector::Constrained, make_reference,
+    AttributeKey, DialogArtifactsError, EntityKey, FromKey, HASH_SIZE, Key, KeyView,
+    KeyViewConstruct, KeyViewMut, State, ValueKey, artifacts::selector::Constrained,
+    make_reference,
 };
 
 /// An alias type that describes the [`Tree`]-based prolly tree that is

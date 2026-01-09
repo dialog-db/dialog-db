@@ -9,7 +9,11 @@ use crate::{Adopter, DialogProllyTreeError, Entry, KeyType, Node, TreeDifference
 use async_stream::try_stream;
 use dialog_storage::{ContentAddressedStorage, Encoder, HashType};
 use futures_core::Stream;
+use futures_util::StreamExt;
 use nonempty::NonEmpty;
+
+use super::differential::Change;
+use crate::{Adopter, DialogProllyTreeError, Entry, KeyType, Node, TreeDifference, ValueType};
 
 /// A hash representing an empty (usually newly created) `Tree`.
 pub static EMPT_TREE_HASH: [u8; 32] = [0; 32];
@@ -245,12 +249,37 @@ where
     }
 }
 
+// Impl block for methods that require Value: PartialEq
+impl<Distribution, Key, Value, Hash, Storage> Tree<Distribution, Key, Value, Hash, Storage>
+where
+    Distribution: crate::Distribution<Key, Hash>,
+    Key: KeyType,
+    Value: ValueType + PartialEq,
+    Hash: HashType,
+    Storage: ContentAddressedStorage<Hash = Hash>,
+{
+    /// Returns a differential that produces changes to transform `self` into `other`.
+    ///
+    /// Usage: `self.integrate(self.differentiate(other))` will result in `other`.
+    pub fn differentiate<'a>(
+        &'a self,
+        other: &'a Self,
+    ) -> impl crate::differential::Differential<Key, Value> + 'a {
+        try_stream! {
+            let delta = TreeDifference::compute(self, other).await?;
+            for await change in delta.changes() {
+                yield change?;
+            }
+        }
+    }
+}
+
 // Impl block for methods that require Encoder
 impl<Distribution, Key, Value, Hash, Storage> Tree<Distribution, Key, Value, Hash, Storage>
 where
     Distribution: crate::Distribution<Key, Hash>,
     Key: KeyType,
-    Value: ValueType,
+    Value: ValueType + PartialEq,
     Hash: HashType,
     Storage: ContentAddressedStorage<Hash = Hash> + Encoder,
 {
@@ -272,8 +301,6 @@ where
     where
         Changes: crate::differential::Differential<Key, Value>,
     {
-        use futures_util::StreamExt;
-
         // Copy root here in case we fail integration and need to revert
         let root = self.root.clone();
 
