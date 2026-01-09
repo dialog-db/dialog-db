@@ -372,6 +372,57 @@ where
     }
 }
 
+/// Delegate TransactionalMemoryBackend to the inner backend when it implements the trait.
+/// This allows JournaledStorage to be used with platform code that requires transactional memory.
+///
+/// Note: This requires that the backend's StorageBackend::Key matches TransactionalMemoryBackend::Address
+/// so that both can be journaled together.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Backend> super::TransactionalMemoryBackend for JournaledStorage<Backend>
+where
+    Backend: StorageBackend + super::TransactionalMemoryBackend<
+        Address = <Backend as StorageBackend>::Key,
+        Value = <Backend as StorageBackend>::Value,
+        Error = <Backend as StorageBackend>::Error,
+    > + ConditionalSync,
+    <Backend as StorageBackend>::Key: Clone + std::hash::Hash + Eq + ConditionalSync,
+    <Backend as StorageBackend>::Value: ConditionalSync,
+    <Backend as StorageBackend>::Error: ConditionalSync,
+    <Backend as super::TransactionalMemoryBackend>::Edition: ConditionalSync,
+{
+    type Address = <Backend as super::TransactionalMemoryBackend>::Address;
+    type Value = <Backend as super::TransactionalMemoryBackend>::Value;
+    type Error = <Backend as super::TransactionalMemoryBackend>::Error;
+    type Edition = <Backend as super::TransactionalMemoryBackend>::Edition;
+
+    async fn resolve(
+        &self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        // Record the read operation
+        self.state.write().unwrap().push(JournalEntry {
+            operation: Operation::Read,
+            key: address.clone(),
+        });
+        self.backend.resolve(address).await
+    }
+
+    async fn replace(
+        &self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        // Record the write operation
+        self.state.write().unwrap().push(JournalEntry {
+            operation: Operation::Write,
+            key: address.clone(),
+        });
+        self.backend.replace(address, edition, content).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

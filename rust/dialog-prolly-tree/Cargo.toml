@@ -23,7 +23,6 @@ async-stream = { workspace = true }
 base58 = { workspace = true }
 blake3 = { workspace = true }
 futures-core = { workspace = true }
-futures-util = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 

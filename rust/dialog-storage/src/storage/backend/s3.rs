@@ -145,7 +145,7 @@ use crate::{DialogStorageError, StorageBackend, StorageSink, TransactionalMemory
 // - Address types (S3Address, PublicS3Address) are available on all platforms
 // - Server implementation is native-only (internal to the helpers module)
 #[cfg(any(feature = "helpers", test))]
-mod helpers;
+pub mod helpers;
 #[cfg(any(feature = "helpers", test))]
 pub use helpers::{PublicS3Address, S3Address};
 

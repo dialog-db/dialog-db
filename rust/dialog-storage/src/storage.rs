@@ -16,9 +16,6 @@ pub use overlay::*;
 mod measure;
 pub use measure::*;
 
-mod journal;
-pub use journal::*;
-
 mod transfer;
 use serde::{Serialize, de::DeserializeOwned};
 pub use transfer::*;
@@ -92,41 +89,6 @@ where
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         self.backend.get(key).await
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Encoder, Backend> TransactionalMemoryBackend for Storage<Encoder, Backend>
-where
-    Encoder: crate::Encoder,
-    Backend: StorageBackend
-        + TransactionalMemoryBackend<
-            Address = <Backend as StorageBackend>::Key,
-            Value = <Backend as StorageBackend>::Value,
-            Error = <Backend as StorageBackend>::Error,
-        >,
-    Self: ConditionalSync,
-{
-    type Address = <Backend as StorageBackend>::Key;
-    type Value = <Backend as StorageBackend>::Value;
-    type Error = <Backend as StorageBackend>::Error;
-    type Edition = <Backend as TransactionalMemoryBackend>::Edition;
-
-    async fn resolve(
-        &self,
-        address: &Self::Address,
-    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
-        self.backend.resolve(address).await
-    }
-
-    async fn replace(
-        &self,
-        address: &Self::Address,
-        edition: Option<&Self::Edition>,
-        content: Option<Self::Value>,
-    ) -> Result<Option<Self::Edition>, Self::Error> {
-        self.backend.replace(address, edition, content).await
     }
 }
 

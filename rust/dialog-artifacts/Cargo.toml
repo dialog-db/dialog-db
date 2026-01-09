@@ -13,6 +13,7 @@ default = ["csv", "s3"]
 debug = []
 helpers = ["dep:anyhow"]
 csv = ["dep:csv-async"]
+s3 = ["dialog-storage/s3"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests

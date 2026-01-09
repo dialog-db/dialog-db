@@ -12,7 +12,7 @@ use super::{StorageBackend, TransactionalMemoryBackend};
 
 /// A trivial implementation of [StorageBackend] - backed by a [HashMap] - where
 /// all values are kept in memory and never persisted.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct MemoryStorageBackend<Key, Value>
 where
     Key: Eq + std::hash::Hash,
@@ -21,14 +21,12 @@ where
     entries: Arc<RwLock<HashMap<Key, Value>>>,
 }
 
-/// A resource handle for a specific entry in [MemoryStorageBackend]
-
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Key, Value> StorageBackend for MemoryStorageBackend<Key, Value>
 where
     Key: Clone + Eq + std::hash::Hash + ConditionalSync,
-    Value: Clone + ConditionalSync + PartialEq,
+    Value: Clone + ConditionalSync,
 {
     type Key = Key;
     type Value = Value;
@@ -39,72 +37,16 @@ where
         entries.insert(key, value);
         Ok(())
     }
-
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         let entries = self.entries.read().await;
         Ok(entries.get(key).cloned())
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Key, Value> TransactionalMemoryBackend for MemoryStorageBackend<Key, Value>
-where
-    Key: Clone + Eq + std::hash::Hash + ConditionalSync,
-    Value: Clone + ConditionalSync + PartialEq,
-{
-    type Address = Key;
-    type Value = Value;
-    type Error = DialogStorageError;
-    type Edition = Value;
-
-    async fn resolve(
-        &self,
-        address: &Self::Address,
-    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
-        let entries = self.entries.read().await;
-        Ok(entries
-            .get(address)
-            .map(|value| (value.clone(), value.clone())))
-    }
-
-    async fn replace(
-        &self,
-        address: &Self::Address,
-        edition: Option<&Self::Edition>,
-        content: Option<Self::Value>,
-    ) -> Result<Option<Self::Edition>, Self::Error> {
-        let mut entries = self.entries.write().await;
-
-        // Get current value from storage
-        let current_value = entries.get(address);
-
-        // Check CAS condition - value must match expected edition
-        if current_value != edition {
-            return Err(DialogStorageError::StorageBackend(
-                "CAS condition failed: edition mismatch".to_string(),
-            ));
-        }
-
-        // Perform the operation
-        match content {
-            Some(new_value) => {
-                entries.insert(address.clone(), new_value.clone());
-                Ok(Some(new_value))
-            }
-            None => {
-                // Delete operation
-                entries.remove(address);
-                Ok(None)
-            }
-        }
-    }
-}
-
 impl<Key, Value> StorageSource for MemoryStorageBackend<Key, Value>
 where
     Key: Clone + Eq + std::hash::Hash + ConditionalSync,
-    Value: Clone + ConditionalSync + PartialEq,
+    Value: Clone + ConditionalSync,
 {
     fn read(
         &self,

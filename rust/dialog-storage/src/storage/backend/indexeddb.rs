@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_common::Blake3Hash;
 use futures_util::{Stream, TryStreamExt};
-use js_sys::{Object, Reflect, Uint8Array};
+use js_sys::Uint8Array;
 use rexie::{ObjectStore, Rexie, RexieBuilder, TransactionMode};
 use std::{marker::PhantomData, rc::Rc};
 use wasm_bindgen::{JsCast, JsValue};
@@ -39,19 +39,6 @@ where
     value_type: PhantomData<Value>,
 }
 
-unsafe impl<Key, Value> Send for IndexedDbStorageBackend<Key, Value>
-where
-    Key: AsRef<[u8]>,
-    Value: AsRef<[u8]> + From<Vec<u8>>,
-{
-}
-unsafe impl<Key, Value> Sync for IndexedDbStorageBackend<Key, Value>
-where
-    Key: AsRef<[u8]>,
-    Value: AsRef<[u8]> + From<Vec<u8>>,
-{
-}
-
 impl<Key, Value> IndexedDbStorageBackend<Key, Value>
 where
     Key: AsRef<[u8]>,
@@ -83,7 +70,7 @@ where
 impl<Key, Value> StorageBackend for IndexedDbStorageBackend<Key, Value>
 where
     Key: AsRef<[u8]> + Clone,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + PartialEq,
+    Value: AsRef<[u8]> + From<Vec<u8>> + Clone,
 {
     type Key = Key;
     type Value = Value;
@@ -103,7 +90,7 @@ where
         let value = bytes_to_typed_array(value.as_ref());
 
         store
-            .put(&versioned_value, Some(&key_array))
+            .put(&value, Some(&key))
             .await
             .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
 
@@ -126,7 +113,7 @@ where
         // Base58 encode key for lookup
         let key = JsValue::from_str(&key.as_ref().to_base58());
 
-        let Some(js_val) = store
+        let Some(value) = store
             .get(key)
             .await
             .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?
@@ -134,120 +121,20 @@ where
             return Ok(None);
         };
 
-        let value = parse_value_only(js_val)?;
-
+        let out = value
+            .dyn_into::<Uint8Array>()
+            .map_err(|value| {
+                DialogStorageError::StorageBackend(format!(
+                    "Failed to downcast value to bytes: {:?}",
+                    value
+                ))
+            })?
+            .to_vec();
         tx.done()
             .await
             .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
 
-        Ok(Some(value))
-    }
-}
-
-#[async_trait(?Send)]
-impl<Key, Value> TransactionalMemoryBackend for IndexedDbStorageBackend<Key, Value>
-where
-    Key: AsRef<[u8]> + Clone,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + PartialEq,
-{
-    type Address = Key;
-    type Value = Value;
-    type Error = DialogStorageError;
-    type Edition = u64;
-
-    async fn resolve(
-        &self,
-        address: &Self::Address,
-    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
-        let tx = self
-            .db
-            .transaction(&[&self.store_name], TransactionMode::ReadOnly)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-        let store = tx
-            .store(&self.store_name)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-        let key_array = bytes_to_typed_array(address.as_ref());
-        let result = store
-            .get(key_array)
-            .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-        match result {
-            Some(js_val) => {
-                let (value, version) = parse_versioned_value(js_val)?;
-                Ok(Some((value, version)))
-            }
-            None => Ok(None),
-        }
-    }
-
-    async fn replace(
-        &self,
-        address: &Self::Address,
-        edition: Option<&Self::Edition>,
-        content: Option<Self::Value>,
-    ) -> Result<Option<Self::Edition>, Self::Error> {
-        let tx = self
-            .db
-            .transaction(&[&self.store_name], TransactionMode::ReadWrite)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-        let store = tx
-            .store(&self.store_name)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-        let key_array = bytes_to_typed_array(address.as_ref());
-
-        // Check CAS condition - get current version
-        let current_js = store
-            .get(key_array.clone())
-            .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-        let current_version = if let Some(js_val) = current_js {
-            let (_, version) = parse_versioned_value::<Value>(js_val)?;
-            Some(version)
-        } else {
-            None
-        };
-
-        // Verify edition matches
-        if current_version.as_ref() != edition {
-            return Err(DialogStorageError::StorageBackend(
-                "CAS condition failed: edition mismatch".to_string(),
-            ));
-        }
-
-        // Perform the operation
-        match content {
-            Some(new_value) => {
-                let new_version = current_version.unwrap_or(0) + 1;
-                let versioned_value = create_versioned_value(new_value.as_ref(), new_version)?;
-                store
-                    .put(&versioned_value, Some(&key_array))
-                    .await
-                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-                tx.done()
-                    .await
-                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-                Ok(Some(new_version))
-            }
-            None => {
-                // Delete operation
-                store
-                    .delete(key_array)
-                    .await
-                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-                tx.done()
-                    .await
-                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
-
-                Ok(None)
-            }
-        }
+        Ok(Some(Value::from(out)))
     }
 }
 
@@ -409,7 +296,7 @@ where
 impl<Key, Value> StorageSink for IndexedDbStorageBackend<Key, Value>
 where
     Key: AsRef<[u8]> + Clone,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + PartialEq,
+    Value: AsRef<[u8]> + From<Vec<u8>> + Clone,
 {
     async fn write<EntryStream>(
         &mut self,

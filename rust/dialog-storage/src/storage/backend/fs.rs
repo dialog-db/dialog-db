@@ -331,7 +331,7 @@ where
 impl<Key, Value> StorageSink for FileSystemStorageBackend<Key, Value>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
-    Value: AsRef<[u8]> + Clone + From<Vec<u8>> + ConditionalSync + PartialEq,
+    Value: AsRef<[u8]> + Clone + From<Vec<u8>> + ConditionalSync,
 {
     async fn write<EntryStream>(
         &mut self,

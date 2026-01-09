@@ -31,9 +31,7 @@ impl<const COMPRESSION_LEVEL: u32, Backend> StorageBackend
     for CompressedStorage<COMPRESSION_LEVEL, Backend>
 where
     Backend: StorageBackend + ConditionalSync,
-    Backend::Key: ConditionalSync,
-    Backend::Value: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
-    Backend::Error: Into<DialogStorageError> + ConditionalSync,
+    Backend::Value: From<Vec<u8>> + AsRef<[u8]>,
 {
     type Key = Backend::Key;
     type Value = Backend::Value;

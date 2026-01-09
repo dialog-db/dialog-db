@@ -82,7 +82,6 @@ throbber-widgets-tui = "0.8"
 tokio = "1"
 ulid = "1"
 url = "2"
-web-time = "1"
 wasm-bindgen = "=0.2.100"
 wasm-bindgen-futures = "0.4"
 wasm-bindgen-test = "0.3"
@@ -107,6 +106,9 @@ path = "./rust/dialog-query"
 
 [workspace.dependencies.dialog-storage]
 path = "./rust/dialog-storage"
+
+[workspace.dependencies.dialog-query-macros]
+path = "./rust/dialog-query-macros"
 
 [workspace.dependencies.dialog-macros]
 path = "./rust/dialog-macros"

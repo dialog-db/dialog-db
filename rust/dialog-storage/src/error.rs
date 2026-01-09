@@ -1,8 +1,7 @@
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// The common error type used by this crate
-#[derive(Error, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Error, Debug)]
 pub enum DialogStorageError {
     /// An error that occurs during block encoding
     #[error("Failed to encode a block: {0}")]

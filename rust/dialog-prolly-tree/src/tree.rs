@@ -4,8 +4,6 @@ use std::{
     ops::{Bound, RangeBounds},
 };
 
-use super::differential::Change;
-use crate::{Adopter, DialogProllyTreeError, Entry, KeyType, Node, TreeDifference, ValueType};
 use async_stream::try_stream;
 use dialog_storage::{ContentAddressedStorage, Encoder, HashType};
 use futures_core::Stream;
@@ -146,21 +144,6 @@ where
                 Ok(())
             }
             None => Ok(()),
-        }
-    }
-
-    /// Returns a differential that produces changes to transform `self` into `other`.
-    ///
-    /// Usage: `self.integrate(self.differentiate(other))` will result in `other`.
-    pub fn differentiate<'a>(
-        &'a self,
-        other: &'a Self,
-    ) -> impl crate::differential::Differential<Key, Value> + 'a {
-        try_stream! {
-            let delta = TreeDifference::compute(self, other).await?;
-            for await change in delta.changes() {
-                yield change?;
-            }
         }
     }
 
