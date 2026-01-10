@@ -284,6 +284,16 @@ mod tests {
         Ok(())
     }
 
+    /// Tests provisioned test with struct destructuring in the parameter
+    #[dialog_common::test]
+    async fn it_supports_destructuring(
+        ConfiguredAddress { endpoint, bucket }: ConfiguredAddress,
+    ) -> anyhow::Result<()> {
+        assert_eq!(endpoint, "http://default:9000");
+        assert_eq!(bucket, "default-bucket");
+        Ok(())
+    }
+
     // --- Tests with actual native provider ---
     // These tests are native-only because TcpServer can't run in wasm.
     // They're also skipped in web integration mode (web-integration-tests feature) since
