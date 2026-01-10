@@ -377,7 +377,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         default_state: Option<BranchState>,
     ) -> Result<TypedStoreResource<BranchState, Backend>, ReplicaError> {
         let key = format!("local/{}", id);
-        let mut memory = storage
+        let memory = storage
             .open::<BranchState>(&key.into())
             .await
             .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;

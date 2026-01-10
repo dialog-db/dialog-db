@@ -252,14 +252,21 @@ where
         Codec::Error: std::fmt::Display,
         Self: Clone,
     {
-        TransactionalMemoryCell::open(key.clone(), self, self.codec.clone(), UpdatePolicy::default()).await
+        TransactionalMemoryCell::open(
+            key.clone(),
+            self,
+            self.codec.clone(),
+            UpdatePolicy::default(),
+        )
+        .await
     }
 }
 
 // Implement TransactionalMemoryBackend for Storage so it can be passed directly to replace/reload
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend: StorageBackend, Codec: Encoder> TransactionalMemoryBackend for PlatformStorage<Backend, Codec>
+impl<Backend: StorageBackend, Codec: Encoder> TransactionalMemoryBackend
+    for PlatformStorage<Backend, Codec>
 where
     Backend: TransactionalMemoryBackend + ConditionalSync,
     Backend::Address: Clone + Eq + std::hash::Hash + AsRef<[u8]> + From<Vec<u8>> + ConditionalSync,

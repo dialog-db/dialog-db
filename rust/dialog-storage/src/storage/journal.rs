@@ -381,11 +381,12 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Backend> super::TransactionalMemoryBackend for JournaledStorage<Backend>
 where
-    Backend: StorageBackend + super::TransactionalMemoryBackend<
-        Address = <Backend as StorageBackend>::Key,
-        Value = <Backend as StorageBackend>::Value,
-        Error = <Backend as StorageBackend>::Error,
-    > + ConditionalSync,
+    Backend: StorageBackend
+        + super::TransactionalMemoryBackend<
+            Address = <Backend as StorageBackend>::Key,
+            Value = <Backend as StorageBackend>::Value,
+            Error = <Backend as StorageBackend>::Error,
+        > + ConditionalSync,
     <Backend as StorageBackend>::Key: Clone + std::hash::Hash + Eq + ConditionalSync,
     <Backend as StorageBackend>::Value: ConditionalSync,
     <Backend as StorageBackend>::Error: ConditionalSync,
