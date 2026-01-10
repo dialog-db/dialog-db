@@ -110,7 +110,6 @@
 //! - Segments containing unsafe characters or binary data are base58-encoded with a `!` prefix
 //! - Path separators (`/`) preserve the S3 key hierarchy
 
-use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use futures_util::{Stream, StreamExt, TryStreamExt};
@@ -145,7 +144,7 @@ use crate::{DialogStorageError, StorageBackend, StorageSink, TransactionalMemory
 // - Address types (S3Address, PublicS3Address) are available on all platforms
 // - Server implementation is native-only (internal to the helpers module)
 #[cfg(any(feature = "helpers", test))]
-mod helpers;
+pub mod helpers;
 #[cfg(any(feature = "helpers", test))]
 pub use helpers::{PublicS3Address, S3Address};
 

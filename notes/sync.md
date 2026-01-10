@@ -10,12 +10,12 @@
 
 ## Architecture Overview
 
-A **Mutable Pointer** represents the canonical shared root of a tree, while the **Archive** stores immutable, hash-addressed blobs representing tree nodes.
+Dialog synchronization changes through git like remotes. Remote consists of a revision **Register** that holds record announcing canonical root of the search tree and tree **Archive** that stores immutable, hash-addressed blobs representing tree nodes.
 
 ```mermaid
 graph TD
     subgraph Remote
-        A[Mutable Pointer]
+        A[Register]
         B[Archive Store S3/IPFS/R2]
     end
 
@@ -35,29 +35,29 @@ The synchronization process follows this sequence:
 sequenceDiagram
     participant Archive
     participant Local
-    participant Remote Pointer
-    Local->>Remote Pointer: HEAD /did (query root)
-    Remote Pointer-->>Local: 200 ETag=abc123
+    participant Register
+    Local->>Register: HEAD /did (query root)
+    Register-->>Local: 200 ETag=abc123
     Local->>Archive: GET blobs for root abc123 (Fetch)
     Archive-->>Local: 200
-		
+
     Local->>Local: merge(local, remote)
     Local->>Archive: PUT new blobs (Put)
-    Local->>Remote Pointer: PATCH /did (Push)
+    Local->>Register: PATCH /did (Push)
     Remote Pointer-->>Local: 200 OK or 412 Precondition Failed
 ```
 
 ---
 
-## Mutable Pointer
+## Register
 
-A **Mutable Pointer** represents the shared state of the tree and serves as a single authoritative reference — conceptually similar to a Git remote reference. It stores only the root hash and enforces access and consistency constraints.
+A **Register** represents the shared state of the tree and serves as a single authoritative reference — conceptually similar to a Git remote reference. It stores only the root hash and enforces access and consistency constraints.
 
-### Query Mutable Pointer
+### Query Register
 
 #### Authorization
 
-A `HEAD` request is used to query the latest known root of the tree. 
+A `HEAD` request is used to query the latest known root of the tree.
 
 Requests **MUST** include a valid `Authorization` header:
 
@@ -77,7 +77,7 @@ The payload has the following structure:
 }
 ```
 
-The signer **MUST** match `payload.iss`, `payload.sub`, and the `did:key` being queried. 
+The signer **MUST** match `payload.iss`, `payload.sub`, and the `did:key` being queried.
 If authorization is invalid, the server **MUST** return `401 Unauthorized`.
 
 > ℹ️ In future versions, [UCAN][]s or other decentralized auth mechanisms may replace this simple signature-based scheme.
@@ -97,11 +97,11 @@ last-modified: Tue, 23 Sep 2025 05:41:40 GMT
 ETag: af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
 ```
 
-> ℹ️ In the future we may add `GET` request support to read latest payload that was published. 
+> ℹ️ In the future we may add `GET` request support to read latest payload that was published.
 
 ---
 
-### Update Mutable Pointer
+### Update Register
 
 Updating a mutable pointer follows [Compare-and-Swap](https://en.wikipedia.org/wiki/Compare-and-swap) semantics:
 the remote root is updated from `A → B`, where
@@ -190,12 +190,12 @@ Content-Type: application/json
 
 ## Archive
 
-The **Archive** is a shared data store over a commodity backend such as S3, R2, or IPFS. 
+The **Archive** is a shared data store over a commodity backend such as S3, R2, or IPFS.
 It stores **hash-addressed blobs** representing encoded tree index and segment nodes.
 
 Access control (read/write) is managed out of band and tied directly to the backend’s authentication.
 
-> **Note:** The Mutable Pointer is fully decoupled from the archive — it SHOULD NOT have access to it, nor verify that uploaded roots are archived.
+> **Note:** The **register** is fully decoupled from the **archive** — it SHOULD NOT have access to it, nor verify that uploaded roots are archived.
 
 More advanced implementations may require proof-based updates (e.g., Merkle inclusion proofs or signed archive commitments) to enforce stronger consistency invariants.
 
@@ -214,7 +214,7 @@ The **Fetch** phase discovers the latest remote state and materializes a **parti
 Steps:
 
 1. Determine the last known remote root (`ETag`).
-2. Query the mutable pointer for the current remote root.
+2. Query the register for the current remote root.
 3. Load tree from the root, which will get root node from archive unless it's available in local cache.
 
 Fetch create replica of the tree that in the next phase can be merged into a local replica.
@@ -239,7 +239,7 @@ In order to merge local and remote trees we need to identify what changes have o
   │  └─ P11@g                    │  └─ P11@g
   │     └─ ...                   │     └─ ...
 ► └─ P17@b                       └─ P88@w
-     ├─ ...                         └─ ...    
+     ├─ ...                         └─ ...
      └─ P17@k
         └─ ...
 ```
@@ -254,68 +254,140 @@ Merge logic could be described as follows
 
 ```rs
 #[derive(Debug, Clone)]
-pub struct Replica {
-  current: Tree
-  checkpoint: Tree
-  upstream: MutablePointer
+pub struct Branch {
+    /// Local branch identifier identifier
+    id: String,
+
+    /// Revision from from which working in tree evolved.
+    origin: Revision,
+    /// Current revision of the tree.
+    current: Revision,
+
+    /// Upstream represents coordination mechanism with collaborators,
+    /// where you can fetch latest agreed upon revision and where you
+    /// can publish new revision so others can integrate it into their
+    /// work tree.
+    upstream: Option<Uri>,
 }
 
-impl Replica {
-  /// Computed changes that were made since last push
-  fn changes(&self) -> impl Differntial {
-     Differntial::from((self.current, self.checkpoint))
-  }
-  
-  /// Computes `remote` tree with local changes. Expects
-  /// remote to be diverged from remote
-  async fn merge(&mut self, remote: &Tree) -> Result<&mut Self> {
-    // if remote has not changed from last chekpoint
-    // replica represents current state
-    if remote.root() != self.checkpoint.root() {
-      // inegrate changes into remote tree to derive
-      // merged tree & produce new replica with it
-      // and old checkpoint
-      self.current = integrate(remote, self.changes())?;
-    }
-    
-    Ok(self)
-  }
-  
-  async fn pull(&mut self) -> Result<&mut Self> {
-    let root = self.upstream.query().await?;
-    if root != self.checkpoint.root() {
-       self.merge(Tree::load(root)).await;
-    } 
-    
-    
-    Ok(self)
-  }
-  
-  async fn push(&self) -> Result<&mut Self> {
-     loop {
-        let checkpoint = self.current.clone()
-        if let Ok(_) = upstream.assert(checkpoint.root()).await {
-          self.checkpoint = checkpoint
+pub struct RevisionChange {
+    revision: Revision,
+    origin: Option<Revision>,
+}
+
+
+pub struct Replica<B: Backend> {
+    branch: Branch,
+    backend: B
+}
+
+trait Backend {
+    fn artifacts(&self) -> impl StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = ArchiveStorageError>;
+
+    fn revisions(&self) -> impl AtomicStorageBackend<Key = String, Value = Revision, Error = RevisionStorageError>;
+}
+
+impl<B: Backend> Replica<B> {
+    /// Computed changes that were made since last push
+    pub fn changes(&self) -> impl Differntial {
+        if self.branch.current != self.branch.origin {
+            let current = Tree::load(self.backend, self.branch.current);
+            let origin = Tree::load(self.backend, self.branch.origin);
+            Differntial::from((current, origin))
         } else {
-          self.pull().await?;
+            Differntial::empty()
         }
-     }
-  }
+    }
+
+    /// Pulls latest revision from the audience
+    async fn pull(&mut self) -> Result<&mut Self> {
+        if let Some(upstream) = self.branch.upstream {
+            let revisions = self.backend.revisions();
+            let revision = revisions.resolve(&upstream).await?;
+            self.rebase(revision).await?
+        }
+        Ok(self)
+    }
+
+    /// Rebases local changes onto the provided revision.
+    async fn rebase(&mut self, revision: Revision) -> Result<&mut Self> {
+        // If we don't have local changes we simply reset branch to a
+        // provided revision
+        if self.branch.origin == self.branch.current {
+            *self.branch.current = revision;
+            *self.branch.origin = revision;
+        }
+        // If provided revision is the same as current revision we don't // need to rebase changes we simply need to update the branch
+        // origin branch
+        else if revision == self.branch.current {
+            *self.branch.origin = revision;
+        }
+        // Otherwise we compute differential between origin and current
+        // trees and merge them into the tree loaded from the the
+        // provided revision.
+        else {
+            let target = Tree::load(self.backend, revision)?;
+            let tree = target.merge(self.changes()).await?;
+            let revision = tree.revision()?;
+
+            *self.branch.current = revision;
+            *self.branch.origin = revision;
+        }
+
+        Ok(self)
+    }
+
+    /// Pushes local changes to the upstream.
+    async fn push(&mut self) -> Result<&mut Self> {
+        if let Some(upstream) = self.branch.upstream {
+            let revisions = self.backend.revisions();
+            loop {
+                // capture because current branch can change while
+                // we're pushing
+                let revision = self.current.branch.clone();
+                let origin = if self.origin.isEmpty() {
+                    None
+                } else {
+                    Some(self.origin.clone())
+                };
+
+                let upgrade = revisions.swap(
+                    upstream.clone(),
+                    revision.clone(),
+                    origin
+                );
+
+                match upgrade {
+                    // if swapped successfully we've converged
+                    Ok(_) => {
+                        self.branch.origin = revision;
+                    }
+                    // if revision has shanged upstream we need
+                    // to rebase our changes on top.
+                    Err(Swap::RevisionMismatch { actual, .. }) => {
+                        self.rebase(actual);
+                    }
+                    // Other errors propagate.
+                    Err(err) => {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+    }
 }
 ```
 
 ### Differentiation
 
-It is best to think of our search tree as a sorted set of entries. Differential between last **checkpoint** (tree that was succesfully pushed) and **current** working tree can be represented as a set of entries added or removed.
-
+It is best to think of our search tree as a sorted set of entries. The differential between the last **checkpoint** (tree that was successfully pushed) and **current** working tree can be represented as a stream of entries added or removed.
 
 ```rust
-trait Differential: TryStream<Change> {
-  fn from(source: (Tree, Tree)) -> Self
-}
+/// A differential is a stream of changes
+trait Differential: Stream<Item = Result<Change, Error>> {}
 
 pub enum Change {
-  Remove(Entry)
+  Remove(Entry),
   Add(Entry),
 }
 ```
@@ -326,6 +398,8 @@ ZSet weight can be out of -1/+1 range but my understanding is that for collectio
 </details>
 
 > ✨ Computing differential should not require replicating subtrees that have not changed because those can be skipped over. It is also highly likely that subtrees that have changed will already be in cache because to change them we had to replicate first
+>
+> For details see [explanation of the  algorithm](./diff.md).
 
 
 ### Integration
@@ -360,6 +434,6 @@ Target tree may contain an entry for the same key with a same hash, in that cas 
 
 ## Consistency Model
 
-This protocol provides **eventual consistency** with **deterministic convergence**.  
-Each peer maintains an immutable local tree (partial replica) and coordinates via a single mutable pointer that serves as the canonical root reference.  
+This protocol provides **eventual consistency** with **deterministic convergence**.
+Each peer maintains an immutable local tree (partial replica) and coordinates via a single mutable pointer that serves as the canonical root reference.
 Given identical merge strategies and histories, all replicas converge to the same state.
