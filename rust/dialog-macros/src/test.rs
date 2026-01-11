@@ -150,6 +150,9 @@ fn generate_unit_test(source: &ItemFn) -> TokenStream {
     let vis = &source.vis;
     let name = &source.sig.ident;
     let asyncness = &source.sig.asyncness;
+    let unsafety = &source.sig.unsafety;
+    let generics = &source.sig.generics;
+    let where_clause = &generics.where_clause;
     let output = &source.sig.output;
     let body = &source.block;
     let user_attrs = &source.attrs;
@@ -169,7 +172,7 @@ fn generate_unit_test(source: &ItemFn) -> TokenStream {
         // Compile as bindgen test on wasm, except during web integration tests
         #[cfg_attr(all(not(feature = "web-integration-tests"), target_arch = "wasm32"), wasm_bindgen_test::wasm_bindgen_test)]
         #(#user_attrs)*
-        #vis #asyncness fn #name() #output
+        #vis #unsafety #asyncness fn #name #generics() #output #where_clause
             #body
     };
 
@@ -252,6 +255,10 @@ struct IntegrationTest<'a> {
     ident: &'a Ident,
     /// Test name as string
     name: String,
+    /// Unsafety marker (if present)
+    unsafety: &'a Option<syn::token::Unsafe>,
+    /// Generics (including lifetimes and type parameters)
+    generics: &'a syn::Generics,
     /// Function body
     body: &'a syn::Block,
     /// Return type
@@ -302,6 +309,8 @@ impl<'a> IntegrationTest<'a> {
             vis: &source.vis,
             ident,
             name: name.clone(),
+            unsafety: &source.sig.unsafety,
+            generics: &source.sig.generics,
             body: &source.block,
             output: &source.sig.output,
             user_attrs: &source.attrs,
@@ -339,6 +348,8 @@ impl<'a> IntegrationTest<'a> {
     fn integration_logic(&self) -> proc_macro2::TokenStream {
         let IntegrationTest {
             vis,
+            unsafety,
+            generics,
             user_attrs,
             integration_ident,
             param_pattern,
@@ -348,6 +359,8 @@ impl<'a> IntegrationTest<'a> {
             ..
         } = self;
 
+        let where_clause = &generics.where_clause;
+
         quote! {
             // Integration logic - called by native test or wasm test.
             // Gated behind integration-tests OR web-integration-tests features.
@@ -356,7 +369,7 @@ impl<'a> IntegrationTest<'a> {
             #[cfg(any(feature = "integration-tests", feature = "web-integration-tests"))]
             #[cfg_attr(feature = "web-integration-tests", allow(dead_code))]
             #(#user_attrs)*
-            #vis async fn #integration_ident(#param_pattern: #address_type) #output
+            #vis #unsafety async fn #integration_ident #generics(#param_pattern: #address_type) #output #where_clause
                 #body
         }
     }
@@ -372,6 +385,7 @@ impl<'a> IntegrationTest<'a> {
             address_type,
             integration_ident,
             settings_setup,
+            output,
             ..
         } = self;
 
@@ -380,7 +394,7 @@ impl<'a> IntegrationTest<'a> {
             // Starts service, runs test, stops service - all in same process
             #[cfg(all(feature = "integration-tests", not(feature = "web-integration-tests"), not(target_arch = "wasm32")))]
             #[tokio::test]
-            #vis async fn #ident() -> ::anyhow::Result<()> {
+            #vis async fn #ident() #output {
                 use ::dialog_common::helpers::Provisionable;
 
                 #settings_setup
@@ -394,18 +408,17 @@ impl<'a> IntegrationTest<'a> {
                 // Run the test in a spawned task so panics don't prevent cleanup
                 let result = ::tokio::spawn(#integration_ident(address)).await;
 
-                // Always stop the service
-                service.stop().await?;
+                // Always stop the service (panic if this fails to ensure cleanup issues are visible)
+                service.stop().await.expect("Failed to stop service");
 
                 // Propagate the result
                 match result {
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(e)) => Err(e),
+                    Ok(inner) => inner,
                     Err(e) => {
                         if e.is_panic() {
                             ::std::panic::resume_unwind(e.into_panic());
                         }
-                        Err(::anyhow::anyhow!("Task failed: {}", e))
+                        panic!("Task failed: {}", e)
                     }
                 }
             }

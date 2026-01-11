@@ -294,6 +294,14 @@ mod tests {
         Ok(())
     }
 
+    /// Tests unit test with lifetime parameter (Rust's #[test] doesn't support
+    /// type generics, but does support lifetime parameters)
+    #[dialog_common::test]
+    fn it_supports_lifetimes<'a>() {
+        let value: &'a str = "test";
+        assert_eq!(value, "test");
+    }
+
     // --- Tests with actual native provider ---
     // These tests are native-only because TcpServer can't run in wasm.
     // They're also skipped in web integration mode (web-integration-tests feature) since
