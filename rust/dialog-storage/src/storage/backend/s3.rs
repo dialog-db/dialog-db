@@ -142,12 +142,10 @@ use crate::{DialogStorageError, StorageBackend, StorageSink, TransactionalMemory
 // - Server implementation is native-only (internal to the helpers module)
 #[cfg(any(feature = "helpers", test))]
 pub mod helpers;
+#[cfg(all(feature = "helpers", not(target_arch = "wasm32")))]
+pub use helpers::{LocalS3, PublicS3Settings, S3Settings};
 #[cfg(any(feature = "helpers", test))]
 pub use helpers::{PublicS3Address, S3Address};
-#[cfg(all(feature = "helpers", not(target_arch = "wasm32")))]
-pub use helpers::{
-    LocalS3, PublicS3Settings, S3Settings,
-};
 
 /// Errors that can occur when using the S3 storage backend.
 #[derive(Error, Debug)]
