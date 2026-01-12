@@ -845,7 +845,6 @@ dependencies = [
  "dialog-common",
  "futures-util",
  "getrandom 0.2.16",
- "hmac 0.12.1",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -856,11 +855,11 @@ dependencies = [
  "rand 0.8.5",
  "reqwest",
  "rexie",
+ "s3-presign",
  "s3s",
  "serde",
  "serde_ipld_dagcbor",
  "serde_json",
- "sha2 0.10.9",
  "sieve-cache",
  "tempfile",
  "thiserror 2.0.17",
@@ -2161,6 +2160,22 @@ name = "ryu"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
+
+[[package]]
+name = "s3-presign"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "hmac 0.12.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.17",
+ "url",
+ "web-time",
+]
 
 [[package]]
 name = "s3s"

@@ -121,14 +121,11 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use thiserror::Error;
 
-mod access;
-pub use access::{Acl, AuthorizationError, Credentials, Invocation, unauthorized};
-
-mod address;
-pub use address::Address;
-
-mod checksum;
-pub use checksum::{Checksum, Hasher};
+// Re-export core presigning types from s3-presign crate
+pub use s3_presign::{
+    Acl, Address, Authorization, AuthorizationError, Checksum, Credentials, DEFAULT_EXPIRES,
+    Hasher, Invocation, Public, unauthorized,
+};
 
 mod key;
 pub use key::{decode as decode_s3_key, encode as encode_s3_key};
@@ -151,7 +148,9 @@ use crate::{DialogStorageError, StorageBackend, StorageSink, TransactionalMemory
 #[cfg(any(feature = "helpers", test))]
 pub mod helpers;
 #[cfg(all(feature = "helpers", not(target_arch = "wasm32")))]
-pub use helpers::{PublicS3Address, S3Address, start, start_public, LocalS3, S3Settings, PublicS3Settings};
+pub use helpers::{
+    LocalS3, PublicS3Address, PublicS3Settings, S3Address, S3Settings, start, start_public,
+};
 
 /// Errors that can occur when using the S3 storage backend.
 #[derive(Error, Debug)]

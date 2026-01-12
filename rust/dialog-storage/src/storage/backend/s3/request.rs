@@ -7,9 +7,7 @@ use async_trait::async_trait;
 use dialog_common::ConditionalSync;
 use url::Url;
 
-use super::access::{Acl, Invocation, unauthorized};
-use super::checksum::{Checksum, Hasher};
-use super::{Bucket, S3StorageError};
+use super::{Acl, Bucket, Checksum, Hasher, Invocation, S3StorageError, unauthorized};
 
 /// Precondition for PUT operations to enable compare-and-swap semantics.
 #[derive(Debug, Clone)]
