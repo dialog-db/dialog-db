@@ -59,14 +59,13 @@ impl Checksum {
 
 impl std::fmt::Display for Checksum {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let encoded = base64::engine::general_purpose::STANDARD.encode(self.as_bytes());
-        f.write_str(&encoded)
+        f.write_str(&String::from(self))
     }
 }
 
 impl From<&Checksum> for String {
     fn from(checksum: &Checksum) -> Self {
-        checksum.to_string()
+        base64::engine::general_purpose::STANDARD.encode(checksum.as_bytes())
     }
 }
 
