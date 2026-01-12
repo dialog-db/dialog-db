@@ -566,6 +566,7 @@ where
     fn read(&self) -> impl Stream<Item = Result<(Self::Key, Self::Value), Self::Error>> {
         let storage = self.clone();
         let prefix = self.prefix().map(String::from);
+        use async_stream::try_stream;
 
         try_stream! {
             let mut continuation_token: Option<String> = None;
