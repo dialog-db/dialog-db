@@ -1,305 +1,294 @@
-import init, {
-	Artifacts,
-	generateEntity,
-	encode,
-	Entity,
-	InstructionType,
-	ValueDataType,
-	Artifact,
-	ArtifactApi,
-} from "./dialog-artifacts";
+import init, { Artifacts, generateEntity, encode, Entity, InstructionType, ValueDataType, Artifact, ArtifactApi } from "./dialog-artifacts";
 import { assert, expect } from "@open-wc/testing";
 
 await init();
 
 interface HackerProfile {
-	name: string;
-	handle: string;
+    name: string,
+    handle: string
 }
 
-describe("artifacts", () => {
-	const populateWithHackers = async (
-		artifacts: Artifacts,
-	): Promise<Map<string, HackerProfile>> => {
-		const hackers = [
-			{
-				name: "Emmanuel Goldstein",
-				handle: "Cereal Killer",
-			},
-			{
-				name: "Paul Cook",
-				handle: "Lord Nikon",
-			},
-			{
-				name: "Dade Murphy",
-				handle: "Zero Cool",
-			},
-			{
-				name: "Kate Libby",
-				handle: "Acid Burn",
-			},
-			{
-				name: "Eugene Belford",
-				handle: "The Plague",
-			},
-		];
-		const entityMap = new Map();
+describe('artifacts', () => {
+    const populateWithHackers = async (artifacts: Artifacts): Promise<Map<string, HackerProfile>> => {
+        const hackers = [
+            {
+                name: "Emmanuel Goldstein",
+                handle: "Cereal Killer"
+            },
+            {
+                name: "Paul Cook",
+                handle: "Lord Nikon"
+            },
+            {
+                name: "Dade Murphy",
+                handle: "Zero Cool"
+            },
+            {
+                name: "Kate Libby",
+                handle: "Acid Burn"
+            },
+            {
+                name: "Eugene Belford",
+                handle: "The Plague"
+            }
+        ];
+        const entityMap = new Map();
 
-		for (const hacker of hackers) {
-			// NOTE: We purposefully break this up into multiple transactions
-			// to test that they compound in their effects
-			let entity = generateEntity();
+        for (const hacker of hackers) {
+            // NOTE: We purposefully break this up into multiple transactions
+            // to test that they compound in their effects
+            let entity = generateEntity();
 
-			entityMap.set(encode(entity), hacker);
+            entityMap.set(encode(entity), hacker);
 
-			await artifacts.commit([
-				{
-					type: InstructionType.Assert,
-					artifact: {
-						the: "profile/name",
-						of: entity,
-						is: {
-							type: ValueDataType.String,
-							value: hacker.name,
-						},
-					},
-				},
-				{
-					type: InstructionType.Assert,
-					artifact: {
-						the: "profile/handle",
-						of: entity,
-						is: {
-							type: ValueDataType.String,
-							value: hacker.handle,
-						},
-					},
-				},
-			]);
-		}
+            await artifacts.commit([
+                {
+                    type: InstructionType.Assert,
+                    artifact: {
+                        the: "profile/name",
+                        of: entity,
+                        is: {
+                            type: ValueDataType.String,
+                            value: hacker.name
+                        }
+                    }
+                },
+                {
+                    type: InstructionType.Assert,
+                    artifact: {
+                        the: "profile/handle",
+                        of: entity,
+                        is: {
+                            type: ValueDataType.String,
+                            value: hacker.handle
+                        }
+                    }
+                }
+            ]);
+        }
 
-		return entityMap;
-	};
+        return entityMap;
+    }
 
-	it("can restore from a revision", async () => {
-		let artifacts = await Artifacts.anonymous();
-		let entityMap = await populateWithHackers(artifacts);
-		let identifier = await artifacts.identifier();
+    it('can restore from a revision', async () => {
+        let artifacts = await Artifacts.anonymous();
+        let entityMap = await populateWithHackers(artifacts);
+        let identifier = await artifacts.identifier();
 
-		let restored_artifacts = await Artifacts.open(identifier);
+        let restored_artifacts = await Artifacts.open(identifier);
 
-		let query = restored_artifacts.select({
-			the: "profile/handle",
-		});
+        let query = restored_artifacts.select({
+            the: "profile/handle"
+        });
 
-		let count = 0;
+        let count = 0;
 
-		for await (const artifact of query) {
-			let expectedHandle = entityMap.get(encode(artifact.of))?.handle;
-			expect(expectedHandle).to.be.ok;
-			expect(artifact.is.value).to.be.eq(expectedHandle!);
-			count++;
-		}
+        for await (const artifact of query) {
+            let expectedHandle = entityMap.get(encode(artifact.of))?.handle;
+            expect(expectedHandle).to.be.ok;
+            expect(artifact.is.value).to.be.eq(expectedHandle!)
+            count++;
+        }
 
-		expect(count).to.be.eq(5);
-	});
+        expect(count).to.be.eq(5);
+    });
 
-	it("throws for invalid entities", async () => {
-		let artifacts = await Artifacts.anonymous();
+    it('throws for invalid entities', async () => {
+        let artifacts = await Artifacts.anonymous();
 
-		await populateWithHackers(artifacts);
+        await populateWithHackers(artifacts);
 
-		let query;
+        let query;
 
-		try {
-			query = artifacts.select({
-				of: new Uint8Array(),
-			});
-		} catch (error) {
-			expect(error).to.be.ok;
-		} finally {
-			expect(query).to.be.undefined;
-		}
-	});
+        try {
+            query = artifacts.select({
+                of: new Uint8Array()
+            });
+        } catch (error) { expect(error).to.be.ok } finally {
+            expect(query).to.be.undefined;
+        }
+    });
 
-	it("can store an artifacts and select them again", async () => {
-		let artifacts = await Artifacts.anonymous();
-		let entityMap = await populateWithHackers(artifacts);
+    it('can store an artifacts and select them again', async () => {
+        let artifacts = await Artifacts.anonymous();
+        let entityMap = await populateWithHackers(artifacts);
 
-		let query = artifacts.select({
-			the: "profile/handle",
-		});
+        let query = artifacts.select({
+            the: "profile/handle"
+        });
 
-		let count = 0;
+        let count = 0;
 
-		for await (const artifact of query) {
-			let expectedHandle = entityMap.get(encode(artifact.of))?.handle;
-			expect(expectedHandle).to.be.ok;
-			expect(artifact.is.value).to.be.eq(expectedHandle!);
-			count++;
-		}
+        for await (const artifact of query) {
+            let expectedHandle = entityMap.get(encode(artifact.of))?.handle;
+            expect(expectedHandle).to.be.ok;
+            expect(artifact.is.value).to.be.eq(expectedHandle!)
+            count++;
+        }
 
-		expect(count).to.be.eq(5);
-	});
+        expect(count).to.be.eq(5);
+    });
 
-	it("can update an artifact and record a causal reference", async () => {
-		let artifacts = await Artifacts.anonymous();
-		let entityMap = await populateWithHackers(artifacts);
+    it('can update an artifact and record a causal reference', async () => {
+        let artifacts = await Artifacts.anonymous();
+        let entityMap = await populateWithHackers(artifacts);
 
-		let query = artifacts.select({
-			the: "profile/handle",
-			is: {
-				type: ValueDataType.String,
-				value: "Lord Nikon",
-			},
-		});
+        let query = artifacts.select({
+            the: "profile/handle",
+            is: {
+                type: ValueDataType.String,
+                value: "Lord Nikon"
+            }
+        });
 
-		let artifact;
 
-		for await (const result of query) {
-			artifact = result;
-		}
+        let artifact;
 
-		expect(artifact!.cause).to.be.undefined;
+        for await (const result of query) {
+            artifact = result;
+        }
 
-		artifact = artifact!.update({
-			type: ValueDataType.String,
-			value: "Godking Nikon",
-		})!;
+        expect(artifact!.cause).to.be.undefined;
 
-		expect(artifact.cause).to.be.ok;
+        artifact = artifact!.update({
+            type: ValueDataType.String,
+            value: "Godking Nikon"
+        })!;
 
-		await artifacts.commit([
-			{
-				type: InstructionType.Assert,
-				artifact,
-			},
-		]);
+        expect(artifact.cause).to.be.ok;
 
-		query = artifacts.select({
-			the: "profile/handle",
-			is: {
-				type: ValueDataType.String,
-				value: "Godking Nikon",
-			},
-		});
+        await artifacts.commit([
+            {
+                type: InstructionType.Assert,
+                artifact
+            }
+        ]);
 
-		let descendantArtifact;
+        query = artifacts.select({
+            the: "profile/handle",
+            is: {
+                type: ValueDataType.String,
+                value: "Godking Nikon"
+            }
+        });
 
-		for await (const result of query) {
-			descendantArtifact = result;
-		}
+        let descendantArtifact;
 
-		expect(descendantArtifact!.cause).to.be.ok;
-	});
+        for await (const result of query) {
+            descendantArtifact = result;
+        }
 
-	it("can use a query result multiple times", async () => {
-		let artifacts = await Artifacts.anonymous();
-		let entityMap = await populateWithHackers(artifacts);
+        expect(descendantArtifact!.cause).to.be.ok;
+    });
 
-		let query = artifacts.select({
-			the: "profile/name",
-		});
+    it('can use a query result multiple times', async () => {
+        let artifacts = await Artifacts.anonymous();
+        let entityMap = await populateWithHackers(artifacts);
 
-		let count = 0;
+        let query = artifacts.select({
+            the: "profile/name"
+        });
 
-		for await (const artifact of query) {
-			let expectedHandle = entityMap.get(encode(artifact.of))?.name;
-			expect(expectedHandle).to.be.ok;
-			expect(artifact.is.value).to.be.eq(expectedHandle!);
+        let count = 0;
 
-			count++;
-		}
+        for await (const artifact of query) {
+            let expectedHandle = entityMap.get(encode(artifact.of))?.name;
+            expect(expectedHandle).to.be.ok;
+            expect(artifact.is.value).to.be.eq(expectedHandle!)
 
-		expect(count).to.be.eq(5);
+            count++;
+        }
 
-		for await (const artifact of query) {
-			let expectedHandle = entityMap.get(encode(artifact.of))?.name;
-			expect(expectedHandle).to.be.ok;
-			expect(artifact.is.value).to.be.eq(expectedHandle!);
+        expect(count).to.be.eq(5);
 
-			count++;
-		}
+        for await (const artifact of query) {
+            let expectedHandle = entityMap.get(encode(artifact.of))?.name;
+            expect(expectedHandle).to.be.ok;
+            expect(artifact.is.value).to.be.eq(expectedHandle!)
 
-		expect(count).to.be.eq(10);
+            count++;
+        }
 
-		for await (const _artifact of query) {
-			for await (const _artifact of query) {
-				count++;
-			}
-		}
+        expect(count).to.be.eq(10);
 
-		expect(count).to.be.eql(35);
+        for await (const _artifact of query) {
+            for await (const _artifact of query) {
+                count++;
+            }
+        }
 
-		const otherQuery = artifacts.select({
-			is: {
-				type: ValueDataType.String,
-				value: "Acid Burn",
-			},
-		});
+        expect(count).to.be.eql(35);
 
-		for await (const _artifact of query) {
-			for await (const _artifact of otherQuery) {
-				count++;
-			}
-		}
+        const otherQuery = artifacts.select({
+            is: {
+                type: ValueDataType.String,
+                value: "Acid Burn"
+            }
+        });
 
-		expect(count).to.be.eql(40);
-	});
+        for await (const _artifact of query) {
+            for await (const _artifact of otherQuery) {
+                count++;
+            }
+        }
 
-	it("pins an iterator at the version where iteration began", async () => {
-		let artifacts = await Artifacts.anonymous();
-		let entityMap = await populateWithHackers(artifacts);
+        expect(count).to.be.eql(40);
+    });
 
-		let query = artifacts.select({
-			the: "profile/name",
-		});
+    it('pins an iterator at the version where iteration began', async () => {
+        let artifacts = await Artifacts.anonymous();
+        let entityMap = await populateWithHackers(artifacts);
 
-		let count = 0;
+        let query = artifacts.select({
+            the: "profile/name"
+        });
 
-		for await (const artifact of query) {
-			await populateWithHackers(artifacts);
+        let count = 0;
 
-			let expectedHandle = entityMap.get(encode(artifact.of))?.name;
-			expect(expectedHandle).to.be.ok;
-			expect(artifact.is.value).to.be.eq(expectedHandle!);
+        for await (const artifact of query) {
+            await populateWithHackers(artifacts);
 
-			count++;
-		}
+            let expectedHandle = entityMap.get(encode(artifact.of))?.name;
+            expect(expectedHandle).to.be.ok;
+            expect(artifact.is.value).to.be.eq(expectedHandle!)
 
-		expect(count).to.be.eql(5);
-	});
+            count++;
+        }
 
-	it("gives a 32-byte hash as the revision", async () => {
-		let artifacts = await Artifacts.anonymous();
-		await populateWithHackers(artifacts);
+        expect(count).to.be.eql(5);
+    });
 
-		let revision = await artifacts.revision();
+    it('gives a 32-byte hash as the revision', async () => {
+        let artifacts = await Artifacts.anonymous();
+        await populateWithHackers(artifacts);
 
-		expect(revision.length).to.be.eql(32);
-	});
+        let revision = await artifacts.revision();
 
-	it("can reset to an earlier revision", async () => {
-		let artifacts = await Artifacts.anonymous();
-		let entityMap = await populateWithHackers(artifacts);
+        expect(revision.length).to.be.eql(32);
+    });
 
-		let revision = await artifacts.revision();
+    it('can reset to an earlier revision', async () => {
+        let artifacts = await Artifacts.anonymous();
+        let entityMap = await populateWithHackers(artifacts);
 
-		await populateWithHackers(artifacts);
+        let revision = await artifacts.revision();
 
-		await artifacts.reset(revision);
+        await populateWithHackers(artifacts);
 
-		let query = artifacts.select({
-			the: "profile/name",
-		});
+        await artifacts.reset(revision);
 
-		let count = 0;
+        let query = artifacts.select({
+            the: "profile/name"
+        });
 
-		for await (const artifact of query) {
-			count++;
-			expect(entityMap.has(encode(artifact.of))).to.be.true;
-		}
+        let count = 0;
 
-		expect(count).to.be.eql(5);
-	});
+        for await (const artifact of query) {
+            count++;
+            expect(entityMap.has(encode(artifact.of))).to.be.true;
+        }
+
+        expect(count).to.be.eql(5);
+    });
+
 });

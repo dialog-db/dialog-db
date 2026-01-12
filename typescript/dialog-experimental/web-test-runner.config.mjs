@@ -1,13 +1,13 @@
-import { vitePlugin } from "@remcovaes/web-test-runner-vite-plugin";
-import react from "@vitejs/plugin-react-swc";
+import { vitePlugin } from '@remcovaes/web-test-runner-vite-plugin'
+import react from '@vitejs/plugin-react-swc'
 
-react.preambleCode;
+react.preambleCode
 export default {
-	plugins: [
-		vitePlugin({
-			plugins: [react()],
-		}),
-	],
+  plugins: [
+    vitePlugin({
+      plugins: [react()],
+    }),
+  ],
 
-	testsFinishTimeout: 10000,
-};
+  testsFinishTimeout: 10000,
+}
