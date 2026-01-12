@@ -6,8 +6,8 @@ use crate::replica::{BranchId, Site};
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_storage::{
-    CborEncoder, DialogStorageError, Encoder, StorageBackend, TransactionalMemory,
-    TransactionalMemoryBackend,
+    CborEncoder, DialogStorageError, Encoder, StorageBackend, TransactionalMemoryBackend,
+    TransactionalMemoryCell, UpdatePolicy,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -149,7 +149,7 @@ where
 /// A transactional storage wraps a backend and encoder, providing
 /// a foundation for creating typed stores.
 #[derive(Clone)]
-pub struct Storage<Backend: StorageBackend, Codec: Encoder = CborEncoder>
+pub struct PlatformStorage<Backend: StorageBackend, Codec: Encoder = CborEncoder>
 where
     Backend: TransactionalMemoryBackend,
     Backend::Address: Clone + Eq + std::hash::Hash,
@@ -158,7 +158,7 @@ where
     codec: Codec,
 }
 
-impl<Backend: StorageBackend, Codec: Encoder> std::fmt::Debug for Storage<Backend, Codec>
+impl<Backend: StorageBackend, Codec: Encoder> std::fmt::Debug for PlatformStorage<Backend, Codec>
 where
     Backend: TransactionalMemoryBackend,
     Backend::Address: Clone + Eq + std::hash::Hash,
@@ -174,7 +174,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend: StorageBackend, Codec: Encoder> Encoder for Storage<Backend, Codec>
+impl<Backend: StorageBackend, Codec: Encoder> Encoder for PlatformStorage<Backend, Codec>
 where
     Backend: TransactionalMemoryBackend + ConditionalSync,
     Backend::Address: Clone + Eq + std::hash::Hash,
@@ -202,7 +202,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend: StorageBackend, Codec: Encoder> StorageBackend for Storage<Backend, Codec>
+impl<Backend: StorageBackend, Codec: Encoder> StorageBackend for PlatformStorage<Backend, Codec>
 where
     Backend: TransactionalMemoryBackend + ConditionalSync,
     Backend::Key: From<Vec<u8>> + AsRef<[u8]> + ConditionalSync,
@@ -225,7 +225,7 @@ where
     }
 }
 
-impl<Backend: StorageBackend, Codec: Encoder> Storage<Backend, Codec>
+impl<Backend: StorageBackend, Codec: Encoder> PlatformStorage<Backend, Codec>
 where
     Backend: TransactionalMemoryBackend,
     Backend::Address: Clone + Eq + std::hash::Hash,
@@ -240,26 +240,33 @@ where
     pub async fn open<T>(
         &self,
         key: &Backend::Address,
-    ) -> Result<TransactionalMemory<T, Self, Codec>, DialogStorageError>
+    ) -> Result<TransactionalMemoryCell<T, Self, 32, Codec>, DialogStorageError>
     where
         T: Serialize + DeserializeOwned + ConditionalSync + std::fmt::Debug + Clone,
         Backend: TransactionalMemoryBackend<Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
-        Backend::Address: Clone + AsRef<[u8]> + From<Vec<u8>>,
+        Backend::Address: Clone + AsRef<[u8]> + From<Vec<u8>> + std::fmt::Debug,
         Backend::Edition: Clone,
         Codec: ConditionalSync + Clone,
         Codec::Bytes: AsRef<[u8]>,
         Codec::Error: std::fmt::Display,
         Self: Clone,
     {
-        TransactionalMemory::open(key.clone(), self, self.codec.clone()).await
+        TransactionalMemoryCell::open(
+            key.clone(),
+            self,
+            self.codec.clone(),
+            UpdatePolicy::default(),
+        )
+        .await
     }
 }
 
 // Implement TransactionalMemoryBackend for Storage so it can be passed directly to replace/reload
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend: StorageBackend, Codec: Encoder> TransactionalMemoryBackend for Storage<Backend, Codec>
+impl<Backend: StorageBackend, Codec: Encoder> TransactionalMemoryBackend
+    for PlatformStorage<Backend, Codec>
 where
     Backend: TransactionalMemoryBackend + ConditionalSync,
     Backend::Address: Clone + Eq + std::hash::Hash + AsRef<[u8]> + From<Vec<u8>> + ConditionalSync,
@@ -290,8 +297,8 @@ where
     }
 }
 
-/// Type alias for TransactionalMemory with default CborEncoder.
+/// Type alias for TransactionalMemoryCell with default CborEncoder.
 /// Type alias for backwards compatibility with old TypedStoreResource API.
-/// Now uses TransactionalMemory from dialog_storage.
-/// Both Storage and TransactionalMemory default to CborEncoder, so we don't need to specify it.
-pub type TypedStoreResource<T, Backend> = TransactionalMemory<T, Storage<Backend>>;
+/// Now uses TransactionalMemoryCell from dialog_storage.
+/// Both Storage and TransactionalMemoryCell default to CborEncoder, so we don't need to specify it.
+pub type TypedStoreResource<T, Backend> = TransactionalMemoryCell<T, PlatformStorage<Backend>>;

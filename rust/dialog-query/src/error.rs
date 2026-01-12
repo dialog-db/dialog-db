@@ -33,9 +33,7 @@ pub enum QueryError {
     ConstraintViolation { constraint: String },
 
     /// A variable was used inconsistently in a formula
-    #[error(
-        "Variable inconsistency: {parameter:?} has actual value {actual:?} but expected {expected:?}"
-    )]
+    #[error("Variable inconsistency: {parameter:?} has actual value {actual:?} but expected {expected:?}")]
     VariableInconsistency {
         parameter: String,
         actual: Term<Value>,

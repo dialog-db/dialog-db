@@ -1,4 +1,4 @@
-use super::platform::Storage as PlatformStorage;
+use super::platform::PlatformStorage;
 use super::platform::{ErrorMappingBackend, PlatformBackend, TypedStoreResource};
 pub use super::uri::Uri;
 use crate::artifacts::selector::Constrained;
@@ -13,7 +13,7 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use base58::ToBase58;
 use blake3;
-use dialog_common::{ConditionalSend, DialogAsyncError, SharedCell, TaskQueue};
+use dialog_common::{ConditionalSend, DialogAsyncError, TaskQueue};
 use dialog_prolly_tree::{
     Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Node, Tree, TreeDifference,
 };
@@ -350,7 +350,7 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::Encoder for Archive<Bac
 }
 
 /// A branch represents a named line of development within a replica.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Branch<Backend: PlatformBackend + 'static> {
     issuer: Issuer,
     id: BranchId,
@@ -358,7 +358,16 @@ pub struct Branch<Backend: PlatformBackend + 'static> {
     archive: Archive<Backend>,
     memory: TypedStoreResource<BranchState, Backend>,
     tree: Arc<RwLock<Index<Backend>>>,
-    upstream: Arc<SharedCell<Option<Upstream<Backend>>>>,
+    upstream: Arc<std::sync::RwLock<Option<Upstream<Backend>>>>,
+}
+
+impl<Backend: PlatformBackend + 'static> std::fmt::Debug for Branch<Backend> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Branch")
+            .field("id", &self.id)
+            .field("issuer", &self.issuer)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<Backend: PlatformBackend + 'static> Branch<Backend> {
@@ -368,14 +377,14 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         default_state: Option<BranchState>,
     ) -> Result<TypedStoreResource<BranchState, Backend>, ReplicaError> {
         let key = format!("local/{}", id);
-        let mut memory = storage
+        let memory = storage
             .open::<BranchState>(&key.into())
             .await
             .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
         // if we branch does not exist yet and we have default state we create
         // a branch.
-        if let (None, Some(state)) = (memory.content(), default_state) {
+        if let (None, Some(state)) = (memory.read(), default_state) {
             memory
                 .replace_with(
                     move |prior| prior.to_owned().or(Some(state.clone())),
@@ -400,7 +409,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
         // if we have a memory of tis branch we initialize it otherwise
         // we produce an error.
-        if let Some(state) = memory.content() {
+        if let Some(state) = memory.read() {
             // Load the tree from the revision's tree hash
             let tree = Tree::from_hash(state.revision.tree().hash(), archive.clone())
                 .await
@@ -426,7 +435,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                 memory,
                 archive,
                 storage: storage.clone(),
-                upstream: Arc::new(SharedCell::new(upstream)),
+                upstream: Arc::new(std::sync::RwLock::new(upstream)),
                 tree: Arc::new(RwLock::new(tree)),
             })
         } else {
@@ -526,7 +535,10 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// Lazily initializes and returns a mutable reference to the upstream.
     /// Returns None if no upstream is configured.
     pub fn upstream(&self) -> Option<Upstream<Backend>> {
-        self.upstream.read().clone()
+        self.upstream
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Fetches remote reference of this branch. If this branch has no upstream
@@ -544,7 +556,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     }
 
     fn state(&self) -> BranchState {
-        self.memory.content().unwrap_or_else(|| {
+        self.memory.read().unwrap_or_else(|| {
             BranchState::new(
                 self.id.clone(),
                 Revision::new(self.issuer.principal().to_owned()),
@@ -680,7 +692,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// 3. Integrates local changes into upstream tree
     /// 4. Creates a new revision with proper period/moment
     pub async fn pull(&mut self) -> Result<Option<Revision>, ReplicaError> {
-        if let Some(_revision) = &mut self.upstream() {
+        if self.upstream().is_some() {
             if let Some(revision) = self.fetch().await? {
                 // if upstream revision is different from our base
                 // we'll merge local changes onto upstream tree otherwise
@@ -778,8 +790,8 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             .await
             .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
-        // Next set the archive remote to the upstream store if it is a
-        // remote so tree changes will be replicated if local clear the remote
+        // Set the archive remote to the upstream store if it is a
+        // remote so tree changes will be replicated; if local, clear the remote
         match &upstream {
             Upstream::Remote(remote) => {
                 self.archive.set_remote(remote.remote_storage.clone()).await;
@@ -789,8 +801,8 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             }
         }
 
-        // Also update the upstream on the branch
-        *self.upstream.write() = Some(upstream);
+        // Update the cached upstream on the branch
+        *self.upstream.write().unwrap_or_else(|e| e.into_inner()) = Some(upstream);
 
         Ok(())
     }
@@ -1061,7 +1073,6 @@ pub type RemoteBackend =
     ErrorMappingBackend<dialog_storage::MemoryStorageBackend<Vec<u8>, Vec<u8>>>;
 
 /// Represents a connection to a remote repository.
-#[derive(Debug)]
 pub struct Remote<Backend: PlatformBackend> {
     /// Site of the remote
     pub site: Site,
@@ -1069,6 +1080,15 @@ pub struct Remote<Backend: PlatformBackend> {
     storage: PlatformStorage<Backend>,
     connection: PlatformStorage<RemoteBackend>,
 }
+
+impl<Backend: PlatformBackend> std::fmt::Debug for Remote<Backend> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Remote")
+            .field("site", &self.site)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<Backend: PlatformBackend> Remote<Backend> {
     /// Returns the site identifier for this remote.
     pub fn site(&self) -> &Site {
@@ -1094,7 +1114,7 @@ impl<Backend: PlatformBackend> Remote<Backend> {
         storage: PlatformStorage<Backend>,
     ) -> Result<Remote<Backend>, ReplicaError> {
         let memory = Self::mount(site, &storage).await?;
-        if let Some(state) = memory.content().clone() {
+        if let Some(state) = memory.read().clone() {
             Ok(Remote {
                 site: state.site.clone(),
                 connection: state.connect()?,
@@ -1113,10 +1133,10 @@ impl<Backend: PlatformBackend> Remote<Backend> {
         state: RemoteState,
         storage: PlatformStorage<Backend>,
     ) -> Result<Remote<Backend>, ReplicaError> {
-        let mut memory = Self::mount(&state.site, &storage).await?;
+        let memory = Self::mount(&state.site, &storage).await?;
         let mut alread_exists = false;
 
-        if let Some(existing_state) = memory.content() {
+        if let Some(existing_state) = memory.read() {
             alread_exists = true;
             if state != existing_state {
                 return Err(ReplicaError::RemoteAlreadyExists {
@@ -1175,7 +1195,7 @@ impl<Backend: PlatformBackend> Remote<Backend> {
 }
 
 /// Represents a branch on a remote repository.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RemoteBranch<Backend: PlatformBackend> {
     /// Name of the remote this branch is part of
     pub site: Site,
@@ -1192,6 +1212,15 @@ pub struct RemoteBranch<Backend: PlatformBackend> {
     pub cache: TypedStoreResource<Revision, Backend>,
     /// Canonical revision, which is created lazily on fetch.
     pub canonical: Option<TypedStoreResource<Revision, RemoteBackend>>,
+}
+
+impl<Backend: PlatformBackend> std::fmt::Debug for RemoteBranch<Backend> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteBranch")
+            .field("site", &self.site)
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<Backend: PlatformBackend> RemoteBranch<Backend> {
@@ -1279,7 +1308,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
         // Force reload from storage to ensure we get fresh data
         let _ = canonical.reload(&self.remote_storage).await;
 
-        let revision = canonical.content().clone();
+        let revision = canonical.read().clone();
 
         // update local record for the revision.
         self.cache
@@ -1298,7 +1327,7 @@ impl<Backend: PlatformBackend> RemoteBranch<Backend> {
 
         // we only need to publish to upstream if desired revision is different
         // from the last revision we have read from upstream.
-        if canonical.content().as_ref() != Some(&revision) {
+        if canonical.read().as_ref() != Some(&revision) {
             canonical
                 .replace(Some(revision.clone()), &self.remote_storage)
                 .await
@@ -1931,10 +1960,10 @@ pub enum ReplicaError {
     },
 
     /// Pushing a revision failed
-    #[error("Pushing revision failed cause {cause}")]
+    #[error("Pushing revision failed: {cause}")]
     PushFailed {
-        /// The underlying error
-        cause: DialogStorageError,
+        /// The underlying error message
+        cause: String,
     },
 
     /// Remote repository not found
@@ -2185,15 +2214,12 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    #[tokio::test]
-    async fn test_end_to_end_remote_upstream() -> anyhow::Result<()> {
+    #[dialog_common::test]
+    async fn test_end_to_end_remote_upstream(
+        s3_address: dialog_storage::s3::helpers::S3Address,
+    ) -> anyhow::Result<()> {
         use dialog_storage::JournaledStorage;
-        use dialog_storage::s3::helpers::{S3Settings, start};
         use futures_util::stream;
-
-        // Start a local S3-compatible test server
-        let (s3_address, _s3_server) = start(S3Settings::default()).await?;
 
         // Step 1: Generate issuer
         let issuer = Issuer::from_passphrase("test_end_to_end_remote_upstream");
@@ -2408,18 +2434,11 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    #[tokio::test]
-    async fn test_push_and_pull_simple() -> anyhow::Result<()> {
-        use dialog_storage::s3::helpers::{S3Settings, start};
+    #[dialog_common::test]
+    async fn test_push_and_pull_simple(
+        s3_address: dialog_storage::s3::helpers::S3Address,
+    ) -> anyhow::Result<()> {
         use futures_util::stream;
-
-        // Start S3 server
-        let (s3_address, _s3_server) = start(S3Settings {
-            bucket: "shared-repo".to_string(),
-            ..S3Settings::default()
-        })
-        .await?;
 
         // Create Alice's replica
         let alice_issuer = Issuer::from_passphrase("alice");
@@ -2538,19 +2557,12 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    #[tokio::test]
-    async fn test_collaborative_workflow_alice_and_bob() -> anyhow::Result<()> {
+    #[dialog_common::test]
+    async fn test_collaborative_workflow_alice_and_bob(
+        s3_address: dialog_storage::s3::helpers::S3Address,
+    ) -> anyhow::Result<()> {
         use dialog_storage::JournaledStorage;
-        use dialog_storage::s3::helpers::{S3Settings, start};
         use futures_util::stream;
-
-        // Start a shared S3-compatible test server for collaboration
-        let (s3_address, _s3_server) = start(S3Settings {
-            bucket: "shared-repo".to_string(),
-            ..S3Settings::default()
-        })
-        .await?;
 
         // Step 1: Create Alice's replica with her own issuer and backend
         let alice_issuer = Issuer::from_passphrase("alice");
@@ -2786,21 +2798,14 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    #[tokio::test]
-    async fn test_pull_without_local_changes_adopts_upstream_revision() -> anyhow::Result<()> {
+    #[dialog_common::test]
+    async fn test_pull_without_local_changes_adopts_upstream_revision(
+        s3_address: dialog_storage::s3::helpers::S3Address,
+    ) -> anyhow::Result<()> {
         // This test verifies that when pulling with no local changes,
         // we adopt the upstream revision directly without creating a new one
         use dialog_storage::JournaledStorage;
-        use dialog_storage::s3::helpers::{S3Settings, start};
         use futures_util::stream;
-
-        // Start a shared S3-compatible test server
-        let (s3_address, _s3_server) = start(S3Settings {
-            bucket: "shared-repo".to_string(),
-            ..S3Settings::default()
-        })
-        .await?;
 
         // Create Alice's replica
         let alice_issuer = Issuer::from_passphrase("alice");
@@ -2986,19 +2991,13 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    #[tokio::test]
-    async fn test_fetch_without_pull() -> anyhow::Result<()> {
+    #[dialog_common::test]
+    async fn test_fetch_without_pull(
+        s3_address: dialog_storage::s3::helpers::S3Address,
+    ) -> anyhow::Result<()> {
         // Test that fetch() retrieves upstream state without merging
         use dialog_storage::JournaledStorage;
-        use dialog_storage::s3::helpers::{S3Settings, start};
         use futures_util::stream;
-
-        let (s3_address, _s3_server) = start(S3Settings {
-            bucket: "fetch-test".to_string(),
-            ..S3Settings::default()
-        })
-        .await?;
 
         // Create Alice's replica
         let alice_issuer = Issuer::from_passphrase("alice");
@@ -3093,18 +3092,12 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    #[tokio::test]
-    async fn test_multiple_remotes() -> anyhow::Result<()> {
+    #[dialog_common::test]
+    async fn test_multiple_remotes(
+        s3_address: dialog_storage::s3::helpers::S3Address,
+    ) -> anyhow::Result<()> {
         // Test managing multiple remote upstreams
         use dialog_storage::JournaledStorage;
-        use dialog_storage::s3::helpers::{S3Settings, start};
-
-        let (s3_address, _s3_server) = start(S3Settings {
-            bucket: "multi-remote".to_string(),
-            ..S3Settings::default()
-        })
-        .await?;
 
         let issuer = Issuer::from_passphrase("multi-remote-user");
         let backend = MemoryStorageBackend::default();
@@ -3198,13 +3191,11 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    #[tokio::test]
-    async fn test_archive_caches_remote_reads_to_local() -> anyhow::Result<()> {
-        use dialog_storage::s3::{
-            Address, Bucket, Credentials,
-            helpers::{S3Settings, start},
-        };
+    #[dialog_common::test]
+    async fn test_archive_caches_remote_reads_to_local(
+        s3_address: dialog_storage::s3::helpers::S3Address,
+    ) -> anyhow::Result<()> {
+        use dialog_storage::s3::{Address, Bucket, Credentials};
         use dialog_storage::{ContentAddressedStorage, MemoryStorageBackend};
         use serde::{Deserialize, Serialize};
 
@@ -3214,8 +3205,6 @@ mod tests {
             value: String,
         }
 
-        // Start S3 test server
-        let (s3_address, _s3_server) = start(S3Settings::default()).await?;
         let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
         let credentials = Credentials {
             access_key_id: s3_address.access_key_id.clone(),

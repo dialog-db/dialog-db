@@ -43,13 +43,11 @@ pub mod web;
 
 /// Core artifacts types and functionality for operating on artifacts
 pub mod artifacts;
-#[allow(ambiguous_glob_reexports)]
 pub use artifacts::*;
 
 mod platform;
 /// Replica abstraction for dialog
 pub mod replica;
-// #[allow(ambiguous_glob_reexports)]
 pub use platform::*;
 mod reference;
 pub use reference::*;
