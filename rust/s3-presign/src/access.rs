@@ -394,8 +394,6 @@ mod tests {
     use crate::Hasher;
     use chrono::TimeZone;
 
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
-
     fn test_credentials() -> Credentials {
         Credentials {
             access_key_id: "my-id".into(),
@@ -567,7 +565,7 @@ mod tests {
         }
     }
 
-    #[dialog_common::test]
+    #[test]
     fn it_authorizes_s3_put_request() {
         let credentials = test_credentials();
         let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
@@ -583,7 +581,7 @@ mod tests {
         assert!(auth.url.as_str().contains("X-Amz-Signature="));
     }
 
-    #[dialog_common::test]
+    #[test]
     fn it_authorizes_r2_put_request() {
         let credentials = test_credentials();
         let request = TestPutRequest::new(r2_url("file/path"), b"test body", TEST_REGION)
@@ -598,7 +596,7 @@ mod tests {
         assert!(auth.url.as_str().contains("X-Amz-Signature="));
     }
 
-    #[dialog_common::test]
+    #[test]
     fn it_authorizes_get_request() {
         let credentials = test_credentials();
         let request = TestGetRequest::new(s3_url("file/path"), TEST_REGION).with_time(test_time());
@@ -611,7 +609,7 @@ mod tests {
         );
     }
 
-    #[dialog_common::test]
+    #[test]
     fn it_authorizes_delete_request() {
         let credentials = test_credentials();
         let request =
@@ -625,7 +623,7 @@ mod tests {
         );
     }
 
-    #[dialog_common::test]
+    #[test]
     fn it_includes_checksum_header_in_put_request() {
         let credentials = test_credentials();
         let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
@@ -641,7 +639,7 @@ mod tests {
         assert!(auth.url.as_str().contains("x-amz-checksum-sha256"));
     }
 
-    #[dialog_common::test]
+    #[test]
     fn it_includes_acl_in_put_request() {
         let credentials = test_credentials();
         let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
@@ -653,19 +651,19 @@ mod tests {
         assert!(auth.url.as_str().contains("x-amz-acl=public-read"));
     }
 
-    #[dialog_common::test]
+    #[test]
     fn it_hex_encodes_bytes() {
         assert_eq!(hex_encode(&[0x01, 0x02, 0x03, 0x0A, 0x0F]), "0102030a0f");
     }
 
-    #[dialog_common::test]
+    #[test]
     fn it_percent_encodes_strings() {
         assert_eq!(percent_encode("abc123"), "abc123");
         assert_eq!(percent_encode("a b+c"), "a%20b%2Bc");
         assert_eq!(percent_encode("test/path"), "test%2Fpath");
     }
 
-    #[dialog_common::test]
+    #[test]
     fn it_includes_host_and_checksum_headers() {
         let credentials = test_credentials();
         let request =
@@ -681,8 +679,8 @@ mod tests {
     }
 
     /// Test that current_time() returns a reasonable value on all platforms.
-    #[dialog_common::test]
-    async fn it_gets_reasonable_current_time() -> anyhow::Result<()> {
+    #[test]
+    fn it_gets_reasonable_current_time() {
         let now = current_time();
         let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
 
@@ -706,14 +704,12 @@ mod tests {
 
         // Just verify it produces a valid signature
         assert!(auth.url.to_string().contains("X-Amz-Signature="));
-
-        Ok(())
     }
 
     /// Uses fixed inputs to verify signature generation is identical across platforms.
     /// If the signatures differ, it indicates a platform-specific bug in the signing code.
-    #[dialog_common::test]
-    async fn it_generates_identical_signatures_across_platforms() -> anyhow::Result<()> {
+    #[test]
+    fn it_generates_identical_signatures_across_platforms() {
         // Use the same fixed inputs as other tests
         // Note: expires = 86400 (24 hours) to match the original test configuration
         let credentials = test_credentials();
@@ -734,7 +730,5 @@ mod tests {
             "04b33a973b320c6aa27ab8e2f1821a563e80a032f6089b992070310de196bdff";
 
         assert_eq!(signature, EXPECTED_SIGNATURE);
-
-        Ok(())
     }
 }

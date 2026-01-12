@@ -2127,18 +2127,14 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 name = "s3-presign"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "base64",
  "chrono",
- "dialog-common",
  "hmac 0.12.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.17",
- "tokio",
  "url",
- "wasm-bindgen-test",
  "web-time",
 ]
 
