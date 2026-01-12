@@ -162,10 +162,7 @@ impl S3 for InMemoryS3 {
         if let Some(bucket_contents) = buckets.get(bucket) {
             if let Some(obj) = bucket_contents.get(key) {
                 let body = s3s::Body::from(Bytes::from(obj.data.clone()));
-                let content_type = obj
-                    .content_type
-                    .as_ref()
-                    .and_then(|s| s.parse().ok());
+                let content_type = obj.content_type.as_ref().and_then(|s| s.parse().ok());
                 let output = GetObjectOutput {
                     body: Some(StreamingBlob::from(body)),
                     content_length: Some(obj.data.len() as i64),
@@ -277,10 +274,7 @@ impl S3 for InMemoryS3 {
         let buckets = self.buckets.read().await;
         if let Some(bucket_contents) = buckets.get(bucket) {
             if let Some(obj) = bucket_contents.get(key) {
-                let content_type = obj
-                    .content_type
-                    .as_ref()
-                    .and_then(|s| s.parse().ok());
+                let content_type = obj.content_type.as_ref().and_then(|s| s.parse().ok());
                 let output = HeadObjectOutput {
                     content_length: Some(obj.data.len() as i64),
                     content_type,
@@ -385,7 +379,9 @@ pub async fn start(settings: S3Settings) -> anyhow::Result<(S3Address, LocalS3)>
 }
 
 /// Start a public (no auth) local S3 server.
-pub async fn start_public(settings: PublicS3Settings) -> anyhow::Result<(PublicS3Address, LocalS3)> {
+pub async fn start_public(
+    settings: PublicS3Settings,
+) -> anyhow::Result<(PublicS3Address, LocalS3)> {
     let bucket = if settings.bucket.is_empty() {
         "test-bucket"
     } else {

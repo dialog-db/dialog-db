@@ -1057,7 +1057,8 @@ impl<Backend: PlatformBackend> Remotes<Backend> {
 pub type RemoteBackend = ErrorMappingBackend<S3Bucket<Vec<u8>, Vec<u8>>>;
 
 #[cfg(not(feature = "s3"))]
-pub type RemoteBackend = ErrorMappingBackend<dialog_storage::MemoryStorageBackend<Vec<u8>, Vec<u8>>>;
+pub type RemoteBackend =
+    ErrorMappingBackend<dialog_storage::MemoryStorageBackend<Vec<u8>, Vec<u8>>>;
 
 /// Represents a connection to a remote repository.
 #[derive(Debug)]
@@ -2188,7 +2189,7 @@ mod tests {
     #[tokio::test]
     async fn test_end_to_end_remote_upstream() -> anyhow::Result<()> {
         use dialog_storage::JournaledStorage;
-        use dialog_storage::s3::helpers::{start, S3Settings};
+        use dialog_storage::s3::helpers::{S3Settings, start};
         use futures_util::stream;
 
         // Start a local S3-compatible test server
@@ -2270,8 +2271,7 @@ mod tests {
             "Remote state should contain site name 'origin'"
         );
         assert_eq!(
-            decoded_remote_state.address.endpoint,
-            s3_address.endpoint,
+            decoded_remote_state.address.endpoint, s3_address.endpoint,
             "Remote state should contain correct endpoint"
         );
 
@@ -2411,7 +2411,7 @@ mod tests {
     #[cfg(all(test, not(target_arch = "wasm32")))]
     #[tokio::test]
     async fn test_push_and_pull_simple() -> anyhow::Result<()> {
-        use dialog_storage::s3::helpers::{start, S3Settings};
+        use dialog_storage::s3::helpers::{S3Settings, start};
         use futures_util::stream;
 
         // Start S3 server
@@ -2542,7 +2542,7 @@ mod tests {
     #[tokio::test]
     async fn test_collaborative_workflow_alice_and_bob() -> anyhow::Result<()> {
         use dialog_storage::JournaledStorage;
-        use dialog_storage::s3::helpers::{start, S3Settings};
+        use dialog_storage::s3::helpers::{S3Settings, start};
         use futures_util::stream;
 
         // Start a shared S3-compatible test server for collaboration
@@ -2792,7 +2792,7 @@ mod tests {
         // This test verifies that when pulling with no local changes,
         // we adopt the upstream revision directly without creating a new one
         use dialog_storage::JournaledStorage;
-        use dialog_storage::s3::helpers::{start, S3Settings};
+        use dialog_storage::s3::helpers::{S3Settings, start};
         use futures_util::stream;
 
         // Start a shared S3-compatible test server
@@ -2991,7 +2991,7 @@ mod tests {
     async fn test_fetch_without_pull() -> anyhow::Result<()> {
         // Test that fetch() retrieves upstream state without merging
         use dialog_storage::JournaledStorage;
-        use dialog_storage::s3::helpers::{start, S3Settings};
+        use dialog_storage::s3::helpers::{S3Settings, start};
         use futures_util::stream;
 
         let (s3_address, _s3_server) = start(S3Settings {
@@ -3098,7 +3098,7 @@ mod tests {
     async fn test_multiple_remotes() -> anyhow::Result<()> {
         // Test managing multiple remote upstreams
         use dialog_storage::JournaledStorage;
-        use dialog_storage::s3::helpers::{start, S3Settings};
+        use dialog_storage::s3::helpers::{S3Settings, start};
 
         let (s3_address, _s3_server) = start(S3Settings {
             bucket: "multi-remote".to_string(),
@@ -3201,8 +3201,11 @@ mod tests {
     #[cfg(all(test, not(target_arch = "wasm32")))]
     #[tokio::test]
     async fn test_archive_caches_remote_reads_to_local() -> anyhow::Result<()> {
+        use dialog_storage::s3::{
+            Address, Bucket, Credentials,
+            helpers::{S3Settings, start},
+        };
         use dialog_storage::{ContentAddressedStorage, MemoryStorageBackend};
-        use dialog_storage::s3::{helpers::{start, S3Settings}, Address, Bucket, Credentials};
         use serde::{Deserialize, Serialize};
 
         // Define a simple test type
@@ -3213,11 +3216,7 @@ mod tests {
 
         // Start S3 test server
         let (s3_address, _s3_server) = start(S3Settings::default()).await?;
-        let address = Address::new(
-            &s3_address.endpoint,
-            "auto",
-            &s3_address.bucket,
-        );
+        let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
         let credentials = Credentials {
             access_key_id: s3_address.access_key_id.clone(),
             secret_access_key: s3_address.secret_access_key.clone(),

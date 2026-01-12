@@ -1,23 +1,23 @@
-import { type Predicate, type FactSchema, Task } from '@dialog-db/query'
-import { useEffect, useState, useContext, createContext, useMemo } from 'react'
-import type { Session, Changes, DID } from './session.js'
-import { open } from './session.js'
+import { type Predicate, type FactSchema, Task } from "@dialog-db/query";
+import { useEffect, useState, useContext, createContext, useMemo } from "react";
+import type { Session, Changes, DID } from "./session.js";
+import { open } from "./session.js";
 
-const DialogContext = createContext<DID | null>(null)
+const DialogContext = createContext<DID | null>(null);
 
 /**
  * Provider that can be used to bind a dialog db instance.
  */
-export const { Provider } = DialogContext
+export const { Provider } = DialogContext;
 
 /**
  * React hook that can be called at the top level of your component to obtain
  * dialog session that was set using exported provider.
  */
 export const useSession = () => {
-  const did = useContext(DialogContext)
-  return useMemo(() => (did ? open(did) : null), [did])
-}
+	const did = useContext(DialogContext);
+	return useMemo(() => (did ? open(did) : null), [did]);
+};
 
 /**
  * @param predicate - Predicate hook will react to.
@@ -42,21 +42,21 @@ export const useSession = () => {
  * ```
  */
 export const useQuery = function useQuery<Fact>(
-  predicate: Predicate<Fact, string, FactSchema>,
-  source?: Session
+	predicate: Predicate<Fact, string, FactSchema>,
+	source?: Session,
 ) {
-  const [selection, resetSelection] = useState([] as Fact[])
-  const session = source ?? useSession()
+	const [selection, resetSelection] = useState([] as Fact[]);
+	const session = source ?? useSession();
 
-  useEffect(() => {
-    if (session) {
-      const subscription = session.subscribe(predicate, resetSelection)
-      Task.perform(subscription.poll(session))
-      return subscription.cancel
-    }
-  }, [session])
-  return selection
-}
+	useEffect(() => {
+		if (session) {
+			const subscription = session.subscribe(predicate, resetSelection);
+			Task.perform(subscription.poll(session));
+			return subscription.cancel;
+		}
+	}, [session]);
+	return selection;
+};
 
 /**
  * React hook that can be used from the react component in order to obtain
@@ -64,14 +64,14 @@ export const useQuery = function useQuery<Fact>(
  * {@link Provider}.
  */
 export const useTransaction = () => {
-  const session = useSession()
+	const session = useSession();
 
-  return (changes: Changes) => transact(changes, session!)
-}
+	return (changes: Changes) => transact(changes, session!);
+};
 
 /**
  * Transacts all of the assertions and retractions atomically in the provided
  * dialog session.
  */
 export const transact = (changes: Changes, session: Session) =>
-  session.transact(changes)
+	session.transact(changes);
