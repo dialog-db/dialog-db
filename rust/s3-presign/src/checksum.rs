@@ -64,6 +64,12 @@ impl std::fmt::Display for Checksum {
     }
 }
 
+impl From<&Checksum> for String {
+    fn from(checksum: &Checksum) -> Self {
+        checksum.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

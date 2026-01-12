@@ -229,28 +229,27 @@ impl Public {
         &self,
         request: &I,
     ) -> Result<Authorization, AuthorizationError> {
-        unauthorized(request)
+        let url = request.url();
+        let host_str = url
+            .host_str()
+            .ok_or_else(|| AuthorizationError::InvalidEndpoint("URL missing host".into()))?;
+        let host = if let Some(port) = url.port() {
+            format!("{}:{}", host_str, port)
+        } else {
+            host_str.to_string()
+        };
+
+        let mut headers = vec![("host".to_string(), host)];
+        if let Some(checksum) = request.checksum() {
+            let header_name = format!("x-amz-checksum-{}", checksum.name());
+            headers.push((header_name, checksum.to_string()));
+        }
+
+        Ok(Authorization {
+            url: request.url().clone(),
+            headers,
+        })
     }
-}
-
-/// Authorize a public (unsigned) request.
-///
-/// Adds required headers (host, checksum) without signing.
-/// This is a convenience function equivalent to `Public.authorize(request)`.
-pub fn unauthorized<I: Invocation>(request: &I) -> Result<Authorization, AuthorizationError> {
-    let url = request.url();
-    let host = extract_host(url)?;
-
-    let mut headers = vec![("host".to_string(), host)];
-    if let Some(checksum) = request.checksum() {
-        let header_name = format!("x-amz-checksum-{}", checksum.name());
-        headers.push((header_name, checksum.to_string()));
-    }
-
-    Ok(Authorization {
-        url: url.clone(),
-        headers,
-    })
 }
 
 /// Request metadata required for S3 authorization.
@@ -395,6 +394,8 @@ mod tests {
     use crate::Hasher;
     use chrono::TimeZone;
 
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     fn test_credentials() -> Credentials {
         Credentials {
             access_key_id: "my-id".into(),
@@ -527,7 +528,46 @@ mod tests {
         }
     }
 
-    #[test]
+    struct TestDeleteRequest {
+        url: Url,
+        region: String,
+        time: Option<DateTime<Utc>>,
+    }
+
+    impl TestDeleteRequest {
+        fn new(url: Url, region: &str) -> Self {
+            Self {
+                url,
+                region: region.to_string(),
+                time: None,
+            }
+        }
+
+        fn with_time(mut self, time: DateTime<Utc>) -> Self {
+            self.time = Some(time);
+            self
+        }
+    }
+
+    impl Invocation for TestDeleteRequest {
+        fn method(&self) -> &'static str {
+            "DELETE"
+        }
+
+        fn url(&self) -> &Url {
+            &self.url
+        }
+
+        fn region(&self) -> &str {
+            &self.region
+        }
+
+        fn time(&self) -> DateTime<Utc> {
+            self.time.unwrap_or_else(current_time)
+        }
+    }
+
+    #[dialog_common::test]
     fn it_authorizes_s3_put_request() {
         let credentials = test_credentials();
         let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
@@ -543,7 +583,7 @@ mod tests {
         assert!(auth.url.as_str().contains("X-Amz-Signature="));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_authorizes_r2_put_request() {
         let credentials = test_credentials();
         let request = TestPutRequest::new(r2_url("file/path"), b"test body", TEST_REGION)
@@ -558,7 +598,7 @@ mod tests {
         assert!(auth.url.as_str().contains("X-Amz-Signature="));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_authorizes_get_request() {
         let credentials = test_credentials();
         let request = TestGetRequest::new(s3_url("file/path"), TEST_REGION).with_time(test_time());
@@ -571,7 +611,21 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
+    fn it_authorizes_delete_request() {
+        let credentials = test_credentials();
+        let request =
+            TestDeleteRequest::new(s3_url("file/path"), TEST_REGION).with_time(test_time());
+        let auth = credentials.authorize(&request).unwrap();
+
+        assert!(
+            auth.url
+                .as_str()
+                .contains("X-Amz-Algorithm=AWS4-HMAC-SHA256")
+        );
+    }
+
+    #[dialog_common::test]
     fn it_includes_checksum_header_in_put_request() {
         let credentials = test_credentials();
         let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
@@ -587,7 +641,7 @@ mod tests {
         assert!(auth.url.as_str().contains("x-amz-checksum-sha256"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_includes_acl_in_put_request() {
         let credentials = test_credentials();
         let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
@@ -599,19 +653,19 @@ mod tests {
         assert!(auth.url.as_str().contains("x-amz-acl=public-read"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_hex_encodes_bytes() {
         assert_eq!(hex_encode(&[0x01, 0x02, 0x03, 0x0A, 0x0F]), "0102030a0f");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_percent_encodes_strings() {
         assert_eq!(percent_encode("abc123"), "abc123");
         assert_eq!(percent_encode("a b+c"), "a%20b%2Bc");
         assert_eq!(percent_encode("test/path"), "test%2Fpath");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_includes_host_and_checksum_headers() {
         let credentials = test_credentials();
         let request =
@@ -626,9 +680,42 @@ mod tests {
         );
     }
 
+    /// Test that current_time() returns a reasonable value on all platforms.
+    #[dialog_common::test]
+    async fn it_gets_reasonable_current_time() -> anyhow::Result<()> {
+        let now = current_time();
+        let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+
+        // Verify the time is reasonable (year should be 2024-2030)
+        let year = &timestamp[0..4];
+        let year_num: u32 = year.parse().unwrap();
+        assert!(
+            year_num >= 2024 && year_num <= 2030,
+            "Year out of range: {}",
+            timestamp
+        );
+
+        // Print for debugging
+        #[cfg(not(target_arch = "wasm32"))]
+        println!("Native current_time: {}", timestamp);
+
+        // The signature is deterministic for a given time
+        let credentials = test_credentials();
+        let request = TestPutRequest::new(s3_url("test"), b"body", TEST_REGION).with_time(now);
+        let auth = credentials.authorize(&request).unwrap();
+
+        // Just verify it produces a valid signature
+        assert!(auth.url.to_string().contains("X-Amz-Signature="));
+
+        Ok(())
+    }
+
     /// Uses fixed inputs to verify signature generation is identical across platforms.
-    #[test]
-    fn it_generates_identical_signatures_across_platforms() {
+    /// If the signatures differ, it indicates a platform-specific bug in the signing code.
+    #[dialog_common::test]
+    async fn it_generates_identical_signatures_across_platforms() -> anyhow::Result<()> {
+        // Use the same fixed inputs as other tests
+        // Note: expires = 86400 (24 hours) to match the original test configuration
         let credentials = test_credentials();
         let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
             .with_time(test_time())
@@ -647,5 +734,7 @@ mod tests {
             "04b33a973b320c6aa27ab8e2f1821a563e80a032f6089b992070310de196bdff";
 
         assert_eq!(signature, EXPECTED_SIGNATURE);
+
+        Ok(())
     }
 }

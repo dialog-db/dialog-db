@@ -41,13 +41,12 @@
 //! println!("Presigned URL: {}", auth.url);
 //! ```
 
-mod access;
-mod address;
-mod checksum;
+pub mod access;
+pub mod address;
+pub mod checksum;
 
 pub use access::{
     Acl, Authorization, AuthorizationError, Credentials, DEFAULT_EXPIRES, Invocation, Public,
-    unauthorized,
 };
 pub use address::Address;
 pub use checksum::{Checksum, Hasher};

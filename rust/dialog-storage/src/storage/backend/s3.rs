@@ -119,7 +119,7 @@ use thiserror::Error;
 // Re-export core presigning types from s3-presign crate
 pub use s3_presign::{
     Acl, Address, Authorization, AuthorizationError, Checksum, Credentials, DEFAULT_EXPIRES,
-    Hasher, Invocation, Public, unauthorized,
+    Hasher, Invocation, Public, access,
 };
 
 mod key;

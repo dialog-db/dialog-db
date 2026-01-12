@@ -2130,12 +2130,15 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
+ "dialog-common",
  "hmac 0.12.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.17",
+ "tokio",
  "url",
+ "wasm-bindgen-test",
  "web-time",
 ]
 
