@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 ///
 /// Use a `Hasher` variant to compute a [`Checksum`] from data:
 ///
-/// ```no_run
-/// use dialog_storage::s3::{Hasher};
+/// ```
+/// use s3_presign::Hasher;
 /// let checksum = Hasher::Sha256.checksum(b"hello world");
 /// ```
 #[derive(Debug, Clone, Copy)]
@@ -59,13 +59,8 @@ impl Checksum {
 
 impl std::fmt::Display for Checksum {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&String::from(self))
-    }
-}
-
-impl From<&Checksum> for String {
-    fn from(checksum: &Checksum) -> Self {
-        base64::engine::general_purpose::STANDARD.encode(checksum.as_bytes())
+        let encoded = base64::engine::general_purpose::STANDARD.encode(self.as_bytes());
+        f.write_str(&encoded)
     }
 }
 

@@ -3,9 +3,7 @@
 //! This module contains the request types (`Put`, `Get`, `Delete`) and the `Request` trait
 //! for executing requests against an S3 backend.
 
-use super::access::{Acl, Invocation, Public};
-use super::checksum::{Checksum, Hasher};
-use super::{Bucket, S3StorageError};
+use super::{Acl, Bucket, Checksum, Hasher, Invocation, Public, S3StorageError};
 use async_trait::async_trait;
 use dialog_common::ConditionalSync;
 use url::Url;

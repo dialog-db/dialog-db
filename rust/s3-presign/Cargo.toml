@@ -1,0 +1,23 @@
+[package]
+name = "s3-presign"
+description = "AWS SigV4 presigned URL generation for S3-compatible storage"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+chrono = "0.4"
+hmac = "0.12"
+serde = { workspace = true, features = ["derive"] }
+sha2 = "0.10"
+thiserror = { workspace = true }
+url = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+serde_json = { workspace = true }
