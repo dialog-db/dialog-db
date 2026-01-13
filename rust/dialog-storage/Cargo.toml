@@ -21,7 +21,7 @@ helpers = [
   "dep:tower-http",
 ]
 # Enables the S3/R2-compatible storage backend
-s3 = ["dep:s3-presign", "dep:reqwest", "dep:url"]
+s3 = ["dep:dialog-s3-credentials", "dep:reqwest", "dep:url"]
 # Enables S3 list operations (ListObjectsV2) with XML parsing
 s3-list = ["s3", "dep:quick-xml"]
 # Enables real S3/R2 integration tests (requires R2S3_* environment variables)
@@ -44,7 +44,7 @@ brotli = { workspace = true }
 futures-util = { workspace = true }
 md5 = "0.8.0"
 reqwest = { workspace = true, features = ["json"], optional = true }
-s3-presign = { workspace = true, optional = true }
+dialog-s3-credentials = { workspace = true, optional = true }
 quick-xml = { version = "0.37", features = ["serde", "serialize"], optional = true }
 sieve-cache = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

@@ -116,8 +116,8 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 use std::marker::PhantomData;
 use thiserror::Error;
 
-// Re-export core presigning types from s3-presign crate
-pub use s3_presign::{
+// Re-export core presigning types from dialog-s3-credentials crate
+pub use dialog_s3_credentials::{
     Acl, Address, Authorization, AuthorizationError, Checksum, Credentials, DEFAULT_EXPIRES,
     Hasher, Invocation, Public, access,
 };

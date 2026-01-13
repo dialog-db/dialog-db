@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 /// Use a `Hasher` variant to compute a [`Checksum`] from data:
 ///
 /// ```
-/// use s3_presign::Hasher;
+/// use dialog_s3_credentials::Hasher;
 /// let checksum = Hasher::Sha256.checksum(b"hello world");
 /// ```
 #[derive(Debug, Clone, Copy)]

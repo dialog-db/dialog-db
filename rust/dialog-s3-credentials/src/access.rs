@@ -365,7 +365,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 ///
 /// Unreserved characters (A-Z, a-z, 0-9, `-`, `_`, `.`, `~`) are not encoded.
 /// All other bytes are encoded as `%XX` where XX is the uppercase hex value.
-pub fn percent_encode(s: &str) -> String {
+fn percent_encode(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 3);
     for byte in s.bytes() {
         match byte {
@@ -384,7 +384,7 @@ pub fn percent_encode(s: &str) -> String {
 ///
 /// Like [`percent_encode`], but keeps `/` characters unencoded to preserve
 /// the path hierarchy in S3 keys.
-pub fn percent_encode_path(path: &str) -> String {
+fn percent_encode_path(path: &str) -> String {
     percent_encode(path).replace("%2F", "/")
 }
 

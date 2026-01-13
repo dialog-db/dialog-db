@@ -1,5 +1,5 @@
 [package]
-name = "s3-presign"
+name = "dialog-s3-credentials"
 description = "AWS SigV4 presigned URL generation for S3-compatible storage"
 edition = "2024"
 version.workspace = true

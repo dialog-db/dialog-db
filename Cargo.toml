@@ -26,7 +26,7 @@ members = [
     "rust/dialog-query",
     "rust/dialog-query-macros",
     "rust/dialog-storage",
-    "rust/s3-presign",
+    "rust/dialog-s3-credentials",
 ]
 resolver = "2"
 
@@ -114,8 +114,8 @@ path = "./rust/dialog-query-macros"
 [workspace.dependencies.dialog-macros]
 path = "./rust/dialog-macros"
 
-[workspace.dependencies.s3-presign]
-path = "./rust/s3-presign"
+[workspace.dependencies.dialog-s3-credentials]
+path = "./rust/dialog-s3-credentials"
 
 # [patch.crates-io]
 # # TODO: https://github.com/gwierzchowski/csv-async/issues/27

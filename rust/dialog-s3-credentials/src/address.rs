@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// # Examples
 ///
 /// ```
-/// use s3_presign::Address;
+/// use dialog_s3_credentials::Address;
 ///
 /// // AWS S3
 /// let addr = Address::new(
@@ -61,7 +61,7 @@ impl Address {
     /// # Examples
     ///
     /// ```
-    /// use s3_presign::Address;
+    /// use dialog_s3_credentials::Address;
     ///
     /// // AWS S3
     /// let addr = Address::new(

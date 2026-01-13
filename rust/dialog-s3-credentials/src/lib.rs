@@ -11,7 +11,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use s3_presign::{Credentials, Invocation, Address};
+//! use dialog_s3_credentials::{Credentials, Invocation, Address};
 //! use url::Url;
 //!
 //! // Create credentials
