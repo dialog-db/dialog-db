@@ -116,14 +116,11 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 use std::marker::PhantomData;
 use thiserror::Error;
 
-mod access;
-pub use access::{Acl, AuthorizationError, Credentials, Invocation, Public};
-
-mod address;
-pub use address::Address;
-
-mod checksum;
-pub use checksum::{Checksum, Hasher};
+// Re-export core presigning types from dialog-s3-credentials crate
+pub use dialog_s3_credentials::{
+    Acl, Address, Authorization, AuthorizationError, Checksum, Credentials, DEFAULT_EXPIRES,
+    Hasher, Invocation, Public, access,
+};
 
 mod key;
 pub use key::{decode as decode_s3_key, encode as encode_s3_key};
@@ -145,6 +142,8 @@ use crate::{DialogStorageError, StorageBackend, StorageSink, TransactionalMemory
 // - Server implementation is native-only (internal to the helpers module)
 #[cfg(any(feature = "helpers", test))]
 pub mod helpers;
+#[cfg(all(feature = "helpers", not(target_arch = "wasm32")))]
+pub use helpers::{LocalS3, PublicS3Settings, S3Settings};
 #[cfg(any(feature = "helpers", test))]
 pub use helpers::{PublicS3Address, S3Address};
 

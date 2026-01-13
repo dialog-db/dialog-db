@@ -813,6 +813,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-s3-credentials"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "hmac 0.12.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.17",
+ "url",
+ "web-time",
+]
+
+[[package]]
 name = "dialog-storage"
 version = "0.1.0"
 dependencies = [
@@ -826,9 +841,9 @@ dependencies = [
  "bytes",
  "chrono",
  "dialog-common",
+ "dialog-s3-credentials",
  "futures-util",
  "getrandom 0.2.16",
- "hmac 0.12.1",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -843,7 +858,6 @@ dependencies = [
  "serde",
  "serde_ipld_dagcbor",
  "serde_json",
- "sha2 0.10.9",
  "sieve-cache",
  "tempfile",
  "thiserror 2.0.17",
