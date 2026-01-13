@@ -5,6 +5,7 @@
 //!
 //! [query string authentication]: https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -322,6 +323,131 @@ pub enum AuthorizationError {
     /// Failed to parse a URL.
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),
+    /// Error from access service.
+    #[error("access service error: {0}")]
+    AccessService(String),
+}
+
+/// Request metadata for authorization.
+///
+/// This struct captures all the information needed to authorize an S3 request.
+/// It can be constructed from any type implementing [`Invocation`], or built directly.
+///
+/// `RequestInfo` itself implements `Invocation`, so it can be passed to
+/// existing authorization methods.
+#[derive(Debug, Clone)]
+pub struct RequestInfo {
+    /// HTTP method (GET, PUT, DELETE)
+    pub method: &'static str,
+    /// Target URL
+    pub url: Url,
+    /// AWS region for signing
+    pub region: String,
+    /// Content checksum for integrity verification
+    pub checksum: Option<Checksum>,
+    /// Access control list setting
+    pub acl: Option<Acl>,
+    /// URL signature expiration in seconds
+    pub expires: u64,
+    /// Timestamp for signing
+    pub time: DateTime<Utc>,
+    /// Service name (defaults to "s3")
+    pub service: String,
+}
+
+impl RequestInfo {
+    /// Create RequestInfo from any type implementing Invocation.
+    pub fn from_invocation<I: Invocation>(inv: &I) -> Self {
+        Self {
+            method: inv.method(),
+            url: inv.url().clone(),
+            region: inv.region().to_string(),
+            checksum: inv.checksum().cloned(),
+            acl: inv.acl(),
+            expires: inv.expires(),
+            time: inv.time(),
+            service: inv.service().to_string(),
+        }
+    }
+}
+
+impl Invocation for RequestInfo {
+    fn method(&self) -> &'static str {
+        self.method
+    }
+
+    fn url(&self) -> &Url {
+        &self.url
+    }
+
+    fn region(&self) -> &str {
+        &self.region
+    }
+
+    fn checksum(&self) -> Option<&Checksum> {
+        self.checksum.as_ref()
+    }
+
+    fn acl(&self) -> Option<Acl> {
+        self.acl
+    }
+
+    fn service(&self) -> &str {
+        &self.service
+    }
+
+    fn expires(&self) -> u64 {
+        self.expires
+    }
+
+    fn time(&self) -> DateTime<Utc> {
+        self.time
+    }
+}
+
+/// Async authorizer for S3 requests.
+///
+/// This trait abstracts over different authorization mechanisms:
+/// - [`Credentials`] - AWS SigV4 local signing
+/// - [`Public`] - No signing for public buckets
+/// - Custom implementations for access services, token providers, etc.
+///
+/// # Example
+///
+/// ```ignore
+/// use dialog_s3_credentials::{Authorizer, Credentials, Public, RequestInfo};
+///
+/// // Both Credentials and Public implement Authorizer
+/// async fn authorize_request<A: Authorizer>(
+///     authorizer: &A,
+///     request: &RequestInfo,
+/// ) -> Result<Authorization, AuthorizationError> {
+///     authorizer.authorize(request).await
+/// }
+/// ```
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait Authorizer: Send + Sync + std::fmt::Debug {
+    /// Authorize a request, returning the URL and headers to use.
+    async fn authorize(&self, request: &RequestInfo) -> Result<Authorization, AuthorizationError>;
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Authorizer for Credentials {
+    async fn authorize(&self, request: &RequestInfo) -> Result<Authorization, AuthorizationError> {
+        // Delegate to the existing sync implementation
+        Credentials::authorize(self, request)
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Authorizer for Public {
+    async fn authorize(&self, request: &RequestInfo) -> Result<Authorization, AuthorizationError> {
+        // Delegate to the existing sync implementation
+        Public::authorize(self, request)
+    }
 }
 
 /// Extract host string from URL, including port for non-standard ports.

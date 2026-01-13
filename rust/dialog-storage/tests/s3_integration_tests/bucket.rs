@@ -41,7 +41,7 @@ pub fn open() -> Bucket<Vec<u8>, Vec<u8>> {
         option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
     );
 
-    Bucket::open(address, Some(credentials)).expect("Failed to open bucket")
+    Bucket::open(address, credentials).expect("Failed to open bucket")
 }
 
 pub fn open_unque_at(base: &str) -> Bucket<Vec<u8>, Vec<u8>> {

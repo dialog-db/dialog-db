@@ -7,6 +7,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait = "0.1"
 base64 = { workspace = true }
 chrono = "0.4"
 hmac = "0.12"

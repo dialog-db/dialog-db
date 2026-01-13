@@ -1450,6 +1450,8 @@ impl RemoteState {
     /// Creates a storage connection using this remote's configuration.
     #[cfg(feature = "s3")]
     pub fn connect(&self) -> Result<PlatformStorage<RemoteBackend>, ReplicaError> {
+        use dialog_storage::s3::Public;
+
         let address = S3Address::new(
             &self.address.endpoint,
             &self.address.region,
@@ -1464,16 +1466,18 @@ impl RemoteState {
             _ => None,
         };
 
-        let bucket = S3Bucket::open(address, credentials).map_err(|_| {
-            ReplicaError::RemoteConnectionError {
-                remote: self.site.clone(),
-            }
-        })?;
+        let bucket = match credentials {
+            Some(creds) => S3Bucket::open(address, creds),
+            None => S3Bucket::open(address, Public),
+        }
+        .map_err(|_| ReplicaError::RemoteConnectionError {
+            remote: self.site.clone(),
+        });
 
         let backend = if let Some(prefix) = &self.address.prefix {
-            bucket.at(prefix)
+            bucket?.at(prefix)
         } else {
-            bucket
+            bucket?
         };
 
         Ok(PlatformStorage::new(

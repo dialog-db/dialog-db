@@ -46,7 +46,8 @@ pub mod address;
 pub mod checksum;
 
 pub use access::{
-    Acl, Authorization, AuthorizationError, Credentials, DEFAULT_EXPIRES, Invocation, Public,
+    Acl, Authorization, AuthorizationError, Authorizer, Credentials, DEFAULT_EXPIRES, Invocation,
+    Public, RequestInfo,
 };
 pub use address::Address;
 pub use checksum::{Checksum, Hasher};

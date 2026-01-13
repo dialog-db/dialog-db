@@ -816,6 +816,7 @@ dependencies = [
 name = "dialog-s3-credentials"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64",
  "chrono",
  "hmac 0.12.1",

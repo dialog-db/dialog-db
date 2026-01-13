@@ -35,7 +35,7 @@ impl Hasher {
 ///
 /// This enum represents different checksum algorithms supported for S3 object integrity
 /// verification. The checksum is used in the `x-amz-checksum-{algorithm}` header.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Checksum {
     /// SHA-256 checksum.
     Sha256([u8; 32]),
