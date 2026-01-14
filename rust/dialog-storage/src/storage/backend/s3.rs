@@ -16,7 +16,7 @@
 //! For publicly accessible buckets that don't require authentication:
 //!
 //! ```no_run
-//! use dialog_storage::s3::{Address, Bucket};
+//! use dialog_storage::s3::{Address, Bucket, Public};
 //! use dialog_storage::StorageBackend;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,7 +26,8 @@
 //!     "us-east-1",
 //!     "my-bucket",
 //! );
-//! let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?;
+//! let authorizer = Public::new(address)?;
+//! let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
 //! let mut backend = bucket.at("data");  // Scope to a prefix/directory
 //!
 //! backend.set(b"key".to_vec(), b"value".to_vec()).await?;
@@ -42,17 +43,18 @@
 //! use dialog_storage::StorageBackend;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let credentials = Credentials {
-//!     access_key_id: std::env::var("AWS_ACCESS_KEY_ID")?,
-//!     secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY")?,
-//! };
-//!
 //! let address = Address::new(
 //!     "https://s3.us-east-1.amazonaws.com",
 //!     "us-east-1",
 //!     "my-bucket",
 //! );
-//! let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(address, credentials)?;
+//! let authorizer = Credentials::new(
+//!     address,
+//!     std::env::var("AWS_ACCESS_KEY_ID")?,
+//!     std::env::var("AWS_SECRET_ACCESS_KEY")?,
+//! )?;
+//!
+//! let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
 //! let mut backend = bucket.at("data");
 //!
 //! backend.set(b"key".to_vec(), b"value".to_vec()).await?;
@@ -66,18 +68,19 @@
 //! use dialog_storage::s3::{Address, Credentials, Bucket};
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let credentials = Credentials {
-//!     access_key_id: std::env::var("R2_ACCESS_KEY_ID")?,
-//!     secret_access_key: std::env::var("R2_SECRET_ACCESS_KEY")?,
-//! };
-//!
 //! // R2 uses "auto" region for signing
 //! let address = Address::new(
 //!     "https://account-id.r2.cloudflarestorage.com",
 //!     "auto",
 //!     "my-bucket",
 //! );
-//! let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(address, credentials)?;
+//! let authorizer = Credentials::new(
+//!     address,
+//!     std::env::var("R2_ACCESS_KEY_ID")?,
+//!     std::env::var("R2_SECRET_ACCESS_KEY")?,
+//! )?;
+//!
+//! let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
 //! let backend = bucket.at("data");
 //! # Ok(())
 //! # }
@@ -89,14 +92,10 @@
 //! use dialog_storage::s3::{Address, Credentials, Bucket};
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let credentials = Credentials {
-//!     access_key_id: "minioadmin".into(),
-//!     secret_access_key: "minioadmin".into(),
-//! };
-//!
 //! // IP addresses and localhost automatically use path-style URLs
 //! let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
-//! let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, credentials)?;
+//! let authorizer = Credentials::new(address, "minioadmin", "minioadmin")?;
+//! let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
 //! // path_style is true by default for IP addresses and localhost
 //! # Ok(())
 //! # }
@@ -121,6 +120,12 @@ use thiserror::Error;
 pub use dialog_s3_credentials::{
     Acl, Address, Authorization, AuthorizationError, Authorizer, Checksum, Credentials,
     DEFAULT_EXPIRES, Hasher, Invocation, Public, RequestInfo, access,
+};
+
+// Re-export UCAN types when the feature is enabled
+#[cfg(feature = "ucan")]
+pub use dialog_s3_credentials::{
+    DelegationChain, OperatorIdentity, UcanAuthorizer, UcanAuthorizerBuilder,
 };
 
 mod key;
@@ -180,26 +185,34 @@ impl From<reqwest::Error> for S3StorageError {
     }
 }
 
+impl From<AuthorizationError> for S3StorageError {
+    fn from(error: AuthorizationError) -> Self {
+        S3StorageError::AuthorizationError(error.to_string())
+    }
+}
+
 /// S3/R2-compatible storage backend.
+///
+/// The `Bucket` is configured entirely through its [`Authorizer`], which provides:
+/// - The S3 endpoint, region, and bucket (for [`Credentials`] and [`Public`])
+/// - URL building logic
+/// - Request signing/authorization
 ///
 /// # Example
 ///
 /// ```no_run
-/// use dialog_storage::s3::{Bucket, Address, Credentials};
+/// use dialog_storage::s3::{Bucket, Address, Credentials, Public};
 /// use dialog_storage::StorageBackend;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Public access (no credentials)
 /// let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "my-bucket");
-/// let mut storage = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?;
+/// let mut storage = Bucket::<Vec<u8>, Vec<u8>>::open(Public::new(address)?)?;
 ///
 /// // With credentials and prefix
-/// let credentials = Credentials {
-///     access_key_id: "...".into(),
-///     secret_access_key: "...".into(),
-/// };
 /// let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "my-bucket");
-/// let mut storage = Bucket::<Vec<u8>, Vec<u8>>::open(address, credentials)?
+/// let authorizer = Credentials::new(address, "access_key", "secret_key")?;
+/// let mut storage = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?
 ///     .at("data");  // Scope to a prefix/directory within the bucket
 ///
 /// storage.set(b"key".to_vec(), b"value".to_vec()).await?;
@@ -212,18 +225,9 @@ where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
 {
-    /// Parsed endpoint URL
-    endpoint: url::Url,
-    /// AWS region for signing
-    region: String,
-    /// Bucket name
-    bucket: String,
     /// Optional prefix/directory within the bucket
     path: Option<String>,
-    /// Use path-style URLs (bucket in path) vs virtual-hosted (bucket in subdomain)
-    /// Defaults to true for IP addresses and localhost, false otherwise.
-    path_style: bool,
-    /// Authorizer for signing requests
+    /// Authorizer for signing requests and building URLs
     authorizer: Arc<dyn Authorizer>,
     /// Hasher for computing checksums
     hasher: Hasher,
@@ -240,18 +244,14 @@ where
 {
     /// Open an S3 storage bucket with a specific authorizer.
     ///
-    /// Use [`Public`] for public/unsigned access, [`Credentials`] for AWS SigV4 signing,
-    /// or a custom [`Authorizer`] implementation for other auth mechanisms.
+    /// The authorizer provides all configuration including endpoint, region, bucket,
+    /// and signing credentials. Use:
+    /// - [`Public::new(address)`](Public::new) for public/unsigned access
+    /// - [`Credentials::new(address, key, secret)`](Credentials::new) for AWS SigV4 signing
+    /// - [`UcanAuthorizer`] for UCAN-based access via an access service
     ///
     /// By default uses SHA-256 for checksums. Use [`with_hasher`](Self::with_hasher)
     /// to configure a different algorithm.
-    ///
-    /// Path-style URLs are automatically enabled for IP addresses and localhost.
-    /// Use [`with_path_style`](Self::with_path_style) to override this behavior.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the endpoint URL is invalid.
     ///
     /// # Examples
     ///
@@ -261,52 +261,24 @@ where
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Public access (no signing)
     /// let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "my-bucket");
-    /// let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?;
+    /// let backend = Bucket::<Vec<u8>, Vec<u8>>::open(Public::new(address)?)?;
     ///
     /// // AWS credentials
-    /// let credentials = Credentials {
-    ///     access_key_id: "minioadmin".into(),
-    ///     secret_access_key: "minioadmin".into(),
-    /// };
     /// let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
-    /// let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, credentials)?;
+    /// let authorizer = Credentials::new(address, "minioadmin", "minioadmin")?;
+    /// let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn open<A: Authorizer + 'static>(
-        address: Address,
-        authorizer: A,
-    ) -> Result<Self, S3StorageError> {
-        let endpoint = url::Url::parse(address.endpoint())
-            .map_err(|e| S3StorageError::ServiceError(format!("Invalid endpoint URL: {}", e)))?;
-
-        let path_style = Self::is_path_style_default(&endpoint);
-
+    pub fn open<A: Authorizer + 'static>(authorizer: A) -> Result<Self, S3StorageError> {
         Ok(Self {
-            endpoint,
-            region: address.region().to_string(),
-            bucket: address.bucket().to_string(),
             path: None,
-            path_style,
             authorizer: Arc::new(authorizer),
             hasher: Hasher::Sha256,
             client: reqwest::Client::new(),
             key_type: PhantomData,
             value_type: PhantomData,
         })
-    }
-
-    /// Returns true if path-style URLs should be used by default for this endpoint.
-    ///
-    /// Returns true for IP addresses and localhost, since virtual-hosted style
-    /// URLs require DNS resolution of `{bucket}.{host}`.
-    fn is_path_style_default(endpoint: &url::Url) -> bool {
-        use url::Host;
-        match endpoint.host() {
-            Some(Host::Ipv4(_)) | Some(Host::Ipv6(_)) => true,
-            Some(Host::Domain(domain)) => domain == "localhost",
-            None => false,
-        }
     }
 
     /// Returns a new `Bucket` scoped to the given prefix/directory.
@@ -317,11 +289,11 @@ where
     /// # Examples
     ///
     /// ```no_run
-    /// use dialog_storage::s3::{Bucket, Address};
+    /// use dialog_storage::s3::{Bucket, Address, Public};
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "my-bucket");
-    /// let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?;
+    /// let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(Public::new(address)?)?;
     ///
     /// // Scope to "data" directory
     /// let data = bucket.at("data");
@@ -341,43 +313,13 @@ where
         };
 
         Self {
-            endpoint: self.endpoint.clone(),
-            region: self.region.clone(),
-            bucket: self.bucket.clone(),
             path: prefix,
-            path_style: self.path_style,
             authorizer: self.authorizer.clone(),
             hasher: self.hasher,
             client: self.client.clone(),
             key_type: PhantomData,
             value_type: PhantomData,
         }
-    }
-
-    /// Override the path-style URL setting.
-    ///
-    /// - `true`: Use path-style URLs (`https://endpoint/bucket/key`)
-    /// - `false`: Use virtual-hosted style URLs (`https://bucket.endpoint/key`)
-    ///
-    /// By default, path-style is enabled for IP addresses and localhost.
-    /// Most S3-compatible services (AWS S3, R2, Wasabi) support virtual-hosted style.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use dialog_storage::s3::{Bucket, Address};
-    ///
-    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// // Force path-style for a custom endpoint that doesn't support virtual-hosted
-    /// let address = Address::new("https://custom-s3.example.com", "us-east-1", "my-bucket");
-    /// let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?
-    ///     .with_path_style(true);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn with_path_style(mut self, path_style: bool) -> Self {
-        self.path_style = path_style;
-        self
     }
 
     /// Get the prefix/directory path, if any.
@@ -387,12 +329,7 @@ where
 
     /// Get the region for signing.
     pub fn region(&self) -> &str {
-        &self.region
-    }
-
-    /// Get the bucket name.
-    pub fn bucket(&self) -> &str {
-        &self.bucket
+        self.authorizer.region()
     }
 
     /// Set the hasher for computing checksums.
@@ -406,52 +343,25 @@ where
     /// This handles:
     /// - Key encoding (base58 for binary/unsafe characters)
     /// - Prefix prepending
-    /// - Path-style vs virtual-hosted style URL construction
+    /// - URL construction via the authorizer
     pub fn resolve(&self, key: &[u8]) -> Result<url::Url, S3StorageError> {
         let encoded_key = encode_s3_key(key);
-        let full_key = match &self.path {
+        let full_path = match &self.path {
             Some(prefix) => format!("{}/{}", prefix, encoded_key),
             None => encoded_key,
         };
 
-        self.build_url(&full_key)
+        self.authorizer
+            .build_url(&full_path)
+            .map_err(S3StorageError::from)
     }
 
     /// Build the base URL for the bucket (used for listing operations).
     pub fn base_url(&self) -> Result<url::Url, S3StorageError> {
-        self.build_url("")
-    }
-
-    /// Build a URL for the given path within the bucket.
-    fn build_url(&self, path: &str) -> Result<url::Url, S3StorageError> {
-        let url = if self.path_style {
-            // Path-style: https://endpoint/bucket/path
-            let mut url = self.endpoint.clone();
-            let new_path = if path.is_empty() {
-                format!("{}/", self.bucket)
-            } else {
-                format!("{}/{}", self.bucket, path)
-            };
-            url.set_path(&new_path);
-            url
-        } else {
-            // Virtual-hosted style: https://bucket.endpoint/path
-            let host = self
-                .endpoint
-                .host_str()
-                .ok_or_else(|| S3StorageError::ServiceError("Invalid endpoint: no host".into()))?;
-            let new_host = format!("{}.{}", self.bucket, host);
-
-            let mut url = self.endpoint.clone();
-            url.set_host(Some(&new_host))
-                .map_err(|e| S3StorageError::ServiceError(format!("Invalid host: {}", e)))?;
-
-            let new_path = if path.is_empty() { "/" } else { path };
-            url.set_path(new_path);
-            url
-        };
-
-        Ok(url)
+        let path = self.path.as_deref().unwrap_or("");
+        self.authorizer
+            .build_url(path)
+            .map_err(S3StorageError::from)
     }
 
     /// Delete an object from S3.
@@ -523,7 +433,7 @@ where
 }
 
 /// Maximum number of concurrent S3 PUT requests when writing.
-/// Modern mainstream browsers typically enforce a limit of 6 concurren
+/// Modern mainstream browsers typically enforce a limit of 6 concurrent
 /// requests on HTTP/1.1 which is what S3 is.
 const MAX_CONCURRENT_WRITES: usize = 6;
 
@@ -756,11 +666,18 @@ mod tests {
     use helpers::*;
     use url::Url;
 
+    fn test_address() -> Address {
+        Address::new("https://s3.amazonaws.com", "us-east-1", "bucket")
+    }
+
+    fn test_public() -> Public {
+        Public::new(test_address()).unwrap()
+    }
+
     #[dialog_common::test]
     fn it_builds_virtual_hosted_url_without_prefix() {
         // Virtual-hosted style: {bucket}.{endpoint}/{key}
-        let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public).unwrap();
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(test_public()).unwrap();
 
         let url = backend.resolve(&[1, 2, 3]).unwrap();
         assert_eq!(url.as_str(), "https://bucket.s3.amazonaws.com/!Ldp");
@@ -769,8 +686,7 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_virtual_hosted_url_with_prefix() {
         // Virtual-hosted style with prefix: {bucket}.{endpoint}/{prefix}/{key}
-        let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(test_public())
             .unwrap()
             .at("prefix");
 
@@ -782,7 +698,7 @@ mod tests {
     fn it_builds_virtual_hosted_url_with_key() {
         // Virtual-hosted style with text key
         let address = Address::new("https://s3.amazonaws.com", "us-east-1", "my-bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public).unwrap();
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(Public::new(address).unwrap()).unwrap();
 
         // "my-key" is safe ASCII, so it stays as-is (not encoded)
         let url = backend.resolve(b"my-key").unwrap();
@@ -793,7 +709,7 @@ mod tests {
     fn it_builds_path_style_url() {
         // Path-style: {endpoint}/{bucket}/{key}
         let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public).unwrap();
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(Public::new(address).unwrap()).unwrap();
         // localhost defaults to path_style=true
 
         let url = backend.resolve(b"my-key").unwrap();
@@ -804,7 +720,7 @@ mod tests {
     fn it_builds_path_style_url_with_prefix() {
         // Path-style with prefix: {endpoint}/{bucket}/{prefix}/{key}
         let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(Public::new(address).unwrap())
             .unwrap()
             .at("prefix");
 
@@ -816,9 +732,8 @@ mod tests {
     fn it_forces_path_style() {
         // Force path-style on a non-localhost endpoint
         let address = Address::new("https://custom-s3.example.com", "us-east-1", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)
-            .unwrap()
-            .with_path_style(true);
+        let authorizer = Public::new(address).unwrap().with_path_style(true);
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer).unwrap();
 
         let url = backend.resolve(b"key").unwrap();
         assert_eq!(url.as_str(), "https://custom-s3.example.com/bucket/key");
@@ -828,9 +743,8 @@ mod tests {
     fn it_forces_virtual_hosted_on_localhost() {
         // Force virtual-hosted on localhost (not typical, but supported)
         let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)
-            .unwrap()
-            .with_path_style(false);
+        let authorizer = Public::new(address).unwrap().with_path_style(false);
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer).unwrap();
 
         let url = backend.resolve(b"key").unwrap();
         assert_eq!(url.as_str(), "http://bucket.localhost:9000/key");
@@ -840,7 +754,7 @@ mod tests {
     fn it_builds_r2_url() {
         // R2 uses virtual-hosted style by default (non-localhost)
         let address = Address::new("https://abc123.r2.cloudflarestorage.com", "auto", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public).unwrap();
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(Public::new(address).unwrap()).unwrap();
 
         let url = backend.resolve(b"my-key").unwrap();
         assert_eq!(
@@ -851,8 +765,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_nests_open_calls() {
-        let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(test_public())
             .unwrap()
             .at("data")
             .at("v1");
@@ -875,43 +788,25 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_detects_path_style_default() {
-        // localhost should use path-style (auto-detected by Bucket::open)
-        let localhost = Url::parse("http://localhost:9000").unwrap();
-        assert!(Bucket::<Vec<u8>, Vec<u8>>::is_path_style_default(
-            &localhost
-        ));
-
-        // IPv4 addresses should use path-style
-        let ipv4 = Url::parse("http://127.0.0.1:9000").unwrap();
-        assert!(Bucket::<Vec<u8>, Vec<u8>>::is_path_style_default(&ipv4));
-
-        let ipv4_other = Url::parse("http://192.168.1.100:9000").unwrap();
-        assert!(Bucket::<Vec<u8>, Vec<u8>>::is_path_style_default(
-            &ipv4_other
-        ));
-
-        // Remote domains should use virtual-hosted
-        let remote = Url::parse("https://s3.amazonaws.com").unwrap();
-        assert!(!Bucket::<Vec<u8>, Vec<u8>>::is_path_style_default(&remote));
-    }
-
-    #[dialog_common::test]
-    fn it_generates_signed_urls() {
-        let credentials = Credentials {
-            access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
-            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
-        };
-
+    async fn it_generates_signed_urls() {
         let address = Address::new("https://s3.amazonaws.com", "us-east-1", "my-bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, credentials.clone()).unwrap();
+        let credentials = Credentials::new(
+            address,
+            "AKIAIOSFODNN7EXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        )
+        .unwrap();
+
+        // Bucket::open now takes a single Authorizer that contains the address
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(credentials.clone()).unwrap();
 
         // Create a PUT request for a key
         let url = backend.resolve(b"test-key").unwrap();
         let request = Put::new(url, b"test-value", "us-east-1");
 
-        // The credentials should be able to sign it
-        let authorized = credentials.authorize(&request).unwrap();
+        // The credentials should be able to sign it via the Authorizer trait
+        let request_info = RequestInfo::from_invocation(&request);
+        let authorized = credentials.authorize(&request_info).await.unwrap();
 
         // Should have signing parameters
         assert!(
@@ -924,11 +819,15 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_authorizes_public_request() {
-        let url = Url::parse("https://s3.amazonaws.com/bucket/key").unwrap();
+    async fn it_authorizes_public_request() {
+        let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
+        let public = Public::new(address).unwrap();
+
+        let url = Url::parse("https://bucket.s3.amazonaws.com/key").unwrap();
         let request = Put::new(url.clone(), b"test", "us-east-1").with_checksum(&Hasher::Sha256);
 
-        let authorization = Public.authorize(&request).unwrap();
+        let request_info = RequestInfo::from_invocation(&request);
+        let authorization = public.authorize(&request_info).await.unwrap();
 
         assert!(authorization.headers.iter().any(|(k, _)| k == "host"));
 
@@ -943,8 +842,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_configures_bucket_with_hasher() {
-        let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(test_public())
             .unwrap()
             .with_hasher(Hasher::Sha256);
 
@@ -964,9 +862,8 @@ mod tests {
     async fn it_sets_and_gets_values(env: PublicS3Address) -> anyhow::Result<()> {
         // Using public access for simplicity. Signed sessions are tested separately.
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?
-            .with_path_style(true)
-            .at("test");
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?.at("test");
 
         // Test data
         let key = b"test-key-1".to_vec();
@@ -985,7 +882,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_performs_multiple_operations(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?.with_path_style(true);
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
 
         // Set multiple values
         backend.set(b"key1".to_vec(), b"value1".to_vec()).await?;
@@ -1015,7 +913,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_large_values(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?.with_path_style(true);
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
 
         // Create a 100KB value
         let key = b"large-key".to_vec();
@@ -1032,7 +931,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_deletes_values(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?.with_path_style(true);
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
 
         let key = b"delete-test-key".to_vec();
         let value = b"delete-test-value".to_vec();
@@ -1059,9 +959,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_lists_objects(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?
-            .with_path_style(true)
-            .at("list-test");
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?.at("list-test");
 
         // Set multiple values
         backend.set(b"key1".to_vec(), b"value1".to_vec()).await?;
@@ -1086,8 +985,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_lists_empty_for_nonexistent_prefix(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?
-            .with_path_style(true)
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?
             .at("nonexistent-prefix-that-does-not-exist");
 
         // List objects with a prefix that has no objects - should return empty list
@@ -1104,7 +1003,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_errors_on_nonexistent_bucket(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", "bucket-that-does-not-exist");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?.with_path_style(true);
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
 
         // S3 returns 404 NoSuchBucket error when listing a non-existent bucket.
         // See: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_Errors
@@ -1127,9 +1027,8 @@ mod tests {
         use futures_util::TryStreamExt;
 
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?
-            .with_path_style(true)
-            .at("stream-test");
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?.at("stream-test");
 
         // Set multiple values
         backend.set(b"a".to_vec(), b"value-a".to_vec()).await?;
@@ -1156,7 +1055,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_none_for_missing_values(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?.with_path_style(true);
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
 
         // Try to get a key that doesn't exist
         let key = b"nonexistent-key".to_vec();
@@ -1170,9 +1070,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_performs_bulk_writes(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?
-            .with_path_style(true)
-            .at("bulk-test");
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?.at("bulk-test");
 
         // Create a source stream with multiple items
         use async_stream::try_stream;
@@ -1200,9 +1099,8 @@ mod tests {
         use futures_util::StreamExt;
 
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut s3_backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?
-            .with_path_style(true)
-            .at("memory-integration");
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let mut s3_backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?.at("memory-integration");
 
         // Create a memory backend with some data
         let mut memory_backend = crate::MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
@@ -1232,7 +1130,8 @@ mod tests {
     async fn it_uses_prefix(env: PublicS3Address) -> anyhow::Result<()> {
         // Create two backends with different prefixes
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?.with_path_style(true);
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
         let mut backend1 = bucket.clone().at("prefix-a");
         let mut backend2 = bucket.at("prefix-b");
 
@@ -1253,7 +1152,8 @@ mod tests {
     async fn it_uses_prefix_for_listing(env: PublicS3Address) -> anyhow::Result<()> {
         // Create two backends with different prefixes
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?.with_path_style(true);
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
         let mut backend1 = bucket.clone().at("prefix-a");
         let mut backend2 = bucket.at("prefix-b");
 
@@ -1275,7 +1175,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_overwrites_value(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?.with_path_style(true);
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
 
         let key = b"overwrite-key".to_vec();
 
@@ -1293,7 +1194,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_binary_keys(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?.with_path_style(true);
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
 
         // Binary key with non-UTF8 bytes
         let key = vec![0x00, 0xFF, 0x80, 0x7F];
@@ -1310,7 +1212,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_path_like_keys(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?.with_path_style(true);
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
 
         // Path-like key with slashes
         let key = b"path/to/nested/key".to_vec();
@@ -1327,7 +1230,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_encoded_key_segments(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?.with_path_style(true);
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
 
         // Test key with mixed safe and unsafe segments
         // "safe-segment/user@example.com" - first segment is safe, second has @ which is unsafe
@@ -1354,7 +1258,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_multi_segment_mixed_encoding(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?.with_path_style(true);
+        let authorizer = Public::new(address)?.with_path_style(true);
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
 
         // Test key with multiple segments: safe/unsafe/safe/unsafe pattern
         // "data/file name with spaces/v1/special!chars"
@@ -1412,16 +1317,12 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_works_with_signed_session(env: S3Address) -> anyhow::Result<()> {
-        // Create credentials matching the test server
-        let credentials = Credentials {
-            access_key_id: env.access_key_id.clone(),
-            secret_access_key: env.secret_access_key.clone(),
-        };
-
+        // Create credentials
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, credentials)?
-            .with_path_style(true)
-            .at("signed-test");
+        let credentials = Credentials::new(address, &env.access_key_id, &env.secret_access_key)?
+            .with_path_style(true);
+
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(credentials)?.at("signed-test");
 
         // Test data
         let key = b"signed-key".to_vec();
@@ -1440,14 +1341,11 @@ mod tests {
     #[dialog_common::test]
     async fn it_fails_with_wrong_secret_key(env: S3Address) -> anyhow::Result<()> {
         // Create credentials with WRONG secret key
-        let credentials = Credentials {
-            access_key_id: env.access_key_id.clone(),
-            secret_access_key: "wrong-secret".into(),
-        };
-
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend =
-            Bucket::<Vec<u8>, Vec<u8>>::open(address, credentials)?.with_path_style(true);
+        let credentials =
+            Credentials::new(address, &env.access_key_id, "wrong-secret")?.with_path_style(true);
+
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(credentials)?;
 
         // Attempt to set a value - should fail due to signature mismatch
         let result = backend.set(b"key".to_vec(), b"value".to_vec()).await;
@@ -1463,14 +1361,11 @@ mod tests {
     #[dialog_common::test]
     async fn it_fails_with_wrong_access_key(env: S3Address) -> anyhow::Result<()> {
         // Create credentials with WRONG access key
-        let credentials = Credentials {
-            access_key_id: "wrong-access-key".into(),
-            secret_access_key: env.secret_access_key.clone(),
-        };
-
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend =
-            Bucket::<Vec<u8>, Vec<u8>>::open(address, credentials)?.with_path_style(true);
+        let credentials = Credentials::new(address, "wrong-access-key", &env.secret_access_key)?
+            .with_path_style(true);
+
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(credentials)?;
 
         // Attempt to set a value - should fail due to unknown access key
         let result = backend.set(b"key".to_vec(), b"value".to_vec()).await;
@@ -1487,7 +1382,8 @@ mod tests {
     async fn it_fails_unsigned_request_to_auth_server(env: S3Address) -> anyhow::Result<()> {
         // Client uses no credentials but server requires authentication
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public)?.with_path_style(true);
+        let public = Public::new(address)?.with_path_style(true);
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(public)?;
 
         // Attempt to set a value - should fail because server expects signed requests
         let result = backend.set(b"key".to_vec(), b"value".to_vec()).await;
@@ -1503,27 +1399,21 @@ mod tests {
     #[dialog_common::test]
     async fn it_fails_get_with_wrong_credentials(env: S3Address) -> anyhow::Result<()> {
         // First, set a value with correct credentials
-        let correct_credentials = Credentials {
-            access_key_id: env.access_key_id.clone(),
-            secret_access_key: env.secret_access_key.clone(),
-        };
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(address, Some(correct_credentials))?
-            .with_path_style(true);
-        let mut correct_backend = bucket.clone();
+        let correct_credentials =
+            Credentials::new(address, &env.access_key_id, &env.secret_access_key)?
+                .with_path_style(true);
+        let mut correct_backend = Bucket::<Vec<u8>, Vec<u8>>::open(correct_credentials)?;
 
         correct_backend
             .set(b"protected-key".to_vec(), b"secret-value".to_vec())
             .await?;
 
         // Now try to GET with wrong credentials
-        let wrong_credentials = Credentials {
-            access_key_id: env.access_key_id.clone(),
-            secret_access_key: "wrong-secret".into(),
-        };
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let wrong_backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Some(wrong_credentials))?
-            .with_path_style(true);
+        let wrong_credentials =
+            Credentials::new(address, &env.access_key_id, "wrong-secret")?.with_path_style(true);
+        let wrong_backend = Bucket::<Vec<u8>, Vec<u8>>::open(wrong_credentials)?;
 
         // Attempt to get the value - should fail
         let result = wrong_backend.get(&b"protected-key".to_vec()).await;
@@ -1539,16 +1429,12 @@ mod tests {
     #[cfg(feature = "s3-list")]
     #[dialog_common::test]
     async fn it_lists_with_signed_session(env: S3Address) -> anyhow::Result<()> {
-        // Create credentials matching the test server
-        let credentials = Credentials {
-            access_key_id: env.access_key_id.clone(),
-            secret_access_key: env.secret_access_key.clone(),
-        };
-
+        // Create credentials
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, credentials)?
-            .with_path_style(true)
-            .at("signed-list-test");
+        let credentials = Credentials::new(address, &env.access_key_id, &env.secret_access_key)?
+            .with_path_style(true);
+
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(credentials)?.at("signed-list-test");
 
         // Set multiple values
         backend.set(b"key1".to_vec(), b"value1".to_vec()).await?;
@@ -1577,15 +1463,11 @@ mod tests {
     async fn it_reads_stream_with_signed_session(env: S3Address) -> anyhow::Result<()> {
         use futures_util::TryStreamExt;
 
-        let credentials = Credentials {
-            access_key_id: env.access_key_id.clone(),
-            secret_access_key: env.secret_access_key.clone(),
-        };
-
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, credentials)?
-            .with_path_style(true)
-            .at("signed-stream-test");
+        let credentials = Credentials::new(address, &env.access_key_id, &env.secret_access_key)?
+            .with_path_style(true);
+
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(credentials)?.at("signed-stream-test");
 
         // Set multiple values
         backend.set(b"a".to_vec(), b"value-a".to_vec()).await?;

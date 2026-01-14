@@ -5,6 +5,7 @@
             "async_trait"
         ]
     },
+    "rust-analyzer.diagnostics.disabled": ["proc-macro-disabled"],
     "[github-actions-workflow]": {
         "prettier.singleQuote": true
     },

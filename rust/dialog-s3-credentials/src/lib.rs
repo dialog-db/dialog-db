@@ -8,6 +8,14 @@
 //!
 //! [query string authentication]: https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html
 //!
+//! # Authorization Strategies
+//!
+//! This crate provides multiple authorization strategies via the [`Authorizer`] trait:
+//!
+//! - [`Credentials`] - AWS SigV4 signing with access key and secret
+//! - [`Public`] - No signing for public buckets
+//! - [`UcanAuthorizer`] - UCAN-based authorization via external access service (requires `ucan` feature)
+//!
 //! # Example
 //!
 //! ```no_run
@@ -45,9 +53,15 @@ pub mod access;
 pub mod address;
 pub mod checksum;
 
+#[cfg(feature = "ucan")]
+pub mod ucan;
+
 pub use access::{
     Acl, Authorization, AuthorizationError, Authorizer, Credentials, DEFAULT_EXPIRES, Invocation,
     Public, RequestInfo,
 };
 pub use address::Address;
 pub use checksum::{Checksum, Hasher};
+
+#[cfg(feature = "ucan")]
+pub use ucan::{DelegationChain, OperatorIdentity, UcanAuthorizer, UcanAuthorizerBuilder};

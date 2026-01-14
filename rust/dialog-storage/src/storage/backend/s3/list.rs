@@ -281,7 +281,8 @@ mod tests {
         // Non-IP endpoints use virtual-hosted style by default
         use super::super::{Address, Public};
         let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public).unwrap();
+        let authorizer = Public::new(address).unwrap();
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer).unwrap();
 
         let url = backend.base_url().unwrap();
         assert_eq!(url.as_str(), "https://bucket.s3.amazonaws.com/");
@@ -292,7 +293,8 @@ mod tests {
         // IP/localhost endpoints use path style by default
         use super::super::{Address, Public};
         let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, Public).unwrap();
+        let authorizer = Public::new(address).unwrap();
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer).unwrap();
 
         let url = backend.base_url().unwrap();
         assert_eq!(url.as_str(), "http://localhost:9000/bucket/");

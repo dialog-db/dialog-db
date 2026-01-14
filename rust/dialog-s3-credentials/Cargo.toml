@@ -6,6 +6,17 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+default = []
+ucan = [
+    "dep:ed25519-dalek",
+    "dep:ipld-core",
+    "dep:reqwest",
+    "dep:serde_ipld_dagcbor",
+    "dep:serde_json",
+    "dep:ucan",
+]
+
 [dependencies]
 async-trait = "0.1"
 base64 = { workspace = true }
@@ -15,6 +26,14 @@ serde = { workspace = true, features = ["derive"] }
 sha2 = "0.10"
 thiserror = { workspace = true }
 url = { workspace = true }
+
+# UCAN feature dependencies (optional)
+ed25519-dalek = { workspace = true, optional = true }
+ipld-core = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+serde_ipld_dagcbor = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+ucan = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = { workspace = true }
