@@ -21,9 +21,11 @@ helpers = [
   "dep:tower-http",
 ]
 # Enables the S3/R2-compatible storage backend
-s3 = ["dep:chrono", "dep:hmac", "dep:reqwest", "dep:sha2", "dep:url"]
+s3 = ["dep:dialog-s3-credentials", "dep:reqwest", "dep:url"]
 # Enables S3 list operations (ListObjectsV2) with XML parsing
 s3-list = ["s3", "dep:quick-xml"]
+# Enables UCAN-based authorization via external access service
+ucan = ["s3", "dialog-s3-credentials/ucan"]
 # Enables real S3/R2 integration tests (requires R2S3_* environment variables)
 s3-integration-tests = ["s3-list", "helpers"]
 # Enable integration tests (tests with service provisioning)
@@ -41,12 +43,10 @@ base58 = { workspace = true }
 base64 = { workspace = true }
 blake3 = { workspace = true }
 brotli = { workspace = true }
-chrono = { version = "0.4", optional = true }
 futures-util = { workspace = true }
-hmac = { version = "0.12", optional = true }
 md5 = "0.8.0"
 reqwest = { workspace = true, features = ["json"], optional = true }
-sha2 = { version = "0.10", optional = true }
+dialog-s3-credentials = { workspace = true, optional = true }
 quick-xml = { version = "0.37", features = ["serde", "serialize"], optional = true }
 sieve-cache = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -90,11 +90,15 @@ rand = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 bytes = "1.0"
 chrono = "0.4"
+clap = { version = "4.5", features = ["derive"] }
+ed25519-dalek = { workspace = true }
+getrandom = { workspace = true }
 tokio-test = "0.4"
 s3s = "0.12.0-rc.3"
 hyper = "1.0"
 hyper-util = { version = "0.1", features = ["server", "tokio", "service"] }
 http-body-util = "0.1"
+serde_ipld_dagcbor = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = [
   "sync",
@@ -105,11 +109,16 @@ tokio = { workspace = true, features = [
 ] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
+ucan = { workspace = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 # getrandom = { workspace = true, features = ["wasm_js"] }
 getrandom = { workspace = true, features = ["js"] }
 wasm-bindgen-test = { workspace = true }
+
+[[example]]
+name = "ucan_e2e_test"
+required-features = ["ucan"]
 
 [lints.rust]
 # This cfg is used by the dialog_common::test proc macro for wasm inner tests

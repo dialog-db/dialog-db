@@ -3,9 +3,7 @@
 //! This module contains the request types (`Put`, `Get`, `Delete`) and the `Request` trait
 //! for executing requests against an S3 backend.
 
-use super::access::{Acl, Invocation, Public};
-use super::checksum::{Checksum, Hasher};
-use super::{Bucket, S3StorageError};
+use super::{Acl, Bucket, Checksum, Hasher, Invocation, RequestInfo, S3StorageError};
 use async_trait::async_trait;
 use dialog_common::ConditionalSync;
 use url::Url;
@@ -227,14 +225,12 @@ pub trait Request: Invocation + Sized {
         Key: AsRef<[u8]> + Clone + ConditionalSync,
         Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
     {
-        let authorized = match &bucket.credentials {
-            Some(creds) => creds
-                .authorize(self)
-                .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?,
-            None => Public
-                .authorize(self)
-                .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?,
-        };
+        let request_info = RequestInfo::from_invocation(self);
+        let authorized = bucket
+            .authorizer
+            .authorize(&request_info)
+            .await
+            .map_err(|e| S3StorageError::AuthorizationError(e.to_string()))?;
 
         let mut builder = match self.method() {
             "GET" => bucket.client.get(authorized.url),

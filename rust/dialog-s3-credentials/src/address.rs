@@ -9,12 +9,12 @@ use serde::{Deserialize, Serialize};
 /// Combines endpoint, region, and bucket into a simple data struct that can be used
 /// with any S3-compatible service (AWS S3, Cloudflare R2, Wasabi, MinIO, etc.).
 ///
-/// This is a plain data type - URL validation happens when opening a [`Bucket`](super::Bucket).
+/// This is a plain data type - URL validation happens when building request URLs.
 ///
 /// # Examples
 ///
 /// ```
-/// use dialog_storage::s3::Address;
+/// use dialog_s3_credentials::Address;
 ///
 /// // AWS S3
 /// let addr = Address::new(
@@ -50,7 +50,7 @@ pub struct Address {
 impl Address {
     /// Create a new address with the given endpoint, region, and bucket.
     ///
-    /// This is infallible - URL validation happens when opening a [`Bucket`](super::Bucket).
+    /// This is infallible - URL validation happens when building request URLs.
     ///
     /// # Arguments
     ///
@@ -61,7 +61,7 @@ impl Address {
     /// # Examples
     ///
     /// ```
-    /// use dialog_storage::s3::Address;
+    /// use dialog_s3_credentials::Address;
     ///
     /// // AWS S3
     /// let addr = Address::new(
