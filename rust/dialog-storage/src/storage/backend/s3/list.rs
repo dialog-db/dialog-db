@@ -126,7 +126,12 @@ where
         &self,
         continuation_token: Option<&str>,
     ) -> Result<ListResult, S3StorageError> {
-        let bucket_url = self.base_url()?;
+        // For ListObjectsV2, we need the bucket root URL (not including prefix in path).
+        // The prefix is passed as a query parameter, not part of the URL path.
+        let bucket_url = self
+            .authorizer
+            .build_url("")
+            .map_err(S3StorageError::from)?;
         let list_request = List::new(bucket_url, self.region(), self.prefix(), continuation_token);
         let response = list_request.perform(self).await?;
 
