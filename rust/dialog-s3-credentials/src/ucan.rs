@@ -257,6 +257,7 @@ impl UcanAuthorizerBuilder {
         #[cfg(target_arch = "wasm32")]
         let client = reqwest::Client::new();
 
+
         Ok(UcanAuthorizer {
             service_url,
             operator,
