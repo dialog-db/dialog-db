@@ -23,7 +23,10 @@ members = [
     "rust/dialog-dbsp",
     "rust/dialog-encoding",
     "rust/dialog-prolly-tree",
+    "rust/dialog-query",
+    "rust/dialog-query-macros",
     "rust/dialog-storage",
+    "rust/dialog-s3-credentials",
 ]
 resolver = "2"
 
@@ -47,6 +50,8 @@ console_error_panic_hook = "0.1"
 csv-async = { version = "1", features = ["tokio"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures-core = "0.3"
+ipld-core = { version = "0.4", features = ["serde"] }
+ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "jackddouglas/feat/check" }
 futures-util = "0.3"
 # getrandom = "0.3"
 getrandom = "0.2"
@@ -99,11 +104,20 @@ path = "./rust/dialog-encoding"
 [workspace.dependencies.dialog-prolly-tree]
 path = "./rust/dialog-prolly-tree"
 
+[workspace.dependencies.dialog-query]
+path = "./rust/dialog-query"
+
 [workspace.dependencies.dialog-storage]
 path = "./rust/dialog-storage"
 
+[workspace.dependencies.dialog-query-macros]
+path = "./rust/dialog-query-macros"
+
 [workspace.dependencies.dialog-macros]
 path = "./rust/dialog-macros"
+
+[workspace.dependencies.dialog-s3-credentials]
+path = "./rust/dialog-s3-credentials"
 
 # [patch.crates-io]
 # # TODO: https://github.com/gwierzchowski/csv-async/issues/27

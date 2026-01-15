@@ -1,0 +1,3 @@
+- What should happen if `count` attribute has u64 but is queried as u32 ?
+  - We should be storing ints as leb128 so it can be arbitrary large. That also implies that at some point records may get value updated to u32::MAX + 1 count, which would be perfectly fine for queries by u64 but will no longer match queries by u32.
+  - It also should be possible to stratify by type so that `Count<u32>` and `Count<u64>` will be separate, but that seems that consumers will not see each other's values, while if they share same type later will see values from former but former may not see values from latter.

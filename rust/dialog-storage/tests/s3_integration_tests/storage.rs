@@ -24,7 +24,7 @@
 use super::bucket;
 use anyhow::Result;
 use async_stream::try_stream;
-use dialog_storage::s3::{Address, Bucket, Credentials, encode_s3_key};
+use dialog_storage::s3::encode_s3_key;
 use dialog_storage::{StorageBackend, StorageSink, StorageSource};
 use futures_util::TryStreamExt;
 

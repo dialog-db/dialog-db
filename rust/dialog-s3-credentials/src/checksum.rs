@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 ///
 /// Use a `Hasher` variant to compute a [`Checksum`] from data:
 ///
-/// ```no_run
-/// use dialog_storage::s3::{Hasher};
+/// ```
+/// use dialog_s3_credentials::Hasher;
 /// let checksum = Hasher::Sha256.checksum(b"hello world");
 /// ```
 #[derive(Debug, Clone, Copy)]
@@ -35,7 +35,7 @@ impl Hasher {
 ///
 /// This enum represents different checksum algorithms supported for S3 object integrity
 /// verification. The checksum is used in the `x-amz-checksum-{algorithm}` header.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Checksum {
     /// SHA-256 checksum.
     Sha256([u8; 32]),

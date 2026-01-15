@@ -126,7 +126,12 @@ where
         &self,
         continuation_token: Option<&str>,
     ) -> Result<ListResult, S3StorageError> {
-        let bucket_url = self.base_url()?;
+        // For ListObjectsV2, we need the bucket root URL (not including prefix in path).
+        // The prefix is passed as a query parameter, not part of the URL path.
+        let bucket_url = self
+            .authorizer
+            .build_url("")
+            .map_err(S3StorageError::from)?;
         let list_request = List::new(bucket_url, self.region(), self.prefix(), continuation_token);
         let response = list_request.perform(self).await?;
 
@@ -279,9 +284,10 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_virtual_hosted_bucket_url() {
         // Non-IP endpoints use virtual-hosted style by default
-        use super::super::Address;
+        use super::super::{Address, Public};
         let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None).unwrap();
+        let authorizer = Public::new(address).unwrap();
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer).unwrap();
 
         let url = backend.base_url().unwrap();
         assert_eq!(url.as_str(), "https://bucket.s3.amazonaws.com/");
@@ -290,9 +296,10 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_path_style_bucket_url() {
         // IP/localhost endpoints use path style by default
-        use super::super::Address;
+        use super::super::{Address, Public};
         let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(address, None).unwrap();
+        let authorizer = Public::new(address).unwrap();
+        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer).unwrap();
 
         let url = backend.base_url().unwrap();
         assert_eq!(url.as_str(), "http://localhost:9000/bucket/");
