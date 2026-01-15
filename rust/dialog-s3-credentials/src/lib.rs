@@ -19,34 +19,41 @@
 //! # Example
 //!
 //! ```no_run
-//! use dialog_s3_credentials::{Credentials, Invocation, Address};
-//! use url::Url;
+//! use dialog_s3_credentials::{Address, Authorizer, Credentials, RequestInfo, DEFAULT_EXPIRES};
+//! use chrono::Utc;
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! // Create address for S3 bucket
+//! let address = Address::new(
+//!     "https://s3.us-east-1.amazonaws.com",
+//!     "us-east-1",
+//!     "my-bucket",
+//! );
 //!
 //! // Create credentials
-//! let credentials = Credentials {
-//!     access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
-//!     secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
+//! let credentials = Credentials::new(
+//!     address,
+//!     "AKIAIOSFODNN7EXAMPLE",
+//!     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+//! )?;
+//!
+//! // Build the URL and authorize a GET request
+//! let url = credentials.build_url("my-key")?;
+//! let request = RequestInfo {
+//!     method: "GET",
+//!     url,
+//!     region: credentials.region().to_string(),
+//!     checksum: None,
+//!     acl: None,
+//!     expires: DEFAULT_EXPIRES,
+//!     time: Utc::now(),
+//!     service: "s3".to_string(),
 //! };
 //!
-//! // Create a simple GET request
-//! struct GetRequest {
-//!     url: Url,
-//!     region: String,
-//! }
-//!
-//! impl Invocation for GetRequest {
-//!     fn method(&self) -> &'static str { "GET" }
-//!     fn url(&self) -> &Url { &self.url }
-//!     fn region(&self) -> &str { &self.region }
-//! }
-//!
-//! let request = GetRequest {
-//!     url: Url::parse("https://my-bucket.s3.us-east-1.amazonaws.com/my-key").unwrap(),
-//!     region: "us-east-1".into(),
-//! };
-//!
-//! let auth = credentials.authorize(&request).unwrap();
+//! let auth = credentials.authorize(&request).await?;
 //! println!("Presigned URL: {}", auth.url);
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod access;
