@@ -27,7 +27,7 @@ use std::fmt::Debug;
 use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
 
 #[cfg(feature = "s3")]
-use dialog_storage::s3::{Address as S3Address, Bucket as S3Bucket, Credentials as S3Credentials};
+use dialog_storage::s3::Bucket as S3Bucket;
 use ed25519_dalek::ed25519::signature::SignerMut;
 use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, SignatureError, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -1450,30 +1450,39 @@ impl RemoteState {
     /// Creates a storage connection using this remote's configuration.
     #[cfg(feature = "s3")]
     pub fn connect(&self) -> Result<PlatformStorage<RemoteBackend>, ReplicaError> {
-        let address = S3Address::new(
+        use dialog_storage::s3::{Address, Credentials, Public};
+
+        let address = Address::new(
             &self.address.endpoint,
             &self.address.region,
             &self.address.bucket,
         );
 
-        let credentials = match (&self.address.access_key_id, &self.address.secret_access_key) {
-            (Some(key_id), Some(secret)) => Some(S3Credentials {
-                access_key_id: key_id.clone(),
-                secret_access_key: secret.clone(),
-            }),
-            _ => None,
-        };
-
-        let bucket = S3Bucket::open(address, credentials).map_err(|_| {
-            ReplicaError::RemoteConnectionError {
-                remote: self.site.clone(),
+        let bucket = match (&self.address.access_key_id, &self.address.secret_access_key) {
+            (Some(key_id), Some(secret)) => {
+                let authorizer = Credentials::new(address, key_id, secret).map_err(|_| {
+                    ReplicaError::RemoteConnectionError {
+                        remote: self.site.clone(),
+                    }
+                })?;
+                S3Bucket::open(authorizer)
             }
-        })?;
+            _ => {
+                let authorizer =
+                    Public::new(address).map_err(|_| ReplicaError::RemoteConnectionError {
+                        remote: self.site.clone(),
+                    })?;
+                S3Bucket::open(authorizer)
+            }
+        }
+        .map_err(|_| ReplicaError::RemoteConnectionError {
+            remote: self.site.clone(),
+        });
 
         let backend = if let Some(prefix) = &self.address.prefix {
-            bucket.at(prefix)
+            bucket?.at(prefix)
         } else {
-            bucket
+            bucket?
         };
 
         Ok(PlatformStorage::new(
@@ -3206,11 +3215,12 @@ mod tests {
         }
 
         let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
-        let credentials = Credentials {
-            access_key_id: s3_address.access_key_id.clone(),
-            secret_access_key: s3_address.secret_access_key.clone(),
-        };
-        let s3_storage = Bucket::<Vec<u8>, Vec<u8>>::open(address, Some(credentials))?;
+        let authorizer = Credentials::new(
+            address,
+            &s3_address.access_key_id,
+            &s3_address.secret_access_key,
+        )?;
+        let s3_storage = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
 
         // Create local and remote archives
         let local_storage = PlatformStorage::new(

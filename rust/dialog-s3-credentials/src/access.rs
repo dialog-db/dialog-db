@@ -5,6 +5,7 @@
 //!
 //! [query string authentication]: https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -12,7 +13,7 @@ use std::fmt::Write;
 use thiserror::Error;
 use url::Url;
 
-use crate::Checksum;
+use crate::{Address, Checksum};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
@@ -24,23 +25,86 @@ use web_time::{SystemTime, web::SystemTimeExt};
 pub const DEFAULT_EXPIRES: u64 = 3600;
 
 /// AWS S3 credentials for signing requests.
+///
+/// This authorizer holds both the credentials and the S3 address, providing
+/// a complete configuration for authenticated S3 access.
+///
+/// # Example
+///
+/// ```no_run
+/// use dialog_s3_credentials::{Address, Credentials};
+///
+/// let address = Address::new(
+///     "https://s3.us-east-1.amazonaws.com",
+///     "us-east-1",
+///     "my-bucket",
+/// );
+///
+/// let credentials = Credentials::new(
+///     address,
+///     "AKIAIOSFODNN7EXAMPLE",
+///     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+/// ).expect("valid endpoint URL");
+/// ```
 #[derive(Debug, Clone)]
 pub struct Credentials {
     /// AWS Access Key ID
-    pub access_key_id: String,
+    access_key_id: String,
     /// AWS Secret Access Key
-    pub secret_access_key: String,
+    secret_access_key: String,
+    /// S3 address (endpoint, region, bucket)
+    address: Address,
+    /// Parsed endpoint URL
+    endpoint: Url,
+    /// Whether to use path-style URLs
+    path_style: bool,
 }
 
 impl Credentials {
+    /// Create new credentials with the given address and keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the endpoint URL in the address is invalid.
+    pub fn new(
+        address: Address,
+        access_key_id: impl Into<String>,
+        secret_access_key: impl Into<String>,
+    ) -> Result<Self, AuthorizationError> {
+        let endpoint = Url::parse(address.endpoint())
+            .map_err(|e| AuthorizationError::InvalidEndpoint(e.to_string()))?;
+        let path_style = is_path_style_default(&endpoint);
+
+        Ok(Self {
+            access_key_id: access_key_id.into(),
+            secret_access_key: secret_access_key.into(),
+            address,
+            endpoint,
+            path_style,
+        })
+    }
+
+    /// Set whether to use path-style URLs.
+    ///
+    /// - `true`: Use path-style URLs (`https://endpoint/bucket/key`)
+    /// - `false`: Use virtual-hosted style URLs (`https://bucket.endpoint/key`)
+    ///
+    /// By default, path-style is enabled for IP addresses and localhost.
+    pub fn with_path_style(mut self, path_style: bool) -> Self {
+        self.path_style = path_style;
+        self
+    }
+
+    /// Get the access key ID.
+    pub fn access_key_id(&self) -> &str {
+        &self.access_key_id
+    }
+
     /// Authorize a request with AWS SigV4 presigned URL.
     ///
     /// Derives the signing key on demand using the request's time.
     /// The request provides all signing parameters (region, service, expires, time).
-    pub fn authorize<I: Invocation>(
-        &self,
-        request: &I,
-    ) -> Result<Authorization, AuthorizationError> {
+    fn sign<I: Invocation>(&self, request: &I) -> Result<Authorization, AuthorizationError> {
         let time = request.time();
         let timestamp = time.format("%Y%m%dT%H%M%SZ").to_string();
         let date = &timestamp[0..8];
@@ -151,6 +215,26 @@ impl Credentials {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Authorizer for Credentials {
+    async fn authorize(&self, request: &RequestInfo) -> Result<Authorization, AuthorizationError> {
+        self.sign(request)
+    }
+
+    fn build_url(&self, path: &str) -> Result<Url, AuthorizationError> {
+        build_s3_url(&self.endpoint, self.address.bucket(), path, self.path_style)
+    }
+
+    fn region(&self) -> &str {
+        self.address.region()
+    }
+
+    fn path_style(&self) -> bool {
+        self.path_style
+    }
+}
+
 /// S3 Access Control List (ACL) settings.
 ///
 /// These are canned ACLs supported by S3 and S3-compatible services.
@@ -217,15 +301,67 @@ impl SigningKey {
     }
 }
 
-/// AWS S3 credential used for accessing public buckets
+/// Authorizer for accessing public S3 buckets.
+///
+/// This authorizer holds the S3 address and provides unsigned access
+/// to publicly readable buckets.
+///
+/// # Example
+///
+/// ```no_run
+/// use dialog_s3_credentials::{Address, Public};
+///
+/// let address = Address::new(
+///     "https://s3.us-east-1.amazonaws.com",
+///     "us-east-1",
+///     "public-bucket",
+/// );
+///
+/// let public = Public::new(address).expect("valid endpoint URL");
+/// ```
 #[derive(Debug, Clone)]
-pub struct Public;
+pub struct Public {
+    /// S3 address (endpoint, region, bucket)
+    address: Address,
+    /// Parsed endpoint URL
+    endpoint: Url,
+    /// Whether to use path-style URLs
+    path_style: bool,
+}
 
 impl Public {
+    /// Create a new public authorizer with the given address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the endpoint URL in the address is invalid.
+    pub fn new(address: Address) -> Result<Self, AuthorizationError> {
+        let endpoint = Url::parse(address.endpoint())
+            .map_err(|e| AuthorizationError::InvalidEndpoint(e.to_string()))?;
+        let path_style = is_path_style_default(&endpoint);
+
+        Ok(Self {
+            address,
+            endpoint,
+            path_style,
+        })
+    }
+
+    /// Set whether to use path-style URLs.
+    ///
+    /// - `true`: Use path-style URLs (`https://endpoint/bucket/key`)
+    /// - `false`: Use virtual-hosted style URLs (`https://bucket.endpoint/key`)
+    ///
+    /// By default, path-style is enabled for IP addresses and localhost.
+    pub fn with_path_style(mut self, path_style: bool) -> Self {
+        self.path_style = path_style;
+        self
+    }
+
     /// Authorize a public request.
     ///
     /// Adds required headers (host, checksum) without signing.
-    pub fn authorize<I: Invocation>(
+    fn authorize_request<I: Invocation>(
         &self,
         request: &I,
     ) -> Result<Authorization, AuthorizationError> {
@@ -249,6 +385,26 @@ impl Public {
             url: request.url().clone(),
             headers,
         })
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Authorizer for Public {
+    async fn authorize(&self, request: &RequestInfo) -> Result<Authorization, AuthorizationError> {
+        self.authorize_request(request)
+    }
+
+    fn build_url(&self, path: &str) -> Result<Url, AuthorizationError> {
+        build_s3_url(&self.endpoint, self.address.bucket(), path, self.path_style)
+    }
+
+    fn region(&self) -> &str {
+        self.address.region()
+    }
+
+    fn path_style(&self) -> bool {
+        self.path_style
     }
 }
 
@@ -322,6 +478,184 @@ pub enum AuthorizationError {
     /// Failed to parse a URL.
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),
+    /// Error from access service.
+    #[error("access service error: {0}")]
+    AccessService(String),
+}
+
+/// Request metadata for authorization.
+///
+/// This struct captures all the information needed to authorize an S3 request.
+/// It can be constructed from any type implementing [`Invocation`], or built directly.
+///
+/// `RequestInfo` itself implements `Invocation`, so it can be passed to
+/// existing authorization methods.
+#[derive(Debug, Clone)]
+pub struct RequestInfo {
+    /// HTTP method (GET, PUT, DELETE)
+    pub method: &'static str,
+    /// Target URL
+    pub url: Url,
+    /// AWS region for signing
+    pub region: String,
+    /// Content checksum for integrity verification
+    pub checksum: Option<Checksum>,
+    /// Access control list setting
+    pub acl: Option<Acl>,
+    /// URL signature expiration in seconds
+    pub expires: u64,
+    /// Timestamp for signing
+    pub time: DateTime<Utc>,
+    /// Service name (defaults to "s3")
+    pub service: String,
+}
+
+impl RequestInfo {
+    /// Create RequestInfo from any type implementing Invocation.
+    pub fn from_invocation<I: Invocation>(inv: &I) -> Self {
+        Self {
+            method: inv.method(),
+            url: inv.url().clone(),
+            region: inv.region().to_string(),
+            checksum: inv.checksum().cloned(),
+            acl: inv.acl(),
+            expires: inv.expires(),
+            time: inv.time(),
+            service: inv.service().to_string(),
+        }
+    }
+}
+
+impl Invocation for RequestInfo {
+    fn method(&self) -> &'static str {
+        self.method
+    }
+
+    fn url(&self) -> &Url {
+        &self.url
+    }
+
+    fn region(&self) -> &str {
+        &self.region
+    }
+
+    fn checksum(&self) -> Option<&Checksum> {
+        self.checksum.as_ref()
+    }
+
+    fn acl(&self) -> Option<Acl> {
+        self.acl
+    }
+
+    fn service(&self) -> &str {
+        &self.service
+    }
+
+    fn expires(&self) -> u64 {
+        self.expires
+    }
+
+    fn time(&self) -> DateTime<Utc> {
+        self.time
+    }
+}
+
+/// Async authorizer for S3 requests.
+///
+/// This trait abstracts over different authorization mechanisms:
+/// - [`Credentials`] - AWS SigV4 local signing with address
+/// - [`Public`] - No signing for public buckets, with address
+/// - Custom implementations for access services, token providers, etc.
+///
+/// The authorizer is responsible for:
+/// 1. Building URLs for S3 requests (via [`build_url`](Authorizer::build_url))
+/// 2. Authorizing those requests (via [`authorize`](Authorizer::authorize))
+///
+/// # Example
+///
+/// ```ignore
+/// use dialog_s3_credentials::{Authorizer, Credentials, Public, RequestInfo, Address};
+///
+/// // Both Credentials and Public implement Authorizer
+/// async fn authorize_request<A: Authorizer>(
+///     authorizer: &A,
+///     request: &RequestInfo,
+/// ) -> Result<Authorization, AuthorizationError> {
+///     authorizer.authorize(request).await
+/// }
+/// ```
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait Authorizer: Send + Sync + std::fmt::Debug {
+    /// Authorize a request, returning the URL and headers to use.
+    async fn authorize(&self, request: &RequestInfo) -> Result<Authorization, AuthorizationError>;
+
+    /// Build a URL for the given key path.
+    ///
+    /// For S3-based authorizers, this constructs the bucket URL using the
+    /// configured endpoint and bucket. For UCAN authorizers, this constructs
+    /// the access service URL.
+    fn build_url(&self, path: &str) -> Result<Url, AuthorizationError>;
+
+    /// Get the region for signing requests.
+    fn region(&self) -> &str;
+
+    /// Whether to use path-style URLs.
+    ///
+    /// - `true`: Use path-style URLs (`https://endpoint/bucket/key`)
+    /// - `false`: Use virtual-hosted style URLs (`https://bucket.endpoint/key`)
+    fn path_style(&self) -> bool {
+        false
+    }
+}
+
+/// Build an S3 URL for the given path.
+///
+/// Handles both path-style and virtual-hosted style URLs.
+fn build_s3_url(
+    endpoint: &Url,
+    bucket: &str,
+    path: &str,
+    path_style: bool,
+) -> Result<Url, AuthorizationError> {
+    if path_style {
+        // Path-style: https://endpoint/bucket/path
+        let mut url = endpoint.clone();
+        let new_path = if path.is_empty() {
+            format!("{}/", bucket)
+        } else {
+            format!("{}/{}", bucket, path)
+        };
+        url.set_path(&new_path);
+        Ok(url)
+    } else {
+        // Virtual-hosted style: https://bucket.endpoint/path
+        let host = endpoint.host_str().ok_or_else(|| {
+            AuthorizationError::InvalidEndpoint("Invalid endpoint: no host".into())
+        })?;
+        let new_host = format!("{}.{}", bucket, host);
+
+        let mut url = endpoint.clone();
+        url.set_host(Some(&new_host))
+            .map_err(|e| AuthorizationError::InvalidEndpoint(format!("Invalid host: {}", e)))?;
+
+        let new_path = if path.is_empty() { "/" } else { path };
+        url.set_path(new_path);
+        Ok(url)
+    }
+}
+
+/// Determine if path-style URLs should be used by default for this endpoint.
+///
+/// Returns true for IP addresses and localhost, since virtual-hosted style
+/// URLs require DNS resolution of `{bucket}.{host}`.
+pub fn is_path_style_default(endpoint: &Url) -> bool {
+    use url::Host;
+    match endpoint.host() {
+        Some(Host::Ipv4(_)) | Some(Host::Ipv6(_)) => true,
+        Some(Host::Domain(domain)) => domain == "localhost",
+        None => false,
+    }
 }
 
 /// Extract host string from URL, including port for non-standard ports.
@@ -394,11 +728,12 @@ mod tests {
     use crate::Hasher;
     use chrono::TimeZone;
 
+    fn test_address() -> Address {
+        Address::new("https://s3.auto.amazonaws.com", "auto", "pale")
+    }
+
     fn test_credentials() -> Credentials {
-        Credentials {
-            access_key_id: "my-id".into(),
-            secret_access_key: "top secret".into(),
-        }
+        Credentials::new(test_address(), "my-id", "top secret").unwrap()
     }
 
     fn test_time() -> DateTime<Utc> {
@@ -566,11 +901,61 @@ mod tests {
     }
 
     #[test]
+    fn it_creates_credentials() {
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "my-bucket",
+        );
+        let creds = Credentials::new(address, "access-key", "secret-key").unwrap();
+        assert_eq!(creds.access_key_id(), "access-key");
+        assert_eq!(creds.region(), "us-east-1");
+    }
+
+    #[test]
+    fn it_creates_public() {
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "my-bucket",
+        );
+        let public = Public::new(address).unwrap();
+        assert_eq!(public.region(), "us-east-1");
+    }
+
+    #[test]
+    fn it_builds_virtual_hosted_url() {
+        let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
+        let creds = Credentials::new(address, "id", "secret").unwrap();
+        let url = creds.build_url("my-key").unwrap();
+        assert_eq!(url.as_str(), "https://bucket.s3.amazonaws.com/my-key");
+    }
+
+    #[test]
+    fn it_builds_path_style_url() {
+        let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
+        let creds = Credentials::new(address, "id", "secret").unwrap();
+        // localhost defaults to path-style
+        let url = creds.build_url("my-key").unwrap();
+        assert_eq!(url.as_str(), "http://localhost:9000/bucket/my-key");
+    }
+
+    #[test]
+    fn it_forces_path_style() {
+        let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
+        let creds = Credentials::new(address, "id", "secret")
+            .unwrap()
+            .with_path_style(true);
+        let url = creds.build_url("my-key").unwrap();
+        assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket/my-key");
+    }
+
+    #[test]
     fn it_authorizes_s3_put_request() {
         let credentials = test_credentials();
         let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
             .with_time(test_time());
-        let auth = credentials.authorize(&request).unwrap();
+        let auth = credentials.sign(&request).unwrap();
 
         // URL should contain signing parameters
         assert!(
@@ -583,10 +968,15 @@ mod tests {
 
     #[test]
     fn it_authorizes_r2_put_request() {
-        let credentials = test_credentials();
+        let address = Address::new(
+            "https://2c5a882977b89ac2fc7ca2f958422366.r2.cloudflarestorage.com",
+            "auto",
+            "pale",
+        );
+        let credentials = Credentials::new(address, "my-id", "top secret").unwrap();
         let request = TestPutRequest::new(r2_url("file/path"), b"test body", TEST_REGION)
             .with_time(test_time());
-        let auth = credentials.authorize(&request).unwrap();
+        let auth = credentials.sign(&request).unwrap();
 
         assert!(
             auth.url
@@ -600,7 +990,7 @@ mod tests {
     fn it_authorizes_get_request() {
         let credentials = test_credentials();
         let request = TestGetRequest::new(s3_url("file/path"), TEST_REGION).with_time(test_time());
-        let auth = credentials.authorize(&request).unwrap();
+        let auth = credentials.sign(&request).unwrap();
 
         assert!(
             auth.url
@@ -614,7 +1004,7 @@ mod tests {
         let credentials = test_credentials();
         let request =
             TestDeleteRequest::new(s3_url("file/path"), TEST_REGION).with_time(test_time());
-        let auth = credentials.authorize(&request).unwrap();
+        let auth = credentials.sign(&request).unwrap();
 
         assert!(
             auth.url
@@ -628,7 +1018,7 @@ mod tests {
         let credentials = test_credentials();
         let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
             .with_time(test_time());
-        let auth = credentials.authorize(&request).unwrap();
+        let auth = credentials.sign(&request).unwrap();
 
         // Should have checksum header
         assert!(
@@ -645,7 +1035,7 @@ mod tests {
         let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
             .with_acl(Acl::PublicRead)
             .with_time(test_time());
-        let auth = credentials.authorize(&request).unwrap();
+        let auth = credentials.sign(&request).unwrap();
 
         // Should have ACL in query params
         assert!(auth.url.as_str().contains("x-amz-acl=public-read"));
@@ -668,7 +1058,7 @@ mod tests {
         let credentials = test_credentials();
         let request =
             TestPutRequest::new(s3_url("file/path"), b"test", TEST_REGION).with_time(test_time());
-        let auth = credentials.authorize(&request).unwrap();
+        let auth = credentials.sign(&request).unwrap();
 
         assert!(auth.headers.iter().any(|(k, _)| k == "host"));
         assert!(
@@ -700,7 +1090,7 @@ mod tests {
         // The signature is deterministic for a given time
         let credentials = test_credentials();
         let request = TestPutRequest::new(s3_url("test"), b"body", TEST_REGION).with_time(now);
-        let auth = credentials.authorize(&request).unwrap();
+        let auth = credentials.sign(&request).unwrap();
 
         // Just verify it produces a valid signature
         assert!(auth.url.to_string().contains("X-Amz-Signature="));
@@ -716,7 +1106,7 @@ mod tests {
         let request = TestPutRequest::new(s3_url("file/path"), b"test body", TEST_REGION)
             .with_time(test_time())
             .with_expires(86400);
-        let auth = credentials.authorize(&request).unwrap();
+        let auth = credentials.sign(&request).unwrap();
 
         // Extract the signature from the signed URL
         let signed_url = auth.url.to_string();
@@ -730,5 +1120,35 @@ mod tests {
             "04b33a973b320c6aa27ab8e2f1821a563e80a032f6089b992070310de196bdff";
 
         assert_eq!(signature, EXPECTED_SIGNATURE);
+    }
+
+    #[test]
+    fn it_detects_path_style_default() {
+        let localhost = Url::parse("http://localhost:9000").unwrap();
+        assert!(is_path_style_default(&localhost));
+
+        let ipv4 = Url::parse("http://127.0.0.1:9000").unwrap();
+        assert!(is_path_style_default(&ipv4));
+
+        let remote = Url::parse("https://s3.amazonaws.com").unwrap();
+        assert!(!is_path_style_default(&remote));
+    }
+
+    #[test]
+    fn it_authorizes_public_request() {
+        let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
+        let public = Public::new(address).unwrap();
+        let url = Url::parse("https://bucket.s3.amazonaws.com/key").unwrap();
+        let request = TestPutRequest::new(url, b"test", "us-east-1").with_time(test_time());
+
+        let authorization = public.authorize_request(&request).unwrap();
+
+        assert!(authorization.headers.iter().any(|(k, _)| k == "host"));
+        assert!(
+            authorization
+                .headers
+                .iter()
+                .any(|(k, _)| k == "x-amz-checksum-sha256")
+        );
     }
 }
