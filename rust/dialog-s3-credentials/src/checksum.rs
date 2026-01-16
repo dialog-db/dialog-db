@@ -35,10 +35,71 @@ impl Hasher {
 ///
 /// This enum represents different checksum algorithms supported for S3 object integrity
 /// verification. The checksum is used in the `x-amz-checksum-{algorithm}` header.
+///
+/// When deserializing from IPLD/CBOR, expects 32 raw bytes.
 #[derive(Debug, Clone)]
 pub enum Checksum {
     /// SHA-256 checksum.
     Sha256([u8; 32]),
+}
+
+impl TryFrom<Vec<u8>> for Checksum {
+    type Error = String;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        if bytes.len() != 32 {
+            return Err(format!("Checksum must be 32 bytes, got {}", bytes.len()));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(Checksum::Sha256(arr))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Checksum {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Visitor;
+
+        struct ChecksumVisitor;
+
+        impl<'de> Visitor<'de> for ChecksumVisitor {
+            type Value = Checksum;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("32 bytes or a sequence of 32 bytes")
+            }
+
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Checksum::try_from(v.to_vec()).map_err(E::custom)
+            }
+
+            fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Checksum::try_from(v).map_err(E::custom)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut bytes = Vec::with_capacity(32);
+                while let Some(byte) = seq.next_element()? {
+                    bytes.push(byte);
+                }
+                Checksum::try_from(bytes).map_err(serde::de::Error::custom)
+            }
+        }
+
+        deserializer.deserialize_any(ChecksumVisitor)
+    }
 }
 
 impl Checksum {
