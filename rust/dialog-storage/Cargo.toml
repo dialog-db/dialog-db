@@ -21,7 +21,7 @@ helpers = [
   "dep:tower-http",
 ]
 # Enables the S3/R2-compatible storage backend
-s3 = ["dep:dialog-s3-credentials", "dep:reqwest", "dep:url"]
+s3 = ["dep:dialog-s3-credentials", "dep:reqwest", "dep:url", "dep:chrono"]
 # Enables S3 list operations (ListObjectsV2) with XML parsing
 s3-list = ["s3", "dep:quick-xml"]
 # Enables UCAN-based authorization via external access service
@@ -55,6 +55,7 @@ rand = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 url = { version = "2.5", optional = true }
+chrono = { version = "0.4", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pidlock = "0.1"
@@ -91,8 +92,6 @@ rand = { workspace = true }
 bytes = "1.0"
 chrono = "0.4"
 clap = { version = "4.5", features = ["derive"] }
-ed25519-dalek = { workspace = true }
-getrandom = { workspace = true }
 tokio-test = "0.4"
 s3s = "0.12.0-rc.3"
 hyper = "1.0"

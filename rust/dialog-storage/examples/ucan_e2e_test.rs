@@ -1,11 +1,11 @@
 //! End-to-end test for UCAN-authorized S3 access.
 //!
-//! This example tests the full flow of using `UcanAuthorizer` with the `Bucket` API:
+//! This example tests the full flow of using `ucan::Credentials` with the `Bucket` API:
 //!
 //! 1. Generate keypairs for a "space" (subject) and "operator"
 //! 2. Create a delegation from space to operator
-//! 3. Configure `UcanAuthorizer` with the delegation
-//! 4. Open a `Bucket` with the authorizer
+//! 3. Configure `ucan::Credentials` with the delegation
+//! 4. Open a `Bucket` with the credentials
 //! 5. Perform CRUD operations via the access service
 //!
 //! Run with:
@@ -20,13 +20,12 @@
 //! ```
 
 use clap::Parser;
-use dialog_s3_credentials::ucan::{DelegationChain, OperatorIdentity, UcanAuthorizer};
+use dialog_s3_credentials::ucan::{Credentials, DelegationChain, OperatorIdentity, generate_signer};
 use dialog_storage::StorageBackend;
 use dialog_storage::s3::Bucket;
-use ed25519_dalek::SigningKey;
 use ucan::delegation::builder::DelegationBuilder;
 use ucan::delegation::subject::DelegatedSubject;
-use ucan::did::{Ed25519Did, Ed25519Signer};
+use ucan::did::Ed25519Did;
 
 #[derive(Parser)]
 #[command(name = "ucan_e2e_test")]
@@ -55,16 +54,11 @@ async fn main() -> anyhow::Result<()> {
     // Step 1: Generate keypairs
     println!("\n[1/6] Generating keypairs...");
 
-    let mut space_seed = [0u8; 32];
-    getrandom::getrandom(&mut space_seed)?;
-    let space_signing_key = SigningKey::from_bytes(&space_seed);
-    let space_signer = Ed25519Signer::new(space_signing_key);
+    let space_signer = generate_signer();
     let space_did = space_signer.did();
     println!("  Space DID: {}", space_did);
 
-    let mut operator_seed = [0u8; 32];
-    getrandom::getrandom(&mut operator_seed)?;
-    let operator_identity = OperatorIdentity::from_secret(&operator_seed);
+    let operator_identity = OperatorIdentity::generate();
     println!("  Operator DID: {}", operator_identity.did());
 
     // Step 2: Create delegation (space -> operator)
@@ -85,27 +79,26 @@ async fn main() -> anyhow::Result<()> {
         .try_build()
         .map_err(|e| anyhow::anyhow!("Failed to build delegation: {:?}", e))?;
 
-    let delegation_bytes = serde_ipld_dagcbor::to_vec(&delegation)?;
     let delegation_cid = delegation.to_cid();
     println!("  Delegation CID: {}", delegation_cid);
 
-    // Step 3: Configure UcanAuthorizer
-    println!("\n[3/6] Configuring UcanAuthorizer...");
+    // Step 3: Configure ucan::Credentials
+    println!("\n[3/6] Configuring ucan::Credentials...");
 
-    let delegation_chain = DelegationChain::single(delegation_bytes, delegation_cid);
+    let delegation_chain = DelegationChain::single(delegation);
 
-    let authorizer = UcanAuthorizer::builder()
+    let credentials = Credentials::builder()
         .service_url(&args.service_url)
         .operator(operator_identity)
         .delegation(space_did.to_string(), delegation_chain)
         .build()?;
 
-    println!("  Authorizer configured with 1 delegation");
+    println!("  Credentials configured with 1 delegation");
 
     // Step 4: Open bucket and perform operations
     println!("\n[4/6] Opening bucket...");
 
-    let bucket: Bucket<Vec<u8>, Vec<u8>> = Bucket::open(authorizer)?;
+    let bucket: Bucket<Vec<u8>, Vec<u8>, _> = Bucket::open(credentials)?;
 
     // Scope to subject's index
     let subject_path = format!("{}/index", space_did);
@@ -179,17 +172,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     println!("\n=== All Tests Passed! ===\n");
-
-    // Print test artifacts for debugging
-    println!("Test artifacts (for debugging):");
-    println!(
-        "  Space seed (base64): {}",
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &space_seed)
-    );
-    println!(
-        "  Operator seed (base64): {}",
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &operator_seed)
-    );
 
     Ok(())
 }

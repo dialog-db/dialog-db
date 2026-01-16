@@ -3,6 +3,8 @@ use dialog_common::ConditionalSync;
 
 mod backend;
 pub use backend::*;
+#[cfg(feature = "s3")]
+pub use backend::s3;
 
 mod cache;
 pub use cache::*;
