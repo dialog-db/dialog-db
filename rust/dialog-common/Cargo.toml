@@ -9,7 +9,7 @@ license.workspace = true
 [features]
 default = []
 # Testing utilities (Provision, Provider traits, EnvGuard)
-helpers = ["dep:anyhow", "dep:serde", "dep:serde_json", "dep:dialog-macros", "dep:async-trait"]
+helpers = ["dep:anyhow", "dep:serde", "dep:serde_json", "dep:dialog-macros"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["helpers"]
 # Enable web integration tests (implies integration-tests behavior)
@@ -21,7 +21,7 @@ anyhow = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
 dialog-macros = { workspace = true, optional = true }
-async-trait = { workspace = true, optional = true }
+async-trait = { workspace = true }
 futures-util = { workspace = true }
 thiserror = { workspace = true }
 

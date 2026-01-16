@@ -25,23 +25,23 @@ pub fn unique(base: &str) -> String {
 ///
 /// Uses `option_env!` instead of `env!` so that `cargo check --tests --all-features`
 /// doesn't fail when the R2S3_* environment variables aren't set at compile time.
-pub fn open() -> Bucket<Vec<u8>, Vec<u8>> {
+pub fn open() -> Bucket<Vec<u8>, Vec<u8>, Credentials> {
     let address = Address::new(
         option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
         option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
         option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
     );
 
-    let authorizer = Credentials::new(
+    let credentials = Credentials::private(
         address,
         option_env!("R2S3_ACCESS_KEY_ID").expect("R2S3_ACCESS_KEY_ID not set"),
         option_env!("R2S3_SECRET_ACCESS_KEY").expect("R2S3_SECRET_ACCESS_KEY not set"),
     )
     .expect("Failed to create credentials");
 
-    Bucket::open(authorizer).expect("Failed to open bucket")
+    Bucket::open(credentials).expect("Failed to open bucket")
 }
 
-pub fn open_unque_at(base: &str) -> Bucket<Vec<u8>, Vec<u8>> {
+pub fn open_unque_at(base: &str) -> Bucket<Vec<u8>, Vec<u8>, Credentials> {
     open().at(unique(base))
 }

@@ -16,7 +16,7 @@
 //! For publicly accessible buckets that don't require authentication:
 //!
 //! ```no_run
-//! use dialog_storage::s3::{Address, Bucket, Public};
+//! use dialog_storage::s3::{Address, Bucket, Credentials};
 //! use dialog_storage::StorageBackend;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,8 +26,8 @@
 //!     "us-east-1",
 //!     "my-bucket",
 //! );
-//! let authorizer = Public::new(address)?;
-//! let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+//! let credentials = Credentials::public(address)?;
+//! let bucket = Bucket::<Vec<u8>, Vec<u8>, _>::open(credentials)?;
 //! let mut backend = bucket.at("data");  // Scope to a prefix/directory
 //!
 //! backend.set(b"key".to_vec(), b"value".to_vec()).await?;
@@ -48,13 +48,13 @@
 //!     "us-east-1",
 //!     "my-bucket",
 //! );
-//! let authorizer = Credentials::new(
+//! let credentials = Credentials::private(
 //!     address,
 //!     std::env::var("AWS_ACCESS_KEY_ID")?,
 //!     std::env::var("AWS_SECRET_ACCESS_KEY")?,
 //! )?;
 //!
-//! let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+//! let bucket = Bucket::<Vec<u8>, Vec<u8>, _>::open(credentials)?;
 //! let mut backend = bucket.at("data");
 //!
 //! backend.set(b"key".to_vec(), b"value".to_vec()).await?;
@@ -74,13 +74,13 @@
 //!     "auto",
 //!     "my-bucket",
 //! );
-//! let authorizer = Credentials::new(
+//! let credentials = Credentials::private(
 //!     address,
 //!     std::env::var("R2_ACCESS_KEY_ID")?,
 //!     std::env::var("R2_SECRET_ACCESS_KEY")?,
 //! )?;
 //!
-//! let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+//! let bucket = Bucket::<Vec<u8>, Vec<u8>, _>::open(credentials)?;
 //! let backend = bucket.at("data");
 //! # Ok(())
 //! # }
@@ -94,8 +94,8 @@
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // IP addresses and localhost automatically use path-style URLs
 //! let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
-//! let authorizer = Credentials::new(address, "minioadmin", "minioadmin")?;
-//! let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+//! let credentials = Credentials::private(address, "minioadmin", "minioadmin")?;
+//! let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(credentials)?;
 //! // path_style is true by default for IP addresses and localhost
 //! # Ok(())
 //! # }
@@ -110,48 +110,79 @@
 //! - Path separators (`/`) preserve the S3 key hierarchy
 
 use async_trait::async_trait;
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_common::{ConditionalSend, ConditionalSync, Provider};
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use std::marker::PhantomData;
-use std::sync::Arc;
 use thiserror::Error;
 
-// Re-export core presigning types from dialog-s3-credentials crate
+// Re-export core types from dialog-s3-credentials crate
 pub use dialog_s3_credentials::{
-    Acl, Address, Authorization, AuthorizationError, Authorizer, Checksum, Credentials,
-    DEFAULT_EXPIRES, Hasher, Invocation, Public, RequestInfo, access,
+    Address, AuthorizationError as AccessError, Checksum, Hasher, RequestDescriptor, memory, storage,
 };
+use dialog_s3_credentials::access::Precondition;
+
+// Re-export s3::Credentials types
+pub use dialog_s3_credentials::s3::{Credentials, PrivateCredentials, PublicCredentials};
+
+/// Type alias for backwards compatibility.
+pub type Public = PublicCredentials;
 
 // Re-export UCAN types when the feature is enabled
 #[cfg(feature = "ucan")]
-pub use dialog_s3_credentials::{
-    DelegationChain, OperatorIdentity, UcanAuthorizer, UcanAuthorizerBuilder,
+pub use dialog_s3_credentials::ucan::{
+    Credentials as UcanCredentials, CredentialsBuilder as UcanCredentialsBuilder, DelegationChain,
+    OperatorIdentity,
 };
+
+/// Extension trait for RequestDescriptor to convert to reqwest RequestBuilder.
+pub trait RequestDescriptorExt {
+    /// Convert into a reqwest RequestBuilder with the client.
+    fn into_request(self, client: &reqwest::Client) -> reqwest::RequestBuilder;
+}
+
+impl RequestDescriptorExt for RequestDescriptor {
+    fn into_request(self, client: &reqwest::Client) -> reqwest::RequestBuilder {
+        let mut builder = match self.method.as_str() {
+            "GET" => client.get(self.url),
+            "PUT" => client.put(self.url),
+            "DELETE" => client.delete(self.url),
+            _ => client.request(
+                reqwest::Method::from_bytes(self.method.as_bytes()).unwrap(),
+                self.url,
+            ),
+        };
+
+        for (key, value) in self.headers {
+            builder = builder.header(key, value);
+        }
+
+        builder
+    }
+}
 
 mod key;
 pub use key::{decode as decode_s3_key, encode as encode_s3_key};
 
-mod request;
-pub use request::{Delete, Get, Precondition, Put, Request};
-
 #[cfg(feature = "s3-list")]
 mod list;
 #[cfg(feature = "s3-list")]
-pub use list::{List, ListResult};
+pub use list::ListResult;
 
 #[cfg(feature = "s3-list")]
 use crate::StorageSource;
 use crate::{DialogStorageError, StorageBackend, StorageSink, TransactionalMemoryBackend};
 
 // Testing helpers module:
-// - Address types (S3Address, PublicS3Address) are available on all platforms
+// - Address types (S3Address, PublicS3Address, UcanS3Address) are available on all platforms
 // - Server implementation is native-only (internal to the helpers module)
 #[cfg(any(feature = "helpers", test))]
 pub mod helpers;
 #[cfg(all(feature = "helpers", not(target_arch = "wasm32")))]
 pub use helpers::{LocalS3, PublicS3Settings, S3Settings};
 #[cfg(any(feature = "helpers", test))]
-pub use helpers::{PublicS3Address, S3Address};
+pub use helpers::{PublicS3Address, S3Address, UcanS3Address};
+#[cfg(all(feature = "helpers", feature = "ucan", not(target_arch = "wasm32")))]
+pub use helpers::{UcanAccessServer, UcanS3Settings};
 
 /// Errors that can occur when using the S3 storage backend.
 #[derive(Error, Debug)]
@@ -185,34 +216,88 @@ impl From<reqwest::Error> for S3StorageError {
     }
 }
 
-impl From<AuthorizationError> for S3StorageError {
-    fn from(error: AuthorizationError) -> Self {
+impl From<AccessError> for S3StorageError {
+    fn from(error: AccessError) -> Self {
         S3StorageError::AuthorizationError(error.to_string())
     }
 }
 
+/// Trait alias for credentials that can authorize storage operations.
+///
+/// This combines the [`Provider`] trait for each storage capability effect.
+pub trait StorageAuthorizer:
+    Provider<storage::Get>
+    + Provider<storage::Set>
+    + Provider<storage::Delete>
+    + Provider<storage::List>
+    + Clone
+    + std::fmt::Debug
+    + Send
+    + Sync
+{
+}
+
+// Blanket implementation for any type that implements all required traits
+impl<T> StorageAuthorizer for T where
+    T: Provider<storage::Get>
+        + Provider<storage::Set>
+        + Provider<storage::Delete>
+        + Provider<storage::List>
+        + Clone
+        + std::fmt::Debug
+        + Send
+        + Sync
+{
+}
+
+/// Trait alias for credentials that can authorize memory (transactional) operations.
+///
+/// This combines the [`Provider`] trait for each memory capability effect.
+pub trait MemoryAuthorizer:
+    Provider<memory::Resolve>
+    + Provider<memory::Update>
+    + Provider<memory::Delete>
+    + Clone
+    + std::fmt::Debug
+    + Send
+    + Sync
+{
+}
+
+// Blanket implementation for any type that implements all required traits
+impl<T> MemoryAuthorizer for T where
+    T: Provider<memory::Resolve>
+        + Provider<memory::Update>
+        + Provider<memory::Delete>
+        + Clone
+        + std::fmt::Debug
+        + Send
+        + Sync
+{
+}
+
 /// S3/R2-compatible storage backend.
 ///
-/// The `Bucket` is configured entirely through its [`Authorizer`], which provides:
-/// - The S3 endpoint, region, and bucket (for [`Credentials`] and [`Public`])
+/// The `Bucket` is configured entirely through its credentials, which provides:
+/// - The S3 endpoint, region, and bucket
 /// - URL building logic
-/// - Request signing/authorization
+/// - Request signing/authorization via the [`Provider`] trait
 ///
 /// # Example
 ///
 /// ```no_run
-/// use dialog_storage::s3::{Bucket, Address, Credentials, Public};
+/// use dialog_storage::s3::{Bucket, Address, Credentials};
 /// use dialog_storage::StorageBackend;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Public access (no credentials)
 /// let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "my-bucket");
-/// let mut storage = Bucket::<Vec<u8>, Vec<u8>>::open(Public::new(address)?)?;
+/// let mut storage = Bucket::<Vec<u8>, Vec<u8>, _>::open(Credentials::public(address)?)?;
 ///
 /// // With credentials and prefix
 /// let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "my-bucket");
-/// let authorizer = Credentials::new(address, "access_key", "secret_key")?;
-/// let mut storage = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?
+/// let credentials = Credentials::private(address, "access_key", "secret_key")?;
+/// let mut storage = Bucket::<Vec<u8>, Vec<u8>, _>::open(credentials)?
 ///     .at("data");  // Scope to a prefix/directory within the bucket
 ///
 /// storage.set(b"key".to_vec(), b"value".to_vec()).await?;
@@ -220,15 +305,16 @@ impl From<AuthorizationError> for S3StorageError {
 /// # }
 /// ```
 #[derive(Debug, Clone)]
-pub struct Bucket<Key, Value>
+pub struct Bucket<Key, Value, C>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
+    C: StorageAuthorizer,
 {
     /// Optional prefix/directory within the bucket
     path: Option<String>,
-    /// Authorizer for signing requests and building URLs
-    authorizer: Arc<dyn Authorizer>,
+    /// Credentials for authorizing requests and building URLs
+    credentials: C,
     /// Hasher for computing checksums
     hasher: Hasher,
     /// HTTP client
@@ -237,18 +323,19 @@ where
     value_type: PhantomData<Value>,
 }
 
-impl<Key, Value> Bucket<Key, Value>
+impl<Key, Value, C> Bucket<Key, Value, C>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
+    C: StorageAuthorizer,
 {
-    /// Open an S3 storage bucket with a specific authorizer.
+    /// Open an S3 storage bucket with the given credentials.
     ///
-    /// The authorizer provides all configuration including endpoint, region, bucket,
-    /// and signing credentials. Use:
-    /// - [`Public::new(address)`](Public::new) for public/unsigned access
-    /// - [`Credentials::new(address, key, secret)`](Credentials::new) for AWS SigV4 signing
-    /// - [`UcanAuthorizer`] for UCAN-based access via an access service
+    /// The credentials provide all configuration including endpoint, region, bucket,
+    /// and signing logic. Use:
+    /// - [`Credentials::public(address)`](Credentials::public) for public/unsigned access
+    /// - [`Credentials::private(address, key, secret)`](Credentials::private) for AWS SigV4 signing
+    /// - [`UcanCredentials`] for UCAN-based access via an access service
     ///
     /// By default uses SHA-256 for checksums. Use [`with_hasher`](Self::with_hasher)
     /// to configure a different algorithm.
@@ -256,24 +343,24 @@ where
     /// # Examples
     ///
     /// ```no_run
-    /// use dialog_storage::s3::{Bucket, Address, Credentials, Public};
+    /// use dialog_storage::s3::{Bucket, Address, Credentials};
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Public access (no signing)
     /// let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "my-bucket");
-    /// let backend = Bucket::<Vec<u8>, Vec<u8>>::open(Public::new(address)?)?;
+    /// let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(Credentials::public(address)?)?;
     ///
     /// // AWS credentials
     /// let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
-    /// let authorizer = Credentials::new(address, "minioadmin", "minioadmin")?;
-    /// let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+    /// let credentials = Credentials::private(address, "minioadmin", "minioadmin")?;
+    /// let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(credentials)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn open<A: Authorizer + 'static>(authorizer: A) -> Result<Self, S3StorageError> {
+    pub fn open(credentials: C) -> Result<Self, S3StorageError> {
         Ok(Self {
             path: None,
-            authorizer: Arc::new(authorizer),
+            credentials,
             hasher: Hasher::Sha256,
             client: reqwest::Client::new(),
             key_type: PhantomData,
@@ -289,11 +376,11 @@ where
     /// # Examples
     ///
     /// ```no_run
-    /// use dialog_storage::s3::{Bucket, Address, Public};
+    /// use dialog_storage::s3::{Bucket, Address, Credentials};
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "my-bucket");
-    /// let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(Public::new(address)?)?;
+    /// let bucket = Bucket::<Vec<u8>, Vec<u8>, _>::open(Credentials::public(address)?)?;
     ///
     /// // Scope to "data" directory
     /// let data = bucket.at("data");
@@ -314,7 +401,7 @@ where
 
         Self {
             path: prefix,
-            authorizer: self.authorizer.clone(),
+            credentials: self.credentials.clone(),
             hasher: self.hasher,
             client: self.client.clone(),
             key_type: PhantomData,
@@ -327,41 +414,64 @@ where
         self.path.as_deref()
     }
 
-    /// Get the region for signing.
-    pub fn region(&self) -> &str {
-        self.authorizer.region()
-    }
-
     /// Set the hasher for computing checksums.
     pub fn with_hasher(mut self, hasher: Hasher) -> Self {
         self.hasher = hasher;
         self
     }
 
-    /// Resolve a key to its full S3 URL.
+    /// Encode a key and build the full path including any prefix.
     ///
     /// This handles:
     /// - Key encoding (base58 for binary/unsafe characters)
     /// - Prefix prepending
-    /// - URL construction via the authorizer
-    pub fn resolve(&self, key: &[u8]) -> Result<url::Url, S3StorageError> {
+    pub fn encode_path(&self, key: &[u8]) -> String {
         let encoded_key = encode_s3_key(key);
-        let full_path = match &self.path {
+        match &self.path {
             Some(prefix) => format!("{}/{}", prefix, encoded_key),
             None => encoded_key,
-        };
-
-        self.authorizer
-            .build_url(&full_path)
-            .map_err(S3StorageError::from)
+        }
     }
 
-    /// Build the base URL for the bucket (used for listing operations).
-    pub fn base_url(&self) -> Result<url::Url, S3StorageError> {
-        let path = self.path.as_deref().unwrap_or("");
-        self.authorizer
-            .build_url(path)
-            .map_err(S3StorageError::from)
+    /// Get the prefix path (used for listing operations).
+    pub fn prefix_path(&self) -> String {
+        self.path.clone().unwrap_or_default()
+    }
+
+    /// Send an authorized HTTP request using the Provider trait.
+    ///
+    /// This is the core method that:
+    /// 1. Uses the pre-authorized RequestDescriptor from Provider::execute
+    /// 2. Builds the reqwest request with headers via `into_request`
+    /// 3. Optionally adds body and precondition headers
+    /// 4. Sends the request
+    async fn send_request(
+        &self,
+        descriptor: RequestDescriptor,
+        body: Option<&[u8]>,
+        precondition: Precondition,
+    ) -> Result<reqwest::Response, S3StorageError> {
+        // Build the HTTP request using the pre-authorized descriptor
+        let mut builder = descriptor.into_request(&self.client);
+
+        // Add precondition headers for CAS semantics
+        match &precondition {
+            Precondition::None => {}
+            Precondition::IfMatch(etag) => {
+                builder = builder.header("If-Match", format!("\"{}\"", etag));
+            }
+            Precondition::IfNoneMatch => {
+                builder = builder.header("If-None-Match", "*");
+            }
+        }
+
+        // Add body if present
+        if let Some(body) = body {
+            builder = builder.body(body.to_vec());
+        }
+
+        // Send the request
+        Ok(builder.send().await?)
     }
 
     /// Delete an object from S3.
@@ -369,8 +479,18 @@ where
     /// Note: S3 DELETE always returns 204 No Content, even if the object didn't exist.
     /// This method always returns `Ok(())` on success.
     pub async fn delete(&mut self, key: &Key) -> Result<(), S3StorageError> {
-        let url = self.resolve(key.as_ref())?;
-        let response = Delete::new(url, self.region()).perform(self).await?;
+        let store = self.prefix_path();
+        let encoded_key = encode_s3_key(key.as_ref());
+        let effect = storage::Delete::new(store, encoded_key);
+        let descriptor = self
+            .credentials
+            .execute(effect)
+            .await
+            .map_err(S3StorageError::from)?;
+
+        let response = self
+            .send_request(descriptor, None, Precondition::None)
+            .await?;
 
         if response.status().is_success() {
             Ok(())
@@ -385,20 +505,29 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Key, Value> StorageBackend for Bucket<Key, Value>
+impl<Key, Value, C> StorageBackend for Bucket<Key, Value, C>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
+    C: StorageAuthorizer,
 {
     type Key = Key;
     type Value = Value;
     type Error = S3StorageError;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        let url = self.resolve(key.as_ref())?;
-        let response = Put::new(url, value.as_ref(), self.region())
-            .with_checksum(&self.hasher)
-            .perform(self)
+        let store = self.prefix_path();
+        let encoded_key = encode_s3_key(key.as_ref());
+        let checksum = self.hasher.checksum(value.as_ref());
+        let effect = storage::Set::new(store, encoded_key, checksum);
+        let descriptor = self
+            .credentials
+            .execute(effect)
+            .await
+            .map_err(S3StorageError::from)?;
+
+        let response = self
+            .send_request(descriptor, Some(value.as_ref()), Precondition::None)
             .await?;
 
         if response.status().is_success() {
@@ -412,8 +541,18 @@ where
     }
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        let url = self.resolve(key.as_ref())?;
-        let response = Get::new(url, self.region()).perform(self).await?;
+        let store = self.prefix_path();
+        let encoded_key = encode_s3_key(key.as_ref());
+        let effect = storage::Get::new(store, encoded_key);
+        let descriptor = self
+            .credentials
+            .execute(effect)
+            .await
+            .map_err(S3StorageError::from)?;
+
+        let response = self
+            .send_request(descriptor, None, Precondition::None)
+            .await?;
 
         if response.status().is_success() {
             let bytes = response
@@ -439,10 +578,11 @@ const MAX_CONCURRENT_WRITES: usize = 6;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Key, Value> StorageSink for Bucket<Key, Value>
+impl<Key, Value, C> StorageSink for Bucket<Key, Value, C>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
+    C: StorageAuthorizer,
 {
     async fn write<S>(&mut self, source: S) -> Result<(), Self::Error>
     where
@@ -466,10 +606,11 @@ where
 }
 
 #[cfg(feature = "s3-list")]
-impl<Key, Value> StorageSource for Bucket<Key, Value>
+impl<Key, Value, C> StorageSource for Bucket<Key, Value, C>
 where
     Key: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
+    C: StorageAuthorizer,
 {
     fn read(&self) -> impl Stream<Item = Result<(Self::Key, Self::Value), Self::Error>> {
         let storage = self.clone();
@@ -544,10 +685,11 @@ where
 /// [ETag]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/ETag
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Key, Value> TransactionalMemoryBackend for Bucket<Key, Value>
+impl<Key, Value, C> TransactionalMemoryBackend for Bucket<Key, Value, C>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
+    C: StorageAuthorizer + MemoryAuthorizer,
 {
     type Address = Key;
     type Value = Value;
@@ -558,8 +700,18 @@ where
         &self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
-        let url = self.resolve(address.as_ref())?;
-        let response = Get::new(url, self.region()).perform(self).await?;
+        let space = self.path.clone().unwrap_or_default();
+        let cell = encode_s3_key(address.as_ref());
+        let effect = memory::Resolve::new(space, cell);
+        let descriptor = self
+            .credentials
+            .execute(effect)
+            .await
+            .map_err(S3StorageError::from)?;
+
+        let response = self
+            .send_request(descriptor, None, Precondition::None)
+            .await?;
 
         if response.status().is_success() {
             // Extract ETag from response headers
@@ -593,20 +745,29 @@ where
         edition: Option<&Self::Edition>,
         content: Option<Self::Value>,
     ) -> Result<Option<Self::Edition>, Self::Error> {
+        let space = self.path.clone().unwrap_or_default();
+        let cell = encode_s3_key(address.as_ref());
+        // Edition is now String (memory::Edition = String)
+        let when = edition.cloned();
+
         match content {
             Some(new_value) => {
-                let url = self.resolve(address.as_ref())?;
+                let checksum = self.hasher.checksum(new_value.as_ref());
+                let effect = memory::Update::new(space, cell, when, checksum);
+                let descriptor = self
+                    .credentials
+                    .execute(effect)
+                    .await
+                    .map_err(S3StorageError::from)?;
 
-                // Build precondition
-                let precondition = match edition {
+                // Convert edition to local Precondition for send_request
+                let local_precondition = match edition {
                     Some(etag) => Precondition::IfMatch(etag.clone()),
                     None => Precondition::IfNoneMatch,
                 };
 
-                let response = Put::new(url, new_value.as_ref(), self.region())
-                    .with_checksum(&self.hasher)
-                    .with_precondition(precondition)
-                    .perform(self)
+                let response = self
+                    .send_request(descriptor, Some(new_value.as_ref()), local_precondition)
                     .await?;
 
                 match response.status() {
@@ -634,15 +795,24 @@ where
                 }
             }
             None => {
-                // DELETE with If-Match header for CAS
-                let url = self.resolve(address.as_ref())?;
-                let mut delete_request = Delete::new(url, self.region());
+                // DELETE requires edition (when) - delete with None is a no-op
+                let Some(when) = when else {
+                    return Ok(None);
+                };
 
-                if let Some(etag) = edition {
-                    delete_request = delete_request.with_if_match(etag.clone());
-                }
+                let effect = memory::Delete::new(space, cell, when);
+                let descriptor = self
+                    .credentials
+                    .execute(effect)
+                    .await
+                    .map_err(S3StorageError::from)?;
 
-                let response = delete_request.perform(self).await?;
+                let precondition = match edition {
+                    Some(etag) => Precondition::IfMatch(etag.clone()),
+                    None => Precondition::None,
+                };
+
+                let response = self.send_request(descriptor, None, precondition).await?;
 
                 match response.status() {
                     status if status.is_success() => Ok(None),
@@ -664,7 +834,6 @@ mod tests {
     use super::*;
     #[cfg(all(feature = "helpers", feature = "integration-tests"))]
     use helpers::*;
-    use url::Url;
 
     fn test_address() -> Address {
         Address::new("https://s3.amazonaws.com", "us-east-1", "bucket")
@@ -675,33 +844,33 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_builds_virtual_hosted_url_without_prefix() {
-        // Virtual-hosted style: {bucket}.{endpoint}/{key}
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(test_public()).unwrap();
+    fn it_encodes_path_without_prefix() {
+        // Test path encoding for binary keys
+        let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(test_public()).unwrap();
 
-        let url = backend.resolve(&[1, 2, 3]).unwrap();
-        assert_eq!(url.as_str(), "https://bucket.s3.amazonaws.com/!Ldp");
+        let path = backend.encode_path(&[1, 2, 3]);
+        assert_eq!(path, "!Ldp");
     }
 
     #[dialog_common::test]
-    fn it_builds_virtual_hosted_url_with_prefix() {
-        // Virtual-hosted style with prefix: {bucket}.{endpoint}/{prefix}/{key}
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(test_public())
+    fn it_encodes_path_with_prefix() {
+        // Path with prefix
+        let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(test_public())
             .unwrap()
             .at("prefix");
 
-        let url = backend.resolve(&[1, 2, 3]).unwrap();
-        assert_eq!(url.as_str(), "https://bucket.s3.amazonaws.com/prefix/!Ldp");
+        let path = backend.encode_path(&[1, 2, 3]);
+        assert_eq!(path, "prefix/!Ldp");
     }
 
     #[dialog_common::test]
-    fn it_builds_virtual_hosted_url_with_key() {
-        // Virtual-hosted style with text key
+    fn it_builds_virtual_hosted_url() {
+        // Virtual-hosted style: {bucket}.{endpoint}/{key}
         let address = Address::new("https://s3.amazonaws.com", "us-east-1", "my-bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(Public::new(address).unwrap()).unwrap();
+        let authorizer = Public::new(address).unwrap();
 
         // "my-key" is safe ASCII, so it stays as-is (not encoded)
-        let url = backend.resolve(b"my-key").unwrap();
+        let url = authorizer.build_url("my-key").unwrap();
         assert_eq!(url.as_str(), "https://my-bucket.s3.amazonaws.com/my-key");
     }
 
@@ -709,23 +878,11 @@ mod tests {
     fn it_builds_path_style_url() {
         // Path-style: {endpoint}/{bucket}/{key}
         let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(Public::new(address).unwrap()).unwrap();
+        let authorizer = Public::new(address).unwrap();
         // localhost defaults to path_style=true
 
-        let url = backend.resolve(b"my-key").unwrap();
+        let url = authorizer.build_url("my-key").unwrap();
         assert_eq!(url.as_str(), "http://localhost:9000/bucket/my-key");
-    }
-
-    #[dialog_common::test]
-    fn it_builds_path_style_url_with_prefix() {
-        // Path-style with prefix: {endpoint}/{bucket}/{prefix}/{key}
-        let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(Public::new(address).unwrap())
-            .unwrap()
-            .at("prefix");
-
-        let url = backend.resolve(b"my-key").unwrap();
-        assert_eq!(url.as_str(), "http://localhost:9000/bucket/prefix/my-key");
     }
 
     #[dialog_common::test]
@@ -733,9 +890,8 @@ mod tests {
         // Force path-style on a non-localhost endpoint
         let address = Address::new("https://custom-s3.example.com", "us-east-1", "bucket");
         let authorizer = Public::new(address).unwrap().with_path_style(true);
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer).unwrap();
 
-        let url = backend.resolve(b"key").unwrap();
+        let url = authorizer.build_url("key").unwrap();
         assert_eq!(url.as_str(), "https://custom-s3.example.com/bucket/key");
     }
 
@@ -744,9 +900,8 @@ mod tests {
         // Force virtual-hosted on localhost (not typical, but supported)
         let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
         let authorizer = Public::new(address).unwrap().with_path_style(false);
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer).unwrap();
 
-        let url = backend.resolve(b"key").unwrap();
+        let url = authorizer.build_url("key").unwrap();
         assert_eq!(url.as_str(), "http://bucket.localhost:9000/key");
     }
 
@@ -754,9 +909,9 @@ mod tests {
     fn it_builds_r2_url() {
         // R2 uses virtual-hosted style by default (non-localhost)
         let address = Address::new("https://abc123.r2.cloudflarestorage.com", "auto", "bucket");
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(Public::new(address).unwrap()).unwrap();
+        let authorizer = Public::new(address).unwrap();
 
-        let url = backend.resolve(b"my-key").unwrap();
+        let url = authorizer.build_url("my-key").unwrap();
         assert_eq!(
             url.as_str(),
             "https://bucket.abc123.r2.cloudflarestorage.com/my-key"
@@ -764,14 +919,14 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_nests_open_calls() {
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(test_public())
+    fn it_nests_at_calls() {
+        let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(test_public())
             .unwrap()
             .at("data")
             .at("v1");
 
-        let url = backend.resolve(b"key").unwrap();
-        assert_eq!(url.as_str(), "https://bucket.s3.amazonaws.com/data/v1/key");
+        let path = backend.encode_path(b"key");
+        assert_eq!(path, "data/v1/key");
     }
 
     #[dialog_common::test]
@@ -788,67 +943,14 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_generates_signed_urls() {
-        let address = Address::new("https://s3.amazonaws.com", "us-east-1", "my-bucket");
-        let credentials = Credentials::new(
-            address,
-            "AKIAIOSFODNN7EXAMPLE",
-            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-        )
-        .unwrap();
-
-        // Bucket::open now takes a single Authorizer that contains the address
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(credentials.clone()).unwrap();
-
-        // Create a PUT request for a key
-        let url = backend.resolve(b"test-key").unwrap();
-        let request = Put::new(url, b"test-value", "us-east-1");
-
-        // The credentials should be able to sign it via the Authorizer trait
-        let request_info = RequestInfo::from_invocation(&request);
-        let authorized = credentials.authorize(&request_info).await.unwrap();
-
-        // Should have signing parameters
-        assert!(
-            authorized
-                .url
-                .as_str()
-                .contains("X-Amz-Algorithm=AWS4-HMAC-SHA256")
-        );
-        assert!(authorized.url.as_str().contains("X-Amz-Signature="));
-    }
-
-    #[dialog_common::test]
-    async fn it_authorizes_public_request() {
-        let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
-        let public = Public::new(address).unwrap();
-
-        let url = Url::parse("https://bucket.s3.amazonaws.com/key").unwrap();
-        let request = Put::new(url.clone(), b"test", "us-east-1").with_checksum(&Hasher::Sha256);
-
-        let request_info = RequestInfo::from_invocation(&request);
-        let authorization = public.authorize(&request_info).await.unwrap();
-
-        assert!(authorization.headers.iter().any(|(k, _)| k == "host"));
-
-        // Should have checksum header
-        assert!(
-            authorization
-                .headers
-                .iter()
-                .any(|(k, _)| k == "x-amz-checksum-sha256")
-        );
-    }
-
-    #[dialog_common::test]
     fn it_configures_bucket_with_hasher() {
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(test_public())
+        let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(test_public())
             .unwrap()
             .with_hasher(Hasher::Sha256);
 
         // Hasher should be set (we can't directly inspect it, but the backend should work)
-        let url = backend.resolve(b"key").unwrap();
-        assert!(url.as_str().contains("bucket"));
+        let path = backend.encode_path(b"key");
+        assert_eq!(path, "key");
     }
 
     #[dialog_common::test]
@@ -863,7 +965,7 @@ mod tests {
         // Using public access for simplicity. Signed sessions are tested separately.
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?.at("test");
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?.at("test");
 
         // Test data
         let key = b"test-key-1".to_vec();
@@ -883,7 +985,7 @@ mod tests {
     async fn it_performs_multiple_operations(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?;
 
         // Set multiple values
         backend.set(b"key1".to_vec(), b"value1".to_vec()).await?;
@@ -914,7 +1016,7 @@ mod tests {
     async fn it_handles_large_values(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?;
 
         // Create a 100KB value
         let key = b"large-key".to_vec();
@@ -932,7 +1034,7 @@ mod tests {
     async fn it_deletes_values(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?;
 
         let key = b"delete-test-key".to_vec();
         let value = b"delete-test-value".to_vec();
@@ -960,7 +1062,7 @@ mod tests {
     async fn it_lists_objects(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?.at("list-test");
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?.at("list-test");
 
         // Set multiple values
         backend.set(b"key1".to_vec(), b"value1".to_vec()).await?;
@@ -986,7 +1088,7 @@ mod tests {
     async fn it_lists_empty_for_nonexistent_prefix(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?
+        let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?
             .at("nonexistent-prefix-that-does-not-exist");
 
         // List objects with a prefix that has no objects - should return empty list
@@ -1004,7 +1106,7 @@ mod tests {
     async fn it_errors_on_nonexistent_bucket(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", "bucket-that-does-not-exist");
         let authorizer = Public::new(address)?.with_path_style(true);
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+        let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?;
 
         // S3 returns 404 NoSuchBucket error when listing a non-existent bucket.
         // See: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_Errors
@@ -1028,7 +1130,7 @@ mod tests {
 
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?.at("stream-test");
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?.at("stream-test");
 
         // Set multiple values
         backend.set(b"a".to_vec(), b"value-a".to_vec()).await?;
@@ -1056,7 +1158,7 @@ mod tests {
     async fn it_returns_none_for_missing_values(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+        let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?;
 
         // Try to get a key that doesn't exist
         let key = b"nonexistent-key".to_vec();
@@ -1071,7 +1173,7 @@ mod tests {
     async fn it_performs_bulk_writes(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?.at("bulk-test");
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?.at("bulk-test");
 
         // Create a source stream with multiple items
         use async_stream::try_stream;
@@ -1100,7 +1202,8 @@ mod tests {
 
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let mut s3_backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?.at("memory-integration");
+        let mut s3_backend =
+            Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?.at("memory-integration");
 
         // Create a memory backend with some data
         let mut memory_backend = crate::MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
@@ -1131,7 +1234,7 @@ mod tests {
         // Create two backends with different prefixes
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+        let bucket = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?;
         let mut backend1 = bucket.clone().at("prefix-a");
         let mut backend2 = bucket.at("prefix-b");
 
@@ -1153,7 +1256,7 @@ mod tests {
         // Create two backends with different prefixes
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let bucket = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+        let bucket = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?;
         let mut backend1 = bucket.clone().at("prefix-a");
         let mut backend2 = bucket.at("prefix-b");
 
@@ -1176,7 +1279,7 @@ mod tests {
     async fn it_overwrites_value(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?;
 
         let key = b"overwrite-key".to_vec();
 
@@ -1195,7 +1298,7 @@ mod tests {
     async fn it_handles_binary_keys(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?;
 
         // Binary key with non-UTF8 bytes
         let key = vec![0x00, 0xFF, 0x80, 0x7F];
@@ -1213,7 +1316,7 @@ mod tests {
     async fn it_handles_path_like_keys(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?;
 
         // Path-like key with slashes
         let key = b"path/to/nested/key".to_vec();
@@ -1231,7 +1334,7 @@ mod tests {
     async fn it_handles_encoded_key_segments(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?;
 
         // Test key with mixed safe and unsafe segments
         // "safe-segment/user@example.com" - first segment is safe, second has @ which is unsafe
@@ -1259,7 +1362,7 @@ mod tests {
     async fn it_handles_multi_segment_mixed_encoding(env: PublicS3Address) -> anyhow::Result<()> {
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let authorizer = Public::new(address)?.with_path_style(true);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)?;
 
         // Test key with multiple segments: safe/unsafe/safe/unsafe pattern
         // "data/file name with spaces/v1/special!chars"
@@ -1319,10 +1422,11 @@ mod tests {
     async fn it_works_with_signed_session(env: S3Address) -> anyhow::Result<()> {
         // Create credentials
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let credentials = Credentials::new(address, &env.access_key_id, &env.secret_access_key)?
-            .with_path_style(true);
+        let credentials =
+            Credentials::private(address, &env.access_key_id, &env.secret_access_key)?
+                .with_path_style(true);
 
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(credentials)?.at("signed-test");
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(credentials)?.at("signed-test");
 
         // Test data
         let key = b"signed-key".to_vec();
@@ -1342,10 +1446,10 @@ mod tests {
     async fn it_fails_with_wrong_secret_key(env: S3Address) -> anyhow::Result<()> {
         // Create credentials with WRONG secret key
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let credentials =
-            Credentials::new(address, &env.access_key_id, "wrong-secret")?.with_path_style(true);
+        let credentials = Credentials::private(address, &env.access_key_id, "wrong-secret")?
+            .with_path_style(true);
 
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(credentials)?;
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(credentials)?;
 
         // Attempt to set a value - should fail due to signature mismatch
         let result = backend.set(b"key".to_vec(), b"value".to_vec()).await;
@@ -1362,10 +1466,11 @@ mod tests {
     async fn it_fails_with_wrong_access_key(env: S3Address) -> anyhow::Result<()> {
         // Create credentials with WRONG access key
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let credentials = Credentials::new(address, "wrong-access-key", &env.secret_access_key)?
-            .with_path_style(true);
+        let credentials =
+            Credentials::private(address, "wrong-access-key", &env.secret_access_key)?
+                .with_path_style(true);
 
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(credentials)?;
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(credentials)?;
 
         // Attempt to set a value - should fail due to unknown access key
         let result = backend.set(b"key".to_vec(), b"value".to_vec()).await;
@@ -1383,7 +1488,7 @@ mod tests {
         // Client uses no credentials but server requires authentication
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let public = Public::new(address)?.with_path_style(true);
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(public)?;
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(public)?;
 
         // Attempt to set a value - should fail because server expects signed requests
         let result = backend.set(b"key".to_vec(), b"value".to_vec()).await;
@@ -1401,9 +1506,9 @@ mod tests {
         // First, set a value with correct credentials
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
         let correct_credentials =
-            Credentials::new(address, &env.access_key_id, &env.secret_access_key)?
+            Credentials::private(address, &env.access_key_id, &env.secret_access_key)?
                 .with_path_style(true);
-        let mut correct_backend = Bucket::<Vec<u8>, Vec<u8>>::open(correct_credentials)?;
+        let mut correct_backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(correct_credentials)?;
 
         correct_backend
             .set(b"protected-key".to_vec(), b"secret-value".to_vec())
@@ -1411,9 +1516,9 @@ mod tests {
 
         // Now try to GET with wrong credentials
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let wrong_credentials =
-            Credentials::new(address, &env.access_key_id, "wrong-secret")?.with_path_style(true);
-        let wrong_backend = Bucket::<Vec<u8>, Vec<u8>>::open(wrong_credentials)?;
+        let wrong_credentials = Credentials::private(address, &env.access_key_id, "wrong-secret")?
+            .with_path_style(true);
+        let wrong_backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(wrong_credentials)?;
 
         // Attempt to get the value - should fail
         let result = wrong_backend.get(&b"protected-key".to_vec()).await;
@@ -1431,10 +1536,11 @@ mod tests {
     async fn it_lists_with_signed_session(env: S3Address) -> anyhow::Result<()> {
         // Create credentials
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let credentials = Credentials::new(address, &env.access_key_id, &env.secret_access_key)?
-            .with_path_style(true);
+        let credentials =
+            Credentials::private(address, &env.access_key_id, &env.secret_access_key)?
+                .with_path_style(true);
 
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(credentials)?.at("signed-list-test");
+        let mut backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(credentials)?.at("signed-list-test");
 
         // Set multiple values
         backend.set(b"key1".to_vec(), b"value1".to_vec()).await?;
@@ -1464,10 +1570,12 @@ mod tests {
         use futures_util::TryStreamExt;
 
         let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-        let credentials = Credentials::new(address, &env.access_key_id, &env.secret_access_key)?
-            .with_path_style(true);
+        let credentials =
+            Credentials::private(address, &env.access_key_id, &env.secret_access_key)?
+                .with_path_style(true);
 
-        let mut backend = Bucket::<Vec<u8>, Vec<u8>>::open(credentials)?.at("signed-stream-test");
+        let mut backend =
+            Bucket::<Vec<u8>, Vec<u8>, _>::open(credentials)?.at("signed-stream-test");
 
         // Set multiple values
         backend.set(b"a".to_vec(), b"value-a".to_vec()).await?;
@@ -1489,5 +1597,145 @@ mod tests {
         assert!(keys.contains(&b"b".as_slice()));
 
         Ok(())
+    }
+
+    // UCAN-authorized S3 access tests
+    #[cfg(feature = "ucan")]
+    mod ucan_tests {
+        use super::*;
+        use dialog_s3_credentials::ucan::{Credentials as UcanCredentials, DelegationChain, OperatorIdentity, generate_signer};
+        use ucan::delegation::builder::DelegationBuilder;
+        use ucan::delegation::subject::DelegatedSubject;
+        use ucan::did::Ed25519Did;
+
+        /// Create a test delegation from space to operator for storage commands.
+        fn create_storage_delegation(
+            space_signer: &ucan::did::Ed25519Signer,
+            operator_did: &Ed25519Did,
+        ) -> ucan::Delegation<Ed25519Did> {
+            DelegationBuilder::new()
+                .issuer(space_signer.clone())
+                .audience(operator_did.clone())
+                .subject(DelegatedSubject::Specific(*space_signer.did()))
+                .command(vec!["storage".to_string()])
+                .try_build()
+                .expect("Failed to build delegation")
+        }
+
+        #[dialog_common::test]
+        async fn it_sets_and_gets_with_ucan(env: UcanS3Address) -> anyhow::Result<()> {
+            // 1. Generate keypairs
+            let space_signer = generate_signer();
+            let space_did = space_signer.did();
+
+            let operator_identity = OperatorIdentity::generate();
+            let operator_did: Ed25519Did = operator_identity.did().to_string().parse()
+                .map_err(|e| anyhow::anyhow!("Failed to parse DID: {:?}", e))?;
+
+            // 2. Create delegation
+            let delegation = create_storage_delegation(&space_signer, &operator_did);
+            let delegation_chain = DelegationChain::new(vec![delegation]);
+
+            // 3. The UCAN subject is the space DID (must be valid DID, not a path)
+            let subject = space_did.to_string();
+
+            // 4. Create UCAN credentials - delegation keyed by DID
+            let credentials = UcanCredentials::builder()
+                .service_url(&env.access_service_url)
+                .operator(operator_identity)
+                .delegation(&subject, delegation_chain)
+                .build()?;
+
+            // 5. Open bucket - store name is the DID
+            let bucket: Bucket<Vec<u8>, Vec<u8>, _> = Bucket::open(credentials)?;
+            let backend = bucket.at(&subject);
+
+            // 6. Test set and get - key can include sub-paths
+            let key = b"index/test-key".to_vec();
+            let value = b"test-value".to_vec();
+
+            backend.clone().set(key.clone(), value.clone()).await?;
+            let retrieved = backend.get(&key).await?;
+            assert_eq!(retrieved, Some(value));
+
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn it_deletes_with_ucan(env: UcanS3Address) -> anyhow::Result<()> {
+            // 1. Generate keypairs
+            let space_signer = generate_signer();
+            let space_did = space_signer.did();
+
+            let operator_identity = OperatorIdentity::generate();
+            let operator_did: Ed25519Did = operator_identity.did().to_string().parse()
+                .map_err(|e| anyhow::anyhow!("Failed to parse DID: {:?}", e))?;
+
+            // 2. Create delegation
+            let delegation = create_storage_delegation(&space_signer, &operator_did);
+            let delegation_chain = DelegationChain::new(vec![delegation]);
+
+            // 3. Subject is the DID
+            let subject = space_did.to_string();
+
+            // 4. Create UCAN credentials
+            let credentials = UcanCredentials::builder()
+                .service_url(&env.access_service_url)
+                .operator(operator_identity)
+                .delegation(&subject, delegation_chain)
+                .build()?;
+
+            // 5. Open bucket
+            let bucket: Bucket<Vec<u8>, Vec<u8>, _> = Bucket::open(credentials)?;
+            let mut backend = bucket.at(&subject);
+
+            // 6. Set, verify, delete, verify
+            let key = b"index/delete-test-key".to_vec();
+            let value = b"delete-test-value".to_vec();
+
+            backend.set(key.clone(), value.clone()).await?;
+            assert_eq!(backend.get(&key).await?, Some(value));
+
+            backend.delete(&key).await?;
+            assert_eq!(backend.get(&key).await?, None);
+
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn it_returns_none_for_nonexistent_key_with_ucan(env: UcanS3Address) -> anyhow::Result<()> {
+            // 1. Generate keypairs
+            let space_signer = generate_signer();
+            let space_did = space_signer.did();
+
+            let operator_identity = OperatorIdentity::generate();
+            let operator_did: Ed25519Did = operator_identity.did().to_string().parse()
+                .map_err(|e| anyhow::anyhow!("Failed to parse DID: {:?}", e))?;
+
+            // 2. Create delegation
+            let delegation = create_storage_delegation(&space_signer, &operator_did);
+            let delegation_chain = DelegationChain::new(vec![delegation]);
+
+            // 3. Subject is the DID
+            let subject = space_did.to_string();
+
+            // 4. Create UCAN credentials
+            let credentials = UcanCredentials::builder()
+                .service_url(&env.access_service_url)
+                .operator(operator_identity)
+                .delegation(&subject, delegation_chain)
+                .build()?;
+
+            // 5. Open bucket
+            let bucket: Bucket<Vec<u8>, Vec<u8>, _> = Bucket::open(credentials)?;
+            let backend = bucket.at(&subject);
+
+            // 6. Get nonexistent key
+            let key = b"index/nonexistent-key".to_vec();
+            let result = backend.get(&key).await?;
+            assert_eq!(result, None);
+
+            Ok(())
+        }
     }
 }

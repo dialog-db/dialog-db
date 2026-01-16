@@ -1,67 +1,14 @@
 //! S3 ListObjectsV2 operations.
 //!
-//! This module provides the [`List`] request type and [`ListResult`] response type
-//! for listing objects in an S3 bucket using the [ListObjectsV2] API.
+//! This module provides the [`ListResult`] response type for listing objects
+//! in an S3 bucket using the [ListObjectsV2] API.
 //!
 //! [ListObjectsV2]: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
 
-use serde::Deserialize;
-use url::Url;
-
-use super::{Bucket, Invocation, Request, S3StorageError};
 use dialog_common::ConditionalSync;
+use serde::Deserialize;
 
-/// A GET request to list objects in a bucket.
-///
-/// Uses the S3 [ListObjectsV2] API to retrieve object keys.
-///
-/// [ListObjectsV2]: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
-#[derive(Debug, Clone)]
-pub struct List {
-    url: Url,
-    region: String,
-}
-
-impl List {
-    /// Create a new list request for the given bucket URL with optional prefix.
-    ///
-    /// The URL should be the bucket root (e.g., `https://s3.amazonaws.com/bucket`)
-    /// with query parameters for `list-type=2` and optionally `prefix`.
-    pub fn new(
-        mut url: Url,
-        region: &str,
-        prefix: Option<&str>,
-        continuation_token: Option<&str>,
-    ) -> Self {
-        url.query_pairs_mut().append_pair("list-type", "2");
-        if let Some(prefix) = prefix {
-            url.query_pairs_mut().append_pair("prefix", prefix);
-        }
-        if let Some(token) = continuation_token {
-            url.query_pairs_mut()
-                .append_pair("continuation-token", token);
-        }
-        Self {
-            url,
-            region: region.to_string(),
-        }
-    }
-}
-
-impl Invocation for List {
-    fn method(&self) -> &'static str {
-        "GET"
-    }
-
-    fn url(&self) -> &Url {
-        &self.url
-    }
-
-    fn region(&self) -> &str {
-        &self.region
-    }
-}
-impl Request for List {}
+use super::{Access, Bucket, Precondition, S3StorageError, StorageAuthorizer, storage};
 
 /// Response from S3 ListObjectsV2 API.
 #[derive(Debug)]
@@ -107,10 +54,29 @@ struct S3Error {
     message: Option<String>,
 }
 
-impl<Key, Value> Bucket<Key, Value>
+/// Build a list URL with query parameters.
+fn build_list_url(
+    base_url: url::Url,
+    prefix: Option<&str>,
+    continuation_token: Option<&str>,
+) -> url::Url {
+    let mut url = base_url;
+    url.query_pairs_mut().append_pair("list-type", "2");
+    if let Some(prefix) = prefix {
+        url.query_pairs_mut().append_pair("prefix", prefix);
+    }
+    if let Some(token) = continuation_token {
+        url.query_pairs_mut()
+            .append_pair("continuation-token", token);
+    }
+    url
+}
+
+impl<Key, Value, C> Bucket<Key, Value, C>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
+    C: StorageAuthorizer,
 {
     /// List objects in the bucket with the configured prefix.
     ///
@@ -126,14 +92,21 @@ where
         &self,
         continuation_token: Option<&str>,
     ) -> Result<ListResult, S3StorageError> {
-        // For ListObjectsV2, we need the bucket root URL (not including prefix in path).
-        // The prefix is passed as a query parameter, not part of the URL path.
-        let bucket_url = self
-            .authorizer
-            .build_url("")
+        // Build the list effect with prefix
+        let effect = Access(storage::List {
+            prefix: self.prefix_path(),
+            continuation_token: continuation_token.map(String::from),
+        });
+
+        let descriptor = self
+            .credentials
+            .execute(effect)
+            .await
             .map_err(S3StorageError::from)?;
-        let list_request = List::new(bucket_url, self.region(), self.prefix(), continuation_token);
-        let response = list_request.perform(self).await?;
+
+        let response = self
+            .send_request(descriptor, None, Precondition::None)
+            .await?;
 
         let status = response.status();
 
@@ -199,34 +172,28 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::access::Invocation;
-    use super::super::{Bucket, S3StorageError};
+    use super::super::{Bucket, Public, S3StorageError};
     use super::*;
+    use url::Url;
 
-    const TEST_REGION: &str = "us-east-1";
+    // Type alias for tests that need a concrete Bucket type
+    type TestBucket = Bucket<Vec<u8>, Vec<u8>, Public>;
 
     #[dialog_common::test]
-    fn it_builds_list_request_with_prefix() {
+    fn it_builds_list_url_with_prefix() {
         let url = Url::parse("https://s3.amazonaws.com/bucket").unwrap();
-        let request = List::new(url.clone(), TEST_REGION, Some("prefix/"), None);
+        let list_url = build_list_url(url, Some("prefix/"), None);
 
-        assert_eq!(request.method(), "GET");
-        assert_eq!(request.region(), TEST_REGION);
-        assert!(request.url().as_str().contains("list-type=2"));
-        assert!(request.url().as_str().contains("prefix=prefix%2F"));
+        assert!(list_url.as_str().contains("list-type=2"));
+        assert!(list_url.as_str().contains("prefix=prefix%2F"));
     }
 
     #[dialog_common::test]
-    fn it_builds_list_request_with_continuation_token() {
+    fn it_builds_list_url_with_continuation_token() {
         let url = Url::parse("https://s3.amazonaws.com/bucket").unwrap();
-        let request = List::new(url.clone(), TEST_REGION, None, Some("token123"));
+        let list_url = build_list_url(url, None, Some("token123"));
 
-        assert!(
-            request
-                .url()
-                .as_str()
-                .contains("continuation-token=token123")
-        );
+        assert!(list_url.as_str().contains("continuation-token=token123"));
     }
 
     #[dialog_common::test]
@@ -236,7 +203,7 @@ mod tests {
                 <IsTruncated>false</IsTruncated>
             </ListBucketResult>"#;
 
-        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml).unwrap();
+        let result = TestBucket::parse_list_response(xml).unwrap();
         assert!(result.keys.is_empty());
         assert!(!result.is_truncated);
         assert!(result.next_continuation_token.is_none());
@@ -257,7 +224,7 @@ mod tests {
                 </Contents>
             </ListBucketResult>"#;
 
-        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml).unwrap();
+        let result = TestBucket::parse_list_response(xml).unwrap();
         assert_eq!(result.keys.len(), 2);
         assert_eq!(result.keys[0], "prefix/key1");
         assert_eq!(result.keys[1], "prefix/key2");
@@ -275,34 +242,35 @@ mod tests {
                 </Contents>
             </ListBucketResult>"#;
 
-        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml).unwrap();
+        let result = TestBucket::parse_list_response(xml).unwrap();
         assert_eq!(result.keys.len(), 1);
         assert!(result.is_truncated);
         assert_eq!(result.next_continuation_token, Some("abc123".to_string()));
     }
 
     #[dialog_common::test]
-    fn it_builds_virtual_hosted_bucket_url() {
+    fn it_builds_virtual_hosted_path() {
         // Non-IP endpoints use virtual-hosted style by default
         use super::super::{Address, Public};
         let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
         let authorizer = Public::new(address).unwrap();
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer).unwrap();
+        let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer).unwrap();
 
-        let url = backend.base_url().unwrap();
-        assert_eq!(url.as_str(), "https://bucket.s3.amazonaws.com/");
+        // encode_path creates a path that gets combined with the bucket URL
+        let path = backend.encode_path(b"key");
+        assert_eq!(path, "key");
     }
 
     #[dialog_common::test]
-    fn it_builds_path_style_bucket_url() {
+    fn it_builds_path_with_prefix() {
         // IP/localhost endpoints use path style by default
         use super::super::{Address, Public};
         let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
         let authorizer = Public::new(address).unwrap();
-        let backend = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer).unwrap();
+        let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer).unwrap().at("prefix");
 
-        let url = backend.base_url().unwrap();
-        assert_eq!(url.as_str(), "http://localhost:9000/bucket/");
+        let path = backend.encode_path(b"key");
+        assert_eq!(path, "prefix/key");
     }
 
     #[dialog_common::test]
@@ -314,7 +282,7 @@ mod tests {
                     <Key>key1</Key>
                 <!-- missing closing tags -->"#;
 
-        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
+        let result = TestBucket::parse_list_response(xml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, S3StorageError::SerializationError(_)));
@@ -328,7 +296,7 @@ mod tests {
                 <Foo>bar</Foo>
             </SomeUnknownElement>"#;
 
-        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
+        let result = TestBucket::parse_list_response(xml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -349,7 +317,7 @@ mod tests {
                 </Contents>
             </WrongRootElement>"#;
 
-        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
+        let result = TestBucket::parse_list_response(xml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -364,7 +332,7 @@ mod tests {
         // Not XML at all - should error
         let xml = "this is not xml at all { json: maybe? }";
 
-        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
+        let result = TestBucket::parse_list_response(xml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, S3StorageError::SerializationError(_)));
@@ -382,7 +350,7 @@ mod tests {
                 <HostId>xyz</HostId>
             </Error>"#;
 
-        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
+        let result = TestBucket::parse_list_response(xml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -403,7 +371,7 @@ mod tests {
                 <HostId>xyz</HostId>
             </Error>"#;
 
-        let result = Bucket::<Vec<u8>, Vec<u8>>::parse_list_response(xml);
+        let result = TestBucket::parse_list_response(xml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
