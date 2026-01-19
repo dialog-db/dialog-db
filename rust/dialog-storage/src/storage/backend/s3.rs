@@ -328,7 +328,7 @@ where
     }
 
     /// Get the region for signing.
-    pub fn region(&self) -> &str {
+    pub(crate) fn region(&self) -> &str {
         self.authorizer.region()
     }
 

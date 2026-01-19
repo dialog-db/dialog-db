@@ -927,6 +927,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-ucan"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ed25519-dalek",
+ "ipld-core",
+ "serde",
+ "serde_ipld_dagcbor",
+ "thiserror 2.0.17",
+ "tokio",
+ "ucan",
+ "web-time",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
