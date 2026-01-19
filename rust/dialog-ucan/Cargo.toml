@@ -13,3 +13,8 @@ serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }
 thiserror = { workspace = true }
 ucan = { workspace = true }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+web-time = { workspace = true }
