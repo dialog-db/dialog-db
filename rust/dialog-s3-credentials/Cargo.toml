@@ -37,6 +37,7 @@ ucan = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = { workspace = true }
+getrandom = { workspace = true, features = ["js"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
