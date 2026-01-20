@@ -11,6 +11,7 @@ default = []
 ucan = [
     "dep:ed25519-dalek",
     "dep:ipld-core",
+    "dep:rand_core",
     "dep:reqwest",
     "dep:serde_ipld_dagcbor",
     "dep:serde_json",
@@ -21,6 +22,7 @@ ucan = [
 async-trait = "0.1"
 base64 = { workspace = true }
 chrono = "0.4"
+dialog-common = { workspace = true }
 hmac = "0.12"
 serde = { workspace = true, features = ["derive"] }
 sha2 = "0.10"
@@ -30,6 +32,7 @@ url = { workspace = true }
 # UCAN feature dependencies (optional)
 ed25519-dalek = { workspace = true, optional = true }
 ipld-core = { workspace = true, optional = true }
+rand_core = { version = "0.6", features = ["getrandom"], optional = true }
 reqwest = { workspace = true, optional = true }
 serde_ipld_dagcbor = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
