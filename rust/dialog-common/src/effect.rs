@@ -12,7 +12,8 @@ use async_trait::async_trait;
 ///
 /// Effects are command types that define their output type.
 /// This provides a clear contract for what each command returns.
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Effect: Sized {
     /// The output type produced when this effect is performed.
     type Output;
@@ -32,7 +33,7 @@ pub trait Effect: Sized {
     async fn perform<Env>(self, env: &Env) -> Self::Output
     where
         Self: ConditionalSend,
-        Env: Provider<Self>,
+        Env: Provider<Self> + ConditionalSync,
     {
         env.execute(self).await
     }
@@ -49,7 +50,8 @@ pub trait Effect: Sized {
 ///     P: Provider<GetEffect> + Provider<ListEffect>
 /// { ... }
 /// ```
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Provider<Fx: Effect + ConditionalSend>: ConditionalSend + ConditionalSync {
     /// Execute the effect and return its output.
     async fn execute(&self, effect: Fx) -> Fx::Output;

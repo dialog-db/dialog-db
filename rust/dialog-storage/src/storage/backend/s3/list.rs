@@ -8,7 +8,7 @@
 use dialog_common::ConditionalSync;
 use serde::Deserialize;
 
-use super::{Access, Bucket, Precondition, S3StorageError, StorageAuthorizer, storage};
+use super::{Bucket, Precondition, S3StorageError, StorageAuthorizer, storage};
 
 /// Response from S3 ListObjectsV2 API.
 #[derive(Debug)]
@@ -54,24 +54,6 @@ struct S3Error {
     message: Option<String>,
 }
 
-/// Build a list URL with query parameters.
-fn build_list_url(
-    base_url: url::Url,
-    prefix: Option<&str>,
-    continuation_token: Option<&str>,
-) -> url::Url {
-    let mut url = base_url;
-    url.query_pairs_mut().append_pair("list-type", "2");
-    if let Some(prefix) = prefix {
-        url.query_pairs_mut().append_pair("prefix", prefix);
-    }
-    if let Some(token) = continuation_token {
-        url.query_pairs_mut()
-            .append_pair("continuation-token", token);
-    }
-    url
-}
-
 impl<Key, Value, C> Bucket<Key, Value, C>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
@@ -92,11 +74,11 @@ where
         &self,
         continuation_token: Option<&str>,
     ) -> Result<ListResult, S3StorageError> {
-        // Build the list effect with prefix
-        let effect = Access(storage::List {
-            prefix: self.prefix_path(),
+        // Build the list effect with store (prefix)
+        let effect = storage::List {
+            store: self.prefix_path(),
             continuation_token: continuation_token.map(String::from),
-        });
+        };
 
         let descriptor = self
             .credentials
@@ -174,27 +156,9 @@ where
 mod tests {
     use super::super::{Bucket, Public, S3StorageError};
     use super::*;
-    use url::Url;
 
     // Type alias for tests that need a concrete Bucket type
     type TestBucket = Bucket<Vec<u8>, Vec<u8>, Public>;
-
-    #[dialog_common::test]
-    fn it_builds_list_url_with_prefix() {
-        let url = Url::parse("https://s3.amazonaws.com/bucket").unwrap();
-        let list_url = build_list_url(url, Some("prefix/"), None);
-
-        assert!(list_url.as_str().contains("list-type=2"));
-        assert!(list_url.as_str().contains("prefix=prefix%2F"));
-    }
-
-    #[dialog_common::test]
-    fn it_builds_list_url_with_continuation_token() {
-        let url = Url::parse("https://s3.amazonaws.com/bucket").unwrap();
-        let list_url = build_list_url(url, None, Some("token123"));
-
-        assert!(list_url.as_str().contains("continuation-token=token123"));
-    }
 
     #[dialog_common::test]
     fn it_parses_empty_list_response() {
