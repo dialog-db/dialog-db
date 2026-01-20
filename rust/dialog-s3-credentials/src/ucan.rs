@@ -245,10 +245,17 @@ impl UcanAuthorizerBuilder {
             .operator
             .ok_or_else(|| AuthorizationError::AccessService("operator is required".into()))?;
 
+        // On native, disable automatic redirects so we can extract the Location header.
+        // On wasm32, the redirect policy API isn't available, but we handle the
+        // response manually anyway (checking for 307 status and Location header).
+        #[cfg(not(target_arch = "wasm32"))]
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| AuthorizationError::AccessService(e.to_string()))?;
+
+        #[cfg(target_arch = "wasm32")]
+        let client = reqwest::Client::new();
 
         Ok(UcanAuthorizer {
             service_url,
