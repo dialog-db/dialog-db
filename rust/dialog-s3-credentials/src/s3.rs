@@ -10,7 +10,7 @@
 
 mod credentials;
 
-pub use credentials::{current_time, Credentials, PrivateCredentials, PublicCredentials};
+pub use credentials::{Credentials, PrivateCredentials, PublicCredentials, current_time};
 
 use url::Url;
 
@@ -54,8 +54,9 @@ pub(crate) fn build_url(
         let new_host = format!("{}.{}", bucket, host);
 
         let mut url = endpoint.clone();
-        url.set_host(Some(&new_host))
-            .map_err(|e| crate::AuthorizationError::Configuration(format!("Invalid host: {}", e)))?;
+        url.set_host(Some(&new_host)).map_err(|e| {
+            crate::AuthorizationError::Configuration(format!("Invalid host: {}", e))
+        })?;
 
         let new_path = if path.is_empty() { "/" } else { path };
         url.set_path(new_path);

@@ -16,5 +16,8 @@
 mod credentials;
 mod provider;
 
-pub use credentials::{Credentials, CredentialsBuilder, DelegationChain, IntoUcanArgs, OperatorIdentity, generate_signer};
+pub use credentials::{
+    Credentials, CredentialsBuilder, DelegationChain, IntoUcanArgs, OperatorIdentity,
+    generate_signer,
+};
 pub use provider::{InvocationChain, UcanAuthorizer};

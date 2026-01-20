@@ -5,9 +5,9 @@
 
 use super::checksum::Checksum;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
@@ -53,14 +53,17 @@ impl Args<'_> {
             .map(|(k, v)| {
                 Ipld::try_from(v)
                     .map(|ipld| (k.clone(), ipld))
-                    .map_err(|e| AuthorizationError::Invocation(format!("Promise not resolved: {}", e)))
+                    .map_err(|e| {
+                        AuthorizationError::Invocation(format!("Promise not resolved: {}", e))
+                    })
             })
             .collect::<Result<_, _>>()?;
 
         let ipld = Ipld::Map(ipld_map);
 
-        ipld_core::serde::from_ipld(ipld)
-            .map_err(|e| AuthorizationError::Invocation(format!("Failed to parse arguments: {}", e)))
+        ipld_core::serde::from_ipld(ipld).map_err(|e| {
+            AuthorizationError::Invocation(format!("Failed to parse arguments: {}", e))
+        })
     }
 }
 

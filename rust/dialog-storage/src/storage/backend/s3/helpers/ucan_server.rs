@@ -6,9 +6,9 @@
 
 use super::{LocalS3, UcanS3Address};
 use dialog_common::helpers::{Provider, Service};
+use dialog_s3_credentials::Address;
 use dialog_s3_credentials::s3::Credentials as S3Credentials;
 use dialog_s3_credentials::ucan::UcanAuthorizer;
-use dialog_s3_credentials::Address;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::{Method, Request, Response, StatusCode};
@@ -44,8 +44,8 @@ impl UcanAccessServer {
     ) -> anyhow::Result<Self> {
         // Create S3 credentials for the authorizer
         let address = Address::new(&s3_server.endpoint, "us-east-1", bucket);
-        let s3_credentials = S3Credentials::private(address, access_key, secret_key)?
-            .with_path_style(true);
+        let s3_credentials =
+            S3Credentials::private(address, access_key, secret_key)?.with_path_style(true);
 
         // Use UcanAuthorizer from ucan/provider.rs
         let authorizer = Arc::new(RwLock::new(UcanAuthorizer::new(s3_credentials)));
@@ -112,7 +112,10 @@ async fn handle_request(
         Err(e) => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::new(Bytes::from(format!("Failed to read body: {}", e))))
+                .body(Full::new(Bytes::from(format!(
+                    "Failed to read body: {}",
+                    e
+                ))))
                 .unwrap());
         }
     };
@@ -133,13 +136,19 @@ async fn handle_request(
                 }
                 Err(e) => Ok(Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Full::new(Bytes::from(format!("Failed to encode response: {}", e))))
+                    .body(Full::new(Bytes::from(format!(
+                        "Failed to encode response: {}",
+                        e
+                    ))))
                     .unwrap()),
             }
         }
         Err(e) => Ok(Response::builder()
             .status(StatusCode::FORBIDDEN)
-            .body(Full::new(Bytes::from(format!("Authorization failed: {}", e))))
+            .body(Full::new(Bytes::from(format!(
+                "Authorization failed: {}",
+                e
+            ))))
             .unwrap()),
     }
 }

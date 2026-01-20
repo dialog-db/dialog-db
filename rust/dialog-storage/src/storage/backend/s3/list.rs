@@ -267,7 +267,9 @@ mod tests {
         use super::super::{Address, Public};
         let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
         let authorizer = Public::new(address).unwrap();
-        let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer).unwrap().at("prefix");
+        let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)
+            .unwrap()
+            .at("prefix");
 
         let path = backend.encode_path(b"key");
         assert_eq!(path, "prefix/key");

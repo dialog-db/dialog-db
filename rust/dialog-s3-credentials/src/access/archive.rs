@@ -49,15 +49,24 @@ impl<'a> TryFrom<(&'a [&'a str], Args<'a>)> for Do {
 
 /// Trait for providers that can execute all archive commands.
 #[cfg(feature = "ucan")]
-pub trait ArchiveProvider: Provider<Get> + Provider<Put> + Provider<Delete> + Provider<List> {}
+pub trait ArchiveProvider:
+    Provider<Get> + Provider<Put> + Provider<Delete> + Provider<List>
+{
+}
 
 #[cfg(feature = "ucan")]
-impl<T> ArchiveProvider for T where T: Provider<Get> + Provider<Put> + Provider<Delete> + Provider<List> {}
+impl<T> ArchiveProvider for T where
+    T: Provider<Get> + Provider<Put> + Provider<Delete> + Provider<List>
+{
+}
 
 #[cfg(feature = "ucan")]
 impl Do {
     /// Perform this command using the given provider.
-    pub async fn perform<P: ArchiveProvider>(self, provider: &P) -> Result<RequestDescriptor, AuthorizationError> {
+    pub async fn perform<P: ArchiveProvider>(
+        self,
+        provider: &P,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         match self {
             Do::Get(cmd) => cmd.perform(provider).await,
             Do::Put(cmd) => cmd.perform(provider).await,

@@ -50,15 +50,24 @@ impl<'a> TryFrom<(&'a [&'a str], Args<'a>)> for Do {
 
 /// Trait for providers that can execute all storage commands.
 #[cfg(feature = "ucan")]
-pub trait StorageProvider: Provider<Get> + Provider<Set> + Provider<Delete> + Provider<List> {}
+pub trait StorageProvider:
+    Provider<Get> + Provider<Set> + Provider<Delete> + Provider<List>
+{
+}
 
 #[cfg(feature = "ucan")]
-impl<T> StorageProvider for T where T: Provider<Get> + Provider<Set> + Provider<Delete> + Provider<List> {}
+impl<T> StorageProvider for T where
+    T: Provider<Get> + Provider<Set> + Provider<Delete> + Provider<List>
+{
+}
 
 #[cfg(feature = "ucan")]
 impl Do {
     /// Perform this command using the given provider.
-    pub async fn perform<P: StorageProvider>(self, provider: &P) -> Result<RequestDescriptor, AuthorizationError> {
+    pub async fn perform<P: StorageProvider>(
+        self,
+        provider: &P,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         match self {
             Do::Get(cmd) => cmd.perform(provider).await,
             Do::Set(cmd) => cmd.perform(provider).await,

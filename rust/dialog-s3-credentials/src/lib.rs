@@ -54,6 +54,6 @@ pub mod s3;
 pub mod ucan;
 
 // Primary exports
-pub use access::{memory, storage, AuthorizationError, RequestDescriptor};
+pub use access::{AuthorizationError, RequestDescriptor, memory, storage};
 pub use address::Address;
 pub use checksum::{Checksum, Hasher};

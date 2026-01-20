@@ -8,8 +8,8 @@ use sha2::{Digest, Sha256};
 use std::fmt::Write;
 use url::Url;
 
-use crate::access::{archive, memory, storage, Claim, RequestDescriptor};
-use crate::{AuthorizationError, Address};
+use crate::access::{Claim, RequestDescriptor, archive, memory, storage};
+use crate::{Address, AuthorizationError};
 
 use super::{build_url, extract_host, is_path_style_default};
 
@@ -316,7 +316,10 @@ impl Provider<storage::Set> for PublicCredentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<storage::Delete> for PublicCredentials {
-    async fn execute(&self, effect: storage::Delete) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: storage::Delete,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(effect)
     }
 }
@@ -324,7 +327,10 @@ impl Provider<storage::Delete> for PublicCredentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<storage::List> for PublicCredentials {
-    async fn execute(&self, effect: storage::List) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: storage::List,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(effect)
     }
 }
@@ -332,7 +338,10 @@ impl Provider<storage::List> for PublicCredentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<memory::Resolve> for PublicCredentials {
-    async fn execute(&self, effect: memory::Resolve) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: memory::Resolve,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(effect)
     }
 }
@@ -340,7 +349,10 @@ impl Provider<memory::Resolve> for PublicCredentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<memory::Update> for PublicCredentials {
-    async fn execute(&self, effect: memory::Update) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: memory::Update,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(effect)
     }
 }
@@ -348,7 +360,10 @@ impl Provider<memory::Update> for PublicCredentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<memory::Delete> for PublicCredentials {
-    async fn execute(&self, effect: memory::Delete) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: memory::Delete,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(effect)
     }
 }
@@ -372,7 +387,10 @@ impl Provider<archive::Put> for PublicCredentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<archive::Delete> for PublicCredentials {
-    async fn execute(&self, effect: archive::Delete) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: archive::Delete,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(effect)
     }
 }
@@ -380,7 +398,10 @@ impl Provider<archive::Delete> for PublicCredentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<archive::List> for PublicCredentials {
-    async fn execute(&self, effect: archive::List) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: archive::List,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(effect)
     }
 }
@@ -404,7 +425,10 @@ impl Provider<storage::Set> for PrivateCredentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<storage::Delete> for PrivateCredentials {
-    async fn execute(&self, effect: storage::Delete) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: storage::Delete,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(effect)
     }
 }
@@ -412,7 +436,10 @@ impl Provider<storage::Delete> for PrivateCredentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<storage::List> for PrivateCredentials {
-    async fn execute(&self, effect: storage::List) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: storage::List,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(effect)
     }
 }
@@ -420,7 +447,10 @@ impl Provider<storage::List> for PrivateCredentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<memory::Resolve> for PrivateCredentials {
-    async fn execute(&self, effect: memory::Resolve) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: memory::Resolve,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(effect)
     }
 }
@@ -428,7 +458,10 @@ impl Provider<memory::Resolve> for PrivateCredentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<memory::Update> for PrivateCredentials {
-    async fn execute(&self, effect: memory::Update) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: memory::Update,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(effect)
     }
 }
@@ -436,7 +469,10 @@ impl Provider<memory::Update> for PrivateCredentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<memory::Delete> for PrivateCredentials {
-    async fn execute(&self, effect: memory::Delete) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: memory::Delete,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(effect)
     }
 }
@@ -460,7 +496,10 @@ impl Provider<archive::Put> for PrivateCredentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<archive::Delete> for PrivateCredentials {
-    async fn execute(&self, effect: archive::Delete) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: archive::Delete,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(effect)
     }
 }
@@ -468,7 +507,10 @@ impl Provider<archive::Delete> for PrivateCredentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<archive::List> for PrivateCredentials {
-    async fn execute(&self, effect: archive::List) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: archive::List,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(effect)
     }
 }
@@ -591,7 +633,10 @@ impl Provider<storage::Set> for Credentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<storage::Delete> for Credentials {
-    async fn execute(&self, effect: storage::Delete) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: storage::Delete,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         match self {
             Self::Public(c) => c.execute(effect).await,
             Self::Private(c) => c.execute(effect).await,
@@ -602,7 +647,10 @@ impl Provider<storage::Delete> for Credentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<storage::List> for Credentials {
-    async fn execute(&self, effect: storage::List) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: storage::List,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         match self {
             Self::Public(c) => c.execute(effect).await,
             Self::Private(c) => c.execute(effect).await,
@@ -613,7 +661,10 @@ impl Provider<storage::List> for Credentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<memory::Resolve> for Credentials {
-    async fn execute(&self, effect: memory::Resolve) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: memory::Resolve,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         match self {
             Self::Public(c) => c.execute(effect).await,
             Self::Private(c) => c.execute(effect).await,
@@ -624,7 +675,10 @@ impl Provider<memory::Resolve> for Credentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<memory::Update> for Credentials {
-    async fn execute(&self, effect: memory::Update) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: memory::Update,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         match self {
             Self::Public(c) => c.execute(effect).await,
             Self::Private(c) => c.execute(effect).await,
@@ -635,7 +689,10 @@ impl Provider<memory::Update> for Credentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<memory::Delete> for Credentials {
-    async fn execute(&self, effect: memory::Delete) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: memory::Delete,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         match self {
             Self::Public(c) => c.execute(effect).await,
             Self::Private(c) => c.execute(effect).await,
@@ -668,7 +725,10 @@ impl Provider<archive::Put> for Credentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<archive::Delete> for Credentials {
-    async fn execute(&self, effect: archive::Delete) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: archive::Delete,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         match self {
             Self::Public(c) => c.execute(effect).await,
             Self::Private(c) => c.execute(effect).await,
@@ -679,7 +739,10 @@ impl Provider<archive::Delete> for Credentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<archive::List> for Credentials {
-    async fn execute(&self, effect: archive::List) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: archive::List,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         match self {
             Self::Public(c) => c.execute(effect).await,
             Self::Private(c) => c.execute(effect).await,

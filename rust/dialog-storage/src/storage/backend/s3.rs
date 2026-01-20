@@ -116,10 +116,11 @@ use std::marker::PhantomData;
 use thiserror::Error;
 
 // Re-export core types from dialog-s3-credentials crate
-pub use dialog_s3_credentials::{
-    Address, AuthorizationError as AccessError, Checksum, Hasher, RequestDescriptor, memory, storage,
-};
 use dialog_s3_credentials::access::Precondition;
+pub use dialog_s3_credentials::{
+    Address, AuthorizationError as AccessError, Checksum, Hasher, RequestDescriptor, memory,
+    storage,
+};
 
 // Re-export s3::Credentials types
 pub use dialog_s3_credentials::s3::{Credentials, PrivateCredentials, PublicCredentials};
@@ -1603,7 +1604,9 @@ mod tests {
     #[cfg(feature = "ucan")]
     mod ucan_tests {
         use super::*;
-        use dialog_s3_credentials::ucan::{Credentials as UcanCredentials, DelegationChain, OperatorIdentity, generate_signer};
+        use dialog_s3_credentials::ucan::{
+            Credentials as UcanCredentials, DelegationChain, OperatorIdentity, generate_signer,
+        };
         use ucan::delegation::builder::DelegationBuilder;
         use ucan::delegation::subject::DelegatedSubject;
         use ucan::did::Ed25519Did;
@@ -1629,7 +1632,10 @@ mod tests {
             let space_did = space_signer.did();
 
             let operator_identity = OperatorIdentity::generate();
-            let operator_did: Ed25519Did = operator_identity.did().to_string().parse()
+            let operator_did: Ed25519Did = operator_identity
+                .did()
+                .to_string()
+                .parse()
                 .map_err(|e| anyhow::anyhow!("Failed to parse DID: {:?}", e))?;
 
             // 2. Create delegation
@@ -1668,7 +1674,10 @@ mod tests {
             let space_did = space_signer.did();
 
             let operator_identity = OperatorIdentity::generate();
-            let operator_did: Ed25519Did = operator_identity.did().to_string().parse()
+            let operator_did: Ed25519Did = operator_identity
+                .did()
+                .to_string()
+                .parse()
                 .map_err(|e| anyhow::anyhow!("Failed to parse DID: {:?}", e))?;
 
             // 2. Create delegation
@@ -1703,13 +1712,18 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn it_returns_none_for_nonexistent_key_with_ucan(env: UcanS3Address) -> anyhow::Result<()> {
+        async fn it_returns_none_for_nonexistent_key_with_ucan(
+            env: UcanS3Address,
+        ) -> anyhow::Result<()> {
             // 1. Generate keypairs
             let space_signer = generate_signer();
             let space_did = space_signer.did();
 
             let operator_identity = OperatorIdentity::generate();
-            let operator_did: Ed25519Did = operator_identity.did().to_string().parse()
+            let operator_did: Ed25519Did = operator_identity
+                .did()
+                .to_string()
+                .parse()
                 .map_err(|e| anyhow::anyhow!("Failed to parse DID: {:?}", e))?;
 
             // 2. Create delegation

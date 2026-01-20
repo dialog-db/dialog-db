@@ -58,7 +58,10 @@ impl<T> MemoryProvider for T where T: Provider<Resolve> + Provider<Update> + Pro
 #[cfg(feature = "ucan")]
 impl Do {
     /// Perform this command using the given provider.
-    pub async fn perform<P: MemoryProvider>(self, provider: &P) -> Result<RequestDescriptor, AuthorizationError> {
+    pub async fn perform<P: MemoryProvider>(
+        self,
+        provider: &P,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         match self {
             Do::Resolve(cmd) => cmd.perform(provider).await,
             Do::Update(cmd) => cmd.perform(provider).await,

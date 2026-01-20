@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use dialog_common::ConditionalSync;
 
 mod backend;
-pub use backend::*;
 #[cfg(feature = "s3")]
 pub use backend::s3;
+pub use backend::*;
 
 mod cache;
 pub use cache::*;

@@ -1466,11 +1466,9 @@ impl RemoteState {
                     }
                 })?
             }
-            _ => {
-                Credentials::public(address).map_err(|_| ReplicaError::RemoteConnectionError {
-                    remote: self.site.clone(),
-                })?
-            }
+            _ => Credentials::public(address).map_err(|_| ReplicaError::RemoteConnectionError {
+                remote: self.site.clone(),
+            })?,
         };
 
         let bucket = S3Bucket::open(credentials).map_err(|_| ReplicaError::RemoteConnectionError {

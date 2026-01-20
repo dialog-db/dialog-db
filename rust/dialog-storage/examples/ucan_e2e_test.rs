@@ -20,7 +20,9 @@
 //! ```
 
 use clap::Parser;
-use dialog_s3_credentials::ucan::{Credentials, DelegationChain, OperatorIdentity, generate_signer};
+use dialog_s3_credentials::ucan::{
+    Credentials, DelegationChain, OperatorIdentity, generate_signer,
+};
 use dialog_storage::StorageBackend;
 use dialog_storage::s3::Bucket;
 use ucan::delegation::builder::DelegationBuilder;

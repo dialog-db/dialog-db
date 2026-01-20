@@ -52,14 +52,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 use ucan::{
+    Delegation,
     delegation::store::DelegationStore,
     did::Ed25519Did,
     future::Sendable,
     invocation::{CheckFailed, Invocation},
-    Delegation,
 };
 
-use crate::access::{self, AuthorizationError, Args, RequestDescriptor};
+use crate::access::{self, Args, AuthorizationError, RequestDescriptor};
 
 /// UCAN Container version key
 const CONTAINER_VERSION: &str = "ctn-v1";
@@ -184,9 +184,12 @@ fn map_check_failed(err: CheckFailed) -> AuthorizationError {
         CheckFailed::RootProofIssuerIsNotSubject => {
             AuthorizationError::Invocation("root proof issuer is not the subject".to_string())
         }
-        CheckFailed::CommandMismatch { expected, found } => AuthorizationError::Invocation(
-            format!("command mismatch: expected {:?}, found {:?}", expected, found),
-        ),
+        CheckFailed::CommandMismatch { expected, found } => {
+            AuthorizationError::Invocation(format!(
+                "command mismatch: expected {:?}, found {:?}",
+                expected, found
+            ))
+        }
         CheckFailed::PredicateFailed(predicate) => {
             AuthorizationError::Invocation(format!("predicate failed: {:?}", predicate))
         }
@@ -235,17 +238,15 @@ impl<'de> Deserialize<'de> for InvocationChain {
         }
 
         // First token is the invocation - deserialize using rs-ucan's Invocation
-        let invocation: Invocation<Ed25519Did> =
-            serde_ipld_dagcbor::from_slice(&token_bytes[0]).map_err(|e| {
-                serde::de::Error::custom(format!("failed to decode invocation: {}", e))
-            })?;
+        let invocation: Invocation<Ed25519Did> = serde_ipld_dagcbor::from_slice(&token_bytes[0])
+            .map_err(|e| serde::de::Error::custom(format!("failed to decode invocation: {}", e)))?;
 
         // Remaining tokens are delegations - build a map keyed by CID
         let mut delegations: HashMap<Cid, Arc<Delegation<Ed25519Did>>> =
             HashMap::with_capacity(token_bytes.len() - 1);
         for (i, bytes) in token_bytes.iter().skip(1).enumerate() {
-            let delegation: Delegation<Ed25519Did> =
-                serde_ipld_dagcbor::from_slice(bytes).map_err(|e| {
+            let delegation: Delegation<Ed25519Did> = serde_ipld_dagcbor::from_slice(bytes)
+                .map_err(|e| {
                     serde::de::Error::custom(format!("failed to decode delegation {}: {}", i, e))
                 })?;
             let cid = delegation.to_cid();
@@ -263,8 +264,9 @@ impl TryFrom<&[u8]> for InvocationChain {
     type Error = AuthorizationError;
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        serde_ipld_dagcbor::from_slice(bytes)
-            .map_err(|e| AuthorizationError::Invocation(format!("failed to decode container: {}", e)))
+        serde_ipld_dagcbor::from_slice(bytes).map_err(|e| {
+            AuthorizationError::Invocation(format!("failed to decode container: {}", e))
+        })
     }
 }
 
@@ -274,8 +276,8 @@ impl Serialize for InvocationChain {
         S: Serializer,
     {
         // Serialize invocation to bytes
-        let invocation_bytes = serde_ipld_dagcbor::to_vec(&self.invocation)
-            .map_err(serde::ser::Error::custom)?;
+        let invocation_bytes =
+            serde_ipld_dagcbor::to_vec(&self.invocation).map_err(serde::ser::Error::custom)?;
 
         // Collect delegation bytes - order by the proof CIDs in the invocation
         let mut token_bytes: Vec<Ipld> = Vec::with_capacity(1 + self.delegations.len());
@@ -301,8 +303,9 @@ impl Serialize for InvocationChain {
 impl InvocationChain {
     /// Serialize to DAG-CBOR bytes (UCAN container format).
     pub fn to_bytes(&self) -> Result<Vec<u8>, AuthorizationError> {
-        serde_ipld_dagcbor::to_vec(self)
-            .map_err(|e| AuthorizationError::Invocation(format!("failed to encode container: {}", e)))
+        serde_ipld_dagcbor::to_vec(self).map_err(|e| {
+            AuthorizationError::Invocation(format!("failed to encode container: {}", e))
+        })
     }
 }
 
@@ -400,7 +403,10 @@ mod tests {
     #[test]
     fn test_parse_memory_resolve() {
         let mut args = BTreeMap::new();
-        args.insert("space".to_string(), Promised::String("did:key:z6MkTest".to_string()));
+        args.insert(
+            "space".to_string(),
+            Promised::String("did:key:z6MkTest".to_string()),
+        );
         args.insert("cell".to_string(), Promised::String("main".to_string()));
 
         let cmd: memory::Do = (&["resolve"][..], Args(&args)).try_into().unwrap();
@@ -417,7 +423,10 @@ mod tests {
     fn test_parse_storage_list_with_continuation() {
         let mut args = BTreeMap::new();
         args.insert("store".to_string(), Promised::String("index".to_string()));
-        args.insert("continuation_token".to_string(), Promised::String("abc123".to_string()));
+        args.insert(
+            "continuation_token".to_string(),
+            Promised::String("abc123".to_string()),
+        );
 
         let cmd: storage::Do = (&["list"][..], Args(&args)).try_into().unwrap();
         match cmd {
@@ -514,9 +523,11 @@ mod tests {
         let result = InvocationChain::try_from(container_bytes.as_slice());
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("at least an invocation"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("at least an invocation")
+        );
     }
 }

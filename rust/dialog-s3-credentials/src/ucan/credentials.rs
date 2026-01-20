@@ -37,14 +37,14 @@ use ipld_core::cid::Cid;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use ucan::Delegation;
 use ucan::did::{Ed25519Did, Ed25519Signer};
 use ucan::invocation::builder::InvocationBuilder;
 use ucan::promise::Promised;
-use ucan::Delegation;
 
 use super::provider::InvocationChain;
-use crate::access::{memory, storage, AuthorizationError, Claim, RequestDescriptor};
 use crate::Checksum;
+use crate::access::{AuthorizationError, Claim, RequestDescriptor, memory, storage};
 
 /// A chain of UCAN delegations proving authority over a subject.
 ///
@@ -89,9 +89,12 @@ impl DelegationChain {
     pub fn from_bytes(proof_bytes: Vec<Vec<u8>>) -> Result<Self, AuthorizationError> {
         let mut delegations = Vec::with_capacity(proof_bytes.len());
         for (i, bytes) in proof_bytes.iter().enumerate() {
-            let delegation: Delegation<Ed25519Did> =
-                serde_ipld_dagcbor::from_slice(bytes).map_err(|e| {
-                    AuthorizationError::Invocation(format!("failed to decode delegation {}: {}", i, e))
+            let delegation: Delegation<Ed25519Did> = serde_ipld_dagcbor::from_slice(bytes)
+                .map_err(|e| {
+                    AuthorizationError::Invocation(format!(
+                        "failed to decode delegation {}: {}",
+                        i, e
+                    ))
                 })?;
             delegations.push(delegation);
         }
@@ -227,9 +230,10 @@ impl Credentials {
         command: &C,
     ) -> Result<RequestDescriptor, AuthorizationError> {
         // 1. Look up delegation chain
-        let delegation = self.delegations.get(subject_did).ok_or_else(|| {
-            AuthorizationError::NoDelegation(subject_did.to_string())
-        })?;
+        let delegation = self
+            .delegations
+            .get(subject_did)
+            .ok_or_else(|| AuthorizationError::NoDelegation(subject_did.to_string()))?;
 
         // 2. Parse subject DID
         let subject: Ed25519Did = subject_did
@@ -502,7 +506,10 @@ impl Provider<storage::Set> for Credentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<storage::Delete> for Credentials {
-    async fn execute(&self, effect: storage::Delete) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: storage::Delete,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(&effect.store, &effect).await
     }
 }
@@ -510,7 +517,10 @@ impl Provider<storage::Delete> for Credentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<storage::List> for Credentials {
-    async fn execute(&self, effect: storage::List) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: storage::List,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(&effect.store, &effect).await
     }
 }
@@ -518,7 +528,10 @@ impl Provider<storage::List> for Credentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<memory::Resolve> for Credentials {
-    async fn execute(&self, effect: memory::Resolve) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: memory::Resolve,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(&effect.space, &effect).await
     }
 }
@@ -526,7 +539,10 @@ impl Provider<memory::Resolve> for Credentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<memory::Update> for Credentials {
-    async fn execute(&self, effect: memory::Update) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: memory::Update,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(&effect.space, &effect).await
     }
 }
@@ -534,7 +550,10 @@ impl Provider<memory::Update> for Credentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<memory::Delete> for Credentials {
-    async fn execute(&self, effect: memory::Delete) -> Result<RequestDescriptor, AuthorizationError> {
+    async fn execute(
+        &self,
+        effect: memory::Delete,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
         self.authorize(&effect.space, &effect).await
     }
 }
