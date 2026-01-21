@@ -27,7 +27,7 @@ use std::fmt::Debug;
 use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
 
 #[cfg(feature = "s3")]
-use dialog_storage::s3::{Bucket as S3Bucket, Credentials as S3Credentials};
+use dialog_storage::s3::{Bucket as S3Bucket, S3Credentials};
 use ed25519_dalek::ed25519::signature::SignerMut;
 use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, SignatureError, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -1450,7 +1450,7 @@ impl RemoteState {
     /// Creates a storage connection using this remote's configuration.
     #[cfg(feature = "s3")]
     pub fn connect(&self) -> Result<PlatformStorage<RemoteBackend>, ReplicaError> {
-        use dialog_storage::s3::{Address, Credentials};
+        use dialog_storage::s3::{Address, S3Credentials};
 
         let address = Address::new(
             &self.address.endpoint,
@@ -1463,21 +1463,24 @@ impl RemoteState {
 
         let credentials = match (&self.address.access_key_id, &self.address.secret_access_key) {
             (Some(key_id), Some(secret)) => {
-                Credentials::private(address, &subject, key_id, secret).map_err(|_| {
+                S3Credentials::private(address, &subject, key_id, secret).map_err(|_| {
                     ReplicaError::RemoteConnectionError {
                         remote: self.site.clone(),
                     }
                 })?
             }
-            _ => Credentials::public(address, &subject).map_err(|_| ReplicaError::RemoteConnectionError {
-                remote: self.site.clone(),
+            _ => S3Credentials::public(address, &subject).map_err(|_| {
+                ReplicaError::RemoteConnectionError {
+                    remote: self.site.clone(),
+                }
             })?,
         };
 
         // Subject already defines the path prefix, no need for bucket.at(prefix)
-        let backend = S3Bucket::open(credentials).map_err(|_| ReplicaError::RemoteConnectionError {
-            remote: self.site.clone(),
-        })?;
+        let backend =
+            S3Bucket::open(credentials).map_err(|_| ReplicaError::RemoteConnectionError {
+                remote: self.site.clone(),
+            })?;
 
         Ok(PlatformStorage::new(
             ErrorMappingBackend::new(backend),
@@ -3198,7 +3201,7 @@ mod tests {
     async fn test_archive_caches_remote_reads_to_local(
         s3_address: dialog_storage::s3::helpers::S3Address,
     ) -> anyhow::Result<()> {
-        use dialog_storage::s3::{Address, Bucket, Credentials};
+        use dialog_storage::s3::{Address, Bucket, S3Credentials};
         use dialog_storage::{ContentAddressedStorage, MemoryStorageBackend};
         use serde::{Deserialize, Serialize};
 

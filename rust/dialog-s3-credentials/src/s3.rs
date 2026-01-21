@@ -11,7 +11,7 @@
 mod credentials;
 mod provider;
 
-pub use credentials::{Credentials, PrivateCredentials, PublicCredentials};
+pub use credentials::{Authorizer, Credentials, PrivateCredentials, PublicCredentials};
 
 use url::Url;
 

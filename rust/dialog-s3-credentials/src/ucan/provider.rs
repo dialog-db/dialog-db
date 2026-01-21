@@ -48,8 +48,9 @@
 use std::collections::BTreeMap;
 
 use super::invocation::InvocationChain;
-use crate::access::{self, AuthorizationError, AuthorizedRequest};
+use crate::access::{AuthorizationError, AuthorizedRequest};
 use crate::capability::{archive, memory, storage};
+use crate::credentials::Credentials;
 use dialog_common::capability::{Capability, Subject};
 
 /// UCAN authorizer that wraps credentials and handles UCAN invocations.
@@ -58,16 +59,17 @@ use dialog_common::capability::{Capability, Subject};
 /// 1. Receives UCAN containers (invocation + delegations)
 /// 2. Verifies the delegation chain
 /// 3. Extracts commands and constructs effects
+
 /// 4. Delegates to wrapped credentials for presigned URLs
 #[derive(Debug, Clone)]
-pub struct UcanAuthorizer<C> {
-    signer: C,
+pub struct UcanAuthorizer<C: Credentials> {
+    credentials: C,
 }
 
-impl<C: access::Signer + Sync> UcanAuthorizer<C> {
+impl<C: Credentials + Sync> UcanAuthorizer<C> {
     /// Create a new UCAN authorizer wrapping the given credentials.
-    pub fn new(signer: C) -> Self {
-        Self { signer }
+    pub fn new(credentials: C) -> Self {
+        Self { credentials }
     }
 
     /// Authorize a UCAN container.
@@ -88,26 +90,20 @@ impl<C: access::Signer + Sync> UcanAuthorizer<C> {
     /// 1. Verifies the delegation chain from subject to invocation issuer
     /// 2. Checks command prefix authorization at each delegation
     /// 3. Validates policy predicates on each delegation
-    pub async fn authorize(&self, container: &[u8]) -> Result<AuthorizedRequest, AuthorizationError> {
-        // 1. Parse and verify the invocation chain
+    pub async fn authorize(
+        &self,
+        container: &[u8],
+    ) -> Result<AuthorizedRequest, AuthorizationError> {
+        // Parse and verify the invocation chain
         let chain = InvocationChain::try_from(container)?;
         chain.verify().await?;
 
-        // 2. Extract command path and arguments
+        // Extract command path and arguments
         let command = chain.command();
         let args = chain.arguments();
 
-        // 3. Get subject DID from the invocation
+        // Get subject DID from the invocation
         let subject_did = chain.subject().to_string();
-
-        // 4. Verify the subject matches this signer's subject
-        let expected_subject = self.signer.subject();
-        if &subject_did != expected_subject {
-            return Err(AuthorizationError::NoDelegation(format!(
-                "Subject mismatch: invocation subject '{}' does not match credentials subject '{}'",
-                subject_did, expected_subject
-            )));
-        }
 
         // 5. Dispatch based on command path
         // Command format: ["storage", "get"] or ["memory", "resolve"] etc.
@@ -118,46 +114,46 @@ impl<C: access::Signer + Sync> UcanAuthorizer<C> {
             ["storage", "get"] => {
                 let effect = parse_storage_get(args)?;
                 let capability = build_storage_capability(&subject_did, args, effect)?;
-                self.signer.sign(&capability).await
+                self.credentials.authorize(&capability).await
             }
             ["storage", "set"] => {
                 let effect = parse_storage_set(args)?;
                 let capability = build_storage_capability(&subject_did, args, effect)?;
-                self.signer.sign(&capability).await
+                self.credentials.authorize(&capability).await
             }
             ["storage", "delete"] => {
                 let effect = parse_storage_delete(args)?;
                 let capability = build_storage_capability(&subject_did, args, effect)?;
-                self.signer.sign(&capability).await
+                self.credentials.authorize(&capability).await
             }
             ["storage", "list"] => {
                 let effect = parse_storage_list(args)?;
                 let capability = build_storage_capability(&subject_did, args, effect)?;
-                self.signer.sign(&capability).await
+                self.credentials.authorize(&capability).await
             }
 
             // Memory commands
             ["memory", "resolve"] => {
                 let capability = build_memory_resolve_capability(&subject_did, args)?;
-                self.signer.sign(&capability).await
+                self.credentials.authorize(&capability).await
             }
             ["memory", "publish"] => {
                 let capability = build_memory_publish_capability(&subject_did, args)?;
-                self.signer.sign(&capability).await
+                self.credentials.authorize(&capability).await
             }
             ["memory", "retract"] => {
                 let capability = build_memory_retract_capability(&subject_did, args)?;
-                self.signer.sign(&capability).await
+                self.credentials.authorize(&capability).await
             }
 
             // Archive commands
             ["archive", "get"] => {
                 let capability = build_archive_get_capability(&subject_did, args)?;
-                self.signer.sign(&capability).await
+                self.credentials.authorize(&capability).await
             }
             ["archive", "put"] => {
                 let capability = build_archive_put_capability(&subject_did, args)?;
-                self.signer.sign(&capability).await
+                self.credentials.authorize(&capability).await
             }
 
             _ => Err(AuthorizationError::Invocation(format!(
@@ -457,46 +453,6 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_acquire_fails_for_wrong_subject() {
-        use crate::{Address, s3::Credentials};
-
-        let address = Address::new(
-            "https://s3.us-east-1.amazonaws.com",
-            "us-east-1",
-            "test-bucket",
-        );
-        let credentials = Credentials::private(
-            address,
-            "did:key:zWrongSubject",
-            "access-key-id",
-            "secret-access-key",
-        )
-        .unwrap();
-
-        let authorizer = UcanAuthorizer::new(credentials);
-
-        // Build container with different subject
-        let subject_signer = test_signer();
-        let operator_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
-        let operator_signer = Ed25519Signer::new(operator_key);
-
-        let mut args = BTreeMap::new();
-        args.insert("store".to_string(), Promised::String("index".to_string()));
-        args.insert("key".to_string(), Promised::Bytes(b"test-key".to_vec()));
-
-        let container = build_test_container(
-            &subject_signer,
-            &operator_signer,
-            vec!["storage".to_string(), "get".to_string()],
-            args,
-        );
-
-        let result = authorizer.authorize(&container).await;
-        // Should fail because the subject doesn't match
-        assert!(result.is_err());
-    }
-
-    #[dialog_common::test]
     async fn test_acquire_perform_storage_get() {
         use crate::{Address, s3::Credentials};
 
@@ -509,8 +465,7 @@ mod tests {
             "test-bucket",
         );
         let credentials =
-            Credentials::private(address, &subject_did, "access-key-id", "secret-access-key")
-                .unwrap();
+            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
 
         let authorizer = UcanAuthorizer::new(credentials);
 
@@ -548,8 +503,7 @@ mod tests {
             "test-bucket",
         );
         let credentials =
-            Credentials::private(address, &subject_did, "access-key-id", "secret-access-key")
-                .unwrap();
+            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
 
         let authorizer = UcanAuthorizer::new(credentials);
 
@@ -594,8 +548,7 @@ mod tests {
             "test-bucket",
         );
         let credentials =
-            Credentials::private(address, &subject_did, "access-key-id", "secret-access-key")
-                .unwrap();
+            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
 
         let authorizer = UcanAuthorizer::new(credentials);
 
@@ -638,8 +591,7 @@ mod tests {
             "test-bucket",
         );
         let credentials =
-            Credentials::private(address, &subject_did, "access-key-id", "secret-access-key")
-                .unwrap();
+            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
 
         let authorizer = UcanAuthorizer::new(credentials);
 
@@ -676,8 +628,7 @@ mod tests {
             "test-bucket",
         );
         let credentials =
-            Credentials::private(address, &subject_did, "access-key-id", "secret-access-key")
-                .unwrap();
+            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
 
         let authorizer = UcanAuthorizer::new(credentials);
 

@@ -7,7 +7,7 @@
 use super::{LocalS3, UcanS3Address};
 use dialog_common::helpers::{Provider, Service};
 use dialog_s3_credentials::Address;
-use dialog_s3_credentials::s3::Credentials as S3Credentials;
+use dialog_s3_credentials::s3::S3Credentials;
 use dialog_s3_credentials::ucan::UcanAuthorizer;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;

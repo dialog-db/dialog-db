@@ -15,6 +15,7 @@
 //!
 //! ```no_run
 //! use dialog_s3_credentials::{Address, s3, access};
+//! use dialog_s3_credentials::credentials::Credentials;
 //! use dialog_s3_credentials::capability::storage::{Storage, Store};
 //! use dialog_common::capability::{Capability, Subject};
 //!
@@ -32,22 +33,21 @@
 //! // Create credentials (public or private)
 //! let credentials = s3::Credentials::private(
 //!     address,
-//!     subject,
 //!     "AKIAIOSFODNN7EXAMPLE",
 //!     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 //! )?;
 //!
 //! // Build capability chain: Subject -> Storage -> Store -> access::storage::Get
 //! // Uses capability types for hierarchy, access types for effects (Claim impl)
-//! let capability: Capability<access::storage::Get> = Subject::from(subject)
+//! let capability = Subject::from(subject)
 //!     .attenuate(Storage)
 //!     .attenuate(Store::new("index"))
 //!     .invoke(access::storage::Get::new(b"my-key"));
 //!
 //! // Sign the capability to get a presigned URL
-//! let descriptor = credentials.authorize(&capability).await?;
+//! let permission = credentials.authorize(&capability).await?;
 //!
-//! println!("Presigned URL: {}", descriptor.url);
+//! println!("Presigned URL: {}", permission.url);
 //! # Ok(())
 //! # }
 //! ```
@@ -56,6 +56,7 @@ pub mod access;
 pub mod address;
 pub mod capability;
 pub mod checksum;
+pub mod credentials;
 pub mod s3;
 
 #[cfg(feature = "ucan")]

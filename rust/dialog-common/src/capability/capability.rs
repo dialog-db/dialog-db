@@ -7,11 +7,13 @@
 //! - `Constraint` - trait that computes full chain type
 
 use super::ability::Ability;
+use super::access::Access;
 use super::constrained::Constrained;
 use super::provider::Provider;
 use super::selector::Selector;
 use super::subject::{Did, Subject};
-use crate::ConditionalSend;
+use super::{Authority, Claim, authorization};
+use crate::{ConditionalSend, ConditionalSync};
 
 /// Trait for policy types that restrict capabilities.
 ///
@@ -167,6 +169,24 @@ impl<T: Constraint> Capability<T> {
             constraint: fx,
             capability: self.0,
         })
+    }
+
+    pub async fn acquire<A: Access + Authority>(
+        self,
+        access: &mut A,
+    ) -> Result<Authorized<T, A::Authorization>, A::Error>
+    where
+        Self: ConditionalSend + Clone + 'static,
+    {
+        let capability = self.clone();
+        let authorization = access
+            .claim(Claim {
+                capability,
+                audience: access.did().into(),
+            })
+            .await?;
+
+        Ok(Authorized::new(self.clone(), authorization))
     }
 }
 

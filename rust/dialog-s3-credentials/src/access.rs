@@ -6,7 +6,7 @@
 
 use super::checksum::Checksum;
 use chrono::{DateTime, Utc};
-use dialog_common::ConditionalSend;
+use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
@@ -116,7 +116,7 @@ pub enum Precondition {
 /// S3 requests. Providing convenient way for creating authorizations in
 /// form of presigned URLs + headers.
 ///
-pub trait S3Request: ConditionalSend {
+pub trait S3Request: ConditionalSend + ConditionalSync {
     /// The HTTP method for this request.
     fn method(&self) -> &'static str;
 

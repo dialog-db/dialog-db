@@ -231,50 +231,6 @@ impl Credentials {
     }
 }
 
-// Implement Signer trait for Credentials
-// This allows ucan::Credentials to be used with StorageClaim, MemoryClaim, etc.
-use crate::access::S3Request as S3Claim;
-use crate::access::Signer;
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Signer for Credentials {
-    fn subject(&self) -> &dialog_common::capability::Did {
-        &self.subject
-    }
-
-    async fn sign<C: S3Claim + Send + Sync + 'static>(
-        &self,
-        claim: &C,
-    ) -> Result<AuthorizedRequest, AuthorizationError> {
-        // We need to dispatch to the appropriate authorize call based on the claim type.
-        // Since we can't pattern match on type at runtime easily, we use Any.
-        use crate::access::storage::{Delete, Get, List, Set, StorageClaim};
-        use std::any::Any;
-
-        let claim_any = claim as &dyn Any;
-
-        // Try each StorageClaim variant
-        if let Some(c) = claim_any.downcast_ref::<StorageClaim<Get>>() {
-            return self.authorize(c).await;
-        }
-        if let Some(c) = claim_any.downcast_ref::<StorageClaim<Set>>() {
-            return self.authorize(c).await;
-        }
-        if let Some(c) = claim_any.downcast_ref::<StorageClaim<Delete>>() {
-            return self.authorize(c).await;
-        }
-        if let Some(c) = claim_any.downcast_ref::<StorageClaim<List>>() {
-            return self.authorize(c).await;
-        }
-
-        // Add memory and archive claims as needed...
-        Err(AuthorizationError::Service(
-            "Unsupported claim type for UCAN authorization".to_string(),
-        ))
-    }
-}
-
 /// Implement Access trait for Credentials.
 ///
 /// This allows Credentials to find authorization proofs for capability claims

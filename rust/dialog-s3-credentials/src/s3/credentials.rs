@@ -8,6 +8,7 @@ use std::fmt::Write;
 use url::Url;
 
 use crate::access::{AuthorizedRequest, S3Request};
+pub use crate::credentials::Credentials as Authorizer;
 use crate::{Address, AuthorizationError};
 
 use super::{build_url, extract_host, is_path_style_default};
@@ -29,8 +30,6 @@ pub struct PublicCredentials {
     endpoint: Url,
     /// Whether to use path-style URLs
     path_style: bool,
-    /// Subject DID (used as path prefix within the bucket)
-    pub(crate) subject: dialog_common::capability::Did,
 }
 
 impl PublicCredentials {
@@ -44,10 +43,7 @@ impl PublicCredentials {
     /// # Errors
     ///
     /// Returns an error if the endpoint URL in the address is invalid.
-    pub fn new(
-        address: Address,
-        subject: impl Into<dialog_common::capability::Did>,
-    ) -> Result<Self, AuthorizationError> {
+    pub fn new(address: Address) -> Result<Self, AuthorizationError> {
         let endpoint = Url::parse(address.endpoint())
             .map_err(|e| AuthorizationError::Configuration(e.to_string()))?;
         let path_style = is_path_style_default(&endpoint);
@@ -56,7 +52,6 @@ impl PublicCredentials {
             address,
             endpoint,
             path_style,
-            subject: subject.into(),
         })
     }
 
@@ -80,17 +75,21 @@ impl PublicCredentials {
     pub fn build_url(&self, path: &str) -> Result<Url, AuthorizationError> {
         build_url(&self.endpoint, self.address.bucket(), path, self.path_style)
     }
+}
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Authorizer for PublicCredentials {
     /// Authorize a claim by generating an unsigned URL for public access.
-    pub async fn authorize<C: S3Request>(
+    async fn authorize<R: S3Request>(
         &self,
-        claim: &C,
+        request: &R,
     ) -> Result<AuthorizedRequest, AuthorizationError> {
-        let path = claim.path();
+        let path = request.path();
         let mut url = self.build_url(&path)?;
 
         // Add query parameters if specified
-        if let Some(params) = claim.params() {
+        if let Some(params) = request.params() {
             let mut query = url.query_pairs_mut();
             for (key, value) in params {
                 query.append_pair(&key, &value);
@@ -100,14 +99,14 @@ impl PublicCredentials {
         let host = extract_host(&url)?;
 
         let mut headers = vec![("host".to_string(), host)];
-        if let Some(checksum) = claim.checksum() {
+        if let Some(checksum) = request.checksum() {
             let header_name = format!("x-amz-checksum-{}", checksum.name());
             headers.push((header_name, checksum.to_string()));
         }
 
         Ok(AuthorizedRequest {
             url,
-            method: claim.method().to_string(),
+            method: request.method().to_string(),
             headers,
         })
     }
@@ -128,8 +127,6 @@ pub struct PrivateCredentials {
     endpoint: Url,
     /// Whether to use path-style URLs
     path_style: bool,
-    /// Subject DID (used as path prefix within the bucket)
-    pub(crate) subject: dialog_common::capability::Did,
 }
 
 impl PrivateCredentials {
@@ -147,7 +144,6 @@ impl PrivateCredentials {
     /// Returns an error if the endpoint URL in the address is invalid.
     pub fn new(
         address: Address,
-        subject: impl Into<dialog_common::capability::Did>,
         access_key_id: impl Into<String>,
         secret_access_key: impl Into<String>,
     ) -> Result<Self, AuthorizationError> {
@@ -161,7 +157,6 @@ impl PrivateCredentials {
             address,
             endpoint,
             path_style,
-            subject: subject.into(),
         })
     }
 
@@ -190,25 +185,30 @@ impl PrivateCredentials {
     pub fn build_url(&self, path: &str) -> Result<Url, AuthorizationError> {
         build_url(&self.endpoint, self.address.bucket(), path, self.path_style)
     }
+}
 
-    /// Authorize a claim by generating a presigned URL with AWS SigV4 signature.
-    pub async fn authorize<C: S3Request>(
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Authorizer for PrivateCredentials {
+    /// Authorize a claim by generating an unsigned URL for public access.
+    /// Authorize a claim by generating an unsigned URL for public access.
+    async fn authorize<R: S3Request>(
         &self,
-        claim: &C,
+        request: &R,
     ) -> Result<AuthorizedRequest, AuthorizationError> {
         let time = current_time();
         let timestamp = time.format("%Y%m%dT%H%M%SZ").to_string();
         let date = &timestamp[0..8];
 
         let region = self.region();
-        let service = claim.service();
-        let expires = claim.expires();
+        let service = request.service();
+        let expires = request.expires();
 
         // Derive signing key on demand
         let key = SigningKey::derive(&self.secret_access_key, date, region, service);
         let scope = format!("{}/{}/{}/aws4_request", date, region, service);
 
-        let path = claim.path();
+        let path = request.path();
         // Extract host from request URL, including port for non-standard ports.
         let url = self.build_url(&path)?;
 
@@ -227,7 +227,7 @@ impl PrivateCredentials {
         let mut headers = vec![("host".to_string(), host.clone())];
         // If request has a checksum, we add it to the headers so that S3 will
         // will perform integrity checks on the data.
-        if let Some(checksum) = claim.checksum() {
+        if let Some(checksum) = request.checksum() {
             let header_name = format!("x-amz-checksum-{}", checksum.name());
             headers.push((header_name, checksum.to_string()));
         }
@@ -252,7 +252,7 @@ impl PrivateCredentials {
         ];
 
         // Include ACL if specified by the request
-        if let Some(acl) = claim.acl() {
+        if let Some(acl) = request.acl() {
             query_params.push(("x-amz-acl".into(), acl.as_str().to_string()));
         }
 
@@ -260,7 +260,7 @@ impl PrivateCredentials {
 
         // Include existing query parameters from the request URL
         // (e.g., list-type=2, prefix=... for ListObjectsV2)
-        if let Some(params) = claim.params() {
+        if let Some(params) = request.params() {
             for (key, value) in params {
                 query_params.push((key, value));
             }
@@ -286,7 +286,7 @@ impl PrivateCredentials {
 
         let canonical_request = format!(
             "{}\n{}\n{}\n{}\n\n{}\nUNSIGNED-PAYLOAD",
-            claim.method(),
+            request.method(),
             canonical_uri,
             canonical_query,
             canonical_headers,
@@ -318,7 +318,7 @@ impl PrivateCredentials {
 
         Ok(AuthorizedRequest {
             url,
-            method: claim.method().to_string(),
+            method: request.method().to_string(),
             headers,
         })
     }
@@ -351,12 +351,11 @@ impl PrivateCredentials {
 /// let subject = "did:key:zSubject";
 ///
 /// // Public access (no signing)
-/// let public = Credentials::public(address.clone(), subject)?;
+/// let public = Credentials::public(address.clone())?;
 ///
 /// // Private access (SigV4 signing)
 /// let private = Credentials::private(
 ///     address,
-///     subject,
 ///     "AKIAIOSFODNN7EXAMPLE",
 ///     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 /// )?;
@@ -378,11 +377,8 @@ impl Credentials {
     ///
     /// * `address` - S3 address (endpoint, region, bucket)
     /// * `subject` - Subject DID used as path prefix within the bucket
-    pub fn public(
-        address: Address,
-        subject: impl Into<dialog_common::capability::Did>,
-    ) -> Result<Self, AuthorizationError> {
-        Ok(Self::Public(PublicCredentials::new(address, subject)?))
+    pub fn public(address: Address) -> Result<Self, AuthorizationError> {
+        Ok(Self::Public(PublicCredentials::new(address)?))
     }
 
     /// Create private credentials with AWS SigV4 signing.
@@ -395,24 +391,14 @@ impl Credentials {
     /// * `secret_access_key` - AWS Secret Access Key
     pub fn private(
         address: Address,
-        subject: impl Into<dialog_common::capability::Did>,
         access_key_id: impl Into<String>,
         secret_access_key: impl Into<String>,
     ) -> Result<Self, AuthorizationError> {
         Ok(Self::Private(PrivateCredentials::new(
             address,
-            subject,
             access_key_id,
             secret_access_key,
         )?))
-    }
-
-    /// Get the subject DID (path prefix within the bucket).
-    pub fn subject(&self) -> &dialog_common::capability::Did {
-        match self {
-            Self::Public(c) => &c.subject,
-            Self::Private(c) => &c.subject,
-        }
     }
 
     /// Set whether to use path-style URLs.
@@ -446,18 +432,22 @@ impl Credentials {
             Self::Private(c) => c.build_url(path),
         }
     }
+}
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Authorizer for Credentials {
     /// Authorize a claim and produce a request descriptor.
     ///
     /// This generates either an unsigned URL (for public credentials) or a
     /// presigned URL with AWS SigV4 signature (for private credentials).
-    pub async fn authorize<C: S3Request>(
+    async fn authorize<R: S3Request>(
         &self,
-        claim: &C,
+        request: &R,
     ) -> Result<AuthorizedRequest, AuthorizationError> {
         match self {
-            Self::Public(c) => c.authorize(claim).await,
-            Self::Private(c) => c.authorize(claim).await,
+            Self::Public(c) => c.authorize(request).await,
+            Self::Private(c) => c.authorize(request).await,
         }
     }
 }
@@ -586,7 +576,7 @@ mod tests {
             "us-east-1",
             "my-bucket",
         );
-        let creds = PublicCredentials::new(address, TEST_SUBJECT).unwrap();
+        let creds = PublicCredentials::new(address).unwrap();
 
         let get = get_capability("index", b"test-key");
         let descriptor = creds.authorize(&get).await.unwrap();
@@ -603,8 +593,7 @@ mod tests {
             "us-east-1",
             "my-bucket",
         );
-        let creds =
-            PrivateCredentials::new(address, TEST_SUBJECT, "AKIATEST", "secret123").unwrap();
+        let creds = PrivateCredentials::new(address, "AKIATEST", "secret123").unwrap();
 
         let get = get_capability("index", b"test-key");
         let descriptor = creds.authorize(&get).await.unwrap();
@@ -621,7 +610,7 @@ mod tests {
             "us-east-1",
             "my-bucket",
         );
-        let creds = Credentials::public(address, TEST_SUBJECT).unwrap();
+        let creds = Credentials::public(address).unwrap();
 
         let get = get_capability("", b"key");
         let descriptor = creds.authorize(&get).await.unwrap();
@@ -636,7 +625,7 @@ mod tests {
             "us-east-1",
             "my-bucket",
         );
-        let creds = Credentials::public(address, TEST_SUBJECT).unwrap();
+        let creds = Credentials::public(address).unwrap();
 
         let checksum = Checksum::Sha256([0u8; 32]);
         let set = set_capability("store", b"key", checksum);

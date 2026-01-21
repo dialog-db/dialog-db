@@ -156,11 +156,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Bucket, Credentials, S3StorageError};
+    use super::super::{Bucket, S3Credentials, S3StorageError};
     use super::*;
 
     // Type alias for tests that need a concrete Bucket type
-    type TestBucket = Bucket<Vec<u8>, Vec<u8>, Credentials>;
+    type TestBucket = Bucket<Vec<u8>, Vec<u8>, S3Credentials>;
 
     #[dialog_common::test]
     fn it_parses_empty_list_response() {
@@ -219,7 +219,7 @@ mod tests {
         // Non-IP endpoints use virtual-hosted style by default
         use super::super::Address;
         let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
-        let authorizer = Credentials::public(address, "did:key:test").unwrap();
+        let authorizer = S3Credentials::public(address, "did:key:test").unwrap();
         let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer).unwrap();
 
         // encode_path creates a path that gets combined with the bucket URL
@@ -232,7 +232,7 @@ mod tests {
         // IP/localhost endpoints use path style by default
         use super::super::Address;
         let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
-        let authorizer = Credentials::public(address, "did:key:test").unwrap();
+        let authorizer = S3Credentials::public(address, "did:key:test").unwrap();
         let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)
             .unwrap()
             .at("prefix");

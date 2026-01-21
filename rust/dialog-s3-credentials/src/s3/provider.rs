@@ -15,7 +15,7 @@ use crate::access::{
 };
 use crate::{AuthorizationError as S3Error, AuthorizedRequest};
 
-use super::Credentials;
+use super::{Authorizer, Credentials};
 
 /// Self-issued authorization for direct S3 access.
 ///
@@ -53,30 +53,6 @@ impl Authorization for S3Authorization {
     }
 }
 
-// --- Principal implementation for Credentials ---
-//
-// S3 credentials use the subject DID as their identity.
-// The subject DID is used as a path prefix within the bucket.
-// This allows self-issuing authorization for operations on paths under the subject.
-
-impl Principal for Credentials {
-    fn did(&self) -> &Did {
-        self.subject()
-    }
-}
-
-impl dialog_common::capability::Authority for Credentials {
-    fn sign(&self, _payload: &[u8]) -> Vec<u8> {
-        // S3 credentials sign via the SigV4 algorithm during URL generation,
-        // not via a general-purpose sign method. This method exists only to
-        // satisfy the Authority trait.
-        // The actual signing happens in Provider::execute().
-        Vec::new()
-    }
-}
-
-// --- Access implementation for Credentials ---
-
 /// Error type that combines S3 and Authorization errors.
 #[derive(Debug, thiserror::Error)]
 pub enum AccessError {
@@ -99,21 +75,13 @@ impl Access for Credentials {
         // For direct S3, we only support self-issued authorization.
         // If the claim's subject matches our DID, we self-issue.
         // Otherwise, we need delegation (not supported for direct S3).
-        if claim.subject() == self.did() {
-            // Self-issue
-            Ok(S3Authorization::new(
-                claim.subject().clone(),
-                claim.audience().clone(),
-                claim.command(),
-            ))
-        } else {
-            Err(AccessError::Authorization(
-                AuthorizationError::NoDelegationChain {
-                    subject: claim.subject().clone(),
-                    audience: claim.audience().clone(),
-                },
-            ))
-        }
+
+        // Self-issue
+        Ok(S3Authorization::new(
+            claim.subject().clone(),
+            claim.audience().clone(),
+            claim.command(),
+        ))
     }
 }
 
@@ -270,7 +238,7 @@ mod tests {
             "us-east-1",
             "my-bucket",
         );
-        let mut creds = Credentials::public(address, TEST_SUBJECT).unwrap();
+        let mut creds = Credentials::public(address).unwrap();
 
         // Build capability chain using access effect types (which implement Claim)
         let capability = get_capability(TEST_SUBJECT, "index", b"my-key");
@@ -298,7 +266,7 @@ mod tests {
             "us-east-1",
             "my-bucket",
         );
-        let mut creds = Credentials::public(address, TEST_SUBJECT).unwrap();
+        let mut creds = Credentials::public(address).unwrap();
 
         let checksum = crate::Checksum::Sha256([0u8; 32]);
         let capability = set_capability(TEST_SUBJECT, "blob", b"my-key", checksum);
@@ -325,9 +293,9 @@ mod tests {
             "us-east-1",
             "my-bucket",
         );
-        let mut creds = Credentials::public(address, TEST_SUBJECT).unwrap();
+        let mut creds = Credentials::public(address).unwrap();
 
-        let capability: Capability<access_memory::Resolve> = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(TEST_SUBJECT)
             .attenuate(memory::Memory)
             .attenuate(memory::Space::new("did:key:zUser"))
             .attenuate(memory::Cell::new("main"))
@@ -351,12 +319,12 @@ mod tests {
             "us-east-1",
             "my-bucket",
         );
-        let mut creds = Credentials::public(address, TEST_SUBJECT).unwrap();
+        let mut creds = Credentials::public(address).unwrap();
 
         // Blake3 digest (32 bytes)
         let digest = [0u8; 32];
 
-        let capability: Capability<access_archive::Get> = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(TEST_SUBJECT)
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(access_archive::Get::new(digest));
@@ -377,7 +345,7 @@ mod tests {
             "us-east-1",
             "my-bucket",
         );
-        let mut creds = Credentials::public(address, TEST_SUBJECT).unwrap();
+        let mut creds = Credentials::public(address).unwrap();
 
         let checksum = crate::Checksum::Sha256([0u8; 32]);
         let digest = [0u8; 32];
