@@ -40,10 +40,10 @@ use super::authority::OperatorIdentity;
 use super::authorization::UcanAuthorization;
 use super::delegation::DelegationChain;
 use super::invocation::InvocationChain;
-use crate::access::{AuthorizationError, RequestDescriptor};
+use crate::access::{AuthorizationError, AuthorizedRequest};
 use crate::capability::{archive, memory, storage};
-use dialog_common::capability::{Ability, Access, Authorized, Capability, Provider, ToIpldArgs};
 use dialog_common::ConditionalSend;
+use dialog_common::capability::{Ability, Access, Authorized, Capability, Provider, ToIpldArgs};
 
 /// Convert IPLD to Promised (for UCAN invocation arguments).
 fn ipld_to_promised(ipld: Ipld) -> Promised {
@@ -153,7 +153,7 @@ impl Credentials {
     async fn authorize<C: Ability + ToIpldArgs>(
         &self,
         capability: &C,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
+    ) -> Result<AuthorizedRequest, AuthorizationError> {
         let capability_subject = capability.subject();
 
         // 1. Verify the capability subject matches our delegation's subject
@@ -233,7 +233,7 @@ impl Credentials {
 
 // Implement Signer trait for Credentials
 // This allows ucan::Credentials to be used with StorageClaim, MemoryClaim, etc.
-use crate::access::Claim as S3Claim;
+use crate::access::S3Request as S3Claim;
 use crate::access::Signer;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -246,7 +246,7 @@ impl Signer for Credentials {
     async fn sign<C: S3Claim + Send + Sync + 'static>(
         &self,
         claim: &C,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
+    ) -> Result<AuthorizedRequest, AuthorizationError> {
         // We need to dispatch to the appropriate authorize call based on the claim type.
         // Since we can't pattern match on type at runtime easily, we use Any.
         use crate::access::storage::{Delete, Get, List, Set, StorageClaim};
@@ -327,7 +327,7 @@ impl Provider<Authorized<storage::Get, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<storage::Get, UcanAuthorization>,
-    ) -> RequestDescriptor {
+    ) -> AuthorizedRequest {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize storage::Get")
@@ -341,7 +341,7 @@ impl Provider<Authorized<storage::Set, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<storage::Set, UcanAuthorization>,
-    ) -> RequestDescriptor {
+    ) -> AuthorizedRequest {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize storage::Set")
@@ -355,7 +355,7 @@ impl Provider<Authorized<storage::Delete, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<storage::Delete, UcanAuthorization>,
-    ) -> RequestDescriptor {
+    ) -> AuthorizedRequest {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize storage::Delete")
@@ -369,7 +369,7 @@ impl Provider<Authorized<storage::List, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<storage::List, UcanAuthorization>,
-    ) -> RequestDescriptor {
+    ) -> AuthorizedRequest {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize storage::List")
@@ -383,7 +383,7 @@ impl Provider<Authorized<memory::Resolve, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<memory::Resolve, UcanAuthorization>,
-    ) -> RequestDescriptor {
+    ) -> AuthorizedRequest {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize memory::Resolve")
@@ -397,7 +397,7 @@ impl Provider<Authorized<memory::Publish, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<memory::Publish, UcanAuthorization>,
-    ) -> RequestDescriptor {
+    ) -> AuthorizedRequest {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize memory::Publish")
@@ -411,7 +411,7 @@ impl Provider<Authorized<memory::Retract, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<memory::Retract, UcanAuthorization>,
-    ) -> RequestDescriptor {
+    ) -> AuthorizedRequest {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize memory::Retract")
@@ -425,7 +425,7 @@ impl Provider<Authorized<archive::Get, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<archive::Get, UcanAuthorization>,
-    ) -> RequestDescriptor {
+    ) -> AuthorizedRequest {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize archive::Get")
@@ -439,7 +439,7 @@ impl Provider<Authorized<archive::Put, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<archive::Put, UcanAuthorization>,
-    ) -> RequestDescriptor {
+    ) -> AuthorizedRequest {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize archive::Put")
@@ -540,8 +540,8 @@ impl CredentialsBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::delegation::tests::{create_delegation, generate_signer};
+    use super::*;
 
     /// Helper to create a test delegation chain from subject to operator.
     fn test_delegation_chain(

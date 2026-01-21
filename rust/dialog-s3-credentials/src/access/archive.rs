@@ -3,7 +3,7 @@
 //! Request types for content-addressed storage operations.
 //! Each type implements `Claim` to provide HTTP method, path, and other request details.
 
-use super::{AuthorizationError, Claim, RequestDescriptor};
+use super::{AuthorizationError, AuthorizedRequest, S3Request};
 use crate::Checksum;
 use crate::capability::archive::Catalog;
 use base58::ToBase58;
@@ -31,10 +31,10 @@ impl Get {
 /// be used to perform actual get from the s3 bucket.
 impl Effect for Get {
     type Of = Catalog;
-    type Output = Result<RequestDescriptor, AuthorizationError>;
+    type Output = Result<AuthorizedRequest, AuthorizationError>;
 }
 
-impl Claim for Capability<Get> {
+impl S3Request for Capability<Get> {
     fn method(&self) -> &'static str {
         "GET"
     }
@@ -45,9 +45,6 @@ impl Claim for Capability<Get> {
             Catalog::of(&self).name,
             Get::of(&self).digest.as_bytes().to_base58()
         )
-    }
-    fn store(&self) -> &str {
-        &Catalog::of(&self).name
     }
 }
 
@@ -74,10 +71,10 @@ impl Put {
 /// be used to perform actual put into the s3 bucket.
 impl Effect for Put {
     type Of = Catalog;
-    type Output = Result<RequestDescriptor, AuthorizationError>;
+    type Output = Result<AuthorizedRequest, AuthorizationError>;
 }
 
-impl Claim for Capability<Put> {
+impl S3Request for Capability<Put> {
     fn method(&self) -> &'static str {
         "PUT"
     }
@@ -88,9 +85,6 @@ impl Claim for Capability<Put> {
             Catalog::of(&self).name,
             Put::of(&self).digest.as_bytes().to_base58()
         )
-    }
-    fn store(&self) -> &str {
-        &Catalog::of(&self).name
     }
     fn checksum(&self) -> Option<&Checksum> {
         Some(&Put::of(&self).checksum)

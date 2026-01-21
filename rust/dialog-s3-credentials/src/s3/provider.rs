@@ -10,8 +10,10 @@ use dialog_common::capability::{
     Ability, Access, Authorization, AuthorizationError, Capability, Claim, Principal, Provider,
 };
 
-use crate::access::{archive as access_archive, memory as access_memory, storage as access_storage};
-use crate::{AuthorizationError as S3Error, RequestDescriptor};
+use crate::access::{
+    archive as access_archive, memory as access_memory, storage as access_storage,
+};
+use crate::{AuthorizationError as S3Error, AuthorizedRequest};
 
 use super::Credentials;
 
@@ -115,7 +117,6 @@ impl Access for Credentials {
     }
 }
 
-
 // --- Provider implementations for capabilities ---
 //
 // Each effect type needs a Provider implementation that generates the RequestDescriptor.
@@ -129,9 +130,9 @@ impl Provider<access_storage::Get> for Credentials {
     async fn execute(
         &mut self,
         cap: Capability<access_storage::Get>,
-    ) -> Result<RequestDescriptor, S3Error> {
+    ) -> Result<AuthorizedRequest, S3Error> {
         // Capability<access_storage::Get> implements access::Claim
-        self.authorize(&cap)
+        self.authorize(&cap).await
     }
 }
 
@@ -142,8 +143,8 @@ impl Provider<access_storage::Set> for Credentials {
     async fn execute(
         &mut self,
         cap: Capability<access_storage::Set>,
-    ) -> Result<RequestDescriptor, S3Error> {
-        self.authorize(&cap)
+    ) -> Result<AuthorizedRequest, S3Error> {
+        self.authorize(&cap).await
     }
 }
 
@@ -154,8 +155,8 @@ impl Provider<access_storage::Delete> for Credentials {
     async fn execute(
         &mut self,
         cap: Capability<access_storage::Delete>,
-    ) -> Result<RequestDescriptor, S3Error> {
-        self.authorize(&cap)
+    ) -> Result<AuthorizedRequest, S3Error> {
+        self.authorize(&cap).await
     }
 }
 
@@ -166,8 +167,8 @@ impl Provider<access_storage::List> for Credentials {
     async fn execute(
         &mut self,
         cap: Capability<access_storage::List>,
-    ) -> Result<RequestDescriptor, S3Error> {
-        self.authorize(&cap)
+    ) -> Result<AuthorizedRequest, S3Error> {
+        self.authorize(&cap).await
     }
 }
 
@@ -178,8 +179,8 @@ impl Provider<access_memory::Resolve> for Credentials {
     async fn execute(
         &mut self,
         cap: Capability<access_memory::Resolve>,
-    ) -> Result<RequestDescriptor, S3Error> {
-        self.authorize(&cap)
+    ) -> Result<AuthorizedRequest, S3Error> {
+        self.authorize(&cap).await
     }
 }
 
@@ -190,8 +191,8 @@ impl Provider<access_memory::Publish> for Credentials {
     async fn execute(
         &mut self,
         cap: Capability<access_memory::Publish>,
-    ) -> Result<RequestDescriptor, S3Error> {
-        self.authorize(&cap)
+    ) -> Result<AuthorizedRequest, S3Error> {
+        self.authorize(&cap).await
     }
 }
 
@@ -202,8 +203,8 @@ impl Provider<access_memory::Retract> for Credentials {
     async fn execute(
         &mut self,
         cap: Capability<access_memory::Retract>,
-    ) -> Result<RequestDescriptor, S3Error> {
-        self.authorize(&cap)
+    ) -> Result<AuthorizedRequest, S3Error> {
+        self.authorize(&cap).await
     }
 }
 
@@ -214,8 +215,8 @@ impl Provider<access_archive::Get> for Credentials {
     async fn execute(
         &mut self,
         cap: Capability<access_archive::Get>,
-    ) -> Result<RequestDescriptor, S3Error> {
-        self.authorize(&cap)
+    ) -> Result<AuthorizedRequest, S3Error> {
+        self.authorize(&cap).await
     }
 }
 
@@ -226,8 +227,8 @@ impl Provider<access_archive::Put> for Credentials {
     async fn execute(
         &mut self,
         cap: Capability<access_archive::Put>,
-    ) -> Result<RequestDescriptor, S3Error> {
-        self.authorize(&cap)
+    ) -> Result<AuthorizedRequest, S3Error> {
+        self.authorize(&cap).await
     }
 }
 
@@ -333,7 +334,6 @@ mod tests {
         );
         assert!(descriptor.url.as_str().contains("did:key:zUser/main"));
     }
-
 
     #[dialog_common::test]
     async fn it_performs_archive_get() {

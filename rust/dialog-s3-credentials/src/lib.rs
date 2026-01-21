@@ -15,7 +15,6 @@
 //!
 //! ```no_run
 //! use dialog_s3_credentials::{Address, s3, access};
-//! use dialog_s3_credentials::access::Signer;
 //! use dialog_s3_credentials::capability::storage::{Storage, Store};
 //! use dialog_common::capability::{Capability, Subject};
 //!
@@ -46,7 +45,7 @@
 //!     .invoke(access::storage::Get::new(b"my-key"));
 //!
 //! // Sign the capability to get a presigned URL
-//! let descriptor = credentials.sign(&capability).await?;
+//! let descriptor = credentials.authorize(&capability).await?;
 //!
 //! println!("Presigned URL: {}", descriptor.url);
 //! # Ok(())
@@ -63,6 +62,6 @@ pub mod s3;
 pub mod ucan;
 
 // Primary exports
-pub use access::{AuthorizationError, RequestDescriptor, memory, storage};
+pub use access::{AuthorizationError, AuthorizedRequest, memory, storage};
 pub use address::Address;
 pub use checksum::{Checksum, Hasher};

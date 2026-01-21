@@ -48,7 +48,7 @@
 use std::collections::BTreeMap;
 
 use super::invocation::InvocationChain;
-use crate::access::{self, AuthorizationError, RequestDescriptor};
+use crate::access::{self, AuthorizationError, AuthorizedRequest};
 use crate::capability::{archive, memory, storage};
 use dialog_common::capability::{Capability, Subject};
 
@@ -88,10 +88,7 @@ impl<C: access::Signer + Sync> UcanAuthorizer<C> {
     /// 1. Verifies the delegation chain from subject to invocation issuer
     /// 2. Checks command prefix authorization at each delegation
     /// 3. Validates policy predicates on each delegation
-    pub async fn authorize(
-        &self,
-        container: &[u8],
-    ) -> Result<RequestDescriptor, AuthorizationError> {
+    pub async fn authorize(&self, container: &[u8]) -> Result<AuthorizedRequest, AuthorizationError> {
         // 1. Parse and verify the invocation chain
         let chain = InvocationChain::try_from(container)?;
         chain.verify().await?;
@@ -325,9 +322,9 @@ fn build_archive_get_capability(
 ) -> Result<Capability<crate::access::archive::Get>, AuthorizationError> {
     let catalog = get_string_arg(args, "catalog")?;
     let digest = get_bytes_arg(args, "digest")?;
-    let digest_arr: [u8; 32] = digest.try_into().map_err(|_| {
-        AuthorizationError::Invocation("digest must be 32 bytes".to_string())
-    })?;
+    let digest_arr: [u8; 32] = digest
+        .try_into()
+        .map_err(|_| AuthorizationError::Invocation("digest must be 32 bytes".to_string()))?;
     let digest_hash = dialog_common::Blake3Hash::from(digest_arr);
     Ok(Subject::from(subject_did)
         .attenuate(archive::Archive)
@@ -341,9 +338,9 @@ fn build_archive_put_capability(
 ) -> Result<Capability<crate::access::archive::Put>, AuthorizationError> {
     let catalog = get_string_arg(args, "catalog")?;
     let digest = get_bytes_arg(args, "digest")?;
-    let digest_arr: [u8; 32] = digest.try_into().map_err(|_| {
-        AuthorizationError::Invocation("digest must be 32 bytes".to_string())
-    })?;
+    let digest_arr: [u8; 32] = digest
+        .try_into()
+        .map_err(|_| AuthorizationError::Invocation("digest must be 32 bytes".to_string()))?;
     let digest_hash = dialog_common::Blake3Hash::from(digest_arr);
     let checksum = parse_checksum(args)?;
     Ok(Subject::from(subject_did)
@@ -366,7 +363,7 @@ fn parse_checksum(
                 _ => {
                     return Err(AuthorizationError::Invocation(
                         "checksum.algorithm must be a string".to_string(),
-                    ))
+                    ));
                 }
             };
             let value = match map.get("value") {
@@ -374,7 +371,7 @@ fn parse_checksum(
                 _ => {
                     return Err(AuthorizationError::Invocation(
                         "checksum.value must be bytes".to_string(),
-                    ))
+                    ));
                 }
             };
 
@@ -463,7 +460,11 @@ mod tests {
     async fn test_acquire_fails_for_wrong_subject() {
         use crate::{Address, s3::Credentials};
 
-        let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "test-bucket");
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "test-bucket",
+        );
         let credentials = Credentials::private(
             address,
             "did:key:zWrongSubject",
@@ -502,7 +503,11 @@ mod tests {
         let subject_signer = test_signer();
         let subject_did = subject_signer.did().to_string();
 
-        let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "test-bucket");
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "test-bucket",
+        );
         let credentials =
             Credentials::private(address, &subject_did, "access-key-id", "secret-access-key")
                 .unwrap();
@@ -537,7 +542,11 @@ mod tests {
         let subject_signer = test_signer();
         let subject_did = subject_signer.did().to_string();
 
-        let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "test-bucket");
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "test-bucket",
+        );
         let credentials =
             Credentials::private(address, &subject_did, "access-key-id", "secret-access-key")
                 .unwrap();
@@ -579,7 +588,11 @@ mod tests {
         let subject_signer = test_signer();
         let subject_did = subject_signer.did().to_string();
 
-        let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "test-bucket");
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "test-bucket",
+        );
         let credentials =
             Credentials::private(address, &subject_did, "access-key-id", "secret-access-key")
                 .unwrap();
@@ -590,8 +603,14 @@ mod tests {
         let operator_signer = Ed25519Signer::new(operator_key);
 
         let mut args = BTreeMap::new();
-        args.insert("space".to_string(), Promised::String("test-space".to_string()));
-        args.insert("cell".to_string(), Promised::String("test-cell".to_string()));
+        args.insert(
+            "space".to_string(),
+            Promised::String("test-space".to_string()),
+        );
+        args.insert(
+            "cell".to_string(),
+            Promised::String("test-cell".to_string()),
+        );
 
         let container = build_test_container(
             &subject_signer,
@@ -613,7 +632,11 @@ mod tests {
         let subject_signer = test_signer();
         let subject_did = subject_signer.did().to_string();
 
-        let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "test-bucket");
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "test-bucket",
+        );
         let credentials =
             Credentials::private(address, &subject_did, "access-key-id", "secret-access-key")
                 .unwrap();
@@ -647,7 +670,11 @@ mod tests {
         let subject_signer = test_signer();
         let subject_did = subject_signer.did().to_string();
 
-        let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "test-bucket");
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "test-bucket",
+        );
         let credentials =
             Credentials::private(address, &subject_did, "access-key-id", "secret-access-key")
                 .unwrap();

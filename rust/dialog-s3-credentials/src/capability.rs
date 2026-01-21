@@ -38,7 +38,7 @@
 //! let descriptor = authorized.perform(&mut credentials).await;
 //! ```
 
-use crate::{Checksum, RequestDescriptor};
+use crate::{AuthorizedRequest, Checksum};
 use dialog_common::capability::{Attenuation, Effect, Policy, Subject};
 use serde::{Deserialize, Serialize};
 
@@ -63,13 +63,13 @@ pub mod storage {
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     pub struct Store {
         /// The store name (e.g., "index", "blob").
-        pub name: String,
+        pub store: String,
     }
 
     impl Store {
         /// Create a new Store policy.
         pub fn new(name: impl Into<String>) -> Self {
-            Self { name: name.into() }
+            Self { store: name.into() }
         }
     }
 
@@ -93,7 +93,7 @@ pub mod storage {
 
     impl Effect for Get {
         type Of = Store;
-        type Output = RequestDescriptor;
+        type Output = AuthorizedRequest;
     }
 
     /// Set value with key and checksum.
@@ -117,7 +117,7 @@ pub mod storage {
 
     impl Effect for Set {
         type Of = Store;
-        type Output = RequestDescriptor;
+        type Output = AuthorizedRequest;
     }
 
     /// Delete value by key.
@@ -136,7 +136,7 @@ pub mod storage {
 
     impl Effect for Delete {
         type Of = Store;
-        type Output = RequestDescriptor;
+        type Output = AuthorizedRequest;
     }
 
     /// List keys in store.
@@ -155,15 +155,15 @@ pub mod storage {
 
     impl Effect for List {
         type Of = Store;
-        type Output = RequestDescriptor;
+        type Output = AuthorizedRequest;
     }
 
     /// Build the S3 path for a storage effect.
     pub fn path(store: &Store, key: &str) -> String {
-        if store.name.is_empty() {
+        if store.store.is_empty() {
             key.to_string()
         } else {
-            format!("{}/{}", store.name, key)
+            format!("{}/{}", store.store, key)
         }
     }
 }
@@ -238,7 +238,7 @@ pub mod memory {
 
     impl Effect for Resolve {
         type Of = Cell;
-        type Output = RequestDescriptor;
+        type Output = AuthorizedRequest;
     }
 
     /// Publish cell content with CAS semantics.
@@ -267,7 +267,7 @@ pub mod memory {
 
     impl Effect for Publish {
         type Of = Cell;
-        type Output = RequestDescriptor;
+        type Output = AuthorizedRequest;
     }
 
     /// Retract cell with CAS semantics.
@@ -291,7 +291,7 @@ pub mod memory {
 
     impl Effect for Retract {
         type Of = Cell;
-        type Output = RequestDescriptor;
+        type Output = AuthorizedRequest;
     }
 
     /// Build the S3 path for a memory effect.
@@ -350,7 +350,7 @@ pub mod archive {
 
     impl Effect for Get {
         type Of = Catalog;
-        type Output = RequestDescriptor;
+        type Output = AuthorizedRequest;
     }
 
     /// Put content by digest with checksum.
@@ -374,7 +374,7 @@ pub mod archive {
 
     impl Effect for Put {
         type Of = Catalog;
-        type Output = RequestDescriptor;
+        type Output = AuthorizedRequest;
     }
 
     /// Build the S3 path for an archive effect.

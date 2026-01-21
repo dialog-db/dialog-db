@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::fmt::Write;
 use url::Url;
 
-use crate::access::{Claim, RequestDescriptor, Signer};
+use crate::access::{AuthorizedRequest, S3Request};
 use crate::{Address, AuthorizationError};
 
 use super::{build_url, extract_host, is_path_style_default};
@@ -82,7 +82,10 @@ impl PublicCredentials {
     }
 
     /// Authorize a claim by generating an unsigned URL for public access.
-    pub fn authorize<C: Claim>(&self, claim: &C) -> Result<RequestDescriptor, AuthorizationError> {
+    pub async fn authorize<C: S3Request>(
+        &self,
+        claim: &C,
+    ) -> Result<AuthorizedRequest, AuthorizationError> {
         let path = claim.path();
         let mut url = self.build_url(&path)?;
 
@@ -102,26 +105,11 @@ impl PublicCredentials {
             headers.push((header_name, checksum.to_string()));
         }
 
-        Ok(RequestDescriptor {
+        Ok(AuthorizedRequest {
             url,
             method: claim.method().to_string(),
             headers,
         })
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Signer for PublicCredentials {
-    fn subject(&self) -> &dialog_common::capability::Did {
-        &self.subject
-    }
-
-    async fn sign<C: Claim + Send + Sync + 'static>(
-        &self,
-        claim: &C,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(claim)
     }
 }
 
@@ -204,7 +192,10 @@ impl PrivateCredentials {
     }
 
     /// Authorize a claim by generating a presigned URL with AWS SigV4 signature.
-    pub fn authorize<C: Claim>(&self, claim: &C) -> Result<RequestDescriptor, AuthorizationError> {
+    pub async fn authorize<C: S3Request>(
+        &self,
+        claim: &C,
+    ) -> Result<AuthorizedRequest, AuthorizationError> {
         let time = current_time();
         let timestamp = time.format("%Y%m%dT%H%M%SZ").to_string();
         let date = &timestamp[0..8];
@@ -325,26 +316,11 @@ impl PrivateCredentials {
             query.append_pair("X-Amz-Signature", &signature.to_string());
         }
 
-        Ok(RequestDescriptor {
+        Ok(AuthorizedRequest {
             url,
             method: claim.method().to_string(),
             headers,
         })
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Signer for PrivateCredentials {
-    fn subject(&self) -> &dialog_common::capability::Did {
-        &self.subject
-    }
-
-    async fn sign<C: Claim + Send + Sync + 'static>(
-        &self,
-        claim: &C,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(claim)
     }
 }
 
@@ -362,7 +338,7 @@ impl Signer for PrivateCredentials {
 /// # Example
 ///
 /// ```no_run
-/// use dialog_s3_credentials::{Address, s3::Credentials, access::Signer};
+/// use dialog_s3_credentials::{Address, s3::Credentials};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let address = Address::new(
@@ -475,31 +451,13 @@ impl Credentials {
     ///
     /// This generates either an unsigned URL (for public credentials) or a
     /// presigned URL with AWS SigV4 signature (for private credentials).
-    pub fn authorize<C: Claim>(&self, claim: &C) -> Result<RequestDescriptor, AuthorizationError> {
-        match self {
-            Self::Public(c) => c.authorize(claim),
-            Self::Private(c) => c.authorize(claim),
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Signer for Credentials {
-    fn subject(&self) -> &dialog_common::capability::Did {
-        match self {
-            Self::Public(c) => &c.subject,
-            Self::Private(c) => &c.subject,
-        }
-    }
-
-    async fn sign<C: Claim + Send + Sync + 'static>(
+    pub async fn authorize<C: S3Request>(
         &self,
         claim: &C,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
+    ) -> Result<AuthorizedRequest, AuthorizationError> {
         match self {
-            Self::Public(c) => c.sign(claim).await,
-            Self::Private(c) => c.sign(claim).await,
+            Self::Public(c) => c.authorize(claim).await,
+            Self::Private(c) => c.authorize(claim).await,
         }
     }
 }
@@ -610,7 +568,11 @@ mod tests {
     }
 
     /// Helper to build a storage Set capability.
-    fn set_capability(store: &str, key: &[u8], checksum: Checksum) -> Capability<access_storage::Set> {
+    fn set_capability(
+        store: &str,
+        key: &[u8],
+        checksum: Checksum,
+    ) -> Capability<access_storage::Set> {
         Subject::from(TEST_SUBJECT)
             .attenuate(Storage)
             .attenuate(Store::new(store))
@@ -627,7 +589,7 @@ mod tests {
         let creds = PublicCredentials::new(address, TEST_SUBJECT).unwrap();
 
         let get = get_capability("index", b"test-key");
-        let descriptor = creds.sign(&get).await.unwrap();
+        let descriptor = creds.authorize(&get).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
         assert!(descriptor.url.as_str().contains("my-bucket"));
@@ -645,7 +607,7 @@ mod tests {
             PrivateCredentials::new(address, TEST_SUBJECT, "AKIATEST", "secret123").unwrap();
 
         let get = get_capability("index", b"test-key");
-        let descriptor = creds.sign(&get).await.unwrap();
+        let descriptor = creds.authorize(&get).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
         assert!(descriptor.url.as_str().contains("X-Amz-Signature="));
@@ -662,7 +624,7 @@ mod tests {
         let creds = Credentials::public(address, TEST_SUBJECT).unwrap();
 
         let get = get_capability("", b"key");
-        let descriptor = creds.sign(&get).await.unwrap();
+        let descriptor = creds.authorize(&get).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
     }
@@ -678,7 +640,7 @@ mod tests {
 
         let checksum = Checksum::Sha256([0u8; 32]);
         let set = set_capability("store", b"key", checksum);
-        let descriptor = creds.sign(&set).await.unwrap();
+        let descriptor = creds.authorize(&set).await.unwrap();
 
         assert!(
             descriptor

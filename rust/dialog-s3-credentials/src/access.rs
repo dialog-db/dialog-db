@@ -6,6 +6,7 @@
 
 use super::checksum::Checksum;
 use chrono::{DateTime, Utc};
+use dialog_common::ConditionalSend;
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
@@ -13,7 +14,7 @@ use thiserror::Error;
 use url::Url;
 
 #[cfg(target_arch = "wasm32")]
-use web_time::{web::SystemTimeExt, SystemTime};
+use web_time::{SystemTime, web::SystemTimeExt};
 
 #[cfg(feature = "ucan")]
 use std::collections::BTreeMap;
@@ -25,10 +26,7 @@ pub const DEFAULT_EXPIRES: u64 = 3600;
 
 pub mod archive;
 pub mod memory;
-mod signer;
 pub mod storage;
-
-pub use signer::Signer;
 
 /// Wrapper for UCAN invocation arguments that enables generic deserialization.
 ///
@@ -94,7 +92,7 @@ pub enum AuthorizationError {
 /// This is the result of authorizing a claim - it contains all the
 /// information needed to make the actual HTTP request.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct RequestDescriptor {
+pub struct AuthorizedRequest {
     /// The presigned URL to use.
     pub url: Url,
     /// HTTP method (GET, PUT, DELETE).
@@ -114,24 +112,16 @@ pub enum Precondition {
     IfNoneMatch,
 }
 
-/// Request metadata required for S3 authorization.
+/// This trait can be implemented by effects that that be translated into
+/// S3 requests. Providing convenient way for creating authorizations in
+/// form of presigned URLs + headers.
 ///
-/// This trait captures all information needed to sign an S3 request:
-/// - HTTP method, URL, checksum, ACL (request-specific)
-/// - Region, service, expires, time (signing parameters)
-///
-pub trait Claim: Send {
+pub trait S3Request: ConditionalSend {
     /// The HTTP method for this request.
     fn method(&self) -> &'static str;
 
     /// The URL path for this request.
     fn path(&self) -> String;
-
-    /// The store/namespace for this request.
-    ///
-    /// For UCAN credentials, this is the subject DID.
-    /// For S3 credentials, this is typically a bucket prefix.
-    fn store(&self) -> &str;
 
     /// The checksum of the body, if any.
     fn checksum(&self) -> Option<&Checksum> {
