@@ -470,6 +470,17 @@ impl Credentials {
             Self::Private(c) => c.build_url(path),
         }
     }
+
+    /// Authorize a claim and produce a request descriptor.
+    ///
+    /// This generates either an unsigned URL (for public credentials) or a
+    /// presigned URL with AWS SigV4 signature (for private credentials).
+    pub fn authorize<C: Claim>(&self, claim: &C) -> Result<RequestDescriptor, AuthorizationError> {
+        match self {
+            Self::Public(c) => c.authorize(claim),
+            Self::Private(c) => c.authorize(claim),
+        }
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

@@ -16,7 +16,7 @@ use super::subject::Did;
 /// - `capability` - the capability being delegated
 /// - `authorization` - proof of authority (signature, UCAN chain, etc.)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Delegation<C: Ability, A: Authorization<C>> {
+pub struct Delegation<C: Ability, A: Authorization> {
     /// Who issued this delegation.
     pub issuer: Did,
     /// Who this delegation is for.
@@ -27,7 +27,7 @@ pub struct Delegation<C: Ability, A: Authorization<C>> {
     pub authorization: A,
 }
 
-impl<C: Ability, A: Authorization<C>> Delegation<C, A> {
+impl<C: Ability, A: Authorization> Delegation<C, A> {
     /// Create a new delegation.
     pub fn new(issuer: Did, audience: Did, capability: C, authorization: A) -> Self {
         Self {

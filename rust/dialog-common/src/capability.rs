@@ -55,8 +55,7 @@
 //! | [`Effect`] | Executable operation trait |
 //! | [`Invocation`] | Connects types to Provider I/O |
 //! | [`Provider<I>`] | Executes invocations |
-//! | [`Authorized<Fx, A>`] | Capability + authorization proof |
-//! | [`Authorization<C>`] | Proof of authority trait |
+//! | [`Authorization`] | Proof of authority trait |
 //! | [`Delegation<C, A>`] | Grants access to another party |
 //! | [`Access`] | Finds delegation chains |
 
@@ -82,12 +81,12 @@ pub use access::Access;
 #[cfg(feature = "ucan")]
 pub use args::{ClaimArgsExt, ToIpldArgs};
 pub use authority::{Authority, Principal};
-pub use authorization::{Authorization, AuthorizationError, Authorized};
-pub use capability::{Attenuation, Capability, Constraint, Effect, Policy};
+pub use authorization::{Authorization, AuthorizationError};
+pub use capability::{Attenuation, Authorized, Capability, Constraint, Effect, Policy};
 pub use claim::Claim;
 pub use constrained::Constrained;
 pub use delegation::Delegation;
-pub use invocation::{Invocation, Proof};
+pub use invocation::Invocation;
 pub use provider::Provider;
 pub use selector::{Here, Never, Selector, There};
 pub use subject::{Did, Subject};

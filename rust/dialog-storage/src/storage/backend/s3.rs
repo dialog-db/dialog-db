@@ -119,16 +119,17 @@
 
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_s3_credentials::access::Signer;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use std::marker::PhantomData;
 use thiserror::Error;
 
 // Re-export core types from dialog-s3-credentials crate
-use dialog_s3_credentials::access::Precondition;
 pub use dialog_s3_credentials::{
-    Address, AuthorizationError as AccessError, Checksum, Hasher, RequestDescriptor, memory,
-    storage,
+    Address, AuthorizationError as AccessError, Checksum, Hasher, RequestDescriptor,
+};
+// Use access module types for direct S3 authorization
+pub use dialog_s3_credentials::access::{
+    memory::MemoryClaim, storage::StorageClaim, Claim, Precondition,
 };
 
 // Re-export s3::Credentials types
@@ -234,35 +235,40 @@ impl From<AccessError> for S3StorageError {
 
 /// Trait for credentials that can authorize S3 operations.
 ///
-/// This requires the [`Signer`] trait which can sign any storage claim,
-/// plus access to the subject DID for building claims.
-pub trait S3Authorizer: Signer + Clone + std::fmt::Debug + Send + Sync {
+/// Implementations can sign claims to produce RequestDescriptors.
+pub trait Authorizer: Clone + std::fmt::Debug + Send + Sync {
     /// Get the subject DID (path prefix within the bucket).
     fn subject(&self) -> &str;
+
+    /// Authorize a claim and produce a request descriptor.
+    fn authorize<C: Claim>(&self, claim: &C) -> Result<RequestDescriptor, AccessError>;
 }
 
-// Implement for s3::Credentials
-impl S3Authorizer for Credentials {
+// Implement Authorizer for s3::Credentials
+impl Authorizer for Credentials {
     fn subject(&self) -> &str {
         dialog_s3_credentials::s3::Credentials::subject(self).as_str()
+    }
+
+    fn authorize<C: Claim>(&self, claim: &C) -> Result<RequestDescriptor, AccessError> {
+        dialog_s3_credentials::s3::Credentials::authorize(self, claim)
     }
 }
 
 // Implement for ucan::Credentials
 #[cfg(feature = "ucan")]
-impl S3Authorizer for UcanCredentials {
+impl Authorizer for UcanCredentials {
     fn subject(&self) -> &str {
         dialog_s3_credentials::ucan::Credentials::subject(self)
     }
+
+    fn authorize<C: Claim>(&self, _claim: &C) -> Result<RequestDescriptor, AccessError> {
+        // TODO: UCAN credentials need async authorization - this needs a different approach
+        Err(AccessError::Invocation(
+            "UCAN credentials require async authorization".to_string(),
+        ))
+    }
 }
-
-/// Trait alias for credentials that can authorize storage operations.
-pub trait StorageAuthorizer: S3Authorizer {}
-impl<T: S3Authorizer> StorageAuthorizer for T {}
-
-/// Trait alias for credentials that can authorize memory (transactional) operations.
-pub trait MemoryAuthorizer: S3Authorizer {}
-impl<T: S3Authorizer> MemoryAuthorizer for T {}
 
 /// S3/R2-compatible storage backend.
 ///
@@ -298,7 +304,7 @@ pub struct Bucket<Key, Value, C>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-    C: StorageAuthorizer,
+    C: Authorizer,
 {
     /// Optional prefix/directory within the bucket
     path: Option<String>,
@@ -316,7 +322,7 @@ impl<Key, Value, C> Bucket<Key, Value, C>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-    C: StorageAuthorizer,
+    C: Authorizer,
 {
     /// Open an S3 storage bucket with the given credentials.
     ///
@@ -473,11 +479,10 @@ where
         let subject = self.credentials.subject();
         let store = self.prefix_path();
         let encoded_key = encode_s3_key(key.as_ref());
-        let claim = storage::StorageClaim::delete(subject, store, encoded_key.as_bytes());
+        let claim = StorageClaim::delete(subject, store, encoded_key.as_bytes());
         let descriptor = self
             .credentials
-            .sign(&claim)
-            .await
+            .authorize(&claim)
             .map_err(S3StorageError::from)?;
 
         let response = self
@@ -501,7 +506,7 @@ impl<Key, Value, C> StorageBackend for Bucket<Key, Value, C>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-    C: StorageAuthorizer,
+    C: Authorizer,
 {
     type Key = Key;
     type Value = Value;
@@ -512,11 +517,10 @@ where
         let store = self.prefix_path();
         let encoded_key = encode_s3_key(key.as_ref());
         let checksum = self.hasher.checksum(value.as_ref());
-        let claim = storage::StorageClaim::set(subject, store, encoded_key.as_bytes(), checksum);
+        let claim = StorageClaim::set(subject, store, encoded_key.as_bytes(), checksum);
         let descriptor = self
             .credentials
-            .sign(&claim)
-            .await
+            .authorize(&claim)
             .map_err(S3StorageError::from)?;
 
         let response = self
@@ -537,11 +541,10 @@ where
         let subject = self.credentials.subject();
         let store = self.prefix_path();
         let encoded_key = encode_s3_key(key.as_ref());
-        let claim = storage::StorageClaim::get(subject, store, encoded_key.as_bytes());
+        let claim = StorageClaim::get(subject, store, encoded_key.as_bytes());
         let descriptor = self
             .credentials
-            .sign(&claim)
-            .await
+            .authorize(&claim)
             .map_err(S3StorageError::from)?;
 
         let response = self
@@ -576,7 +579,7 @@ impl<Key, Value, C> StorageSink for Bucket<Key, Value, C>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-    C: StorageAuthorizer,
+    C: Authorizer,
 {
     async fn write<S>(&mut self, source: S) -> Result<(), Self::Error>
     where
@@ -604,7 +607,7 @@ impl<Key, Value, C> StorageSource for Bucket<Key, Value, C>
 where
     Key: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-    C: StorageAuthorizer,
+    C: Authorizer,
 {
     fn read(&self) -> impl Stream<Item = Result<(Self::Key, Self::Value), Self::Error>> {
         let storage = self.clone();
@@ -683,7 +686,7 @@ impl<Key, Value, C> TransactionalMemoryBackend for Bucket<Key, Value, C>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-    C: StorageAuthorizer + MemoryAuthorizer,
+    C: Authorizer + Authorizer,
 {
     type Address = Key;
     type Value = Value;
@@ -697,11 +700,10 @@ where
         let subject_did = self.credentials.subject();
         let space = self.path.clone().unwrap_or_default();
         let cell = encode_s3_key(address.as_ref());
-        let claim = memory::MemoryClaim::resolve(subject_did, &space, &cell);
+        let claim = MemoryClaim::resolve(subject_did, &space, &cell);
         let descriptor = self
             .credentials
-            .sign(&claim)
-            .await
+            .authorize(&claim)
             .map_err(S3StorageError::from)?;
 
         let response = self
@@ -749,11 +751,10 @@ where
         match content {
             Some(new_value) => {
                 let checksum = self.hasher.checksum(new_value.as_ref());
-                let claim = memory::MemoryClaim::publish(subject_did, &space, &cell, checksum, when.clone());
+                let claim = MemoryClaim::publish(subject_did, &space, &cell, checksum, when.clone());
                 let descriptor = self
                     .credentials
-                    .sign(&claim)
-                    .await
+                    .authorize(&claim)
                     .map_err(S3StorageError::from)?;
 
                 // Convert edition to local Precondition for send_request
@@ -796,11 +797,10 @@ where
                     return Ok(None);
                 };
 
-                let claim = memory::MemoryClaim::retract(subject_did, &space, &cell, when);
+                let claim = MemoryClaim::retract(subject_did, &space, &cell, when);
                 let descriptor = self
                     .credentials
-                    .sign(&claim)
-                    .await
+                    .authorize(&claim)
                     .map_err(S3StorageError::from)?;
 
                 let precondition = match edition {

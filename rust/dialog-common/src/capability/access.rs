@@ -16,10 +16,8 @@ use crate::ConditionalSend;
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Access {
-    /// The authorization type for a given capability type.
-    ///
-    /// Must implement `Authorization<C>` to prove authority over capability `C`.
-    type Authorization<C: Ability + Clone + ConditionalSend + 'static>: Authorization<C>;
+    /// The authorization type returned by this access store.
+    type Authorization: Authorization;
 
     /// Error type for authorization lookup failures.
     type Error;
@@ -31,5 +29,5 @@ pub trait Access {
     async fn claim<C: Ability + Clone + ConditionalSend + 'static>(
         &self,
         claim: Claim<C>,
-    ) -> Result<Self::Authorization<C>, Self::Error>;
+    ) -> Result<Self::Authorization, Self::Error>;
 }

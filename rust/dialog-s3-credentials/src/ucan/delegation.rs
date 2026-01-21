@@ -132,6 +132,23 @@ impl DelegationChain {
         }
     }
 
+    /// Get the command (ability) path of the first delegation.
+    ///
+    /// Returns the command as a string path (e.g., "/storage/get").
+    /// The first delegation (closest to invoker) defines the most attenuated capability.
+    pub fn can(&self) -> String {
+        // Safe because chain is guaranteed non-empty
+        let cid = &self.proof_cids[0];
+        let delegation = self.delegations.get(cid).unwrap();
+        let cmd = delegation.command();
+        // Command is a newtype around Vec<String>, access inner via .0
+        if cmd.0.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", cmd.0.join("/"))
+        }
+    }
+
     /// Create a new chain by extending this one with an additional delegation.
     ///
     /// The new delegation is added to the front of the proof chain (closest to invoker).

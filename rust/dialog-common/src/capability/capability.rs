@@ -7,15 +7,11 @@
 //! - `Constraint` - trait that computes full chain type
 
 use super::ability::Ability;
-use super::access::Access;
-use super::authority::Authority;
-use super::authorization::{Authorization, AuthorizationError, Authorized};
-use super::claim::Claim;
 use super::constrained::Constrained;
 use super::provider::Provider;
 use super::selector::Selector;
 use super::subject::{Did, Subject};
-use crate::{ConditionalSend, ConditionalSync};
+use crate::ConditionalSend;
 
 /// Trait for policy types that restrict capabilities.
 ///
@@ -184,41 +180,6 @@ impl<T: Policy + Constraint> Capability<T> {
     }
 }
 
-impl<C: Constraint> Capability<C>
-where
-    C::Capability: Ability,
-    Self: Ability + Clone + ConditionalSend + 'static,
-{
-    /// Acquire authorization for this capability or fail if operator is not
-    /// authorized.
-    ///
-    /// Obtains authorization, usually a delegation chain stemming from the resource
-    /// owner and leading to an operating authority (provided by env). If resource
-    /// matches operator DID, authorization is self-issued by the operator;
-    /// otherwise it is claimed via `Access` API through `env`.
-    ///
-    /// This method allows consumers to fail early before invocation if
-    /// authorization for a desired capability cannot be obtained.
-    pub async fn acquire<Env>(
-        self,
-        env: &Env,
-    ) -> Result<Authorized<Self, Env::Authorization<Self>>, Env::Error>
-    where
-        Env: Access + Authority + ConditionalSync,
-        Env::Error: From<AuthorizationError>,
-    {
-        let authorization = if env.did() == self.subject() {
-            // Self-issue: we own the resource
-            Env::Authorization::<Self>::issue(self.clone(), env).map_err(Env::Error::from)?
-        } else {
-            // Need delegation chain
-            let claim = Claim::new(self.clone(), env.did().clone());
-            env.claim(claim).await?
-        };
-        Ok(Authorized::new(self, authorization))
-    }
-}
-
 /// Implementation for effect capabilities.
 ///
 /// When a Capability wraps an Effect, we can perform it directly in an
@@ -231,6 +192,78 @@ impl<Fx: Effect + Constraint> Capability<Fx> {
         Env: Provider<Fx>,
     {
         env.execute(self).await
+    }
+}
+
+/// A capability paired with its authorization proof.
+///
+/// `Authorized` bundles a capability with proof that the invoker has
+/// permission to execute it. This is the input to authorized `Provider`
+/// implementations.
+///
+/// - `C` is the constraint type (e.g., `storage::Get`)
+/// - `A` is the authorization type (e.g., `UcanAuthorization`)
+pub struct Authorized<C: Constraint, A> {
+    capability: Capability<C>,
+    authorization: A,
+}
+
+impl<C: Constraint, A: Clone> Clone for Authorized<C, A>
+where
+    C::Capability: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            capability: Capability(self.capability.0.clone()),
+            authorization: self.authorization.clone(),
+        }
+    }
+}
+
+impl<C: Constraint + std::fmt::Debug, A: std::fmt::Debug> std::fmt::Debug for Authorized<C, A>
+where
+    C::Capability: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Authorized")
+            .field("capability", &self.capability)
+            .field("authorization", &self.authorization)
+            .finish()
+    }
+}
+
+impl<C: Constraint, A> Authorized<C, A> {
+    /// Create a new authorized capability.
+    pub fn new(capability: Capability<C>, authorization: A) -> Self {
+        Self {
+            capability,
+            authorization,
+        }
+    }
+
+    /// Get the capability.
+    pub fn capability(&self) -> &Capability<C> {
+        &self.capability
+    }
+
+    /// Get the authorization proof.
+    pub fn authorization(&self) -> &A {
+        &self.authorization
+    }
+
+    /// Consume and return the inner capability.
+    pub fn into_capability(self) -> Capability<C> {
+        self.capability
+    }
+
+    /// Consume and return the inner authorization.
+    pub fn into_authorization(self) -> A {
+        self.authorization
+    }
+
+    /// Consume and return both parts.
+    pub fn into_parts(self) -> (Capability<C>, A) {
+        (self.capability, self.authorization)
     }
 }
 

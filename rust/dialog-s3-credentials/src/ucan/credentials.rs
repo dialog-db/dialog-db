@@ -42,8 +42,8 @@ use super::delegation::DelegationChain;
 use super::invocation::InvocationChain;
 use crate::access::{AuthorizationError, RequestDescriptor};
 use crate::capability::{archive, memory, storage};
-use dialog_common::ConditionalSend;
 use dialog_common::capability::{Ability, Access, Authorized, Capability, Provider, ToIpldArgs};
+use dialog_common::ConditionalSend;
 
 /// Convert IPLD to Promised (for UCAN invocation arguments).
 fn ipld_to_promised(ipld: Ipld) -> Promised {
@@ -282,13 +282,13 @@ impl Signer for Credentials {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Access for Credentials {
-    type Authorization<C: Ability + Clone + ConditionalSend + 'static> = UcanAuthorization<C>;
+    type Authorization = UcanAuthorization;
     type Error = AuthorizationError;
 
     async fn claim<C: Ability + Clone + ConditionalSend + 'static>(
         &self,
         claim: dialog_common::capability::Claim<C>,
-    ) -> Result<Self::Authorization<C>, Self::Error> {
+    ) -> Result<Self::Authorization, Self::Error> {
         // Verify the claim's subject matches our delegation's subject
         if claim.subject() != &self.subject {
             return Err(AuthorizationError::NoDelegation(format!(
@@ -309,56 +309,25 @@ impl Access for Credentials {
             )));
         }
 
-        Ok(UcanAuthorization::new(claim, self.delegation.clone()))
+        // Return authorization from the delegation chain
+        Ok(UcanAuthorization::delegated(self.delegation.clone()))
     }
 }
 
 // --- Provider implementations for authorized capabilities ---
 //
 // These implementations allow UCAN credentials to execute authorized capabilities
-// via the access service.
-
-/// Helper type alias for authorized storage Get capability.
-type AuthorizedStorageGet =
-    Authorized<Capability<storage::Get>, UcanAuthorization<Capability<storage::Get>>>;
-
-/// Helper type alias for authorized storage Set capability.
-type AuthorizedStorageSet =
-    Authorized<Capability<storage::Set>, UcanAuthorization<Capability<storage::Set>>>;
-
-/// Helper type alias for authorized storage Delete capability.
-type AuthorizedStorageDelete =
-    Authorized<Capability<storage::Delete>, UcanAuthorization<Capability<storage::Delete>>>;
-
-/// Helper type alias for authorized storage List capability.
-type AuthorizedStorageList =
-    Authorized<Capability<storage::List>, UcanAuthorization<Capability<storage::List>>>;
-
-/// Helper type alias for authorized memory Resolve capability.
-type AuthorizedMemoryResolve =
-    Authorized<Capability<memory::Resolve>, UcanAuthorization<Capability<memory::Resolve>>>;
-
-/// Helper type alias for authorized memory Publish capability.
-type AuthorizedMemoryPublish =
-    Authorized<Capability<memory::Publish>, UcanAuthorization<Capability<memory::Publish>>>;
-
-/// Helper type alias for authorized memory Retract capability.
-type AuthorizedMemoryRetract =
-    Authorized<Capability<memory::Retract>, UcanAuthorization<Capability<memory::Retract>>>;
-
-/// Helper type alias for authorized archive Get capability.
-type AuthorizedArchiveGet =
-    Authorized<Capability<archive::Get>, UcanAuthorization<Capability<archive::Get>>>;
-
-/// Helper type alias for authorized archive Put capability.
-type AuthorizedArchivePut =
-    Authorized<Capability<archive::Put>, UcanAuthorization<Capability<archive::Put>>>;
+// via the access service. Each takes `Authorized<Fx, UcanAuthorization>` where
+// `Fx` is the effect type.
 
 // Provider for storage::Get
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<AuthorizedStorageGet> for Credentials {
-    async fn execute(&mut self, authorized: AuthorizedStorageGet) -> RequestDescriptor {
+impl Provider<Authorized<storage::Get, UcanAuthorization>> for Credentials {
+    async fn execute(
+        &mut self,
+        authorized: Authorized<storage::Get, UcanAuthorization>,
+    ) -> RequestDescriptor {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize storage::Get")
@@ -368,8 +337,11 @@ impl Provider<AuthorizedStorageGet> for Credentials {
 // Provider for storage::Set
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<AuthorizedStorageSet> for Credentials {
-    async fn execute(&mut self, authorized: AuthorizedStorageSet) -> RequestDescriptor {
+impl Provider<Authorized<storage::Set, UcanAuthorization>> for Credentials {
+    async fn execute(
+        &mut self,
+        authorized: Authorized<storage::Set, UcanAuthorization>,
+    ) -> RequestDescriptor {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize storage::Set")
@@ -379,8 +351,11 @@ impl Provider<AuthorizedStorageSet> for Credentials {
 // Provider for storage::Delete
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<AuthorizedStorageDelete> for Credentials {
-    async fn execute(&mut self, authorized: AuthorizedStorageDelete) -> RequestDescriptor {
+impl Provider<Authorized<storage::Delete, UcanAuthorization>> for Credentials {
+    async fn execute(
+        &mut self,
+        authorized: Authorized<storage::Delete, UcanAuthorization>,
+    ) -> RequestDescriptor {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize storage::Delete")
@@ -390,8 +365,11 @@ impl Provider<AuthorizedStorageDelete> for Credentials {
 // Provider for storage::List
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<AuthorizedStorageList> for Credentials {
-    async fn execute(&mut self, authorized: AuthorizedStorageList) -> RequestDescriptor {
+impl Provider<Authorized<storage::List, UcanAuthorization>> for Credentials {
+    async fn execute(
+        &mut self,
+        authorized: Authorized<storage::List, UcanAuthorization>,
+    ) -> RequestDescriptor {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize storage::List")
@@ -401,8 +379,11 @@ impl Provider<AuthorizedStorageList> for Credentials {
 // Provider for memory::Resolve
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<AuthorizedMemoryResolve> for Credentials {
-    async fn execute(&mut self, authorized: AuthorizedMemoryResolve) -> RequestDescriptor {
+impl Provider<Authorized<memory::Resolve, UcanAuthorization>> for Credentials {
+    async fn execute(
+        &mut self,
+        authorized: Authorized<memory::Resolve, UcanAuthorization>,
+    ) -> RequestDescriptor {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize memory::Resolve")
@@ -412,8 +393,11 @@ impl Provider<AuthorizedMemoryResolve> for Credentials {
 // Provider for memory::Publish
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<AuthorizedMemoryPublish> for Credentials {
-    async fn execute(&mut self, authorized: AuthorizedMemoryPublish) -> RequestDescriptor {
+impl Provider<Authorized<memory::Publish, UcanAuthorization>> for Credentials {
+    async fn execute(
+        &mut self,
+        authorized: Authorized<memory::Publish, UcanAuthorization>,
+    ) -> RequestDescriptor {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize memory::Publish")
@@ -423,8 +407,11 @@ impl Provider<AuthorizedMemoryPublish> for Credentials {
 // Provider for memory::Retract
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<AuthorizedMemoryRetract> for Credentials {
-    async fn execute(&mut self, authorized: AuthorizedMemoryRetract) -> RequestDescriptor {
+impl Provider<Authorized<memory::Retract, UcanAuthorization>> for Credentials {
+    async fn execute(
+        &mut self,
+        authorized: Authorized<memory::Retract, UcanAuthorization>,
+    ) -> RequestDescriptor {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize memory::Retract")
@@ -434,8 +421,11 @@ impl Provider<AuthorizedMemoryRetract> for Credentials {
 // Provider for archive::Get
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<AuthorizedArchiveGet> for Credentials {
-    async fn execute(&mut self, authorized: AuthorizedArchiveGet) -> RequestDescriptor {
+impl Provider<Authorized<archive::Get, UcanAuthorization>> for Credentials {
+    async fn execute(
+        &mut self,
+        authorized: Authorized<archive::Get, UcanAuthorization>,
+    ) -> RequestDescriptor {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize archive::Get")
@@ -445,8 +435,11 @@ impl Provider<AuthorizedArchiveGet> for Credentials {
 // Provider for archive::Put
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<AuthorizedArchivePut> for Credentials {
-    async fn execute(&mut self, authorized: AuthorizedArchivePut) -> RequestDescriptor {
+impl Provider<Authorized<archive::Put, UcanAuthorization>> for Credentials {
+    async fn execute(
+        &mut self,
+        authorized: Authorized<archive::Put, UcanAuthorization>,
+    ) -> RequestDescriptor {
         self.authorize(authorized.capability())
             .await
             .expect("Failed to authorize archive::Put")
