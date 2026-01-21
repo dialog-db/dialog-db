@@ -237,6 +237,7 @@ mod tests {
     use super::*;
     use crate::Address;
     use crate::capability::{archive, memory, storage};
+    use base58::ToBase58;
     use dialog_common::capability::Subject;
 
     const TEST_SUBJECT: &str = "did:key:zTestSubject";
@@ -275,13 +276,17 @@ mod tests {
         let capability = get_capability(TEST_SUBJECT, "index", b"my-key");
 
         // Perform to get RequestDescriptor
-        let descriptor = capability.perform(&mut creds).await.unwrap();
+        let permission = capability.perform(&mut creds).await.unwrap();
 
-        assert_eq!(descriptor.method, "GET");
-        assert!(descriptor.url.as_str().contains("my-bucket"));
+        assert_eq!(permission.method, "GET");
+        assert!(permission.url.as_str().contains("my-bucket"));
+        assert_eq!(
+            permission.url.path(),
+            format!("/{}/{}/{}", TEST_SUBJECT, "index", b"my-key".to_base58())
+        );
         // Path should be subject/store/key
         assert!(
-            descriptor.url.as_str().contains(TEST_SUBJECT),
+            permission.url.as_str().contains(TEST_SUBJECT),
             "URL should contain subject prefix"
         );
     }
@@ -298,11 +303,15 @@ mod tests {
         let checksum = crate::Checksum::Sha256([0u8; 32]);
         let capability = set_capability(TEST_SUBJECT, "blob", b"my-key", checksum);
 
-        let descriptor = capability.perform(&mut creds).await.unwrap();
+        let permission = capability.perform(&mut creds).await.unwrap();
 
-        assert_eq!(descriptor.method, "PUT");
+        assert_eq!(permission.method, "PUT");
+        assert_eq!(
+            permission.url.path(),
+            format!("/{}/{}/{}", TEST_SUBJECT, "blob", b"my-key".to_base58())
+        );
         assert!(
-            descriptor
+            permission
                 .headers
                 .iter()
                 .any(|(k, _)| k == "x-amz-checksum-sha256")
@@ -324,15 +333,15 @@ mod tests {
             .attenuate(memory::Cell::new("main"))
             .invoke(access_memory::Resolve);
 
-        let descriptor = capability.perform(&mut creds).await.unwrap();
+        let permission = capability.perform(&mut creds).await.unwrap();
 
-        assert_eq!(descriptor.method, "GET");
+        assert_eq!(permission.method, "GET");
         // Path should include subject prefix
         assert!(
-            descriptor.url.as_str().contains(TEST_SUBJECT),
+            permission.url.as_str().contains(TEST_SUBJECT),
             "URL should contain subject prefix"
         );
-        assert!(descriptor.url.as_str().contains("did:key:zUser/main"));
+        assert!(permission.url.as_str().contains("did:key:zUser/main"));
     }
 
     #[dialog_common::test]
@@ -352,11 +361,11 @@ mod tests {
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(access_archive::Get::new(digest));
 
-        let descriptor = capability.perform(&mut creds).await.unwrap();
+        let permission = capability.perform(&mut creds).await.unwrap();
 
-        assert_eq!(descriptor.method, "GET");
+        assert_eq!(permission.method, "GET");
         assert!(
-            descriptor.url.as_str().contains(TEST_SUBJECT),
+            permission.url.as_str().contains(TEST_SUBJECT),
             "URL should contain subject prefix"
         );
     }
@@ -373,20 +382,20 @@ mod tests {
         let checksum = crate::Checksum::Sha256([0u8; 32]);
         let digest = [0u8; 32];
 
-        let capability: Capability<access_archive::Put> = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(TEST_SUBJECT)
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(access_archive::Put::new(digest, checksum));
 
-        let descriptor = capability.perform(&mut creds).await.unwrap();
+        let permission = capability.perform(&mut creds).await.unwrap();
 
-        assert_eq!(descriptor.method, "PUT");
+        assert_eq!(permission.method, "PUT");
         assert!(
-            descriptor.url.as_str().contains(TEST_SUBJECT),
+            permission.url.as_str().contains(TEST_SUBJECT),
             "URL should contain subject prefix"
         );
         assert!(
-            descriptor
+            permission
                 .headers
                 .iter()
                 .any(|(k, _)| k == "x-amz-checksum-sha256")
