@@ -32,8 +32,12 @@ pub fn open() -> Bucket<Vec<u8>, Vec<u8>, Credentials> {
         option_env!("R2S3_BUCKET").expect("R2S3_BUCKET not set"),
     );
 
+    // Use the bucket name as subject by default for integration tests
+    let subject = option_env!("R2S3_SUBJECT").unwrap_or("did:key:zTestSubject");
+
     let credentials = Credentials::private(
         address,
+        subject,
         option_env!("R2S3_ACCESS_KEY_ID").expect("R2S3_ACCESS_KEY_ID not set"),
         option_env!("R2S3_SECRET_ACCESS_KEY").expect("R2S3_SECRET_ACCESS_KEY not set"),
     )

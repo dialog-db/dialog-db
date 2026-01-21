@@ -29,6 +29,8 @@
 
 extern crate self as dialog_storage;
 
+pub mod capability;
+
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub mod web;
 

@@ -74,15 +74,17 @@ where
         &self,
         continuation_token: Option<&str>,
     ) -> Result<ListResult, S3StorageError> {
-        // Build the list effect with store (prefix)
-        let effect = storage::List {
-            store: self.prefix_path(),
-            continuation_token: continuation_token.map(String::from),
-        };
+        // Build the list claim with subject and store (prefix)
+        let subject = self.credentials.subject();
+        let claim = storage::StorageClaim::list(
+            subject,
+            self.prefix_path(),
+            continuation_token.map(String::from),
+        );
 
         let descriptor = self
             .credentials
-            .execute(effect)
+            .sign(&claim)
             .await
             .map_err(S3StorageError::from)?;
 
@@ -154,11 +156,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Bucket, Public, S3StorageError};
+    use super::super::{Bucket, Credentials, S3StorageError};
     use super::*;
 
     // Type alias for tests that need a concrete Bucket type
-    type TestBucket = Bucket<Vec<u8>, Vec<u8>, Public>;
+    type TestBucket = Bucket<Vec<u8>, Vec<u8>, Credentials>;
 
     #[dialog_common::test]
     fn it_parses_empty_list_response() {
@@ -215,9 +217,9 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_virtual_hosted_path() {
         // Non-IP endpoints use virtual-hosted style by default
-        use super::super::{Address, Public};
+        use super::super::Address;
         let address = Address::new("https://s3.amazonaws.com", "us-east-1", "bucket");
-        let authorizer = Public::new(address).unwrap();
+        let authorizer = Credentials::public(address, "did:key:test").unwrap();
         let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer).unwrap();
 
         // encode_path creates a path that gets combined with the bucket URL
@@ -228,9 +230,9 @@ mod tests {
     #[dialog_common::test]
     fn it_builds_path_with_prefix() {
         // IP/localhost endpoints use path style by default
-        use super::super::{Address, Public};
+        use super::super::Address;
         let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
-        let authorizer = Public::new(address).unwrap();
+        let authorizer = Credentials::public(address, "did:key:test").unwrap();
         let backend = Bucket::<Vec<u8>, Vec<u8>, _>::open(authorizer)
             .unwrap()
             .at("prefix");

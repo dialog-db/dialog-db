@@ -43,9 +43,16 @@ impl UcanAccessServer {
         secret_key: &str,
     ) -> anyhow::Result<Self> {
         // Create S3 credentials for the authorizer
+        // Note: The subject here is a placeholder since UcanAuthorizer uses
+        // the subject from the UCAN invocation's capability chain
         let address = Address::new(&s3_server.endpoint, "us-east-1", bucket);
-        let s3_credentials =
-            S3Credentials::private(address, access_key, secret_key)?.with_path_style(true);
+        let s3_credentials = S3Credentials::private(
+            address,
+            "did:key:placeholder", // Subject comes from UCAN, not credentials
+            access_key,
+            secret_key,
+        )?
+        .with_path_style(true);
 
         // Use UcanAuthorizer from ucan/provider.rs
         let authorizer = Arc::new(RwLock::new(UcanAuthorizer::new(s3_credentials)));
