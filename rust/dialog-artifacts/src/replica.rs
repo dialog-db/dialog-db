@@ -1458,28 +1458,26 @@ impl RemoteState {
             &self.address.bucket,
         );
 
+        // The prefix serves as the subject DID (path prefix within the bucket)
+        let subject = self.address.prefix.clone().unwrap_or_default();
+
         let credentials = match (&self.address.access_key_id, &self.address.secret_access_key) {
             (Some(key_id), Some(secret)) => {
-                Credentials::private(address, key_id, secret).map_err(|_| {
+                Credentials::private(address, &subject, key_id, secret).map_err(|_| {
                     ReplicaError::RemoteConnectionError {
                         remote: self.site.clone(),
                     }
                 })?
             }
-            _ => Credentials::public(address).map_err(|_| ReplicaError::RemoteConnectionError {
+            _ => Credentials::public(address, &subject).map_err(|_| ReplicaError::RemoteConnectionError {
                 remote: self.site.clone(),
             })?,
         };
 
-        let bucket = S3Bucket::open(credentials).map_err(|_| ReplicaError::RemoteConnectionError {
+        // Subject already defines the path prefix, no need for bucket.at(prefix)
+        let backend = S3Bucket::open(credentials).map_err(|_| ReplicaError::RemoteConnectionError {
             remote: self.site.clone(),
-        });
-
-        let backend = if let Some(prefix) = &self.address.prefix {
-            bucket?.at(prefix)
-        } else {
-            bucket?
-        };
+        })?;
 
         Ok(PlatformStorage::new(
             ErrorMappingBackend::new(backend),
@@ -3211,8 +3209,10 @@ mod tests {
         }
 
         let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
+        let subject = "test-archive-cache"; // Test subject for this test case
         let credentials = Credentials::private(
             address,
+            subject,
             &s3_address.access_key_id,
             &s3_address.secret_access_key,
         )?;

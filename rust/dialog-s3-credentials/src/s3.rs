@@ -5,12 +5,13 @@
 //! - [`Credentials::Public`] - No signing for public buckets
 //! - [`Credentials::Private`] - AWS SigV4 signing with access key and secret
 //!
-//! Both variants implement [`Provider<Access<storage::*>>`](dialog_common::Provider) to
-//! produce [`RequestDescriptor`](crate::RequestDescriptor) for making S3 requests.
+//! Both variants implement [`Access`](dialog_common::capability::Access) and
+//! [`Provider`](dialog_common::capability::Provider) for capability-based authorization.
 
 mod credentials;
+mod provider;
 
-pub use credentials::{Credentials, PrivateCredentials, PublicCredentials, current_time};
+pub use credentials::{Credentials, PrivateCredentials, PublicCredentials};
 
 use url::Url;
 

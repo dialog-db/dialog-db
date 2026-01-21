@@ -30,129 +30,48 @@
 //!     .build()?;
 //! ```
 
-use async_trait::async_trait;
-use dialog_common::Provider;
-use ed25519_dalek::SigningKey;
-use ipld_core::cid::Cid;
+use ipld_core::ipld::Ipld;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::sync::Arc;
-use ucan::Delegation;
-use ucan::did::{Ed25519Did, Ed25519Signer};
+use ucan::did::Ed25519Did;
 use ucan::invocation::builder::InvocationBuilder;
 use ucan::promise::Promised;
 
-use super::provider::InvocationChain;
-use crate::Checksum;
-use crate::access::{AuthorizationError, Claim, RequestDescriptor, memory, storage};
+use super::authority::OperatorIdentity;
+use super::authorization::UcanAuthorization;
+use super::delegation::DelegationChain;
+use super::invocation::InvocationChain;
+use crate::access::{AuthorizationError, RequestDescriptor};
+use crate::capability::{archive, memory, storage};
+use dialog_common::ConditionalSend;
+use dialog_common::capability::{Ability, Access, Authorized, Capability, Provider, ToIpldArgs};
 
-/// A chain of UCAN delegations proving authority over a subject.
-///
-/// A delegation chain consists of one or more delegations that together prove
-/// that the operator has been granted authority over a subject. Each delegation
-/// in the chain grants authority from one party to another, forming a chain
-/// from the subject (root authority) to the operator.
-#[derive(Debug, Clone)]
-pub struct DelegationChain {
-    /// The delegation proofs keyed by CID.
-    delegations: HashMap<Cid, Arc<Delegation<Ed25519Did>>>,
-    /// The CIDs of the delegation proofs (for reference in invocations).
-    proof_cids: Vec<Cid>,
-}
-
-impl DelegationChain {
-    /// Create a new delegation chain from delegations.
-    ///
-    /// The CIDs are computed from the delegations.
-    pub fn new(delegations: Vec<Delegation<Ed25519Did>>) -> Self {
-        let mut map = HashMap::with_capacity(delegations.len());
-        let mut cids = Vec::with_capacity(delegations.len());
-
-        for delegation in delegations {
-            let cid = delegation.to_cid();
-            cids.push(cid);
-            map.insert(cid, Arc::new(delegation));
-        }
-
-        Self {
-            delegations: map,
-            proof_cids: cids,
-        }
-    }
-
-    /// Create a delegation chain with a single delegation.
-    pub fn single(delegation: Delegation<Ed25519Did>) -> Self {
-        Self::new(vec![delegation])
-    }
-
-    /// Create from raw bytes (deserializes each as a Delegation).
-    pub fn from_bytes(proof_bytes: Vec<Vec<u8>>) -> Result<Self, AuthorizationError> {
-        let mut delegations = Vec::with_capacity(proof_bytes.len());
-        for (i, bytes) in proof_bytes.iter().enumerate() {
-            let delegation: Delegation<Ed25519Did> = serde_ipld_dagcbor::from_slice(bytes)
-                .map_err(|e| {
-                    AuthorizationError::Invocation(format!(
-                        "failed to decode delegation {}: {}",
-                        i, e
-                    ))
-                })?;
-            delegations.push(delegation);
-        }
-        Ok(Self::new(delegations))
-    }
-
-    /// Get the CIDs for use in invocation proofs field.
-    pub fn proof_cids(&self) -> &[Cid] {
-        &self.proof_cids
-    }
-
-    /// Get the delegations map for building InvocationChain.
-    pub(crate) fn delegations(&self) -> &HashMap<Cid, Arc<Delegation<Ed25519Did>>> {
-        &self.delegations
+/// Convert IPLD to Promised (for UCAN invocation arguments).
+fn ipld_to_promised(ipld: Ipld) -> Promised {
+    match ipld {
+        Ipld::Null => Promised::Null,
+        Ipld::Bool(b) => Promised::Bool(b),
+        Ipld::Integer(i) => Promised::Integer(i),
+        Ipld::Float(f) => Promised::Float(f),
+        Ipld::String(s) => Promised::String(s),
+        Ipld::Bytes(b) => Promised::Bytes(b),
+        Ipld::Link(c) => Promised::Link(c),
+        Ipld::List(l) => Promised::List(l.into_iter().map(ipld_to_promised).collect()),
+        Ipld::Map(m) => Promised::Map(
+            m.into_iter()
+                .map(|(k, v)| (k, ipld_to_promised(v)))
+                .collect(),
+        ),
     }
 }
 
-/// Generate a new random Ed25519 signer.
-///
-/// This is useful for creating space signers in tests or for any use case
-/// that needs a randomly generated Ed25519 keypair.
-pub fn generate_signer() -> Ed25519Signer {
-    let signing_key = SigningKey::generate(&mut rand_core::OsRng);
-    Ed25519Signer::new(signing_key)
-}
-
-/// Identity of an operator making UCAN invocations.
-///
-/// The operator is the entity that signs UCAN invocations. They must have
-/// been granted authority by the subject(s) they wish to access.
-#[derive(Debug, Clone)]
-pub struct OperatorIdentity {
-    signer: Ed25519Signer,
-}
-
-impl OperatorIdentity {
-    /// Generate a new random operator identity.
-    pub fn generate() -> Self {
-        let signing_key = SigningKey::generate(&mut rand_core::OsRng);
-        let signer = Ed25519Signer::new(signing_key);
-        Self { signer }
-    }
-
-    /// Create an operator identity from a 32-byte secret key.
-    pub fn from_secret(secret: &[u8; 32]) -> Self {
-        let signing_key = SigningKey::from_bytes(secret);
-        let signer = Ed25519Signer::new(signing_key);
-        Self { signer }
-    }
-
-    /// Returns the DID of this operator.
-    pub fn did(&self) -> Ed25519Did {
-        self.signer.did().clone()
-    }
-
-    /// Returns a reference to the underlying signer.
-    pub(crate) fn signer(&self) -> &Ed25519Signer {
-        &self.signer
+/// Convert IPLD Map to BTreeMap<String, Promised> for UCAN invocation.
+fn ipld_args_to_promised(ipld: Ipld) -> BTreeMap<String, Promised> {
+    match ipld {
+        Ipld::Map(m) => m
+            .into_iter()
+            .map(|(k, v)| (k, ipld_to_promised(v)))
+            .collect(),
+        _ => BTreeMap::new(),
     }
 }
 
@@ -178,15 +97,22 @@ impl OperatorIdentity {
 /// let authorizer = Credentials::builder()
 ///     .service_url("https://access.example.com")
 ///     .operator(operator)
-///     .delegation("did:key:z6MkSubject1...", chain1)
-///     .delegation("did:key:z6MkSubject2...", chain2)
+///     .subject("did:key:z6MkSubject...")
+///     .delegation(chain)
 ///     .build()?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct Credentials {
+    /// The access service URL to POST invocations to.
     service_url: String,
+    /// The operator identity (signs invocations).
     operator: OperatorIdentity,
-    delegations: HashMap<String, DelegationChain>,
+    /// The subject DID (resource owner).
+    subject: String,
+    /// The delegation chain proving authority from subject to operator.
+    /// Order: first delegation's `aud` matches operator, last delegation's `iss` matches subject.
+    delegation: DelegationChain,
+    /// HTTP client for making requests.
     client: reqwest::Client,
 }
 
@@ -206,57 +132,70 @@ impl Credentials {
         &self.operator
     }
 
-    /// Returns an iterator over the configured subject DIDs.
-    pub fn subjects(&self) -> impl Iterator<Item = &str> {
-        self.delegations.keys().map(|s| s.as_str())
+    /// Returns the subject DID (resource owner).
+    pub fn subject(&self) -> &str {
+        &self.subject
     }
 
-    /// Check if a delegation exists for the given subject.
-    pub fn has_delegation(&self, subject_did: &str) -> bool {
-        self.delegations.contains_key(subject_did)
+    /// Returns the delegation chain.
+    pub fn delegation(&self) -> &DelegationChain {
+        &self.delegation
     }
 
-    /// Authorize a storage command via the UCAN access service.
+    /// Authorize a capability via the UCAN access service.
     ///
     /// This method:
-    /// 1. Looks up the delegation chain for the subject
-    /// 2. Creates a UCAN invocation for the command
+    /// 1. Verifies the capability subject matches this credentials' subject
+    /// 2. Creates a UCAN invocation for the capability
     /// 3. Builds an InvocationChain (UCAN container)
     /// 4. POSTs it to the access service
     /// 5. Returns the RequestDescriptor from the response
-    async fn authorize<C: Claim + IntoUcanArgs>(
+    async fn authorize<C: Ability + ToIpldArgs>(
         &self,
-        subject_did: &str,
-        command: &C,
+        capability: &C,
     ) -> Result<RequestDescriptor, AuthorizationError> {
-        // 1. Look up delegation chain
-        let delegation = self
-            .delegations
-            .get(subject_did)
-            .ok_or_else(|| AuthorizationError::NoDelegation(subject_did.to_string()))?;
+        let capability_subject = capability.subject();
+
+        // 1. Verify the capability subject matches our delegation's subject
+        if capability_subject != &self.subject {
+            return Err(AuthorizationError::NoDelegation(format!(
+                "Capability subject '{}' does not match credentials subject '{}'",
+                capability_subject, self.subject
+            )));
+        }
 
         // 2. Parse subject DID
-        let subject: Ed25519Did = subject_did
+        let subject: Ed25519Did = self
+            .subject
             .parse()
             .map_err(|e| AuthorizationError::Service(format!("Invalid subject DID: {:?}", e)))?;
 
-        // 3. Get UCAN command path and arguments
-        let ucan_command = command.ucan_command();
-        let args = command.ucan_args();
+        // 3. Get UCAN command path and arguments from capability
+        let command_path = capability.command();
+        let ucan_command: Vec<String> = command_path
+            .trim_start_matches('/')
+            .split('/')
+            .map(|s| s.to_string())
+            .collect();
+        let args = ipld_args_to_promised(capability.to_ipld_args());
 
         // 4. Build invocation
+        // - issuer: the operator (who is making the request)
+        // - audience: the subject (per UCAN spec: "sub throughout MUST match the aud of the Invocation")
+        // - subject: the resource being accessed
+        // - proofs: delegation chain from subject to operator
         let invocation = InvocationBuilder::new()
             .issuer(self.operator.signer().clone())
             .audience(subject.clone())
             .subject(subject)
             .command(ucan_command)
             .arguments(args)
-            .proofs(delegation.proof_cids().to_vec())
+            .proofs(self.delegation.proof_cids().to_vec())
             .try_build()
             .map_err(|e| AuthorizationError::Invocation(format!("{:?}", e)))?;
 
         // 5. Build InvocationChain (UCAN container)
-        let chain = InvocationChain::new(invocation, delegation.delegations().clone());
+        let chain = InvocationChain::new(invocation, self.delegation.delegations().clone());
 
         // 6. Serialize to CBOR
         let container_bytes = chain.to_bytes()?;
@@ -292,6 +231,228 @@ impl Credentials {
     }
 }
 
+// Implement Signer trait for Credentials
+// This allows ucan::Credentials to be used with StorageClaim, MemoryClaim, etc.
+use crate::access::Claim as S3Claim;
+use crate::access::Signer;
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Signer for Credentials {
+    fn subject(&self) -> &dialog_common::capability::Did {
+        &self.subject
+    }
+
+    async fn sign<C: S3Claim + Send + Sync + 'static>(
+        &self,
+        claim: &C,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
+        // We need to dispatch to the appropriate authorize call based on the claim type.
+        // Since we can't pattern match on type at runtime easily, we use Any.
+        use crate::access::storage::{Delete, Get, List, Set, StorageClaim};
+        use std::any::Any;
+
+        let claim_any = claim as &dyn Any;
+
+        // Try each StorageClaim variant
+        if let Some(c) = claim_any.downcast_ref::<StorageClaim<Get>>() {
+            return self.authorize(c).await;
+        }
+        if let Some(c) = claim_any.downcast_ref::<StorageClaim<Set>>() {
+            return self.authorize(c).await;
+        }
+        if let Some(c) = claim_any.downcast_ref::<StorageClaim<Delete>>() {
+            return self.authorize(c).await;
+        }
+        if let Some(c) = claim_any.downcast_ref::<StorageClaim<List>>() {
+            return self.authorize(c).await;
+        }
+
+        // Add memory and archive claims as needed...
+        Err(AuthorizationError::Service(
+            "Unsupported claim type for UCAN authorization".to_string(),
+        ))
+    }
+}
+
+/// Implement Access trait for Credentials.
+///
+/// This allows Credentials to find authorization proofs for capability claims
+/// by looking up delegation chains for the subject.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Access for Credentials {
+    type Authorization<C: Ability + Clone + ConditionalSend + 'static> = UcanAuthorization<C>;
+    type Error = AuthorizationError;
+
+    async fn claim<C: Ability + Clone + ConditionalSend + 'static>(
+        &self,
+        claim: dialog_common::capability::Claim<C>,
+    ) -> Result<Self::Authorization<C>, Self::Error> {
+        // Verify the claim's subject matches our delegation's subject
+        if claim.subject() != &self.subject {
+            return Err(AuthorizationError::NoDelegation(format!(
+                "Claim subject '{}' does not match credentials subject '{}'",
+                claim.subject(),
+                self.subject
+            )));
+        }
+
+        // Verify the claim's audience matches the first delegation's audience
+        // Per UCAN spec: first delegation's `aud` should match the invoker
+        let chain_audience_str = self.delegation.audience().to_string();
+        if claim.audience() != &chain_audience_str {
+            return Err(AuthorizationError::Configuration(format!(
+                "Claim audience '{}' does not match delegation chain audience '{}'",
+                claim.audience(),
+                chain_audience_str
+            )));
+        }
+
+        Ok(UcanAuthorization::new(claim, self.delegation.clone()))
+    }
+}
+
+// --- Provider implementations for authorized capabilities ---
+//
+// These implementations allow UCAN credentials to execute authorized capabilities
+// via the access service.
+
+/// Helper type alias for authorized storage Get capability.
+type AuthorizedStorageGet =
+    Authorized<Capability<storage::Get>, UcanAuthorization<Capability<storage::Get>>>;
+
+/// Helper type alias for authorized storage Set capability.
+type AuthorizedStorageSet =
+    Authorized<Capability<storage::Set>, UcanAuthorization<Capability<storage::Set>>>;
+
+/// Helper type alias for authorized storage Delete capability.
+type AuthorizedStorageDelete =
+    Authorized<Capability<storage::Delete>, UcanAuthorization<Capability<storage::Delete>>>;
+
+/// Helper type alias for authorized storage List capability.
+type AuthorizedStorageList =
+    Authorized<Capability<storage::List>, UcanAuthorization<Capability<storage::List>>>;
+
+/// Helper type alias for authorized memory Resolve capability.
+type AuthorizedMemoryResolve =
+    Authorized<Capability<memory::Resolve>, UcanAuthorization<Capability<memory::Resolve>>>;
+
+/// Helper type alias for authorized memory Publish capability.
+type AuthorizedMemoryPublish =
+    Authorized<Capability<memory::Publish>, UcanAuthorization<Capability<memory::Publish>>>;
+
+/// Helper type alias for authorized memory Retract capability.
+type AuthorizedMemoryRetract =
+    Authorized<Capability<memory::Retract>, UcanAuthorization<Capability<memory::Retract>>>;
+
+/// Helper type alias for authorized archive Get capability.
+type AuthorizedArchiveGet =
+    Authorized<Capability<archive::Get>, UcanAuthorization<Capability<archive::Get>>>;
+
+/// Helper type alias for authorized archive Put capability.
+type AuthorizedArchivePut =
+    Authorized<Capability<archive::Put>, UcanAuthorization<Capability<archive::Put>>>;
+
+// Provider for storage::Get
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<AuthorizedStorageGet> for Credentials {
+    async fn execute(&mut self, authorized: AuthorizedStorageGet) -> RequestDescriptor {
+        self.authorize(authorized.capability())
+            .await
+            .expect("Failed to authorize storage::Get")
+    }
+}
+
+// Provider for storage::Set
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<AuthorizedStorageSet> for Credentials {
+    async fn execute(&mut self, authorized: AuthorizedStorageSet) -> RequestDescriptor {
+        self.authorize(authorized.capability())
+            .await
+            .expect("Failed to authorize storage::Set")
+    }
+}
+
+// Provider for storage::Delete
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<AuthorizedStorageDelete> for Credentials {
+    async fn execute(&mut self, authorized: AuthorizedStorageDelete) -> RequestDescriptor {
+        self.authorize(authorized.capability())
+            .await
+            .expect("Failed to authorize storage::Delete")
+    }
+}
+
+// Provider for storage::List
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<AuthorizedStorageList> for Credentials {
+    async fn execute(&mut self, authorized: AuthorizedStorageList) -> RequestDescriptor {
+        self.authorize(authorized.capability())
+            .await
+            .expect("Failed to authorize storage::List")
+    }
+}
+
+// Provider for memory::Resolve
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<AuthorizedMemoryResolve> for Credentials {
+    async fn execute(&mut self, authorized: AuthorizedMemoryResolve) -> RequestDescriptor {
+        self.authorize(authorized.capability())
+            .await
+            .expect("Failed to authorize memory::Resolve")
+    }
+}
+
+// Provider for memory::Publish
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<AuthorizedMemoryPublish> for Credentials {
+    async fn execute(&mut self, authorized: AuthorizedMemoryPublish) -> RequestDescriptor {
+        self.authorize(authorized.capability())
+            .await
+            .expect("Failed to authorize memory::Publish")
+    }
+}
+
+// Provider for memory::Retract
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<AuthorizedMemoryRetract> for Credentials {
+    async fn execute(&mut self, authorized: AuthorizedMemoryRetract) -> RequestDescriptor {
+        self.authorize(authorized.capability())
+            .await
+            .expect("Failed to authorize memory::Retract")
+    }
+}
+
+// Provider for archive::Get
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<AuthorizedArchiveGet> for Credentials {
+    async fn execute(&mut self, authorized: AuthorizedArchiveGet) -> RequestDescriptor {
+        self.authorize(authorized.capability())
+            .await
+            .expect("Failed to authorize archive::Get")
+    }
+}
+
+// Provider for archive::Put
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<AuthorizedArchivePut> for Credentials {
+    async fn execute(&mut self, authorized: AuthorizedArchivePut) -> RequestDescriptor {
+        self.authorize(authorized.capability())
+            .await
+            .expect("Failed to authorize archive::Put")
+    }
+}
+
 /// Builder for [`Credentials`].
 ///
 /// Use this to construct a `Credentials` with the required configuration.
@@ -300,15 +461,14 @@ impl Credentials {
 ///
 /// - `service_url`: The URL of the access service
 /// - `operator`: The operator identity for signing invocations
-///
-/// # Optional Fields
-///
-/// - `delegation`: One or more subject DID to delegation chain mappings
+/// - `subject`: The subject DID (resource owner)
+/// - `delegation`: The delegation chain proving authority
 #[derive(Default)]
 pub struct CredentialsBuilder {
     service_url: Option<String>,
     operator: Option<OperatorIdentity>,
-    delegations: HashMap<String, DelegationChain>,
+    subject: Option<String>,
+    delegation: Option<DelegationChain>,
 }
 
 impl CredentialsBuilder {
@@ -324,18 +484,26 @@ impl CredentialsBuilder {
     /// Set the operator identity for signing invocations.
     ///
     /// The operator is the entity making requests. They must have been
-    /// delegated authority by the subject(s) they wish to access.
+    /// delegated authority by the subject.
     pub fn operator(mut self, operator: OperatorIdentity) -> Self {
         self.operator = Some(operator);
         self
     }
 
-    /// Add a delegation chain for a subject.
+    /// Set the subject DID (resource owner).
     ///
-    /// The subject is identified by its DID (e.g., "did:key:z6Mk...").
-    /// Multiple delegations can be added for different subjects.
-    pub fn delegation(mut self, subject_did: impl Into<String>, chain: DelegationChain) -> Self {
-        self.delegations.insert(subject_did.into(), chain);
+    /// This is the DID that owns the resources being accessed.
+    pub fn subject(mut self, subject_did: impl Into<String>) -> Self {
+        self.subject = Some(subject_did.into());
+        self
+    }
+
+    /// Set the delegation chain proving authority from subject to operator.
+    ///
+    /// The chain order should be: first delegation's `aud` matches operator,
+    /// last delegation's `iss` matches subject.
+    pub fn delegation(mut self, chain: DelegationChain) -> Self {
+        self.delegation = Some(chain);
         self
     }
 
@@ -354,6 +522,14 @@ impl CredentialsBuilder {
             .operator
             .ok_or_else(|| AuthorizationError::Configuration("operator is required".into()))?;
 
+        let subject = self
+            .subject
+            .ok_or_else(|| AuthorizationError::Configuration("subject is required".into()))?;
+
+        let delegation = self
+            .delegation
+            .ok_or_else(|| AuthorizationError::Configuration("delegation is required".into()))?;
+
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -362,233 +538,44 @@ impl CredentialsBuilder {
         Ok(Credentials {
             service_url,
             operator,
-            delegations: self.delegations,
+            subject,
+            delegation,
             client,
         })
-    }
-}
-
-/// Trait for converting a command into UCAN invocation arguments.
-pub trait IntoUcanArgs {
-    /// Get the UCAN command path (e.g., ["/storage/get"]).
-    fn ucan_command(&self) -> Vec<String>;
-
-    /// Get the UCAN invocation arguments as a BTreeMap of Promised values.
-    fn ucan_args(&self) -> BTreeMap<String, Promised>;
-}
-
-fn string_arg(s: &str) -> Promised {
-    Promised::String(s.to_string())
-}
-
-fn checksum_to_promised(checksum: &Checksum) -> Promised {
-    // Encode checksum as raw bytes - serde_ipld_dagcbor will handle
-    // the appropriate CBOR encoding
-    Promised::Bytes(checksum.as_bytes().to_vec())
-}
-
-impl IntoUcanArgs for storage::Get {
-    fn ucan_command(&self) -> Vec<String> {
-        vec!["storage".to_string(), "get".to_string()]
-    }
-
-    fn ucan_args(&self) -> BTreeMap<String, Promised> {
-        let mut args = BTreeMap::new();
-        args.insert("store".to_string(), string_arg(&self.store));
-        args.insert("key".to_string(), string_arg(&self.key));
-        args
-    }
-}
-
-impl IntoUcanArgs for storage::Set {
-    fn ucan_command(&self) -> Vec<String> {
-        vec!["storage".to_string(), "set".to_string()]
-    }
-
-    fn ucan_args(&self) -> BTreeMap<String, Promised> {
-        let mut args = BTreeMap::new();
-        args.insert("store".to_string(), string_arg(&self.store));
-        args.insert("key".to_string(), string_arg(&self.key));
-        args.insert("checksum".to_string(), checksum_to_promised(&self.checksum));
-        args
-    }
-}
-
-impl IntoUcanArgs for storage::Delete {
-    fn ucan_command(&self) -> Vec<String> {
-        vec!["storage".to_string(), "delete".to_string()]
-    }
-
-    fn ucan_args(&self) -> BTreeMap<String, Promised> {
-        let mut args = BTreeMap::new();
-        args.insert("store".to_string(), string_arg(&self.store));
-        args.insert("key".to_string(), string_arg(&self.key));
-        args
-    }
-}
-
-impl IntoUcanArgs for storage::List {
-    fn ucan_command(&self) -> Vec<String> {
-        vec!["storage".to_string(), "list".to_string()]
-    }
-
-    fn ucan_args(&self) -> BTreeMap<String, Promised> {
-        let mut args = BTreeMap::new();
-        args.insert("store".to_string(), string_arg(&self.store));
-        if let Some(token) = &self.continuation_token {
-            args.insert("continuation_token".to_string(), string_arg(token));
-        }
-        args
-    }
-}
-
-impl IntoUcanArgs for memory::Resolve {
-    fn ucan_command(&self) -> Vec<String> {
-        vec!["memory".to_string(), "resolve".to_string()]
-    }
-
-    fn ucan_args(&self) -> BTreeMap<String, Promised> {
-        let mut args = BTreeMap::new();
-        args.insert("space".to_string(), string_arg(&self.space));
-        args.insert("cell".to_string(), string_arg(&self.cell));
-        args
-    }
-}
-
-impl IntoUcanArgs for memory::Update {
-    fn ucan_command(&self) -> Vec<String> {
-        vec!["memory".to_string(), "update".to_string()]
-    }
-
-    fn ucan_args(&self) -> BTreeMap<String, Promised> {
-        let mut args = BTreeMap::new();
-        args.insert("space".to_string(), string_arg(&self.space));
-        args.insert("cell".to_string(), string_arg(&self.cell));
-        if let Some(edition) = &self.when {
-            args.insert("when".to_string(), string_arg(edition));
-        }
-        args.insert("checksum".to_string(), checksum_to_promised(&self.checksum));
-        args
-    }
-}
-
-impl IntoUcanArgs for memory::Delete {
-    fn ucan_command(&self) -> Vec<String> {
-        vec!["memory".to_string(), "delete".to_string()]
-    }
-
-    fn ucan_args(&self) -> BTreeMap<String, Promised> {
-        let mut args = BTreeMap::new();
-        args.insert("space".to_string(), string_arg(&self.space));
-        args.insert("cell".to_string(), string_arg(&self.cell));
-        args.insert("when".to_string(), string_arg(&self.when));
-        args
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Get> for Credentials {
-    async fn execute(&self, effect: storage::Get) -> Result<RequestDescriptor, AuthorizationError> {
-        // Subject DID is the store name for UCAN-based access
-        self.authorize(&effect.store, &effect).await
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Set> for Credentials {
-    async fn execute(&self, effect: storage::Set) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(&effect.store, &effect).await
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Delete> for Credentials {
-    async fn execute(
-        &self,
-        effect: storage::Delete,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(&effect.store, &effect).await
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::List> for Credentials {
-    async fn execute(
-        &self,
-        effect: storage::List,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(&effect.store, &effect).await
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<memory::Resolve> for Credentials {
-    async fn execute(
-        &self,
-        effect: memory::Resolve,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(&effect.space, &effect).await
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<memory::Update> for Credentials {
-    async fn execute(
-        &self,
-        effect: memory::Update,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(&effect.space, &effect).await
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<memory::Delete> for Credentials {
-    async fn execute(
-        &self,
-        effect: memory::Delete,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(&effect.space, &effect).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::delegation::tests::{create_delegation, generate_signer};
 
-    #[test]
-    fn test_operator_identity_from_secret() {
-        let secret = [0u8; 32];
-        let identity = OperatorIdentity::from_secret(&secret);
-        let did_str = identity.did().to_string();
-        assert!(did_str.starts_with("did:key:z"));
-    }
-
-    #[test]
-    fn test_operator_identity_deterministic() {
-        let secret = [42u8; 32];
-        let identity1 = OperatorIdentity::from_secret(&secret);
-        let identity2 = OperatorIdentity::from_secret(&secret);
-        assert_eq!(identity1.did().to_string(), identity2.did().to_string());
-    }
-
-    #[test]
-    fn test_delegation_chain_empty() {
-        let chain = DelegationChain::new(vec![]);
-        assert_eq!(chain.proof_cids().len(), 0);
-        assert_eq!(chain.delegations().len(), 0);
+    /// Helper to create a test delegation chain from subject to operator.
+    fn test_delegation_chain(
+        subject_signer: &ucan::did::Ed25519Signer,
+        operator_did: &Ed25519Did,
+    ) -> DelegationChain {
+        let subject_did = subject_signer.did().clone();
+        let delegation = create_delegation(
+            subject_signer,
+            operator_did,
+            &subject_did,
+            vec!["storage".to_string()],
+        )
+        .expect("Failed to create test delegation");
+        DelegationChain::new(delegation)
     }
 
     #[test]
     fn test_builder_missing_service_url() {
+        let subject_signer = generate_signer();
+        let operator = OperatorIdentity::from_secret(&[0u8; 32]);
+        let chain = test_delegation_chain(&subject_signer, &operator.did());
+
         let result = Credentials::builder()
-            .operator(OperatorIdentity::from_secret(&[0u8; 32]))
+            .operator(operator)
+            .subject(subject_signer.did().to_string())
+            .delegation(chain)
             .build();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("service_url"));
@@ -596,101 +583,61 @@ mod tests {
 
     #[test]
     fn test_builder_missing_operator() {
+        let subject_signer = generate_signer();
+        let operator = OperatorIdentity::from_secret(&[0u8; 32]);
+        let chain = test_delegation_chain(&subject_signer, &operator.did());
+
         let result = Credentials::builder()
             .service_url("https://example.com")
+            .subject(subject_signer.did().to_string())
+            .delegation(chain)
             .build();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("operator"));
     }
 
     #[test]
+    fn test_builder_missing_subject() {
+        let subject_signer = generate_signer();
+        let operator = OperatorIdentity::from_secret(&[0u8; 32]);
+        let chain = test_delegation_chain(&subject_signer, &operator.did());
+
+        let result = Credentials::builder()
+            .service_url("https://example.com")
+            .operator(operator)
+            .delegation(chain)
+            .build();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("subject"));
+    }
+
+    #[test]
+    fn test_builder_missing_delegation() {
+        let result = Credentials::builder()
+            .service_url("https://example.com")
+            .operator(OperatorIdentity::from_secret(&[0u8; 32]))
+            .subject("did:key:z6MkTest")
+            .build();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("delegation"));
+    }
+
+    #[test]
     fn test_builder_success() {
+        let subject_signer = generate_signer();
+        let operator = OperatorIdentity::from_secret(&[0u8; 32]);
+        let chain = test_delegation_chain(&subject_signer, &operator.did());
+        let subject_did = subject_signer.did().to_string();
+
         let authorizer = Credentials::builder()
             .service_url("https://access.example.com")
-            .operator(OperatorIdentity::from_secret(&[0u8; 32]))
-            .delegation("did:key:z6MkTest", DelegationChain::new(vec![]))
+            .operator(operator)
+            .subject(&subject_did)
+            .delegation(chain)
             .build()
             .unwrap();
 
         assert_eq!(authorizer.service_url(), "https://access.example.com");
-        assert!(authorizer.has_delegation("did:key:z6MkTest"));
-        assert!(!authorizer.has_delegation("did:key:z6MkOther"));
-    }
-
-    #[test]
-    fn test_builder_multiple_delegations() {
-        let authorizer = Credentials::builder()
-            .service_url("https://access.example.com")
-            .operator(OperatorIdentity::from_secret(&[0u8; 32]))
-            .delegation("did:key:z6MkOne", DelegationChain::new(vec![]))
-            .delegation("did:key:z6MkTwo", DelegationChain::new(vec![]))
-            .build()
-            .unwrap();
-
-        let subjects: Vec<&str> = authorizer.subjects().collect();
-        assert_eq!(subjects.len(), 2);
-        assert!(authorizer.has_delegation("did:key:z6MkOne"));
-        assert!(authorizer.has_delegation("did:key:z6MkTwo"));
-    }
-
-    #[test]
-    fn test_storage_get_ucan_command() {
-        let cmd = storage::Get::new("index", "hello");
-        assert_eq!(cmd.ucan_command(), vec!["storage", "get"]);
-    }
-
-    #[test]
-    fn test_storage_get_ucan_args() {
-        let cmd = storage::Get::new("index", "hello");
-        let args = cmd.ucan_args();
-        assert_eq!(
-            args.get("store"),
-            Some(&Promised::String("index".to_string()))
-        );
-        assert_eq!(
-            args.get("key"),
-            Some(&Promised::String("hello".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_storage_set_ucan_command() {
-        let cmd = storage::Set::new("index", "hello", crate::Hasher::Sha256.checksum(&[1, 2, 3]));
-        assert_eq!(cmd.ucan_command(), vec!["storage", "set"]);
-    }
-
-    #[test]
-    fn test_storage_set_ucan_args() {
-        let cmd = storage::Set::new("index", "hello", crate::Hasher::Sha256.checksum(&[1, 2, 3]));
-        let args = cmd.ucan_args();
-        assert_eq!(
-            args.get("store"),
-            Some(&Promised::String("index".to_string()))
-        );
-        assert_eq!(
-            args.get("key"),
-            Some(&Promised::String("hello".to_string()))
-        );
-        assert!(args.contains_key("checksum"));
-    }
-
-    #[test]
-    fn test_memory_resolve_ucan_command() {
-        let cmd = memory::Resolve::new("did:key:z6MkTest", "main");
-        assert_eq!(cmd.ucan_command(), vec!["memory", "resolve"]);
-    }
-
-    #[test]
-    fn test_memory_resolve_ucan_args() {
-        let cmd = memory::Resolve::new("did:key:z6MkTest", "main");
-        let args = cmd.ucan_args();
-        assert_eq!(
-            args.get("space"),
-            Some(&Promised::String("did:key:z6MkTest".to_string()))
-        );
-        assert_eq!(
-            args.get("cell"),
-            Some(&Promised::String("main".to_string()))
-        );
+        assert_eq!(authorizer.subject(), &subject_did);
     }
 }

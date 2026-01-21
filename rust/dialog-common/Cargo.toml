@@ -9,21 +9,24 @@ license.workspace = true
 [features]
 default = []
 # Testing utilities (Provision, Provider traits, EnvGuard)
-helpers = ["dep:anyhow", "dep:serde", "dep:serde_json", "dep:dialog-macros"]
+helpers = ["dep:anyhow", "dep:serde_json", "dep:dialog-macros"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["helpers"]
 # Enable web integration tests (implies integration-tests behavior)
 web-integration-tests = ["helpers"]
+# UCAN support (IPLD serialization for capabilities)
+ucan = ["dep:ipld-core"]
 
 [dependencies]
 blake3 = { workspace = true }
 anyhow = { workspace = true, optional = true }
-serde = { workspace = true, features = ["derive"], optional = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { version = "1.0", optional = true }
 dialog-macros = { workspace = true, optional = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 thiserror = { workspace = true }
+ipld-core = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["rt", "sync"] }

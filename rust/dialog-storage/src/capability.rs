@@ -16,9 +16,6 @@
 
 pub mod archive;
 pub mod memory;
+pub mod storage;
 
-pub use archive::{ArchiveError, Delete, Get, List, ListResult, Put};
-pub use memory::{MemoryError, Precondition, Publication, Publish, Resolution, Resolve};
-
-// Re-export Effect and Provider from dialog_common
-pub use dialog_common::{Effect, Provider};
+pub use dialog_common::capability::*;

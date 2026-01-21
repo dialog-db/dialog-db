@@ -748,6 +748,7 @@ dependencies = [
  "blake3",
  "dialog-macros",
  "futures-util",
+ "ipld-core",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
@@ -869,6 +870,7 @@ name = "dialog-s3-credentials"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base58",
  "base64",
  "chrono",
  "dialog-common",
@@ -883,6 +885,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.17",
+ "tokio",
  "ucan",
  "url",
  "web-time",
@@ -909,6 +912,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "ipld-core",
  "js-sys",
  "md5",
  "pidlock",

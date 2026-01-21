@@ -2,13 +2,12 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use dialog_common::Provider;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
 use url::Url;
 
-use crate::access::{Claim, RequestDescriptor, archive, memory, storage};
+use crate::access::{Claim, RequestDescriptor, Signer};
 use crate::{Address, AuthorizationError};
 
 use super::{build_url, extract_host, is_path_style_default};
@@ -30,15 +29,25 @@ pub struct PublicCredentials {
     endpoint: Url,
     /// Whether to use path-style URLs
     path_style: bool,
+    /// Subject DID (used as path prefix within the bucket)
+    pub(crate) subject: dialog_common::capability::Did,
 }
 
 impl PublicCredentials {
     /// Create new public credentials.
     ///
+    /// # Arguments
+    ///
+    /// * `address` - S3 address (endpoint, region, bucket)
+    /// * `subject` - Subject DID used as path prefix within the bucket
+    ///
     /// # Errors
     ///
     /// Returns an error if the endpoint URL in the address is invalid.
-    pub fn new(address: Address) -> Result<Self, AuthorizationError> {
+    pub fn new(
+        address: Address,
+        subject: impl Into<dialog_common::capability::Did>,
+    ) -> Result<Self, AuthorizationError> {
         let endpoint = Url::parse(address.endpoint())
             .map_err(|e| AuthorizationError::Configuration(e.to_string()))?;
         let path_style = is_path_style_default(&endpoint);
@@ -47,6 +56,7 @@ impl PublicCredentials {
             address,
             endpoint,
             path_style,
+            subject: subject.into(),
         })
     }
 
@@ -72,7 +82,7 @@ impl PublicCredentials {
     }
 
     /// Authorize a claim by generating an unsigned URL for public access.
-    pub fn authorize<C: Claim>(&self, claim: C) -> Result<RequestDescriptor, AuthorizationError> {
+    pub fn authorize<C: Claim>(&self, claim: &C) -> Result<RequestDescriptor, AuthorizationError> {
         let path = claim.path();
         let mut url = self.build_url(&path)?;
 
@@ -80,7 +90,7 @@ impl PublicCredentials {
         if let Some(params) = claim.params() {
             let mut query = url.query_pairs_mut();
             for (key, value) in params {
-                query.append_pair(key, value);
+                query.append_pair(&key, &value);
             }
         }
 
@@ -100,6 +110,21 @@ impl PublicCredentials {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Signer for PublicCredentials {
+    fn subject(&self) -> &dialog_common::capability::Did {
+        &self.subject
+    }
+
+    async fn sign<C: Claim + Send + Sync + 'static>(
+        &self,
+        claim: &C,
+    ) -> Result<RequestDescriptor, AuthorizationError> {
+        self.authorize(claim)
+    }
+}
+
 /// Private S3 credentials with AWS SigV4 signing.
 ///
 /// Use this for authenticated access to S3 buckets.
@@ -115,16 +140,26 @@ pub struct PrivateCredentials {
     endpoint: Url,
     /// Whether to use path-style URLs
     path_style: bool,
+    /// Subject DID (used as path prefix within the bucket)
+    pub(crate) subject: dialog_common::capability::Did,
 }
 
 impl PrivateCredentials {
     /// Create new private credentials with AWS SigV4 signing.
+    ///
+    /// # Arguments
+    ///
+    /// * `address` - S3 address (endpoint, region, bucket)
+    /// * `subject` - Subject DID used as path prefix within the bucket
+    /// * `access_key_id` - AWS Access Key ID
+    /// * `secret_access_key` - AWS Secret Access Key
     ///
     /// # Errors
     ///
     /// Returns an error if the endpoint URL in the address is invalid.
     pub fn new(
         address: Address,
+        subject: impl Into<dialog_common::capability::Did>,
         access_key_id: impl Into<String>,
         secret_access_key: impl Into<String>,
     ) -> Result<Self, AuthorizationError> {
@@ -138,6 +173,7 @@ impl PrivateCredentials {
             address,
             endpoint,
             path_style,
+            subject: subject.into(),
         })
     }
 
@@ -168,7 +204,7 @@ impl PrivateCredentials {
     }
 
     /// Authorize a claim by generating a presigned URL with AWS SigV4 signature.
-    pub fn authorize<C: Claim>(&self, claim: C) -> Result<RequestDescriptor, AuthorizationError> {
+    pub fn authorize<C: Claim>(&self, claim: &C) -> Result<RequestDescriptor, AuthorizationError> {
         let time = current_time();
         let timestamp = time.format("%Y%m%dT%H%M%SZ").to_string();
         let date = &timestamp[0..8];
@@ -235,7 +271,7 @@ impl PrivateCredentials {
         // (e.g., list-type=2, prefix=... for ListObjectsV2)
         if let Some(params) = claim.params() {
             for (key, value) in params {
-                query_params.push((key.to_owned(), value.to_owned()));
+                query_params.push((key, value));
             }
         }
 
@@ -299,219 +335,16 @@ impl PrivateCredentials {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Get> for PublicCredentials {
-    async fn execute(&self, effect: storage::Get) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
+impl Signer for PrivateCredentials {
+    fn subject(&self) -> &dialog_common::capability::Did {
+        &self.subject
     }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Set> for PublicCredentials {
-    async fn execute(&self, effect: storage::Set) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Delete> for PublicCredentials {
-    async fn execute(
+    async fn sign<C: Claim + Send + Sync + 'static>(
         &self,
-        effect: storage::Delete,
+        claim: &C,
     ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::List> for PublicCredentials {
-    async fn execute(
-        &self,
-        effect: storage::List,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<memory::Resolve> for PublicCredentials {
-    async fn execute(
-        &self,
-        effect: memory::Resolve,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<memory::Update> for PublicCredentials {
-    async fn execute(
-        &self,
-        effect: memory::Update,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<memory::Delete> for PublicCredentials {
-    async fn execute(
-        &self,
-        effect: memory::Delete,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<archive::Get> for PublicCredentials {
-    async fn execute(&self, effect: archive::Get) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<archive::Put> for PublicCredentials {
-    async fn execute(&self, effect: archive::Put) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<archive::Delete> for PublicCredentials {
-    async fn execute(
-        &self,
-        effect: archive::Delete,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<archive::List> for PublicCredentials {
-    async fn execute(
-        &self,
-        effect: archive::List,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Get> for PrivateCredentials {
-    async fn execute(&self, effect: storage::Get) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Set> for PrivateCredentials {
-    async fn execute(&self, effect: storage::Set) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Delete> for PrivateCredentials {
-    async fn execute(
-        &self,
-        effect: storage::Delete,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::List> for PrivateCredentials {
-    async fn execute(
-        &self,
-        effect: storage::List,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<memory::Resolve> for PrivateCredentials {
-    async fn execute(
-        &self,
-        effect: memory::Resolve,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<memory::Update> for PrivateCredentials {
-    async fn execute(
-        &self,
-        effect: memory::Update,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<memory::Delete> for PrivateCredentials {
-    async fn execute(
-        &self,
-        effect: memory::Delete,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<archive::Get> for PrivateCredentials {
-    async fn execute(&self, effect: archive::Get) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<archive::Put> for PrivateCredentials {
-    async fn execute(&self, effect: archive::Put) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<archive::Delete> for PrivateCredentials {
-    async fn execute(
-        &self,
-        effect: archive::Delete,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<archive::List> for PrivateCredentials {
-    async fn execute(
-        &self,
-        effect: archive::List,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        self.authorize(effect)
+        self.authorize(claim)
     }
 }
 
@@ -520,28 +353,34 @@ impl Provider<archive::List> for PrivateCredentials {
 /// This enum supports both public (unsigned) and private (SigV4 signed) access
 /// to S3-compatible storage.
 ///
-/// Implements [`Provider<Access<storage::*>>`] to produce [`RequestDescriptor`]
-/// for making S3 requests.
+/// The `subject` parameter identifies whose data we're accessing and is used
+/// as a path prefix within the bucket. This allows multiple subjects to share
+/// the same bucket with isolated storage paths.
+///
+/// Implements [`Signer`] to produce [`RequestDescriptor`] for making S3 requests.
 ///
 /// # Example
 ///
 /// ```no_run
-/// use dialog_s3_credentials::{Address, s3::Credentials};
-/// use dialog_common::Provider;
+/// use dialog_s3_credentials::{Address, s3::Credentials, access::Signer};
 ///
-/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let address = Address::new(
 ///     "https://s3.us-east-1.amazonaws.com",
 ///     "us-east-1",
 ///     "my-bucket",
 /// );
 ///
+/// // Subject DID identifies whose data we're accessing
+/// let subject = "did:key:zSubject";
+///
 /// // Public access (no signing)
-/// let public = Credentials::public(address.clone())?;
+/// let public = Credentials::public(address.clone(), subject)?;
 ///
 /// // Private access (SigV4 signing)
 /// let private = Credentials::private(
 ///     address,
+///     subject,
 ///     "AKIAIOSFODNN7EXAMPLE",
 ///     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 /// )?;
@@ -558,21 +397,46 @@ pub enum Credentials {
 
 impl Credentials {
     /// Create public credentials for unsigned access.
-    pub fn public(address: Address) -> Result<Self, AuthorizationError> {
-        Ok(Self::Public(PublicCredentials::new(address)?))
+    ///
+    /// # Arguments
+    ///
+    /// * `address` - S3 address (endpoint, region, bucket)
+    /// * `subject` - Subject DID used as path prefix within the bucket
+    pub fn public(
+        address: Address,
+        subject: impl Into<dialog_common::capability::Did>,
+    ) -> Result<Self, AuthorizationError> {
+        Ok(Self::Public(PublicCredentials::new(address, subject)?))
     }
 
     /// Create private credentials with AWS SigV4 signing.
+    ///
+    /// # Arguments
+    ///
+    /// * `address` - S3 address (endpoint, region, bucket)
+    /// * `subject` - Subject DID used as path prefix within the bucket
+    /// * `access_key_id` - AWS Access Key ID
+    /// * `secret_access_key` - AWS Secret Access Key
     pub fn private(
         address: Address,
+        subject: impl Into<dialog_common::capability::Did>,
         access_key_id: impl Into<String>,
         secret_access_key: impl Into<String>,
     ) -> Result<Self, AuthorizationError> {
         Ok(Self::Private(PrivateCredentials::new(
             address,
+            subject,
             access_key_id,
             secret_access_key,
         )?))
+    }
+
+    /// Get the subject DID (path prefix within the bucket).
+    pub fn subject(&self) -> &dialog_common::capability::Did {
+        match self {
+            Self::Public(c) => &c.subject,
+            Self::Private(c) => &c.subject,
+        }
     }
 
     /// Set whether to use path-style URLs.
@@ -610,202 +474,78 @@ impl Credentials {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Get> for Credentials {
-    async fn execute(&self, effect: storage::Get) -> Result<RequestDescriptor, AuthorizationError> {
+impl Signer for Credentials {
+    fn subject(&self) -> &dialog_common::capability::Did {
         match self {
-            Self::Public(c) => c.execute(effect).await,
-            Self::Private(c) => c.execute(effect).await,
+            Self::Public(c) => &c.subject,
+            Self::Private(c) => &c.subject,
         }
     }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Set> for Credentials {
-    async fn execute(&self, effect: storage::Set) -> Result<RequestDescriptor, AuthorizationError> {
-        match self {
-            Self::Public(c) => c.execute(effect).await,
-            Self::Private(c) => c.execute(effect).await,
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Delete> for Credentials {
-    async fn execute(
+    async fn sign<C: Claim + Send + Sync + 'static>(
         &self,
-        effect: storage::Delete,
+        claim: &C,
     ) -> Result<RequestDescriptor, AuthorizationError> {
         match self {
-            Self::Public(c) => c.execute(effect).await,
-            Self::Private(c) => c.execute(effect).await,
+            Self::Public(c) => c.sign(claim).await,
+            Self::Private(c) => c.sign(claim).await,
         }
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::List> for Credentials {
-    async fn execute(
-        &self,
-        effect: storage::List,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        match self {
-            Self::Public(c) => c.execute(effect).await,
-            Self::Private(c) => c.execute(effect).await,
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<memory::Resolve> for Credentials {
-    async fn execute(
-        &self,
-        effect: memory::Resolve,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        match self {
-            Self::Public(c) => c.execute(effect).await,
-            Self::Private(c) => c.execute(effect).await,
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<memory::Update> for Credentials {
-    async fn execute(
-        &self,
-        effect: memory::Update,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        match self {
-            Self::Public(c) => c.execute(effect).await,
-            Self::Private(c) => c.execute(effect).await,
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<memory::Delete> for Credentials {
-    async fn execute(
-        &self,
-        effect: memory::Delete,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        match self {
-            Self::Public(c) => c.execute(effect).await,
-            Self::Private(c) => c.execute(effect).await,
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<archive::Get> for Credentials {
-    async fn execute(&self, effect: archive::Get) -> Result<RequestDescriptor, AuthorizationError> {
-        match self {
-            Self::Public(c) => c.execute(effect).await,
-            Self::Private(c) => c.execute(effect).await,
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<archive::Put> for Credentials {
-    async fn execute(&self, effect: archive::Put) -> Result<RequestDescriptor, AuthorizationError> {
-        match self {
-            Self::Public(c) => c.execute(effect).await,
-            Self::Private(c) => c.execute(effect).await,
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<archive::Delete> for Credentials {
-    async fn execute(
-        &self,
-        effect: archive::Delete,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        match self {
-            Self::Public(c) => c.execute(effect).await,
-            Self::Private(c) => c.execute(effect).await,
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<archive::List> for Credentials {
-    async fn execute(
-        &self,
-        effect: archive::List,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        match self {
-            Self::Public(c) => c.execute(effect).await,
-            Self::Private(c) => c.execute(effect).await,
-        }
-    }
-}
-
-/// AWS SigV4 signing key derived from credentials.
-#[derive(Debug, Clone)]
-struct SigningKey(Vec<u8>);
+/// AWS SigV4 signing key.
+struct SigningKey(Hmac<Sha256>);
 
 impl SigningKey {
-    fn derive(secret: &str, date: &str, region: &str, service: &str) -> Self {
-        let secret = format!("AWS4{}", secret);
-        let k_date = Self::hmac(secret.as_bytes(), date.as_bytes());
-        let k_region = Self::hmac(&k_date, region.as_bytes());
-        let k_service = Self::hmac(&k_region, service.as_bytes());
-        Self(Self::hmac(&k_service, b"aws4_request"))
+    /// Derive a signing key for the given date, region, and service.
+    fn derive(secret_key: &str, date: &str, region: &str, service: &str) -> Self {
+        let date_key = hmac_sha256(format!("AWS4{}", secret_key).as_bytes(), date.as_bytes());
+        let region_key = hmac_sha256(&date_key, region.as_bytes());
+        let service_key = hmac_sha256(&region_key, service.as_bytes());
+        let signing_key = hmac_sha256(&service_key, b"aws4_request");
+
+        Self(Hmac::new_from_slice(&signing_key).expect("HMAC can take key of any size"))
     }
 
-    fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts keys of any size");
-        mac.update(data);
-        mac.finalize().into_bytes().to_vec()
-    }
-
-    fn sign(&self, data: &[u8]) -> Signature {
-        Signature(Self::hmac(&self.0, data))
+    /// Sign a message with this key.
+    fn sign(&self, message: &[u8]) -> Signature {
+        let mut mac = self.0.clone();
+        mac.update(message);
+        Signature(mac.finalize().into_bytes().to_vec())
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// AWS SigV4 signature.
 struct Signature(Vec<u8>);
 
 impl std::fmt::Display for Signature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&hex_encode(&self.0))
+        for byte in &self.0 {
+            write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
     }
 }
 
-/// Get the current time as a UTC datetime.
-pub fn current_time() -> DateTime<Utc> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        DateTime::<Utc>::from(SystemTime::now().to_std())
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        DateTime::<Utc>::from(SystemTime::now())
-    }
+/// Compute HMAC-SHA256.
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC can take key of any size");
+    mac.update(data);
+    mac.finalize().into_bytes().to_vec()
 }
 
+/// Hex-encode bytes.
 fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
+    let mut result = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        write!(s, "{:02x}", byte).unwrap();
+        write!(result, "{:02x}", byte).unwrap();
     }
-    s
+    result
 }
 
+/// Percent-encode a string for URL use.
 fn percent_encode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() * 3);
+    let mut result = String::new();
     for byte in s.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
@@ -819,105 +559,121 @@ fn percent_encode(s: &str) -> String {
     result
 }
 
+/// Percent-encode a URL path (preserving slashes).
 fn percent_encode_path(path: &str) -> String {
-    percent_encode(path).replace("%2F", "/")
+    path.split('/')
+        .map(percent_encode)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Get the current time as a UTC datetime.
+fn current_time() -> DateTime<Utc> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        DateTime::<Utc>::from(SystemTime::now().to_std())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        DateTime::<Utc>::from(SystemTime::now())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Checksum;
+    // Use capability module for Storage/Store hierarchy, access module for effects
+    use crate::access::storage as access_storage;
+    use crate::capability::storage::{Storage, Store};
+    use dialog_common::capability::{Capability, Subject};
 
-    fn test_address() -> Address {
-        Address::new("https://s3.amazonaws.com", "us-east-1", "bucket")
+    const TEST_SUBJECT: &str = "did:key:zTestSubject";
+
+    /// Helper to build a storage Get capability.
+    fn get_capability(store: &str, key: &[u8]) -> Capability<access_storage::Get> {
+        Subject::from(TEST_SUBJECT)
+            .attenuate(Storage)
+            .attenuate(Store::new(store))
+            .invoke(access_storage::Get::new(key))
     }
 
-    #[test]
-    fn it_creates_public_credentials() {
-        let creds = PublicCredentials::new(test_address()).unwrap();
-        assert_eq!(creds.region(), "us-east-1");
-        assert_eq!(creds.bucket(), "bucket");
+    /// Helper to build a storage Set capability.
+    fn set_capability(store: &str, key: &[u8], checksum: Checksum) -> Capability<access_storage::Set> {
+        Subject::from(TEST_SUBJECT)
+            .attenuate(Storage)
+            .attenuate(Store::new(store))
+            .invoke(access_storage::Set::new(key, checksum))
     }
 
-    #[test]
-    fn it_creates_private_credentials() {
-        let creds = PrivateCredentials::new(test_address(), "access-key", "secret-key").unwrap();
-        assert_eq!(creds.region(), "us-east-1");
-        assert_eq!(creds.access_key_id(), "access-key");
-    }
+    #[dialog_common::test]
+    async fn test_public_credentials_sign() {
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "my-bucket",
+        );
+        let creds = PublicCredentials::new(address, TEST_SUBJECT).unwrap();
 
-    #[test]
-    fn it_creates_credentials_enum_public() {
-        let creds = Credentials::public(test_address()).unwrap();
-        assert_eq!(creds.region(), "us-east-1");
-        assert!(matches!(creds, Credentials::Public(_)));
-    }
-
-    #[test]
-    fn it_creates_credentials_enum_private() {
-        let creds = Credentials::private(test_address(), "key", "secret").unwrap();
-        assert_eq!(creds.region(), "us-east-1");
-        assert!(matches!(creds, Credentials::Private(_)));
-    }
-
-    #[test]
-    fn it_builds_virtual_hosted_url() {
-        let creds = PublicCredentials::new(test_address()).unwrap();
-        let url = creds.build_url("my-key").unwrap();
-        assert_eq!(url.as_str(), "https://bucket.s3.amazonaws.com/my-key");
-    }
-
-    #[test]
-    fn it_builds_path_style_url() {
-        let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
-        let creds = PublicCredentials::new(address).unwrap();
-        let url = creds.build_url("my-key").unwrap();
-        assert_eq!(url.as_str(), "http://localhost:9000/bucket/my-key");
-    }
-
-    #[test]
-    fn it_presigns_public_request() {
-        let creds = PublicCredentials::new(test_address()).unwrap();
-        let effect = storage::Get::new("", "test-key");
-        let descriptor = creds.authorize(effect).unwrap();
+        let get = get_capability("index", b"test-key");
+        let descriptor = creds.sign(&get).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
-        assert!(descriptor.headers.iter().any(|(k, _)| k == "host"));
-        // Public requests should NOT have signing params
-        assert!(!descriptor.url.as_str().contains("X-Amz-Signature"));
+        assert!(descriptor.url.as_str().contains("my-bucket"));
+        assert!(descriptor.url.as_str().contains("index/"));
     }
 
-    #[test]
-    fn it_presigns_private_request() {
+    #[dialog_common::test]
+    async fn test_private_credentials_sign() {
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "my-bucket",
+        );
         let creds =
-            PrivateCredentials::new(test_address(), "AKIAIOSFODNN7EXAMPLE", "secret").unwrap();
-        let effect = storage::Get::new("", "test-key");
-        let descriptor = creds.authorize(effect).unwrap();
+            PrivateCredentials::new(address, TEST_SUBJECT, "AKIATEST", "secret123").unwrap();
+
+        let get = get_capability("index", b"test-key");
+        let descriptor = creds.sign(&get).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
+        assert!(descriptor.url.as_str().contains("X-Amz-Signature="));
+        assert!(descriptor.url.as_str().contains("X-Amz-Credential="));
+    }
+
+    #[dialog_common::test]
+    async fn test_credentials_enum_sign() {
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "my-bucket",
+        );
+        let creds = Credentials::public(address, TEST_SUBJECT).unwrap();
+
+        let get = get_capability("", b"key");
+        let descriptor = creds.sign(&get).await.unwrap();
+
+        assert_eq!(descriptor.method, "GET");
+    }
+
+    #[dialog_common::test]
+    async fn test_checksum_header() {
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "my-bucket",
+        );
+        let creds = Credentials::public(address, TEST_SUBJECT).unwrap();
+
+        let checksum = Checksum::Sha256([0u8; 32]);
+        let set = set_capability("store", b"key", checksum);
+        let descriptor = creds.sign(&set).await.unwrap();
+
         assert!(
             descriptor
-                .url
-                .as_str()
-                .contains("X-Amz-Algorithm=AWS4-HMAC-SHA256")
+                .headers
+                .iter()
+                .any(|(k, _)| k == "x-amz-checksum-sha256")
         );
-        assert!(descriptor.url.as_str().contains("X-Amz-Signature="));
-    }
-
-    #[test]
-    fn it_forces_path_style() {
-        let creds = PublicCredentials::new(test_address())
-            .unwrap()
-            .with_path_style(true);
-        let url = creds.build_url("key").unwrap();
-        assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket/key");
-    }
-
-    #[test]
-    fn it_forces_path_style_via_enum() {
-        let creds = Credentials::public(test_address())
-            .unwrap()
-            .with_path_style(true);
-        let url = creds.build_url("key").unwrap();
-        assert_eq!(url.as_str(), "https://s3.amazonaws.com/bucket/key");
     }
 }

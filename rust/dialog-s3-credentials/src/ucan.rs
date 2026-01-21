@@ -13,11 +13,18 @@
 //! - [`UcanAuthorizer`] - Wraps credentials to handle UCAN invocations and authorize requests
 //! - [`InvocationChain`] - Parsed UCAN container with invocation and delegation chain
 
+mod authority;
+mod authorization;
+mod container;
 mod credentials;
+mod delegation;
+mod invocation;
 mod provider;
 
-pub use credentials::{
-    Credentials, CredentialsBuilder, DelegationChain, IntoUcanArgs, OperatorIdentity,
-    generate_signer,
-};
-pub use provider::{InvocationChain, UcanAuthorizer};
+pub use authority::{OperatorIdentity, UcanAuthority};
+pub use authorization::UcanAuthorization;
+pub use container::Container;
+pub use credentials::{Credentials, CredentialsBuilder};
+pub use delegation::DelegationChain;
+pub use invocation::InvocationChain;
+pub use provider::UcanAuthorizer;

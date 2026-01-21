@@ -10,8 +10,13 @@ extern crate self as dialog_common;
 mod sync;
 pub use sync::*;
 
-mod effect;
-pub use effect::*;
+pub mod bytes;
+/// Capability-based authorization system with hierarchical policies.
+pub mod capability;
+pub use bytes::Bytes;
+
+// Re-export core capability types at crate root for convenience
+pub use capability::{Attenuation, Authority, Authorization, Capability, Effect, Policy, Provider};
 
 mod hash;
 pub use hash::*;

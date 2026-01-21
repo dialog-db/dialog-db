@@ -1,7 +1,8 @@
 //! Access commands for S3 storage operations.
 //!
-//! This module defines effect types for authorization of storage and memory operations.
-//! Each effect returns a `Result<RequestDescriptor, AuthorizationError>` for making authorized requests.
+//! This module defines request types for storage and memory operations.
+//! Each type implements `Claim` to provide HTTP method, path, and other request details.
+//! Use a `Signer` to authorize claims and produce `RequestDescriptor`s.
 
 use super::checksum::Checksum;
 use chrono::{DateTime, Utc};
@@ -12,10 +13,8 @@ use thiserror::Error;
 use url::Url;
 
 #[cfg(target_arch = "wasm32")]
-use web_time::{SystemTime, web::SystemTimeExt};
+use web_time::{web::SystemTimeExt, SystemTime};
 
-#[cfg(feature = "ucan")]
-use dialog_common::Effect;
 #[cfg(feature = "ucan")]
 use std::collections::BTreeMap;
 #[cfg(feature = "ucan")]
@@ -26,7 +25,10 @@ pub const DEFAULT_EXPIRES: u64 = 3600;
 
 pub mod archive;
 pub mod memory;
+mod signer;
 pub mod storage;
+
+pub use signer::Signer;
 
 /// Wrapper for UCAN invocation arguments that enables generic deserialization.
 ///
@@ -67,67 +69,6 @@ impl Args<'_> {
     }
 }
 
-/// Unified command enum for all access operations.
-///
-/// Parsed from UCAN invocation command path and arguments.
-#[cfg(feature = "ucan")]
-#[derive(Debug)]
-pub enum Do {
-    Storage(storage::Do),
-    Memory(memory::Do),
-    Archive(archive::Do),
-}
-
-#[cfg(feature = "ucan")]
-impl Effect for Do {
-    type Output = Result<RequestDescriptor, AuthorizationError>;
-}
-
-#[cfg(feature = "ucan")]
-impl<'a> TryFrom<(&'a [&'a str], Args<'a>)> for Do {
-    type Error = AuthorizationError;
-
-    fn try_from((segments, args): (&'a [&'a str], Args<'a>)) -> Result<Self, Self::Error> {
-        match segments.first() {
-            Some(&"storage") => Ok(Do::Storage((&segments[1..], args).try_into()?)),
-            Some(&"memory") => Ok(Do::Memory((&segments[1..], args).try_into()?)),
-            Some(&"archive") => Ok(Do::Archive((&segments[1..], args).try_into()?)),
-            _ => Err(AuthorizationError::Invocation(format!(
-                "Unknown command: {:?}",
-                segments
-            ))),
-        }
-    }
-}
-
-/// Trait for providers that can execute all access commands.
-#[cfg(feature = "ucan")]
-pub trait AccessProvider:
-    storage::StorageProvider + memory::MemoryProvider + archive::ArchiveProvider
-{
-}
-
-#[cfg(feature = "ucan")]
-impl<T> AccessProvider for T where
-    T: storage::StorageProvider + memory::MemoryProvider + archive::ArchiveProvider
-{
-}
-
-#[cfg(feature = "ucan")]
-impl Do {
-    /// Perform this command using the given provider.
-    pub async fn perform<P: AccessProvider>(
-        self,
-        provider: &P,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        match self {
-            Do::Storage(cmd) => cmd.perform(provider).await,
-            Do::Memory(cmd) => cmd.perform(provider).await,
-            Do::Archive(cmd) => cmd.perform(provider).await,
-        }
-    }
-}
-
 /// Error type for authorization operations.
 #[derive(Debug, Error)]
 pub enum AuthorizationError {
@@ -150,7 +91,7 @@ pub enum AuthorizationError {
 
 /// Describes an HTTP request to perform an authorized operation.
 ///
-/// This is the result of authorizing an effect - it contains all the
+/// This is the result of authorizing a claim - it contains all the
 /// information needed to make the actual HTTP request.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RequestDescriptor {
@@ -179,12 +120,18 @@ pub enum Precondition {
 /// - HTTP method, URL, checksum, ACL (request-specific)
 /// - Region, service, expires, time (signing parameters)
 ///
-pub trait Claim {
+pub trait Claim: Send {
     /// The HTTP method for this request.
     fn method(&self) -> &'static str;
 
     /// The URL path for this request.
     fn path(&self) -> String;
+
+    /// The store/namespace for this request.
+    ///
+    /// For UCAN credentials, this is the subject DID.
+    /// For S3 credentials, this is typically a bucket prefix.
+    fn store(&self) -> &str;
 
     /// The checksum of the body, if any.
     fn checksum(&self) -> Option<&Checksum> {
@@ -206,10 +153,12 @@ pub trait Claim {
         current_time()
     }
 
-    fn params(&self) -> Option<Vec<(&str, &str)>> {
+    /// Query parameters for the request.
+    fn params(&self) -> Option<Vec<(String, String)>> {
         None
     }
 
+    /// Precondition for conditional operations.
     fn precondition(&self) -> Precondition {
         Precondition::None
     }

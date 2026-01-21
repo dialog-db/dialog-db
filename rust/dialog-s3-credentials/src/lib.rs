@@ -11,14 +11,13 @@
 //! - [`s3::Credentials`] - Direct S3 access (public or SigV4 signed)
 //! - [`ucan::Credentials`] - UCAN-based authorization via external access service (requires `ucan` feature)
 //!
-//! All credential types implement [`Provider<storage::Get>`](dialog_common::Provider) etc.
-//! to produce [`RequestDescriptor`] for making S3 requests.
-//!
 //! # Example
 //!
 //! ```no_run
-//! use dialog_s3_credentials::{Address, s3, storage};
-//! use dialog_common::Effect;
+//! use dialog_s3_credentials::{Address, s3, access};
+//! use dialog_s3_credentials::access::Signer;
+//! use dialog_s3_credentials::capability::storage::{Storage, Store};
+//! use dialog_common::capability::{Capability, Subject};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create address for S3 bucket
@@ -28,17 +27,26 @@
 //!     "my-bucket",
 //! );
 //!
+//! // Subject DID identifies whose data we're accessing (used as path prefix)
+//! let subject = "did:key:zSubject";
+//!
 //! // Create credentials (public or private)
 //! let credentials = s3::Credentials::private(
 //!     address,
+//!     subject,
 //!     "AKIAIOSFODNN7EXAMPLE",
 //!     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 //! )?;
 //!
-//! // Get a presigned request descriptor
-//! let descriptor = storage::Get::new("", "my-key")
-//!     .perform(&credentials)
-//!     .await?;
+//! // Build capability chain: Subject -> Storage -> Store -> access::storage::Get
+//! // Uses capability types for hierarchy, access types for effects (Claim impl)
+//! let capability: Capability<access::storage::Get> = Subject::from(subject)
+//!     .attenuate(Storage)
+//!     .attenuate(Store::new("index"))
+//!     .invoke(access::storage::Get::new(b"my-key"));
+//!
+//! // Sign the capability to get a presigned URL
+//! let descriptor = credentials.sign(&capability).await?;
 //!
 //! println!("Presigned URL: {}", descriptor.url);
 //! # Ok(())
@@ -47,6 +55,7 @@
 
 pub mod access;
 pub mod address;
+pub mod capability;
 pub mod checksum;
 pub mod s3;
 

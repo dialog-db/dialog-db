@@ -37,7 +37,7 @@ impl Hasher {
 /// verification. The checksum is used in the `x-amz-checksum-{algorithm}` header.
 ///
 /// When deserializing from IPLD/CBOR, expects 32 raw bytes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Checksum {
     /// SHA-256 checksum.
     Sha256([u8; 32]),
@@ -53,6 +53,15 @@ impl TryFrom<Vec<u8>> for Checksum {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
         Ok(Checksum::Sha256(arr))
+    }
+}
+
+impl serde::Serialize for Checksum {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bytes(self.as_bytes())
     }
 }
 

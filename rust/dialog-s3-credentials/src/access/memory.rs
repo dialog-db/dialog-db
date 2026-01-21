@@ -1,156 +1,202 @@
 //! Memory access commands.
 //!
-//! Dos for authorizing transactional memory (CAS) operations.
-//! Each effect returns a `Result<RequestDescriptor, AuthorizationError>` that can
-//! be used to make the actual HTTP request.
+//! Request types for transactional memory (CAS) operations.
+//! Each type implements `Claim` to provide HTTP method, path, and other request details.
+//!
+//! # Two APIs
+//!
+//! 1. **Direct API**: Use `MemoryClaim::resolve(subject, space, cell)` for direct S3 access
+//! 2. **Capability API**: Use `Capability<Resolve>` with the capability hierarchy for UCAN flows
 
 use super::{AuthorizationError, Claim, Precondition, RequestDescriptor};
 use crate::Checksum;
-use dialog_common::Effect;
+use crate::capability::memory::{Cell, Space};
+use dialog_common::capability::{Capability, Effect, Policy};
 use serde::Deserialize;
-
-#[cfg(feature = "ucan")]
-use super::Args;
-#[cfg(feature = "ucan")]
-use dialog_common::Provider;
 
 /// Edition identifier for CAS operations.
 pub type Edition = String;
 
-/// Memory command enum for UCAN parsing.
-#[cfg(feature = "ucan")]
+/// A memory claim that can be directly signed.
+///
+/// This wraps a memory operation with subject, space, and cell context,
+/// allowing it to be used with `Signer::sign()` directly.
 #[derive(Debug)]
-pub enum Do {
-    Resolve(Resolve),
-    Update(Update),
-    Delete(Delete),
+pub struct MemoryClaim<T> {
+    /// Subject DID (path prefix)
+    pub subject: String,
+    /// Space name
+    pub space: String,
+    /// Cell name
+    pub cell: String,
+    /// The operation
+    pub operation: T,
 }
 
-#[cfg(feature = "ucan")]
-impl Effect for Do {
-    type Output = Result<RequestDescriptor, AuthorizationError>;
-}
-
-#[cfg(feature = "ucan")]
-impl<'a> TryFrom<(&'a [&'a str], Args<'a>)> for Do {
-    type Error = AuthorizationError;
-
-    fn try_from((segments, args): (&'a [&'a str], Args<'a>)) -> Result<Self, Self::Error> {
-        match segments {
-            ["resolve"] => Ok(Do::Resolve(args.deserialize()?)),
-            ["update"] => Ok(Do::Update(args.deserialize()?)),
-            ["delete"] => Ok(Do::Delete(args.deserialize()?)),
-            _ => Err(AuthorizationError::Invocation(format!(
-                "Unknown memory command: {:?}",
-                segments
-            ))),
+impl<T> MemoryClaim<T> {
+    /// Create a new memory claim.
+    pub fn new(
+        subject: impl Into<String>,
+        space: impl Into<String>,
+        cell: impl Into<String>,
+        operation: T,
+    ) -> Self {
+        Self {
+            subject: subject.into(),
+            space: space.into(),
+            cell: cell.into(),
+            operation,
         }
     }
 }
 
-/// Trait for providers that can execute all memory commands.
-#[cfg(feature = "ucan")]
-pub trait MemoryProvider: Provider<Resolve> + Provider<Update> + Provider<Delete> {}
+impl MemoryClaim<Resolve> {
+    /// Create a RESOLVE claim.
+    pub fn resolve(
+        subject: impl Into<String>,
+        space: impl Into<String>,
+        cell: impl Into<String>,
+    ) -> Self {
+        Self::new(subject, space, cell, Resolve)
+    }
+}
 
-#[cfg(feature = "ucan")]
-impl<T> MemoryProvider for T where T: Provider<Resolve> + Provider<Update> + Provider<Delete> {}
+impl MemoryClaim<Publish> {
+    /// Create a PUBLISH claim.
+    pub fn publish(
+        subject: impl Into<String>,
+        space: impl Into<String>,
+        cell: impl Into<String>,
+        checksum: Checksum,
+        when: Option<Edition>,
+    ) -> Self {
+        Self::new(subject, space, cell, Publish { checksum, when })
+    }
+}
 
-#[cfg(feature = "ucan")]
-impl Do {
-    /// Perform this command using the given provider.
-    pub async fn perform<P: MemoryProvider>(
-        self,
-        provider: &P,
-    ) -> Result<RequestDescriptor, AuthorizationError> {
-        match self {
-            Do::Resolve(cmd) => cmd.perform(provider).await,
-            Do::Update(cmd) => cmd.perform(provider).await,
-            Do::Delete(cmd) => cmd.perform(provider).await,
+impl MemoryClaim<Retract> {
+    /// Create a RETRACT claim.
+    pub fn retract(
+        subject: impl Into<String>,
+        space: impl Into<String>,
+        cell: impl Into<String>,
+        when: impl Into<Edition>,
+    ) -> Self {
+        Self::new(subject, space, cell, Retract::new(when))
+    }
+}
+
+impl Claim for MemoryClaim<Resolve> {
+    fn method(&self) -> &'static str {
+        "GET"
+    }
+    fn path(&self) -> String {
+        format!("{}/{}/{}", self.subject, self.space, self.cell)
+    }
+    fn store(&self) -> &str {
+        &self.space
+    }
+}
+
+impl Claim for MemoryClaim<Publish> {
+    fn method(&self) -> &'static str {
+        "PUT"
+    }
+    fn path(&self) -> String {
+        format!("{}/{}/{}", self.subject, self.space, self.cell)
+    }
+    fn store(&self) -> &str {
+        &self.space
+    }
+    fn checksum(&self) -> Option<&Checksum> {
+        Some(&self.operation.checksum)
+    }
+    fn precondition(&self) -> Precondition {
+        match &self.operation.when {
+            Some(edition) => Precondition::IfMatch(edition.clone()),
+            None => Precondition::IfNoneMatch,
         }
+    }
+}
+
+impl Claim for MemoryClaim<Retract> {
+    fn method(&self) -> &'static str {
+        "DELETE"
+    }
+    fn path(&self) -> String {
+        format!("{}/{}/{}", self.subject, self.space, self.cell)
+    }
+    fn store(&self) -> &str {
+        &self.space
+    }
+    fn precondition(&self) -> Precondition {
+        Precondition::IfMatch(self.operation.when.clone())
     }
 }
 
 /// Resolve current cell content and edition.
 #[derive(Debug, Deserialize)]
-pub struct Resolve {
-    /// Memory space.
-    pub space: String,
-    /// Cell name.
-    pub cell: String,
+pub struct Resolve;
+
+/// Resolve is an effect that produces `RequestDescriptor` that can
+/// be used to perform get from the s3 bucket.
+impl Effect for Resolve {
+    type Of = Cell;
+    type Output = Result<RequestDescriptor, AuthorizationError>;
 }
 
-impl Resolve {
-    /// Create a new Resolve command.
-    pub fn new(space: impl Into<String>, cell: impl Into<String>) -> Self {
-        Self {
-            space: space.into(),
-            cell: cell.into(),
-        }
-    }
-}
-
-impl Claim for Resolve {
+impl Claim for Capability<Resolve> {
     fn method(&self) -> &'static str {
         "GET"
     }
     fn path(&self) -> String {
-        format!("{}/{}", self.space, self.cell)
+        format!(
+            "{}/{}/{}",
+            self.subject(),
+            &Space::of(self).name,
+            &Cell::of(self).name
+        )
+    }
+    fn store(&self) -> &str {
+        &Space::of(self).name
     }
 }
 
-impl Effect for Resolve {
-    type Output = Result<RequestDescriptor, AuthorizationError>;
-}
-
-/// Update cell content with CAS semantics.
-///
-/// - `when: Some(edition)` → only update if current edition matches
-/// - `when: None` → only update if cell doesn't exist (create)
-#[derive(Debug, Deserialize)]
-pub struct Update {
-    /// Memory space.
-    pub space: String,
-    /// Cell name.
-    pub cell: String,
-    /// Expected current edition for CAS. None means cell must not exist.
-    pub when: Option<Edition>,
-    /// Checksum for integrity verification (32 bytes SHA-256).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Publish {
+    /// The content to publish.
     pub checksum: Checksum,
+    /// The expected current edition, or None if expecting empty cell.
+    pub when: Option<Edition>,
 }
 
-impl Update {
-    /// Create a new Update command.
-    pub fn new(
-        space: impl Into<String>,
-        cell: impl Into<String>,
-        when: Option<Edition>,
-        checksum: Checksum,
-    ) -> Self {
-        Self {
-            space: space.into(),
-            cell: cell.into(),
-            when,
-            checksum,
-        }
-    }
-}
-
-impl Effect for Update {
+/// Publish is an effect that produces `RequestDescriptor` that can
+/// be used to perform preconditioned put in the s3 bucket.
+impl Effect for Publish {
+    type Of = Cell;
     type Output = Result<RequestDescriptor, AuthorizationError>;
 }
 
-impl Claim for Update {
+impl Claim for Capability<Publish> {
     fn method(&self) -> &'static str {
         "PUT"
     }
     fn path(&self) -> String {
-        format!("{}/{}", self.space, self.cell)
+        format!(
+            "{}/{}/{}",
+            self.subject(),
+            &Space::of(self).name,
+            &Cell::of(self).name
+        )
+    }
+    fn store(&self) -> &str {
+        &Space::of(self).name
     }
     fn checksum(&self) -> Option<&Checksum> {
-        Some(&self.checksum)
+        Some(&Publish::of(&self).checksum)
     }
     fn precondition(&self) -> Precondition {
-        match &self.when {
+        match &Publish::of(&self).when {
             Some(edition) => Precondition::IfMatch(edition.clone()),
             None => Precondition::IfNoneMatch,
         }
@@ -162,38 +208,41 @@ impl Claim for Update {
 /// Delete only succeeds if current edition matches `when`.
 /// If `when` doesn't match, the delete is a no-op.
 #[derive(Debug, Deserialize)]
-pub struct Delete {
-    /// Memory space.
-    pub space: String,
-    /// Cell name.
-    pub cell: String,
+pub struct Retract {
     /// Required current edition. Delete is no-op if edition doesn't match.
     pub when: Edition,
 }
 
-impl Delete {
-    /// Create a new Delete command.
-    pub fn new(space: impl Into<String>, cell: impl Into<String>, when: Edition) -> Self {
-        Self {
-            space: space.into(),
-            cell: cell.into(),
-            when,
-        }
+/// Retract is an effect that produces `RequestDescriptor` that can
+/// be used to perform delete in the s3 bucket.
+impl Effect for Retract {
+    type Of = Cell;
+    type Output = Result<RequestDescriptor, AuthorizationError>;
+}
+
+impl Retract {
+    /// Create a new Retract command.
+    pub fn new(when: impl Into<Edition>) -> Self {
+        Self { when: when.into() }
     }
 }
 
-impl Claim for Delete {
+impl Claim for Capability<Retract> {
     fn method(&self) -> &'static str {
         "DELETE"
     }
     fn path(&self) -> String {
-        format!("{}/{}", self.space, self.cell)
+        format!(
+            "{}/{}/{}",
+            self.subject(),
+            &Space::of(self).name,
+            &Cell::of(self).name
+        )
+    }
+    fn store(&self) -> &str {
+        &Space::of(self).name
     }
     fn precondition(&self) -> Precondition {
-        Precondition::IfMatch(self.when.clone())
+        Precondition::IfMatch(Retract::of(&self).when.clone())
     }
-}
-
-impl Effect for Delete {
-    type Output = Result<RequestDescriptor, AuthorizationError>;
 }
