@@ -435,14 +435,14 @@ mod tests {
         command: Vec<String>,
         args: BTreeMap<String, Promised>,
     ) -> Vec<u8> {
-        let subject_did = subject_signer.did().clone();
-        let operator_did = operator_signer.did().clone();
+        let subject_did = *subject_signer.did();
+        let operator_did = *operator_signer.did();
 
         // Create delegation: subject -> operator
         let delegation = DelegationBuilder::new()
             .issuer(subject_signer.clone())
-            .audience(operator_did.clone())
-            .subject(DelegatedSubject::Specific(subject_did.clone()))
+            .audience(operator_did)
+            .subject(DelegatedSubject::Specific(subject_did))
             .command(command.clone())
             .try_build()
             .expect("Failed to build delegation");
@@ -452,7 +452,7 @@ mod tests {
         // Create invocation: operator invokes on subject
         let invocation = InvocationBuilder::new()
             .issuer(operator_signer.clone())
-            .audience(subject_did.clone())
+            .audience(subject_did)
             .subject(subject_did)
             .command(command)
             .arguments(args)
@@ -688,7 +688,7 @@ mod tests {
 
         let credentials = Credentials::new(
             "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, &operator.did(), &["archive"]),
+            test_delegation_chain(&operator, operator.did(), &["archive"]),
         );
 
         let mut session = Session::new(credentials, &[0u8; 32]);
@@ -704,7 +704,7 @@ mod tests {
             .acquire(&mut session)
             .await?;
 
-        let authorization = read.authorization().invoke(&mut session)?;
+        let authorization = read.authorization().invoke(&session)?;
         let ucan = match authorization {
             UcanAuthorization::Invocation { chain, .. } => chain,
             _ => panic!("expected invocation"),
@@ -717,7 +717,7 @@ mod tests {
             authorization.url.path(),
             format!(
                 "/{}/blobs/{}",
-                operator.did().to_string(),
+                operator.did(),
                 Blake3Hash::hash(b"hello").as_bytes().to_base58()
             )
         );
