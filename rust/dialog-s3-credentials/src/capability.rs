@@ -319,13 +319,15 @@ pub mod archive {
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     pub struct Catalog {
         /// The catalog name (e.g., "index", "blobs").
-        pub name: String,
+        pub catalog: String,
     }
 
     impl Catalog {
         /// Create a new Catalog policy.
         pub fn new(name: impl Into<String>) -> Self {
-            Self { name: name.into() }
+            Self {
+                catalog: name.into(),
+            }
         }
     }
 
@@ -381,10 +383,10 @@ pub mod archive {
     /// Build the S3 path for an archive effect.
     pub fn path(catalog: &Catalog, digest: &Blake3Hash) -> String {
         use base58::ToBase58;
-        if catalog.name.is_empty() {
+        if catalog.catalog.is_empty() {
             digest.as_bytes().to_base58()
         } else {
-            format!("{}/{}", catalog.name, digest.as_bytes().to_base58())
+            format!("{}/{}", catalog.catalog, digest.as_bytes().to_base58())
         }
     }
 }

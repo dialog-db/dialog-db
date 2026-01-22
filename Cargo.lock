@@ -715,6 +715,7 @@ dependencies = [
  "csv-async",
  "dialog-common",
  "dialog-prolly-tree",
+ "dialog-s3-credentials",
  "dialog-storage",
  "ed25519-dalek",
  "futures-util",

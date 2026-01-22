@@ -40,9 +40,9 @@ use super::authority::OperatorIdentity;
 use super::authorization::UcanAuthorization;
 use super::delegation::DelegationChain;
 use super::invocation::InvocationChain;
-use crate::access::{archive, memory, storage, AuthorizationError, AuthorizedRequest};
+use crate::access::{AuthorizationError, AuthorizedRequest, archive, memory, storage};
 use dialog_common::ConditionalSend;
-use dialog_common::capability::{Ability, Access, Authorized, Provider, ToIpldArgs};
+use dialog_common::capability::{Ability, Access, Authorized, Parameters, Provider};
 
 /// Convert IPLD to Promised (for UCAN invocation arguments).
 fn ipld_to_promised(ipld: Ipld) -> Promised {
@@ -64,14 +64,11 @@ fn ipld_to_promised(ipld: Ipld) -> Promised {
 }
 
 /// Convert IPLD Map to BTreeMap<String, Promised> for UCAN invocation.
-fn ipld_args_to_promised(ipld: Ipld) -> BTreeMap<String, Promised> {
-    match ipld {
-        Ipld::Map(m) => m
-            .into_iter()
-            .map(|(k, v)| (k, ipld_to_promised(v)))
-            .collect(),
-        _ => BTreeMap::new(),
-    }
+fn parameters_to_args(parameters: Parameters) -> BTreeMap<String, Promised> {
+    parameters
+        .into_iter()
+        .map(|(k, v)| (k, ipld_to_promised(v)))
+        .collect()
 }
 
 /// UCAN-based authorizer that delegates to an external access service.
@@ -149,7 +146,7 @@ impl Credentials {
     /// 3. Builds an InvocationChain (UCAN container)
     /// 4. POSTs it to the access service
     /// 5. Returns the RequestDescriptor from the response
-    async fn authorize<C: Ability + ToIpldArgs>(
+    async fn authorize<C: Ability>(
         &self,
         capability: &C,
     ) -> Result<AuthorizedRequest, AuthorizationError> {
@@ -176,7 +173,11 @@ impl Credentials {
             .split('/')
             .map(|s| s.to_string())
             .collect();
-        let args = ipld_args_to_promised(capability.to_ipld_args());
+
+        let mut parameters = BTreeMap::new();
+        capability.parametrize(&mut parameters);
+
+        let args = parameters_to_args(parameters);
 
         // 4. Build invocation
         // - issuer: the operator (who is making the request)
@@ -264,8 +265,14 @@ impl Access for Credentials {
             )));
         }
 
+        let mut parameters = Parameters::new();
+        claim.capability().parametrize(&mut parameters);
+
         // Return authorization from the delegation chain
-        Ok(UcanAuthorization::delegated(self.delegation.clone()))
+        Ok(UcanAuthorization::delegated(
+            self.delegation.clone(),
+            parameters,
+        ))
     }
 }
 

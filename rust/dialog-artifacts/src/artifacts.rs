@@ -42,12 +42,9 @@ pub use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, HashType,
     Storage, StorageBackend,
 };
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use std::{ops::Range, sync::Arc};
 use tokio::sync::RwLock;
-
-#[cfg(feature = "csv")]
-use futures_util::TryStreamExt;
 
 #[cfg(feature = "csv")]
 use async_stream::stream;

@@ -3,7 +3,9 @@
 //! The `Ability` trait is the abstract interface for all capability chain types,
 //! providing access to the subject DID and command path.
 
-use super::capability::Policy;
+use std::collections::BTreeMap;
+
+use super::capability::{Parameters, Policy};
 use super::constrained::Constrained;
 use super::subject::{Did, Subject};
 
@@ -19,6 +21,10 @@ pub trait Ability: Sized {
     /// Command path representing a level of access this capability
     /// has over the `subject` resource.
     fn command(&self) -> String;
+
+    /// Collects parameters into given settings
+    #[cfg(feature = "ucan")]
+    fn parametrize(&self, parameters: &mut Parameters);
 }
 
 /// Subject represents unconstrained capability, hence
@@ -31,6 +37,9 @@ impl Ability for Subject {
     fn command(&self) -> String {
         "/".into()
     }
+
+    #[cfg(feature = "ucan")]
+    fn parametrize(&self, _: &mut Parameters) {}
 }
 
 /// Constrained capabilities are also capabilities
@@ -56,5 +65,11 @@ where
         } else {
             command
         }
+    }
+
+    #[cfg(feature = "ucan")]
+    fn parametrize(&self, parameters: &mut Parameters) {
+        self.capability.parametrize(parameters);
+        self.constraint.parametrize(parameters);
     }
 }

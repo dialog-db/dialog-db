@@ -17,6 +17,7 @@
 use super::container::Container;
 use crate::access::AuthorizationError;
 use ipld_core::cid::Cid;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::sync::Arc;
 use ucan::did::Ed25519Did;
@@ -39,6 +40,16 @@ pub struct DelegationChain {
     /// This is guaranteed to be non-empty.
     proof_cids: Vec<Cid>,
 }
+
+impl PartialEq for DelegationChain {
+    fn eq(&self, other: &Self) -> bool {
+        // Delegation chains are equal if they have the same proof CIDs
+        // (CIDs are content-addressed, so same CIDs means same content)
+        self.proof_cids == other.proof_cids
+    }
+}
+
+impl Eq for DelegationChain {}
 
 impl DelegationChain {
     /// Create a new delegation chain with a single delegation.
@@ -311,6 +322,26 @@ impl From<&DelegationChain> for Container {
         }
 
         Container::new(tokens)
+    }
+}
+
+impl Serialize for DelegationChain {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let bytes = self.to_bytes().map_err(serde::ser::Error::custom)?;
+        serializer.serialize_bytes(&bytes)
+    }
+}
+
+impl<'de> Deserialize<'de> for DelegationChain {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = Vec::deserialize(deserializer)?;
+        DelegationChain::try_from(bytes.as_slice()).map_err(serde::de::Error::custom)
     }
 }
 

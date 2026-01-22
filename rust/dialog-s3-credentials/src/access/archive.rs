@@ -5,7 +5,7 @@
 
 use super::{AuthorizationError, AuthorizedRequest, S3Request};
 use crate::Checksum;
-use crate::capability::archive::Catalog;
+pub use crate::capability::archive::{Archive, Catalog};
 use base58::ToBase58;
 use dialog_common::Blake3Hash;
 use dialog_common::capability::{Capability, Effect, Policy};
@@ -42,7 +42,7 @@ impl S3Request for Capability<Get> {
         format!(
             "{}/{}/{}",
             self.subject(),
-            Catalog::of(&self).name,
+            Catalog::of(&self).catalog,
             Get::of(&self).digest.as_bytes().to_base58()
         )
     }
@@ -82,7 +82,7 @@ impl S3Request for Capability<Put> {
         format!(
             "{}/{}/{}",
             self.subject(),
-            Catalog::of(&self).name,
+            Catalog::of(&self).catalog,
             Put::of(&self).digest.as_bytes().to_base58()
         )
     }

@@ -4,7 +4,8 @@
 //! for a specific capability claim using UCAN delegations.
 
 use super::delegation::DelegationChain;
-use dialog_common::capability::{Authorization, Did};
+use dialog_common::capability::{Authorization, Did, Parameters};
+use ipld_core::ipld::Ipld;
 
 /// UCAN-based authorization proof for a capability.
 ///
@@ -19,6 +20,8 @@ pub enum UcanAuthorization {
         subject: Did,
         /// The command path this authorization permits.
         can: String,
+        /// Constraints of the delegation
+        parameters: Parameters,
     },
     /// Authorization through a delegation chain.
     Delegated {
@@ -30,20 +33,23 @@ pub enum UcanAuthorization {
         audience: Did,
         /// Cached command path.
         can: String,
+        /// Constraints of the delegation
+        parameters: Parameters,
     },
 }
 
 impl UcanAuthorization {
     /// Create a self-issued authorization for an owner.
-    pub fn owned(subject: impl Into<Did>, can: impl Into<String>) -> Self {
+    pub fn owned(subject: impl Into<Did>, can: impl Into<String>, parameters: Parameters) -> Self {
         Self::Owned {
             subject: subject.into(),
             can: can.into(),
+            parameters,
         }
     }
 
     /// Create an authorization from a delegation chain.
-    pub fn delegated(chain: DelegationChain) -> Self {
+    pub fn delegated(chain: DelegationChain, parameters: Parameters) -> Self {
         // Pre-compute and cache the string representations
         let subject = chain
             .subject()
@@ -57,6 +63,7 @@ impl UcanAuthorization {
             subject,
             audience,
             can,
+            parameters,
         }
     }
 
@@ -65,6 +72,13 @@ impl UcanAuthorization {
         match self {
             Self::Owned { .. } => None,
             Self::Delegated { chain, .. } => Some(chain),
+        }
+    }
+
+    fn parameters(&self) -> &Parameters {
+        match self {
+            Self::Owned { parameters, .. } => parameters,
+            Self::Delegated { parameters, .. } => parameters,
         }
     }
 }
@@ -94,17 +108,20 @@ impl Authorization for UcanAuthorization {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::ucan::delegation::tests::{create_delegation, generate_signer};
 
     #[test]
     fn it_creates_owned_authorization() {
-        let auth = UcanAuthorization::owned("did:key:zTest", "/storage/get");
+        let auth = UcanAuthorization::owned("did:key:zTest", "/storage/get", BTreeMap::default());
 
         assert_eq!(auth.subject(), "did:key:zTest");
         assert_eq!(auth.audience(), "did:key:zTest");
         assert_eq!(auth.can(), "/storage/get");
         assert!(auth.chain().is_none());
+        assert_eq!(auth.parameters(), &BTreeMap::default());
     }
 
     #[test]
@@ -122,11 +139,18 @@ mod tests {
         .unwrap();
 
         let chain = DelegationChain::new(delegation);
-        let auth = UcanAuthorization::delegated(chain);
+        let auth = UcanAuthorization::delegated(
+            chain,
+            BTreeMap::from([("key".to_string(), Ipld::Bytes(b"hello".into()))]),
+        );
 
         assert_eq!(auth.subject(), &subject_did.to_string());
         assert_eq!(auth.audience(), &operator_signer.did().to_string());
         assert_eq!(auth.can(), "/storage/get");
+        assert_eq!(
+            auth.parameters(),
+            &BTreeMap::from([("key".to_string(), Ipld::Bytes(b"hello".into()))])
+        );
         assert!(auth.chain().is_some());
     }
 }

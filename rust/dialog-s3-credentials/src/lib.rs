@@ -66,3 +66,4 @@ pub mod ucan;
 pub use access::{AuthorizationError, AuthorizedRequest, memory, storage};
 pub use address::Address;
 pub use checksum::{Checksum, Hasher};
+pub use credentials::Credentials;

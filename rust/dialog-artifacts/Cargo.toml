@@ -14,6 +14,7 @@ debug = []
 helpers = ["dep:anyhow"]
 csv = ["dep:csv-async"]
 s3 = ["dialog-storage/s3"]
+ucan = ["dialog-s3-credentials/ucan"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
@@ -23,6 +24,7 @@ web-integration-tests = ["dialog-common/web-integration-tests"]
 dialog-common = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-prolly-tree = { workspace = true }
+dialog-s3-credentials = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
 arrayref = { workspace = true }

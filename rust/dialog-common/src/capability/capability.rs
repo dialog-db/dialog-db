@@ -13,8 +13,28 @@ use super::constrained::Constrained;
 use super::provider::Provider;
 use super::selector::Selector;
 use super::subject::{Did, Subject};
-use super::Claim;
+use super::{Authorization, Claim};
 use crate::ConditionalSend;
+#[cfg(feature = "ucan")]
+use ipld_core::{ipld::Ipld, serde::to_ipld};
+use serde::Serialize;
+use std::collections::BTreeMap;
+
+pub type Parameters = BTreeMap<String, Ipld>;
+
+pub trait Settings {
+    #[cfg(feature = "ucan")]
+    fn parametrize(&self, settings: &mut Parameters);
+}
+
+impl<P: Serialize> Settings for P {
+    #[cfg(feature = "ucan")]
+    fn parametrize(&self, settings: &mut Parameters) {
+        if let Ok(Ipld::Map(constraint_map)) = to_ipld(&self) {
+            settings.extend(constraint_map)
+        }
+    }
+}
 
 /// Trait for policy types that restrict capabilities.
 ///
@@ -24,7 +44,7 @@ use crate::ConditionalSend;
 ///
 /// For types that contribute to the command path, implement `Attenuation`
 /// instead (which provides `Policy` via blanket impl).
-pub trait Policy: Sized {
+pub trait Policy: Sized + Settings {
     /// The capability this policy restricts.
     /// Must implement `Constraint` so we can compute the full chain type.
     type Of: Constraint;
@@ -56,7 +76,7 @@ pub trait Policy: Sized {
 /// provides the path segment for the command path.
 ///
 /// Note: `Effect` types automatically implement `Attenuation` via blanket impl.
-pub trait Attenuation: Sized {
+pub trait Attenuation: Sized + Settings {
     /// The capability this type constrains.
     /// Must implement `Constraint` so the blanket `Policy` impl works.
     type Of: Constraint;
@@ -83,7 +103,7 @@ impl<T: Attenuation> Policy for T {
 /// Effects are capabilities that can be invoked and therefor require their
 /// output type. Implementing `Effect` automatically makes the type an
 /// `Attenuation` (and thus a `Policy`) via blanket impls.
-pub trait Effect: Sized {
+pub trait Effect: Sized + Settings {
     /// The capability this effect requires (the parent in the chain).
     type Of: Constraint;
     /// The output type produced by the invoaction of this effect when performed.
@@ -229,12 +249,12 @@ impl<Fx: Effect + Constraint> Capability<Fx> {
 ///
 /// - `C` is the constraint type (e.g., `storage::Get`)
 /// - `A` is the authorization type (e.g., `UcanAuthorization`)
-pub struct Authorized<C: Constraint, A> {
+pub struct Authorized<C: Constraint, A: Authorization> {
     capability: Capability<C>,
     authorization: A,
 }
 
-impl<C: Constraint, A: Clone> Clone for Authorized<C, A>
+impl<C: Constraint, A: Authorization + Clone> Clone for Authorized<C, A>
 where
     C::Capability: Clone,
 {
@@ -246,7 +266,8 @@ where
     }
 }
 
-impl<C: Constraint + std::fmt::Debug, A: std::fmt::Debug> std::fmt::Debug for Authorized<C, A>
+impl<C: Constraint + std::fmt::Debug, A: Authorization + std::fmt::Debug> std::fmt::Debug
+    for Authorized<C, A>
 where
     C::Capability: std::fmt::Debug,
 {
@@ -258,7 +279,7 @@ where
     }
 }
 
-impl<C: Constraint, A> Authorized<C, A> {
+impl<C: Constraint, A: Authorization> Authorized<C, A> {
     /// Create a new authorized capability.
     pub fn new(capability: Capability<C>, authorization: A) -> Self {
         Self {
@@ -293,6 +314,17 @@ impl<C: Constraint, A> Authorized<C, A> {
     }
 }
 
+impl<Fx: Effect + Constraint, A: Authorization> Authorized<Fx, A> {
+    /// Perform the invocation directly without authorization verification.
+    /// For operations that require authorization, use `acquire` first.
+    pub async fn perform<Env>(self, env: &mut Env) -> Fx::Output
+    where
+        Env: Provider<Self>,
+    {
+        env.execute(self).await
+    }
+}
+
 impl<T: Constraint> Ability for Capability<T>
 where
     T::Capability: Ability,
@@ -303,6 +335,11 @@ where
 
     fn command(&self) -> String {
         self.0.command()
+    }
+
+    #[cfg(feature = "ucan")]
+    fn parametrize(&self, parameters: &mut Parameters) {
+        self.0.parametrize(parameters)
     }
 }
 
