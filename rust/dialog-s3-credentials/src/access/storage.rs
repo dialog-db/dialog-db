@@ -13,7 +13,7 @@ use crate::Checksum;
 use base58::ToBase58;
 use dialog_common::Bytes;
 use dialog_common::capability::{Capability, Effect, Policy};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::capability::storage::Store;
 
@@ -21,7 +21,7 @@ use crate::capability::storage::Store;
 ///
 /// The key should be already encoded for S3 compatibility
 /// (e.g., using base58 for binary keys).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Get {
     /// The key to look up.
     pub key: Bytes,
@@ -58,7 +58,7 @@ impl S3Request for Capability<Get> {
 /// Set value with key and checksum.
 ///
 /// The key should be already encoded for S3 compatibility.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Set {
     /// The storage key (already encoded).
     pub key: Bytes,
@@ -103,7 +103,7 @@ impl S3Request for Capability<Set> {
 /// Delete value by key.
 ///
 /// The key should be already encoded for S3 compatibility.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Delete {
     /// The storage key
     pub key: Bytes,
@@ -138,7 +138,7 @@ impl S3Request for Capability<Delete> {
 }
 
 /// List keys in store.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct List {
     /// Continuation token for pagination.
     pub continuation_token: Option<String>,

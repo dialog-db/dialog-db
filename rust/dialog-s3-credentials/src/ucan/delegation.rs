@@ -113,6 +113,7 @@ impl DelegationChain {
         self.delegations.get(cid).unwrap().audience()
     }
 
+
     /// Get the subject of the delegation chain.
     ///
     /// Per UCAN spec, the last delegation's `iss` (issuer) should match the `sub` (subject).

@@ -12,13 +12,13 @@ use super::{AuthorizationError, AuthorizedRequest, Precondition, S3Request};
 use crate::Checksum;
 use crate::capability::memory::{Cell, Space};
 use dialog_common::capability::{Capability, Effect, Policy};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Edition identifier for CAS operations.
 pub type Edition = String;
 
 /// Resolve current cell content and edition.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Resolve;
 
 /// Resolve is an effect that produces `RequestDescriptor` that can
@@ -84,7 +84,7 @@ impl S3Request for Capability<Publish> {
 ///
 /// Delete only succeeds if current edition matches `when`.
 /// If `when` doesn't match, the delete is a no-op.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Retract {
     /// Required current edition. Delete is no-op if edition doesn't match.
     pub when: Edition,

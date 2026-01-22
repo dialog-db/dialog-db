@@ -303,6 +303,7 @@ pub mod memory {
 /// Archive capability effects for content-addressed storage operations.
 pub mod archive {
     use super::*;
+    use dialog_common::Blake3Hash;
 
     /// Root attenuation for archive operations.
     ///
@@ -335,13 +336,13 @@ pub mod archive {
     /// Get content by digest.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     pub struct Get {
-        /// The digest of the content (hex-encoded or base58).
-        pub digest: String,
+        /// The blake3 digest of the content to retrieve.
+        pub digest: Blake3Hash,
     }
 
     impl Get {
         /// Create a new Get effect.
-        pub fn new(digest: impl Into<String>) -> Self {
+        pub fn new(digest: impl Into<Blake3Hash>) -> Self {
             Self {
                 digest: digest.into(),
             }
@@ -356,15 +357,15 @@ pub mod archive {
     /// Put content by digest with checksum.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     pub struct Put {
-        /// The digest of the content (hex-encoded or base58).
-        pub digest: String,
+        /// The blake3 digest of the content.
+        pub digest: Blake3Hash,
         /// Checksum for integrity verification.
         pub checksum: Checksum,
     }
 
     impl Put {
         /// Create a new Put effect.
-        pub fn new(digest: impl Into<String>, checksum: Checksum) -> Self {
+        pub fn new(digest: impl Into<Blake3Hash>, checksum: Checksum) -> Self {
             Self {
                 digest: digest.into(),
                 checksum,
@@ -378,11 +379,12 @@ pub mod archive {
     }
 
     /// Build the S3 path for an archive effect.
-    pub fn path(catalog: &Catalog, digest: &str) -> String {
+    pub fn path(catalog: &Catalog, digest: &Blake3Hash) -> String {
+        use base58::ToBase58;
         if catalog.name.is_empty() {
-            digest.to_string()
+            digest.as_bytes().to_base58()
         } else {
-            format!("{}/{}", catalog.name, digest)
+            format!("{}/{}", catalog.name, digest.as_bytes().to_base58())
         }
     }
 }

@@ -8,12 +8,13 @@
 
 use super::ability::Ability;
 use super::access::Access;
+use super::authority::Principal;
 use super::constrained::Constrained;
 use super::provider::Provider;
 use super::selector::Selector;
 use super::subject::{Did, Subject};
-use super::{Authority, Claim, authorization};
-use crate::{ConditionalSend, ConditionalSync};
+use super::Claim;
+use crate::ConditionalSend;
 
 /// Trait for policy types that restrict capabilities.
 ///
@@ -171,7 +172,12 @@ impl<T: Constraint> Capability<T> {
         })
     }
 
-    pub async fn acquire<A: Access + Authority>(
+    /// Acquire authorization for this capability from an access provider.
+    ///
+    /// This method uses the `Access` trait to find authorization proofs for
+    /// the capability claim, returning an `Authorized` bundle that pairs the
+    /// capability with its authorization proof.
+    pub async fn acquire<A: Access + Principal>(
         self,
         access: &mut A,
     ) -> Result<Authorized<T, A::Authorization>, A::Error>

@@ -9,10 +9,10 @@ use crate::capability::archive::Catalog;
 use base58::ToBase58;
 use dialog_common::Blake3Hash;
 use dialog_common::capability::{Capability, Effect, Policy};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Get content by digest.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Get {
     /// The blake3 digest of the content to retrieve.
     pub digest: Blake3Hash,
@@ -49,7 +49,7 @@ impl S3Request for Capability<Get> {
 }
 
 /// Put content with digest and checksum.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Put {
     /// Content digest (Blake3 hash, used as S3 key).
     pub digest: Blake3Hash,

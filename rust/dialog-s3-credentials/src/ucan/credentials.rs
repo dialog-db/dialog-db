@@ -40,10 +40,9 @@ use super::authority::OperatorIdentity;
 use super::authorization::UcanAuthorization;
 use super::delegation::DelegationChain;
 use super::invocation::InvocationChain;
-use crate::access::{AuthorizationError, AuthorizedRequest};
-use crate::capability::{archive, memory, storage};
+use crate::access::{archive, memory, storage, AuthorizationError, AuthorizedRequest};
 use dialog_common::ConditionalSend;
-use dialog_common::capability::{Ability, Access, Authorized, Capability, Provider, ToIpldArgs};
+use dialog_common::capability::{Ability, Access, Authorized, Provider, ToIpldArgs};
 
 /// Convert IPLD to Promised (for UCAN invocation arguments).
 fn ipld_to_promised(ipld: Ipld) -> Promised {
@@ -283,10 +282,8 @@ impl Provider<Authorized<storage::Get, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<storage::Get, UcanAuthorization>,
-    ) -> AuthorizedRequest {
-        self.authorize(authorized.capability())
-            .await
-            .expect("Failed to authorize storage::Get")
+    ) -> Result<AuthorizedRequest, AuthorizationError> {
+        self.authorize(authorized.capability()).await
     }
 }
 
@@ -297,10 +294,8 @@ impl Provider<Authorized<storage::Set, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<storage::Set, UcanAuthorization>,
-    ) -> AuthorizedRequest {
-        self.authorize(authorized.capability())
-            .await
-            .expect("Failed to authorize storage::Set")
+    ) -> Result<AuthorizedRequest, AuthorizationError> {
+        self.authorize(authorized.capability()).await
     }
 }
 
@@ -311,10 +306,8 @@ impl Provider<Authorized<storage::Delete, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<storage::Delete, UcanAuthorization>,
-    ) -> AuthorizedRequest {
-        self.authorize(authorized.capability())
-            .await
-            .expect("Failed to authorize storage::Delete")
+    ) -> Result<AuthorizedRequest, AuthorizationError> {
+        self.authorize(authorized.capability()).await
     }
 }
 
@@ -325,10 +318,8 @@ impl Provider<Authorized<storage::List, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<storage::List, UcanAuthorization>,
-    ) -> AuthorizedRequest {
-        self.authorize(authorized.capability())
-            .await
-            .expect("Failed to authorize storage::List")
+    ) -> Result<AuthorizedRequest, AuthorizationError> {
+        self.authorize(authorized.capability()).await
     }
 }
 
@@ -339,10 +330,8 @@ impl Provider<Authorized<memory::Resolve, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<memory::Resolve, UcanAuthorization>,
-    ) -> AuthorizedRequest {
-        self.authorize(authorized.capability())
-            .await
-            .expect("Failed to authorize memory::Resolve")
+    ) -> Result<AuthorizedRequest, AuthorizationError> {
+        self.authorize(authorized.capability()).await
     }
 }
 
@@ -353,10 +342,8 @@ impl Provider<Authorized<memory::Publish, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<memory::Publish, UcanAuthorization>,
-    ) -> AuthorizedRequest {
-        self.authorize(authorized.capability())
-            .await
-            .expect("Failed to authorize memory::Publish")
+    ) -> Result<AuthorizedRequest, AuthorizationError> {
+        self.authorize(authorized.capability()).await
     }
 }
 
@@ -367,10 +354,8 @@ impl Provider<Authorized<memory::Retract, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<memory::Retract, UcanAuthorization>,
-    ) -> AuthorizedRequest {
-        self.authorize(authorized.capability())
-            .await
-            .expect("Failed to authorize memory::Retract")
+    ) -> Result<AuthorizedRequest, AuthorizationError> {
+        self.authorize(authorized.capability()).await
     }
 }
 
@@ -381,10 +366,8 @@ impl Provider<Authorized<archive::Get, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<archive::Get, UcanAuthorization>,
-    ) -> AuthorizedRequest {
-        self.authorize(authorized.capability())
-            .await
-            .expect("Failed to authorize archive::Get")
+    ) -> Result<AuthorizedRequest, AuthorizationError> {
+        self.authorize(authorized.capability()).await
     }
 }
 
@@ -395,10 +378,8 @@ impl Provider<Authorized<archive::Put, UcanAuthorization>> for Credentials {
     async fn execute(
         &mut self,
         authorized: Authorized<archive::Put, UcanAuthorization>,
-    ) -> AuthorizedRequest {
-        self.authorize(authorized.capability())
-            .await
-            .expect("Failed to authorize archive::Put")
+    ) -> Result<AuthorizedRequest, AuthorizationError> {
+        self.authorize(authorized.capability()).await
     }
 }
 
