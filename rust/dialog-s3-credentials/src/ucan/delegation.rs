@@ -15,7 +15,7 @@
 //! (index 0) to closest to subject (last index).
 
 use super::container::Container;
-use crate::access::AccessError;
+use crate::capability::AccessError;
 use ipld_core::cid::Cid;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;

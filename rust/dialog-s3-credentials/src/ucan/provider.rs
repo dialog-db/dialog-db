@@ -48,8 +48,8 @@
 use std::collections::BTreeMap;
 
 use super::invocation::InvocationChain;
-use crate::access::{AccessError, AuthorizedRequest};
-use crate::access::{archive, memory, storage};
+use crate::capability::{AccessError, AuthorizedRequest};
+use crate::capability::{archive, memory, storage};
 use crate::credentials::Authorizer;
 use crate::s3::Credentials;
 use base58::ToBase58;
@@ -222,31 +222,31 @@ fn get_bytes_arg(
 
 fn parse_storage_get(
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<crate::access::storage::Get, AccessError> {
+) -> Result<crate::capability::storage::Get, AccessError> {
     let key = get_bytes_arg(args, "key")?;
-    Ok(crate::access::storage::Get::new(key))
+    Ok(crate::capability::storage::Get::new(key))
 }
 
 fn parse_storage_set(
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<crate::access::storage::Set, AccessError> {
+) -> Result<crate::capability::storage::Set, AccessError> {
     let key = get_bytes_arg(args, "key")?;
     let checksum = parse_checksum(args)?;
-    Ok(crate::access::storage::Set::new(key, checksum))
+    Ok(crate::capability::storage::Set::new(key, checksum))
 }
 
 fn parse_storage_delete(
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<crate::access::storage::Delete, AccessError> {
+) -> Result<crate::capability::storage::Delete, AccessError> {
     let key = get_bytes_arg(args, "key")?;
-    Ok(crate::access::storage::Delete::new(key))
+    Ok(crate::capability::storage::Delete::new(key))
 }
 
 fn parse_storage_list(
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<crate::access::storage::List, AccessError> {
+) -> Result<crate::capability::storage::List, AccessError> {
     let continuation_token = get_optional_string_arg(args, "continuation_token")?;
-    Ok(crate::access::storage::List::new(continuation_token))
+    Ok(crate::capability::storage::List::new(continuation_token))
 }
 
 /// Build a storage capability from subject, args, and effect.
@@ -270,20 +270,20 @@ where
 fn build_memory_resolve_capability(
     subject_did: &str,
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<Capability<crate::access::memory::Resolve>, AccessError> {
+) -> Result<Capability<crate::capability::memory::Resolve>, AccessError> {
     let space = get_string_arg(args, "space")?;
     let cell = get_string_arg(args, "cell")?;
     Ok(Subject::from(subject_did)
         .attenuate(memory::Memory)
         .attenuate(memory::Space::new(space))
         .attenuate(memory::Cell::new(cell))
-        .invoke(crate::access::memory::Resolve))
+        .invoke(crate::capability::memory::Resolve))
 }
 
 fn build_memory_publish_capability(
     subject_did: &str,
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<Capability<crate::access::memory::Publish>, AccessError> {
+) -> Result<Capability<crate::capability::memory::Publish>, AccessError> {
     let space = get_string_arg(args, "space")?;
     let cell = get_string_arg(args, "cell")?;
     let when = get_optional_string_arg(args, "when")?;
@@ -292,13 +292,13 @@ fn build_memory_publish_capability(
         .attenuate(memory::Memory)
         .attenuate(memory::Space::new(space))
         .attenuate(memory::Cell::new(cell))
-        .invoke(crate::access::memory::Publish { checksum, when }))
+        .invoke(crate::capability::memory::Publish { checksum, when }))
 }
 
 fn build_memory_retract_capability(
     subject_did: &str,
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<Capability<crate::access::memory::Retract>, AccessError> {
+) -> Result<Capability<crate::capability::memory::Retract>, AccessError> {
     let space = get_string_arg(args, "space")?;
     let cell = get_string_arg(args, "cell")?;
     let when = get_string_arg(args, "when")?;
@@ -306,7 +306,7 @@ fn build_memory_retract_capability(
         .attenuate(memory::Memory)
         .attenuate(memory::Space::new(space))
         .attenuate(memory::Cell::new(cell))
-        .invoke(crate::access::memory::Retract::new(when)))
+        .invoke(crate::capability::memory::Retract::new(when)))
 }
 
 // Archive command builders
@@ -314,7 +314,7 @@ fn build_memory_retract_capability(
 fn build_archive_get_capability(
     subject_did: &str,
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<Capability<crate::access::archive::Get>, AccessError> {
+) -> Result<Capability<crate::capability::archive::Get>, AccessError> {
     let catalog = get_string_arg(args, "catalog")?;
     let digest = get_bytes_arg(args, "digest")?;
     let digest_arr: [u8; 32] = digest
@@ -324,13 +324,13 @@ fn build_archive_get_capability(
     Ok(Subject::from(subject_did)
         .attenuate(archive::Archive)
         .attenuate(archive::Catalog::new(catalog))
-        .invoke(crate::access::archive::Get::new(digest_hash)))
+        .invoke(crate::capability::archive::Get::new(digest_hash)))
 }
 
 fn build_archive_put_capability(
     subject_did: &str,
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<Capability<crate::access::archive::Put>, AccessError> {
+) -> Result<Capability<crate::capability::archive::Put>, AccessError> {
     let catalog = get_string_arg(args, "catalog")?;
     let digest = get_bytes_arg(args, "digest")?;
     let digest_arr: [u8; 32] = digest
@@ -341,7 +341,7 @@ fn build_archive_put_capability(
     Ok(Subject::from(subject_did)
         .attenuate(archive::Archive)
         .attenuate(archive::Catalog::new(catalog))
-        .invoke(crate::access::archive::Put::new(digest_hash, checksum)))
+        .invoke(crate::capability::archive::Put::new(digest_hash, checksum)))
 }
 
 /// Parse checksum from arguments.

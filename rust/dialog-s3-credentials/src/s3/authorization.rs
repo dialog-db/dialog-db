@@ -1,10 +1,14 @@
-use super::{Authorizer, Credentials};
-use super::{build_url, extract_host, is_path_style_default};
+use super::Credentials;
+use super::extract_host;
 use crate::AuthorizedRequest;
-use crate::access::{AccessError, S3Request, archive, memory, storage};
+use crate::capability::{AccessError, S3Request};
+
 use async_trait::async_trait;
 
-use dialog_common::capability::{Authorization, AuthorizationError, Capability, Did, Provider};
+use dialog_common::{
+    ConditionalSend,
+    capability::{Authorization, AuthorizationError, Capability, Did, Effect, Provider},
+};
 
 /// Self-issued authorization for direct S3 access.
 ///
@@ -93,110 +97,17 @@ impl Authorization for S3Authorization {
     }
 }
 
-// Provider for access::storage::Get
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Get> for S3Authorization {
+impl<Do> Provider<Do> for S3Authorization
+where
+    Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
+    Capability<Do>: ConditionalSend + S3Request,
+{
     async fn execute(
         &mut self,
-        cap: Capability<storage::Get>,
+        capabality: Capability<Do>,
     ) -> Result<AuthorizedRequest, AccessError> {
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::storage::Set
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Set> for S3Authorization {
-    async fn execute(
-        &mut self,
-        cap: Capability<storage::Set>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::storage::Delete
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::Delete> for S3Authorization {
-    async fn execute(
-        &mut self,
-        cap: Capability<storage::Delete>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::storage::List
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<storage::List> for S3Authorization {
-    async fn execute(
-        &mut self,
-        cap: Capability<storage::List>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::memory::Resolve
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<memory::Resolve> for S3Authorization {
-    async fn execute(
-        &mut self,
-        cap: Capability<memory::Resolve>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::memory::Publish
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<memory::Publish> for S3Authorization {
-    async fn execute(
-        &mut self,
-        cap: Capability<memory::Publish>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::memory::Retract
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<memory::Retract> for S3Authorization {
-    async fn execute(
-        &mut self,
-        cap: Capability<memory::Retract>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::archive::Get
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<archive::Get> for S3Authorization {
-    async fn execute(
-        &mut self,
-        cap: Capability<archive::Get>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::archive::Put
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<archive::Put> for S3Authorization {
-    async fn execute(
-        &mut self,
-        cap: Capability<archive::Put>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.authorize(&cap).await
+        self.authorize(&capabality).await
     }
 }

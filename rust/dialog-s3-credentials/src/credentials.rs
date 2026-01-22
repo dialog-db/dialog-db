@@ -1,7 +1,7 @@
 use super::s3;
 #[cfg(feature = "ucan")]
 use super::ucan;
-use crate::access::{AccessError, AuthorizedRequest, S3Request};
+use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
 use dialog_common::capability::{Ability, Access, Authorization, Claim, Effect};
 use dialog_common::{Capability, ConditionalSend};

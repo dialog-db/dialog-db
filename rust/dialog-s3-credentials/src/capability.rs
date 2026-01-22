@@ -1,462 +1,203 @@
-//! Capability-based S3 authorization.
+//! Access commands for S3 storage operations.
 //!
-//! This module defines S3 storage and memory effects that integrate with
-//! `dialog_common::capability` system. Effects can be authorized via the
-//! `Access` trait and performed via the `Provider` trait.
-//!
-//! # Capability Hierarchy
-//!
-//! ```text
-//! Subject (repository DID)
-//!   └── Storage
-//!         └── Store { name }
-//!               └── Get { key } | Set { key, checksum } | Delete { key } | List
-//!
-//! Subject (repository DID)
-//!   └── Memory
-//!         └── Space { name }
-//!               └── Cell { name }
-//!                     └── Resolve | Update { when, checksum } | Delete { when }
-//! ```
-//!
-//! # Usage
-//!
-//! ```ignore
-//! use dialog_common::capability::{Subject, Capability};
-//! use dialog_s3_credentials::capability::storage;
-//!
-//! // Build capability chain
-//! let capability: Capability<storage::Get> = Subject::from("did:key:z...")
-//!     .attenuate(storage::Storage)
-//!     .attenuate(storage::Store::new("index"))
-//!     .invoke(storage::Get::new("my-key"));
-//!
-//! // Acquire authorization
-//! let authorized = capability.acquire(&credentials).await?;
-//!
-//! // Perform to get RequestDescriptor
-//! let descriptor = authorized.perform(&mut credentials).await;
-//! ```
+//! This module defines request types for storage and memory operations.
+//! Each type implements `Claim` to provide HTTP method, path, and other request details.
+//! Use a `Signer` to authorize claims and produce `RequestDescriptor`s.
 
-use crate::{AuthorizedRequest, Checksum};
-use dialog_common::capability::{Attenuation, Effect, Policy, Subject};
+use super::checksum::Checksum;
+use chrono::{DateTime, Utc};
+use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::SystemTime;
+use thiserror::Error;
+use url::Url;
 
-/// Storage capability effects for key-value operations.
-pub mod storage {
-    use super::*;
+#[cfg(target_arch = "wasm32")]
+use web_time::{SystemTime, web::SystemTimeExt};
 
-    /// Root attenuation for storage operations.
-    ///
-    /// Attaches to Subject and provides the `/storage` command path segment.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct Storage;
+#[cfg(feature = "ucan")]
+use std::collections::BTreeMap;
+#[cfg(feature = "ucan")]
+use ucan::promise::Promised;
 
-    impl Attenuation for Storage {
-        type Of = Subject;
+/// Default URL expiration: 1 hour.
+pub const DEFAULT_EXPIRES: u64 = 3600;
+
+pub mod archive;
+pub mod memory;
+pub mod storage;
+
+/// Wrapper for UCAN invocation arguments that enables generic deserialization.
+///
+/// # Example
+///
+/// ```ignore
+/// use dialog_s3_credentials::access::{Args, storage};
+///
+/// let cmd: storage::Get = Args(&args).deserialize()?;
+/// ```
+#[cfg(feature = "ucan")]
+pub struct Args<'a>(pub &'a BTreeMap<String, Promised>);
+
+#[cfg(feature = "ucan")]
+impl Args<'_> {
+    /// Deserialize arguments into the target type.
+    pub fn deserialize<T: serde::de::DeserializeOwned>(self) -> Result<T, AccessError> {
+        use ipld_core::ipld::Ipld;
+
+        // Convert BTreeMap<String, Promised> to Ipld::Map
+        let ipld_map: BTreeMap<String, Ipld> = self
+            .0
+            .iter()
+            .map(|(k, v)| {
+                Ipld::try_from(v)
+                    .map(|ipld| (k.clone(), ipld))
+                    .map_err(|e| AccessError::Invocation(format!("Promise not resolved: {}", e)))
+            })
+            .collect::<Result<_, _>>()?;
+
+        let ipld = Ipld::Map(ipld_map);
+
+        ipld_core::serde::from_ipld(ipld)
+            .map_err(|e| AccessError::Invocation(format!("Failed to parse arguments: {}", e)))
+    }
+}
+
+/// Error type for authorization operations.
+#[derive(Debug, Error)]
+pub enum AccessError {
+    /// No delegation found for the subject.
+    #[error("No delegation for subject: {0}")]
+    NoDelegation(String),
+
+    /// Failed to build the invocation.
+    #[error("Invocation error: {0}")]
+    Invocation(String),
+
+    /// Access service returned an error.
+    #[error("Access service error: {0}")]
+    Service(String),
+
+    /// Invalid configuration.
+    #[error("Configuration error: {0}")]
+    Configuration(String),
+}
+
+/// Describes an HTTP request to perform an authorized operation.
+///
+/// This is the result of authorizing a claim - it contains all the
+/// information needed to make the actual HTTP request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthorizedRequest {
+    /// The presigned URL to use.
+    pub url: Url,
+    /// HTTP method (GET, PUT, DELETE).
+    pub method: String,
+    /// Headers to include in the request.
+    pub headers: Vec<(String, String)>,
+}
+
+/// Precondition for conditional S3 operations (CAS semantics).
+#[derive(Debug, Clone)]
+pub enum Precondition {
+    /// No precondition - unconditional operation.
+    None,
+    /// Update only if current ETag matches (If-Match: <etag>).
+    IfMatch(String),
+    /// Update only if key doesn't exist (If-None-Match: *).
+    IfNoneMatch,
+}
+
+/// This trait can be implemented by effects that that be translated into
+/// S3 requests. Providing convenient way for creating authorizations in
+/// form of presigned URLs + headers.
+///
+pub trait S3Request: ConditionalSend + ConditionalSync {
+    /// The HTTP method for this request.
+    fn method(&self) -> &'static str;
+
+    /// The URL path for this request.
+    fn path(&self) -> String;
+
+    /// The checksum of the body, if any.
+    fn checksum(&self) -> Option<&Checksum> {
+        None
     }
 
-    /// Store policy that scopes operations to a named store.
-    ///
-    /// This is a policy (not attenuation) so it doesn't contribute to the command path.
-    /// It restricts operations to a specific store (e.g., "index", "blob").
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct Store {
-        /// The store name (e.g., "index", "blob").
-        pub store: String,
+    /// The service name for signing. Defaults to "s3".
+    fn service(&self) -> &str {
+        "s3"
     }
 
-    impl Store {
-        /// Create a new Store policy.
-        pub fn new(name: impl Into<String>) -> Self {
-            Self { store: name.into() }
-        }
+    /// URL signature expiration in seconds. Defaults to 24 hours.
+    fn expires(&self) -> u64 {
+        DEFAULT_EXPIRES
     }
 
-    impl Policy for Store {
-        type Of = Storage;
+    /// The timestamp for signing. Defaults to current time.
+    fn time(&self) -> DateTime<Utc> {
+        current_time()
     }
 
-    /// Get value by key.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct Get {
-        /// The storage key (already encoded).
-        pub key: String,
+    /// Query parameters for the request.
+    fn params(&self) -> Option<Vec<(String, String)>> {
+        None
     }
 
-    impl Get {
-        /// Create a new Get effect.
-        pub fn new(key: impl Into<String>) -> Self {
-            Self { key: key.into() }
-        }
+    /// Precondition for conditional operations.
+    fn precondition(&self) -> Precondition {
+        Precondition::None
     }
 
-    impl Effect for Get {
-        type Of = Store;
-        type Output = AuthorizedRequest;
+    /// The ACL for this request, if any.
+    fn acl(&self) -> Option<Acl> {
+        None
     }
+}
 
-    /// Set value with key and checksum.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct Set {
-        /// The storage key.
-        pub key: String,
-        /// Checksum for integrity verification.
-        pub checksum: Checksum,
-    }
+/// S3 Access Control List (ACL) settings.
+///
+/// These are canned ACLs supported by S3 and S3-compatible services.
+/// See: https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html#canned-acl
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acl {
+    /// Owner gets FULL_CONTROL. No one else has access rights.
+    Private,
+    /// Owner gets FULL_CONTROL. The AllUsers group gets READ access.
+    PublicRead,
+    /// Owner gets FULL_CONTROL. The AllUsers group gets READ and WRITE access.
+    PublicReadWrite,
+    /// Owner gets FULL_CONTROL. The AuthenticatedUsers group gets READ access.
+    AuthenticatedRead,
+    /// Object owner gets FULL_CONTROL. Bucket owner gets READ access.
+    BucketOwnerRead,
+    /// Both the object owner and the bucket owner get FULL_CONTROL.
+    BucketOwnerFullControl,
+}
 
-    impl Set {
-        /// Create a new Set effect.
-        pub fn new(key: impl Into<String>, checksum: Checksum) -> Self {
-            Self {
-                key: key.into(),
-                checksum,
-            }
-        }
-    }
-
-    impl Effect for Set {
-        type Of = Store;
-        type Output = AuthorizedRequest;
-    }
-
-    /// Delete value by key.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct Delete {
-        /// The storage key.
-        pub key: String,
-    }
-
-    impl Delete {
-        /// Create a new Delete effect.
-        pub fn new(key: impl Into<String>) -> Self {
-            Self { key: key.into() }
-        }
-    }
-
-    impl Effect for Delete {
-        type Of = Store;
-        type Output = AuthorizedRequest;
-    }
-
-    /// List keys in store.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct List {
-        /// Continuation token for pagination.
-        pub continuation_token: Option<String>,
-    }
-
-    impl List {
-        /// Create a new List effect.
-        pub fn new(continuation_token: Option<String>) -> Self {
-            Self { continuation_token }
-        }
-    }
-
-    impl Effect for List {
-        type Of = Store;
-        type Output = AuthorizedRequest;
-    }
-
-    /// Build the S3 path for a storage effect.
-    pub fn path(store: &Store, key: &str) -> String {
-        if store.store.is_empty() {
-            key.to_string()
-        } else {
-            format!("{}/{}", store.store, key)
+impl Acl {
+    /// Get the S3 ACL header value.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::PublicRead => "public-read",
+            Self::PublicReadWrite => "public-read-write",
+            Self::AuthenticatedRead => "authenticated-read",
+            Self::BucketOwnerRead => "bucket-owner-read",
+            Self::BucketOwnerFullControl => "bucket-owner-full-control",
         }
     }
 }
 
-/// Memory capability effects for transactional operations.
-pub mod memory {
-    use super::*;
-
-    /// Edition identifier for CAS operations.
-    pub type Edition = String;
-
-    /// Precondition for memory operations.
-    #[derive(Debug, Clone, PartialEq)]
-    pub enum Precondition {
-        /// No precondition.
-        None,
-        /// Only succeed if edition matches.
-        IfMatch(Edition),
-        /// Only succeed if no current value exists.
-        IfNoneMatch,
+/// Get the current time as a UTC datetime.
+pub fn current_time() -> DateTime<Utc> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        DateTime::<Utc>::from(SystemTime::now().to_std())
     }
-
-    /// Root attenuation for memory operations.
-    ///
-    /// Attaches to Subject and provides the `/memory` command path segment.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct Memory;
-
-    impl Attenuation for Memory {
-        type Of = Subject;
-    }
-
-    /// Space policy that scopes operations to a memory space.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct Space {
-        /// The space name (typically a DID).
-        pub name: String,
-    }
-
-    impl Space {
-        /// Create a new Space policy.
-        pub fn new(name: impl Into<String>) -> Self {
-            Self { name: name.into() }
-        }
-    }
-
-    impl Policy for Space {
-        type Of = Memory;
-    }
-
-    /// Cell policy that scopes operations to a specific cell within a space.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct Cell {
-        /// The cell name.
-        pub name: String,
-    }
-
-    impl Cell {
-        /// Create a new Cell policy.
-        pub fn new(name: impl Into<String>) -> Self {
-            Self { name: name.into() }
-        }
-    }
-
-    impl Policy for Cell {
-        type Of = Space;
-    }
-
-    /// Resolve current cell content and edition.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct Resolve;
-
-    impl Effect for Resolve {
-        type Of = Cell;
-        type Output = AuthorizedRequest;
-    }
-
-    /// Publish cell content with CAS semantics.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct Publish {
-        /// Expected current edition for CAS. None means "if-none-match".
-        pub when: Option<Edition>,
-        /// Checksum for integrity verification.
-        pub checksum: Checksum,
-    }
-
-    impl Publish {
-        /// Create a new Publish effect.
-        pub fn new(when: Option<Edition>, checksum: Checksum) -> Self {
-            Self { when, checksum }
-        }
-
-        /// Get the precondition for this publish.
-        pub fn precondition(&self) -> Precondition {
-            match &self.when {
-                Some(edition) => Precondition::IfMatch(edition.clone()),
-                None => Precondition::IfNoneMatch,
-            }
-        }
-    }
-
-    impl Effect for Publish {
-        type Of = Cell;
-        type Output = AuthorizedRequest;
-    }
-
-    /// Retract cell with CAS semantics.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct Retract {
-        /// Required current edition.
-        pub when: Edition,
-    }
-
-    impl Retract {
-        /// Create a new Retract effect.
-        pub fn new(when: Edition) -> Self {
-            Self { when }
-        }
-
-        /// Get the precondition for this retract.
-        pub fn precondition(&self) -> Precondition {
-            Precondition::IfMatch(self.when.clone())
-        }
-    }
-
-    impl Effect for Retract {
-        type Of = Cell;
-        type Output = AuthorizedRequest;
-    }
-
-    /// Build the S3 path for a memory effect.
-    pub fn path(space: &Space, cell: &Cell) -> String {
-        format!("{}/{}", space.name, cell.name)
-    }
-}
-
-/// Archive capability effects for content-addressed storage operations.
-pub mod archive {
-    use super::*;
-    use dialog_common::Blake3Hash;
-
-    /// Root attenuation for archive operations.
-    ///
-    /// Attaches to Subject and provides the `/archive` command path segment.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct Archive;
-
-    impl Attenuation for Archive {
-        type Of = Subject;
-    }
-
-    /// Catalog policy that scopes operations to a named catalog.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct Catalog {
-        /// The catalog name (e.g., "index", "blobs").
-        pub catalog: String,
-    }
-
-    impl Catalog {
-        /// Create a new Catalog policy.
-        pub fn new(name: impl Into<String>) -> Self {
-            Self {
-                catalog: name.into(),
-            }
-        }
-    }
-
-    impl Policy for Catalog {
-        type Of = Archive;
-    }
-
-    /// Get content by digest.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct Get {
-        /// The blake3 digest of the content to retrieve.
-        pub digest: Blake3Hash,
-    }
-
-    impl Get {
-        /// Create a new Get effect.
-        pub fn new(digest: impl Into<Blake3Hash>) -> Self {
-            Self {
-                digest: digest.into(),
-            }
-        }
-    }
-
-    impl Effect for Get {
-        type Of = Catalog;
-        type Output = AuthorizedRequest;
-    }
-
-    /// Put content by digest with checksum.
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub struct Put {
-        /// The blake3 digest of the content.
-        pub digest: Blake3Hash,
-        /// Checksum for integrity verification.
-        pub checksum: Checksum,
-    }
-
-    impl Put {
-        /// Create a new Put effect.
-        pub fn new(digest: impl Into<Blake3Hash>, checksum: Checksum) -> Self {
-            Self {
-                digest: digest.into(),
-                checksum,
-            }
-        }
-    }
-
-    impl Effect for Put {
-        type Of = Catalog;
-        type Output = AuthorizedRequest;
-    }
-
-    /// Build the S3 path for an archive effect.
-    pub fn path(catalog: &Catalog, digest: &Blake3Hash) -> String {
-        use base58::ToBase58;
-        if catalog.catalog.is_empty() {
-            digest.as_bytes().to_base58()
-        } else {
-            format!("{}/{}", catalog.catalog, digest.as_bytes().to_base58())
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use dialog_common::capability::Capability;
-
-    #[test]
-    fn storage_get_command_path() {
-        let cap: Capability<storage::Get> = Subject::from("did:key:zSpace")
-            .attenuate(storage::Storage)
-            .attenuate(storage::Store::new("index"))
-            .invoke(storage::Get::new("my-key"));
-
-        assert_eq!(cap.subject(), "did:key:zSpace");
-        // Store is a Policy (not Attenuation), so only Storage and Get contribute
-        assert_eq!(cap.ability(), "/storage/get");
-    }
-
-    #[test]
-    fn storage_set_command_path() {
-        let checksum = Checksum::Sha256([0u8; 32]);
-        let cap: Capability<storage::Set> = Subject::from("did:key:zSpace")
-            .attenuate(storage::Storage)
-            .attenuate(storage::Store::new("blob"))
-            .invoke(storage::Set::new("my-key", checksum));
-
-        assert_eq!(cap.ability(), "/storage/set");
-    }
-
-    #[test]
-    fn memory_resolve_command_path() {
-        let cap: Capability<memory::Resolve> = Subject::from("did:key:zSpace")
-            .attenuate(memory::Memory)
-            .attenuate(memory::Space::new("did:key:zUser"))
-            .attenuate(memory::Cell::new("main"))
-            .invoke(memory::Resolve);
-
-        assert_eq!(cap.subject(), "did:key:zSpace");
-        // Space and Cell are Policies, only Memory and Resolve contribute
-        assert_eq!(cap.ability(), "/memory/resolve");
-    }
-
-    #[test]
-    fn memory_publish_command_path() {
-        let checksum = Checksum::Sha256([0u8; 32]);
-        let cap: Capability<memory::Publish> = Subject::from("did:key:zSpace")
-            .attenuate(memory::Memory)
-            .attenuate(memory::Space::new("did:key:zUser"))
-            .attenuate(memory::Cell::new("main"))
-            .invoke(memory::Publish::new(Some("etag-123".into()), checksum));
-
-        assert_eq!(cap.ability(), "/memory/publish");
-    }
-
-    #[test]
-    fn storage_path_helper() {
-        let store = storage::Store::new("index");
-        assert_eq!(storage::path(&store, "my-key"), "index/my-key");
-
-        let empty_store = storage::Store::new("");
-        assert_eq!(storage::path(&empty_store, "key"), "key");
-    }
-
-    #[test]
-    fn memory_path_helper() {
-        let space = memory::Space::new("did:key:zUser");
-        let cell = memory::Cell::new("main");
-        assert_eq!(memory::path(&space, &cell), "did:key:zUser/main");
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        DateTime::<Utc>::from(SystemTime::now())
     }
 }

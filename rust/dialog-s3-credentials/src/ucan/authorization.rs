@@ -5,7 +5,7 @@
 
 use super::delegation::DelegationChain;
 use super::invocation::InvocationChain;
-use crate::access::{AccessError, AuthorizedRequest, S3Request};
+use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
 use dialog_common::capability::{
     Ability, Authority, Authorization, AuthorizationError, Did, Effect, Parameters, Provider,

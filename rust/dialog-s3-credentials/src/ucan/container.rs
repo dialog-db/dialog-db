@@ -16,7 +16,7 @@
 //! - [`DelegationChain`](super::DelegationChain) - A chain of delegations
 //! - [`InvocationChain`](super::InvocationChain) - An invocation with its delegation chain
 
-use crate::access::AccessError;
+use crate::capability::AccessError;
 use ipld_core::ipld::Ipld;
 use std::collections::BTreeMap;
 
@@ -64,10 +64,8 @@ impl Container {
     /// - The container is empty
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, AccessError> {
         // Deserialize as a map with "ctn-v1" key
-        let container: BTreeMap<String, Ipld> =
-            serde_ipld_dagcbor::from_slice(bytes).map_err(|e| {
-                AccessError::Invocation(format!("failed to decode container: {}", e))
-            })?;
+        let container: BTreeMap<String, Ipld> = serde_ipld_dagcbor::from_slice(bytes)
+            .map_err(|e| AccessError::Invocation(format!("failed to decode container: {}", e)))?;
 
         // Extract the token array under "ctn-v1"
         let tokens_ipld = container.get(CONTAINER_VERSION).ok_or_else(|| {
@@ -110,9 +108,8 @@ impl Container {
         let mut container: BTreeMap<String, Ipld> = BTreeMap::new();
         container.insert(CONTAINER_VERSION.to_string(), Ipld::List(tokens));
 
-        serde_ipld_dagcbor::to_vec(&container).map_err(|e| {
-            AccessError::Invocation(format!("failed to encode container: {}", e))
-        })
+        serde_ipld_dagcbor::to_vec(&container)
+            .map_err(|e| AccessError::Invocation(format!("failed to encode container: {}", e)))
     }
 
     /// Check if the container is empty.
@@ -155,10 +152,12 @@ mod tests {
         let serialized = container.to_bytes().unwrap();
         let result = Container::from_bytes(&serialized);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("at least one token"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("at least one token")
+        );
     }
 
     #[test]

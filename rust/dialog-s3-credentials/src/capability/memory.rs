@@ -10,9 +10,54 @@
 
 use super::{AccessError, AuthorizedRequest, Precondition, S3Request};
 use crate::Checksum;
-pub use crate::capability::memory::{Cell, Memory, Space};
-use dialog_common::capability::{Capability, Effect, Policy};
+use dialog_common::capability::{Attenuation, Capability, Effect, Policy, Subject};
 use serde::{Deserialize, Serialize};
+
+/// Root attenuation for memory operations.
+///
+/// Attaches to Subject and provides the `/memory` command path segment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Memory;
+
+impl Attenuation for Memory {
+    type Of = Subject;
+}
+
+/// Space policy that scopes operations to a memory space.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Space {
+    /// The space name (typically a DID).
+    pub name: String,
+}
+
+impl Space {
+    /// Create a new Space policy.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+impl Policy for Space {
+    type Of = Memory;
+}
+
+/// Cell policy that scopes operations to a specific cell within a space.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Cell {
+    /// The cell name.
+    pub name: String,
+}
+
+impl Cell {
+    /// Create a new Cell policy.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+impl Policy for Cell {
+    type Of = Space;
+}
 
 /// Edition identifier for CAS operations.
 pub type Edition = String;

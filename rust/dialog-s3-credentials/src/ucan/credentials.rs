@@ -31,7 +31,7 @@
 
 use super::authorization::UcanAuthorization;
 use super::delegation::DelegationChain;
-use crate::access::{AccessError, AuthorizedRequest, S3Request, archive, memory, storage};
+use crate::capability::{AccessError, AuthorizedRequest, S3Request, archive, memory, storage};
 use async_trait::async_trait;
 use dialog_common::ConditionalSend;
 use dialog_common::Effect;

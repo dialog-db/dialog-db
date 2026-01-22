@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::fmt::Write;
 use url::Url;
 
-use crate::access::{AuthorizedRequest, S3Request};
+use crate::capability::{AuthorizedRequest, S3Request};
 pub use crate::credentials::Authorizer;
 use crate::{AccessError, Address};
 
@@ -518,30 +518,25 @@ mod tests {
     use super::*;
     use crate::Checksum;
     // Use capability module for Storage/Store hierarchy, access module for effects
-    use crate::access::storage as access_storage;
-    use crate::capability::storage::{Storage, Store};
+    use crate::capability::storage::{Get, List, Set, Storage, Store};
     use dialog_common::capability::{Capability, Subject};
 
     const TEST_SUBJECT: &str = "did:key:zTestSubject";
 
     /// Helper to build a storage Get capability.
-    fn get_capability(store: &str, key: &[u8]) -> Capability<access_storage::Get> {
+    fn get_capability(store: &str, key: &[u8]) -> Capability<Get> {
         Subject::from(TEST_SUBJECT)
             .attenuate(Storage)
             .attenuate(Store::new(store))
-            .invoke(access_storage::Get::new(key))
+            .invoke(Get::new(key))
     }
 
     /// Helper to build a storage Set capability.
-    fn set_capability(
-        store: &str,
-        key: &[u8],
-        checksum: Checksum,
-    ) -> Capability<access_storage::Set> {
+    fn set_capability(store: &str, key: &[u8], checksum: Checksum) -> Capability<Set> {
         Subject::from(TEST_SUBJECT)
             .attenuate(Storage)
             .attenuate(Store::new(store))
-            .invoke(access_storage::Set::new(key, checksum))
+            .invoke(Set::new(key, checksum))
     }
 
     #[dialog_common::test]

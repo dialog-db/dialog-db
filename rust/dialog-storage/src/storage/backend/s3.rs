@@ -130,13 +130,11 @@ use std::marker::PhantomData;
 use thiserror::Error;
 
 // Re-export core types from dialog-s3-credentials crate
-pub use dialog_s3_credentials::{
-    Address, AccessError as AccessError, AuthorizedRequest, Checksum, Hasher,
-};
+pub use dialog_s3_credentials::{AccessError, Address, AuthorizedRequest, Checksum, Hasher};
 // Use access module types for direct S3 authorization
 pub use dialog_s3_credentials::{
-    access,
-    access::{Precondition, S3Request},
+    capability,
+    capability::{Precondition, S3Request},
 };
 
 pub use crate::capability::{archive, memory, storage};
@@ -255,8 +253,11 @@ pub trait Authorizer: Clone + std::fmt::Debug + Send + Sync {
     fn authorize<C: S3Request>(&self, claim: &C) -> Result<AuthorizedRequest, AccessError>;
 }
 
-trait ArchiveProvider: Provider<access::archive::Get> + Provider<access::archive::Put> {}
-impl<P: Provider<access::archive::Get> + Provider<access::archive::Put>> ArchiveProvider for P {}
+trait ArchiveProvider: Provider<capability::archive::Get> + Provider<capability::archive::Put> {}
+impl<P: Provider<capability::archive::Get> + Provider<capability::archive::Put>> ArchiveProvider
+    for P
+{
+}
 
 #[derive(Debug, Clone)]
 pub struct S3Bucket<A: Access + ConditionalSend, P: Authority + ConditionalSend> {
@@ -268,7 +269,7 @@ pub struct S3Bucket<A: Access + ConditionalSend, P: Authority + ConditionalSend>
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<
     A: Access + Principal + ConditionalSend,
-    P: Provider<Authorized<access::archive::Get, A::Authorization>> + Authority + ConditionalSend,
+    P: Provider<Authorized<capability::archive::Get, A::Authorization>> + Authority + ConditionalSend,
 > Provider<archive::Get> for S3Bucket<A, P>
 where
     A::Authorization: ConditionalSend,
@@ -279,11 +280,11 @@ where
     ) -> Result<Option<Bytes>, archive::ArchiveError> {
         // obtain authorization for access::archive::Get
         let authorize = Subject::from(input.subject().to_string())
-            .attenuate(access::archive::Archive)
-            .attenuate(access::archive::Catalog {
+            .attenuate(capability::archive::Archive)
+            .attenuate(capability::archive::Catalog {
                 catalog: archive::Catalog::of(&input).catalog.clone(),
             })
-            .invoke(access::archive::Get {
+            .invoke(capability::archive::Get {
                 digest: archive::Get::of(&input).digest.clone(),
             })
             .acquire(&mut self.access)

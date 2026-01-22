@@ -14,8 +14,8 @@
 //! # Example
 //!
 //! ```no_run
-//! use dialog_s3_credentials::{Address, s3, access, Authorizer};
-//! use dialog_s3_credentials::capability::storage::{Storage, Store};
+//! use dialog_s3_credentials::{Address, s3, capability, Authorizer};
+//! use dialog_s3_credentials::capability::storage::{Storage, Store, Get, Set};
 //! use dialog_common::capability::{Capability, Subject};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -41,7 +41,7 @@
 //! let capability = Subject::from(subject)
 //!     .attenuate(Storage)
 //!     .attenuate(Store::new("index"))
-//!     .invoke(access::storage::Get::new(b"my-key"));
+//!     .invoke(Get::new(b"my-key"));
 //!
 //! // Sign the capability to get a presigned URL
 //! let permission = capability.perform(&mut credentials).await?;
@@ -52,7 +52,6 @@
 //! # }
 //! ```
 
-pub mod access;
 pub mod address;
 pub mod capability;
 pub mod checksum;
@@ -64,7 +63,7 @@ pub mod s3;
 pub mod ucan;
 
 // Primary exports
-pub use access::{AccessError, AuthorizedRequest, memory, storage};
 pub use address::Address;
+pub use capability::{AccessError, AuthorizedRequest, memory, storage};
 pub use checksum::{Checksum, Hasher};
 pub use credentials::Authorizer;

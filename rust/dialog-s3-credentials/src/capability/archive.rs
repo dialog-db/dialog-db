@@ -5,11 +5,40 @@
 
 use super::{AccessError, AuthorizedRequest, S3Request};
 use crate::Checksum;
-pub use crate::capability::archive::{Archive, Catalog};
 use base58::ToBase58;
 use dialog_common::Blake3Hash;
-use dialog_common::capability::{Capability, Effect, Policy};
+use dialog_common::capability::{Attenuation, Capability, Effect, Policy, Subject};
 use serde::{Deserialize, Serialize};
+
+/// Root attenuation for archive operations.
+///
+/// Attaches to Subject and provides the `/archive` command path segment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Archive;
+
+impl Attenuation for Archive {
+    type Of = Subject;
+}
+
+/// Catalog policy that scopes operations to a named catalog.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Catalog {
+    /// The catalog name (e.g., "index", "blobs").
+    pub catalog: String,
+}
+
+impl Catalog {
+    /// Create a new Catalog policy.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            catalog: name.into(),
+        }
+    }
+}
+
+impl Policy for Catalog {
+    type Of = Archive;
+}
 
 /// Get content by digest.
 #[derive(Debug, Clone, Serialize, Deserialize)]

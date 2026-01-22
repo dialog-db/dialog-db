@@ -8,7 +8,7 @@ use dialog_common::ConditionalSend;
 use dialog_common::capability::{Ability, Access, Capability, Claim, Effect, Provider};
 
 use super::{Authorizer, Credentials, S3Authorization};
-use crate::access::{AccessError, AuthorizedRequest, S3Request};
+use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -57,7 +57,7 @@ where
 mod tests {
     use super::*;
     use crate::Address;
-    use crate::access::{archive, memory, storage};
+    use crate::capability::{archive, memory, storage};
     use base58::ToBase58;
     use dialog_common::capability::Subject;
 

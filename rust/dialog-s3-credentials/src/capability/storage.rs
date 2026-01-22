@@ -12,10 +12,39 @@ use super::{AccessError, AuthorizedRequest, S3Request};
 use crate::Checksum;
 use base58::ToBase58;
 use dialog_common::Bytes;
-use dialog_common::capability::{Capability, Effect, Policy};
+use dialog_common::capability::{Attenuation, Capability, Effect, Policy, Subject};
 use serde::{Deserialize, Serialize};
 
-pub use crate::capability::storage::{Storage, Store};
+/// Root attenuation for storage operations.
+///
+/// Attaches to Subject and provides the `/storage` command path segment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Storage;
+
+impl Attenuation for Storage {
+    type Of = Subject;
+}
+
+/// Store policy that scopes operations to a named store.
+///
+/// This is a policy (not attenuation) so it doesn't contribute to the command path.
+/// It restricts operations to a specific store (e.g., "index", "blob").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Store {
+    /// The store name (e.g., "index", "blob").
+    pub store: String,
+}
+
+impl Store {
+    /// Create a new Store policy.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { store: name.into() }
+    }
+}
+
+impl Policy for Store {
+    type Of = Storage;
+}
 
 /// Get value by key.
 ///

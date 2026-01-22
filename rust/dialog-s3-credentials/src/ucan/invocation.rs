@@ -16,7 +16,7 @@
 //! closest to invoker to root.
 
 use super::container::Container;
-use crate::access::AccessError;
+use crate::capability::AccessError;
 use ipld_core::cid::Cid;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -143,9 +143,7 @@ impl TryFrom<Container> for InvocationChain {
 
         // First token is the invocation
         let invocation: Invocation<Ed25519Did> = serde_ipld_dagcbor::from_slice(&token_bytes[0])
-            .map_err(|e| {
-                AccessError::Invocation(format!("failed to decode invocation: {}", e))
-            })?;
+            .map_err(|e| AccessError::Invocation(format!("failed to decode invocation: {}", e)))?;
 
         // Remaining tokens are delegations - build a map keyed by CID
         let mut delegations: HashMap<Cid, Arc<Delegation<Ed25519Did>>> =
@@ -153,10 +151,7 @@ impl TryFrom<Container> for InvocationChain {
         for (i, bytes) in token_bytes.iter().skip(1).enumerate() {
             let delegation: Delegation<Ed25519Did> = serde_ipld_dagcbor::from_slice(bytes)
                 .map_err(|e| {
-                    AccessError::Invocation(format!(
-                        "failed to decode delegation {}: {}",
-                        i, e
-                    ))
+                    AccessError::Invocation(format!("failed to decode delegation {}: {}", i, e))
                 })?;
             let cid = delegation.to_cid();
             delegations.insert(cid, Arc::new(delegation));
@@ -203,12 +198,10 @@ impl From<CheckFailed> for AccessError {
             CheckFailed::RootProofIssuerIsNotSubject => {
                 AccessError::Invocation("root proof issuer is not the subject".to_string())
             }
-            CheckFailed::CommandMismatch { expected, found } => {
-                AccessError::Invocation(format!(
-                    "command mismatch: expected {:?}, found {:?}",
-                    expected, found
-                ))
-            }
+            CheckFailed::CommandMismatch { expected, found } => AccessError::Invocation(format!(
+                "command mismatch: expected {:?}, found {:?}",
+                expected, found
+            )),
             CheckFailed::PredicateFailed(predicate) => {
                 AccessError::Invocation(format!("predicate failed: {:?}", predicate))
             }
