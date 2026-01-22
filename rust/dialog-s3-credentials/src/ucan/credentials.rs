@@ -153,7 +153,6 @@ where
 
 #[cfg(test)]
 pub mod tests {
-    use super::super::authority::OperatorIdentity;
     use super::super::delegation::tests::{create_delegation, generate_signer};
     use super::*;
     use anyhow;

@@ -5,12 +5,12 @@
 
 use super::delegation::DelegationChain;
 use super::invocation::InvocationChain;
-use crate::access::{AccessError, AuthorizedRequest, archive, memory, storage};
-use dialog_common::Capability;
+use crate::access::{AccessError, AuthorizedRequest, S3Request};
+use async_trait::async_trait;
 use dialog_common::capability::{
-    Ability, Authority, Authorization, AuthorizationError, Authorized, Constraint, Did, Effect,
-    Parameters, Provider,
+    Ability, Authority, Authorization, AuthorizationError, Did, Effect, Parameters, Provider,
 };
+use dialog_common::{Capability, ConditionalSend};
 use ed25519_dalek::SigningKey;
 use ipld_core::ipld::Ipld;
 use std::collections::BTreeMap;
@@ -284,108 +284,17 @@ impl Authorization for UcanAuthorization {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<storage::Get> for UcanAuthorization {
+/// Blanket implementation provider ability to
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Do> Provider<Do> for UcanAuthorization
+where
+    Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
+    Capability<Do>: ConditionalSend + S3Request,
+{
     async fn execute(
         &mut self,
-        capability: Capability<storage::Get>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.grant(&capability).await
-    }
-}
-
-// Provider for storage::Set
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<storage::Set> for UcanAuthorization {
-    async fn execute(
-        &mut self,
-        capability: Capability<storage::Set>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.grant(&capability).await
-    }
-}
-
-// Provider for storage::Delete
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<storage::Delete> for UcanAuthorization {
-    async fn execute(
-        &mut self,
-        capability: Capability<storage::Delete>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.grant(&capability).await
-    }
-}
-
-// Provider for storage::List
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<storage::List> for UcanAuthorization {
-    async fn execute(
-        &mut self,
-        capability: Capability<storage::List>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.grant(&capability).await
-    }
-}
-
-// Provider for memory::Resolve
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<memory::Resolve> for UcanAuthorization {
-    async fn execute(
-        &mut self,
-        capability: Capability<memory::Resolve>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.grant(&capability).await
-    }
-}
-
-// Provider for memory::Publish
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<memory::Publish> for UcanAuthorization {
-    async fn execute(
-        &mut self,
-        capability: Capability<memory::Publish>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.grant(&capability).await
-    }
-}
-
-// Provider for memory::Retract
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<memory::Retract> for UcanAuthorization {
-    async fn execute(
-        &mut self,
-        capability: Capability<memory::Retract>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.grant(&capability).await
-    }
-}
-
-// Provider for archive::Get
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<archive::Get> for UcanAuthorization {
-    async fn execute(
-        &mut self,
-        capability: Capability<archive::Get>,
-    ) -> Result<AuthorizedRequest, AccessError> {
-        self.grant(&capability).await
-    }
-}
-
-// Provider for archive::Put
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<archive::Put> for UcanAuthorization {
-    async fn execute(
-        &mut self,
-        capability: Capability<archive::Put>,
+        capability: Capability<Do>,
     ) -> Result<AuthorizedRequest, AccessError> {
         self.grant(&capability).await
     }
