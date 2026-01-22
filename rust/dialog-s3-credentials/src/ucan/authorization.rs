@@ -6,7 +6,6 @@
 use super::delegation::DelegationChain;
 use super::invocation::InvocationChain;
 use crate::access::{AccessError, AuthorizedRequest, archive, memory, storage};
-use crate::capability;
 use dialog_common::Capability;
 use dialog_common::capability::{
     Ability, Authority, Authorization, AuthorizationError, Authorized, Constraint, Did, Effect,

@@ -30,7 +30,7 @@
 //! let subject = "did:key:zSubject";
 //!
 //! // Create credentials (public or private)
-//! let credentials = s3::Credentials::private(
+//! let mut credentials = s3::Credentials::private(
 //!     address,
 //!     "AKIAIOSFODNN7EXAMPLE",
 //!     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
@@ -44,7 +44,8 @@
 //!     .invoke(access::storage::Get::new(b"my-key"));
 //!
 //! // Sign the capability to get a presigned URL
-//! let permission = credentials.authorize(&capability).await?;
+//! let permission = capability.perform(&mut credentials).await?;
+
 //!
 //! println!("Presigned URL: {}", permission.url);
 //! # Ok(())

@@ -24,7 +24,7 @@ mod provider;
 pub use authority::{OperatorIdentity, UcanAuthority};
 pub use authorization::UcanAuthorization;
 pub use container::Container;
-pub use credentials::{Credentials, CredentialsBuilder};
+pub use credentials::Credentials;
 pub use delegation::DelegationChain;
 pub use invocation::InvocationChain;
 pub use provider::UcanAuthorizer;

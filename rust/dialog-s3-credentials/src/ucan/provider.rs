@@ -51,6 +51,7 @@ use super::invocation::InvocationChain;
 use crate::access::{AccessError, AuthorizedRequest};
 use crate::access::{archive, memory, storage};
 use crate::credentials::Authorizer;
+use crate::s3::Credentials;
 use base58::ToBase58;
 use dialog_common::capability::{Ability, Capability, Subject};
 
@@ -63,13 +64,13 @@ use dialog_common::capability::{Ability, Capability, Subject};
 
 /// 4. Delegates to wrapped credentials for presigned URLs
 #[derive(Debug, Clone)]
-pub struct UcanAuthorizer<C: Authorizer> {
-    credentials: C,
+pub struct UcanAuthorizer {
+    credentials: Credentials,
 }
 
-impl<C: Authorizer + Sync> UcanAuthorizer<C> {
+impl UcanAuthorizer {
     /// Create a new UCAN authorizer wrapping the given credentials.
-    pub fn new(credentials: C) -> Self {
+    pub fn new(credentials: Credentials) -> Self {
         Self { credentials }
     }
 
@@ -112,46 +113,46 @@ impl<C: Authorizer + Sync> UcanAuthorizer<C> {
             ["storage", "get"] => {
                 let effect = parse_storage_get(args)?;
                 let capability = build_storage_capability(&subject_did, args, effect)?;
-                self.credentials.authorize(&capability).await
+                self.credentials.grant(&capability).await
             }
             ["storage", "set"] => {
                 let effect = parse_storage_set(args)?;
                 let capability = build_storage_capability(&subject_did, args, effect)?;
-                self.credentials.authorize(&capability).await
+                self.credentials.grant(&capability).await
             }
             ["storage", "delete"] => {
                 let effect = parse_storage_delete(args)?;
                 let capability = build_storage_capability(&subject_did, args, effect)?;
-                self.credentials.authorize(&capability).await
+                self.credentials.grant(&capability).await
             }
             ["storage", "list"] => {
                 let effect = parse_storage_list(args)?;
                 let capability = build_storage_capability(&subject_did, args, effect)?;
-                self.credentials.authorize(&capability).await
+                self.credentials.grant(&capability).await
             }
 
             // Memory commands
             ["memory", "resolve"] => {
                 let capability = build_memory_resolve_capability(&subject_did, args)?;
-                self.credentials.authorize(&capability).await
+                self.credentials.grant(&capability).await
             }
             ["memory", "publish"] => {
                 let capability = build_memory_publish_capability(&subject_did, args)?;
-                self.credentials.authorize(&capability).await
+                self.credentials.grant(&capability).await
             }
             ["memory", "retract"] => {
                 let capability = build_memory_retract_capability(&subject_did, args)?;
-                self.credentials.authorize(&capability).await
+                self.credentials.grant(&capability).await
             }
 
             // Archive commands
             ["archive", "get"] => {
                 let capability = build_archive_get_capability(&subject_did, args)?;
-                self.credentials.authorize(&capability).await
+                self.credentials.grant(&capability).await
             }
             ["archive", "put"] => {
                 let capability = build_archive_put_capability(&subject_did, args)?;
-                self.credentials.authorize(&capability).await
+                self.credentials.grant(&capability).await
             }
 
             _ => Err(AccessError::Invocation(format!(

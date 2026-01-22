@@ -20,11 +20,8 @@ impl Access for Credentials {
         &self,
         claim: Claim<C>,
     ) -> Result<Self::Authorization, Self::Error> {
-        // For direct S3, we only support self-issued authorization.
-        // If the claim's subject matches our DID, we self-issue.
-        // Otherwise, we need delegation (not supported for direct S3).
-
-        // Self-issue
+        // Authorization captures credentials so that pre-singed URL can
+        // be issued when requested
         Ok(S3Authorization::new(
             self.clone(),
             claim.subject().clone(),
@@ -34,6 +31,7 @@ impl Access for Credentials {
     }
 }
 
+/// Blanket implementation provider ability to
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Do> Provider<Do> for Credentials
@@ -45,7 +43,7 @@ where
         &mut self,
         capability: Capability<Do>,
     ) -> Result<AuthorizedRequest, AccessError> {
-        self.authorize(&capability).await
+        self.grant(&capability).await
     }
 }
 

@@ -61,7 +61,7 @@ impl S3Authorization {
     /// This generates either an unsigned URL (for public credentials) or a
     /// presigned URL with AWS SigV4 signature (for private credentials).
     async fn authorize<R: S3Request>(&self, request: &R) -> Result<AuthorizedRequest, AccessError> {
-        self.credentials.authorize(request).await
+        self.credentials.grant(request).await
     }
 }
 

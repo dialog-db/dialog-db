@@ -1,6 +1,5 @@
 //! S3 credentials for direct access.
 
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -9,7 +8,7 @@ use url::Url;
 
 use crate::access::{AuthorizedRequest, S3Request};
 pub use crate::credentials::Authorizer;
-use crate::{Address, AccessError};
+use crate::{AccessError, Address};
 
 use super::{build_url, extract_host, is_path_style_default};
 
@@ -75,16 +74,9 @@ impl PublicCredentials {
     pub fn build_url(&self, path: &str) -> Result<Url, AccessError> {
         build_url(&self.endpoint, self.address.bucket(), path, self.path_style)
     }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Authorizer for PublicCredentials {
-    /// Authorize a claim by generating an unsigned URL for public access.
-    async fn authorize<R: S3Request>(
-        &self,
-        request: &R,
-    ) -> Result<AuthorizedRequest, AccessError> {
+    /// Generates an unsigned URL for public access.
+    pub async fn grant<R: S3Request>(&self, request: &R) -> Result<AuthorizedRequest, AccessError> {
         let path = request.path();
         let mut url = self.build_url(&path)?;
 
@@ -185,17 +177,9 @@ impl PrivateCredentials {
     pub fn build_url(&self, path: &str) -> Result<Url, AccessError> {
         build_url(&self.endpoint, self.address.bucket(), path, self.path_style)
     }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Authorizer for PrivateCredentials {
-    /// Authorize a claim by generating an unsigned URL for public access.
-    /// Authorize a claim by generating an unsigned URL for public access.
-    async fn authorize<R: S3Request>(
-        &self,
-        request: &R,
-    ) -> Result<AuthorizedRequest, AccessError> {
+    /// Generates an signed URL
+    async fn grant<R: S3Request>(&self, request: &R) -> Result<AuthorizedRequest, AccessError> {
         let time = current_time();
         let timestamp = time.format("%Y%m%dT%H%M%SZ").to_string();
         let date = &timestamp[0..8];
@@ -432,24 +416,13 @@ impl Credentials {
             Self::Private(c) => c.build_url(path),
         }
     }
-}
 
-
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Authorizer for Credentials {
-    /// Authorize a claim and produce a request descriptor.
-    ///
-    /// This generates either an unsigned URL (for public credentials) or a
+    /// Generates either an unsigned URL (for public credentials) or a
     /// presigned URL with AWS SigV4 signature (for private credentials).
-    async fn authorize<R: S3Request>(
-        &self,
-        request: &R,
-    ) -> Result<AuthorizedRequest, AccessError> {
+    pub async fn grant<R: S3Request>(&self, request: &R) -> Result<AuthorizedRequest, AccessError> {
         match self {
-            Self::Public(c) => c.authorize(request).await,
-            Self::Private(c) => c.authorize(request).await,
+            Self::Public(public) => public.grant(request).await,
+            Self::Private(private) => private.grant(request).await,
         }
     }
 }
@@ -540,8 +513,6 @@ fn current_time() -> DateTime<Utc> {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,7 +554,7 @@ mod tests {
         let creds = PublicCredentials::new(address).unwrap();
 
         let get = get_capability("index", b"test-key");
-        let descriptor = creds.authorize(&get).await.unwrap();
+        let descriptor = creds.grant(&get).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
         assert!(descriptor.url.as_str().contains("my-bucket"));
@@ -600,7 +571,7 @@ mod tests {
         let creds = PrivateCredentials::new(address, "AKIATEST", "secret123").unwrap();
 
         let get = get_capability("index", b"test-key");
-        let descriptor = creds.authorize(&get).await.unwrap();
+        let descriptor = creds.grant(&get).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
         assert!(descriptor.url.as_str().contains("X-Amz-Signature="));
@@ -617,7 +588,7 @@ mod tests {
         let creds = Credentials::public(address).unwrap();
 
         let get = get_capability("", b"key");
-        let descriptor = creds.authorize(&get).await.unwrap();
+        let descriptor = creds.grant(&get).await.unwrap();
 
         assert_eq!(descriptor.method, "GET");
     }
@@ -633,7 +604,7 @@ mod tests {
 
         let checksum = Checksum::Sha256([0u8; 32]);
         let set = set_capability("store", b"key", checksum);
-        let descriptor = creds.authorize(&set).await.unwrap();
+        let descriptor = creds.grant(&set).await.unwrap();
 
         assert!(
             descriptor
