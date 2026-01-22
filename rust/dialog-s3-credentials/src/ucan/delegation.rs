@@ -20,8 +20,8 @@ use ipld_core::cid::Cid;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::sync::Arc;
-use ucan::did::Ed25519Did;
 use ucan::Delegation;
+use ucan::did::Ed25519Did;
 
 /// A chain of UCAN delegations proving authority over a subject.
 ///
@@ -124,7 +124,6 @@ impl DelegationChain {
         self.delegations.get(cid).unwrap().audience()
     }
 
-
     /// Get the subject of the delegation chain.
     ///
     /// Per UCAN spec, the last delegation's `iss` (issuer) should match the `sub` (subject).
@@ -180,10 +179,7 @@ impl DelegationChain {
     ///
     /// Returns an error if the new delegation's issuer doesn't match the current
     /// chain's audience.
-    pub fn extend(
-        &self,
-        delegation: Delegation<Ed25519Did>,
-    ) -> Result<Self, AuthorizationError> {
+    pub fn extend(&self, delegation: Delegation<Ed25519Did>) -> Result<Self, AuthorizationError> {
         // Verify principal alignment: new delegation's issuer must match current audience
         let current_audience = self.audience();
         let new_issuer = delegation.issuer();
@@ -244,7 +240,9 @@ impl TryFrom<Vec<Delegation<Ed25519Did>>> for DelegationChain {
             if current.issuer() != next.audience() {
                 return Err(AuthorizationError::Invocation(format!(
                     "Principal alignment error at position {}: delegation issuer '{}' does not match next delegation audience '{}'",
-                    i, current.issuer(), next.audience()
+                    i,
+                    current.issuer(),
+                    next.audience()
                 )));
             }
         }
@@ -292,8 +290,8 @@ impl TryFrom<Container> for DelegationChain {
         let mut delegations_vec: Vec<Delegation<Ed25519Did>> =
             Vec::with_capacity(token_bytes.len());
         for (i, bytes) in token_bytes.iter().enumerate() {
-            let delegation: Delegation<Ed25519Did> =
-                serde_ipld_dagcbor::from_slice(bytes).map_err(|e| {
+            let delegation: Delegation<Ed25519Did> = serde_ipld_dagcbor::from_slice(bytes)
+                .map_err(|e| {
                     AuthorizationError::Invocation(format!(
                         "failed to decode delegation {}: {}",
                         i, e
@@ -367,15 +365,22 @@ pub mod tests {
         issuer: &Ed25519Signer,
         audience: &Ed25519Did,
         subject: &Ed25519Did,
-        command: Vec<String>,
+        command: &[&str],
     ) -> Result<Delegation<Ed25519Did>, AuthorizationError> {
         DelegationBuilder::new()
             .issuer(issuer.clone())
             .audience(audience.clone())
             .subject(DelegatedSubject::Specific(subject.clone()))
-            .command(command)
+            .command(
+                command
+                    .iter()
+                    .map(|&s| s.to_string()) // or .map(String::from)
+                    .collect(),
+            )
             .try_build()
-            .map_err(|e| AuthorizationError::Invocation(format!("Failed to build delegation: {:?}", e)))
+            .map_err(|e| {
+                AuthorizationError::Invocation(format!("Failed to build delegation: {:?}", e))
+            })
     }
 
     #[test]
@@ -507,10 +512,12 @@ pub mod tests {
 
         let result = chain.extend(bad_delegation);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Principal alignment error"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Principal alignment error")
+        );
     }
 
     #[test]
@@ -545,10 +552,12 @@ pub mod tests {
         // But operator2 != operator1, so this should fail
         let result = DelegationChain::try_from(vec![delegation1, delegation2]);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Principal alignment error"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Principal alignment error")
+        );
     }
 
     #[test]

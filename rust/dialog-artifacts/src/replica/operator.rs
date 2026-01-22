@@ -1,6 +1,8 @@
 pub use super::Replica;
 use super::principal::Principal;
-use super::{Formatter, PlatformBackend, ReplicaError, SECRET_KEY_LENGTH, Signature, SignerMut, SigningKey};
+use super::{
+    Formatter, PlatformBackend, ReplicaError, SECRET_KEY_LENGTH, Signature, SignerMut, SigningKey,
+};
 pub use dialog_common::capability::Did;
 
 /// Represents a principal operating a replica.
@@ -67,8 +69,9 @@ impl Operator {
 
 #[cfg(test)]
 mod tests {
+    use super::super::remote::RemoteCredentials;
     use super::*;
-    use dialog_common;
+    use dialog_common::{self, Blake3Hash};
     use dialog_storage::{CborEncoder, MemoryStorageBackend};
 
     #[dialog_common::test]
@@ -77,7 +80,18 @@ mod tests {
 
         let operator = Operator::from_passphrase("secret");
         let subject = Operator::from_passphrase("repo").did().to_string();
-        let _repository = operator.open(subject, backend)?;
+        let repository = operator.open(subject, backend)?;
+
+        let origin = repository
+            .remotes
+            .add_v2(
+                "origin",
+                RemoteCredentials::ucan("https://ucan.tonk.workers.dev", None),
+            )
+            .await?;
+
+        let upstream = origin.repository(subject).branch("main");
+        let index = upstream.index();
 
         Ok(())
     }

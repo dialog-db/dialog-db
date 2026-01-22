@@ -1,3 +1,9 @@
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer, de,
+    de::{SeqAccess, Visitor},
+};
+use std::fmt;
+
 /// The size of a BLAKE3 hash in bytes.
 ///
 /// BLAKE3 produces 256-bit (32-byte) hashes by default.
@@ -17,7 +23,7 @@ pub const BLAKE3_HASH_SIZE: usize = 32;
 /// let data = b"hello world";
 /// let hash = Blake3Hash::hash(data);
 /// ```
-#[derive(Clone, Default, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Blake3Hash([u8; 32]);
 
@@ -62,5 +68,68 @@ impl TryFrom<Vec<u8>> for Blake3Hash {
     fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
         let arr: [u8; 32] = bytes.try_into()?;
         Ok(Self(arr))
+    }
+}
+
+/// We want to serialize hashes as byte
+impl Serialize for Blake3Hash {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+/// Deserializes byte into Blake3Hash
+impl<'de> Deserialize<'de> for Blake3Hash {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Blake3HashVisitor;
+
+        impl<'de> Visitor<'de> for Blake3HashVisitor {
+            type Value = Blake3Hash;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a 32-byte Blake3 hash")
+            }
+
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if v.len() != 32 {
+                    return Err(E::invalid_length(v.len(), &self));
+                }
+
+                let mut bytes = [0u8; 32];
+                bytes.copy_from_slice(v);
+                Ok(Blake3Hash(bytes))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut bytes = [0u8; 32];
+
+                for i in 0..32 {
+                    bytes[i] = seq
+                        .next_element()?
+                        .ok_or_else(|| de::Error::invalid_length(i, &self))?;
+                }
+
+                // Ensure no trailing elements
+                if seq.next_element::<u8>()?.is_some() {
+                    return Err(de::Error::invalid_length(33, &self));
+                }
+
+                Ok(Blake3Hash(bytes))
+            }
+        }
+
+        deserializer.deserialize_bytes(Blake3HashVisitor)
     }
 }

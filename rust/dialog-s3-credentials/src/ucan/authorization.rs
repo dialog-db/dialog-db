@@ -90,20 +90,23 @@ impl UcanAuthorization {
     }
 
     /// Create an authorization from a delegation chain.
-    pub fn delegated(chain: DelegationChain, parameters: Parameters) -> Self {
+    pub fn delegated(
+        chain: DelegationChain,
+        can: impl Into<String>,
+        parameters: Parameters,
+    ) -> Self {
         // Pre-compute and cache the string representations
         let subject = chain
             .subject()
             .map(|did| did.to_string())
             .unwrap_or_default();
         let audience = chain.audience().to_string();
-        let can = chain.can();
 
         Self::Delegated {
+            can: can.into(),
             chain,
             subject,
             audience,
-            can,
             parameters,
         }
     }
@@ -195,12 +198,16 @@ impl Authorization for UcanAuthorization {
                 .map(|c| c.delegations().clone())
                 .unwrap_or_default();
 
-            Ok(Self::Invocation {
-                chain: InvocationChain::new(invocation, delegations),
+            let invocation = InvocationChain::new(invocation, delegations);
+
+            let authorization = Self::Invocation {
+                chain: invocation,
                 subject: self.subject().clone(),
                 can: self.can().into(),
                 parameters: self.parameters().clone(),
-            })
+            };
+
+            Ok(authorization)
         }
     }
 }
@@ -234,13 +241,14 @@ mod tests {
             &subject_signer,
             operator_signer.did(),
             &subject_did,
-            vec!["storage".to_string(), "get".to_string()],
+            &["storage", "get"],
         )
         .unwrap();
 
         let chain = DelegationChain::new(delegation);
         let auth = UcanAuthorization::delegated(
             chain,
+            "/storage/get",
             BTreeMap::from([("key".to_string(), Ipld::Bytes(b"hello".into()))]),
         );
 

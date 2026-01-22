@@ -25,23 +25,17 @@
 //! // Build authorizer with delegation for a subject
 //! let authorizer = Credentials::builder()
 //!     .service_url("https://access.example.com")
-//!     .operator(operator)
 //!     .delegation("did:key:z6Mk...", delegation_chain)
 //!     .build()?;
 //! ```
 
-use std::collections::BTreeMap;
-use ucan::did::Ed25519Did;
-use ucan::invocation::builder::InvocationBuilder;
-
-use super::authority::OperatorIdentity;
 use super::authorization::UcanAuthorization;
-use super::authorization::parameters_to_args;
 use super::delegation::DelegationChain;
-use super::invocation::InvocationChain;
 use crate::access::{AuthorizationError, AuthorizedRequest, archive, memory, storage};
 use dialog_common::ConditionalSend;
-use dialog_common::capability::{Ability, Access, Authorized, Parameters, Provider};
+use dialog_common::Effect;
+use dialog_common::capability::{Ability, Access, Authorized, Claim, Did, Parameters, Provider};
+use reqwest;
 
 /// UCAN-based authorizer that delegates to an external access service.
 ///
@@ -72,17 +66,19 @@ use dialog_common::capability::{Ability, Access, Authorized, Parameters, Provide
 #[derive(Debug, Clone)]
 pub struct Credentials {
     /// The access service URL to POST invocations to.
-    service_url: String,
-    /// The operator identity (signs invocations).
-    operator: OperatorIdentity,
+    endpoint: String,
     /// The delegation chain proving authority from subject to operator.
     /// Order: first delegation's `aud` matches operator, last delegation's `iss` matches subject.
     delegation: DelegationChain,
-    /// HTTP client for making requests.
-    client: reqwest::Client,
 }
 
 impl Credentials {
+    pub fn new(endpoint: String, delegation: DelegationChain) -> Self {
+        Self {
+            endpoint,
+            delegation,
+        }
+    }
     /// Create a new builder for `Credentials`.
     pub fn builder() -> CredentialsBuilder {
         CredentialsBuilder::default()
@@ -90,12 +86,7 @@ impl Credentials {
 
     /// Returns the access service URL.
     pub fn service_url(&self) -> &str {
-        &self.service_url
-    }
-
-    /// Returns the operator identity.
-    pub fn operator(&self) -> &OperatorIdentity {
-        &self.operator
+        &self.endpoint
     }
 
     /// Returns the delegation chain.
@@ -103,66 +94,25 @@ impl Credentials {
         &self.delegation
     }
 
-    /// Authorize a capability via the UCAN access service.
-    ///
-    /// This method:
-    /// 1. Verifies the capability subject matches this credentials' subject
-    /// 2. Creates a UCAN invocation for the capability
-    /// 3. Builds an InvocationChain (UCAN container)
-    /// 4. POSTs it to the access service
-    /// 5. Returns the RequestDescriptor from the response
-    async fn authorize<C: Ability>(
+    /// Executes authorized effect
+    async fn authorize<C: Effect>(
         &self,
-        capability: &C,
+        authorization: Authorized<C, UcanAuthorization>,
     ) -> Result<AuthorizedRequest, AuthorizationError> {
-        let capability_subject = capability.subject();
-
-        // 2. Parse subject DID
-        let subject: Ed25519Did = capability
-            .subject()
-            .parse()
-            .map_err(|e| AuthorizationError::Service(format!("Invalid subject DID: {:?}", e)))?;
-
-        // 3. Get UCAN command path and arguments from capability
-        let command_path = capability.command();
-        let ucan_command: Vec<String> = command_path
-            .trim_start_matches('/')
-            .split('/')
-            .map(|s| s.to_string())
-            .collect();
-
-        let mut parameters = BTreeMap::new();
-        capability.parametrize(&mut parameters);
-
-        let args = parameters_to_args(parameters);
-
-        // 4. Build invocation
-        // - issuer: the operator (who is making the request)
-        // - audience: the subject (per UCAN spec: "sub throughout MUST match the aud of the Invocation")
-        // - subject: the resource being accessed
-        // - proofs: delegation chain from subject to operator
-        let invocation = InvocationBuilder::new()
-            .issuer(self.operator.signer().clone())
-            .audience(subject.clone())
-            .subject(subject)
-            .command(ucan_command)
-            .arguments(args)
-            .proofs(self.delegation.proof_cids().to_vec())
-            .try_build()
-            .map_err(|e| AuthorizationError::Invocation(format!("{:?}", e)))?;
-
-        // 5. Build InvocationChain (UCAN container)
-        let chain = InvocationChain::new(invocation, self.delegation.delegations().clone());
-
-        // 6. Serialize to CBOR
-        let container_bytes = chain.to_bytes()?;
+        // Serialize authorization
+        let ucan = authorization
+            .authorization()
+            .chain()
+            .ok_or(AuthorizationError::Invocation(
+                "Authorization is not valid".into(),
+            ))
+            .map(|ch| ch.to_bytes())??;
 
         // 7. POST to access service
-        let response = self
-            .client
-            .post(&self.service_url)
+        let response = reqwest::Client::new()
+            .post(&self.endpoint)
             .header("Content-Type", "application/cbor")
-            .body(container_bytes)
+            .body(ucan)
             .send()
             .await
             .map_err(|e| AuthorizationError::Service(e.to_string()))?;
@@ -200,7 +150,7 @@ impl Access for Credentials {
 
     async fn claim<C: Ability + Clone + ConditionalSend + 'static>(
         &self,
-        claim: dialog_common::capability::Claim<C>,
+        claim: Claim<C>,
     ) -> Result<Self::Authorization, Self::Error> {
         // Verify the claim's subject matches our delegation's subject
 
@@ -221,6 +171,7 @@ impl Access for Credentials {
         // Return authorization from the delegation chain
         Ok(UcanAuthorization::delegated(
             self.delegation.clone(),
+            claim.capability().command(),
             parameters,
         ))
     }
@@ -240,7 +191,7 @@ impl Provider<Authorized<storage::Get, UcanAuthorization>> for Credentials {
         &mut self,
         authorized: Authorized<storage::Get, UcanAuthorization>,
     ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized.capability()).await
+        self.authorize(authorized).await
     }
 }
 
@@ -252,7 +203,7 @@ impl Provider<Authorized<storage::Set, UcanAuthorization>> for Credentials {
         &mut self,
         authorized: Authorized<storage::Set, UcanAuthorization>,
     ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized.capability()).await
+        self.authorize(authorized).await
     }
 }
 
@@ -264,7 +215,7 @@ impl Provider<Authorized<storage::Delete, UcanAuthorization>> for Credentials {
         &mut self,
         authorized: Authorized<storage::Delete, UcanAuthorization>,
     ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized.capability()).await
+        self.authorize(authorized).await
     }
 }
 
@@ -276,7 +227,7 @@ impl Provider<Authorized<storage::List, UcanAuthorization>> for Credentials {
         &mut self,
         authorized: Authorized<storage::List, UcanAuthorization>,
     ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized.capability()).await
+        self.authorize(authorized).await
     }
 }
 
@@ -288,7 +239,7 @@ impl Provider<Authorized<memory::Resolve, UcanAuthorization>> for Credentials {
         &mut self,
         authorized: Authorized<memory::Resolve, UcanAuthorization>,
     ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized.capability()).await
+        self.authorize(authorized).await
     }
 }
 
@@ -300,7 +251,7 @@ impl Provider<Authorized<memory::Publish, UcanAuthorization>> for Credentials {
         &mut self,
         authorized: Authorized<memory::Publish, UcanAuthorization>,
     ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized.capability()).await
+        self.authorize(authorized).await
     }
 }
 
@@ -312,7 +263,7 @@ impl Provider<Authorized<memory::Retract, UcanAuthorization>> for Credentials {
         &mut self,
         authorized: Authorized<memory::Retract, UcanAuthorization>,
     ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized.capability()).await
+        self.authorize(authorized).await
     }
 }
 
@@ -324,7 +275,7 @@ impl Provider<Authorized<archive::Get, UcanAuthorization>> for Credentials {
         &mut self,
         authorized: Authorized<archive::Get, UcanAuthorization>,
     ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized.capability()).await
+        self.authorize(authorized).await
     }
 }
 
@@ -336,7 +287,7 @@ impl Provider<Authorized<archive::Put, UcanAuthorization>> for Credentials {
         &mut self,
         authorized: Authorized<archive::Put, UcanAuthorization>,
     ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized.capability()).await
+        self.authorize(authorized).await
     }
 }
 
@@ -352,9 +303,7 @@ impl Provider<Authorized<archive::Put, UcanAuthorization>> for Credentials {
 /// - `delegation`: The delegation chain proving authority
 #[derive(Default)]
 pub struct CredentialsBuilder {
-    service_url: Option<String>,
-    operator: Option<OperatorIdentity>,
-    subject: Option<String>,
+    endpoint: Option<String>,
     delegation: Option<DelegationChain>,
 }
 
@@ -364,24 +313,7 @@ impl CredentialsBuilder {
     /// This is the base URL of the service that will validate UCAN invocations
     /// and return pre-signed S3 URLs.
     pub fn service_url(mut self, url: impl Into<String>) -> Self {
-        self.service_url = Some(url.into());
-        self
-    }
-
-    /// Set the operator identity for signing invocations.
-    ///
-    /// The operator is the entity making requests. They must have been
-    /// delegated authority by the subject.
-    pub fn operator(mut self, operator: OperatorIdentity) -> Self {
-        self.operator = Some(operator);
-        self
-    }
-
-    /// Set the subject DID (resource owner).
-    ///
-    /// This is the DID that owns the resources being accessed.
-    pub fn subject(mut self, subject_did: impl Into<String>) -> Self {
-        self.subject = Some(subject_did.into());
+        self.endpoint = Some(url.into());
         self
     }
 
@@ -402,88 +334,106 @@ impl CredentialsBuilder {
     /// cannot be constructed.
     pub fn build(self) -> Result<Credentials, AuthorizationError> {
         let service_url = self
-            .service_url
+            .endpoint
             .ok_or_else(|| AuthorizationError::Configuration("service_url is required".into()))?;
-
-        let operator = self
-            .operator
-            .ok_or_else(|| AuthorizationError::Configuration("operator is required".into()))?;
 
         let delegation = self
             .delegation
             .ok_or_else(|| AuthorizationError::Configuration("delegation is required".into()))?;
 
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| AuthorizationError::Service(e.to_string()))?;
-
         Ok(Credentials {
-            service_url,
-            operator,
+            endpoint: service_url,
             delegation,
-            client,
         })
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
+    use std::panic::AssertUnwindSafe;
+
+    use super::super::authority::OperatorIdentity;
     use super::super::delegation::tests::{create_delegation, generate_signer};
     use super::*;
+    use crate::access::archive::{self, Archive};
+    use anyhow;
+    use dialog_common::capability::{Principal, Subject};
+    use dialog_common::{Authority, Authorization, Blake3Hash};
+    use ed25519_dalek::ed25519::signature::SignerMut;
+    use ucan::did::{Ed25519Did, Ed25519Signer};
+    use ucan::promise::Promised;
 
     /// Helper to create a test delegation chain from subject to operator.
-    fn test_delegation_chain(
+    pub fn test_delegation_chain(
         subject_signer: &ucan::did::Ed25519Signer,
         operator_did: &Ed25519Did,
+        can: &[&str],
     ) -> DelegationChain {
         let subject_did = subject_signer.did().clone();
-        let delegation = create_delegation(
-            subject_signer,
-            operator_did,
-            &subject_did,
-            vec!["storage".to_string()],
-        )
-        .expect("Failed to create test delegation");
+        let delegation = create_delegation(subject_signer, operator_did, &subject_did, can)
+            .expect("Failed to create test delegation");
         DelegationChain::new(delegation)
+    }
+
+    pub struct Session {
+        credentials: Credentials,
+        signer: ed25519_dalek::SigningKey,
+        did: Did,
+    }
+    impl Session {
+        pub fn new(credentials: Credentials, secret: &[u8; 32]) -> Self {
+            let signer = ed25519_dalek::SigningKey::from_bytes(secret);
+
+            Session {
+                did: Ed25519Signer::from(signer.clone()).did().to_string(),
+                signer,
+                credentials,
+            }
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Access for Session {
+        type Authorization = UcanAuthorization;
+        type Error = AuthorizationError;
+
+        async fn claim<C: Ability + Clone + ConditionalSend + 'static>(
+            &self,
+            claim: Claim<C>,
+        ) -> Result<Self::Authorization, Self::Error> {
+            self.credentials.claim(claim).await
+        }
+    }
+    impl Principal for Session {
+        fn did(&self) -> &Did {
+            &self.did
+        }
+    }
+    impl Authority for Session {
+        fn sign(&mut self, payload: &[u8]) -> Vec<u8> {
+            self.signer.sign(payload).to_vec()
+        }
+        fn secret_key_bytes(&self) -> Option<[u8; 32]> {
+            self.signer.to_bytes().into()
+        }
     }
 
     #[test]
     fn test_builder_missing_service_url() {
         let subject_signer = generate_signer();
         let operator = OperatorIdentity::from_secret(&[0u8; 32]);
-        let chain = test_delegation_chain(&subject_signer, &operator.did());
+        let chain = test_delegation_chain(&subject_signer, &operator.did(), &["storage"]);
 
-        let result = Credentials::builder()
-            .operator(operator)
-            .subject(subject_signer.did().to_string())
-            .delegation(chain)
-            .build();
+        let result = Credentials::builder().delegation(chain).build();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("service_url"));
-    }
-
-    #[test]
-    fn test_builder_missing_operator() {
-        let subject_signer = generate_signer();
-        let operator = OperatorIdentity::from_secret(&[0u8; 32]);
-        let chain = test_delegation_chain(&subject_signer, &operator.did());
-
-        let result = Credentials::builder()
-            .service_url("https://example.com")
-            .subject(subject_signer.did().to_string())
-            .delegation(chain)
-            .build();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("operator"));
     }
 
     #[test]
     fn test_builder_missing_delegation() {
         let result = Credentials::builder()
             .service_url("https://example.com")
-            .operator(OperatorIdentity::from_secret(&[0u8; 32]))
-            .subject("did:key:z6MkTest")
             .build();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("delegation"));
@@ -493,17 +443,65 @@ mod tests {
     fn test_builder_success() {
         let subject_signer = generate_signer();
         let operator = OperatorIdentity::from_secret(&[0u8; 32]);
-        let chain = test_delegation_chain(&subject_signer, &operator.did());
-        let subject_did = subject_signer.did().to_string();
+        let chain = test_delegation_chain(&subject_signer, &operator.did(), &["storage"]);
 
-        let authorizer = Credentials::builder()
+        let credentials = Credentials::builder()
             .service_url("https://access.example.com")
-            .operator(operator)
-            .subject(&subject_did)
             .delegation(chain)
             .build()
             .unwrap();
 
-        assert_eq!(authorizer.service_url(), "https://access.example.com");
+        assert_eq!(credentials.service_url(), "https://access.example.com");
+    }
+
+    #[dialog_common::test]
+    async fn test_access() -> anyhow::Result<()> {
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
+        let operator = Ed25519Signer::from(signer);
+
+        let credentials = Credentials {
+            endpoint: "https://access.ucan.com".into(),
+            delegation: test_delegation_chain(&operator, &operator.did(), &["archive"]),
+        };
+
+        let mut session = Session::new(credentials, &[0u8; 32]);
+
+        let read = Subject::from(session.did().to_string())
+            .attenuate(archive::Archive)
+            .attenuate(archive::Catalog {
+                catalog: "blobs".into(),
+            })
+            .invoke(archive::Get {
+                digest: Blake3Hash::hash(b"hello"),
+            })
+            .acquire(&mut session)
+            .await?;
+
+        let authorization = read.authorization().invoke(&session)?;
+
+        let ucan = match authorization {
+            UcanAuthorization::Invocation { chain, .. } => chain,
+            _ => panic!("expected invocation"),
+        };
+
+        assert_eq!(ucan.invocation.command().to_string(), "/archive/get");
+        assert_eq!(
+            ucan.invocation.subject().to_string(),
+            session.did().to_string()
+        );
+        assert_eq!(ucan.verify().await?, ());
+
+        assert_eq!(
+            ucan.arguments().get("catalog"),
+            Some(&Promised::String("blobs".into()))
+        );
+        assert_eq!(
+            ucan.arguments().get("digest"),
+            Some(&Promised::Bytes(
+                Blake3Hash::hash(b"hello").as_bytes().into()
+            ))
+        );
+
+        Ok(())
     }
 }

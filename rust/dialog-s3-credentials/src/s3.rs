@@ -11,6 +11,7 @@
 mod credentials;
 mod provider;
 
+pub use crate::Address;
 pub use credentials::{Authorizer, Credentials, PrivateCredentials, PublicCredentials};
 
 use url::Url;

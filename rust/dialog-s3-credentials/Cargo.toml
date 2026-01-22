@@ -30,6 +30,7 @@ serde = { workspace = true, features = ["derive"] }
 sha2 = "0.10"
 thiserror = { workspace = true }
 url = { workspace = true }
+anyhow = { workspace = true }
 
 # UCAN feature dependencies (optional)
 ed25519-dalek = { workspace = true, optional = true }

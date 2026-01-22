@@ -4,7 +4,10 @@
 //! repositories for synchronization.
 
 use dialog_common::capability::{Capability, Subject};
+use dialog_common::helpers::address;
 use dialog_s3_credentials::capability::{archive, memory};
+use dialog_s3_credentials::{credentials, s3, ucan, AuthorizationError}
+use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -84,10 +87,13 @@ impl RemoteBranchRef {
     /// Returns a capability for the archive catalog (content-addressed storage).
     ///
     /// The catalog path is: `{subject}/archive/index`
-    pub fn index(&self) -> Capability<archive::Catalog> {
-        Subject::from(self.repository.subject.as_str())
-            .attenuate(archive::Archive)
-            .attenuate(archive::Catalog::new("index"))
+    pub fn index(&self) -> Index {
+        Index {
+            credentials: self.repository.site.credentials.clone(),
+            archive: Subject::from(self.repository.subject.as_str())
+                .attenuate(archive::Archive)
+                .attenuate(archive::Catalog::new("index")),
+        }
     }
 
     /// Returns a capability for the memory cell (revision pointer).
@@ -101,32 +107,29 @@ impl RemoteBranchRef {
     }
 }
 
+pub struct Index {
+    credentials: RemoteCredentials,
+    archive: Capability<archive::Catalog>,
+}
+
+impl Index {
+    pub fn get(&self, digest: Blake3Hash) -> Capability<archive::Get> {
+        self.archive
+            .invoke(archive::Get { digest })
+            .acquire(self.credentials)
+    }
+}
+
 /// Credentials for connecting to a remote repository.
 ///
 /// This enum stores the credentials configuration that can be persisted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RemoteCredentials {
     /// Direct S3 access with optional signing credentials.
-    S3 {
-        /// S3 endpoint URL.
-        endpoint: Url,
-        /// AWS region for signing.
-        region: String,
-        /// S3 bucket name.
-        bucket: String,
-        /// AWS access key ID (None for public access).
-        access_key_id: Option<String>,
-        /// AWS secret access key (None for public access).
-        secret_access_key: Option<String>,
-    },
+    S3(s3::Credentials),
     /// UCAN-based access via an authorization service.
     #[cfg(feature = "ucan")]
-    Ucan {
-        /// Access service endpoint URL.
-        endpoint: Url,
-        /// UCAN delegation chain proving authority.
-        delegation: Option<DelegationChain>,
-    },
+    Ucan(ucan::Credentials)
 }
 
 impl RemoteCredentials {
@@ -136,13 +139,13 @@ impl RemoteCredentials {
         region: impl Into<String>,
         bucket: impl Into<String>,
     ) -> Self {
-        Self::S3 {
-            endpoint: endpoint.into(),
-            region: region.into(),
-            bucket: bucket.into(),
-            access_key_id: None,
-            secret_access_key: None,
-        }
+        let adress = s3::Address::new(
+            endpoint,
+            region,
+            bucket
+        );
+        Self::S3(s3::PublicCredentials::new(address))
+
     }
 
     /// Create S3 credentials with signing keys.
@@ -152,22 +155,25 @@ impl RemoteCredentials {
         bucket: impl Into<String>,
         access_key_id: impl Into<String>,
         secret_access_key: impl Into<String>,
-    ) -> Self {
-        Self::S3 {
-            endpoint: endpoint.into(),
-            region: region.into(),
-            bucket: bucket.into(),
-            access_key_id: Some(access_key_id.into()),
-            secret_access_key: Some(secret_access_key.into()),
-        }
+    ) -> Result<Self, AuthorizationError> {
+        let address = s3::Address::new(
+            endpoint,
+            region,
+            bucket
+        );
+
+        let credentials = s3::PrivateCredentials::new(
+            address,
+            access_key_id,
+            secret_access_key
+        )?;
+
+        Self::S3(credentials)
     }
 
     /// Create UCAN credentials from an optional delegation chain.
     #[cfg(feature = "ucan")]
     pub fn ucan(endpoint: impl Into<Url>, delegation: Option<DelegationChain>) -> Self {
-        Self::Ucan {
-            endpoint: endpoint.into(),
-            delegation,
-        }
+        Self::Ucan(ucan::Credentials::new(endpoint.into(), delegation));
     }
 }

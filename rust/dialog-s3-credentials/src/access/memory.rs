@@ -10,7 +10,7 @@
 
 use super::{AuthorizationError, AuthorizedRequest, Precondition, S3Request};
 use crate::Checksum;
-use crate::capability::memory::{Cell, Space};
+pub use crate::capability::memory::{Cell, Memory, Space};
 use dialog_common::capability::{Capability, Effect, Policy};
 use serde::{Deserialize, Serialize};
 

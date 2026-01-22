@@ -156,7 +156,7 @@ impl<Backend: PlatformBackend + 'static> Branches<Backend> {
 
     /// Loads a branch with the given identifier or creates a new one if
     /// it does not already exist.
-    pub async fn open(&self, id: &BranchId) -> Result<Branch<Backend>, ReplicaError> {
+    pub async fn open(&self, id: impl Into<BranchId>) -> Result<Branch<Backend>, ReplicaError> {
         Branch::open(id, self.issuer.clone(), self.storage.clone()).await
     }
 }
@@ -3387,9 +3387,7 @@ mod tests {
 
         // Use the fluent API to reference a remote branch
         let remote_did = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
-        let remote_branch = origin
-            .repository(remote_did)
-            .branch("main");
+        let remote_branch = origin.repository(remote_did).branch("main");
 
         assert_eq!(remote_branch.name, "main");
         assert_eq!(remote_branch.repository.subject, remote_did);

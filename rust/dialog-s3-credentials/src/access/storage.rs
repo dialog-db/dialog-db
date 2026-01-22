@@ -15,7 +15,7 @@ use dialog_common::Bytes;
 use dialog_common::capability::{Capability, Effect, Policy};
 use serde::{Deserialize, Serialize};
 
-use crate::capability::storage::Store;
+pub use crate::capability::storage::{Storage, Store};
 
 /// Get value by key.
 ///

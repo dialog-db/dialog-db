@@ -15,7 +15,7 @@ pub trait Principal {
 /// Extends `Principal` with the ability to sign payloads.
 pub trait Authority: Principal {
     /// Sign the given payload.
-    fn sign(&self, payload: &[u8]) -> Vec<u8>;
+    fn sign(&mut self, payload: &[u8]) -> Vec<u8>;
 
     /// Try to export the raw Ed25519 secret key bytes for delegation purposes.
     ///

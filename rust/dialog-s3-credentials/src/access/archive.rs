@@ -12,7 +12,7 @@ use dialog_common::capability::{Capability, Effect, Policy};
 use serde::{Deserialize, Serialize};
 
 /// Get content by digest.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Get {
     /// The blake3 digest of the content to retrieve.
     pub digest: Blake3Hash,

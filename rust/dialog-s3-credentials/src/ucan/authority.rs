@@ -61,7 +61,7 @@ impl dialog_common::capability::Principal for UcanAuthority {
 }
 
 impl dialog_common::capability::Authority for UcanAuthority {
-    fn sign(&self, payload: &[u8]) -> Vec<u8> {
+    fn sign(&mut self, payload: &[u8]) -> Vec<u8> {
         use ed25519_dalek::Signer;
         self.signing_key.sign(payload).to_bytes().to_vec()
     }
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_ucan_authority_sign() {
-        let authority = UcanAuthority::from_secret(&[42u8; 32]);
+        let mut authority = UcanAuthority::from_secret(&[42u8; 32]);
 
         // Signing should produce a 64-byte Ed25519 signature
         let payload = b"test payload";

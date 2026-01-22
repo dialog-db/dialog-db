@@ -49,9 +49,10 @@ use std::collections::BTreeMap;
 
 use super::invocation::InvocationChain;
 use crate::access::{AuthorizationError, AuthorizedRequest};
-use crate::capability::{archive, memory, storage};
+use crate::access::{archive, memory, storage};
 use crate::credentials::Credentials;
-use dialog_common::capability::{Capability, Subject};
+use base58::ToBase58;
+use dialog_common::capability::{Ability, Capability, Subject};
 
 /// UCAN authorizer that wraps credentials and handles UCAN invocations.
 ///
@@ -397,8 +398,13 @@ fn parse_checksum(
 
 #[cfg(test)]
 mod tests {
+    use super::super::credentials::tests::{Session, test_delegation_chain};
+    use super::super::{Credentials, UcanAuthorization};
     use super::*;
     use crate::ucan::InvocationChain;
+    use crate::{Address, s3};
+    use dialog_common::capability::{Ability, Access, Authority, Did, Principal};
+    use dialog_common::{Authorization, Blake3Hash};
     use std::collections::BTreeMap;
     use ucan::delegation::builder::DelegationBuilder;
     use ucan::delegation::subject::DelegatedSubject;
@@ -583,7 +589,6 @@ mod tests {
         use crate::{Address, s3::Credentials};
 
         let subject_signer = test_signer();
-        let subject_did = subject_signer.did().to_string();
 
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
@@ -620,7 +625,6 @@ mod tests {
         use crate::{Address, s3::Credentials};
 
         let subject_signer = test_signer();
-        let subject_did = subject_signer.did().to_string();
 
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
@@ -658,5 +662,59 @@ mod tests {
         assert!(result.is_ok());
         let descriptor = result.unwrap();
         assert_eq!(descriptor.method, "PUT");
+    }
+
+    #[dialog_common::test]
+    async fn test_provider() -> anyhow::Result<()> {
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
+        let operator = Ed25519Signer::from(signer);
+
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "test-bucket",
+        );
+        let credentials =
+            s3::Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
+
+        let mut provider = UcanAuthorizer::new(credentials);
+
+        let credentials = Credentials::new(
+            "https://access.ucan.com".into(),
+            test_delegation_chain(&operator, &operator.did(), &["archive"]),
+        );
+
+        let mut session = Session::new(credentials, &[0u8; 32]);
+
+        let read = Subject::from(session.did().to_string())
+            .attenuate(archive::Archive)
+            .attenuate(archive::Catalog {
+                catalog: "blobs".into(),
+            })
+            .invoke(archive::Get {
+                digest: Blake3Hash::hash(b"hello"),
+            })
+            .acquire(&mut session)
+            .await?;
+
+        let authorization = read.authorization().invoke(&mut session)?;
+        let ucan = match authorization {
+            UcanAuthorization::Invocation { chain, .. } => chain,
+            _ => panic!("expected invocation"),
+        };
+
+        let payload = ucan.to_bytes()?;
+
+        let authorization = provider.authorize(&payload).await?;
+        assert_eq!(
+            authorization.url.path(),
+            format!(
+                "/{}/blobs/{}",
+                operator.did().to_string(),
+                Blake3Hash::hash(b"hello").as_bytes().to_base58()
+            )
+        );
+
+        Ok(())
     }
 }

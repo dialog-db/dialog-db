@@ -33,12 +33,8 @@ use ucan::{
 type ProofStore = Arc<Mutex<HashMap<Cid, Arc<Delegation<Ed25519Did>>>>>;
 
 /// Concrete invocation check error type for our ProofStore.
-type InvocationError = InvocationCheckError<
-    Sendable,
-    Ed25519Did,
-    Arc<Delegation<Ed25519Did>>,
-    ProofStore,
->;
+type InvocationError =
+    InvocationCheckError<Sendable, Ed25519Did, Arc<Delegation<Ed25519Did>>, ProofStore>;
 
 /// An invocation with its delegation chain, parsed from a UCAN container.
 ///
@@ -146,8 +142,8 @@ impl TryFrom<Container> for InvocationChain {
         }
 
         // First token is the invocation
-        let invocation: Invocation<Ed25519Did> =
-            serde_ipld_dagcbor::from_slice(&token_bytes[0]).map_err(|e| {
+        let invocation: Invocation<Ed25519Did> = serde_ipld_dagcbor::from_slice(&token_bytes[0])
+            .map_err(|e| {
                 AuthorizationError::Invocation(format!("failed to decode invocation: {}", e))
             })?;
 
@@ -155,8 +151,8 @@ impl TryFrom<Container> for InvocationChain {
         let mut delegations: HashMap<Cid, Arc<Delegation<Ed25519Did>>> =
             HashMap::with_capacity(token_bytes.len() - 1);
         for (i, bytes) in token_bytes.iter().skip(1).enumerate() {
-            let delegation: Delegation<Ed25519Did> =
-                serde_ipld_dagcbor::from_slice(bytes).map_err(|e| {
+            let delegation: Delegation<Ed25519Did> = serde_ipld_dagcbor::from_slice(bytes)
+                .map_err(|e| {
                     AuthorizationError::Invocation(format!(
                         "failed to decode delegation {}: {}",
                         i, e
@@ -244,8 +240,8 @@ impl From<InvocationError> for AuthorizationError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::delegation::tests::{create_delegation, generate_signer};
+    use super::*;
     use ucan::delegation::builder::DelegationBuilder;
     use ucan::delegation::subject::DelegatedSubject;
     use ucan::invocation::builder::InvocationBuilder;
@@ -261,7 +257,7 @@ mod tests {
             &subject_signer,
             operator_signer.did(),
             &subject_did,
-            vec!["storage".to_string(), "get".to_string()],
+            &["storage", "get"],
         )
         .expect("Failed to create delegation");
 
@@ -300,8 +296,7 @@ mod tests {
         let bytes = chain.to_bytes().expect("Failed to serialize");
 
         // Deserialize back
-        let restored = InvocationChain::try_from(bytes.as_slice())
-            .expect("Failed to deserialize");
+        let restored = InvocationChain::try_from(bytes.as_slice()).expect("Failed to deserialize");
 
         // Verify the chains match
         assert_eq!(restored.subject(), &subject_did);
@@ -315,7 +310,11 @@ mod tests {
 
         // Should verify successfully
         let result = chain.verify().await;
-        assert!(result.is_ok(), "Expected verification to succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Expected verification to succeed: {:?}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -329,7 +328,7 @@ mod tests {
             &subject_signer,
             operator_signer.did(),
             &subject_did,
-            vec!["storage".to_string()],
+            &["storage"],
         )
         .expect("Failed to create delegation");
 
@@ -366,7 +365,7 @@ mod tests {
             &subject_signer,
             operator_signer.did(),
             &subject_did,
-            vec!["storage".to_string()],
+            &["storage"],
         )
         .expect("Failed to create delegation");
 
@@ -397,7 +396,12 @@ mod tests {
         let container = Container::new(vec![]);
         let result = InvocationChain::try_from(container);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("at least an invocation"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("at least an invocation")
+        );
     }
 
     #[test]
@@ -405,7 +409,12 @@ mod tests {
         let container = Container::new(vec![vec![1, 2, 3, 4]]); // Invalid CBOR
         let result = InvocationChain::try_from(container);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("failed to decode invocation"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed to decode invocation")
+        );
     }
 
     #[tokio::test]
@@ -463,7 +472,11 @@ mod tests {
 
         // Should verify successfully - powerline inherits subject from root delegation
         let result = chain.verify().await;
-        assert!(result.is_ok(), "Expected verification to succeed with powerline in middle: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Expected verification to succeed with powerline in middle: {:?}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -511,7 +524,10 @@ mod tests {
 
         // Should fail - invocation subject doesn't match powerline issuer
         let result = chain.verify().await;
-        assert!(result.is_err(), "Expected verification to fail when invocation subject doesn't match powerline root issuer");
+        assert!(
+            result.is_err(),
+            "Expected verification to fail when invocation subject doesn't match powerline root issuer"
+        );
     }
 
     #[tokio::test]
@@ -552,7 +568,11 @@ mod tests {
 
         // Should succeed - invocation subject matches powerline root issuer
         let result = chain.verify().await;
-        assert!(result.is_ok(), "Expected verification to succeed when invocation subject matches powerline root issuer: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Expected verification to succeed when invocation subject matches powerline root issuer: {:?}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -614,7 +634,10 @@ mod tests {
 
         // Should fail - redelegation claims authority over wrong subject
         let result = chain.verify().await;
-        assert!(result.is_err(), "Expected verification to fail when redelegation after powerline root uses wrong subject");
+        assert!(
+            result.is_err(),
+            "Expected verification to fail when redelegation after powerline root uses wrong subject"
+        );
     }
 
     #[tokio::test]
@@ -673,6 +696,10 @@ mod tests {
 
         // Should succeed - redelegation correctly uses the powerline root issuer as subject
         let result = chain.verify().await;
-        assert!(result.is_ok(), "Expected verification to succeed when redelegation after powerline root uses correct subject: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Expected verification to succeed when redelegation after powerline root uses correct subject: {:?}",
+            result
+        );
     }
 }
