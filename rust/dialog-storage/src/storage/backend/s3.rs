@@ -284,7 +284,6 @@ impl<P: Provider<access::archive::Get> + Provider<access::archive::Put>> Archive
 pub struct S3Bucket<A: Access, P> {
     provider: P,
     access: A,
-    client: reqwest::Client,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -297,7 +296,7 @@ impl<A: Access, P: Provider<Authorized<access::archive::Get, A::Authorization>>>
         input: Capability<archive::Get>,
     ) -> Result<Option<Bytes>, archive::ArchiveError> {
         // obtain authorization for access::archive::Get
-        let authorization = Subject::from(input.subject())
+        let authorize = Subject::from(input.subject())
             .attenuate(access::archive::Archive)
             .attenuate(access::archive::Catalog {
                 catalog: archive::Catalog::of(input).catalog,
@@ -308,9 +307,20 @@ impl<A: Access, P: Provider<Authorized<access::archive::Get, A::Authorization>>>
             .acquire(&mut self.access)
             .await?;
 
-        let out = authorization.perform(&mut self.provider).await?;
+        let authorization = authorize.perform(&mut self.provider).await?;
 
-        unimplemented!()
+        let client = reqwest::Client::new();
+        let mut builder = authorization.into_request(&client);
+        let response = builder.send().await?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(S3StorageError::ServiceError(format!(
+                "Failed to get value: {}",
+                response.status()
+            )))
+        }
     }
 }
 

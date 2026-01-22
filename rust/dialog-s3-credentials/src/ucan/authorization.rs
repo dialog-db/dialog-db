@@ -4,8 +4,43 @@
 //! for a specific capability claim using UCAN delegations.
 
 use super::delegation::DelegationChain;
-use dialog_common::capability::{Authorization, Did, Parameters};
+use super::invocation::InvocationChain;
+use dialog_common::capability::{Authority, Authorization, AuthorizationError, Did, Parameters};
+use ed25519_dalek::SigningKey;
 use ipld_core::ipld::Ipld;
+use std::collections::BTreeMap;
+use ucan::did::{Ed25519Did, Ed25519Signer};
+use ucan::invocation::builder::InvocationBuilder;
+use ucan::promise::Promised;
+
+pub type Args = BTreeMap<String, Promised>;
+
+/// Convert IPLD to Promised (for UCAN invocation arguments).
+fn ipld_to_promised(ipld: Ipld) -> Promised {
+    match ipld {
+        Ipld::Null => Promised::Null,
+        Ipld::Bool(b) => Promised::Bool(b),
+        Ipld::Integer(i) => Promised::Integer(i),
+        Ipld::Float(f) => Promised::Float(f),
+        Ipld::String(s) => Promised::String(s),
+        Ipld::Bytes(b) => Promised::Bytes(b),
+        Ipld::Link(c) => Promised::Link(c),
+        Ipld::List(l) => Promised::List(l.into_iter().map(ipld_to_promised).collect()),
+        Ipld::Map(m) => Promised::Map(
+            m.into_iter()
+                .map(|(k, v)| (k, ipld_to_promised(v)))
+                .collect(),
+        ),
+    }
+}
+
+/// Convert IPLD Map to BTreeMap<String, Promised> for UCAN invocation.
+pub fn parameters_to_args(parameters: Parameters) -> Args {
+    parameters
+        .into_iter()
+        .map(|(k, v)| (k, ipld_to_promised(v)))
+        .collect()
+}
 
 /// UCAN-based authorization proof for a capability.
 ///
@@ -34,6 +69,12 @@ pub enum UcanAuthorization {
         /// Cached command path.
         can: String,
         /// Constraints of the delegation
+        parameters: Parameters,
+    },
+    Invocation {
+        chain: InvocationChain,
+        subject: Did,
+        can: String,
         parameters: Parameters,
     },
 }
@@ -72,6 +113,7 @@ impl UcanAuthorization {
         match self {
             Self::Owned { .. } => None,
             Self::Delegated { chain, .. } => Some(chain),
+            Self::Invocation { .. } => None,
         }
     }
 
@@ -79,6 +121,7 @@ impl UcanAuthorization {
         match self {
             Self::Owned { parameters, .. } => parameters,
             Self::Delegated { parameters, .. } => parameters,
+            Self::Invocation { parameters, .. } => parameters,
         }
     }
 }
@@ -88,6 +131,7 @@ impl Authorization for UcanAuthorization {
         match self {
             Self::Owned { subject, .. } => subject,
             Self::Delegated { subject, .. } => subject,
+            Self::Invocation { subject, .. } => subject,
         }
     }
 
@@ -95,6 +139,7 @@ impl Authorization for UcanAuthorization {
         match self {
             Self::Owned { subject, .. } => subject, // For owned, audience == subject
             Self::Delegated { audience, .. } => audience,
+            Self::Invocation { subject, .. } => subject,
         }
     }
 
@@ -102,6 +147,60 @@ impl Authorization for UcanAuthorization {
         match self {
             Self::Owned { can, .. } => can,
             Self::Delegated { can, .. } => can,
+            Self::Invocation { can, .. } => can,
+        }
+    }
+
+    fn invoke<A: Authority>(&self, authority: &A) -> Result<Self, AuthorizationError> {
+        if self.audience() != authority.did() {
+            Err(AuthorizationError::NotAudience {
+                audience: self.audience().into(),
+                issuer: authority.did().into(),
+            })
+        } else {
+            let subject: Ed25519Did = self.subject().parse().map_err(|e| {
+                AuthorizationError::Serialization(format!("Invalid subject DID: {:?}", e))
+            })?;
+
+            let command: Vec<String> = self
+                .can()
+                .trim_start_matches('/')
+                .split('/')
+                .map(|s| s.to_string())
+                .collect();
+
+            let args = parameters_to_args(self.parameters().clone());
+
+            let key = SigningKey::from_bytes(&authority.secret_key_bytes().ok_or(
+                AuthorizationError::Serialization("Authority key can not be used".into()),
+            )?);
+            let issuer = Ed25519Signer::from(key);
+            let proofs = self
+                .chain()
+                .map(|c| c.proof_cids().into())
+                .unwrap_or(vec![]);
+
+            let invocation = InvocationBuilder::new()
+                .issuer(issuer)
+                .audience(subject.clone())
+                .subject(subject)
+                .command(command)
+                .arguments(args)
+                .proofs(proofs)
+                .try_build()
+                .map_err(|e| AuthorizationError::Serialization(format!("{:?}", e)))?;
+
+            let delegations = self
+                .chain()
+                .map(|c| c.delegations().clone())
+                .unwrap_or_default();
+
+            Ok(Self::Invocation {
+                chain: InvocationChain::new(invocation, delegations),
+                subject: self.subject().clone(),
+                can: self.can().into(),
+                parameters: self.parameters().clone(),
+            })
         }
     }
 }
@@ -112,6 +211,7 @@ mod tests {
 
     use super::*;
     use crate::ucan::delegation::tests::{create_delegation, generate_signer};
+    use ipld_core::ipld::Ipld;
 
     #[test]
     fn it_creates_owned_authorization() {

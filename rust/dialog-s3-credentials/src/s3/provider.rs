@@ -51,6 +51,20 @@ impl Authorization for S3Authorization {
     fn can(&self) -> &str {
         &self.can
     }
+
+    fn invoke<A: dialog_common::Authority>(
+        &self,
+        authority: &A,
+    ) -> Result<Self, AuthorizationError> {
+        if &self.audience != authority.did() {
+            Err(AuthorizationError::NotAudience {
+                audience: self.audience.clone(),
+                issuer: authority.did().into(),
+            })
+        } else {
+            Ok(self.clone())
+        }
+    }
 }
 
 /// Error type that combines S3 and Authorization errors.
@@ -225,8 +239,12 @@ mod tests {
             "us-east-1",
             "my-bucket",
         );
-        Credentials::private(address, "AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
-            .unwrap()
+        Credentials::private(
+            address,
+            "AKIAIOSFODNN7EXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        )
+        .unwrap()
     }
 
     fn localhost_creds() -> Credentials {
@@ -259,10 +277,11 @@ mod tests {
     #[dialog_common::test]
     async fn storage_get_with_binary_key() {
         let mut creds = public_creds();
-        let binary_key: [u8; 32] = [0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33,
-                                     0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
-                                     0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03, 0x04,
-                                     0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c];
+        let binary_key: [u8; 32] = [
+            0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
+            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+            0x09, 0x0a, 0x0b, 0x0c,
+        ];
 
         let capability = Subject::from(TEST_SUBJECT)
             .attenuate(storage::Storage)
@@ -341,7 +360,11 @@ mod tests {
         assert_eq!(req.method, "GET");
 
         // Should have list-type=2 query param
-        let query: Vec<(String, String)> = req.url.query_pairs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let query: Vec<(String, String)> = req
+            .url
+            .query_pairs()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         assert!(query.iter().any(|(k, v)| k == "list-type" && v == "2"));
 
         // Should have prefix query param
@@ -364,7 +387,11 @@ mod tests {
 
         let req = capability.perform(&mut creds).await.unwrap();
 
-        let query: Vec<(String, String)> = req.url.query_pairs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let query: Vec<(String, String)> = req
+            .url
+            .query_pairs()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         let cont_token = query.iter().find(|(k, _)| k == "continuation-token");
         assert!(cont_token.is_some());
         assert_eq!(cont_token.unwrap().1, token);
@@ -414,7 +441,11 @@ mod tests {
         );
 
         // Should have checksum header
-        assert!(req.headers.iter().any(|(k, _)| k == "x-amz-checksum-sha256"));
+        assert!(
+            req.headers
+                .iter()
+                .any(|(k, _)| k == "x-amz-checksum-sha256")
+        );
     }
 
     #[dialog_common::test]
@@ -435,7 +466,11 @@ mod tests {
         let req = capability.perform(&mut creds).await.unwrap();
 
         assert_eq!(req.method, "PUT");
-        assert!(req.headers.iter().any(|(k, _)| k == "x-amz-checksum-sha256"));
+        assert!(
+            req.headers
+                .iter()
+                .any(|(k, _)| k == "x-amz-checksum-sha256")
+        );
     }
 
     #[dialog_common::test]
@@ -496,10 +531,12 @@ mod tests {
             req.url.path(),
             format!("/{}/index/{}", TEST_SUBJECT, digest.to_base58())
         );
-        assert!(req.headers.iter().any(|(k, _)| k == "x-amz-checksum-sha256"));
+        assert!(
+            req.headers
+                .iter()
+                .any(|(k, _)| k == "x-amz-checksum-sha256")
+        );
     }
-
-    // ==================== Private Credentials (Signed URLs) ====================
 
     #[dialog_common::test]
     async fn private_creds_generate_signed_url_for_get() {
@@ -516,7 +553,11 @@ mod tests {
         assert_eq!(req.method, "GET");
 
         // Should have AWS signature query params
-        let query: Vec<(String, String)> = req.url.query_pairs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let query: Vec<(String, String)> = req
+            .url
+            .query_pairs()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         assert!(query.iter().any(|(k, _)| k == "X-Amz-Algorithm"));
         assert!(query.iter().any(|(k, _)| k == "X-Amz-Credential"));
         assert!(query.iter().any(|(k, _)| k == "X-Amz-Date"));
@@ -541,11 +582,19 @@ mod tests {
         assert_eq!(req.method, "PUT");
 
         // Should have signature
-        let query: Vec<(String, String)> = req.url.query_pairs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let query: Vec<(String, String)> = req
+            .url
+            .query_pairs()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         assert!(query.iter().any(|(k, _)| k == "X-Amz-Signature"));
 
         // Should have checksum header
-        assert!(req.headers.iter().any(|(k, _)| k == "x-amz-checksum-sha256"));
+        assert!(
+            req.headers
+                .iter()
+                .any(|(k, _)| k == "x-amz-checksum-sha256")
+        );
     }
 
     #[dialog_common::test]
@@ -561,7 +610,11 @@ mod tests {
 
         assert_eq!(req.method, "GET");
 
-        let query: Vec<(String, String)> = req.url.query_pairs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let query: Vec<(String, String)> = req
+            .url
+            .query_pairs()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
 
         // Should have list params
         assert!(query.iter().any(|(k, v)| k == "list-type" && v == "2"));
@@ -622,7 +675,11 @@ mod tests {
             if store_name.is_empty() {
                 assert!(req.url.path().contains(&format!("/{}/", TEST_SUBJECT)));
             } else {
-                assert!(req.url.path().contains(&format!("/{}/{}/", TEST_SUBJECT, store_name)));
+                assert!(
+                    req.url
+                        .path()
+                        .contains(&format!("/{}/{}/", TEST_SUBJECT, store_name))
+                );
             }
         }
     }
@@ -643,7 +700,11 @@ mod tests {
 
             let req = capability.perform(&mut creds).await.unwrap();
 
-            assert!(req.url.path().contains(&format!("/{}/{}/", TEST_SUBJECT, catalog_name)));
+            assert!(
+                req.url
+                    .path()
+                    .contains(&format!("/{}/{}/", TEST_SUBJECT, catalog_name))
+            );
         }
     }
 }

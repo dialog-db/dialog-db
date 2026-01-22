@@ -30,46 +30,18 @@
 //!     .build()?;
 //! ```
 
-use ipld_core::ipld::Ipld;
 use std::collections::BTreeMap;
 use ucan::did::Ed25519Did;
 use ucan::invocation::builder::InvocationBuilder;
-use ucan::promise::Promised;
 
 use super::authority::OperatorIdentity;
 use super::authorization::UcanAuthorization;
+use super::authorization::parameters_to_args;
 use super::delegation::DelegationChain;
 use super::invocation::InvocationChain;
 use crate::access::{AuthorizationError, AuthorizedRequest, archive, memory, storage};
 use dialog_common::ConditionalSend;
 use dialog_common::capability::{Ability, Access, Authorized, Parameters, Provider};
-
-/// Convert IPLD to Promised (for UCAN invocation arguments).
-fn ipld_to_promised(ipld: Ipld) -> Promised {
-    match ipld {
-        Ipld::Null => Promised::Null,
-        Ipld::Bool(b) => Promised::Bool(b),
-        Ipld::Integer(i) => Promised::Integer(i),
-        Ipld::Float(f) => Promised::Float(f),
-        Ipld::String(s) => Promised::String(s),
-        Ipld::Bytes(b) => Promised::Bytes(b),
-        Ipld::Link(c) => Promised::Link(c),
-        Ipld::List(l) => Promised::List(l.into_iter().map(ipld_to_promised).collect()),
-        Ipld::Map(m) => Promised::Map(
-            m.into_iter()
-                .map(|(k, v)| (k, ipld_to_promised(v)))
-                .collect(),
-        ),
-    }
-}
-
-/// Convert IPLD Map to BTreeMap<String, Promised> for UCAN invocation.
-fn parameters_to_args(parameters: Parameters) -> BTreeMap<String, Promised> {
-    parameters
-        .into_iter()
-        .map(|(k, v)| (k, ipld_to_promised(v)))
-        .collect()
-}
 
 /// UCAN-based authorizer that delegates to an external access service.
 ///
@@ -103,8 +75,6 @@ pub struct Credentials {
     service_url: String,
     /// The operator identity (signs invocations).
     operator: OperatorIdentity,
-    /// The subject DID (resource owner).
-    subject: String,
     /// The delegation chain proving authority from subject to operator.
     /// Order: first delegation's `aud` matches operator, last delegation's `iss` matches subject.
     delegation: DelegationChain,
@@ -128,11 +98,6 @@ impl Credentials {
         &self.operator
     }
 
-    /// Returns the subject DID (resource owner).
-    pub fn subject(&self) -> &str {
-        &self.subject
-    }
-
     /// Returns the delegation chain.
     pub fn delegation(&self) -> &DelegationChain {
         &self.delegation
@@ -152,17 +117,9 @@ impl Credentials {
     ) -> Result<AuthorizedRequest, AuthorizationError> {
         let capability_subject = capability.subject();
 
-        // 1. Verify the capability subject matches our delegation's subject
-        if capability_subject != &self.subject {
-            return Err(AuthorizationError::NoDelegation(format!(
-                "Capability subject '{}' does not match credentials subject '{}'",
-                capability_subject, self.subject
-            )));
-        }
-
         // 2. Parse subject DID
-        let subject: Ed25519Did = self
-            .subject
+        let subject: Ed25519Did = capability
+            .subject()
             .parse()
             .map_err(|e| AuthorizationError::Service(format!("Invalid subject DID: {:?}", e)))?;
 
@@ -246,22 +203,15 @@ impl Access for Credentials {
         claim: dialog_common::capability::Claim<C>,
     ) -> Result<Self::Authorization, Self::Error> {
         // Verify the claim's subject matches our delegation's subject
-        if claim.subject() != &self.subject {
-            return Err(AuthorizationError::NoDelegation(format!(
-                "Claim subject '{}' does not match credentials subject '{}'",
-                claim.subject(),
-                self.subject
-            )));
-        }
 
         // Verify the claim's audience matches the first delegation's audience
         // Per UCAN spec: first delegation's `aud` should match the invoker
-        let chain_audience_str = self.delegation.audience().to_string();
-        if claim.audience() != &chain_audience_str {
+        let audience = self.delegation.audience().to_string();
+        if claim.audience() != &audience {
             return Err(AuthorizationError::Configuration(format!(
                 "Claim audience '{}' does not match delegation chain audience '{}'",
                 claim.audience(),
-                chain_audience_str
+                audience
             )));
         }
 
@@ -459,10 +409,6 @@ impl CredentialsBuilder {
             .operator
             .ok_or_else(|| AuthorizationError::Configuration("operator is required".into()))?;
 
-        let subject = self
-            .subject
-            .ok_or_else(|| AuthorizationError::Configuration("subject is required".into()))?;
-
         let delegation = self
             .delegation
             .ok_or_else(|| AuthorizationError::Configuration("delegation is required".into()))?;
@@ -475,7 +421,6 @@ impl CredentialsBuilder {
         Ok(Credentials {
             service_url,
             operator,
-            subject,
             delegation,
             client,
         })
@@ -534,21 +479,6 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_missing_subject() {
-        let subject_signer = generate_signer();
-        let operator = OperatorIdentity::from_secret(&[0u8; 32]);
-        let chain = test_delegation_chain(&subject_signer, &operator.did());
-
-        let result = Credentials::builder()
-            .service_url("https://example.com")
-            .operator(operator)
-            .delegation(chain)
-            .build();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("subject"));
-    }
-
-    #[test]
     fn test_builder_missing_delegation() {
         let result = Credentials::builder()
             .service_url("https://example.com")
@@ -575,6 +505,5 @@ mod tests {
             .unwrap();
 
         assert_eq!(authorizer.service_url(), "https://access.example.com");
-        assert_eq!(authorizer.subject(), &subject_did);
     }
 }

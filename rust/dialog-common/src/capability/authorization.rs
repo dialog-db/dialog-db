@@ -2,7 +2,7 @@
 //!
 //! The `Authorization` trait represents proof of authority over a capability.
 
-use super::subject::Did;
+use super::{Authority, subject::Did};
 
 /// Errors that can occur during authorization.
 #[derive(Debug, thiserror::Error)]
@@ -53,7 +53,7 @@ pub enum AuthorizationError {
 ///
 /// - Self-issued (when subject == audience, i.e., owner acting directly)
 /// - Derived from a delegation chain
-pub trait Authorization {
+pub trait Authorization: Sized {
     /// The subject (resource owner) this authorization covers.
     fn subject(&self) -> &Did;
 
@@ -62,4 +62,7 @@ pub trait Authorization {
 
     /// The command path (ability) this authorization permits.
     fn can(&self) -> &str;
+
+    /// Creates authorized invocation
+    fn invoke<A: Authority>(&self, authority: &A) -> Result<Self, AuthorizationError>;
 }

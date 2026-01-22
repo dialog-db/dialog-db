@@ -13,7 +13,7 @@ use super::constrained::Constrained;
 use super::provider::Provider;
 use super::selector::Selector;
 use super::subject::{Did, Subject};
-use super::{Authorization, Claim};
+use super::{Authority, Authorization, AuthorizationError, Claim};
 use crate::ConditionalSend;
 #[cfg(feature = "ucan")]
 use ipld_core::{ipld::Ipld, serde::to_ipld};
@@ -314,14 +314,30 @@ impl<C: Constraint, A: Authorization> Authorized<C, A> {
     }
 }
 
-impl<Fx: Effect + Constraint, A: Authorization> Authorized<Fx, A> {
+pub enum PerformError<E> {
+    Excution(E),
+    Authorization(AuthorizationError),
+}
+
+impl<Ok, Error, Fx: Effect<Output = Result<Ok, Error>> + Constraint, A: Authorization>
+    Authorized<Fx, A>
+{
     /// Perform the invocation directly without authorization verification.
     /// For operations that require authorization, use `acquire` first.
-    pub async fn perform<Env>(self, env: &mut Env) -> Fx::Output
+    pub async fn perform<Env>(self, env: &mut Env) -> Result<Ok, PerformError<Error>>
     where
-        Env: Provider<Self>,
+        Env: Provider<Self> + Authority,
     {
-        env.execute(self).await
+        match self.authorization.invoke(env) {
+            Ok(authorization) => env
+                .execute(Authorized {
+                    capability: self.capability,
+                    authorization,
+                })
+                .await
+                .map_err(PerformError::Excution),
+            Err(e) => Err(PerformError::Authorization(e)),
+        }
     }
 }
 

@@ -3,8 +3,6 @@
 //! The `Ability` trait is the abstract interface for all capability chain types,
 //! providing access to the subject DID and command path.
 
-use std::collections::BTreeMap;
-
 use super::capability::{Parameters, Policy};
 use super::constrained::Constrained;
 use super::subject::{Did, Subject};
