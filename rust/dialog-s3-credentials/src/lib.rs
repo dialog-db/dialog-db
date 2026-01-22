@@ -14,8 +14,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use dialog_s3_credentials::{Address, s3, access};
-//! use dialog_s3_credentials::credentials::Credentials;
+//! use dialog_s3_credentials::{Address, s3, access, Authorizer};
 //! use dialog_s3_credentials::capability::storage::{Storage, Store};
 //! use dialog_common::capability::{Capability, Subject};
 //!

@@ -127,7 +127,7 @@ mod tests {
         let capability = Subject::from(TEST_SUBJECT)
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("blob"))
-            .invoke(access_storage::Get::new(binary_key));
+            .invoke(storage::Get::new(binary_key));
 
         let req = capability.perform(&mut creds).await.unwrap();
 
