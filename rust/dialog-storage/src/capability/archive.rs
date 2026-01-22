@@ -12,8 +12,11 @@
 //!               └── Put { digest, content } → Effect → Result<(), ArchiveError>
 //! ```
 
-use dialog_common::capability::{Attenuation, Capability, Effect, Policy, Subject};
+use std::error::Error;
+
+use dialog_common::capability::{Attenuation, Capability, Effect, PerformError, Policy, Subject};
 use dialog_common::{Blake3Hash, Bytes};
+use dialog_s3_credentials::AuthorizationError;
 use thiserror::Error;
 
 // Archive Ability
@@ -133,15 +136,43 @@ pub enum ArchiveError {
         actual: String,
     },
 
+    #[error("Unauthorized error: {0}")]
+    AuthorizationError(String),
+
+    #[error("Executions error: {0}")]
+    ExecutionError(String),
+
     /// Storage backend error.
     #[error("Storage error: {0}")]
     Storage(String),
 
     /// IO error.
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(String),
 }
 
+impl From<AuthorizationError> for ArchiveError {
+    fn from(value: AuthorizationError) -> Self {
+        ArchiveError::AuthorizationError(value.to_string())
+    }
+}
+
+impl From<dialog_common::capability::AuthorizationError> for ArchiveError {
+    fn from(value: dialog_common::capability::AuthorizationError) -> Self {
+        ArchiveError::AuthorizationError(value.to_string())
+    }
+}
+
+impl<E: Error> From<PerformError<E>> for ArchiveError {
+    fn from(value: PerformError<E>) -> Self {
+        match value {
+            PerformError::Authorization(error) => {
+                ArchiveError::AuthorizationError(error.to_string())
+            }
+            PerformError::Excution(error) => ArchiveError::ExecutionError(error.to_string()),
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

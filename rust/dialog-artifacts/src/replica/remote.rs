@@ -4,15 +4,16 @@
 //! repositories for synchronization.
 
 use dialog_common::capability::{Capability, Subject};
-use dialog_common::helpers::address;
 use dialog_s3_credentials::capability::{archive, memory};
-use dialog_s3_credentials::{credentials, s3, ucan, AuthorizationError}
+use dialog_s3_credentials::{AuthorizationError, credentials, s3};
 use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 #[cfg(feature = "ucan")]
-pub use dialog_s3_credentials::ucan::DelegationChain;
+pub use dialog_s3_credentials::{ucan, ucan::DelegationChain};
+
+use super::Operator;
 
 /// A named remote site identifier.
 pub type Site = String;
@@ -27,13 +28,16 @@ pub struct RemoteSite {
     pub name: Site,
     /// Credentials for connecting to this remote.
     pub credentials: RemoteCredentials,
+
+    issuer: Operator,
 }
 
 impl RemoteSite {
     /// Create a new remote site with the given name and credentials.
-    pub fn new(name: impl Into<Site>, credentials: RemoteCredentials) -> Self {
+    pub fn new(name: impl Into<Site>, credentials: RemoteCredentials, issuer: Operator) -> Self {
         Self {
             name: name.into(),
+            issuer,
             credentials,
         }
     }
@@ -43,6 +47,7 @@ impl RemoteSite {
     /// The `subject` is the DID identifying the repository owner.
     pub fn repository(&self, subject: impl Into<String>) -> RemoteRepository {
         RemoteRepository {
+            issuer: self.issuer.clone(),
             site: self.clone(),
             subject: subject.into(),
         }
@@ -58,6 +63,8 @@ pub struct RemoteRepository {
     pub site: RemoteSite,
     /// The subject DID identifying the repository owner.
     pub subject: String,
+
+    pub issuer: Operator,
 }
 
 impl RemoteRepository {
@@ -89,6 +96,7 @@ impl RemoteBranchRef {
     /// The catalog path is: `{subject}/archive/index`
     pub fn index(&self) -> Index {
         Index {
+            issuer: self.repository.issuer.clone(),
             credentials: self.repository.site.credentials.clone(),
             archive: Subject::from(self.repository.subject.as_str())
                 .attenuate(archive::Archive)
@@ -108,6 +116,7 @@ impl RemoteBranchRef {
 }
 
 pub struct Index {
+    issuer: Operator,
     credentials: RemoteCredentials,
     archive: Capability<archive::Catalog>,
 }
@@ -129,7 +138,7 @@ pub enum RemoteCredentials {
     S3(s3::Credentials),
     /// UCAN-based access via an authorization service.
     #[cfg(feature = "ucan")]
-    Ucan(ucan::Credentials)
+    Ucan(ucan::Credentials),
 }
 
 impl RemoteCredentials {
@@ -139,13 +148,8 @@ impl RemoteCredentials {
         region: impl Into<String>,
         bucket: impl Into<String>,
     ) -> Self {
-        let adress = s3::Address::new(
-            endpoint,
-            region,
-            bucket
-        );
+        let address = s3::Address::new(endpoint, region, bucket);
         Self::S3(s3::PublicCredentials::new(address))
-
     }
 
     /// Create S3 credentials with signing keys.
@@ -156,17 +160,9 @@ impl RemoteCredentials {
         access_key_id: impl Into<String>,
         secret_access_key: impl Into<String>,
     ) -> Result<Self, AuthorizationError> {
-        let address = s3::Address::new(
-            endpoint,
-            region,
-            bucket
-        );
+        let address = s3::Address::new(endpoint, region, bucket);
 
-        let credentials = s3::PrivateCredentials::new(
-            address,
-            access_key_id,
-            secret_access_key
-        )?;
+        let credentials = s3::PrivateCredentials::new(address, access_key_id, secret_access_key)?;
 
         Self::S3(credentials)
     }

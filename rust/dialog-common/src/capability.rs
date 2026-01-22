@@ -82,7 +82,11 @@ pub use access::Access;
 pub use args::{ClaimArgsExt, ToIpldArgs};
 pub use authority::{Authority, Principal};
 pub use authorization::{Authorization, AuthorizationError};
-pub use capability::{Attenuation, Authorized, Capability, Constraint, Effect, Parameters, Policy};
+#[cfg(feature = "ucan")]
+pub use capability::Parameters;
+pub use capability::{
+    Attenuation, Authorized, Capability, Constraint, Effect, PerformError, Policy,
+};
 pub use claim::Claim;
 pub use constrained::Constrained;
 pub use delegation::Delegation;

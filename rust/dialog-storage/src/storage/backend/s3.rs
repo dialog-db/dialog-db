@@ -119,9 +119,10 @@
 
 use async_trait::async_trait;
 use dialog_common::{
-    Bytes, ConditionalSend, ConditionalSync,
+    Authority, Bytes, ConditionalSend, ConditionalSync,
     capability::{
-        Access, Authorized, Capability, Constrained, Constraint, Policy, Provider, Subject,
+        Access, Authorized, Capability, Constrained, Constraint, Policy, Principal, Provider,
+        Subject,
     },
 };
 use futures_util::{Stream, StreamExt, TryStreamExt};
@@ -203,6 +204,8 @@ pub use helpers::{PublicS3Address, S3Address, UcanS3Address};
 #[cfg(all(feature = "helpers", feature = "ucan", not(target_arch = "wasm32")))]
 pub use helpers::{UcanAccessServer, UcanS3Settings};
 
+use self::archive::ArchiveError;
+
 /// Errors that can occur when using the S3 storage backend.
 #[derive(Error, Debug)]
 pub enum S3StorageError {
@@ -252,71 +255,54 @@ pub trait Authorizer: Clone + std::fmt::Debug + Send + Sync {
     fn authorize<C: S3Request>(&self, claim: &C) -> Result<AuthorizedRequest, AccessError>;
 }
 
-// Implement Authorizer for s3::Credentials
-impl Authorizer for Credentials {
-    fn subject(&self) -> &str {
-        dialog_s3_credentials::s3::Credentials::subject(self).as_str()
-    }
-
-    fn authorize<C: S3Request>(&self, claim: &C) -> Result<AuthorizedRequest, AccessError> {
-        dialog_s3_credentials::s3::Credentials::authorize(self, claim)
-    }
-}
-
-// Implement for ucan::Credentials
-#[cfg(feature = "ucan")]
-impl Authorizer for UcanCredentials {
-    fn subject(&self) -> &str {
-        dialog_s3_credentials::ucan::Credentials::subject(self)
-    }
-
-    fn authorize<C: S3Request>(&self, _claim: &C) -> Result<AuthorizedRequest, AccessError> {
-        // TODO: UCAN credentials need async authorization - this needs a different approach
-        Err(AccessError::Invocation(
-            "UCAN credentials require async authorization".to_string(),
-        ))
-    }
-}
-
 trait ArchiveProvider: Provider<access::archive::Get> + Provider<access::archive::Put> {}
 impl<P: Provider<access::archive::Get> + Provider<access::archive::Put>> ArchiveProvider for P {}
 
-pub struct S3Bucket<A: Access, P> {
+#[derive(Debug, Clone)]
+pub struct S3Bucket<A: Access + ConditionalSend, P: Authority + ConditionalSend> {
     provider: P,
     access: A,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<A: Access, P: Provider<Authorized<access::archive::Get, A::Authorization>>>
-    Provider<archive::Get> for S3Bucket<A, P>
+impl<
+    A: Access + Principal + ConditionalSend,
+    P: Provider<Authorized<access::archive::Get, A::Authorization>> + Authority + ConditionalSend,
+> Provider<archive::Get> for S3Bucket<A, P>
+where
+    A::Authorization: ConditionalSend,
 {
     async fn execute(
         &mut self,
         input: Capability<archive::Get>,
     ) -> Result<Option<Bytes>, archive::ArchiveError> {
         // obtain authorization for access::archive::Get
-        let authorize = Subject::from(input.subject())
+        let authorize = Subject::from(input.subject().to_string())
             .attenuate(access::archive::Archive)
             .attenuate(access::archive::Catalog {
-                catalog: archive::Catalog::of(input).catalog,
+                catalog: archive::Catalog::of(&input).catalog.clone(),
             })
             .invoke(access::archive::Get {
-                digest: archive::Get::of(input).digest,
+                digest: archive::Get::of(&input).digest.clone(),
             })
             .acquire(&mut self.access)
-            .await?;
+            .await
+            .map_err(|e| ArchiveError::AuthorizationError(e.to_string()))?;
 
         let authorization = authorize.perform(&mut self.provider).await?;
 
         let client = reqwest::Client::new();
         let mut builder = authorization.into_request(&client);
-        let response = builder.send().await?;
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| ArchiveError::Io(e.to_string()))?;
 
         if response.status().is_success() {
-            Ok(())
+            Ok(unimplemented!("WIP"))
         } else {
-            Err(S3StorageError::ServiceError(format!(
+            Err(archive::ArchiveError::Storage(format!(
                 "Failed to get value: {}",
                 response.status()
             )))
@@ -533,24 +519,24 @@ where
         let subject = self.credentials.subject();
         let store = self.prefix_path();
         let encoded_key = encode_s3_key(key.as_ref());
-        let claim = StorageClaim::delete(subject, store, encoded_key.as_bytes());
-        let descriptor = self
-            .credentials
-            .authorize(&claim)
-            .map_err(S3StorageError::from)?;
+        todo!("disable");
+        // let descriptor = self
+        //     .credentials
+        //     .authorize(&claim)
+        //     .map_err(S3StorageError::from)?;
 
-        let response = self
-            .send_request(descriptor, None, Precondition::None)
-            .await?;
+        // let response = self
+        //     .send_request(descriptor, None, Precondition::None)
+        //     .await?;
 
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(S3StorageError::ServiceError(format!(
-                "Failed to delete object: {}",
-                response.status()
-            )))
-        }
+        // if response.status().is_success() {
+        //     Ok(())
+        // } else {
+        //     Err(S3StorageError::ServiceError(format!(
+        //         "Failed to delete object: {}",
+        //         response.status()
+        //     )))
+        // }
     }
 }
 
@@ -567,58 +553,62 @@ where
     type Error = S3StorageError;
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        let subject = self.credentials.subject();
-        let store = self.prefix_path();
-        let encoded_key = encode_s3_key(key.as_ref());
-        let checksum = self.hasher.checksum(value.as_ref());
-        let claim = StorageClaim::set(subject, store, encoded_key.as_bytes(), checksum);
-        let descriptor = self
-            .credentials
-            .authorize(&claim)
-            .map_err(S3StorageError::from)?;
+        todo!("disable")
+        // {
+        //     let subject = self.credentials.subject();
+        //     let store = self.prefix_path();
+        //     let encoded_key = encode_s3_key(key.as_ref());
+        //     let checksum = self.hasher.checksum(value.as_ref());
+        //     let claim = StorageClaim::set(subject, store, encoded_key.as_bytes(), checksum);
+        //     let descriptor = self
+        //         .credentials
+        //         .authorize(&claim)
+        //         .map_err(S3StorageError::from)?;
 
-        let response = self
-            .send_request(descriptor, Some(value.as_ref()), Precondition::None)
-            .await?;
+        //     let response = self
+        //         .send_request(descriptor, Some(value.as_ref()), Precondition::None)
+        //         .await?;
 
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(S3StorageError::ServiceError(format!(
-                "Failed to set value: {}",
-                response.status()
-            )))
-        }
+        //     if response.status().is_success() {
+        //         Ok(())
+        //     } else {
+        //         Err(S3StorageError::ServiceError(format!(
+        //             "Failed to set value: {}",
+        //             response.status()
+        //         )))
+        //     }
+        // }
     }
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         let subject = self.credentials.subject();
         let store = self.prefix_path();
         let encoded_key = encode_s3_key(key.as_ref());
-        let claim = StorageClaim::get(subject, store, encoded_key.as_bytes());
-        let descriptor = self
-            .credentials
-            .authorize(&claim)
-            .map_err(S3StorageError::from)?;
+        todo!("disable")
+        // let claim = StorageClaim::get(subject, store, encoded_key.as_bytes());
+        // let descriptor = self
+        //     .credentials
+        //     .authorize(&claim)
+        //     .map_err(S3StorageError::from)?;
 
-        let response = self
-            .send_request(descriptor, None, Precondition::None)
-            .await?;
+        // let response = self
+        //     .send_request(descriptor, None, Precondition::None)
+        //     .await?;
 
-        if response.status().is_success() {
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| S3StorageError::TransportError(e.to_string()))?;
-            Ok(Some(Value::from(bytes.to_vec())))
-        } else if response.status() == reqwest::StatusCode::NOT_FOUND {
-            Ok(None)
-        } else {
-            Err(S3StorageError::ServiceError(format!(
-                "Failed to get value: {}",
-                response.status()
-            )))
-        }
+        // if response.status().is_success() {
+        //     let bytes = response
+        //         .bytes()
+        //         .await
+        //         .map_err(|e| S3StorageError::TransportError(e.to_string()))?;
+        //     Ok(Some(Value::from(bytes.to_vec())))
+        // } else if response.status() == reqwest::StatusCode::NOT_FOUND {
+        //     Ok(None)
+        // } else {
+        //     Err(S3StorageError::ServiceError(format!(
+        //         "Failed to get value: {}",
+        //         response.status()
+        //     )))
+        // }
     }
 }
 
@@ -754,40 +744,41 @@ where
         let subject_did = self.credentials.subject();
         let space = self.path.clone().unwrap_or_default();
         let cell = encode_s3_key(address.as_ref());
-        let claim = MemoryClaim::resolve(subject_did, &space, &cell);
-        let descriptor = self
-            .credentials
-            .authorize(&claim)
-            .map_err(S3StorageError::from)?;
+        todo!("disable");
+        // let claim = MemoryClaim::resolve(subject_did, &space, &cell);
+        // let descriptor = self
+        //     .credentials
+        //     .authorize(&claim)
+        //     .map_err(S3StorageError::from)?;
 
-        let response = self
-            .send_request(descriptor, None, Precondition::None)
-            .await?;
+        // let response = self
+        //     .send_request(descriptor, None, Precondition::None)
+        //     .await?;
 
-        if response.status().is_success() {
-            // Extract ETag from response headers
-            let etag = response
-                .headers()
-                .get("etag")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim_matches('"').to_string())
-                .ok_or_else(|| {
-                    S3StorageError::ServiceError("Response missing ETag header".to_string())
-                })?;
+        // if response.status().is_success() {
+        //     // Extract ETag from response headers
+        //     let etag = response
+        //         .headers()
+        //         .get("etag")
+        //         .and_then(|v| v.to_str().ok())
+        //         .map(|s| s.trim_matches('"').to_string())
+        //         .ok_or_else(|| {
+        //             S3StorageError::ServiceError("Response missing ETag header".to_string())
+        //         })?;
 
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| S3StorageError::TransportError(e.to_string()))?;
-            Ok(Some((Value::from(bytes.to_vec()), etag)))
-        } else if response.status() == reqwest::StatusCode::NOT_FOUND {
-            Ok(None)
-        } else {
-            Err(S3StorageError::ServiceError(format!(
-                "Failed to resolve value: {}",
-                response.status()
-            )))
-        }
+        //     let bytes = response
+        //         .bytes()
+        //         .await
+        //         .map_err(|e| S3StorageError::TransportError(e.to_string()))?;
+        //     Ok(Some((Value::from(bytes.to_vec()), etag)))
+        // } else if response.status() == reqwest::StatusCode::NOT_FOUND {
+        //     Ok(None)
+        // } else {
+        //     Err(S3StorageError::ServiceError(format!(
+        //         "Failed to resolve value: {}",
+        //         response.status()
+        //     )))
+        // }
     }
 
     async fn replace(
@@ -802,81 +793,82 @@ where
         // Edition is now String (memory::Edition = String)
         let when = edition.cloned();
 
-        match content {
-            Some(new_value) => {
-                let checksum = self.hasher.checksum(new_value.as_ref());
-                let claim =
-                    MemoryClaim::publish(subject_did, &space, &cell, checksum, when.clone());
-                let descriptor = self
-                    .credentials
-                    .authorize(&claim)
-                    .map_err(S3StorageError::from)?;
+        todo!("disable");
+        // match content {
+        //     Some(new_value) => {
+        //         let checksum = self.hasher.checksum(new_value.as_ref());
+        //         let claim =
+        //             MemoryClaim::publish(subject_did, &space, &cell, checksum, when.clone());
+        //         let descriptor = self
+        //             .credentials
+        //             .authorize(&claim)
+        //             .map_err(S3StorageError::from)?;
 
-                // Convert edition to local Precondition for send_request
-                let local_precondition = match edition {
-                    Some(etag) => Precondition::IfMatch(etag.clone()),
-                    None => Precondition::IfNoneMatch,
-                };
+        //         // Convert edition to local Precondition for send_request
+        //         let local_precondition = match edition {
+        //             Some(etag) => Precondition::IfMatch(etag.clone()),
+        //             None => Precondition::IfNoneMatch,
+        //         };
 
-                let response = self
-                    .send_request(descriptor, Some(new_value.as_ref()), local_precondition)
-                    .await?;
+        //         let response = self
+        //             .send_request(descriptor, Some(new_value.as_ref()), local_precondition)
+        //             .await?;
 
-                match response.status() {
-                    status if status.is_success() => {
-                        // Extract new ETag from response
-                        let new_etag = response
-                            .headers()
-                            .get("etag")
-                            .and_then(|v| v.to_str().ok())
-                            .map(|s| s.trim_matches('"').to_string())
-                            .ok_or_else(|| {
-                                S3StorageError::ServiceError(
-                                    "Response missing ETag header".to_string(),
-                                )
-                            })?;
-                        Ok(Some(new_etag))
-                    }
-                    reqwest::StatusCode::PRECONDITION_FAILED => Err(S3StorageError::ServiceError(
-                        "CAS condition failed: edition mismatch".to_string(),
-                    )),
-                    status => Err(S3StorageError::ServiceError(format!(
-                        "Failed to replace value: {}",
-                        status
-                    ))),
-                }
-            }
-            None => {
-                // DELETE requires edition (when) - delete with None is a no-op
-                let Some(when) = when else {
-                    return Ok(None);
-                };
+        //         match response.status() {
+        //             status if status.is_success() => {
+        //                 // Extract new ETag from response
+        //                 let new_etag = response
+        //                     .headers()
+        //                     .get("etag")
+        //                     .and_then(|v| v.to_str().ok())
+        //                     .map(|s| s.trim_matches('"').to_string())
+        //                     .ok_or_else(|| {
+        //                         S3StorageError::ServiceError(
+        //                             "Response missing ETag header".to_string(),
+        //                         )
+        //                     })?;
+        //                 Ok(Some(new_etag))
+        //             }
+        //             reqwest::StatusCode::PRECONDITION_FAILED => Err(S3StorageError::ServiceError(
+        //                 "CAS condition failed: edition mismatch".to_string(),
+        //             )),
+        //             status => Err(S3StorageError::ServiceError(format!(
+        //                 "Failed to replace value: {}",
+        //                 status
+        //             ))),
+        //         }
+        //     }
+        //     None => {
+        //         // DELETE requires edition (when) - delete with None is a no-op
+        //         let Some(when) = when else {
+        //             return Ok(None);
+        //         };
 
-                let claim = MemoryClaim::retract(subject_did, &space, &cell, when);
-                let descriptor = self
-                    .credentials
-                    .authorize(&claim)
-                    .map_err(S3StorageError::from)?;
+        //         let claim = MemoryClaim::retract(subject_did, &space, &cell, when);
+        //         let descriptor = self
+        //             .credentials
+        //             .authorize(&claim)
+        //             .map_err(S3StorageError::from)?;
 
-                let precondition = match edition {
-                    Some(etag) => Precondition::IfMatch(etag.clone()),
-                    None => Precondition::None,
-                };
+        //         let precondition = match edition {
+        //             Some(etag) => Precondition::IfMatch(etag.clone()),
+        //             None => Precondition::None,
+        //         };
 
-                let response = self.send_request(descriptor, None, precondition).await?;
+        //         let response = self.send_request(descriptor, None, precondition).await?;
 
-                match response.status() {
-                    status if status.is_success() => Ok(None),
-                    reqwest::StatusCode::PRECONDITION_FAILED => Err(S3StorageError::ServiceError(
-                        "CAS condition failed: edition mismatch".to_string(),
-                    )),
-                    status => Err(S3StorageError::ServiceError(format!(
-                        "Failed to delete value: {}",
-                        status
-                    ))),
-                }
-            }
-        }
+        //         match response.status() {
+        //             status if status.is_success() => Ok(None),
+        //             reqwest::StatusCode::PRECONDITION_FAILED => Err(S3StorageError::ServiceError(
+        //                 "CAS condition failed: edition mismatch".to_string(),
+        //             )),
+        //             status => Err(S3StorageError::ServiceError(format!(
+        //                 "Failed to delete value: {}",
+        //                 status
+        //             ))),
+        //         }
+        //     }
+        // }
     }
 }
 

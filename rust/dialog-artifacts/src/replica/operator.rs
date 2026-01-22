@@ -1,7 +1,9 @@
 pub use super::Replica;
 use super::principal::Principal;
+use super::remote::RemoteCredentials;
 use super::{
-    Formatter, PlatformBackend, ReplicaError, SECRET_KEY_LENGTH, Signature, SignerMut, SigningKey,
+    Formatter, PlatformBackend, RemoteSite, ReplicaError, SECRET_KEY_LENGTH, Signature, SignerMut,
+    SigningKey,
 };
 pub use dialog_common::capability::Did;
 
@@ -62,8 +64,64 @@ impl Operator {
         &self,
         subject: impl Into<Did>,
         backend: Backend,
-    ) -> Result<Replica<Backend>, ReplicaError> {
+    ) -> Result<impl Repository, ReplicaError> {
         Replica::open(self.clone(), subject.into(), backend)
+    }
+}
+
+trait Repository {
+    fn remotes(&self) -> impl Remotes;
+}
+impl<Backend: PlatformBackend> Repository for Replica<Backend> {
+    fn remotes(&self) -> impl Remotes {
+        self
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+trait Remotes {
+    async fn add(
+        &mut self,
+        name: impl Into<String>,
+        credentials: RemoteCredentials,
+    ) -> Result<RemoteSite, ReplicaError>;
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Backend: PlatformBackend> Remotes for Replica<Backend> {
+    async fn add(
+        &mut self,
+        name: impl Into<String>,
+        credentials: RemoteCredentials,
+    ) -> Result<RemoteSite, ReplicaError> {
+        let site = RemoteSite::new(name, credentials, self.issuer.clone());
+        let address = format!("site/{}", site.name);
+        let memory = self
+            .storage
+            .open::<RemoteSite>(&address.into_bytes())
+            .await
+            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+
+        // Check if remote already exists with different config
+        if let Some(existing) = memory.read().clone() {
+            if existing.credentials != site.credentials {
+                return Err(ReplicaError::RemoteAlreadyExists {
+                    remote: site.name.clone(),
+                });
+            }
+            // Already exists with same config, return it
+            return Ok(existing);
+        }
+
+        // Store the new remote site
+        memory
+            .replace(Some(site.clone()), &self.storage)
+            .await
+            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+
+        Ok(site)
     }
 }
 
@@ -83,8 +141,8 @@ mod tests {
         let repository = operator.open(subject, backend)?;
 
         let origin = repository
-            .remotes
-            .add_v2(
+            .remotes()
+            .add(
                 "origin",
                 RemoteCredentials::ucan("https://ucan.tonk.workers.dev", None),
             )
@@ -92,6 +150,8 @@ mod tests {
 
         let upstream = origin.repository(subject).branch("main");
         let index = upstream.index();
+
+        index.get(b"hello");
 
         Ok(())
     }

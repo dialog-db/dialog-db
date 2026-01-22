@@ -20,7 +20,7 @@ pub trait Access {
     type Authorization: Authorization;
 
     /// Error type for authorization lookup failures.
-    type Error;
+    type Error: std::error::Error;
 
     /// Find an authorization for the given claim.
     ///

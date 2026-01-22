@@ -3,9 +3,12 @@
 //! The `Ability` trait is the abstract interface for all capability chain types,
 //! providing access to the subject DID and command path.
 
-use super::capability::{Parameters, Policy};
+use super::capability::Policy;
 use super::constrained::Constrained;
 use super::subject::{Did, Subject};
+
+#[cfg(feature = "ucan")]
+use super::capability::Parameters;
 
 /// Trait for representing an abstract capability (subject + command path).
 ///

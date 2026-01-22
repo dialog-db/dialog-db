@@ -19,7 +19,9 @@ use crate::ConditionalSend;
 use ipld_core::{ipld::Ipld, serde::to_ipld};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::error::Error;
 
+#[cfg(feature = "ucan")]
 pub type Parameters = BTreeMap<String, Ipld>;
 
 pub trait Settings {
@@ -314,17 +316,17 @@ impl<C: Constraint, A: Authorization> Authorized<C, A> {
     }
 }
 
-pub enum PerformError<E> {
+pub enum PerformError<E: Error> {
     Excution(E),
     Authorization(AuthorizationError),
 }
 
-impl<Ok, Error, Fx: Effect<Output = Result<Ok, Error>> + Constraint, A: Authorization>
+impl<Ok, E: Error, Fx: Effect<Output = Result<Ok, E>> + Constraint, A: Authorization>
     Authorized<Fx, A>
 {
     /// Perform the invocation directly without authorization verification.
     /// For operations that require authorization, use `acquire` first.
-    pub async fn perform<Env>(self, env: &mut Env) -> Result<Ok, PerformError<Error>>
+    pub async fn perform<Env>(self, env: &mut Env) -> Result<Ok, PerformError<E>>
     where
         Env: Provider<Self> + Authority,
     {

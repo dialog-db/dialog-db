@@ -28,7 +28,7 @@ use std::fmt::Debug;
 use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
 
 #[cfg(feature = "s3")]
-use dialog_storage::s3::{Bucket as S3Bucket, S3Credentials};
+use dialog_storage::s3::{Bucket as S3Bucket, Credentials};
 use ed25519_dalek::ed25519::signature::SignerMut;
 use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, SignatureError, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -41,9 +41,9 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-mod operator;
-mod principal;
-mod remote;
+pub mod operator;
+pub mod principal;
+pub mod remote;
 
 pub use operator::Operator;
 pub use principal::Principal;
@@ -385,12 +385,12 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// Mounts a typed store for branch state at the appropriate storage location.
     /// Loads a branch with a given id or creates one if it does not exist.
     pub async fn open(
-        id: &BranchId,
+        id: impl Into<BranchId>,
         issuer: Operator,
         storage: PlatformStorage<Backend>,
     ) -> Result<Branch<Backend>, ReplicaError> {
         let default_state = Some(BranchState::new(
-            id.clone(),
+            id.into(),
             #[allow(clippy::clone_on_copy)]
             Revision::new(issuer.principal().clone()),
             None,
@@ -1043,7 +1043,7 @@ impl<Backend: PlatformBackend> Remotes<Backend> {
 
 /// Represents remote storage
 #[cfg(feature = "s3")]
-pub type RemoteBackend = ErrorMappingBackend<S3Bucket<Vec<u8>, Vec<u8>, S3Credentials>>;
+pub type RemoteBackend = ErrorMappingBackend<S3Bucket<Vec<u8>, Vec<u8>, Credentials>>;
 
 #[cfg(not(feature = "s3"))]
 pub type RemoteBackend =
@@ -1427,7 +1427,7 @@ impl RemoteState {
     /// Creates a storage connection using this remote's configuration.
     #[cfg(feature = "s3")]
     pub fn connect(&self) -> Result<PlatformStorage<RemoteBackend>, ReplicaError> {
-        use dialog_storage::s3::{Address, S3Credentials};
+        use dialog_storage::s3::{Address, Credentials};
 
         let address = Address::new(
             &self.address.endpoint,
@@ -1439,17 +1439,12 @@ impl RemoteState {
         let subject = self.address.prefix.clone().unwrap_or_default();
 
         let credentials = match (&self.address.access_key_id, &self.address.secret_access_key) {
-            (Some(key_id), Some(secret)) => {
-                S3Credentials::private(address, &subject, key_id, secret).map_err(|_| {
-                    ReplicaError::RemoteConnectionError {
-                        remote: self.site.clone(),
-                    }
-                })?
-            }
-            _ => S3Credentials::public(address, &subject).map_err(|_| {
-                ReplicaError::RemoteConnectionError {
+            (Some(key_id), Some(secret)) => Credentials::private(address, &subject, key_id, secret)
+                .map_err(|_| ReplicaError::RemoteConnectionError {
                     remote: self.site.clone(),
-                }
+                })?,
+            _ => Credentials::public(address).map_err(|_| ReplicaError::RemoteConnectionError {
+                remote: self.site.clone(),
             })?,
         };
 
@@ -3178,7 +3173,7 @@ mod tests {
     async fn test_archive_caches_remote_reads_to_local(
         s3_address: dialog_storage::s3::helpers::S3Address,
     ) -> anyhow::Result<()> {
-        use dialog_storage::s3::{Address, Bucket, S3Credentials};
+        use dialog_storage::s3::{Address, Bucket, Credentials};
         use dialog_storage::{ContentAddressedStorage, MemoryStorageBackend};
         use serde::{Deserialize, Serialize};
 
