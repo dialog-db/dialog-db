@@ -15,7 +15,7 @@
 //! (index 0) to closest to subject (last index).
 
 use super::container::Container;
-use crate::access::AuthorizationError;
+use crate::access::AccessError;
 use ipld_core::cid::Cid;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
@@ -75,9 +75,9 @@ impl DelegationChain {
     /// # Errors
     ///
     /// Returns an error if the bytes list is empty or if any delegation fails to deserialize.
-    pub fn from_delegation_bytes(proof_bytes: Vec<Vec<u8>>) -> Result<Self, AuthorizationError> {
+    pub fn from_delegation_bytes(proof_bytes: Vec<Vec<u8>>) -> Result<Self, AccessError> {
         if proof_bytes.is_empty() {
-            return Err(AuthorizationError::Configuration(
+            return Err(AccessError::Configuration(
                 "DelegationChain requires at least one delegation".to_string(),
             ));
         }
@@ -86,10 +86,7 @@ impl DelegationChain {
         for (i, bytes) in proof_bytes.iter().enumerate() {
             let delegation: Delegation<Ed25519Did> = serde_ipld_dagcbor::from_slice(bytes)
                 .map_err(|e| {
-                    AuthorizationError::Invocation(format!(
-                        "failed to decode delegation {}: {}",
-                        i, e
-                    ))
+                    AccessError::Invocation(format!("failed to decode delegation {}: {}", i, e))
                 })?;
             delegations_vec.push(delegation);
         }
@@ -100,7 +97,7 @@ impl DelegationChain {
     ///
     /// The container format is: `{ "ctn-v1": [delegation_0_bytes, ...] }`
     /// where delegations are ordered from closest to invoker to closest to subject.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, AuthorizationError> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, AccessError> {
         Container::from(self).to_bytes()
     }
 
@@ -179,12 +176,12 @@ impl DelegationChain {
     ///
     /// Returns an error if the new delegation's issuer doesn't match the current
     /// chain's audience.
-    pub fn extend(&self, delegation: Delegation<Ed25519Did>) -> Result<Self, AuthorizationError> {
+    pub fn extend(&self, delegation: Delegation<Ed25519Did>) -> Result<Self, AccessError> {
         // Verify principal alignment: new delegation's issuer must match current audience
         let current_audience = self.audience();
         let new_issuer = delegation.issuer();
         if new_issuer != current_audience {
-            return Err(AuthorizationError::Invocation(format!(
+            return Err(AccessError::Invocation(format!(
                 "Principal alignment error: delegation issuer '{}' does not match chain audience '{}'",
                 new_issuer, current_audience
             )));
@@ -207,7 +204,7 @@ impl DelegationChain {
 }
 
 impl TryFrom<Vec<Delegation<Ed25519Did>>> for DelegationChain {
-    type Error = AuthorizationError;
+    type Error = AccessError;
 
     /// Create a delegation chain from a vector of delegations.
     ///
@@ -225,7 +222,7 @@ impl TryFrom<Vec<Delegation<Ed25519Did>>> for DelegationChain {
     /// Returns an error if the vector is empty or if principal alignment fails.
     fn try_from(delegations_vec: Vec<Delegation<Ed25519Did>>) -> Result<Self, Self::Error> {
         if delegations_vec.is_empty() {
-            return Err(AuthorizationError::Configuration(
+            return Err(AccessError::Configuration(
                 "DelegationChain requires at least one delegation".to_string(),
             ));
         }
@@ -238,7 +235,7 @@ impl TryFrom<Vec<Delegation<Ed25519Did>>> for DelegationChain {
             // The issuer of current delegation must be the audience of the next delegation
             // (moving from invoker toward subject)
             if current.issuer() != next.audience() {
-                return Err(AuthorizationError::Invocation(format!(
+                return Err(AccessError::Invocation(format!(
                     "Principal alignment error at position {}: delegation issuer '{}' does not match next delegation audience '{}'",
                     i,
                     current.issuer(),
@@ -270,7 +267,7 @@ impl From<Delegation<Ed25519Did>> for DelegationChain {
 }
 
 impl TryFrom<&[u8]> for DelegationChain {
-    type Error = AuthorizationError;
+    type Error = AccessError;
 
     /// Deserialize a delegation chain from DAG-CBOR container format.
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
@@ -280,7 +277,7 @@ impl TryFrom<&[u8]> for DelegationChain {
 }
 
 impl TryFrom<Container> for DelegationChain {
-    type Error = AuthorizationError;
+    type Error = AccessError;
 
     /// Convert a container to a delegation chain.
     fn try_from(container: Container) -> Result<Self, Self::Error> {
@@ -292,10 +289,7 @@ impl TryFrom<Container> for DelegationChain {
         for (i, bytes) in token_bytes.iter().enumerate() {
             let delegation: Delegation<Ed25519Did> = serde_ipld_dagcbor::from_slice(bytes)
                 .map_err(|e| {
-                    AuthorizationError::Invocation(format!(
-                        "failed to decode delegation {}: {}",
-                        i, e
-                    ))
+                    AccessError::Invocation(format!("failed to decode delegation {}: {}", i, e))
                 })?;
             delegations_vec.push(delegation);
         }
@@ -366,7 +360,7 @@ pub mod tests {
         audience: &Ed25519Did,
         subject: &Ed25519Did,
         command: &[&str],
-    ) -> Result<Delegation<Ed25519Did>, AuthorizationError> {
+    ) -> Result<Delegation<Ed25519Did>, AccessError> {
         DelegationBuilder::new()
             .issuer(issuer.clone())
             .audience(audience.clone())
@@ -378,9 +372,7 @@ pub mod tests {
                     .collect(),
             )
             .try_build()
-            .map_err(|e| {
-                AuthorizationError::Invocation(format!("Failed to build delegation: {:?}", e))
-            })
+            .map_err(|e| AccessError::Invocation(format!("Failed to build delegation: {:?}", e)))
     }
 
     #[test]

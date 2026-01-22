@@ -8,8 +8,8 @@ use std::fmt::Write;
 use url::Url;
 
 use crate::access::{AuthorizedRequest, S3Request};
-pub use crate::credentials::Credentials as Authorizer;
-use crate::{Address, AuthorizationError};
+pub use crate::credentials::Authorizer;
+use crate::{Address, AccessError};
 
 use super::{build_url, extract_host, is_path_style_default};
 
@@ -43,9 +43,9 @@ impl PublicCredentials {
     /// # Errors
     ///
     /// Returns an error if the endpoint URL in the address is invalid.
-    pub fn new(address: Address) -> Result<Self, AuthorizationError> {
+    pub fn new(address: Address) -> Result<Self, AccessError> {
         let endpoint = Url::parse(address.endpoint())
-            .map_err(|e| AuthorizationError::Configuration(e.to_string()))?;
+            .map_err(|e| AccessError::Configuration(e.to_string()))?;
         let path_style = is_path_style_default(&endpoint);
 
         Ok(Self {
@@ -72,7 +72,7 @@ impl PublicCredentials {
     }
 
     /// Build a URL for the given key path.
-    pub fn build_url(&self, path: &str) -> Result<Url, AuthorizationError> {
+    pub fn build_url(&self, path: &str) -> Result<Url, AccessError> {
         build_url(&self.endpoint, self.address.bucket(), path, self.path_style)
     }
 }
@@ -84,7 +84,7 @@ impl Authorizer for PublicCredentials {
     async fn authorize<R: S3Request>(
         &self,
         request: &R,
-    ) -> Result<AuthorizedRequest, AuthorizationError> {
+    ) -> Result<AuthorizedRequest, AccessError> {
         let path = request.path();
         let mut url = self.build_url(&path)?;
 
@@ -146,9 +146,9 @@ impl PrivateCredentials {
         address: Address,
         access_key_id: impl Into<String>,
         secret_access_key: impl Into<String>,
-    ) -> Result<Self, AuthorizationError> {
+    ) -> Result<Self, AccessError> {
         let endpoint = Url::parse(address.endpoint())
-            .map_err(|e| AuthorizationError::Configuration(e.to_string()))?;
+            .map_err(|e| AccessError::Configuration(e.to_string()))?;
         let path_style = is_path_style_default(&endpoint);
 
         Ok(Self {
@@ -182,7 +182,7 @@ impl PrivateCredentials {
     }
 
     /// Build a URL for the given key path.
-    pub fn build_url(&self, path: &str) -> Result<Url, AuthorizationError> {
+    pub fn build_url(&self, path: &str) -> Result<Url, AccessError> {
         build_url(&self.endpoint, self.address.bucket(), path, self.path_style)
     }
 }
@@ -195,7 +195,7 @@ impl Authorizer for PrivateCredentials {
     async fn authorize<R: S3Request>(
         &self,
         request: &R,
-    ) -> Result<AuthorizedRequest, AuthorizationError> {
+    ) -> Result<AuthorizedRequest, AccessError> {
         let time = current_time();
         let timestamp = time.format("%Y%m%dT%H%M%SZ").to_string();
         let date = &timestamp[0..8];
@@ -216,7 +216,7 @@ impl Authorizer for PrivateCredentials {
         // host and include it if present
         let hostname = url
             .host_str()
-            .ok_or_else(|| AuthorizationError::Configuration("URL missing host".into()))?;
+            .ok_or_else(|| AccessError::Configuration("URL missing host".into()))?;
         let host = if let Some(port) = url.port() {
             format!("{}:{}", hostname, port)
         } else {
@@ -377,7 +377,7 @@ impl Credentials {
     ///
     /// * `address` - S3 address (endpoint, region, bucket)
     /// * `subject` - Subject DID used as path prefix within the bucket
-    pub fn public(address: Address) -> Result<Self, AuthorizationError> {
+    pub fn public(address: Address) -> Result<Self, AccessError> {
         Ok(Self::Public(PublicCredentials::new(address)?))
     }
 
@@ -393,7 +393,7 @@ impl Credentials {
         address: Address,
         access_key_id: impl Into<String>,
         secret_access_key: impl Into<String>,
-    ) -> Result<Self, AuthorizationError> {
+    ) -> Result<Self, AccessError> {
         Ok(Self::Private(PrivateCredentials::new(
             address,
             access_key_id,
@@ -426,13 +426,15 @@ impl Credentials {
     }
 
     /// Build a URL for the given key path.
-    pub fn build_url(&self, path: &str) -> Result<Url, AuthorizationError> {
+    pub fn build_url(&self, path: &str) -> Result<Url, AccessError> {
         match self {
             Self::Public(c) => c.build_url(path),
             Self::Private(c) => c.build_url(path),
         }
     }
 }
+
+
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -444,7 +446,7 @@ impl Authorizer for Credentials {
     async fn authorize<R: S3Request>(
         &self,
         request: &R,
-    ) -> Result<AuthorizedRequest, AuthorizationError> {
+    ) -> Result<AuthorizedRequest, AccessError> {
         match self {
             Self::Public(c) => c.authorize(request).await,
             Self::Private(c) => c.authorize(request).await,
@@ -537,6 +539,8 @@ fn current_time() -> DateTime<Utc> {
         DateTime::<Utc>::from(SystemTime::now())
     }
 }
+
+
 
 #[cfg(test)]
 mod tests {

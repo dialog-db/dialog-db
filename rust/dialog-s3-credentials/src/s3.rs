@@ -8,12 +8,13 @@
 //! Both variants implement [`Access`](dialog_common::capability::Access) and
 //! [`Provider`](dialog_common::capability::Provider) for capability-based authorization.
 
+mod authorization;
 mod credentials;
 mod provider;
 
 pub use crate::Address;
+pub use authorization::S3Authorization;
 pub use credentials::{Authorizer, Credentials, PrivateCredentials, PublicCredentials};
-
 use url::Url;
 
 /// Determine if path-style URLs should be used by default for this endpoint.
@@ -37,7 +38,7 @@ pub(crate) fn build_url(
     bucket: &str,
     path: &str,
     path_style: bool,
-) -> Result<Url, crate::AuthorizationError> {
+) -> Result<Url, crate::AccessError> {
     if path_style {
         // Path-style: https://endpoint/bucket/path
         let mut url = endpoint.clone();
@@ -50,15 +51,14 @@ pub(crate) fn build_url(
         Ok(url)
     } else {
         // Virtual-hosted style: https://bucket.endpoint/path
-        let host = endpoint.host_str().ok_or_else(|| {
-            crate::AuthorizationError::Configuration("Invalid endpoint: no host".into())
-        })?;
+        let host = endpoint
+            .host_str()
+            .ok_or_else(|| crate::AccessError::Configuration("Invalid endpoint: no host".into()))?;
         let new_host = format!("{}.{}", bucket, host);
 
         let mut url = endpoint.clone();
-        url.set_host(Some(&new_host)).map_err(|e| {
-            crate::AuthorizationError::Configuration(format!("Invalid host: {}", e))
-        })?;
+        url.set_host(Some(&new_host))
+            .map_err(|e| crate::AccessError::Configuration(format!("Invalid host: {}", e)))?;
 
         let new_path = if path.is_empty() { "/" } else { path };
         url.set_path(new_path);
@@ -67,10 +67,10 @@ pub(crate) fn build_url(
 }
 
 /// Extract host string from URL, including port for non-standard ports.
-pub(crate) fn extract_host(url: &Url) -> Result<String, crate::AuthorizationError> {
+pub(crate) fn extract_host(url: &Url) -> Result<String, crate::AccessError> {
     let hostname = url
         .host_str()
-        .ok_or_else(|| crate::AuthorizationError::Configuration("URL missing host".into()))?;
+        .ok_or_else(|| crate::AccessError::Configuration("URL missing host".into()))?;
 
     Ok(match url.port() {
         Some(port) => format!("{}:{}", hostname, port),

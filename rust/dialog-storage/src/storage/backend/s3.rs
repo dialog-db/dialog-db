@@ -131,7 +131,7 @@ use thiserror::Error;
 
 // Re-export core types from dialog-s3-credentials crate
 pub use dialog_s3_credentials::{
-    Address, AuthorizationError as AccessError, AuthorizedRequest, Checksum, Hasher,
+    Address, AccessError as AccessError, AuthorizedRequest, Checksum, Hasher,
 };
 // Use access module types for direct S3 authorization
 pub use dialog_s3_credentials::{

@@ -16,7 +16,7 @@ use std::error::Error;
 
 use dialog_common::capability::{Attenuation, Capability, Effect, PerformError, Policy, Subject};
 use dialog_common::{Blake3Hash, Bytes};
-use dialog_s3_credentials::AuthorizationError;
+use dialog_s3_credentials::AccessError;
 use thiserror::Error;
 
 // Archive Ability
@@ -151,8 +151,8 @@ pub enum ArchiveError {
     Io(String),
 }
 
-impl From<AuthorizationError> for ArchiveError {
-    fn from(value: AuthorizationError) -> Self {
+impl From<AccessError> for ArchiveError {
+    fn from(value: AccessError) -> Self {
         ArchiveError::AuthorizationError(value.to_string())
     }
 }

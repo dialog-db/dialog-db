@@ -48,9 +48,9 @@
 use std::collections::BTreeMap;
 
 use super::invocation::InvocationChain;
-use crate::access::{AuthorizationError, AuthorizedRequest};
+use crate::access::{AccessError, AuthorizedRequest};
 use crate::access::{archive, memory, storage};
-use crate::credentials::Credentials;
+use crate::credentials::Authorizer;
 use base58::ToBase58;
 use dialog_common::capability::{Ability, Capability, Subject};
 
@@ -63,11 +63,11 @@ use dialog_common::capability::{Ability, Capability, Subject};
 
 /// 4. Delegates to wrapped credentials for presigned URLs
 #[derive(Debug, Clone)]
-pub struct UcanAuthorizer<C: Credentials> {
+pub struct UcanAuthorizer<C: Authorizer> {
     credentials: C,
 }
 
-impl<C: Credentials + Sync> UcanAuthorizer<C> {
+impl<C: Authorizer + Sync> UcanAuthorizer<C> {
     /// Create a new UCAN authorizer wrapping the given credentials.
     pub fn new(credentials: C) -> Self {
         Self { credentials }
@@ -91,10 +91,7 @@ impl<C: Credentials + Sync> UcanAuthorizer<C> {
     /// 1. Verifies the delegation chain from subject to invocation issuer
     /// 2. Checks command prefix authorization at each delegation
     /// 3. Validates policy predicates on each delegation
-    pub async fn authorize(
-        &self,
-        container: &[u8],
-    ) -> Result<AuthorizedRequest, AuthorizationError> {
+    pub async fn authorize(&self, container: &[u8]) -> Result<AuthorizedRequest, AccessError> {
         // Parse and verify the invocation chain
         let chain = InvocationChain::try_from(container)?;
         chain.verify().await?;
@@ -157,7 +154,7 @@ impl<C: Credentials + Sync> UcanAuthorizer<C> {
                 self.credentials.authorize(&capability).await
             }
 
-            _ => Err(AuthorizationError::Invocation(format!(
+            _ => Err(AccessError::Invocation(format!(
                 "Unknown command: {:?}",
                 command_segments
             ))),
@@ -169,15 +166,15 @@ impl<C: Credentials + Sync> UcanAuthorizer<C> {
 fn get_string_arg(
     args: &BTreeMap<String, ucan::promise::Promised>,
     key: &str,
-) -> Result<String, AuthorizationError> {
+) -> Result<String, AccessError> {
     use ucan::promise::Promised;
     match args.get(key) {
         Some(Promised::String(s)) => Ok(s.clone()),
-        Some(_) => Err(AuthorizationError::Invocation(format!(
+        Some(_) => Err(AccessError::Invocation(format!(
             "Expected string for '{}' argument",
             key
         ))),
-        None => Err(AuthorizationError::Invocation(format!(
+        None => Err(AccessError::Invocation(format!(
             "Missing '{}' argument",
             key
         ))),
@@ -188,12 +185,12 @@ fn get_string_arg(
 fn get_optional_string_arg(
     args: &BTreeMap<String, ucan::promise::Promised>,
     key: &str,
-) -> Result<Option<String>, AuthorizationError> {
+) -> Result<Option<String>, AccessError> {
     use ucan::promise::Promised;
     match args.get(key) {
         Some(Promised::String(s)) => Ok(Some(s.clone())),
         Some(Promised::Null) => Ok(None),
-        Some(_) => Err(AuthorizationError::Invocation(format!(
+        Some(_) => Err(AccessError::Invocation(format!(
             "Expected string or null for '{}' argument",
             key
         ))),
@@ -205,15 +202,15 @@ fn get_optional_string_arg(
 fn get_bytes_arg(
     args: &BTreeMap<String, ucan::promise::Promised>,
     key: &str,
-) -> Result<Vec<u8>, AuthorizationError> {
+) -> Result<Vec<u8>, AccessError> {
     use ucan::promise::Promised;
     match args.get(key) {
         Some(Promised::Bytes(b)) => Ok(b.clone()),
-        Some(_) => Err(AuthorizationError::Invocation(format!(
+        Some(_) => Err(AccessError::Invocation(format!(
             "Expected bytes for '{}' argument",
             key
         ))),
-        None => Err(AuthorizationError::Invocation(format!(
+        None => Err(AccessError::Invocation(format!(
             "Missing '{}' argument",
             key
         ))),
@@ -224,14 +221,14 @@ fn get_bytes_arg(
 
 fn parse_storage_get(
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<crate::access::storage::Get, AuthorizationError> {
+) -> Result<crate::access::storage::Get, AccessError> {
     let key = get_bytes_arg(args, "key")?;
     Ok(crate::access::storage::Get::new(key))
 }
 
 fn parse_storage_set(
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<crate::access::storage::Set, AuthorizationError> {
+) -> Result<crate::access::storage::Set, AccessError> {
     let key = get_bytes_arg(args, "key")?;
     let checksum = parse_checksum(args)?;
     Ok(crate::access::storage::Set::new(key, checksum))
@@ -239,14 +236,14 @@ fn parse_storage_set(
 
 fn parse_storage_delete(
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<crate::access::storage::Delete, AuthorizationError> {
+) -> Result<crate::access::storage::Delete, AccessError> {
     let key = get_bytes_arg(args, "key")?;
     Ok(crate::access::storage::Delete::new(key))
 }
 
 fn parse_storage_list(
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<crate::access::storage::List, AuthorizationError> {
+) -> Result<crate::access::storage::List, AccessError> {
     let continuation_token = get_optional_string_arg(args, "continuation_token")?;
     Ok(crate::access::storage::List::new(continuation_token))
 }
@@ -256,7 +253,7 @@ fn build_storage_capability<E>(
     subject_did: &str,
     args: &BTreeMap<String, ucan::promise::Promised>,
     effect: E,
-) -> Result<Capability<E>, AuthorizationError>
+) -> Result<Capability<E>, AccessError>
 where
     E: dialog_common::capability::Effect<Of = storage::Store>,
 {
@@ -272,7 +269,7 @@ where
 fn build_memory_resolve_capability(
     subject_did: &str,
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<Capability<crate::access::memory::Resolve>, AuthorizationError> {
+) -> Result<Capability<crate::access::memory::Resolve>, AccessError> {
     let space = get_string_arg(args, "space")?;
     let cell = get_string_arg(args, "cell")?;
     Ok(Subject::from(subject_did)
@@ -285,7 +282,7 @@ fn build_memory_resolve_capability(
 fn build_memory_publish_capability(
     subject_did: &str,
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<Capability<crate::access::memory::Publish>, AuthorizationError> {
+) -> Result<Capability<crate::access::memory::Publish>, AccessError> {
     let space = get_string_arg(args, "space")?;
     let cell = get_string_arg(args, "cell")?;
     let when = get_optional_string_arg(args, "when")?;
@@ -300,7 +297,7 @@ fn build_memory_publish_capability(
 fn build_memory_retract_capability(
     subject_did: &str,
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<Capability<crate::access::memory::Retract>, AuthorizationError> {
+) -> Result<Capability<crate::access::memory::Retract>, AccessError> {
     let space = get_string_arg(args, "space")?;
     let cell = get_string_arg(args, "cell")?;
     let when = get_string_arg(args, "when")?;
@@ -316,12 +313,12 @@ fn build_memory_retract_capability(
 fn build_archive_get_capability(
     subject_did: &str,
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<Capability<crate::access::archive::Get>, AuthorizationError> {
+) -> Result<Capability<crate::access::archive::Get>, AccessError> {
     let catalog = get_string_arg(args, "catalog")?;
     let digest = get_bytes_arg(args, "digest")?;
     let digest_arr: [u8; 32] = digest
         .try_into()
-        .map_err(|_| AuthorizationError::Invocation("digest must be 32 bytes".to_string()))?;
+        .map_err(|_| AccessError::Invocation("digest must be 32 bytes".to_string()))?;
     let digest_hash = dialog_common::Blake3Hash::from(digest_arr);
     Ok(Subject::from(subject_did)
         .attenuate(archive::Archive)
@@ -332,12 +329,12 @@ fn build_archive_get_capability(
 fn build_archive_put_capability(
     subject_did: &str,
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<Capability<crate::access::archive::Put>, AuthorizationError> {
+) -> Result<Capability<crate::access::archive::Put>, AccessError> {
     let catalog = get_string_arg(args, "catalog")?;
     let digest = get_bytes_arg(args, "digest")?;
     let digest_arr: [u8; 32] = digest
         .try_into()
-        .map_err(|_| AuthorizationError::Invocation("digest must be 32 bytes".to_string()))?;
+        .map_err(|_| AccessError::Invocation("digest must be 32 bytes".to_string()))?;
     let digest_hash = dialog_common::Blake3Hash::from(digest_arr);
     let checksum = parse_checksum(args)?;
     Ok(Subject::from(subject_did)
@@ -349,7 +346,7 @@ fn build_archive_put_capability(
 /// Parse checksum from arguments.
 fn parse_checksum(
     args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<crate::Checksum, AuthorizationError> {
+) -> Result<crate::Checksum, AccessError> {
     use ucan::promise::Promised;
 
     // Try to get checksum as a map with algorithm and value
@@ -358,7 +355,7 @@ fn parse_checksum(
             let algorithm = match map.get("algorithm") {
                 Some(Promised::String(s)) => s.as_str(),
                 _ => {
-                    return Err(AuthorizationError::Invocation(
+                    return Err(AccessError::Invocation(
                         "checksum.algorithm must be a string".to_string(),
                     ));
                 }
@@ -366,7 +363,7 @@ fn parse_checksum(
             let value = match map.get("value") {
                 Some(Promised::Bytes(b)) => b.clone(),
                 _ => {
-                    return Err(AuthorizationError::Invocation(
+                    return Err(AccessError::Invocation(
                         "checksum.value must be bytes".to_string(),
                     ));
                 }
@@ -375,22 +372,20 @@ fn parse_checksum(
             match algorithm {
                 "sha256" => {
                     let arr: [u8; 32] = value.try_into().map_err(|_| {
-                        AuthorizationError::Invocation(
-                            "sha256 checksum must be 32 bytes".to_string(),
-                        )
+                        AccessError::Invocation("sha256 checksum must be 32 bytes".to_string())
                     })?;
                     Ok(crate::Checksum::Sha256(arr))
                 }
-                _ => Err(AuthorizationError::Invocation(format!(
+                _ => Err(AccessError::Invocation(format!(
                     "Unknown checksum algorithm: {}",
                     algorithm
                 ))),
             }
         }
-        Some(_) => Err(AuthorizationError::Invocation(
+        Some(_) => Err(AccessError::Invocation(
             "checksum must be a map with algorithm and value".to_string(),
         )),
-        None => Err(AuthorizationError::Invocation(
+        None => Err(AccessError::Invocation(
             "Missing checksum argument".to_string(),
         )),
     }

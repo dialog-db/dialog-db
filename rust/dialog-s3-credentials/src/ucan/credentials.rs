@@ -31,11 +31,13 @@
 
 use super::authorization::UcanAuthorization;
 use super::delegation::DelegationChain;
-use crate::access::{AuthorizationError, AuthorizedRequest, archive, memory, storage};
+use crate::access::{AccessError, AuthorizedRequest, S3Request, archive, memory, storage};
+use async_trait::async_trait;
 use dialog_common::ConditionalSend;
 use dialog_common::Effect;
-use dialog_common::capability::{Ability, Access, Authorized, Claim, Did, Parameters, Provider};
-use reqwest;
+use dialog_common::capability::{
+    Ability, Access, Authorized, Capability, Claim, Parameters, Provider,
+};
 
 /// UCAN-based authorizer that delegates to an external access service.
 ///
@@ -93,49 +95,6 @@ impl Credentials {
     pub fn delegation(&self) -> &DelegationChain {
         &self.delegation
     }
-
-    /// Executes authorized effect
-    async fn authorize<C: Effect>(
-        &self,
-        authorization: Authorized<C, UcanAuthorization>,
-    ) -> Result<AuthorizedRequest, AuthorizationError> {
-        // Serialize authorization
-        let ucan = authorization
-            .authorization()
-            .chain()
-            .ok_or(AuthorizationError::Invocation(
-                "Authorization is not valid".into(),
-            ))
-            .map(|ch| ch.to_bytes())??;
-
-        // 7. POST to access service
-        let response = reqwest::Client::new()
-            .post(&self.endpoint)
-            .header("Content-Type", "application/cbor")
-            .body(ucan)
-            .send()
-            .await
-            .map_err(|e| AuthorizationError::Service(e.to_string()))?;
-
-        // 8. Handle response
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(AuthorizationError::Service(format!(
-                "Access service returned {}: {}",
-                status, body
-            )));
-        }
-
-        // 9. Decode response as RequestDescriptor
-        let response_bytes = response
-            .bytes()
-            .await
-            .map_err(|e| AuthorizationError::Service(e.to_string()))?;
-
-        serde_ipld_dagcbor::from_slice(&response_bytes)
-            .map_err(|e| AuthorizationError::Service(format!("Failed to decode response: {}", e)))
-    }
 }
 
 /// Implement Access trait for Credentials.
@@ -146,7 +105,7 @@ impl Credentials {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Access for Credentials {
     type Authorization = UcanAuthorization;
-    type Error = AuthorizationError;
+    type Error = AccessError;
 
     async fn claim<C: Ability + Clone + ConditionalSend + 'static>(
         &self,
@@ -158,7 +117,7 @@ impl Access for Credentials {
         // Per UCAN spec: first delegation's `aud` should match the invoker
         let audience = self.delegation.audience().to_string();
         if claim.audience() != &audience {
-            return Err(AuthorizationError::Configuration(format!(
+            return Err(AccessError::Configuration(format!(
                 "Claim audience '{}' does not match delegation chain audience '{}'",
                 claim.audience(),
                 audience
@@ -170,6 +129,7 @@ impl Access for Credentials {
 
         // Return authorization from the delegation chain
         Ok(UcanAuthorization::delegated(
+            self.endpoint.clone(),
             self.delegation.clone(),
             claim.capability().command(),
             parameters,
@@ -177,119 +137,137 @@ impl Access for Credentials {
     }
 }
 
-// --- Provider implementations for authorized capabilities ---
-//
-// These implementations allow UCAN credentials to execute authorized capabilities
-// via the access service. Each takes `Authorized<Fx, UcanAuthorization>` where
-// `Fx` is the effect type.
-
-// Provider for storage::Get
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<Authorized<storage::Get, UcanAuthorization>> for Credentials {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Do> Provider<Authorized<Do, UcanAuthorization>> for Credentials
+where
+    Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
+    Capability<Do>: ConditionalSend + S3Request,
+{
     async fn execute(
         &mut self,
-        authorized: Authorized<storage::Get, UcanAuthorization>,
-    ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized).await
+        authorized: Authorized<Do, UcanAuthorization>,
+    ) -> Result<AuthorizedRequest, AccessError> {
+        authorized
+            .authorization()
+            .grant(authorized.capability())
+            .await
     }
 }
 
-// Provider for storage::Set
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<Authorized<storage::Set, UcanAuthorization>> for Credentials {
-    async fn execute(
-        &mut self,
-        authorized: Authorized<storage::Set, UcanAuthorization>,
-    ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized).await
-    }
-}
+// // --- Provider implementations for authorized capabilities ---
+// //
+// // These implementations allow UCAN credentials to execute authorized capabilities
+// // via the access service. Each takes `Authorized<Fx, UcanAuthorization>` where
+// // `Fx` is the effect type.
 
-// Provider for storage::Delete
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<Authorized<storage::Delete, UcanAuthorization>> for Credentials {
-    async fn execute(
-        &mut self,
-        authorized: Authorized<storage::Delete, UcanAuthorization>,
-    ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized).await
-    }
-}
+// // Provider for storage::Get
+// #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+// #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+// impl Provider<Authorized<storage::Get, UcanAuthorization>> for Credentials {
+//     async fn execute(
+//         &mut self,
+//         authorized: Authorized<storage::Get, UcanAuthorization>,
+//     ) -> Result<AuthorizedRequest, AccessError> {
+//         authorized.authorization().perform().await
+//     }
+// }
 
-// Provider for storage::List
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<Authorized<storage::List, UcanAuthorization>> for Credentials {
-    async fn execute(
-        &mut self,
-        authorized: Authorized<storage::List, UcanAuthorization>,
-    ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized).await
-    }
-}
+// // Provider for storage::Set
+// #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+// #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+// impl Provider<Authorized<storage::Set, UcanAuthorization>> for Credentials {
+//     async fn execute(
+//         &mut self,
+//         authorized: Authorized<storage::Set, UcanAuthorization>,
+//     ) -> Result<AuthorizedRequest, AccessError> {
+//         authorized.authorization().perform().await
+//     }
+// }
 
-// Provider for memory::Resolve
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<Authorized<memory::Resolve, UcanAuthorization>> for Credentials {
-    async fn execute(
-        &mut self,
-        authorized: Authorized<memory::Resolve, UcanAuthorization>,
-    ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized).await
-    }
-}
+// // Provider for storage::Delete
+// #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+// #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+// impl Provider<Authorized<storage::Delete, UcanAuthorization>> for Credentials {
+//     async fn execute(
+//         &mut self,
+//         authorized: Authorized<storage::Delete, UcanAuthorization>,
+//     ) -> Result<AuthorizedRequest, AccessError> {
+//         authorized.authorization().perform().await
+//     }
+// }
 
-// Provider for memory::Publish
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<Authorized<memory::Publish, UcanAuthorization>> for Credentials {
-    async fn execute(
-        &mut self,
-        authorized: Authorized<memory::Publish, UcanAuthorization>,
-    ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized).await
-    }
-}
+// // Provider for storage::List
+// #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+// #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+// impl Provider<Authorized<storage::List, UcanAuthorization>> for Credentials {
+//     async fn execute(
+//         &mut self,
+//         authorized: Authorized<storage::List, UcanAuthorization>,
+//     ) -> Result<AuthorizedRequest, AccessError> {
+//         authorized.authorization().perform().await
+//     }
+// }
 
-// Provider for memory::Retract
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<Authorized<memory::Retract, UcanAuthorization>> for Credentials {
-    async fn execute(
-        &mut self,
-        authorized: Authorized<memory::Retract, UcanAuthorization>,
-    ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized).await
-    }
-}
+// // Provider for memory::Resolve
+// #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+// #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+// impl Provider<Authorized<memory::Resolve, UcanAuthorization>> for Credentials {
+//     async fn execute(
+//         &mut self,
+//         authorized: Authorized<memory::Resolve, UcanAuthorization>,
+//     ) -> Result<AuthorizedRequest, AccessError> {
+//         authorized.authorization().perform().await
+//     }
+// }
 
-// Provider for archive::Get
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<Authorized<archive::Get, UcanAuthorization>> for Credentials {
-    async fn execute(
-        &mut self,
-        authorized: Authorized<archive::Get, UcanAuthorization>,
-    ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized).await
-    }
-}
+// // Provider for memory::Publish
+// #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+// #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+// impl Provider<Authorized<memory::Publish, UcanAuthorization>> for Credentials {
+//     async fn execute(
+//         &mut self,
+//         authorized: Authorized<memory::Publish, UcanAuthorization>,
+//     ) -> Result<AuthorizedRequest, AccessError> {
+//         authorized.authorization().perform().await
+//     }
+// }
 
-// Provider for archive::Put
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<Authorized<archive::Put, UcanAuthorization>> for Credentials {
-    async fn execute(
-        &mut self,
-        authorized: Authorized<archive::Put, UcanAuthorization>,
-    ) -> Result<AuthorizedRequest, AuthorizationError> {
-        self.authorize(authorized).await
-    }
-}
+// // Provider for memory::Retract
+// #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+// #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+// impl Provider<Authorized<memory::Retract, UcanAuthorization>> for Credentials {
+//     async fn execute(
+//         &mut self,
+//         authorized: Authorized<memory::Retract, UcanAuthorization>,
+//     ) -> Result<AuthorizedRequest, AccessError> {
+//         authorized.authorization().perform().await
+//     }
+// }
+
+// // Provider for archive::Get
+// #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+// #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+// impl Provider<Authorized<archive::Get, UcanAuthorization>> for Credentials {
+//     async fn execute(
+//         &mut self,
+//         authorized: Authorized<archive::Get, UcanAuthorization>,
+//     ) -> Result<AuthorizedRequest, AccessError> {
+//         authorized.authorization().perform().await
+//     }
+// }
+
+// // Provider for archive::Put
+// #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+// #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+// impl Provider<Authorized<archive::Put, UcanAuthorization>> for Credentials {
+//     async fn execute(
+//         &mut self,
+//         authorized: Authorized<archive::Put, UcanAuthorization>,
+//     ) -> Result<AuthorizedRequest, AccessError> {
+//         authorized.authorization().perform().await
+//     }
+// }
 
 /// Builder for [`Credentials`].
 ///
@@ -332,14 +310,14 @@ impl CredentialsBuilder {
     ///
     /// Returns an error if required fields are missing or if the HTTP client
     /// cannot be constructed.
-    pub fn build(self) -> Result<Credentials, AuthorizationError> {
+    pub fn build(self) -> Result<Credentials, AccessError> {
         let service_url = self
             .endpoint
-            .ok_or_else(|| AuthorizationError::Configuration("service_url is required".into()))?;
+            .ok_or_else(|| AccessError::Configuration("service_url is required".into()))?;
 
         let delegation = self
             .delegation
-            .ok_or_else(|| AuthorizationError::Configuration("delegation is required".into()))?;
+            .ok_or_else(|| AccessError::Configuration("delegation is required".into()))?;
 
         Ok(Credentials {
             endpoint: service_url,
@@ -350,14 +328,11 @@ impl CredentialsBuilder {
 
 #[cfg(test)]
 pub mod tests {
-    use std::panic::AssertUnwindSafe;
-
     use super::super::authority::OperatorIdentity;
     use super::super::delegation::tests::{create_delegation, generate_signer};
     use super::*;
-    use crate::access::archive::{self, Archive};
     use anyhow;
-    use dialog_common::capability::{Principal, Subject};
+    use dialog_common::capability::{Did, Principal, Subject};
     use dialog_common::{Authority, Authorization, Blake3Hash};
     use ed25519_dalek::ed25519::signature::SignerMut;
     use ucan::did::{Ed25519Did, Ed25519Signer};
@@ -396,7 +371,7 @@ pub mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl Access for Session {
         type Authorization = UcanAuthorization;
-        type Error = AuthorizationError;
+        type Error = AccessError;
 
         async fn claim<C: Ability + Clone + ConditionalSend + 'static>(
             &self,

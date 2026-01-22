@@ -232,7 +232,7 @@ impl<T: Policy + Constraint> Capability<T> {
 ///
 /// When a Capability wraps an Effect, we can perform it directly in an
 /// environment that provides unauthorized effects to be performed.
-impl<Fx: Effect + Constraint> Capability<Fx> {
+impl<Fx: Effect> Capability<Fx> {
     /// Perform the invocation directly without authorization verification.
     /// For operations that require authorization, use `acquire` first.
     pub async fn perform<Env>(self, env: &mut Env) -> Fx::Output

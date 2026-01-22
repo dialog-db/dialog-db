@@ -16,7 +16,7 @@
 //! closest to invoker to root.
 
 use super::container::Container;
-use crate::access::AuthorizationError;
+use crate::access::AccessError;
 use ipld_core::cid::Cid;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -75,7 +75,7 @@ impl InvocationChain {
     /// The invocation's `proofs` field contains CIDs that reference
     /// delegations in the container. This method builds a store from
     /// those delegations and uses rs-ucan's `Invocation::check` to verify.
-    pub async fn verify(&self) -> Result<(), AuthorizationError> {
+    pub async fn verify(&self) -> Result<(), AccessError> {
         // Build delegation store from our map
         let store: ProofStore = Arc::new(Mutex::new(self.delegations.clone()));
 
@@ -112,13 +112,13 @@ impl InvocationChain {
     }
 
     /// Serialize to DAG-CBOR bytes (UCAN container format).
-    pub fn to_bytes(&self) -> Result<Vec<u8>, AuthorizationError> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, AccessError> {
         Container::from(self).to_bytes()
     }
 }
 
 impl TryFrom<&[u8]> for InvocationChain {
-    type Error = AuthorizationError;
+    type Error = AccessError;
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         let container = Container::from_bytes(bytes)?;
@@ -127,7 +127,7 @@ impl TryFrom<&[u8]> for InvocationChain {
 }
 
 impl TryFrom<Container> for InvocationChain {
-    type Error = AuthorizationError;
+    type Error = AccessError;
 
     /// Convert a container to an invocation chain.
     ///
@@ -136,7 +136,7 @@ impl TryFrom<Container> for InvocationChain {
         let token_bytes = container.into_tokens();
 
         if token_bytes.is_empty() {
-            return Err(AuthorizationError::Invocation(
+            return Err(AccessError::Invocation(
                 "container must contain at least an invocation".to_string(),
             ));
         }
@@ -144,7 +144,7 @@ impl TryFrom<Container> for InvocationChain {
         // First token is the invocation
         let invocation: Invocation<Ed25519Did> = serde_ipld_dagcbor::from_slice(&token_bytes[0])
             .map_err(|e| {
-                AuthorizationError::Invocation(format!("failed to decode invocation: {}", e))
+                AccessError::Invocation(format!("failed to decode invocation: {}", e))
             })?;
 
         // Remaining tokens are delegations - build a map keyed by CID
@@ -153,7 +153,7 @@ impl TryFrom<Container> for InvocationChain {
         for (i, bytes) in token_bytes.iter().skip(1).enumerate() {
             let delegation: Delegation<Ed25519Did> = serde_ipld_dagcbor::from_slice(bytes)
                 .map_err(|e| {
-                    AuthorizationError::Invocation(format!(
+                    AccessError::Invocation(format!(
                         "failed to decode delegation {}: {}",
                         i, e
                     ))
@@ -191,46 +191,46 @@ impl From<&InvocationChain> for Container {
     }
 }
 
-impl From<CheckFailed> for AuthorizationError {
+impl From<CheckFailed> for AccessError {
     fn from(err: CheckFailed) -> Self {
         match err {
             CheckFailed::InvalidProofIssuerChain => {
-                AuthorizationError::Invocation("invalid proof issuer chain".to_string())
+                AccessError::Invocation("invalid proof issuer chain".to_string())
             }
             CheckFailed::SubjectNotAllowedByProof => {
-                AuthorizationError::Invocation("subject not allowed by proof".to_string())
+                AccessError::Invocation("subject not allowed by proof".to_string())
             }
             CheckFailed::RootProofIssuerIsNotSubject => {
-                AuthorizationError::Invocation("root proof issuer is not the subject".to_string())
+                AccessError::Invocation("root proof issuer is not the subject".to_string())
             }
             CheckFailed::CommandMismatch { expected, found } => {
-                AuthorizationError::Invocation(format!(
+                AccessError::Invocation(format!(
                     "command mismatch: expected {:?}, found {:?}",
                     expected, found
                 ))
             }
             CheckFailed::PredicateFailed(predicate) => {
-                AuthorizationError::Invocation(format!("predicate failed: {:?}", predicate))
+                AccessError::Invocation(format!("predicate failed: {:?}", predicate))
             }
             CheckFailed::PredicateRunError(run_err) => {
-                AuthorizationError::Invocation(format!("predicate run error: {}", run_err))
+                AccessError::Invocation(format!("predicate run error: {}", run_err))
             }
             CheckFailed::WaitingOnPromise(waiting) => {
-                AuthorizationError::Invocation(format!("waiting on promise: {:?}", waiting))
+                AccessError::Invocation(format!("waiting on promise: {:?}", waiting))
             }
         }
     }
 }
 
-impl From<InvocationError> for AuthorizationError {
+impl From<InvocationError> for AccessError {
     fn from(err: InvocationError) -> Self {
         match err {
             InvocationCheckError::SignatureVerification(sig_err) => {
-                AuthorizationError::Invocation(format!("invalid signature: {}", sig_err))
+                AccessError::Invocation(format!("invalid signature: {}", sig_err))
             }
             InvocationCheckError::StoredCheck(stored_err) => match stored_err {
                 StoredCheckError::GetError(get_err) => {
-                    AuthorizationError::Invocation(format!("proof not found: {}", get_err))
+                    AccessError::Invocation(format!("proof not found: {}", get_err))
                 }
                 StoredCheckError::CheckFailed(check_err) => check_err.into(),
             },

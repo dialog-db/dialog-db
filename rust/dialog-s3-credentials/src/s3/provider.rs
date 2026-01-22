@@ -5,76 +5,10 @@
 
 use async_trait::async_trait;
 use dialog_common::ConditionalSend;
-use dialog_common::capability::Did;
-use dialog_common::capability::{
-    Ability, Access, Authorization, AuthorizationError, Capability, Claim, Provider,
-};
+use dialog_common::capability::{Ability, Access, Capability, Claim, Effect, Provider};
 
-use crate::access::{
-    archive as access_archive, memory as access_memory, storage as access_storage,
-};
-use crate::{AuthorizationError as S3Error, AuthorizedRequest};
-
-use super::{Authorizer, Credentials};
-
-/// Self-issued authorization for direct S3 access.
-///
-/// For S3 credentials that own the bucket, authorization is self-issued.
-/// This struct holds the subject, audience, and command for the authorized capability.
-#[derive(Debug, Clone)]
-pub struct S3Authorization {
-    subject: Did,
-    audience: Did,
-    can: String,
-}
-
-impl S3Authorization {
-    /// Create a new S3 authorization.
-    pub fn new(subject: Did, audience: Did, can: String) -> Self {
-        Self {
-            subject,
-            audience,
-            can,
-        }
-    }
-}
-
-impl Authorization for S3Authorization {
-    fn subject(&self) -> &Did {
-        &self.subject
-    }
-
-    fn audience(&self) -> &Did {
-        &self.audience
-    }
-
-    fn can(&self) -> &str {
-        &self.can
-    }
-
-    fn invoke<A: dialog_common::Authority>(
-        &self,
-        authority: &A,
-    ) -> Result<Self, AuthorizationError> {
-        if &self.audience != authority.did() {
-            Err(AuthorizationError::NotAudience {
-                audience: self.audience.clone(),
-                issuer: authority.did().into(),
-            })
-        } else {
-            Ok(self.clone())
-        }
-    }
-}
-
-/// Error type that combines S3 and Authorization errors.
-#[derive(Debug, thiserror::Error)]
-pub enum AccessError {
-    #[error("Authorization error: {0}")]
-    Authorization(#[from] AuthorizationError),
-    #[error("S3 error: {0}")]
-    S3(#[from] S3Error),
-}
+use super::{Authorizer, Credentials, S3Authorization};
+use crate::access::{AccessError, AuthorizedRequest, S3Request};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -92,10 +26,26 @@ impl Access for Credentials {
 
         // Self-issue
         Ok(S3Authorization::new(
+            self.clone(),
             claim.subject().clone(),
             claim.audience().clone(),
             claim.command(),
         ))
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Do> Provider<Do> for Credentials
+where
+    Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
+    Capability<Do>: ConditionalSend + S3Request,
+{
+    async fn execute(
+        &mut self,
+        capability: Capability<Do>,
+    ) -> Result<AuthorizedRequest, AccessError> {
+        self.authorize(&capability).await
     }
 }
 
@@ -105,120 +55,11 @@ impl Access for Credentials {
 // These providers work with Capability<Fx> directly. Since Capability<access::*::Fx>
 // implements the access::Claim trait, we delegate to Credentials::authorize.
 
-// Provider for access::storage::Get
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<access_storage::Get> for Credentials {
-    async fn execute(
-        &mut self,
-        cap: Capability<access_storage::Get>,
-    ) -> Result<AuthorizedRequest, S3Error> {
-        // Capability<access_storage::Get> implements access::Claim
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::storage::Set
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<access_storage::Set> for Credentials {
-    async fn execute(
-        &mut self,
-        cap: Capability<access_storage::Set>,
-    ) -> Result<AuthorizedRequest, S3Error> {
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::storage::Delete
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<access_storage::Delete> for Credentials {
-    async fn execute(
-        &mut self,
-        cap: Capability<access_storage::Delete>,
-    ) -> Result<AuthorizedRequest, S3Error> {
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::storage::List
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<access_storage::List> for Credentials {
-    async fn execute(
-        &mut self,
-        cap: Capability<access_storage::List>,
-    ) -> Result<AuthorizedRequest, S3Error> {
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::memory::Resolve
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<access_memory::Resolve> for Credentials {
-    async fn execute(
-        &mut self,
-        cap: Capability<access_memory::Resolve>,
-    ) -> Result<AuthorizedRequest, S3Error> {
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::memory::Publish
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<access_memory::Publish> for Credentials {
-    async fn execute(
-        &mut self,
-        cap: Capability<access_memory::Publish>,
-    ) -> Result<AuthorizedRequest, S3Error> {
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::memory::Retract
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<access_memory::Retract> for Credentials {
-    async fn execute(
-        &mut self,
-        cap: Capability<access_memory::Retract>,
-    ) -> Result<AuthorizedRequest, S3Error> {
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::archive::Get
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<access_archive::Get> for Credentials {
-    async fn execute(
-        &mut self,
-        cap: Capability<access_archive::Get>,
-    ) -> Result<AuthorizedRequest, S3Error> {
-        self.authorize(&cap).await
-    }
-}
-
-// Provider for access::archive::Put
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Provider<access_archive::Put> for Credentials {
-    async fn execute(
-        &mut self,
-        cap: Capability<access_archive::Put>,
-    ) -> Result<AuthorizedRequest, S3Error> {
-        self.authorize(&cap).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Address;
-    use crate::capability::{archive, memory, storage};
+    use crate::access::{archive, memory, storage};
     use base58::ToBase58;
     use dialog_common::capability::Subject;
 
@@ -262,7 +103,7 @@ mod tests {
         let capability = Subject::from(TEST_SUBJECT)
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("index"))
-            .invoke(access_storage::Get::new(key));
+            .invoke(storage::Get::new(key));
 
         let req = capability.perform(&mut creds).await.unwrap();
 
@@ -305,7 +146,7 @@ mod tests {
         let capability = Subject::from(TEST_SUBJECT)
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("blob"))
-            .invoke(access_storage::Set::new(key, checksum));
+            .invoke(storage::Set::new(key, checksum));
 
         let req = capability.perform(&mut creds).await.unwrap();
 
@@ -335,7 +176,7 @@ mod tests {
         let capability = Subject::from(TEST_SUBJECT)
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("index"))
-            .invoke(access_storage::Delete::new(key));
+            .invoke(storage::Delete::new(key));
 
         let req = capability.perform(&mut creds).await.unwrap();
 
@@ -353,7 +194,7 @@ mod tests {
         let capability = Subject::from(TEST_SUBJECT)
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("index"))
-            .invoke(access_storage::List::new(None));
+            .invoke(storage::List::new(None));
 
         let req = capability.perform(&mut creds).await.unwrap();
 
@@ -383,7 +224,7 @@ mod tests {
         let capability = Subject::from(TEST_SUBJECT)
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("data"))
-            .invoke(access_storage::List::new(Some(token.to_string())));
+            .invoke(storage::List::new(Some(token.to_string())));
 
         let req = capability.perform(&mut creds).await.unwrap();
 
@@ -407,7 +248,7 @@ mod tests {
             .attenuate(memory::Memory)
             .attenuate(memory::Space::new("did:key:zUser123"))
             .attenuate(memory::Cell::new("main"))
-            .invoke(access_memory::Resolve);
+            .invoke(memory::Resolve);
 
         let req = capability.perform(&mut creds).await.unwrap();
 
@@ -427,7 +268,7 @@ mod tests {
             .attenuate(memory::Memory)
             .attenuate(memory::Space::new("did:key:zSpace"))
             .attenuate(memory::Cell::new("head"))
-            .invoke(access_memory::Publish {
+            .invoke(memory::Publish {
                 checksum,
                 when: None, // No prior edition - creating new cell
             });
@@ -458,7 +299,7 @@ mod tests {
             .attenuate(memory::Memory)
             .attenuate(memory::Space::new("did:key:zSpace"))
             .attenuate(memory::Cell::new("main"))
-            .invoke(access_memory::Publish {
+            .invoke(memory::Publish {
                 checksum,
                 when: Some(prior_etag),
             });
@@ -481,7 +322,7 @@ mod tests {
             .attenuate(memory::Memory)
             .attenuate(memory::Space::new("did:key:zOwner"))
             .attenuate(memory::Cell::new("temp"))
-            .invoke(access_memory::Retract::new("etag-to-match"));
+            .invoke(memory::Retract::new("etag-to-match"));
 
         let req = capability.perform(&mut creds).await.unwrap();
 
@@ -502,7 +343,7 @@ mod tests {
         let capability = Subject::from(TEST_SUBJECT)
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
-            .invoke(access_archive::Get::new(digest));
+            .invoke(archive::Get::new(digest));
 
         let req = capability.perform(&mut creds).await.unwrap();
 
@@ -522,7 +363,7 @@ mod tests {
         let capability = Subject::from(TEST_SUBJECT)
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("index"))
-            .invoke(access_archive::Put::new(digest, checksum));
+            .invoke(archive::Put::new(digest, checksum));
 
         let req = capability.perform(&mut creds).await.unwrap();
 
@@ -546,7 +387,7 @@ mod tests {
         let capability = Subject::from(TEST_SUBJECT)
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("data"))
-            .invoke(access_storage::Get::new(key));
+            .invoke(storage::Get::new(key));
 
         let req = capability.perform(&mut creds).await.unwrap();
 
@@ -575,7 +416,7 @@ mod tests {
         let capability = Subject::from(TEST_SUBJECT)
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("uploads"))
-            .invoke(access_storage::Set::new(key, checksum));
+            .invoke(storage::Set::new(key, checksum));
 
         let req = capability.perform(&mut creds).await.unwrap();
 
@@ -604,7 +445,7 @@ mod tests {
         let capability = Subject::from(TEST_SUBJECT)
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("files"))
-            .invoke(access_storage::List::new(None));
+            .invoke(storage::List::new(None));
 
         let req = capability.perform(&mut creds).await.unwrap();
 
@@ -633,7 +474,7 @@ mod tests {
         let capability = Subject::from(TEST_SUBJECT)
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("test"))
-            .invoke(access_storage::Get::new(b"key"));
+            .invoke(storage::Get::new(b"key"));
 
         let req = capability.perform(&mut creds).await.unwrap();
 
@@ -648,7 +489,7 @@ mod tests {
         let capability = Subject::from(TEST_SUBJECT)
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("test"))
-            .invoke(access_storage::Get::new(b"key"));
+            .invoke(storage::Get::new(b"key"));
 
         let req = capability.perform(&mut creds).await.unwrap();
 
@@ -668,7 +509,7 @@ mod tests {
             let capability = Subject::from(TEST_SUBJECT)
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new(store_name))
-                .invoke(access_storage::Get::new(b"key"));
+                .invoke(storage::Get::new(b"key"));
 
             let req = capability.perform(&mut creds).await.unwrap();
 
@@ -696,7 +537,7 @@ mod tests {
             let capability = Subject::from(TEST_SUBJECT)
                 .attenuate(archive::Archive)
                 .attenuate(archive::Catalog::new(catalog_name))
-                .invoke(access_archive::Get::new(digest));
+                .invoke(archive::Get::new(digest));
 
             let req = capability.perform(&mut creds).await.unwrap();
 

@@ -5,7 +5,7 @@
 
 use dialog_common::capability::{Capability, Subject};
 use dialog_s3_credentials::capability::{archive, memory};
-use dialog_s3_credentials::{AuthorizationError, credentials, s3};
+use dialog_s3_credentials::{AccessError, credentials, s3};
 use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -159,7 +159,7 @@ impl RemoteCredentials {
         bucket: impl Into<String>,
         access_key_id: impl Into<String>,
         secret_access_key: impl Into<String>,
-    ) -> Result<Self, AuthorizationError> {
+    ) -> Result<Self, AccessError> {
         let address = s3::Address::new(endpoint, region, bucket);
 
         let credentials = s3::PrivateCredentials::new(address, access_key_id, secret_access_key)?;

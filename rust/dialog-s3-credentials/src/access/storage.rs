@@ -8,7 +8,7 @@
 //! 1. **Direct API**: Use `StorageClaim::get(subject, store, key)` for direct S3 access
 //! 2. **Capability API**: Use `Capability<Get>` with the capability hierarchy for UCAN flows
 
-use super::{AuthorizationError, AuthorizedRequest, S3Request};
+use super::{AccessError, AuthorizedRequest, S3Request};
 use crate::Checksum;
 use base58::ToBase58;
 use dialog_common::Bytes;
@@ -38,7 +38,7 @@ impl Get {
 /// be used to perform actual get from the s3 bucket.
 impl Effect for Get {
     type Of = Store;
-    type Output = Result<AuthorizedRequest, AuthorizationError>;
+    type Output = Result<AuthorizedRequest, AccessError>;
 }
 
 impl S3Request for Capability<Get> {
@@ -70,7 +70,7 @@ pub struct Set {
 /// be used to perform actual set is in the s3 bucket.
 impl Effect for Set {
     type Of = Store;
-    type Output = Result<AuthorizedRequest, AuthorizationError>;
+    type Output = Result<AuthorizedRequest, AccessError>;
 }
 
 impl Set {
@@ -113,7 +113,7 @@ pub struct Delete {
 /// be used to perform actual get from the s3 bucket.
 impl Effect for Delete {
     type Of = Store;
-    type Output = Result<AuthorizedRequest, AuthorizationError>;
+    type Output = Result<AuthorizedRequest, AccessError>;
 }
 
 impl Delete {
@@ -153,7 +153,7 @@ impl List {
 
 impl Effect for List {
     type Of = Store;
-    type Output = Result<AuthorizedRequest, AuthorizationError>;
+    type Output = Result<AuthorizedRequest, AccessError>;
 }
 
 impl S3Request for Capability<List> {

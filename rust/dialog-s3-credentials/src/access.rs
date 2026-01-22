@@ -43,7 +43,7 @@ pub struct Args<'a>(pub &'a BTreeMap<String, Promised>);
 #[cfg(feature = "ucan")]
 impl Args<'_> {
     /// Deserialize arguments into the target type.
-    pub fn deserialize<T: serde::de::DeserializeOwned>(self) -> Result<T, AuthorizationError> {
+    pub fn deserialize<T: serde::de::DeserializeOwned>(self) -> Result<T, AccessError> {
         use ipld_core::ipld::Ipld;
 
         // Convert BTreeMap<String, Promised> to Ipld::Map
@@ -53,23 +53,20 @@ impl Args<'_> {
             .map(|(k, v)| {
                 Ipld::try_from(v)
                     .map(|ipld| (k.clone(), ipld))
-                    .map_err(|e| {
-                        AuthorizationError::Invocation(format!("Promise not resolved: {}", e))
-                    })
+                    .map_err(|e| AccessError::Invocation(format!("Promise not resolved: {}", e)))
             })
             .collect::<Result<_, _>>()?;
 
         let ipld = Ipld::Map(ipld_map);
 
-        ipld_core::serde::from_ipld(ipld).map_err(|e| {
-            AuthorizationError::Invocation(format!("Failed to parse arguments: {}", e))
-        })
+        ipld_core::serde::from_ipld(ipld)
+            .map_err(|e| AccessError::Invocation(format!("Failed to parse arguments: {}", e)))
     }
 }
 
 /// Error type for authorization operations.
 #[derive(Debug, Error)]
-pub enum AuthorizationError {
+pub enum AccessError {
     /// No delegation found for the subject.
     #[error("No delegation for subject: {0}")]
     NoDelegation(String),

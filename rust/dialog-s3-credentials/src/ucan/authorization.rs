@@ -5,7 +5,13 @@
 
 use super::delegation::DelegationChain;
 use super::invocation::InvocationChain;
-use dialog_common::capability::{Authority, Authorization, AuthorizationError, Did, Parameters};
+use crate::access::{AccessError, AuthorizedRequest, archive, memory, storage};
+use crate::capability;
+use dialog_common::Capability;
+use dialog_common::capability::{
+    Ability, Authority, Authorization, AuthorizationError, Authorized, Constraint, Did, Effect,
+    Parameters, Provider,
+};
 use ed25519_dalek::SigningKey;
 use ipld_core::ipld::Ipld;
 use std::collections::BTreeMap;
@@ -51,6 +57,7 @@ pub fn parameters_to_args(parameters: Parameters) -> Args {
 pub enum UcanAuthorization {
     /// Self-authorization where subject == audience.
     Owned {
+        endpoint: String,
         /// The subject DID (also the audience).
         subject: Did,
         /// The command path this authorization permits.
@@ -60,6 +67,7 @@ pub enum UcanAuthorization {
     },
     /// Authorization through a delegation chain.
     Delegated {
+        endpoint: String,
         /// The delegation chain proving authority.
         chain: DelegationChain,
         /// Cached subject DID string.
@@ -72,6 +80,7 @@ pub enum UcanAuthorization {
         parameters: Parameters,
     },
     Invocation {
+        endpoint: String,
         chain: InvocationChain,
         subject: Did,
         can: String,
@@ -81,8 +90,14 @@ pub enum UcanAuthorization {
 
 impl UcanAuthorization {
     /// Create a self-issued authorization for an owner.
-    pub fn owned(subject: impl Into<Did>, can: impl Into<String>, parameters: Parameters) -> Self {
+    pub fn owned(
+        endpoint: String,
+        subject: impl Into<Did>,
+        can: impl Into<String>,
+        parameters: Parameters,
+    ) -> Self {
         Self::Owned {
+            endpoint,
             subject: subject.into(),
             can: can.into(),
             parameters,
@@ -91,6 +106,7 @@ impl UcanAuthorization {
 
     /// Create an authorization from a delegation chain.
     pub fn delegated(
+        endpoint: String,
         chain: DelegationChain,
         can: impl Into<String>,
         parameters: Parameters,
@@ -103,11 +119,20 @@ impl UcanAuthorization {
         let audience = chain.audience().to_string();
 
         Self::Delegated {
+            endpoint,
             can: can.into(),
             chain,
             subject,
             audience,
             parameters,
+        }
+    }
+
+    fn endpoint(&self) -> &str {
+        match self {
+            Self::Owned { endpoint, .. } => endpoint,
+            Self::Delegated { endpoint, .. } => endpoint,
+            Self::Invocation { endpoint, .. } => endpoint,
         }
     }
 
@@ -126,6 +151,53 @@ impl UcanAuthorization {
             Self::Delegated { parameters, .. } => parameters,
             Self::Invocation { parameters, .. } => parameters,
         }
+    }
+
+    /// Executes authorized effect
+    pub async fn grant<C: Effect>(
+        &self,
+        capability: &Capability<C>,
+    ) -> Result<AuthorizedRequest, AccessError> {
+        if capability.command() != self.can() {
+            Err(AccessError::Invocation(format!(
+                "Authorization error: {} not authorized",
+                capability.command(),
+            )))?;
+        }
+
+        // Serialize authorization
+        let ucan = self
+            .chain()
+            .ok_or(AccessError::Invocation("Authorization is not valid".into()))
+            .map(|ch| ch.to_bytes())??;
+
+        // POST to access service
+        let response = reqwest::Client::new()
+            .post(self.endpoint())
+            .header("Content-Type", "application/cbor")
+            .body(ucan)
+            .send()
+            .await
+            .map_err(|e| AccessError::Service(e.to_string()))?;
+
+        // Handle response
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(AccessError::Service(format!(
+                "Access service returned {}: {}",
+                status, body
+            )));
+        }
+
+        // Decode response as RequestDescriptor
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| AccessError::Service(e.to_string()))?;
+
+        serde_ipld_dagcbor::from_slice(&body)
+            .map_err(|e| AccessError::Service(format!("Failed to decode response: {}", e)))
     }
 }
 
@@ -201,6 +273,7 @@ impl Authorization for UcanAuthorization {
             let invocation = InvocationChain::new(invocation, delegations);
 
             let authorization = Self::Invocation {
+                endpoint: self.endpoint().into(),
                 chain: invocation,
                 subject: self.subject().clone(),
                 can: self.can().into(),
@@ -209,6 +282,113 @@ impl Authorization for UcanAuthorization {
 
             Ok(authorization)
         }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<storage::Get> for UcanAuthorization {
+    async fn execute(
+        &mut self,
+        capability: Capability<storage::Get>,
+    ) -> Result<AuthorizedRequest, AccessError> {
+        self.grant(&capability).await
+    }
+}
+
+// Provider for storage::Set
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<storage::Set> for UcanAuthorization {
+    async fn execute(
+        &mut self,
+        capability: Capability<storage::Set>,
+    ) -> Result<AuthorizedRequest, AccessError> {
+        self.grant(&capability).await
+    }
+}
+
+// Provider for storage::Delete
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<storage::Delete> for UcanAuthorization {
+    async fn execute(
+        &mut self,
+        capability: Capability<storage::Delete>,
+    ) -> Result<AuthorizedRequest, AccessError> {
+        self.grant(&capability).await
+    }
+}
+
+// Provider for storage::List
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<storage::List> for UcanAuthorization {
+    async fn execute(
+        &mut self,
+        capability: Capability<storage::List>,
+    ) -> Result<AuthorizedRequest, AccessError> {
+        self.grant(&capability).await
+    }
+}
+
+// Provider for memory::Resolve
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<memory::Resolve> for UcanAuthorization {
+    async fn execute(
+        &mut self,
+        capability: Capability<memory::Resolve>,
+    ) -> Result<AuthorizedRequest, AccessError> {
+        self.grant(&capability).await
+    }
+}
+
+// Provider for memory::Publish
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<memory::Publish> for UcanAuthorization {
+    async fn execute(
+        &mut self,
+        capability: Capability<memory::Publish>,
+    ) -> Result<AuthorizedRequest, AccessError> {
+        self.grant(&capability).await
+    }
+}
+
+// Provider for memory::Retract
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<memory::Retract> for UcanAuthorization {
+    async fn execute(
+        &mut self,
+        capability: Capability<memory::Retract>,
+    ) -> Result<AuthorizedRequest, AccessError> {
+        self.grant(&capability).await
+    }
+}
+
+// Provider for archive::Get
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<archive::Get> for UcanAuthorization {
+    async fn execute(
+        &mut self,
+        capability: Capability<archive::Get>,
+    ) -> Result<AuthorizedRequest, AccessError> {
+        self.grant(&capability).await
+    }
+}
+
+// Provider for archive::Put
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<archive::Put> for UcanAuthorization {
+    async fn execute(
+        &mut self,
+        capability: Capability<archive::Put>,
+    ) -> Result<AuthorizedRequest, AccessError> {
+        self.grant(&capability).await
     }
 }
 
@@ -222,7 +402,12 @@ mod tests {
 
     #[test]
     fn it_creates_owned_authorization() {
-        let auth = UcanAuthorization::owned("did:key:zTest", "/storage/get", BTreeMap::default());
+        let auth = UcanAuthorization::owned(
+            "https://ucan.tonk.workers.dev".into(),
+            "did:key:zTest",
+            "/storage/get",
+            BTreeMap::default(),
+        );
 
         assert_eq!(auth.subject(), "did:key:zTest");
         assert_eq!(auth.audience(), "did:key:zTest");
@@ -247,6 +432,7 @@ mod tests {
 
         let chain = DelegationChain::new(delegation);
         let auth = UcanAuthorization::delegated(
+            "https://ucan.tonk.workers.dev".into(),
             chain,
             "/storage/get",
             BTreeMap::from([("key".to_string(), Ipld::Bytes(b"hello".into()))]),

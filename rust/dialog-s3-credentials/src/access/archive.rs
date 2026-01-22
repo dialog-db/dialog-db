@@ -3,7 +3,7 @@
 //! Request types for content-addressed storage operations.
 //! Each type implements `Claim` to provide HTTP method, path, and other request details.
 
-use super::{AuthorizationError, AuthorizedRequest, S3Request};
+use super::{AccessError, AuthorizedRequest, S3Request};
 use crate::Checksum;
 pub use crate::capability::archive::{Archive, Catalog};
 use base58::ToBase58;
@@ -31,7 +31,7 @@ impl Get {
 /// be used to perform actual get from the s3 bucket.
 impl Effect for Get {
     type Of = Catalog;
-    type Output = Result<AuthorizedRequest, AuthorizationError>;
+    type Output = Result<AuthorizedRequest, AccessError>;
 }
 
 impl S3Request for Capability<Get> {
@@ -71,7 +71,7 @@ impl Put {
 /// be used to perform actual put into the s3 bucket.
 impl Effect for Put {
     type Of = Catalog;
-    type Output = Result<AuthorizedRequest, AuthorizationError>;
+    type Output = Result<AuthorizedRequest, AccessError>;
 }
 
 impl S3Request for Capability<Put> {

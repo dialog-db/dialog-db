@@ -8,7 +8,7 @@
 //! 1. **Direct API**: Use `MemoryClaim::resolve(subject, space, cell)` for direct S3 access
 //! 2. **Capability API**: Use `Capability<Resolve>` with the capability hierarchy for UCAN flows
 
-use super::{AuthorizationError, AuthorizedRequest, Precondition, S3Request};
+use super::{AccessError, AuthorizedRequest, Precondition, S3Request};
 use crate::Checksum;
 pub use crate::capability::memory::{Cell, Memory, Space};
 use dialog_common::capability::{Capability, Effect, Policy};
@@ -25,7 +25,7 @@ pub struct Resolve;
 /// be used to perform get from the s3 bucket.
 impl Effect for Resolve {
     type Of = Cell;
-    type Output = Result<AuthorizedRequest, AuthorizationError>;
+    type Output = Result<AuthorizedRequest, AccessError>;
 }
 
 impl S3Request for Capability<Resolve> {
@@ -54,7 +54,7 @@ pub struct Publish {
 /// be used to perform preconditioned put in the s3 bucket.
 impl Effect for Publish {
     type Of = Cell;
-    type Output = Result<AuthorizedRequest, AuthorizationError>;
+    type Output = Result<AuthorizedRequest, AccessError>;
 }
 
 impl S3Request for Capability<Publish> {
@@ -94,7 +94,7 @@ pub struct Retract {
 /// be used to perform delete in the s3 bucket.
 impl Effect for Retract {
     type Of = Cell;
-    type Output = Result<AuthorizedRequest, AuthorizationError>;
+    type Output = Result<AuthorizedRequest, AccessError>;
 }
 
 impl Retract {

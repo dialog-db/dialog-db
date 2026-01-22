@@ -57,13 +57,14 @@ pub mod address;
 pub mod capability;
 pub mod checksum;
 pub mod credentials;
+pub mod provider;
 pub mod s3;
 
 #[cfg(feature = "ucan")]
 pub mod ucan;
 
 // Primary exports
-pub use access::{AuthorizationError, AuthorizedRequest, memory, storage};
+pub use access::{AccessError, AuthorizedRequest, memory, storage};
 pub use address::Address;
 pub use checksum::{Checksum, Hasher};
-pub use credentials::Credentials;
+pub use credentials::Authorizer;

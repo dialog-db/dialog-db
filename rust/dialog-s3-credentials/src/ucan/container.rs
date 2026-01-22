@@ -16,7 +16,7 @@
 //! - [`DelegationChain`](super::DelegationChain) - A chain of delegations
 //! - [`InvocationChain`](super::InvocationChain) - An invocation with its delegation chain
 
-use crate::access::AuthorizationError;
+use crate::access::AccessError;
 use ipld_core::ipld::Ipld;
 use std::collections::BTreeMap;
 
@@ -62,26 +62,26 @@ impl Container {
     /// - The container is missing the "ctn-v1" key
     /// - The tokens array is invalid
     /// - The container is empty
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, AuthorizationError> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, AccessError> {
         // Deserialize as a map with "ctn-v1" key
         let container: BTreeMap<String, Ipld> =
             serde_ipld_dagcbor::from_slice(bytes).map_err(|e| {
-                AuthorizationError::Invocation(format!("failed to decode container: {}", e))
+                AccessError::Invocation(format!("failed to decode container: {}", e))
             })?;
 
         // Extract the token array under "ctn-v1"
         let tokens_ipld = container.get(CONTAINER_VERSION).ok_or_else(|| {
-            AuthorizationError::Invocation(format!("missing '{}' key", CONTAINER_VERSION))
+            AccessError::Invocation(format!("missing '{}' key", CONTAINER_VERSION))
         })?;
 
         let Ipld::List(tokens) = tokens_ipld else {
-            return Err(AuthorizationError::Invocation(
+            return Err(AccessError::Invocation(
                 "tokens must be an array".to_string(),
             ));
         };
 
         if tokens.is_empty() {
-            return Err(AuthorizationError::Invocation(
+            return Err(AccessError::Invocation(
                 "container must contain at least one token".to_string(),
             ));
         }
@@ -90,7 +90,7 @@ impl Container {
         let mut token_bytes: Vec<Vec<u8>> = Vec::with_capacity(tokens.len());
         for (i, token) in tokens.iter().enumerate() {
             let Ipld::Bytes(bytes) = token else {
-                return Err(AuthorizationError::Invocation(format!(
+                return Err(AccessError::Invocation(format!(
                     "token {} must be bytes",
                     i
                 )));
@@ -104,14 +104,14 @@ impl Container {
     }
 
     /// Serialize the container to DAG-CBOR bytes.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, AuthorizationError> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, AccessError> {
         // Build container: { "ctn-v1": [token_bytes...] }
         let tokens: Vec<Ipld> = self.tokens.iter().cloned().map(Ipld::Bytes).collect();
         let mut container: BTreeMap<String, Ipld> = BTreeMap::new();
         container.insert(CONTAINER_VERSION.to_string(), Ipld::List(tokens));
 
         serde_ipld_dagcbor::to_vec(&container).map_err(|e| {
-            AuthorizationError::Invocation(format!("failed to encode container: {}", e))
+            AccessError::Invocation(format!("failed to encode container: {}", e))
         })
     }
 
@@ -127,7 +127,7 @@ impl Container {
 }
 
 impl TryFrom<&[u8]> for Container {
-    type Error = AuthorizationError;
+    type Error = AccessError;
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         Self::from_bytes(bytes)
