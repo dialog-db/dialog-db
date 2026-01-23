@@ -3020,6 +3020,68 @@ mod tests {
         Ok(())
     }
 
+    /// Test that RemoteState with UCAN credentials can be stored and loaded.
+    #[cfg(feature = "ucan")]
+    #[dialog_common::test]
+    async fn test_ucan_remote_state_persistence() -> anyhow::Result<()> {
+        use dialog_s3_credentials::ucan::{self, DelegationChain, test_helpers::create_delegation};
+
+        // Create operator and subject
+        let operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
+        let operator_did = operator_signer.did().clone();
+        let operator = Operator::from_secret(&operator_signer.signer().to_bytes());
+        let subject = operator.did().to_string();
+
+        // Create a delegation chain
+        let delegation = create_delegation(
+            &operator_signer,
+            &operator_did,
+            operator_signer.did(),
+            &["archive", "memory"],
+        )?;
+        let delegation_chain = DelegationChain::new(delegation);
+
+        // Create UCAN credentials
+        let ucan_credentials =
+            ucan::Credentials::new("https://example.com/access".to_string(), delegation_chain);
+
+        // Create remote state with UCAN credentials
+        let remote_state = RemoteState {
+            site: "origin".to_string(),
+            credentials: Credentials::Ucan(ucan_credentials.clone()),
+        };
+
+        // Test direct serialization/deserialization first
+        let encoded = serde_ipld_dagcbor::to_vec(&remote_state)?;
+        let decoded: RemoteState = serde_ipld_dagcbor::from_slice(&encoded)?;
+        assert_eq!(decoded.site, "origin");
+
+        // Now test via storage
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let journaled_backend = dialog_storage::JournaledStorage::new(backend);
+        let mut replica =
+            Replica::open(operator.clone(), subject.clone(), journaled_backend.clone())
+                .expect("Failed to create replica");
+
+        // Store the remote
+        replica
+            .add_remote(remote_state.clone())
+            .await
+            .expect("Failed to add remote");
+
+        // Load it back
+        let loaded_state = replica
+            .load_remote(&"origin".to_string())
+            .await
+            .expect("Failed to load remote");
+
+        // Verify it matches
+        assert_eq!(loaded_state.site, "origin");
+        assert_eq!(loaded_state.credentials, Credentials::Ucan(ucan_credentials));
+
+        Ok(())
+    }
+
     /// End-to-end test demonstrating the full UCAN-based workflow:
     /// 1. Setup UCAN service & S3
     /// 2. Create local repository with "main" branch
@@ -3039,18 +3101,29 @@ mod tests {
         use futures_util::stream;
 
         // Step 1: Generate operator (issuer) with signing capability
+        // We use the UCAN signer as the authority since it has consistent DID encoding
+        // with the delegation chain.
         let operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
         let operator_did = operator_signer.did().clone();
+        let subject = operator_did.to_string();
+
+        // Create an Operator wrapper that uses the UCAN signer's key
+        // Note: Operator::did() may produce a different DID format than Ed25519Did,
+        // but the UCAN invocation system uses the Authority trait which gets the
+        // secret key bytes for signing, not the DID for identity.
         let operator = Operator::from_secret(&operator_signer.signer().to_bytes());
-        let subject = operator.did().to_string();
 
         // Step 2: Create a delegation chain from subject to operator
         // In this test, the subject and operator are the same (self-signed)
+        // Grant root capability (/) which encompasses all operations:
+        // - /memory/resolve (branch resolution)
+        // - /storage/get, /storage/set (KV storage)
+        // - /archive/get, /archive/put (content-addressed storage)
         let delegation = create_delegation(
             &operator_signer,
             &operator_did,
             operator_signer.did(),
-            &["archive", "memory"],
+            &[], // Empty command = root capability (/)
         )?;
         let delegation_chain = DelegationChain::new(delegation);
 
@@ -3157,11 +3230,12 @@ mod tests {
         let second_operator = Operator::from_secret(&second_operator_signer.signer().to_bytes());
 
         // Create delegation from the original subject to the second operator
+        // Grant root capability (/) to allow all operations for the pull test
         let second_delegation = create_delegation(
             &operator_signer,
             &second_operator_did,
             operator_signer.did(),
-            &["archive", "memory"],
+            &[], // Empty command = root capability (/)
         )?;
         let second_delegation_chain = DelegationChain::new(second_delegation);
         let second_ucan_credentials =

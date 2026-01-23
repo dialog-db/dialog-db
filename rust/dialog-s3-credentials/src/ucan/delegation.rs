@@ -332,7 +332,8 @@ impl<'de> Deserialize<'de> for DelegationChain {
     where
         D: Deserializer<'de>,
     {
-        let bytes: Vec<u8> = Vec::deserialize(deserializer)?;
+        // Use dialog_common::Bytes to properly deserialize CBOR byte strings
+        let bytes: dialog_common::Bytes = dialog_common::Bytes::deserialize(deserializer)?;
         DelegationChain::try_from(bytes.as_slice()).map_err(serde::de::Error::custom)
     }
 }
@@ -578,5 +579,94 @@ pub mod tests {
         assert_eq!(chain.proof_cids().len(), restored.proof_cids().len());
         assert_eq!(chain.audience(), restored.audience());
         assert_eq!(chain.subject(), restored.subject());
+    }
+
+    #[test]
+    fn it_serde_roundtrips_via_dagcbor() {
+        let space_signer = generate_signer();
+        let space_did = space_signer.did().clone();
+        let operator_signer = generate_signer();
+
+        let delegation = DelegationBuilder::new()
+            .issuer(space_signer)
+            .audience(operator_signer.did().clone())
+            .subject(DelegatedSubject::Specific(space_did.clone()))
+            .command(vec!["storage".to_string()])
+            .try_build()
+            .unwrap();
+
+        let chain = DelegationChain::new(delegation);
+
+        // Serialize via serde to DAG-CBOR (this uses serialize_bytes internally)
+        let cbor_bytes = serde_ipld_dagcbor::to_vec(&chain).unwrap();
+
+        // Deserialize via serde from DAG-CBOR (this uses dialog_common::Bytes)
+        let restored: DelegationChain = serde_ipld_dagcbor::from_slice(&cbor_bytes).unwrap();
+
+        // Verify the chains match
+        assert_eq!(chain, restored);
+        assert_eq!(chain.proof_cids(), restored.proof_cids());
+        assert_eq!(chain.audience(), restored.audience());
+        assert_eq!(chain.subject(), restored.subject());
+    }
+
+    /// Test that a delegation for archive capability roundtrips correctly.
+    /// This tests creating a delegation that grants /archive access.
+    #[test]
+    fn it_roundtrips_archive_delegation() {
+        let subject_signer = generate_signer();
+        let subject_did = subject_signer.did().clone();
+        let operator_signer = generate_signer();
+
+        // Create delegation granting /archive capability
+        let delegation = DelegationBuilder::new()
+            .issuer(subject_signer)
+            .audience(operator_signer.did().clone())
+            .subject(DelegatedSubject::Specific(subject_did.clone()))
+            .command(vec!["archive".to_string()])
+            .try_build()
+            .unwrap();
+
+        let chain = DelegationChain::new(delegation);
+
+        // Verify command path
+        assert_eq!(chain.can(), "/archive");
+
+        // Serialize and deserialize
+        let bytes = chain.to_bytes().unwrap();
+        let restored = DelegationChain::try_from(bytes.as_slice()).unwrap();
+
+        assert_eq!(chain, restored);
+        assert_eq!(restored.can(), "/archive");
+    }
+
+    /// Test that a delegation for archive/put capability roundtrips correctly.
+    /// This tests the more specific command path.
+    #[test]
+    fn it_roundtrips_archive_put_delegation() {
+        let subject_signer = generate_signer();
+        let subject_did = subject_signer.did().clone();
+        let operator_signer = generate_signer();
+
+        // Create delegation granting /archive/put capability
+        let delegation = DelegationBuilder::new()
+            .issuer(subject_signer)
+            .audience(operator_signer.did().clone())
+            .subject(DelegatedSubject::Specific(subject_did.clone()))
+            .command(vec!["archive".to_string(), "put".to_string()])
+            .try_build()
+            .unwrap();
+
+        let chain = DelegationChain::new(delegation);
+
+        // Verify command path
+        assert_eq!(chain.can(), "/archive/put");
+
+        // Serialize via serde to DAG-CBOR
+        let cbor_bytes = serde_ipld_dagcbor::to_vec(&chain).unwrap();
+        let restored: DelegationChain = serde_ipld_dagcbor::from_slice(&cbor_bytes).unwrap();
+
+        assert_eq!(chain, restored);
+        assert_eq!(restored.can(), "/archive/put");
     }
 }

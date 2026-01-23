@@ -18,6 +18,7 @@
 use super::container::Container;
 use crate::capability::AccessError;
 use ipld_core::cid::Cid;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
@@ -186,6 +187,27 @@ impl From<&InvocationChain> for Container {
     }
 }
 
+impl Serialize for InvocationChain {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let bytes = self.to_bytes().map_err(serde::ser::Error::custom)?;
+        serializer.serialize_bytes(&bytes)
+    }
+}
+
+impl<'de> Deserialize<'de> for InvocationChain {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Use dialog_common::Bytes to properly deserialize CBOR byte strings
+        let bytes: dialog_common::Bytes = dialog_common::Bytes::deserialize(deserializer)?;
+        InvocationChain::try_from(bytes.as_slice()).map_err(serde::de::Error::custom)
+    }
+}
+
 impl From<CheckFailed> for AccessError {
     fn from(err: CheckFailed) -> Self {
         match err {
@@ -297,7 +319,24 @@ mod tests {
         assert_eq!(restored.command().to_string(), chain.command().to_string());
     }
 
-    #[tokio::test]
+    #[test]
+    fn it_serde_roundtrips_via_dagcbor() {
+        let (chain, subject_did) = create_test_invocation_chain();
+
+        // Serialize via serde to DAG-CBOR (this uses serialize_bytes internally)
+        let cbor_bytes = serde_ipld_dagcbor::to_vec(&chain).expect("Failed to serialize");
+
+        // Deserialize via serde from DAG-CBOR (this uses dialog_common::Bytes)
+        let restored: InvocationChain =
+            serde_ipld_dagcbor::from_slice(&cbor_bytes).expect("Failed to deserialize");
+
+        // Verify the chains match
+        assert_eq!(restored.subject(), &subject_did);
+        assert_eq!(restored.proofs().len(), chain.proofs().len());
+        assert_eq!(restored.command().to_string(), chain.command().to_string());
+    }
+
+    #[dialog_common::test]
     async fn it_verifies_valid_chain() {
         let (chain, _) = create_test_invocation_chain();
 
@@ -310,7 +349,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_fails_verification_when_proof_is_missing() {
         let subject_signer = generate_signer();
         let subject_did = subject_signer.did().clone();
@@ -346,7 +385,7 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("proof not found"));
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_fails_verification_when_issuer_is_wrong() {
         let subject_signer = generate_signer();
         let subject_did = subject_signer.did().clone();
@@ -410,7 +449,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_verifies_chain_with_powerline_delegation_in_middle() {
         // Powerline delegation (sub: null) in the middle of the chain.
         // Chain: subject -> device1 (specific subject) -> device2 (powerline)
@@ -472,7 +511,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_fails_verification_with_powerline_at_root_wrong_subject() {
         // Powerline delegation at root means subject is inferred from issuer.
         // If the invocation's subject doesn't match the powerline issuer, it should fail.
@@ -523,7 +562,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_verifies_chain_with_powerline_at_root_matching_issuer() {
         // Powerline at root is valid when the invocation subject matches the
         // powerline issuer (since sub: null at root implies subject = issuer).
@@ -568,7 +607,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_fails_when_redelegation_after_powerline_root_uses_wrong_subject() {
         // Scenario: Powerline at root, then a redelegation that tries to claim
         // authority over a different subject than the powerline root issuer.
@@ -633,7 +672,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[dialog_common::test]
     async fn it_verifies_when_redelegation_after_powerline_root_uses_correct_subject() {
         // Scenario: Powerline at root, then a valid redelegation that correctly
         // delegates authority for the powerline root issuer.
@@ -694,5 +733,201 @@ mod tests {
             "Expected verification to succeed when redelegation after powerline root uses correct subject: {:?}",
             result
         );
+    }
+
+    /// Test invocation chain with archive/put command roundtrips correctly.
+    #[test]
+    fn it_roundtrips_archive_put_invocation() {
+        let subject_signer = generate_signer();
+        let subject_did = subject_signer.did().clone();
+        let operator_signer = generate_signer();
+
+        // Create delegation granting /archive capability
+        let delegation = create_delegation(
+            &subject_signer,
+            operator_signer.did(),
+            &subject_did,
+            &["archive"],
+        )
+        .expect("Failed to create delegation");
+
+        let delegation_cid = delegation.to_cid();
+
+        // Create invocation for /archive/put
+        let invocation = InvocationBuilder::new()
+            .issuer(operator_signer)
+            .audience(subject_did.clone())
+            .subject(subject_did.clone())
+            .command(vec!["archive".to_string(), "put".to_string()])
+            .proofs(vec![delegation_cid])
+            .try_build()
+            .expect("Failed to build invocation");
+
+        let mut delegations = HashMap::new();
+        delegations.insert(delegation_cid, Arc::new(delegation));
+
+        let chain = InvocationChain::new(invocation, delegations);
+
+        // Verify command
+        assert_eq!(chain.command().to_string(), "/archive/put");
+
+        // Serialize and deserialize via container format
+        let bytes = chain.to_bytes().expect("Failed to serialize");
+        let restored = InvocationChain::try_from(bytes.as_slice()).expect("Failed to deserialize");
+
+        assert_eq!(restored.command().to_string(), "/archive/put");
+        assert_eq!(restored.subject(), &subject_did);
+    }
+
+    /// Test invocation chain with serde DAG-CBOR roundtrip for archive/put.
+    #[test]
+    fn it_serde_roundtrips_archive_put_invocation() {
+        let subject_signer = generate_signer();
+        let subject_did = subject_signer.did().clone();
+        let operator_signer = generate_signer();
+
+        // Create delegation granting /archive capability
+        let delegation = create_delegation(
+            &subject_signer,
+            operator_signer.did(),
+            &subject_did,
+            &["archive"],
+        )
+        .expect("Failed to create delegation");
+
+        let delegation_cid = delegation.to_cid();
+
+        // Create invocation for /archive/put
+        let invocation = InvocationBuilder::new()
+            .issuer(operator_signer)
+            .audience(subject_did.clone())
+            .subject(subject_did.clone())
+            .command(vec!["archive".to_string(), "put".to_string()])
+            .proofs(vec![delegation_cid])
+            .try_build()
+            .expect("Failed to build invocation");
+
+        let mut delegations = HashMap::new();
+        delegations.insert(delegation_cid, Arc::new(delegation));
+
+        let chain = InvocationChain::new(invocation, delegations);
+
+        // Serialize via serde to DAG-CBOR
+        let cbor_bytes = serde_ipld_dagcbor::to_vec(&chain).expect("Failed to serialize");
+
+        // Deserialize via serde from DAG-CBOR
+        let restored: InvocationChain =
+            serde_ipld_dagcbor::from_slice(&cbor_bytes).expect("Failed to deserialize");
+
+        assert_eq!(restored.command().to_string(), "/archive/put");
+        assert_eq!(restored.subject(), &subject_did);
+    }
+
+    /// Test that a delegation granting /archive can authorize an /archive/put invocation.
+    /// This demonstrates the delegation chain where the delegation grants a parent
+    /// capability and the invocation uses a more specific child capability.
+    #[dialog_common::test]
+    async fn it_verifies_archive_delegation_authorizes_archive_put_invocation() {
+        let subject_signer = generate_signer();
+        let subject_did = subject_signer.did().clone();
+        let operator_signer = generate_signer();
+
+        // Create delegation granting /archive (parent capability)
+        let delegation = create_delegation(
+            &subject_signer,
+            operator_signer.did(),
+            &subject_did,
+            &["archive"],
+        )
+        .expect("Failed to create delegation");
+
+        let delegation_cid = delegation.to_cid();
+
+        // Create invocation for /archive/put (child capability - more specific)
+        let invocation = InvocationBuilder::new()
+            .issuer(operator_signer)
+            .audience(subject_did.clone())
+            .subject(subject_did.clone())
+            .command(vec!["archive".to_string(), "put".to_string()])
+            .proofs(vec![delegation_cid])
+            .try_build()
+            .expect("Failed to build invocation");
+
+        let mut delegations = HashMap::new();
+        delegations.insert(delegation_cid, Arc::new(delegation));
+
+        let chain = InvocationChain::new(invocation, delegations);
+
+        // The /archive delegation should authorize the /archive/put invocation
+        let result = chain.verify().await;
+        assert!(
+            result.is_ok(),
+            "Expected /archive delegation to authorize /archive/put invocation: {:?}",
+            result
+        );
+    }
+
+    /// Test the full chain: delegation grants /archive, invocation uses /archive/put,
+    /// and we verify the chain can be serialized, deserialized, and still verify.
+    #[dialog_common::test]
+    async fn it_roundtrips_and_verifies_archive_to_put_chain() {
+        let subject_signer = generate_signer();
+        let subject_did = subject_signer.did().clone();
+        let operator_signer = generate_signer();
+
+        // Create delegation granting /archive
+        let delegation = create_delegation(
+            &subject_signer,
+            operator_signer.did(),
+            &subject_did,
+            &["archive"],
+        )
+        .expect("Failed to create delegation");
+
+        let delegation_cid = delegation.to_cid();
+
+        // Create invocation for /archive/put
+        let invocation = InvocationBuilder::new()
+            .issuer(operator_signer)
+            .audience(subject_did.clone())
+            .subject(subject_did.clone())
+            .command(vec!["archive".to_string(), "put".to_string()])
+            .proofs(vec![delegation_cid])
+            .try_build()
+            .expect("Failed to build invocation");
+
+        let mut delegations = HashMap::new();
+        delegations.insert(delegation_cid, Arc::new(delegation));
+
+        let original_chain = InvocationChain::new(invocation, delegations);
+
+        // Verify original
+        assert!(
+            original_chain.verify().await.is_ok(),
+            "Original chain should verify"
+        );
+
+        // Serialize via serde DAG-CBOR
+        let cbor_bytes = serde_ipld_dagcbor::to_vec(&original_chain).expect("Failed to serialize");
+
+        // Deserialize
+        let restored_chain: InvocationChain =
+            serde_ipld_dagcbor::from_slice(&cbor_bytes).expect("Failed to deserialize");
+
+        // Verify restored chain still works
+        let result = restored_chain.verify().await;
+        assert!(
+            result.is_ok(),
+            "Restored chain should still verify: {:?}",
+            result
+        );
+
+        // Verify properties preserved
+        assert_eq!(
+            restored_chain.command().to_string(),
+            original_chain.command().to_string()
+        );
+        assert_eq!(restored_chain.subject(), original_chain.subject());
+        assert_eq!(restored_chain.proofs().len(), original_chain.proofs().len());
     }
 }

@@ -16,7 +16,7 @@ csv = ["dep:csv-async"]
 s3 = ["dialog-storage/s3"]
 ucan = ["dialog-s3-credentials/ucan", "dialog-storage/ucan"]
 # Enable integration tests (tests with service provisioning)
-integration-tests = ["dialog-common/integration-tests"]
+integration-tests = ["helpers", "dialog-common/integration-tests"]
 # Enable web integration tests
 web-integration-tests = ["dialog-common/web-integration-tests"]
 
