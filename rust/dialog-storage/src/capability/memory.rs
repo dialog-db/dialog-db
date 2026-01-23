@@ -14,53 +14,17 @@
 //!                     └── Retract { when } → Effect → Result<(), MemoryError>
 //! ```
 
-use dialog_common::Bytes;
-use dialog_common::capability::{Attenuation, Capability, Effect, Policy, Subject};
+pub use dialog_common::Bytes;
+pub use dialog_common::capability::{Attenuation, Capability, Effect, Policy, Subject};
+
+// S3 authorization types (only available with s3 feature)
+#[cfg(feature = "s3")]
+pub use dialog_s3_credentials::capability::memory::{
+    Cell, Memory, Publish as AuthorizePublish, Resolve as AuthorizeResolve,
+    Retract as AuthorizeRetract, Space,
+};
+
 use thiserror::Error;
-
-// Memory Ability
-
-/// Memory ability - restricts to memory operations.
-///
-/// Adds `/memory` to the command path.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-pub struct Memory;
-
-impl Attenuation for Memory {
-    type Of = Subject;
-}
-
-// Space Policy
-
-/// Space policy - restricts memory access to a specific space.
-///
-/// Spaces are named subdivisions of memory (e.g., "local", "remote", "site").
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Space {
-    /// The space name.
-    pub space: String,
-}
-
-impl Policy for Space {
-    type Of = Memory;
-}
-
-// Cell Policy
-
-/// Cell policy - restricts space access to a specific cell.
-///
-/// Cells are individual memory locations within a space.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Cell {
-    /// The cell name.
-    pub cell: String,
-}
-
-impl Policy for Cell {
-    type Of = Space;
-}
-
-// Publication
 
 /// A cell's current state: content and its edition.
 ///
@@ -72,8 +36,6 @@ pub struct Publication {
     /// The edition identifier for this content.
     pub edition: Bytes,
 }
-
-// Resolve Effect
 
 /// Resolve operation - reads current cell content and edition.
 ///
@@ -103,8 +65,6 @@ impl ResolveCapability for Capability<Resolve> {
         &Cell::of(self).cell
     }
 }
-
-// Publish Effect
 
 /// Publish operation - sets cell content with CAS semantics.
 ///
@@ -219,12 +179,12 @@ pub enum MemoryError {
     Io(#[from] std::io::Error),
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "s3"))]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_memory_claim_path() {
+    fn it_builds_memory_claim_path() {
         let claim = Subject::from("did:key:zSpace").attenuate(Memory);
 
         assert_eq!(claim.subject(), "did:key:zSpace");
@@ -232,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn test_space_claim_path() {
+    fn it_builds_space_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Memory)
             .attenuate(Space {
@@ -245,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_claim_path() {
+    fn it_builds_cell_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Memory)
             .attenuate(Space {
@@ -261,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_claim_path() {
+    fn it_builds_resolve_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Memory)
             .attenuate(Space {
@@ -276,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn test_publish_claim_path() {
+    fn it_builds_publish_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Memory)
             .attenuate(Space {
@@ -294,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn test_retract_claim_path() {
+    fn it_builds_retract_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Memory)
             .attenuate(Space {
@@ -313,49 +273,11 @@ mod tests {
     #[cfg(feature = "ucan")]
     mod parameters_tests {
         use super::*;
-        use crate::capability::Settings;
         use ipld_core::ipld::Ipld;
 
         #[test]
-        fn test_memory_parameters() {
-            let cap = Subject::from("did:key:zSpace").attenuate(Memory);
-            let params = cap.parameters();
-
-            // Memory is a unit struct, should produce empty map
-            assert!(params.is_empty());
-        }
-
-        #[test]
-        fn test_space_parameters() {
-            let cap = Subject::from("did:key:zSpace")
-                .attenuate(Memory)
-                .attenuate(Space {
-                    space: "local".into(),
-                });
-            let params = cap.parameters();
-
-            assert_eq!(params.get("space"), Some(&Ipld::String("local".into())));
-        }
-
-        #[test]
-        fn test_cell_parameters() {
-            let cap = Subject::from("did:key:zSpace")
-                .attenuate(Memory)
-                .attenuate(Space {
-                    space: "local".into(),
-                })
-                .attenuate(Cell {
-                    cell: "main".into(),
-                });
-            let params = cap.parameters();
-
-            assert_eq!(params.get("space"), Some(&Ipld::String("local".into())));
-            assert_eq!(params.get("cell"), Some(&Ipld::String("main".into())));
-        }
-
-        #[test]
-        fn test_resolve_parameters() {
-            let cap = Subject::from("did:key:zSpace")
+        fn it_collects_resolve_capability_parameters() {
+            let cap: Capability<Resolve> = Subject::from("did:key:zSpace")
                 .attenuate(Memory)
                 .attenuate(Space {
                     space: "remote".into(),
@@ -363,17 +285,16 @@ mod tests {
                 .attenuate(Cell {
                     cell: "config".into(),
                 })
-                .attenuate(Resolve);
+                .invoke(Resolve);
             let params = cap.parameters();
 
-            // Resolve is a unit struct, doesn't add fields but preserves parent params
             assert_eq!(params.get("space"), Some(&Ipld::String("remote".into())));
             assert_eq!(params.get("cell"), Some(&Ipld::String("config".into())));
         }
 
         #[test]
-        fn test_publish_parameters_with_when() {
-            let cap = Subject::from("did:key:zSpace")
+        fn it_collects_publish_capability_parameters() {
+            let cap: Capability<Publish> = Subject::from("did:key:zSpace")
                 .attenuate(Memory)
                 .attenuate(Space {
                     space: "local".into(),
@@ -381,7 +302,7 @@ mod tests {
                 .attenuate(Cell {
                     cell: "main".into(),
                 })
-                .attenuate(Publish {
+                .invoke(Publish {
                     content: b"hello".to_vec().into(),
                     when: Some(b"v1".to_vec().into()),
                 });
@@ -394,8 +315,8 @@ mod tests {
         }
 
         #[test]
-        fn test_publish_parameters_first_publish() {
-            let cap = Subject::from("did:key:zSpace")
+        fn it_collects_retract_capability_parameters() {
+            let cap: Capability<Retract> = Subject::from("did:key:zSpace")
                 .attenuate(Memory)
                 .attenuate(Space {
                     space: "local".into(),
@@ -403,30 +324,7 @@ mod tests {
                 .attenuate(Cell {
                     cell: "main".into(),
                 })
-                .attenuate(Publish {
-                    content: b"hello".to_vec().into(),
-                    when: None,
-                });
-            let params = cap.parameters();
-
-            assert_eq!(params.get("space"), Some(&Ipld::String("local".into())));
-            assert_eq!(params.get("cell"), Some(&Ipld::String("main".into())));
-            assert_eq!(params.get("content"), Some(&Ipld::Bytes(b"hello".to_vec())));
-            // None serializes as Ipld::Null
-            assert_eq!(params.get("when"), Some(&Ipld::Null));
-        }
-
-        #[test]
-        fn test_retract_parameters() {
-            let cap = Subject::from("did:key:zSpace")
-                .attenuate(Memory)
-                .attenuate(Space {
-                    space: "local".into(),
-                })
-                .attenuate(Cell {
-                    cell: "main".into(),
-                })
-                .attenuate(Retract {
+                .invoke(Retract {
                     when: b"v1".to_vec().into(),
                 });
             let params = cap.parameters();

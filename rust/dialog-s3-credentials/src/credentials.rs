@@ -55,3 +55,29 @@ where
             .await
     }
 }
+
+/// Direct capability execution (works for S3 credentials, fails for UCAN).
+///
+/// For UCAN credentials, this will return an error indicating that
+/// the proper authorization flow (acquire + perform) must be used instead.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Do> Provider<Do> for Credentials
+where
+    Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
+    Capability<Do>: ConditionalSend + S3Request,
+{
+    async fn execute(
+        &mut self,
+        capability: Capability<Do>,
+    ) -> Result<AuthorizedRequest, AccessError> {
+        match self {
+            Self::S3(credentials) => credentials.execute(capability).await,
+            #[cfg(feature = "ucan")]
+            Self::Ucan(_) => Err(AccessError::Configuration(
+                "UCAN credentials require using acquire() + perform() flow".to_string(),
+            )),
+        }
+    }
+}
+

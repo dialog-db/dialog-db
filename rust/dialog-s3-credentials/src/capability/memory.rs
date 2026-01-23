@@ -27,13 +27,13 @@ impl Attenuation for Memory {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Space {
     /// The space name (typically a DID).
-    pub name: String,
+    pub space: String,
 }
 
 impl Space {
     /// Create a new Space policy.
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+        Self { space: name.into() }
     }
 }
 
@@ -45,13 +45,13 @@ impl Policy for Space {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Cell {
     /// The cell name.
-    pub name: String,
+    pub cell: String,
 }
 
 impl Cell {
     /// Create a new Cell policy.
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+        Self { cell: name.into() }
     }
 }
 
@@ -81,8 +81,8 @@ impl S3Request for Capability<Resolve> {
         format!(
             "{}/{}/{}",
             self.subject(),
-            &Space::of(self).name,
-            &Cell::of(self).name
+            &Space::of(self).space,
+            &Cell::of(self).cell
         )
     }
 }
@@ -110,8 +110,8 @@ impl S3Request for Capability<Publish> {
         format!(
             "{}/{}/{}",
             self.subject(),
-            &Space::of(self).name,
-            &Cell::of(self).name
+            &Space::of(self).space,
+            &Cell::of(self).cell
         )
     }
     fn checksum(&self) -> Option<&Checksum> {
@@ -157,8 +157,8 @@ impl S3Request for Capability<Retract> {
         format!(
             "{}/{}/{}",
             self.subject(),
-            &Space::of(self).name,
-            &Cell::of(self).name
+            &Space::of(self).space,
+            &Cell::of(self).cell
         )
     }
     fn precondition(&self) -> Precondition {

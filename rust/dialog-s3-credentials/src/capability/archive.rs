@@ -10,7 +10,7 @@ use dialog_common::Blake3Hash;
 use dialog_common::capability::{Attenuation, Capability, Effect, Policy, Subject};
 use serde::{Deserialize, Serialize};
 
-/// Root attenuation for archive operations.
+/// Archive ability - restricts to archive operations.
 ///
 /// Attaches to Subject and provides the `/archive` command path segment.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -21,6 +21,8 @@ impl Attenuation for Archive {
 }
 
 /// Catalog policy that scopes operations to a named catalog.
+///
+/// Does not add to command path but constrains invocation arguments.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Catalog {
     /// The catalog name (e.g., "index", "blobs").

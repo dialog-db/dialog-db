@@ -14,37 +14,17 @@
 //! ```
 
 use dialog_common::Bytes;
-use dialog_common::capability::{Attenuation, Capability, Effect, Policy, Subject};
+pub use dialog_common::capability::{Attenuation, Capability, Effect, Policy, Subject};
+
+// S3 authorization types (only available with s3 feature)
+#[cfg(feature = "s3")]
+pub use dialog_s3_credentials::storage::{
+    Delete as AuthorizeDelete, Get as AuthorizeGet, Set as AuthorizeSet, Storage, Store,
+};
+
 use thiserror::Error;
 
-// Storage Ability
-
-/// Storage ability - restricts to storage operations.
-///
-/// Adds `/storage` to the command path.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-pub struct Storage;
-
-impl Attenuation for Storage {
-    type Of = Subject;
-}
-
-// Store Policy
-
-/// Store policy - restricts storage access to a specific store.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Store {
-    /// The store name.
-    pub store: String,
-}
-
-impl Policy for Store {
-    type Of = Storage;
-}
-
-// Lookup Effect
-
-/// Lookup operation - retrieves a value by key.
+/// Get operation - retrieves a value by key.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Get {
     /// The key to look up.
@@ -158,12 +138,12 @@ pub enum StorageError {
     Io(#[from] std::io::Error),
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "s3"))]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_storage_claim_path() {
+    fn it_builds_storage_claim_path() {
         let claim = Subject::from("did:key:zSpace").attenuate(Storage);
 
         assert_eq!(claim.subject(), "did:key:zSpace");
@@ -171,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn test_store_claim_path() {
+    fn it_builds_store_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Storage)
             .attenuate(Store {
@@ -184,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_claim_path() {
+    fn it_builds_get_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Storage)
             .attenuate(Store {
@@ -198,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_claim_path() {
+    fn it_builds_set_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Storage)
             .attenuate(Store {
@@ -219,11 +199,10 @@ mod tests {
     #[cfg(feature = "ucan")]
     mod parameters_tests {
         use super::*;
-        use crate::capability::Settings;
         use ipld_core::ipld::Ipld;
 
         #[test]
-        fn test_storage_parameters() {
+        fn it_collects_storage_parameters() {
             let cap = Subject::from("did:key:zSpace").attenuate(Storage);
             let params = cap.parameters();
 
@@ -232,7 +211,7 @@ mod tests {
         }
 
         #[test]
-        fn test_store_parameters() {
+        fn it_collects_store_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
                 .attenuate(Store {
@@ -244,7 +223,7 @@ mod tests {
         }
 
         #[test]
-        fn test_get_parameters() {
+        fn it_collects_get_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
                 .attenuate(Store {
@@ -260,7 +239,7 @@ mod tests {
         }
 
         #[test]
-        fn test_set_parameters() {
+        fn it_collects_set_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
                 .attenuate(Store {
@@ -278,7 +257,7 @@ mod tests {
         }
 
         #[test]
-        fn test_delete_parameters() {
+        fn it_collects_delete_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
                 .attenuate(Store {

@@ -14,40 +14,17 @@
 
 use std::error::Error;
 
-use dialog_common::capability::{Attenuation, Capability, Effect, PerformError, Policy, Subject};
-use dialog_common::{Blake3Hash, Bytes};
-use dialog_s3_credentials::AccessError;
+pub use dialog_common::capability::{Capability, Effect, PerformError, Policy, Subject};
+pub use dialog_common::{Blake3Hash, Bytes};
+
 use thiserror::Error;
 
-// Archive Ability
-
-/// Archive ability - restricts to archive operations.
-///
-/// Adds `/archive` to the command path.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-pub struct Archive;
-
-impl Attenuation for Archive {
-    type Of = Subject;
-}
-
-// Catalog Policy
-
-/// Catalog policy - restricts archive access to a specific catalog.
-///
-/// Does not add to command path but constrains invocation arguments.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Catalog {
-    /// The catalog name (e.g., "index", "blobs").
-    pub catalog: String,
-}
-
-impl Policy for Catalog {
-    type Of = Archive;
-}
-
-// Get Effect
-
+// S3 authorization types (only available with s3 feature)
+#[cfg(feature = "s3")]
+pub use dialog_s3_credentials::{
+    AccessError,
+    capability::archive::{Archive, Catalog, Get as AuthorizeGet, Put as AuthorizePut},
+};
 /// Get operation - retrieves content by digest.
 ///
 /// Requires `Capability<Catalog>` access level.
@@ -151,6 +128,7 @@ pub enum ArchiveError {
     Io(String),
 }
 
+#[cfg(feature = "s3")]
 impl From<AccessError> for ArchiveError {
     fn from(value: AccessError) -> Self {
         ArchiveError::AuthorizationError(value.to_string())
@@ -173,12 +151,12 @@ impl<E: Error> From<PerformError<E>> for ArchiveError {
         }
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "s3"))]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_archive_claim_path() {
+    fn it_builds_archive_claim_path() {
         let claim = Subject::from("did:key:zSpace").attenuate(Archive);
 
         assert_eq!(claim.subject(), "did:key:zSpace");
@@ -186,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn test_catalog_claim_path() {
+    fn it_builds_catalog_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Archive)
             .attenuate(Catalog {
@@ -199,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_claim_path() {
+    fn it_builds_get_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Archive)
             .attenuate(Catalog {
@@ -213,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn test_put_claim_path() {
+    fn it_builds_put_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Archive)
             .attenuate(Catalog {
@@ -230,11 +208,10 @@ mod tests {
     #[cfg(feature = "ucan")]
     mod parameters_tests {
         use super::*;
-        use crate::capability::Settings;
         use ipld_core::ipld::Ipld;
 
         #[test]
-        fn test_archive_parameters() {
+        fn it_collects_archive_parameters() {
             let cap = Subject::from("did:key:zSpace").attenuate(Archive);
             let params = cap.parameters();
 
@@ -243,7 +220,7 @@ mod tests {
         }
 
         #[test]
-        fn test_catalog_parameters() {
+        fn it_collects_catalog_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Archive)
                 .attenuate(Catalog {
@@ -255,7 +232,7 @@ mod tests {
         }
 
         #[test]
-        fn test_get_parameters() {
+        fn it_collects_get_parameters() {
             let digest = Blake3Hash::from([1u8; 32]);
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Archive)
@@ -270,7 +247,7 @@ mod tests {
         }
 
         #[test]
-        fn test_put_parameters() {
+        fn it_collects_put_parameters() {
             let digest = Blake3Hash::from([2u8; 32]);
             let content = b"hello world".to_vec();
             let cap = Subject::from("did:key:zSpace")

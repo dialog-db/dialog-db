@@ -79,6 +79,17 @@ impl<P: Policy, Of: Ability> Constrained<P, Of> {
             capability: self,
         }
     }
+
+    /// Collect all parameters from this capability chain into a new map.
+    ///
+    /// This walks the capability chain and collects parameters from each
+    /// constraint.
+    #[cfg(feature = "ucan")]
+    pub fn parameters(&self) -> super::settings::Parameters {
+        let mut parameters = super::settings::Parameters::new();
+        Ability::parametrize(self, &mut parameters);
+        parameters
+    }
 }
 
 /// Implementation for effect capabilities.

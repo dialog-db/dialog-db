@@ -11,18 +11,18 @@ use std::collections::BTreeMap;
 pub type Parameters = BTreeMap<String, Ipld>;
 
 /// Trait for types that can contribute parameters to capability invocations.
+///
+/// This trait is auto-implemented for all `Serialize` types via a blanket impl.
+/// The `parametrize` method serializes the type's fields into an IPLD map and
+/// extends the given parameters.
+///
+/// **Note**: For capability chains (types implementing `Ability`), use
+/// `Ability::parameters()` instead, which properly walks the chain and collects
+/// parameters from each constraint.
 pub trait Settings {
     /// Serialize this type's fields into the given parameters map.
     #[cfg(feature = "ucan")]
     fn parametrize(&self, settings: &mut Parameters);
-
-    /// Collect all parameters from this type into a new map.
-    #[cfg(feature = "ucan")]
-    fn parameters(&self) -> Parameters {
-        let mut parameters = Parameters::new();
-        self.parametrize(&mut parameters);
-        parameters
-    }
 }
 
 impl<P: Serialize> Settings for P {

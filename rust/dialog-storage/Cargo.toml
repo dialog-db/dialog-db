@@ -116,9 +116,6 @@ ucan = { workspace = true }
 getrandom = { workspace = true, features = ["js"] }
 wasm-bindgen-test = { workspace = true }
 
-[[example]]
-name = "ucan_e2e_test"
-required-features = ["ucan"]
 
 [lints.rust]
 # This cfg is used by the dialog_common::test proc macro for wasm inner tests

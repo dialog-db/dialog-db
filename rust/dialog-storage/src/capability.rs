@@ -14,8 +14,13 @@
 //! { ... }
 //! ```
 
+// The archive, memory, and storage capability modules require the S3 feature
+// because they depend on types from dialog_s3_credentials.
+#[cfg(feature = "s3")]
 pub mod archive;
+#[cfg(feature = "s3")]
 pub mod memory;
+#[cfg(feature = "s3")]
 pub mod storage;
 
 pub use dialog_common::capability::*;

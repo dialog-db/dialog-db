@@ -143,6 +143,22 @@ where
     }
 }
 
+impl<T: Constraint> Capability<T>
+where
+    T::Capability: Ability,
+{
+    /// Collect all parameters from this capability chain into a new map.
+    ///
+    /// This walks the capability chain and collects parameters from each
+    /// constraint.
+    #[cfg(feature = "ucan")]
+    pub fn parameters(&self) -> Parameters {
+        let mut parameters = Parameters::new();
+        self.0.parametrize(&mut parameters);
+        parameters
+    }
+}
+
 impl<T: Constraint> std::ops::Deref for Capability<T> {
     type Target = T::Capability;
 
@@ -311,5 +327,53 @@ mod tests {
 
         let archive: &Archive = cap.policy();
         assert_eq!(archive, &Archive);
+    }
+
+    #[cfg(feature = "ucan")]
+    mod parameters_tests {
+        use super::*;
+        use ipld_core::ipld::Ipld;
+
+        #[test]
+        fn it_collects_parameters_from_chain() {
+            let cap: Capability<Get> = Subject::from("did:key:zSpace")
+                .attenuate(Archive)
+                .attenuate(Catalog {
+                    name: "blobs".into(),
+                })
+                .invoke(Get {
+                    digest: vec![1, 2, 3],
+                });
+
+            let params = cap.parameters();
+
+            // Catalog should contribute "name" parameter
+            assert_eq!(params.get("name"), Some(&Ipld::String("blobs".into())));
+            // Get should contribute "digest" parameter (serialized as list of integers)
+            assert_eq!(
+                params.get("digest"),
+                Some(&Ipld::List(vec![Ipld::Integer(1), Ipld::Integer(2), Ipld::Integer(3)]))
+            );
+        }
+
+        #[test]
+        fn it_collects_parameters_from_attenuations() {
+            let cap: Capability<Lookup> = Subject::from("did:key:zSpace")
+                .attenuate(Storage)
+                .attenuate(Store {
+                    name: "index".into(),
+                })
+                .invoke(Lookup {
+                    key: b"hello".to_vec(),
+                });
+
+            let params = cap.parameters();
+
+            // Store should contribute "name" parameter
+            assert_eq!(params.get("name"), Some(&Ipld::String("index".into())));
+            // Lookup should contribute "key" parameter (serialized as list of integers)
+            let hello_bytes: Vec<Ipld> = b"hello".iter().map(|&b| Ipld::Integer(b as i128)).collect();
+            assert_eq!(params.get("key"), Some(&Ipld::List(hello_bytes)));
+        }
     }
 }

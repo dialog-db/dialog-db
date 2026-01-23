@@ -7,7 +7,7 @@
 use super::{LocalS3, UcanS3Address};
 use dialog_common::helpers::{Provider, Service};
 use dialog_s3_credentials::Address;
-use dialog_s3_credentials::s3::S3Credentials;
+use dialog_s3_credentials::s3::Credentials;
 use dialog_s3_credentials::ucan::UcanAuthorizer;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -46,13 +46,8 @@ impl UcanAccessServer {
         // Note: The subject here is a placeholder since UcanAuthorizer uses
         // the subject from the UCAN invocation's capability chain
         let address = Address::new(&s3_server.endpoint, "us-east-1", bucket);
-        let s3_credentials = S3Credentials::private(
-            address,
-            "did:key:placeholder", // Subject comes from UCAN, not credentials
-            access_key,
-            secret_key,
-        )?
-        .with_path_style(true);
+        let s3_credentials =
+            Credentials::private(address, access_key, secret_key)?.with_path_style(true);
 
         // Use UcanAuthorizer from ucan/provider.rs
         let authorizer = Arc::new(RwLock::new(UcanAuthorizer::new(s3_credentials)));
@@ -99,7 +94,7 @@ impl UcanAccessServer {
 /// Handle an incoming UCAN access service request.
 async fn handle_request(
     req: Request<Incoming>,
-    authorizer: Arc<RwLock<UcanAuthorizer<S3Credentials>>>,
+    authorizer: Arc<RwLock<UcanAuthorizer>>,
 ) -> Result<Response<http_body_util::Full<bytes::Bytes>>, Infallible> {
     use bytes::Bytes;
     use http_body_util::Full;
