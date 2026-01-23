@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::fmt::Write;
 use url::Url;
 
-use crate::capability::{AuthorizedRequest, S3Request};
+use crate::capability::{AuthorizedRequest, Precondition, S3Request};
 use crate::{AccessError, Address};
 
 use super::{build_url, extract_host, is_path_style_default};
@@ -213,6 +213,16 @@ impl PrivateCredentials {
         if let Some(checksum) = request.checksum() {
             let header_name = format!("x-amz-checksum-{}", checksum.name());
             headers.push((header_name, checksum.to_string()));
+        }
+        // Add precondition headers for CAS operations
+        match request.precondition() {
+            Precondition::IfMatch(etag) => {
+                headers.push(("if-match".to_string(), format!("\"{}\"", etag)));
+            }
+            Precondition::IfNoneMatch => {
+                headers.push(("if-none-match".to_string(), "*".to_string()));
+            }
+            Precondition::None => {}
         }
         headers.sort_by(|a, b| a.0.cmp(&b.0));
 

@@ -982,6 +982,57 @@ impl<Issuer: Clone> Bucket<Issuer> {
     }
 }
 
+impl<Issuer> Bucket<Issuer>
+where
+    Issuer: Authority + Clone + ConditionalSend + ConditionalSync,
+{
+    /// Delete a value by key.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
+    /// # use dialog_storage::StorageBackend;
+    /// # use dialog_common::{Authority, capability::{Did, Principal}};
+    /// #
+    /// # #[derive(Clone)]
+    /// # struct Issuer(String);
+    /// # impl Principal for Issuer { fn did(&self) -> &Did { &self.0 } }
+    /// # impl Authority for Issuer {
+    /// #     fn sign(&mut self, _: &[u8]) -> Vec<u8> { Vec::new() }
+    /// #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
+    /// # }
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
+    /// # let credentials = S3Credentials::public(address)?;
+    /// # let issuer = Issuer("did:key:zMyIssuer".into());
+    /// # let s3 = S3::from_s3(credentials, issuer);
+    /// # let mut bucket = Bucket::new(s3, "did:key:zSubject", "store");
+    /// // First set a value
+    /// bucket.set(b"key".to_vec(), b"value".to_vec()).await?;
+    ///
+    /// // Then delete it
+    /// bucket.delete(b"key").await?;
+    ///
+    /// // Verify it's gone
+    /// assert_eq!(bucket.get(&b"key".to_vec()).await?, None);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn delete(&mut self, key: &[u8]) -> Result<(), S3StorageError> {
+        let capability: Capability<storage::Delete> = Subject::from(self.subject.clone())
+            .attenuate(storage::Storage)
+            .attenuate(storage::Store::new(&self.path))
+            .invoke(storage::Delete {
+                key: key.to_vec().into(),
+            });
+
+        Provider::<storage::Delete>::execute(&mut self.bucket, capability)
+            .await
+            .map_err(|e| S3StorageError::ServiceError(e.to_string()))
+    }
+}
+
 // Forward Principal trait to the underlying bucket
 impl<Issuer: Principal> Principal for Bucket<Issuer> {
     fn did(&self) -> &Did {
@@ -1639,6 +1690,41 @@ mod tests {
             bucket.set(key.clone(), value.clone()).await?;
             let retrieved = bucket.get(&key).await?;
             assert_eq!(retrieved, Some(value));
+
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn it_deletes_values(env: helpers::PublicS3Address) -> anyhow::Result<()> {
+            let mut bucket = create_test_bucket(&env);
+
+            let key = b"delete-test-key".to_vec();
+            let value = b"value-to-delete".to_vec();
+
+            // Set the value
+            bucket.set(key.clone(), value.clone()).await?;
+
+            // Verify it exists
+            assert_eq!(bucket.get(&key).await?, Some(value));
+
+            // Delete the value
+            bucket.delete(&key).await?;
+
+            // Verify it's gone
+            assert_eq!(bucket.get(&key).await?, None);
+
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn it_deletes_nonexistent_key_silently(
+            env: helpers::PublicS3Address,
+        ) -> anyhow::Result<()> {
+            let mut bucket = create_test_bucket(&env);
+
+            // Delete a key that doesn't exist - should succeed (S3 behavior)
+            let result = bucket.delete(b"nonexistent-delete-key").await;
+            assert!(result.is_ok(), "Deleting nonexistent key should succeed");
 
             Ok(())
         }

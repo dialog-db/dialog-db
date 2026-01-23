@@ -1,4 +1,8 @@
-use dialog_storage::s3::{Address, Bucket, Credentials};
+//! Test helpers for S3 integration tests.
+
+#![cfg(feature = "s3-integration-tests")]
+
+use dialog_storage::s3::{Address, Bucket, S3, S3Credentials, Session};
 
 /// Adds timestamp to the given string to make it unique
 pub fn unique(base: &str) -> String {
@@ -25,7 +29,7 @@ pub fn unique(base: &str) -> String {
 ///
 /// Uses `option_env!` instead of `env!` so that `cargo check --tests --all-features`
 /// doesn't fail when the R2S3_* environment variables aren't set at compile time.
-pub fn open() -> Bucket<Vec<u8>, Vec<u8>, Credentials> {
+pub fn open() -> Bucket<Session> {
     let address = Address::new(
         option_env!("R2S3_ENDPOINT").expect("R2S3_ENDPOINT not set"),
         option_env!("R2S3_REGION").expect("R2S3_REGION not set"),
@@ -35,17 +39,17 @@ pub fn open() -> Bucket<Vec<u8>, Vec<u8>, Credentials> {
     // Use the bucket name as subject by default for integration tests
     let subject = option_env!("R2S3_SUBJECT").unwrap_or("did:key:zTestSubject");
 
-    let credentials = Credentials::private(
+    let credentials = S3Credentials::private(
         address,
-        subject,
         option_env!("R2S3_ACCESS_KEY_ID").expect("R2S3_ACCESS_KEY_ID not set"),
         option_env!("R2S3_SECRET_ACCESS_KEY").expect("R2S3_SECRET_ACCESS_KEY not set"),
     )
     .expect("Failed to create credentials");
 
-    Bucket::open(credentials).expect("Failed to open bucket")
+    let s3 = S3::from_s3(credentials, Session::new(subject));
+    Bucket::new(s3, subject, "integration-tests")
 }
 
-pub fn open_unque_at(base: &str) -> Bucket<Vec<u8>, Vec<u8>, S3Credentials> {
+pub fn open_unique_at(base: &str) -> Bucket<Session> {
     open().at(unique(base))
 }
