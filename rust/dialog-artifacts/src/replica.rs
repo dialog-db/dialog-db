@@ -3077,7 +3077,10 @@ mod tests {
 
         // Verify it matches
         assert_eq!(loaded_state.site, "origin");
-        assert_eq!(loaded_state.credentials, Credentials::Ucan(ucan_credentials));
+        assert_eq!(
+            loaded_state.credentials,
+            Credentials::Ucan(ucan_credentials)
+        );
 
         Ok(())
     }
