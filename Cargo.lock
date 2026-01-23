@@ -890,6 +890,7 @@ dependencies = [
  "tokio",
  "ucan",
  "url",
+ "wasm-bindgen-test",
  "web-time",
 ]
 

@@ -363,8 +363,8 @@ pub mod tests {
     ) -> Result<Delegation<Ed25519Did>, AccessError> {
         DelegationBuilder::new()
             .issuer(issuer.clone())
-            .audience(audience.clone())
-            .subject(DelegatedSubject::Specific(subject.clone()))
+            .audience(*audience)
+            .subject(DelegatedSubject::Specific(*subject))
             .command(
                 command
                     .iter()

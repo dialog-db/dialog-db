@@ -11,10 +11,10 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["csv", "s3"]
 debug = []
-helpers = ["dep:anyhow"]
+helpers = ["dep:anyhow", "dialog-s3-credentials/helpers", "dialog-storage/helpers"]
 csv = ["dep:csv-async"]
 s3 = ["dialog-storage/s3"]
-ucan = ["dialog-s3-credentials/ucan"]
+ucan = ["dialog-s3-credentials/ucan", "dialog-storage/ucan"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests

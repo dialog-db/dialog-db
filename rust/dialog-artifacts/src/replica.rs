@@ -2172,16 +2172,19 @@ mod tests {
     async fn test_end_to_end_remote_upstream(
         s3_address: dialog_storage::s3::helpers::S3Address,
     ) -> anyhow::Result<()> {
+        use dialog_s3_credentials::Address;
         use dialog_storage::JournaledStorage;
         use futures_util::stream;
 
         // Step 1: Generate issuer
         let issuer = Operator::from_passphrase("test_end_to_end_remote_upstream");
+        let subject = issuer.did().to_string();
 
         // Step 2: Create a replica with that issuer and journaled in-memory backend
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let journaled_backend = JournaledStorage::new(backend);
-        let mut replica = Replica::open(issuer.clone(), journaled_backend.clone())
+        let mut replica = issuer
+            .open(issuer.did(), journaled_backend.clone())
             .expect("Failed to create replica");
 
         // Step 3: Create a branch e.g. main
@@ -2214,20 +2217,19 @@ mod tests {
         );
 
         // Step 4: Add a remote to the replica
+        let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
+        let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
+            address,
+            &s3_address.access_key_id,
+            &s3_address.secret_access_key,
+        )?
+        .with_path_style(true);
         let remote_state = RemoteState {
             site: "origin".to_string(),
-            address: RemoteConfig {
-                endpoint: s3_address.endpoint.clone(),
-                region: "auto".to_string(),
-                bucket: s3_address.bucket.clone(),
-                prefix: Some("test".to_string()),
-                access_key_id: Some(s3_address.access_key_id.clone()),
-                secret_access_key: Some(s3_address.secret_access_key.clone()),
-            },
+            credentials: Credentials::S3(s3_credentials),
         };
-        let remote = replica
-            .remotes
-            .add(remote_state)
+        let _site = replica
+            .add_remote(remote_state.clone())
             .await
             .expect("Failed to add remote");
 
@@ -2250,14 +2252,20 @@ mod tests {
             decoded_remote_state.site, "origin",
             "Remote state should contain site name 'origin'"
         );
-        assert_eq!(
-            decoded_remote_state.address.endpoint, s3_address.endpoint,
-            "Remote state should contain correct endpoint"
-        );
 
         // Step 5: Create a remote branch for the main
-        let remote_branch = remote
-            .open(&main_id)
+        let remote_site = RemoteSite::load(
+            &remote_state.site,
+            replica.storage().clone(),
+            issuer.clone(),
+            subject.clone(),
+        )
+        .await
+        .expect("Failed to load remote site");
+        let remote_repo = remote_site.repository(&subject);
+        let remote_branch = remote_repo
+            .branch(main_id.to_string())
+            .open()
             .await
             .expect("Failed to create remote branch");
 
@@ -2356,7 +2364,7 @@ mod tests {
 
         // Verify remote branch record was created with a cached revision
         // The key uses the branch ID as bytes
-        let remote_branch_key = format!("remote/{}/{}", remote.site(), main_id)
+        let remote_branch_key = format!("remote/{}/{}/{}", remote_state.site, subject, main_id)
             .as_bytes()
             .to_vec();
 
@@ -2365,8 +2373,9 @@ mod tests {
         let was_written = all_written_keys.iter().any(|k| k == &remote_branch_key);
         assert!(
             was_written,
-            "Remote branch key 'remote/{}/{}' should have been written during push. All keys: {:?}",
-            remote.site(),
+            "Remote branch key 'remote/{}/{}/{}' should have been written during push. All keys: {:?}",
+            remote_state.site,
+            subject,
             main_id,
             all_written_keys
                 .iter()
@@ -2392,19 +2401,23 @@ mod tests {
     async fn test_push_and_pull_simple(
         s3_address: dialog_storage::s3::helpers::S3Address,
     ) -> anyhow::Result<()> {
+        use dialog_s3_credentials::Address;
         use futures_util::stream;
+
+        // Both Alice and Bob share the same subject for this test
+        let subject = "did:test:shared_repo".to_string();
 
         // Create Alice's replica
         let alice_issuer = Operator::from_passphrase("alice");
-        let alice_backend = MemoryStorageBackend::default();
-        let mut alice_replica = Replica::open(alice_issuer.clone(), alice_backend)
+        let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let mut alice_replica = Replica::open(alice_issuer.clone(), subject.clone(), alice_backend)
             .expect("Failed to create Alice's replica");
 
         // Create Bob's replica
         let bob_issuer = Operator::from_passphrase("bob");
-        let bob_backend = MemoryStorageBackend::default();
-        let mut bob_replica =
-            Replica::open(bob_issuer.clone(), bob_backend).expect("Failed to create Bob's replica");
+        let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let mut bob_replica = Replica::open(bob_issuer.clone(), subject.clone(), bob_backend)
+            .expect("Failed to create Bob's replica");
 
         // Both create main branches
         let main_id = BranchId::new("main".to_string());
@@ -2419,28 +2432,36 @@ mod tests {
             .await
             .expect("Failed to create Bob's branch");
 
-        // Configure shared remote
-        let remote_config = RemoteConfig {
-            endpoint: s3_address.endpoint.clone(),
-            region: "auto".to_string(),
-            bucket: s3_address.bucket.clone(),
-            prefix: Some("collab".to_string()),
-            access_key_id: Some(s3_address.access_key_id.clone()),
-            secret_access_key: Some(s3_address.secret_access_key.clone()),
-        };
+        // Configure shared remote credentials
+        let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
+        let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
+            address,
+            &s3_address.access_key_id,
+            &s3_address.secret_access_key,
+        )?
+        .with_path_style(true);
 
         // Alice adds remote and sets upstream
         let alice_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config.clone(),
+            credentials: Credentials::S3(s3_credentials.clone()),
         };
-        let alice_remote = alice_replica
-            .remotes
-            .add(alice_remote_state)
+        alice_replica
+            .add_remote(alice_remote_state.clone())
             .await
             .expect("Failed to add remote");
-        let alice_remote_branch = alice_remote
-            .open(&main_id)
+        let alice_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            alice_replica.storage().clone(),
+            alice_issuer.clone(),
+            subject.clone(),
+        )
+        .await
+        .expect("Failed to load Alice's remote site");
+        let alice_remote_branch = alice_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string())
+            .open()
             .await
             .expect("Failed to create remote branch");
         alice_main
@@ -2470,15 +2491,24 @@ mod tests {
         // Bob adds same remote and sets upstream
         let bob_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config,
+            credentials: Credentials::S3(s3_credentials),
         };
-        let bob_remote = bob_replica
-            .remotes
-            .add(bob_remote_state)
+        bob_replica
+            .add_remote(bob_remote_state)
             .await
             .expect("Failed to add remote");
-        let bob_remote_branch = bob_remote
-            .open(&main_id)
+        let bob_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            bob_replica.storage().clone(),
+            bob_issuer.clone(),
+            subject.clone(),
+        )
+        .await
+        .expect("Failed to load Bob's remote site");
+        let bob_remote_branch = bob_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string())
+            .open()
             .await
             .expect("Failed to create remote branch");
         bob_main
@@ -2515,22 +2545,31 @@ mod tests {
     async fn test_collaborative_workflow_alice_and_bob(
         s3_address: dialog_storage::s3::helpers::S3Address,
     ) -> anyhow::Result<()> {
+        use dialog_s3_credentials::Address;
         use dialog_storage::JournaledStorage;
         use futures_util::stream;
 
+        // Both Alice and Bob share the same subject for this test
+        let subject = "did:test:shared_repo".to_string();
+
         // Step 1: Create Alice's replica with her own issuer and backend
         let alice_issuer = Operator::from_passphrase("alice");
-        let alice_backend = MemoryStorageBackend::default();
+        let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
-        let mut alice_replica = Replica::open(alice_issuer.clone(), alice_journaled.clone())
-            .expect("Failed to create Alice's replica");
+        let mut alice_replica = Replica::open(
+            alice_issuer.clone(),
+            subject.clone(),
+            alice_journaled.clone(),
+        )
+        .expect("Failed to create Alice's replica");
 
         // Step 2: Create Bob's replica with his own issuer and backend
         let bob_issuer = Operator::from_passphrase("bob");
-        let bob_backend = MemoryStorageBackend::default();
+        let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
-        let mut bob_replica = Replica::open(bob_issuer.clone(), bob_journaled.clone())
-            .expect("Failed to create Bob's replica");
+        let mut bob_replica =
+            Replica::open(bob_issuer.clone(), subject.clone(), bob_journaled.clone())
+                .expect("Failed to create Bob's replica");
 
         // Step 3: Both create a "main" branch
         let main_id = BranchId::new("main".to_string());
@@ -2546,29 +2585,37 @@ mod tests {
             .await
             .expect("Failed to create Bob's main branch");
 
-        // Step 4: Configure shared remote for both replicas
-        let remote_config = RemoteConfig {
-            endpoint: s3_address.endpoint.clone(),
-            region: "auto".to_string(),
-            bucket: s3_address.bucket.clone(),
-            prefix: Some("collab".to_string()),
-            access_key_id: Some(s3_address.access_key_id.clone()),
-            secret_access_key: Some(s3_address.secret_access_key.clone()),
-        };
+        // Step 4: Configure shared remote credentials
+        let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
+        let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
+            address,
+            &s3_address.access_key_id,
+            &s3_address.secret_access_key,
+        )?
+        .with_path_style(true);
 
         // Alice adds the remote
         let alice_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config.clone(),
+            credentials: Credentials::S3(s3_credentials.clone()),
         };
-        let alice_remote = alice_replica
-            .remotes
-            .add(alice_remote_state)
+        alice_replica
+            .add_remote(alice_remote_state)
             .await
             .expect("Failed to add remote for Alice");
 
-        let alice_remote_branch = alice_remote
-            .open(&main_id)
+        let alice_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            alice_replica.storage().clone(),
+            alice_issuer.clone(),
+            subject.clone(),
+        )
+        .await
+        .expect("Failed to load Alice's remote site");
+        let alice_remote_branch = alice_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string())
+            .open()
             .await
             .expect("Failed to create Alice's remote branch");
 
@@ -2603,16 +2650,25 @@ mod tests {
         // Step 6: Bob adds the remote and sets upstream (after Alice has pushed)
         let bob_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config,
+            credentials: Credentials::S3(s3_credentials),
         };
-        let bob_remote = bob_replica
-            .remotes
-            .add(bob_remote_state)
+        bob_replica
+            .add_remote(bob_remote_state)
             .await
             .expect("Failed to add remote for Bob");
 
-        let bob_remote_branch = bob_remote
-            .open(&main_id)
+        let bob_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            bob_replica.storage().clone(),
+            bob_issuer.clone(),
+            subject.clone(),
+        )
+        .await
+        .expect("Failed to load Bob's remote site");
+        let bob_remote_branch = bob_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string())
+            .open()
             .await
             .expect("Failed to create Bob's remote branch");
 
@@ -2758,22 +2814,31 @@ mod tests {
     ) -> anyhow::Result<()> {
         // This test verifies that when pulling with no local changes,
         // we adopt the upstream revision directly without creating a new one
+        use dialog_s3_credentials::Address;
         use dialog_storage::JournaledStorage;
         use futures_util::stream;
 
+        // Both Alice and Bob share the same subject for this test
+        let subject = "did:test:shared_repo".to_string();
+
         // Create Alice's replica
         let alice_issuer = Operator::from_passphrase("alice");
-        let alice_backend = MemoryStorageBackend::default();
+        let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
-        let mut alice_replica = Replica::open(alice_issuer.clone(), alice_journaled.clone())
-            .expect("Failed to create Alice's replica");
+        let mut alice_replica = Replica::open(
+            alice_issuer.clone(),
+            subject.clone(),
+            alice_journaled.clone(),
+        )
+        .expect("Failed to create Alice's replica");
 
         // Create Bob's replica
         let bob_issuer = Operator::from_passphrase("bob");
-        let bob_backend = MemoryStorageBackend::default();
+        let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
-        let mut bob_replica = Replica::open(bob_issuer.clone(), bob_journaled.clone())
-            .expect("Failed to create Bob's replica");
+        let mut bob_replica =
+            Replica::open(bob_issuer.clone(), subject.clone(), bob_journaled.clone())
+                .expect("Failed to create Bob's replica");
 
         // Both create a "main" branch
         let main_id = BranchId::new("main".to_string());
@@ -2789,29 +2854,37 @@ mod tests {
             .await
             .expect("Failed to create Bob's main branch");
 
-        // Configure shared remote
-        let remote_config = RemoteConfig {
-            endpoint: s3_address.endpoint.clone(),
-            region: "auto".to_string(),
-            bucket: s3_address.bucket.clone(),
-            prefix: Some("noop-pull".to_string()),
-            access_key_id: Some(s3_address.access_key_id.clone()),
-            secret_access_key: Some(s3_address.secret_access_key.clone()),
-        };
+        // Configure shared remote credentials
+        let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
+        let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
+            address,
+            &s3_address.access_key_id,
+            &s3_address.secret_access_key,
+        )?
+        .with_path_style(true);
 
         // Alice adds and configures remote
         let alice_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config.clone(),
+            credentials: Credentials::S3(s3_credentials.clone()),
         };
-        let alice_remote = alice_replica
-            .remotes
-            .add(alice_remote_state)
+        alice_replica
+            .add_remote(alice_remote_state)
             .await
             .expect("Failed to add remote for Alice");
 
-        let alice_remote_branch = alice_remote
-            .open(&main_id)
+        let alice_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            alice_replica.storage().clone(),
+            alice_issuer.clone(),
+            subject.clone(),
+        )
+        .await
+        .expect("Failed to load Alice's remote site");
+        let alice_remote_branch = alice_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string())
+            .open()
             .await
             .expect("Failed to open Alice's remote branch");
 
@@ -2843,16 +2916,25 @@ mod tests {
         // Bob adds the same remote
         let bob_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config,
+            credentials: Credentials::S3(s3_credentials),
         };
-        let bob_remote = bob_replica
-            .remotes
-            .add(bob_remote_state)
+        bob_replica
+            .add_remote(bob_remote_state)
             .await
             .expect("Failed to add remote for Bob");
 
-        let bob_remote_branch = bob_remote
-            .open(&main_id)
+        let bob_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            bob_replica.storage().clone(),
+            bob_issuer.clone(),
+            subject.clone(),
+        )
+        .await
+        .expect("Failed to load Bob's remote site");
+        let bob_remote_branch = bob_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string())
+            .open()
             .await
             .expect("Failed to open Bob's remote branch");
 
@@ -2921,7 +3003,7 @@ mod tests {
     #[tokio::test]
     async fn test_branch_load_vs_open() -> anyhow::Result<()> {
         // Test the difference between load (expects existing) and open (creates if missing)
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
         let issuer = Operator::from_passphrase("test-user");
         let subject = test_subject();
@@ -2953,34 +3035,52 @@ mod tests {
         s3_address: dialog_storage::s3::helpers::S3Address,
     ) -> anyhow::Result<()> {
         // Test that fetch() retrieves upstream state without merging
+        use dialog_s3_credentials::Address;
         use dialog_storage::JournaledStorage;
         use futures_util::stream;
 
+        // Both Alice and Bob share the same subject for this test
+        let subject = "did:test:shared_repo".to_string();
+
         // Create Alice's replica
         let alice_issuer = Operator::from_passphrase("alice");
-        let alice_backend = MemoryStorageBackend::default();
+        let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
-        let mut alice_replica = Replica::open(alice_issuer.clone(), alice_journaled.clone())?;
+        let mut alice_replica = Replica::open(
+            alice_issuer.clone(),
+            subject.clone(),
+            alice_journaled.clone(),
+        )?;
 
         let main_id = BranchId::new("main".to_string());
         let mut alice_main = alice_replica.branches.open(&main_id).await?;
 
-        // Configure remote
-        let remote_config = RemoteConfig {
-            endpoint: s3_address.endpoint.clone(),
-            region: "auto".to_string(),
-            bucket: s3_address.bucket.clone(),
-            prefix: Some("fetch".to_string()),
-            access_key_id: Some(s3_address.access_key_id.clone()),
-            secret_access_key: Some(s3_address.secret_access_key.clone()),
-        };
+        // Configure remote credentials
+        let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
+        let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
+            address,
+            &s3_address.access_key_id,
+            &s3_address.secret_access_key,
+        )?
+        .with_path_style(true);
 
         let alice_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config.clone(),
+            credentials: Credentials::S3(s3_credentials.clone()),
         };
-        let alice_remote = alice_replica.remotes.add(alice_remote_state).await?;
-        let alice_remote_branch = alice_remote.open(&main_id).await?;
+        alice_replica.add_remote(alice_remote_state).await?;
+        let alice_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            alice_replica.storage().clone(),
+            alice_issuer.clone(),
+            subject.clone(),
+        )
+        .await?;
+        let alice_remote_branch = alice_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string())
+            .open()
+            .await?;
         alice_main.set_upstream(alice_remote_branch).await?;
 
         // Alice commits and pushes
@@ -2999,24 +3099,36 @@ mod tests {
 
         // Create Bob's replica
         let bob_issuer = Operator::from_passphrase("bob");
-        let bob_backend = MemoryStorageBackend::default();
+        let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
-        let mut bob_replica = Replica::open(bob_issuer.clone(), bob_journaled.clone())?;
+        let mut bob_replica =
+            Replica::open(bob_issuer.clone(), subject.clone(), bob_journaled.clone())?;
 
         let mut bob_main = bob_replica.branches.open(&main_id).await?;
 
         let bob_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config,
+            credentials: Credentials::S3(s3_credentials),
         };
-        let bob_remote = bob_replica.remotes.add(bob_remote_state).await?;
-        let bob_remote_branch = bob_remote.open(&main_id).await?;
+        bob_replica.add_remote(bob_remote_state).await?;
+        let bob_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            bob_replica.storage().clone(),
+            bob_issuer.clone(),
+            subject.clone(),
+        )
+        .await?;
+        let bob_remote_branch = bob_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string())
+            .open()
+            .await?;
         bob_main.set_upstream(bob_remote_branch).await?;
 
         let bob_revision_before_fetch = bob_main.revision();
 
         // Bob fetches (but doesn't pull/merge)
-        let fetched = bob_main.resolve().await?;
+        let fetched = bob_main.fetch().await?;
         assert!(fetched.is_some(), "Fetch should return upstream revision");
 
         let bob_revision_after_fetch = bob_main.revision();
@@ -3054,53 +3166,46 @@ mod tests {
         s3_address: dialog_storage::s3::helpers::S3Address,
     ) -> anyhow::Result<()> {
         // Test managing multiple remote upstreams
+        use dialog_s3_credentials::Address;
         use dialog_storage::JournaledStorage;
 
         let issuer = Operator::from_passphrase("multi-remote-user");
-        let backend = MemoryStorageBackend::default();
+        let subject = issuer.did().to_string();
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let journaled = JournaledStorage::new(backend);
-        let mut replica = Replica::open(issuer.clone(), journaled.clone())?;
+        let mut replica = Replica::open(issuer.clone(), subject.clone(), journaled.clone())?;
+
+        // Create S3 credentials
+        let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
+        let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
+            address,
+            &s3_address.access_key_id,
+            &s3_address.secret_access_key,
+        )?
+        .with_path_style(true);
 
         // Add first remote (origin)
-        let origin_config = RemoteConfig {
-            endpoint: s3_address.endpoint.clone(),
-            region: "auto".to_string(),
-            bucket: s3_address.bucket.clone(),
-            prefix: Some("origin".to_string()),
-            access_key_id: Some(s3_address.access_key_id.clone()),
-            secret_access_key: Some(s3_address.secret_access_key.clone()),
-        };
-
         let origin_state = RemoteState {
             site: "origin".to_string(),
-            address: origin_config,
+            credentials: Credentials::S3(s3_credentials.clone()),
         };
-        let origin = replica.remotes.add(origin_state.clone()).await?;
-        assert_eq!(origin.site(), "origin");
+        let origin = replica.add_remote(origin_state.clone()).await?;
+        assert_eq!(origin, "origin");
 
         // Add second remote (backup)
-        let backup_config = RemoteConfig {
-            endpoint: s3_address.endpoint.clone(),
-            region: "auto".to_string(),
-            bucket: s3_address.bucket.clone(),
-            prefix: Some("backup".to_string()),
-            access_key_id: Some(s3_address.access_key_id.clone()),
-            secret_access_key: Some(s3_address.secret_access_key.clone()),
-        };
-
         let backup_state = RemoteState {
             site: "backup".to_string(),
-            address: backup_config,
+            credentials: Credentials::S3(s3_credentials),
         };
-        let backup = replica.remotes.add(backup_state.clone()).await?;
-        assert_eq!(backup.site(), "backup");
+        let backup = replica.add_remote(backup_state.clone()).await?;
+        assert_eq!(backup, "backup");
 
         // Load remotes back
-        let loaded_origin = replica.remotes.load(&"origin".to_string()).await?;
-        assert_eq!(loaded_origin.site(), "origin");
+        let loaded_origin = replica.load_remote(&"origin".to_string()).await?;
+        assert_eq!(loaded_origin.site, "origin");
 
-        let loaded_backup = replica.remotes.load(&"backup".to_string()).await?;
-        assert_eq!(loaded_backup.site(), "backup");
+        let loaded_backup = replica.load_remote(&"backup".to_string()).await?;
+        assert_eq!(loaded_backup.site, "backup");
 
         println!("✓ Multiple remotes work correctly");
 
@@ -3111,7 +3216,7 @@ mod tests {
     #[tokio::test]
     async fn test_branch_description() -> anyhow::Result<()> {
         // Test branch description getting and setting
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
         let issuer = Operator::from_passphrase("test-user");
         let subject = test_subject();
@@ -3154,7 +3259,8 @@ mod tests {
     async fn test_archive_caches_remote_reads_to_local(
         s3_address: dialog_storage::s3::helpers::S3Address,
     ) -> anyhow::Result<()> {
-        use dialog_storage::s3::{Address, Bucket, Credentials};
+        use dialog_s3_credentials::Address;
+        use dialog_storage::s3::{Bucket, S3};
         use dialog_storage::{ContentAddressedStorage, MemoryStorageBackend};
         use serde::{Deserialize, Serialize};
 
@@ -3165,17 +3271,20 @@ mod tests {
         }
 
         let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
-        let subject = "test-archive-cache"; // Test subject for this test case
-        let credentials = Credentials::private(
+        let issuer = Operator::from_passphrase("test-archive-cache");
+        let subject = issuer.did().to_string();
+        let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
             address,
             &s3_address.access_key_id,
             &s3_address.secret_access_key,
-        )?;
-        let s3_storage = Bucket::<Vec<u8>, Vec<u8>, _>::open(credentials)?;
+        )?
+        .with_path_style(true);
+        let s3 = S3::new(Credentials::S3(s3_credentials), issuer.clone());
+        let s3_storage = Bucket::new(s3, subject.clone(), "memory");
 
         // Create local and remote archives
         let local_storage = PlatformStorage::new(
-            ErrorMappingBackend::new(MemoryStorageBackend::default()),
+            ErrorMappingBackend::new(MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default()),
             CborEncoder,
         );
         let connection = PlatformStorage::new(ErrorMappingBackend::new(s3_storage), CborEncoder);
@@ -3219,6 +3328,236 @@ mod tests {
                 "Block should now be cached in local storage"
             );
         }
+
+        Ok(())
+    }
+
+    /// End-to-end test demonstrating the full UCAN-based workflow:
+    /// 1. Setup UCAN service & S3
+    /// 2. Create local repository with "main" branch
+    /// 3. Add remote "origin" with UCAN credentials
+    /// 4. Open remote repository with same DID and "main" branch
+    /// 5. Set remote branch as upstream to local "main"
+    /// 6. Add local changes and push
+    /// 7. Verify changes propagate to remote
+    #[cfg(all(feature = "ucan", feature = "helpers"))]
+    #[dialog_common::test]
+    async fn test_ucan_end_to_end_workflow(
+        env: dialog_storage::s3::helpers::UcanS3Address,
+    ) -> anyhow::Result<()> {
+        use crate::artifacts::ArtifactStore;
+        use dialog_s3_credentials::ucan::{self, DelegationChain, test_helpers::create_delegation};
+        use dialog_storage::JournaledStorage;
+        use futures_util::stream;
+
+        // Step 1: Generate operator (issuer) with signing capability
+        let operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
+        let operator_did = operator_signer.did().clone();
+        let operator = Operator::from_secret(&operator_signer.signer().to_bytes());
+        let subject = operator.did().to_string();
+
+        // Step 2: Create a delegation chain from subject to operator
+        // In this test, the subject and operator are the same (self-signed)
+        let delegation = create_delegation(
+            &operator_signer,
+            &operator_did,
+            operator_signer.did(),
+            &["archive", "memory"],
+        )?;
+        let delegation_chain = DelegationChain::new(delegation);
+
+        // Step 3: Create UCAN credentials
+        let ucan_credentials =
+            ucan::Credentials::new(env.access_service_url.clone(), delegation_chain);
+
+        // Step 4: Create local replica with journaled backend
+        let local_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let journaled_backend = JournaledStorage::new(local_backend);
+        let mut local_replica =
+            Replica::open(operator.clone(), subject.clone(), journaled_backend.clone())
+                .expect("Failed to create local replica");
+
+        // Step 5: Create local "main" branch
+        let main_id = BranchId::new("main".to_string());
+        let mut local_main = local_replica
+            .branches
+            .open(&main_id)
+            .await
+            .expect("Failed to create local main branch");
+
+        // Step 6: Add remote "origin" with UCAN credentials
+        let remote_state = RemoteState {
+            site: "origin".to_string(),
+            credentials: Credentials::Ucan(ucan_credentials),
+        };
+        local_replica
+            .add_remote(remote_state.clone())
+            .await
+            .expect("Failed to add remote 'origin'");
+
+        // Step 7: Open remote repository with same DID and create remote branch
+        let remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            local_replica.storage().clone(),
+            operator.clone(),
+            subject.clone(),
+        )
+        .await
+        .expect("Failed to load remote site");
+
+        let remote_repo = remote_site.repository(&subject);
+        let remote_branch = remote_repo
+            .branch(main_id.to_string())
+            .open()
+            .await
+            .expect("Failed to open remote main branch");
+
+        // Step 8: Set remote branch as upstream to local "main"
+        local_main
+            .set_upstream(remote_branch)
+            .await
+            .expect("Failed to set upstream");
+
+        // Verify upstream is configured
+        assert!(
+            local_main.upstream().is_some(),
+            "Upstream should be configured"
+        );
+
+        // Verify archive has remote storage configured
+        let has_remote = {
+            let archive_remote = local_main.archive.remote.read().await;
+            archive_remote.is_some()
+        };
+        assert!(has_remote, "Archive should have remote storage configured");
+
+        // Step 9: Add local changes (commit artifacts)
+        let test_artifact = Artifact {
+            the: "user/name".parse().expect("Invalid attribute"),
+            of: "user:test".parse().expect("Invalid entity"),
+            is: crate::Value::String("Test User".to_string()),
+            cause: None,
+        };
+
+        let instructions = vec![Instruction::Assert(test_artifact.clone())];
+        let tree_hash = local_main
+            .commit(stream::iter(instructions))
+            .await
+            .expect("Commit failed");
+
+        assert_ne!(
+            tree_hash, EMPT_TREE_HASH,
+            "Tree should have content after commit"
+        );
+
+        // Step 10: Push changes to remote
+        let push_result = local_main.push().await.expect("Push failed");
+
+        // First push to a new remote branch returns None (no previous revision)
+        assert_eq!(
+            push_result, None,
+            "First push should return None (no previous revision)"
+        );
+
+        // Step 11: Verify changes propagate - create a second replica and pull
+        let second_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let second_journaled = JournaledStorage::new(second_backend);
+
+        // Generate a second operator for the second replica
+        let second_operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
+        let second_operator_did = second_operator_signer.did().clone();
+        let second_operator = Operator::from_secret(&second_operator_signer.signer().to_bytes());
+
+        // Create delegation from the original subject to the second operator
+        let second_delegation = create_delegation(
+            &operator_signer,
+            &second_operator_did,
+            operator_signer.did(),
+            &["archive", "memory"],
+        )?;
+        let second_delegation_chain = DelegationChain::new(second_delegation);
+        let second_ucan_credentials =
+            ucan::Credentials::new(env.access_service_url.clone(), second_delegation_chain);
+
+        let mut second_replica = Replica::open(
+            second_operator.clone(),
+            subject.clone(),
+            second_journaled.clone(),
+        )
+        .expect("Failed to create second replica");
+
+        let mut second_main = second_replica
+            .branches
+            .open(&main_id)
+            .await
+            .expect("Failed to create second main branch");
+
+        // Add remote to second replica
+        let second_remote_state = RemoteState {
+            site: "origin".to_string(),
+            credentials: Credentials::Ucan(second_ucan_credentials),
+        };
+        second_replica
+            .add_remote(second_remote_state)
+            .await
+            .expect("Failed to add remote to second replica");
+
+        let second_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            second_replica.storage().clone(),
+            second_operator.clone(),
+            subject.clone(),
+        )
+        .await
+        .expect("Failed to load second remote site");
+
+        let second_remote_branch = second_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string())
+            .open()
+            .await
+            .expect("Failed to open second remote branch");
+
+        second_main
+            .set_upstream(second_remote_branch)
+            .await
+            .expect("Failed to set upstream for second replica");
+
+        // Pull changes from remote
+        let pull_result = second_main.pull().await.expect("Pull failed");
+        assert!(
+            pull_result.is_some(),
+            "Pull should return a revision with the pushed changes"
+        );
+
+        // Verify the artifact is now available in the second replica
+        let selector = ArtifactSelector::new()
+            .the("user/name".parse().unwrap())
+            .of("user:test".parse().unwrap());
+
+        let facts: Vec<_> = second_main
+            .select(selector)
+            .try_collect()
+            .await
+            .expect("Failed to query artifacts");
+
+        assert_eq!(
+            facts.len(),
+            1,
+            "Second replica should have the pushed artifact after pull"
+        );
+        assert_eq!(
+            facts[0].is,
+            crate::Value::String("Test User".to_string()),
+            "Artifact value should match what was pushed"
+        );
+
+        println!("✓ UCAN end-to-end workflow completed successfully:");
+        println!("  - Created local replica with 'main' branch");
+        println!("  - Added remote 'origin' with UCAN credentials");
+        println!("  - Set remote branch as upstream");
+        println!("  - Committed and pushed changes");
+        println!("  - Verified changes propagated to second replica via pull");
 
         Ok(())
     }

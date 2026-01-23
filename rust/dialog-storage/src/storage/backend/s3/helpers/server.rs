@@ -228,10 +228,8 @@ impl S3 for InMemoryS3 {
             }
 
             // Handle If-None-Match precondition (only create if doesn't exist)
-            if if_none_match.is_some() {
-                if bucket_contents.contains_key(&key) {
-                    return Err(s3_error!(PreconditionFailed));
-                }
+            if if_none_match.is_some() && bucket_contents.contains_key(&key) {
+                return Err(s3_error!(PreconditionFailed));
             }
 
             bucket_contents.insert(key, stored);
