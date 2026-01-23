@@ -214,7 +214,7 @@ where
     pub async fn open(
         &self,
         address: Backend::Address,
-        backend: &Backend,
+        backend: &mut Backend,
     ) -> Result<TransactionalMemoryCell<T, Backend, HASH_SIZE, Codec>, DialogStorageError> {
         // Check for existing cell
         {
@@ -309,7 +309,7 @@ where
     /// Opens a new cell at the given address, fetching the current value from storage.
     pub async fn open(
         address: Backend::Address,
-        backend: &Backend,
+        backend: &mut Backend,
         codec: Codec,
         policy: UpdatePolicy,
     ) -> Result<Self, DialogStorageError> {
@@ -378,7 +378,7 @@ where
     }
 
     /// Reloads content from storage, replacing the cached state entirely.
-    pub async fn reload(&self, backend: &Backend) -> Result<(), DialogStorageError> {
+    pub async fn reload(&self, backend: &mut Backend) -> Result<(), DialogStorageError> {
         let (value, edition) = if let Some((bytes, edition)) =
             backend.resolve(&self.address).await.map_err(|e| e.into())?
         {
@@ -405,7 +405,7 @@ where
     pub async fn replace(
         &self,
         value: Option<T>,
-        backend: &Backend,
+        backend: &mut Backend,
     ) -> Result<(), DialogStorageError> {
         let encoded = if let Some(ref v) = value {
             let (_, bytes) = self
@@ -442,7 +442,7 @@ where
     /// Calls `f` with the current cached value to compute a new value, then
     /// attempts CAS. On conflict, reloads fresh data and retries according to
     /// the policy (`MaxRetries(n)` = 1 optimistic attempt + up to n retries).
-    pub async fn replace_with<F>(&self, f: F, backend: &Backend) -> Result<(), DialogStorageError>
+    pub async fn replace_with<F>(&self, f: F, backend: &mut Backend) -> Result<(), DialogStorageError>
     where
         F: Fn(&Option<T>) -> Option<T> + ConditionalSend,
     {
@@ -522,10 +522,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_opens_non_existent_memory() -> anyhow::Result<()> {
-        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
-        let cell = memory.open(b"test-key".to_vec(), &backend).await?;
+        let cell = memory.open(b"test-key".to_vec(), &mut backend).await?;
 
         assert!(cell.read().is_none());
         Ok(())
@@ -533,33 +533,33 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_writes_and_reads_value() -> anyhow::Result<()> {
-        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
-        let cell = memory.open(b"test-key".to_vec(), &backend).await?;
+        let cell = memory.open(b"test-key".to_vec(), &mut backend).await?;
 
         let data = TestData {
             name: "test".to_string(),
             value: 42,
         };
 
-        cell.replace(Some(data.clone()), &backend).await?;
+        cell.replace(Some(data.clone()), &mut backend).await?;
 
         assert_eq!(cell.read(), Some(data.clone()));
 
         // Open again to verify persistence
-        let cell2 = memory.open(b"test-key".to_vec(), &backend).await?;
+        let cell2 = memory.open(b"test-key".to_vec(), &mut backend).await?;
         assert_eq!(cell2.read(), Some(data));
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_shares_state_between_cells() -> anyhow::Result<()> {
-        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
-        let cell1 = memory.open(b"test-key".to_vec(), &backend).await?;
-        let cell2 = memory.open(b"test-key".to_vec(), &backend).await?;
+        let cell1 = memory.open(b"test-key".to_vec(), &mut backend).await?;
+        let cell2 = memory.open(b"test-key".to_vec(), &mut backend).await?;
 
         let data = TestData {
             name: "test".to_string(),
@@ -567,7 +567,7 @@ mod tests {
         };
 
         // Write through cell1
-        cell1.replace(Some(data.clone()), &backend).await?;
+        cell1.replace(Some(data.clone()), &mut backend).await?;
 
         // cell2 should see the same data (shared state)
         assert_eq!(cell2.read(), Some(data));
@@ -576,96 +576,96 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_updates_existing_value() -> anyhow::Result<()> {
-        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
-        let cell = memory.open(b"test-key".to_vec(), &backend).await?;
+        let cell = memory.open(b"test-key".to_vec(), &mut backend).await?;
 
         let initial_data = TestData {
             name: "initial".to_string(),
             value: 1,
         };
 
-        cell.replace(Some(initial_data), &backend).await?;
+        cell.replace(Some(initial_data), &mut backend).await?;
 
         let updated_data = TestData {
             name: "updated".to_string(),
             value: 2,
         };
 
-        cell.replace(Some(updated_data.clone()), &backend).await?;
+        cell.replace(Some(updated_data.clone()), &mut backend).await?;
 
         assert_eq!(cell.read(), Some(updated_data.clone()));
 
         // Open again to verify the update persisted
-        let cell2 = memory.open(b"test-key".to_vec(), &backend).await?;
+        let cell2 = memory.open(b"test-key".to_vec(), &mut backend).await?;
         assert_eq!(cell2.read(), Some(updated_data));
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_deletes_value() -> anyhow::Result<()> {
-        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
-        let cell = memory.open(b"test-key".to_vec(), &backend).await?;
+        let cell = memory.open(b"test-key".to_vec(), &mut backend).await?;
 
         let data = TestData {
             name: "test".to_string(),
             value: 42,
         };
 
-        cell.replace(Some(data), &backend).await?;
-        cell.replace(None, &backend).await?;
+        cell.replace(Some(data), &mut backend).await?;
+        cell.replace(None, &mut backend).await?;
 
         assert!(cell.read().is_none());
 
         // Verify deletion persisted
-        let cell2 = memory.open(b"test-key".to_vec(), &backend).await?;
+        let cell2 = memory.open(b"test-key".to_vec(), &mut backend).await?;
         assert!(cell2.read().is_none());
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_reloads_from_storage() -> anyhow::Result<()> {
-        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let memory1: TransactionalMemory<TestData, _> = TransactionalMemory::new();
         let memory2: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
-        let cell1 = memory1.open(b"test-key".to_vec(), &backend).await?;
+        let cell1 = memory1.open(b"test-key".to_vec(), &mut backend).await?;
 
         let data = TestData {
             name: "test".to_string(),
             value: 42,
         };
 
-        cell1.replace(Some(data.clone()), &backend).await?;
+        cell1.replace(Some(data.clone()), &mut backend).await?;
 
         // Open from a different broker (simulates another process)
-        let cell2 = memory2.open(b"test-key".to_vec(), &backend).await?;
+        let cell2 = memory2.open(b"test-key".to_vec(), &mut backend).await?;
 
         let updated_data = TestData {
             name: "updated".to_string(),
             value: 100,
         };
 
-        cell2.replace(Some(updated_data.clone()), &backend).await?;
+        cell2.replace(Some(updated_data.clone()), &mut backend).await?;
 
         // cell1 still has stale data
         assert_eq!(cell1.read(), Some(data));
 
         // After reload, cell1 should see the updated data
-        cell1.reload(&backend).await?;
+        cell1.reload(&mut backend).await?;
         assert_eq!(cell1.read(), Some(updated_data));
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_uses_replace_with() -> anyhow::Result<()> {
-        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
-        let cell = memory.open(b"test-key".to_vec(), &backend).await?;
+        let cell = memory.open(b"test-key".to_vec(), &mut backend).await?;
 
         // Initial write
         cell.replace_with(
@@ -675,7 +675,7 @@ mod tests {
                     value: 1,
                 })
             },
-            &backend,
+            &mut backend,
         )
         .await?;
 
@@ -687,7 +687,7 @@ mod tests {
                     value: d.value + 1,
                 })
             },
-            &backend,
+            &mut backend,
         )
         .await?;
 
@@ -703,7 +703,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_cleans_up_dropped_cells() -> anyhow::Result<()> {
-        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
         let data = TestData {
@@ -713,8 +713,8 @@ mod tests {
 
         // Open and write
         {
-            let cell = memory.open(b"test-key".to_vec(), &backend).await?;
-            cell.replace(Some(data.clone()), &backend).await?;
+            let cell = memory.open(b"test-key".to_vec(), &mut backend).await?;
+            cell.replace(Some(data.clone()), &mut backend).await?;
         }
         // cell is dropped here
 
@@ -726,29 +726,29 @@ mod tests {
         {
             // Use a separate memory to write
             let memory2: TransactionalMemory<TestData, _> = TransactionalMemory::new();
-            let cell2 = memory2.open(b"test-key".to_vec(), &backend).await?;
-            cell2.replace(Some(updated_data.clone()), &backend).await?;
+            let cell2 = memory2.open(b"test-key".to_vec(), &mut backend).await?;
+            cell2.replace(Some(updated_data.clone()), &mut backend).await?;
         }
 
         // Open again - should fetch fresh from backend since old cell was dropped
-        let cell3 = memory.open(b"test-key".to_vec(), &backend).await?;
+        let cell3 = memory.open(b"test-key".to_vec(), &mut backend).await?;
         assert_eq!(cell3.read(), Some(updated_data));
         Ok(())
     }
 
     #[dialog_common::test]
     async fn it_retries_on_concurrent_update() -> anyhow::Result<()> {
-        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let mut backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
         // Open cell and write initial value
-        let cell = memory.open(b"test-key".to_vec(), &backend).await?;
+        let cell = memory.open(b"test-key".to_vec(), &mut backend).await?;
         cell.replace(
             Some(TestData {
                 name: "counter".to_string(),
                 value: 10,
             }),
-            &backend,
+            &mut backend,
         )
         .await?;
 
@@ -757,7 +757,7 @@ mod tests {
         {
             let other_cell = TransactionalMemoryCell::<TestData, _, 32, CborEncoder>::open(
                 b"test-key".to_vec(),
-                &backend,
+                &mut backend,
                 CborEncoder,
                 UpdatePolicy::default(),
             )
@@ -769,7 +769,7 @@ mod tests {
                         name: "counter".to_string(),
                         value: 50, // Changed by "another process"
                     }),
-                    &backend,
+                    &mut backend,
                 )
                 .await?;
         }
@@ -792,7 +792,7 @@ mod tests {
                     value: d.value + 1,
                 })
             },
-            &backend,
+            &mut backend,
         )
         .await?;
 

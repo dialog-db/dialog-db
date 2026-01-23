@@ -8,7 +8,7 @@
 use dialog_common::ConditionalSync;
 use serde::Deserialize;
 
-use super::{Bucket, Precondition, S3StorageError, StorageAuthorizer, storage};
+use super::{Authorizer, Bucket, Precondition, S3StorageError};
 
 /// Response from S3 ListObjectsV2 API.
 #[derive(Debug)]
@@ -58,7 +58,7 @@ impl<Key, Value, C> Bucket<Key, Value, C>
 where
     Key: AsRef<[u8]> + Clone + ConditionalSync,
     Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-    C: StorageAuthorizer,
+    C: Authorizer,
 {
     /// List objects in the bucket with the configured prefix.
     ///

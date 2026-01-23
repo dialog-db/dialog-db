@@ -127,14 +127,14 @@ where
     type Edition = B::Edition;
 
     async fn resolve(
-        &self,
+        &mut self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
         self.inner.resolve(address).await.map_err(|e| e.into())
     }
 
     async fn replace(
-        &self,
+        &mut self,
         address: &Self::Address,
         edition: Option<&Self::Edition>,
         content: Option<Self::Value>,
@@ -238,7 +238,7 @@ where
     /// Opens a transactional memory at the given key.
     /// This provides encoding/decoding and caches the decoded value.
     pub async fn open<T>(
-        &self,
+        &mut self,
         key: &Backend::Address,
     ) -> Result<TransactionalMemoryCell<T, Self, 32, Codec>, DialogStorageError>
     where
@@ -281,14 +281,14 @@ where
     type Error = <Backend as TransactionalMemoryBackend>::Error;
 
     async fn resolve(
-        &self,
+        &mut self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
         self.backend.resolve(address).await
     }
 
     async fn replace(
-        &self,
+        &mut self,
         address: &Self::Address,
         edition: Option<&Self::Edition>,
         content: Option<Self::Value>,

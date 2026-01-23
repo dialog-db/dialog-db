@@ -16,8 +16,20 @@
 //! For publicly accessible buckets that don't require authentication:
 //!
 //! ```no_run
+//! use dialog_common::{Authority, capability::{Did, Principal}};
 //! use dialog_storage::s3::{Address, S3Bucket, S3Credentials};
 //! use dialog_storage::capability::{storage, Provider, Subject};
+//!
+//! // Define an issuer type for capability-based access
+//! #[derive(Clone)]
+//! struct Issuer(String);
+//! impl Principal for Issuer {
+//!     fn did(&self) -> &Did { &self.0 }
+//! }
+//! impl Authority for Issuer {
+//!     fn sign(&mut self, _: &[u8]) -> Vec<u8> { Vec::new() }
+//!     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
+//! }
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create address with endpoint, region, and bucket
@@ -27,7 +39,8 @@
 //!     "my-bucket",
 //! );
 //! let credentials = S3Credentials::public(address)?;
-//! let mut bucket = S3Bucket::from_s3(credentials);
+//! let issuer = Issuer("did:key:zMyIssuer".into());
+//! let mut bucket = S3Bucket::from_s3(credentials, issuer);
 //!
 //! // Use capability-based access with subject DID as the root
 //! let subject = "did:key:zMySubject";
@@ -47,9 +60,19 @@
 //! ## Authorized Access (Credentials based Authentication)
 //!
 //! ```no_run
+//! use dialog_common::{Authority, capability::{Did, Principal}};
 //! use dialog_storage::s3::{Address, S3Credentials, S3Bucket};
 //! use dialog_storage::capability::{storage, Provider, Subject};
 //!
+//! # #[derive(Clone)]
+//! # struct Issuer(String);
+//! # impl Principal for Issuer {
+//! #     fn did(&self) -> &Did { &self.0 }
+//! # }
+//! # impl Authority for Issuer {
+//! #     fn sign(&mut self, _: &[u8]) -> Vec<u8> { Vec::new() }
+//! #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
+//! # }
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let address = Address::new(
 //!     "https://s3.us-east-1.amazonaws.com",
@@ -62,7 +85,8 @@
 //!     std::env::var("AWS_SECRET_ACCESS_KEY")?,
 //! )?;
 //!
-//! let mut bucket = S3Bucket::from_s3(credentials);
+//! let issuer = Issuer("did:key:zMyIssuer".into());
+//! let mut bucket = S3Bucket::from_s3(credentials, issuer);
 //!
 //! // Subject DID identifies whose data we're accessing
 //! let subject = "did:key:zMySubject";
@@ -82,8 +106,18 @@
 //! ## Cloudflare R2
 //!
 //! ```no_run
+//! use dialog_common::{Authority, capability::{Did, Principal}};
 //! use dialog_storage::s3::{Address, S3Credentials, S3Bucket};
 //!
+//! # #[derive(Clone)]
+//! # struct Issuer(String);
+//! # impl Principal for Issuer {
+//! #     fn did(&self) -> &Did { &self.0 }
+//! # }
+//! # impl Authority for Issuer {
+//! #     fn sign(&mut self, _: &[u8]) -> Vec<u8> { Vec::new() }
+//! #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
+//! # }
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // R2 uses "auto" region for signing
 //! let address = Address::new(
@@ -97,7 +131,8 @@
 //!     std::env::var("R2_SECRET_ACCESS_KEY")?,
 //! )?;
 //!
-//! let bucket = S3Bucket::from_s3(credentials);
+//! let issuer = Issuer("did:key:zMyIssuer".into());
+//! let bucket = S3Bucket::from_s3(credentials, issuer);
 //! # Ok(())
 //! # }
 //! ```
@@ -105,13 +140,24 @@
 //! ## Local Development (MinIO)
 //!
 //! ```no_run
+//! use dialog_common::{Authority, capability::{Did, Principal}};
 //! use dialog_storage::s3::{Address, S3Credentials, S3Bucket};
 //!
+//! # #[derive(Clone)]
+//! # struct Issuer(String);
+//! # impl Principal for Issuer {
+//! #     fn did(&self) -> &Did { &self.0 }
+//! # }
+//! # impl Authority for Issuer {
+//! #     fn sign(&mut self, _: &[u8]) -> Vec<u8> { Vec::new() }
+//! #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
+//! # }
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // IP addresses and localhost automatically use path-style URLs
 //! let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
 //! let credentials = S3Credentials::private(address, "minioadmin", "minioadmin")?;
-//! let bucket = S3Bucket::from_s3(credentials);
+//! let issuer = Issuer("did:key:zMyIssuer".into());
+//! let bucket = S3Bucket::from_s3(credentials, issuer);
 //! // path_style is true by default for IP addresses and localhost
 //! # Ok(())
 //! # }
@@ -215,6 +261,15 @@ pub enum S3StorageError {
     /// Error during serialization or deserialization of data.
     #[error("Serialization error: {0}")]
     SerializationError(String),
+
+    /// CAS edition mismatch (concurrent modification detected).
+    #[error("Edition mismatch: expected {expected:?}, got {actual:?}")]
+    EditionMismatch {
+        /// The expected edition.
+        expected: Option<String>,
+        /// The actual edition found.
+        actual: Option<String>,
+    },
 }
 
 impl From<S3StorageError> for DialogStorageError {
@@ -253,6 +308,9 @@ impl<P: Provider<archive::AuthorizeGet> + Provider<archive::AuthorizePut>> Archi
 ///
 /// This type provides access to S3-compatible storage using the capability-based
 /// authorization model. It can be used with both direct S3 credentials and
+/// S3-compatible storage bucket with capability-based access control.
+///
+/// This bucket supports both S3 credentials (SigV4 signing) and
 /// UCAN-based delegated authorization.
 ///
 /// The `Issuer` type parameter represents the authority that signs requests.
@@ -785,6 +843,269 @@ where
     }
 }
 
+/// A scoped S3 storage backend implementing `StorageBackend` and `TransactionalMemoryBackend`.
+///
+/// This is a wrapper around [`S3Bucket`] that adds the subject DID and namespace path
+/// required for the `StorageBackend` and `TransactionalMemoryBackend` traits.
+///
+/// # Example
+///
+/// ```ignore
+/// // This example requires an Issuer that implements Authority
+/// use dialog_storage::s3::{S3Bucket, S3Credentials, Address, ScopedS3Bucket};
+/// use dialog_storage::StorageBackend;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
+/// let credentials = S3Credentials::public(address)?;
+/// let bucket = S3Bucket::from_s3(credentials, issuer); // issuer must implement Authority
+///
+/// // Create a scoped bucket for StorageBackend operations
+/// let mut storage = ScopedS3Bucket::new(bucket, "did:key:zMySubject", "my-store");
+///
+/// // Now you can use StorageBackend methods
+/// storage.set(b"key".to_vec(), b"value".to_vec()).await?;
+/// let value = storage.get(&b"key".to_vec()).await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct ScopedS3Bucket<Issuer> {
+    bucket: S3Bucket<Issuer>,
+    /// The subject DID (whose data we're accessing)
+    subject: Did,
+    /// The namespace path (store for StorageBackend, space for TransactionalMemoryBackend)
+    path: String,
+}
+
+impl<Issuer> ScopedS3Bucket<Issuer> {
+    /// Create a new scoped S3 bucket.
+    ///
+    /// - `bucket`: The underlying S3Bucket
+    /// - `subject`: The subject DID (whose data we're accessing)
+    /// - `path`: The namespace path (store for storage, space for memory)
+    pub fn new(bucket: S3Bucket<Issuer>, subject: impl Into<Did>, path: impl Into<String>) -> Self {
+        Self {
+            bucket,
+            subject: subject.into(),
+            path: path.into(),
+        }
+    }
+
+    /// Get the subject DID.
+    pub fn subject(&self) -> &Did {
+        &self.subject
+    }
+
+    /// Get the namespace path.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+impl<Issuer: Clone> ScopedS3Bucket<Issuer> {
+    /// Create a new scoped bucket with a different path (nested namespace).
+    pub fn at(&self, path: impl Into<String>) -> Self {
+        Self {
+            bucket: self.bucket.clone(),
+            subject: self.subject.clone(),
+            path: format!("{}/{}", self.path, path.into()),
+        }
+    }
+}
+
+// Forward Principal trait to the underlying bucket
+impl<Issuer: Principal> Principal for ScopedS3Bucket<Issuer> {
+    fn did(&self) -> &Did {
+        self.bucket.did()
+    }
+}
+
+// Forward Authority trait to the underlying bucket
+impl<Issuer: Authority> Authority for ScopedS3Bucket<Issuer> {
+    fn sign(&mut self, payload: &[u8]) -> Vec<u8> {
+        self.bucket.sign(payload)
+    }
+
+    fn secret_key_bytes(&self) -> Option<[u8; 32]> {
+        self.bucket.secret_key_bytes()
+    }
+}
+
+// Forward Access trait to the underlying bucket
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Issuer: ConditionalSend + ConditionalSync> Access for ScopedS3Bucket<Issuer> {
+    type Authorization = dialog_s3_credentials::Authorization;
+    type Error = AccessError;
+
+    async fn claim<C: Ability + Clone + ConditionalSend + 'static>(
+        &self,
+        claim: Claim<C>,
+    ) -> Result<Self::Authorization, Self::Error> {
+        self.bucket.claim(claim).await
+    }
+}
+
+// Forward Provider<Authorized<...>> to the underlying bucket
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Issuer, Do> Provider<Authorized<Do, dialog_s3_credentials::Authorization>>
+    for ScopedS3Bucket<Issuer>
+where
+    Issuer: ConditionalSend + ConditionalSync,
+    Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
+    Capability<Do>: ConditionalSend + S3Request,
+{
+    async fn execute(
+        &mut self,
+        authorized: Authorized<Do, dialog_s3_credentials::Authorization>,
+    ) -> Result<AuthorizedRequest, AccessError> {
+        self.bucket.execute(authorized).await
+    }
+}
+
+// Implement StorageBackend for ScopedS3Bucket
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Issuer> StorageBackend for ScopedS3Bucket<Issuer>
+where
+    Issuer: Authority + Clone + ConditionalSend + ConditionalSync,
+{
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+    type Error = S3StorageError;
+
+    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        // Build the capability
+        let capability: Capability<storage::Set> = Subject::from(self.subject.clone())
+            .attenuate(storage::Storage)
+            .attenuate(storage::Store::new(&self.path))
+            .invoke(storage::Set {
+                key: key.into(),
+                value: value.clone().into(),
+            });
+
+        // Execute via Provider
+        Provider::<storage::Set>::execute(&mut self.bucket, capability)
+            .await
+            .map_err(|e| S3StorageError::ServiceError(e.to_string()))
+    }
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        // Build the capability
+        let capability: Capability<storage::Get> = Subject::from(self.subject.clone())
+            .attenuate(storage::Storage)
+            .attenuate(storage::Store::new(&self.path))
+            .invoke(storage::Get {
+                key: key.clone().into(),
+            });
+
+        // We need a mutable reference for Provider, so clone the bucket
+        let mut bucket = self.bucket.clone();
+        Provider::<storage::Get>::execute(&mut bucket, capability)
+            .await
+            .map(|opt| opt.map(|b| b.to_vec()))
+            .map_err(|e| S3StorageError::ServiceError(e.to_string()))
+    }
+}
+
+// Implement TransactionalMemoryBackend for ScopedS3Bucket
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Issuer> TransactionalMemoryBackend for ScopedS3Bucket<Issuer>
+where
+    Issuer: Authority + Clone + ConditionalSend + ConditionalSync,
+{
+    type Address = Vec<u8>;
+    type Value = Vec<u8>;
+    type Error = S3StorageError;
+    type Edition = String;
+
+    async fn resolve(
+        &mut self,
+        address: &Self::Address,
+    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
+        // Encode the address as cell name
+        let cell = encode_s3_key(address);
+
+        // Build the capability
+        let capability: Capability<memory::Resolve> = Subject::from(self.subject.clone())
+            .attenuate(memory::Memory)
+            .attenuate(memory::Space::new(&self.path))
+            .attenuate(memory::Cell::new(&cell))
+            .invoke(memory::Resolve);
+
+        // Execute via Provider
+        let result = Provider::<memory::Resolve>::execute(&mut self.bucket, capability)
+            .await
+            .map_err(|e| S3StorageError::ServiceError(e.to_string()))?;
+
+        Ok(result.map(|pub_| (pub_.content.to_vec(), String::from_utf8_lossy(&pub_.edition).to_string())))
+    }
+
+    async fn replace(
+        &mut self,
+        address: &Self::Address,
+        edition: Option<&Self::Edition>,
+        content: Option<Self::Value>,
+    ) -> Result<Option<Self::Edition>, Self::Error> {
+        // Encode the address as cell name
+        let cell = encode_s3_key(address);
+
+        match content {
+            Some(value) => {
+                // Publish (create or update)
+                let capability: Capability<memory::Publish> = Subject::from(self.subject.clone())
+                    .attenuate(memory::Memory)
+                    .attenuate(memory::Space::new(&self.path))
+                    .attenuate(memory::Cell::new(&cell))
+                    .invoke(memory::Publish {
+                        content: value.into(),
+                        when: edition.map(|e| e.as_bytes().to_vec().into()),
+                    });
+
+                let new_edition = Provider::<memory::Publish>::execute(&mut self.bucket, capability)
+                    .await
+                    .map_err(|e| match e {
+                        memory::MemoryError::EditionMismatch { .. } => S3StorageError::EditionMismatch {
+                            expected: edition.map(|e| e.to_string()),
+                            actual: None,
+                        },
+                        e => S3StorageError::ServiceError(e.to_string()),
+                    })?;
+
+                Ok(Some(String::from_utf8_lossy(&new_edition).to_string()))
+            }
+            None => {
+                // Retract (delete)
+                let when = edition
+                    .ok_or_else(|| S3StorageError::ServiceError("Edition required for delete".into()))?;
+
+                let capability: Capability<memory::Retract> = Subject::from(self.subject.clone())
+                    .attenuate(memory::Memory)
+                    .attenuate(memory::Space::new(&self.path))
+                    .attenuate(memory::Cell::new(&cell))
+                    .invoke(memory::Retract {
+                        when: when.as_bytes().to_vec().into(),
+                    });
+
+                Provider::<memory::Retract>::execute(&mut self.bucket, capability)
+                    .await
+                    .map_err(|e| match e {
+                        memory::MemoryError::EditionMismatch { .. } => S3StorageError::EditionMismatch {
+                            expected: edition.map(|e| e.to_string()),
+                            actual: None,
+                        },
+                        e => S3StorageError::ServiceError(e.to_string()),
+                    })?;
+
+                Ok(None)
+            }
+        }
+    }
+}
+
 /// S3/R2-compatible storage backend (legacy API).
 ///
 /// **Note**: This is the legacy API using the `Authorizer` trait. For new code,
@@ -797,15 +1118,16 @@ where
 ///
 /// # Example
 ///
-/// ```no_run
+/// ```ignore
+/// // Legacy Bucket type - use ScopedS3Bucket with Provider-based API instead
 /// use dialog_storage::s3::{Address, S3Bucket, S3Credentials};
 /// use dialog_storage::capability::{storage, Provider, Subject};
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// // For the new capability-based API, use S3Bucket:
+/// // For the new capability-based API, use S3Bucket with an Issuer:
 /// let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "my-bucket");
 /// let credentials = S3Credentials::public(address)?;
-/// let mut bucket = S3Bucket::from_s3(credentials);
+/// let mut bucket = S3Bucket::from_s3(credentials, issuer);
 ///
 /// // Use capability-based access
 /// let subject = "did:key:zMySubject";
@@ -859,18 +1181,19 @@ where
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```ignore
+    /// // Legacy Bucket API - use ScopedS3Bucket with Provider-based API instead
     /// use dialog_storage::s3::{Address, S3Bucket, S3Credentials};
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Public access (no signing)
     /// let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "my-bucket");
-    /// let bucket = S3Bucket::from_s3(S3Credentials::public(address)?);
+    /// let bucket = S3Bucket::from_s3(S3Credentials::public(address)?, issuer);
     ///
     /// // AWS credentials
     /// let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
     /// let credentials = S3Credentials::private(address, "minioadmin", "minioadmin")?;
-    /// let bucket = S3Bucket::from_s3(credentials);
+    /// let bucket = S3Bucket::from_s3(credentials, issuer);
     /// # Ok(())
     /// # }
     /// ```
@@ -1203,12 +1526,12 @@ where
     type Edition = String;
 
     async fn resolve(
-        &self,
+        &mut self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
-        let subject_did = self.credentials.subject();
-        let space = self.path.clone().unwrap_or_default();
-        let cell = encode_s3_key(address.as_ref());
+        let _subject_did = self.credentials.subject();
+        let _space = self.path.clone().unwrap_or_default();
+        let _cell = encode_s3_key(address.as_ref());
         todo!("disable");
         // let claim = MemoryClaim::resolve(subject_did, &space, &cell);
         // let descriptor = self
@@ -1247,16 +1570,16 @@ where
     }
 
     async fn replace(
-        &self,
+        &mut self,
         address: &Self::Address,
         edition: Option<&Self::Edition>,
-        content: Option<Self::Value>,
+        _content: Option<Self::Value>,
     ) -> Result<Option<Self::Edition>, Self::Error> {
-        let subject_did = self.credentials.subject();
-        let space = self.path.clone().unwrap_or_default();
-        let cell = encode_s3_key(address.as_ref());
+        let _subject_did = self.credentials.subject();
+        let _space = self.path.clone().unwrap_or_default();
+        let _cell = encode_s3_key(address.as_ref());
         // Edition is now String (memory::Edition = String)
-        let when = edition.cloned();
+        let _when = edition.cloned();
 
         todo!("disable");
         // match content {
