@@ -3,7 +3,8 @@
 //! The `Subject` represents the resource owner (identified by a DID) and serves
 //! as the starting point for building capability chains.
 
-use super::capability::{Capability, Policy};
+use super::interface::Capability;
+use super::policy::Policy;
 use super::constrained::Constrained;
 
 /// A DID (Decentralized Identifier).

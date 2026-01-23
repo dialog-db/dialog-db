@@ -217,37 +217,34 @@ mod tests {
     }
 
     #[cfg(feature = "ucan")]
-    mod args_tests {
+    mod parameters_tests {
         use super::*;
-        use crate::capability::ToIpldArgs;
+        use crate::capability::Settings;
         use ipld_core::ipld::Ipld;
 
         #[test]
-        fn test_storage_args() {
+        fn test_storage_parameters() {
             let cap = Subject::from("did:key:zSpace").attenuate(Storage);
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
             // Storage is a unit struct, should produce empty map
-            assert_eq!(args, Ipld::Map(Default::default()));
+            assert!(params.is_empty());
         }
 
         #[test]
-        fn test_store_args() {
+        fn test_store_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
                 .attenuate(Store {
                     store: "index".into(),
                 });
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
-            let Ipld::Map(map) = args else {
-                panic!("Expected Map, got {:?}", args);
-            };
-            assert_eq!(map.get("store"), Some(&Ipld::String("index".into())));
+            assert_eq!(params.get("store"), Some(&Ipld::String("index".into())));
         }
 
         #[test]
-        fn test_get_args() {
+        fn test_get_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
                 .attenuate(Store {
@@ -256,17 +253,14 @@ mod tests {
                 .attenuate(Get {
                     key: vec![1, 2, 3].into(),
                 });
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
-            let Ipld::Map(map) = args else {
-                panic!("Expected Map, got {:?}", args);
-            };
-            assert_eq!(map.get("store"), Some(&Ipld::String("index".into())));
-            assert_eq!(map.get("key"), Some(&Ipld::Bytes(vec![1, 2, 3])));
+            assert_eq!(params.get("store"), Some(&Ipld::String("index".into())));
+            assert_eq!(params.get("key"), Some(&Ipld::Bytes(vec![1, 2, 3])));
         }
 
         #[test]
-        fn test_set_args() {
+        fn test_set_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
                 .attenuate(Store {
@@ -276,18 +270,15 @@ mod tests {
                     key: vec![10, 20].into(),
                     value: vec![30, 40, 50].into(),
                 });
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
-            let Ipld::Map(map) = args else {
-                panic!("Expected Map, got {:?}", args);
-            };
-            assert_eq!(map.get("store"), Some(&Ipld::String("mystore".into())));
-            assert_eq!(map.get("key"), Some(&Ipld::Bytes(vec![10, 20])));
-            assert_eq!(map.get("value"), Some(&Ipld::Bytes(vec![30, 40, 50])));
+            assert_eq!(params.get("store"), Some(&Ipld::String("mystore".into())));
+            assert_eq!(params.get("key"), Some(&Ipld::Bytes(vec![10, 20])));
+            assert_eq!(params.get("value"), Some(&Ipld::Bytes(vec![30, 40, 50])));
         }
 
         #[test]
-        fn test_delete_args() {
+        fn test_delete_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
                 .attenuate(Store {
@@ -296,13 +287,10 @@ mod tests {
                 .attenuate(Delete {
                     key: vec![99].into(),
                 });
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
-            let Ipld::Map(map) = args else {
-                panic!("Expected Map, got {:?}", args);
-            };
-            assert_eq!(map.get("store"), Some(&Ipld::String("trash".into())));
-            assert_eq!(map.get("key"), Some(&Ipld::Bytes(vec![99])));
+            assert_eq!(params.get("store"), Some(&Ipld::String("trash".into())));
+            assert_eq!(params.get("key"), Some(&Ipld::Bytes(vec![99])));
         }
     }
 }

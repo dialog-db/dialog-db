@@ -252,11 +252,11 @@ impl Authorization for UcanAuthorization {
             let proofs = self
                 .chain()
                 .map(|c| c.proof_cids().into())
-                .unwrap_or(vec![]);
+                .unwrap_or_default();
 
             let invocation = InvocationBuilder::new()
                 .issuer(issuer)
-                .audience(subject.clone())
+                .audience(subject)
                 .subject(subject)
                 .command(command)
                 .arguments(args)

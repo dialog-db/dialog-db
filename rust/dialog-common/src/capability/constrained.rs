@@ -4,7 +4,10 @@
 //! forming a chain from Subject through policies and abilities.
 
 use super::ability::Ability;
-use super::capability::{Capability, Constraint, Effect, Policy};
+use super::constraint::Constraint;
+use super::effect::Effect;
+use super::interface::Capability;
+use super::policy::Policy;
 use super::provider::Provider;
 use super::selector::{Here, Selector, There};
 

@@ -119,18 +119,17 @@
 
 use async_trait::async_trait;
 use dialog_common::{
-    Authority, Bytes, ConditionalSend, ConditionalSync,
-    capability::{
-        Access, Authorized, Capability, Constrained, Constraint, Policy, Principal, Provider,
-        Subject,
-    },
+    Bytes, ConditionalSend, ConditionalSync,
+    capability::{Capability, Policy, Principal, Provider, Subject},
 };
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use std::marker::PhantomData;
 use thiserror::Error;
 
 // Re-export core types from dialog-s3-credentials crate
-pub use dialog_s3_credentials::{AccessError, Address, AuthorizedRequest, Checksum, Hasher};
+pub use dialog_s3_credentials::{
+    AccessError, Address, AuthorizedRequest, Checksum, Credentials, Hasher,
+};
 // Use access module types for direct S3 authorization
 pub use dialog_s3_credentials::{
     capability,
@@ -138,19 +137,6 @@ pub use dialog_s3_credentials::{
 };
 
 pub use crate::capability::{archive, memory, storage};
-
-// Re-export s3::Credentials types
-pub use dialog_s3_credentials::s3::{Credentials, PrivateCredentials, PublicCredentials};
-
-/// Type alias for backwards compatibility.
-pub type Public = PublicCredentials;
-
-// Re-export UCAN types when the feature is enabled
-#[cfg(feature = "ucan")]
-pub use dialog_s3_credentials::ucan::{
-    Credentials as UcanCredentials, CredentialsBuilder as UcanCredentialsBuilder, DelegationChain,
-    OperatorIdentity,
-};
 
 /// Extension trait for RequestDescriptor to convert to reqwest RequestBuilder.
 pub trait RequestDescriptorExt {
@@ -260,20 +246,13 @@ impl<P: Provider<capability::archive::Get> + Provider<capability::archive::Put>>
 }
 
 #[derive(Debug, Clone)]
-pub struct S3Bucket<A: Access + ConditionalSend, P: Authority + ConditionalSend> {
-    provider: P,
-    access: A,
+pub struct S3Bucket {
+    credentials: Credentials,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<
-    A: Access + Principal + ConditionalSend,
-    P: Provider<Authorized<capability::archive::Get, A::Authorization>> + Authority + ConditionalSend,
-> Provider<archive::Get> for S3Bucket<A, P>
-where
-    A::Authorization: ConditionalSend,
-{
+impl Provider<archive::Get> for S3Bucket {
     async fn execute(
         &mut self,
         input: Capability<archive::Get>,
@@ -287,11 +266,11 @@ where
             .invoke(capability::archive::Get {
                 digest: archive::Get::of(&input).digest.clone(),
             })
-            .acquire(&mut self.access)
+            .acquire(&mut self.credentials)
             .await
             .map_err(|e| ArchiveError::AuthorizationError(e.to_string()))?;
 
-        let authorization = authorize.perform(&mut self.provider).await?;
+        let authorization = authorize.perform(&mut self.credentials).await?;
 
         let client = reqwest::Client::new();
         let mut builder = authorization.into_request(&client);
@@ -301,7 +280,13 @@ where
             .map_err(|e| ArchiveError::Io(e.to_string()))?;
 
         if response.status().is_success() {
-            Ok(unimplemented!("WIP"))
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|e| ArchiveError::Io(e.to_string()))?;
+            Ok(Some(bytes.to_vec()))
+        } else if response.status() == reqwest::StatusCode::NOT_FOUND {
+            Ok(None)
         } else {
             Err(archive::ArchiveError::Storage(format!(
                 "Failed to get value: {}",

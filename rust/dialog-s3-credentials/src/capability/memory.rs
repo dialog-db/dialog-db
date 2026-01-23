@@ -115,10 +115,10 @@ impl S3Request for Capability<Publish> {
         )
     }
     fn checksum(&self) -> Option<&Checksum> {
-        Some(&Publish::of(&self).checksum)
+        Some(&Publish::of(self).checksum)
     }
     fn precondition(&self) -> Precondition {
-        match &Publish::of(&self).when {
+        match &Publish::of(self).when {
             Some(edition) => Precondition::IfMatch(edition.clone()),
             None => Precondition::IfNoneMatch,
         }
@@ -162,6 +162,6 @@ impl S3Request for Capability<Retract> {
         )
     }
     fn precondition(&self) -> Precondition {
-        Precondition::IfMatch(Retract::of(&self).when.clone())
+        Precondition::IfMatch(Retract::of(self).when.clone())
     }
 }

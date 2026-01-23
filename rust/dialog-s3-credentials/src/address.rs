@@ -110,7 +110,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_new_s3_address() {
+    fn it_creates_s3_address() {
         let addr = Address::new(
             "https://s3.us-east-1.amazonaws.com",
             "us-east-1",
@@ -123,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_r2_address() {
+    fn it_creates_r2_address() {
         let addr = Address::new(
             "https://account-id.r2.cloudflarestorage.com",
             "auto",
@@ -139,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn test_localhost_address() {
+    fn it_creates_localhost_address() {
         let addr = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
 
         assert_eq!(addr.endpoint(), "http://localhost:9000");
@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn test_serde_roundtrip() {
+    fn it_roundtrips_through_serde() {
         let addr = Address::new(
             "https://s3.us-east-1.amazonaws.com",
             "us-east-1",

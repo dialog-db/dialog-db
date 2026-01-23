@@ -139,7 +139,7 @@ impl<'de> Deserialize<'de> for Bytes {
     {
         struct BytesVisitor;
 
-        impl<'de> serde::de::Visitor<'de> for BytesVisitor {
+        impl serde::de::Visitor<'_> for BytesVisitor {
             type Value = Bytes;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -170,27 +170,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_bytes_from_vec() {
+    fn it_creates_from_vec() {
         let bytes = Bytes::from(vec![1, 2, 3]);
         assert_eq!(bytes.as_slice(), &[1, 2, 3]);
     }
 
     #[test]
-    fn test_bytes_into_vec() {
+    fn it_converts_into_vec() {
         let bytes = Bytes::from(vec![1, 2, 3]);
         let vec: Vec<u8> = bytes.into();
         assert_eq!(vec, vec![1, 2, 3]);
     }
 
     #[test]
-    fn test_bytes_deref() {
+    fn it_derefs_to_slice() {
         let bytes = Bytes::from(vec![1, 2, 3]);
         assert_eq!(&*bytes, &[1, 2, 3]);
         assert_eq!(bytes.len(), 3);
     }
 
     #[test]
-    fn test_bytes_from_array() {
+    fn it_creates_from_array() {
         let bytes = Bytes::from([1u8, 2, 3]);
         assert_eq!(bytes.as_slice(), &[1, 2, 3]);
     }

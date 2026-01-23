@@ -78,8 +78,8 @@ impl S3Request for Capability<Get> {
         format!(
             "{}/{}/{}",
             self.subject(),
-            Store::of(&self).store,
-            Get::of(&self).key.as_slice().to_base58()
+            Store::of(self).store,
+            Get::of(self).key.as_slice().to_base58()
         )
     }
 }
@@ -121,11 +121,11 @@ impl S3Request for Capability<Set> {
             "{}/{}/{}",
             self.subject(),
             &Store::of(self).store,
-            Set::of(&self).key.as_slice().to_base58()
+            Set::of(self).key.as_slice().to_base58()
         )
     }
     fn checksum(&self) -> Option<&Checksum> {
-        Some(&Set::of(&self).checksum)
+        Some(&Set::of(self).checksum)
     }
 }
 
@@ -161,7 +161,7 @@ impl S3Request for Capability<Delete> {
             "{}/{}/{}",
             self.subject(),
             &Store::of(self).store,
-            Delete::of(&self).key.as_slice().to_base58()
+            Delete::of(self).key.as_slice().to_base58()
         )
     }
 }
@@ -201,7 +201,7 @@ impl S3Request for Capability<List> {
             ),
         ];
 
-        if let Some(token) = &List::of(&self).continuation_token {
+        if let Some(token) = &List::of(self).continuation_token {
             params.push(("continuation-token".to_owned(), token.clone()));
         }
 

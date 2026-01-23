@@ -8,8 +8,12 @@ use dialog_common::capability::{Ability, Access, Claim};
 use dialog_common::capability::{Authorized, Effect, Provider};
 use dialog_common::{Capability, ConditionalSend};
 
+/// Unified credentials enum supporting multiple authorization backends.
+#[derive(Debug, Clone)]
 pub enum Credentials {
+    /// Direct S3 credentials (public or private).
     S3(s3::Credentials),
+    /// UCAN-based authorization via external access service.
     #[cfg(feature = "ucan")]
     Ucan(ucan::Credentials),
 }

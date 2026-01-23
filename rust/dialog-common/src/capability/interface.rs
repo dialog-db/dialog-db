@@ -1,140 +1,21 @@
-//! Capability traits and types.
-//!
-//! This module defines the core capability system:
-//! - `Policy` - trait for types that restrict capabilities
-//! - `Attenuation` - trait for types that contribute to command path
-//! - `Effect` - trait for types that can be performed
-//! - `Constraint` - trait that computes full chain type
+//! Capability wrapper type.
 
 use super::ability::Ability;
 use super::access::Access;
 use super::authority::Principal;
+use super::authorized::Authorized;
 use super::constrained::Constrained;
+use super::constraint::Constraint;
+use super::effect::Effect;
+use super::policy::Policy;
 use super::provider::Provider;
 use super::selector::Selector;
-use super::subject::{Did, Subject};
-use super::{Authority, Authorization, AuthorizationError, Claim};
+use super::subject::Did;
+use super::Claim;
 use crate::ConditionalSend;
+
 #[cfg(feature = "ucan")]
-use ipld_core::{ipld::Ipld, serde::to_ipld};
-use serde::Serialize;
-use std::collections::BTreeMap;
-use std::error::Error;
-
-/// Parameters for UCAN capability invocations, mapping string keys to IPLD values.
-#[cfg(feature = "ucan")]
-pub type Parameters = BTreeMap<String, Ipld>;
-
-pub trait Settings {
-    #[cfg(feature = "ucan")]
-    fn parametrize(&self, settings: &mut Parameters);
-}
-
-impl<P: Serialize> Settings for P {
-    #[cfg(feature = "ucan")]
-    fn parametrize(&self, settings: &mut Parameters) {
-        if let Ok(Ipld::Map(constraint_map)) = to_ipld(&self) {
-            settings.extend(constraint_map)
-        }
-    }
-}
-
-/// Trait for policy types that restrict capabilities.
-///
-/// `Policy` is for types that represent restrictions on what can be done
-/// with a capability. Implement this for types that don't contribute to
-/// the command path.
-///
-/// For types that contribute to the command path, implement `Attenuation`
-/// instead (which provides `Policy` via blanket impl).
-pub trait Policy: Sized + Settings {
-    /// The capability this policy restricts.
-    /// Must implement `Constraint` so we can compute the full chain type.
-    type Of: Constraint;
-
-    /// Get the attenuation segment for this type, if it contributes to the
-    /// command path. Default returns None (policies don't attenuate the
-    /// command path by default). Attenuation types override this to return
-    /// Some(name).
-    fn attenuation() -> Option<&'static str> {
-        None
-    }
-
-    /// Extract this type from a capability chain. Type parameters allow
-    /// compiler to infer where in the constrain chain desired policy type
-    /// is.
-    fn of<Head, Tail, Index>(capability: &Constrained<Head, Tail>) -> &Self
-    where
-        Head: Policy,
-        Tail: Ability,
-        Constrained<Head, Tail>: Selector<Self, Index>,
-    {
-        capability.select()
-    }
-}
-
-/// Marker trait for policies that also constrain a command path.
-///
-/// Attenuation implies `Policy` via blanket impl. The `attenuation()` method
-/// provides the path segment for the command path.
-///
-/// Note: `Effect` types automatically implement `Attenuation` via blanket impl.
-pub trait Attenuation: Sized + Settings {
-    /// The capability this type constrains.
-    /// Must implement `Constraint` so the blanket `Policy` impl works.
-    type Of: Constraint;
-
-    /// Get the attenuation segment for this type.
-    /// Attenuation types contribute to the command path.
-    fn attenuation() -> &'static str {
-        let full = std::any::type_name::<Self>();
-        full.rsplit("::").next().unwrap_or(full)
-    }
-}
-
-// Attenuation implies Policy (with attenuation override)
-impl<T: Attenuation> Policy for T {
-    type Of = <T as Attenuation>::Of;
-
-    fn attenuation() -> Option<&'static str> {
-        Some(<T as Attenuation>::attenuation())
-    }
-}
-
-/// Trait for effect types that can be performed.
-///
-/// Effects are capabilities that can be invoked and therefor require their
-/// output type. Implementing `Effect` automatically makes the type an
-/// `Attenuation` (and thus a `Policy`) via blanket impls.
-pub trait Effect: Sized + Settings {
-    /// The capability this effect requires (the parent in the chain).
-    type Of: Constraint;
-    /// The output type produced by the invoaction of this effect when performed.
-    type Output: ConditionalSend;
-}
-
-// Effect implies Attenuation
-impl<T: Effect> Attenuation for T {
-    type Of = <T as Effect>::Of;
-}
-
-/// Trait for deriving capability constrain chain type from an individual
-/// constraints of the chain.
-pub trait Constraint {
-    /// The full capability chain type.
-    type Capability: Ability;
-}
-
-/// For the Subject capabilty is the Subject itself.
-impl Constraint for Subject {
-    type Capability = Subject;
-}
-
-/// For any `Policy` or `Subject`, `Constraint::Capability` gives the full
-/// `Constrained<...>` chain type, which implements the `Ability` trait.
-impl<T: Policy> Constraint for T {
-    type Capability = Constrained<T, <T::Of as Constraint>::Capability>;
-}
+use super::settings::Parameters;
 
 /// Newtype wrapper for describing a capability chain from the constraint type.
 /// It enables defining convenience methods for working with that capability.
@@ -244,109 +125,6 @@ impl<Fx: Effect> Capability<Fx> {
     }
 }
 
-/// A capability paired with its authorization proof.
-///
-/// `Authorized` bundles a capability with proof that the invoker has
-/// permission to execute it. This is the input to authorized `Provider`
-/// implementations.
-///
-/// - `C` is the constraint type (e.g., `storage::Get`)
-/// - `A` is the authorization type (e.g., `UcanAuthorization`)
-pub struct Authorized<C: Constraint, A: Authorization> {
-    capability: Capability<C>,
-    authorization: A,
-}
-
-impl<C: Constraint, A: Authorization + Clone> Clone for Authorized<C, A>
-where
-    C::Capability: Clone,
-{
-    fn clone(&self) -> Self {
-        Self {
-            capability: Capability(self.capability.0.clone()),
-            authorization: self.authorization.clone(),
-        }
-    }
-}
-
-impl<C: Constraint + std::fmt::Debug, A: Authorization + std::fmt::Debug> std::fmt::Debug
-    for Authorized<C, A>
-where
-    C::Capability: std::fmt::Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Authorized")
-            .field("capability", &self.capability)
-            .field("authorization", &self.authorization)
-            .finish()
-    }
-}
-
-impl<C: Constraint, A: Authorization> Authorized<C, A> {
-    /// Create a new authorized capability.
-    pub fn new(capability: Capability<C>, authorization: A) -> Self {
-        Self {
-            capability,
-            authorization,
-        }
-    }
-
-    /// Get the capability.
-    pub fn capability(&self) -> &Capability<C> {
-        &self.capability
-    }
-
-    /// Get the authorization proof.
-    pub fn authorization(&self) -> &A {
-        &self.authorization
-    }
-
-    /// Consume and return the inner capability.
-    pub fn into_capability(self) -> Capability<C> {
-        self.capability
-    }
-
-    /// Consume and return the inner authorization.
-    pub fn into_authorization(self) -> A {
-        self.authorization
-    }
-
-    /// Consume and return both parts.
-    pub fn into_parts(self) -> (Capability<C>, A) {
-        (self.capability, self.authorization)
-    }
-}
-
-/// Error type for capability execution failures.
-pub enum PerformError<E: Error> {
-    /// Error during effect execution.
-    Excution(E),
-    /// Error during authorization verification.
-    Authorization(AuthorizationError),
-}
-
-impl<Ok, E: Error, Fx: Effect<Output = Result<Ok, E>> + Constraint, A: Authorization>
-    Authorized<Fx, A>
-{
-    /// Perform the invocation directly without authorization verification.
-    /// For operations that require authorization, use `acquire` first.
-    pub async fn perform<Env>(self, env: &mut Env) -> Result<Ok, PerformError<E>>
-    where
-        Env: Provider<Self> + Authority,
-    {
-        match self.authorization.invoke(env) {
-            Ok(authorization) => env
-                .execute(Authorized {
-                    capability: self.capability,
-                    authorization,
-                })
-                .await
-                .map_err(PerformError::Excution),
-            Err(e) => Err(PerformError::Authorization(e)),
-        }
-    }
-}
-
 impl<T: Constraint> Ability for Capability<T>
 where
     T::Capability: Ability,
@@ -382,6 +160,7 @@ impl<T: Constraint> AsRef<T::Capability> for Capability<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capability::{Attenuation, Subject};
     use serde::{Deserialize, Serialize};
 
     // Test types for capability chains

@@ -136,7 +136,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_roundtrip() {
+    fn it_roundtrips_through_bytes() {
         let original_bytes = vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]];
 
         let container = Container::new(original_bytes.clone());
@@ -147,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_container_fails() {
+    fn it_fails_on_empty_container() {
         let container = Container::new(vec![]);
         let serialized = container.to_bytes().unwrap();
         let result = Container::from_bytes(&serialized);
@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_version_key() {
+    fn it_fails_on_missing_version_key() {
         let mut container: BTreeMap<String, Ipld> = BTreeMap::new();
         container.insert("wrong-key".to_string(), Ipld::List(vec![]));
         let bytes = serde_ipld_dagcbor::to_vec(&container).unwrap();

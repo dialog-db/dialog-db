@@ -115,8 +115,8 @@ impl<'de> Deserialize<'de> for Blake3Hash {
             {
                 let mut bytes = [0u8; 32];
 
-                for i in 0..32 {
-                    bytes[i] = seq
+                for (i, byte) in bytes.iter_mut().enumerate() {
+                    *byte = seq
                         .next_element()?
                         .ok_or_else(|| de::Error::invalid_length(i, &self))?;
                 }

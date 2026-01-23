@@ -31,18 +31,34 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```rust,no_run
 //! use dialog_s3_credentials::ucan::UcanAuthorizer;
 //! use dialog_s3_credentials::s3::Credentials;
+//! use dialog_s3_credentials::Address;
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! // Create address for S3 bucket
+//! let address = Address::new(
+//!     "https://s3.us-east-1.amazonaws.com",
+//!     "us-east-1",
+//!     "my-bucket",
+//! );
 //!
 //! // Create underlying credentials for S3 access
-//! let s3_credentials = Credentials::private(address, subject, access_key, secret_key)?;
+//! let s3_credentials = Credentials::private(
+//!     address,
+//!     "access-key-id",
+//!     "secret-access-key",
+//! )?;
 //!
 //! // Wrap with UCAN authorizer
 //! let authorizer = UcanAuthorizer::new(s3_credentials);
 //!
 //! // Handle incoming UCAN container
+//! let container_bytes: Vec<u8> = vec![]; // UCAN container from request
 //! let result = authorizer.authorize(&container_bytes).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::collections::BTreeMap;
@@ -59,7 +75,6 @@ use dialog_common::capability::{Capability, Subject};
 /// 1. Receives UCAN containers (invocation + delegations)
 /// 2. Verifies the delegation chain
 /// 3. Extracts commands and constructs effects
-
 /// 4. Delegates to wrapped credentials for presigned URLs
 #[derive(Debug, Clone)]
 pub struct UcanAuthorizer {
@@ -454,7 +469,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_acquire_perform_storage_get() {
+    async fn it_acquires_and_performs_storage_get() {
         use crate::{Address, s3::Credentials};
 
         let subject_signer = test_signer();
@@ -491,7 +506,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_acquire_perform_storage_set() {
+    async fn it_acquires_and_performs_storage_set() {
         use crate::{Address, s3::Credentials};
 
         let subject_signer = test_signer();
@@ -535,7 +550,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_acquire_perform_memory_resolve() {
+    async fn it_acquires_and_performs_memory_resolve() {
         use crate::{Address, s3::Credentials};
 
         let subject_signer = test_signer();
@@ -577,7 +592,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_acquire_perform_archive_get() {
+    async fn it_acquires_and_performs_archive_get() {
         use crate::{Address, s3::Credentials};
 
         let subject_signer = test_signer();
@@ -613,7 +628,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_acquire_perform_archive_put() {
+    async fn it_acquires_and_performs_archive_put() {
         use crate::{Address, s3::Credentials};
 
         let subject_signer = test_signer();
@@ -657,7 +672,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_provider() -> anyhow::Result<()> {
+    async fn it_provides_authorized_requests() -> anyhow::Result<()> {
         let signer = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
         let operator = Ed25519Signer::from(signer);
 

@@ -58,7 +58,7 @@ impl<C: Ability> Claim<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability::{Attenuation, Capability, Subject};
+    use crate::capability::{Attenuation, Subject};
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

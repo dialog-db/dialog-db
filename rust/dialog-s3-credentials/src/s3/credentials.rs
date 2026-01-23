@@ -539,7 +539,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_public_credentials_sign() {
+    async fn it_signs_with_public_credentials() {
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
             "us-east-1",
@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_private_credentials_sign() {
+    async fn it_signs_with_private_credentials() {
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
             "us-east-1",
@@ -573,7 +573,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_credentials_enum_sign() {
+    async fn it_signs_with_credentials_enum() {
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
             "us-east-1",
@@ -588,7 +588,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_checksum_header() {
+    async fn it_includes_checksum_header() {
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
             "us-east-1",

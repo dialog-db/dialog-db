@@ -228,37 +228,34 @@ mod tests {
     }
 
     #[cfg(feature = "ucan")]
-    mod args_tests {
+    mod parameters_tests {
         use super::*;
-        use crate::capability::ToIpldArgs;
+        use crate::capability::Settings;
         use ipld_core::ipld::Ipld;
 
         #[test]
-        fn test_archive_args() {
+        fn test_archive_parameters() {
             let cap = Subject::from("did:key:zSpace").attenuate(Archive);
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
             // Archive is a unit struct, should produce empty map
-            assert_eq!(args, Ipld::Map(Default::default()));
+            assert!(params.is_empty());
         }
 
         #[test]
-        fn test_catalog_args() {
+        fn test_catalog_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Archive)
                 .attenuate(Catalog {
                     catalog: "blobs".into(),
                 });
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
-            let Ipld::Map(map) = args else {
-                panic!("Expected Map, got {:?}", args);
-            };
-            assert_eq!(map.get("catalog"), Some(&Ipld::String("blobs".into())));
+            assert_eq!(params.get("catalog"), Some(&Ipld::String("blobs".into())));
         }
 
         #[test]
-        fn test_get_args() {
+        fn test_get_parameters() {
             let digest = Blake3Hash::from([1u8; 32]);
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Archive)
@@ -266,17 +263,14 @@ mod tests {
                     catalog: "index".into(),
                 })
                 .attenuate(Get { digest });
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
-            let Ipld::Map(map) = args else {
-                panic!("Expected Map, got {:?}", args);
-            };
-            assert_eq!(map.get("catalog"), Some(&Ipld::String("index".into())));
-            assert_eq!(map.get("digest"), Some(&Ipld::Bytes([1u8; 32].to_vec())));
+            assert_eq!(params.get("catalog"), Some(&Ipld::String("index".into())));
+            assert_eq!(params.get("digest"), Some(&Ipld::Bytes([1u8; 32].to_vec())));
         }
 
         #[test]
-        fn test_put_args() {
+        fn test_put_parameters() {
             let digest = Blake3Hash::from([2u8; 32]);
             let content = b"hello world".to_vec();
             let cap = Subject::from("did:key:zSpace")
@@ -288,14 +282,11 @@ mod tests {
                     digest,
                     content: content.clone().into(),
                 });
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
-            let Ipld::Map(map) = args else {
-                panic!("Expected Map, got {:?}", args);
-            };
-            assert_eq!(map.get("catalog"), Some(&Ipld::String("data".into())));
-            assert_eq!(map.get("digest"), Some(&Ipld::Bytes([2u8; 32].to_vec())));
-            assert_eq!(map.get("content"), Some(&Ipld::Bytes(content)));
+            assert_eq!(params.get("catalog"), Some(&Ipld::String("data".into())));
+            assert_eq!(params.get("digest"), Some(&Ipld::Bytes([2u8; 32].to_vec())));
+            assert_eq!(params.get("content"), Some(&Ipld::Bytes(content)));
         }
     }
 }

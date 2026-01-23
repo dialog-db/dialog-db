@@ -311,37 +311,34 @@ mod tests {
     }
 
     #[cfg(feature = "ucan")]
-    mod args_tests {
+    mod parameters_tests {
         use super::*;
-        use crate::capability::ToIpldArgs;
+        use crate::capability::Settings;
         use ipld_core::ipld::Ipld;
 
         #[test]
-        fn test_memory_args() {
+        fn test_memory_parameters() {
             let cap = Subject::from("did:key:zSpace").attenuate(Memory);
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
             // Memory is a unit struct, should produce empty map
-            assert_eq!(args, Ipld::Map(Default::default()));
+            assert!(params.is_empty());
         }
 
         #[test]
-        fn test_space_args() {
+        fn test_space_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Memory)
                 .attenuate(Space {
                     space: "local".into(),
                 });
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
-            let Ipld::Map(map) = args else {
-                panic!("Expected Map, got {:?}", args);
-            };
-            assert_eq!(map.get("space"), Some(&Ipld::String("local".into())));
+            assert_eq!(params.get("space"), Some(&Ipld::String("local".into())));
         }
 
         #[test]
-        fn test_cell_args() {
+        fn test_cell_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Memory)
                 .attenuate(Space {
@@ -350,17 +347,14 @@ mod tests {
                 .attenuate(Cell {
                     cell: "main".into(),
                 });
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
-            let Ipld::Map(map) = args else {
-                panic!("Expected Map, got {:?}", args);
-            };
-            assert_eq!(map.get("space"), Some(&Ipld::String("local".into())));
-            assert_eq!(map.get("cell"), Some(&Ipld::String("main".into())));
+            assert_eq!(params.get("space"), Some(&Ipld::String("local".into())));
+            assert_eq!(params.get("cell"), Some(&Ipld::String("main".into())));
         }
 
         #[test]
-        fn test_resolve_args() {
+        fn test_resolve_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Memory)
                 .attenuate(Space {
@@ -370,18 +364,15 @@ mod tests {
                     cell: "config".into(),
                 })
                 .attenuate(Resolve);
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
-            let Ipld::Map(map) = args else {
-                panic!("Expected Map, got {:?}", args);
-            };
-            // Resolve is a unit struct, doesn't add fields but preserves parent args
-            assert_eq!(map.get("space"), Some(&Ipld::String("remote".into())));
-            assert_eq!(map.get("cell"), Some(&Ipld::String("config".into())));
+            // Resolve is a unit struct, doesn't add fields but preserves parent params
+            assert_eq!(params.get("space"), Some(&Ipld::String("remote".into())));
+            assert_eq!(params.get("cell"), Some(&Ipld::String("config".into())));
         }
 
         #[test]
-        fn test_publish_args_with_when() {
+        fn test_publish_parameters_with_when() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Memory)
                 .attenuate(Space {
@@ -394,19 +385,16 @@ mod tests {
                     content: b"hello".to_vec().into(),
                     when: Some(b"v1".to_vec().into()),
                 });
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
-            let Ipld::Map(map) = args else {
-                panic!("Expected Map, got {:?}", args);
-            };
-            assert_eq!(map.get("space"), Some(&Ipld::String("local".into())));
-            assert_eq!(map.get("cell"), Some(&Ipld::String("main".into())));
-            assert_eq!(map.get("content"), Some(&Ipld::Bytes(b"hello".to_vec())));
-            assert_eq!(map.get("when"), Some(&Ipld::Bytes(b"v1".to_vec())));
+            assert_eq!(params.get("space"), Some(&Ipld::String("local".into())));
+            assert_eq!(params.get("cell"), Some(&Ipld::String("main".into())));
+            assert_eq!(params.get("content"), Some(&Ipld::Bytes(b"hello".to_vec())));
+            assert_eq!(params.get("when"), Some(&Ipld::Bytes(b"v1".to_vec())));
         }
 
         #[test]
-        fn test_publish_args_first_publish() {
+        fn test_publish_parameters_first_publish() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Memory)
                 .attenuate(Space {
@@ -419,20 +407,17 @@ mod tests {
                     content: b"hello".to_vec().into(),
                     when: None,
                 });
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
-            let Ipld::Map(map) = args else {
-                panic!("Expected Map, got {:?}", args);
-            };
-            assert_eq!(map.get("space"), Some(&Ipld::String("local".into())));
-            assert_eq!(map.get("cell"), Some(&Ipld::String("main".into())));
-            assert_eq!(map.get("content"), Some(&Ipld::Bytes(b"hello".to_vec())));
+            assert_eq!(params.get("space"), Some(&Ipld::String("local".into())));
+            assert_eq!(params.get("cell"), Some(&Ipld::String("main".into())));
+            assert_eq!(params.get("content"), Some(&Ipld::Bytes(b"hello".to_vec())));
             // None serializes as Ipld::Null
-            assert_eq!(map.get("when"), Some(&Ipld::Null));
+            assert_eq!(params.get("when"), Some(&Ipld::Null));
         }
 
         #[test]
-        fn test_retract_args() {
+        fn test_retract_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Memory)
                 .attenuate(Space {
@@ -444,14 +429,11 @@ mod tests {
                 .attenuate(Retract {
                     when: b"v1".to_vec().into(),
                 });
-            let args = cap.to_ipld_args();
+            let params = cap.parameters();
 
-            let Ipld::Map(map) = args else {
-                panic!("Expected Map, got {:?}", args);
-            };
-            assert_eq!(map.get("space"), Some(&Ipld::String("local".into())));
-            assert_eq!(map.get("cell"), Some(&Ipld::String("main".into())));
-            assert_eq!(map.get("when"), Some(&Ipld::Bytes(b"v1".to_vec())));
+            assert_eq!(params.get("space"), Some(&Ipld::String("local".into())));
+            assert_eq!(params.get("cell"), Some(&Ipld::String("main".into())));
+            assert_eq!(params.get("when"), Some(&Ipld::Bytes(b"v1".to_vec())));
         }
     }
 }

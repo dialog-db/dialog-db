@@ -16,53 +16,12 @@ use url::Url;
 #[cfg(target_arch = "wasm32")]
 use web_time::{SystemTime, web::SystemTimeExt};
 
-#[cfg(feature = "ucan")]
-use std::collections::BTreeMap;
-#[cfg(feature = "ucan")]
-use ucan::promise::Promised;
-
 /// Default URL expiration: 1 hour.
 pub const DEFAULT_EXPIRES: u64 = 3600;
 
 pub mod archive;
 pub mod memory;
 pub mod storage;
-
-/// Wrapper for UCAN invocation arguments that enables generic deserialization.
-///
-/// # Example
-///
-/// ```ignore
-/// use dialog_s3_credentials::access::{Args, storage};
-///
-/// let cmd: storage::Get = Args(&args).deserialize()?;
-/// ```
-#[cfg(feature = "ucan")]
-pub struct Args<'a>(pub &'a BTreeMap<String, Promised>);
-
-#[cfg(feature = "ucan")]
-impl Args<'_> {
-    /// Deserialize arguments into the target type.
-    pub fn deserialize<T: serde::de::DeserializeOwned>(self) -> Result<T, AccessError> {
-        use ipld_core::ipld::Ipld;
-
-        // Convert BTreeMap<String, Promised> to Ipld::Map
-        let ipld_map: BTreeMap<String, Ipld> = self
-            .0
-            .iter()
-            .map(|(k, v)| {
-                Ipld::try_from(v)
-                    .map(|ipld| (k.clone(), ipld))
-                    .map_err(|e| AccessError::Invocation(format!("Promise not resolved: {}", e)))
-            })
-            .collect::<Result<_, _>>()?;
-
-        let ipld = Ipld::Map(ipld_map);
-
-        ipld_core::serde::from_ipld(ipld)
-            .map_err(|e| AccessError::Invocation(format!("Failed to parse arguments: {}", e)))
-    }
-}
 
 /// Error type for authorization operations.
 #[derive(Debug, Error)]

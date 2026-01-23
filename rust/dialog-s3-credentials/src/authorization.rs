@@ -6,6 +6,7 @@ use dialog_common::Capability;
 use dialog_common::{capability, capability::Effect};
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Authorization {
     S3(s3::S3Authorization),
     #[cfg(feature = "ucan")]

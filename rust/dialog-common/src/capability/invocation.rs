@@ -2,10 +2,11 @@
 //!
 //! The `Invocation` trait defines what can be passed to `Provider::execute`.
 
-use super::{
-    Authorization,
-    capability::{Authorized, Capability, Constraint, Effect},
-};
+use super::authorized::Authorized;
+use super::constraint::Constraint;
+use super::effect::Effect;
+use super::interface::Capability;
+use super::Authorization;
 
 /// Trait for types that can be invoked via a Provider.
 ///

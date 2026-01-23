@@ -94,7 +94,7 @@ mod tests {
     // ==================== Storage Operations ====================
 
     #[dialog_common::test]
-    async fn storage_get_generates_correct_url() {
+    async fn it_generates_correct_url_for_storage_get() {
         let mut creds = public_creds();
         let key = b"test-key";
 
@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn storage_get_with_binary_key() {
+    async fn it_handles_binary_key_for_storage_get() {
         let mut creds = public_creds();
         let binary_key: [u8; 32] = [
             0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn storage_set_generates_correct_url_and_checksum_header() {
+    async fn it_generates_correct_url_and_checksum_for_storage_set() {
         let mut creds = public_creds();
         let key = b"my-key";
         let checksum_bytes = [0x12u8; 32];
@@ -167,7 +167,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn storage_delete_generates_correct_url() {
+    async fn it_generates_correct_url_for_storage_delete() {
         let mut creds = public_creds();
         let key = b"key-to-delete";
 
@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn storage_list_generates_correct_query_params() {
+    async fn it_generates_correct_query_params_for_storage_list() {
         let mut creds = public_creds();
 
         let capability = Subject::from(TEST_SUBJECT)
@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn storage_list_with_continuation_token() {
+    async fn it_handles_continuation_token_for_storage_list() {
         let mut creds = public_creds();
         let token = "next-page-token-abc123";
 
@@ -239,7 +239,7 @@ mod tests {
     // ==================== Memory Operations ====================
 
     #[dialog_common::test]
-    async fn memory_resolve_generates_correct_url() {
+    async fn it_generates_correct_url_for_memory_resolve() {
         let mut creds = public_creds();
 
         let capability = Subject::from(TEST_SUBJECT)
@@ -258,7 +258,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn memory_publish_with_no_prior_edition() {
+    async fn it_publishes_memory_without_prior_edition() {
         let mut creds = public_creds();
         let checksum = crate::Checksum::Sha256([0xab; 32]);
 
@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn memory_publish_with_prior_edition() {
+    async fn it_publishes_memory_with_prior_edition() {
         let mut creds = public_creds();
         let checksum = crate::Checksum::Sha256([0xcd; 32]);
         let prior_etag = "abc123etag".to_string();
@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn memory_retract_generates_correct_url() {
+    async fn it_generates_correct_url_for_memory_retract() {
         let mut creds = public_creds();
 
         let capability = Subject::from(TEST_SUBJECT)
@@ -334,7 +334,7 @@ mod tests {
     // ==================== Archive Operations ====================
 
     #[dialog_common::test]
-    async fn archive_get_generates_correct_url() {
+    async fn it_generates_correct_url_for_archive_get() {
         let mut creds = public_creds();
         let digest: [u8; 32] = [0x42; 32];
 
@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn archive_put_generates_correct_url_and_checksum() {
+    async fn it_generates_correct_url_and_checksum_for_archive_put() {
         let mut creds = public_creds();
         let digest: [u8; 32] = [0x99; 32];
         let checksum = crate::Checksum::Sha256([0x11; 32]);
@@ -378,7 +378,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn private_creds_generate_signed_url_for_get() {
+    async fn it_generates_signed_url_for_get_with_private_creds() {
         let mut creds = private_creds();
         let key = b"signed-key";
 
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn private_creds_generate_signed_url_for_put() {
+    async fn it_generates_signed_url_for_put_with_private_creds() {
         let mut creds = private_creds();
         let key = b"upload-key";
         let checksum = crate::Checksum::Sha256([0xff; 32]);
@@ -437,7 +437,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn private_creds_generate_signed_url_for_list() {
+    async fn it_generates_signed_url_for_list_with_private_creds() {
         let mut creds = private_creds();
 
         let capability = Subject::from(TEST_SUBJECT)
@@ -466,7 +466,7 @@ mod tests {
     // ==================== URL Styles ====================
 
     #[dialog_common::test]
-    async fn uses_virtual_hosted_style_for_aws() {
+    async fn it_uses_virtual_hosted_style_for_aws() {
         let mut creds = public_creds();
 
         let capability = Subject::from(TEST_SUBJECT)
@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn uses_path_style_for_localhost() {
+    async fn it_uses_path_style_for_localhost() {
         let mut creds = localhost_creds();
 
         let capability = Subject::from(TEST_SUBJECT)
@@ -499,7 +499,7 @@ mod tests {
     // ==================== Different Stores ====================
 
     #[dialog_common::test]
-    async fn supports_different_store_names() {
+    async fn it_supports_different_store_names() {
         let mut creds = public_creds();
         let stores = ["index", "blob", "metadata", "cache", ""];
 
@@ -526,7 +526,7 @@ mod tests {
     // ==================== Different Catalogs ====================
 
     #[dialog_common::test]
-    async fn supports_different_catalog_names() {
+    async fn it_supports_different_catalog_names() {
         let mut creds = public_creds();
         let catalogs = ["blobs", "index", "refs"];
         let digest: [u8; 32] = [0x55; 32];

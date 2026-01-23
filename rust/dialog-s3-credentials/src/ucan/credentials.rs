@@ -16,17 +16,17 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use dialog_s3_credentials::ucan::{Credentials, OperatorIdentity, DelegationChain};
+//! ```rust
+//! use dialog_s3_credentials::ucan::{Credentials, DelegationChain};
 //!
-//! // Create operator identity from secret key
-//! let operator = OperatorIdentity::from_secret(&secret_key);
-//!
-//! // Build authorizer with delegation for a subject
-//! let authorizer = Credentials::builder()
-//!     .service_url("https://access.example.com")
-//!     .delegation("did:key:z6Mk...", delegation_chain)
-//!     .build()?;
+//! // Create credentials with an endpoint and delegation chain
+//! // (delegation_chain would be obtained from a UCAN delegation)
+//! # fn example(delegation_chain: DelegationChain) {
+//! let credentials = Credentials::new(
+//!     "https://access.example.com".to_string(),
+//!     delegation_chain,
+//! );
+//! # }
 //! ```
 
 use super::authorization::UcanAuthorization;
@@ -57,13 +57,15 @@ use dialog_common::capability::{
 ///
 /// # Example
 ///
-/// ```ignore
-/// let authorizer = Credentials::builder()
-///     .service_url("https://access.example.com")
-///     .operator(operator)
-///     .subject("did:key:z6MkSubject...")
-///     .delegation(chain)
-///     .build()?;
+/// ```rust
+/// use dialog_s3_credentials::ucan::{Credentials, DelegationChain};
+///
+/// # fn example(delegation_chain: DelegationChain) {
+/// let credentials = Credentials::new(
+///     "https://access.example.com".to_string(),
+///     delegation_chain,
+/// );
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Credentials {
@@ -220,7 +222,7 @@ pub mod tests {
     }
 
     #[dialog_common::test]
-    async fn test_access() -> anyhow::Result<()> {
+    async fn it_acquires_access() -> anyhow::Result<()> {
         let signer = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
         let operator = Ed25519Signer::from(signer);
 

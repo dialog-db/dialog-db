@@ -62,35 +62,41 @@
 // Core modules
 mod ability;
 pub mod access;
-#[cfg(feature = "ucan")]
-mod args;
+mod attenuation;
 mod authority;
 mod authorization;
-mod capability;
+mod authorized;
 mod claim;
 mod constrained;
+mod constraint;
 mod delegation;
+mod effect;
+mod interface;
 mod invocation;
+mod policy;
 pub mod provider;
 mod selector;
+mod settings;
 mod subject;
 
 // Re-exports
 pub use ability::Ability;
 pub use access::Access;
-#[cfg(feature = "ucan")]
-pub use args::{ClaimArgsExt, ToIpldArgs};
+pub use attenuation::Attenuation;
 pub use authority::{Authority, Principal};
 pub use authorization::{Authorization, AuthorizationError};
-#[cfg(feature = "ucan")]
-pub use capability::Parameters;
-pub use capability::{
-    Attenuation, Authorized, Capability, Constraint, Effect, PerformError, Policy,
-};
+pub use authorized::{Authorized, PerformError};
 pub use claim::Claim;
 pub use constrained::Constrained;
+pub use constraint::Constraint;
 pub use delegation::Delegation;
+pub use effect::Effect;
+pub use interface::Capability;
 pub use invocation::Invocation;
+pub use policy::Policy;
 pub use provider::Provider;
 pub use selector::{Here, Never, Selector, There};
+#[cfg(feature = "ucan")]
+pub use settings::Parameters;
+pub use settings::Settings;
 pub use subject::{Did, Subject};

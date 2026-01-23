@@ -71,8 +71,8 @@ impl S3Request for Capability<Get> {
         format!(
             "{}/{}/{}",
             self.subject(),
-            Catalog::of(&self).catalog,
-            Get::of(&self).digest.as_bytes().to_base58()
+            Catalog::of(self).catalog,
+            Get::of(self).digest.as_bytes().to_base58()
         )
     }
 }
@@ -111,11 +111,11 @@ impl S3Request for Capability<Put> {
         format!(
             "{}/{}/{}",
             self.subject(),
-            Catalog::of(&self).catalog,
-            Put::of(&self).digest.as_bytes().to_base58()
+            Catalog::of(self).catalog,
+            Put::of(self).digest.as_bytes().to_base58()
         )
     }
     fn checksum(&self) -> Option<&Checksum> {
-        Some(&Put::of(&self).checksum)
+        Some(&Put::of(self).checksum)
     }
 }
