@@ -204,7 +204,7 @@ pub struct Archive<Backend: PlatformBackend> {
 }
 
 impl<Backend: PlatformBackend> Archive<Backend> {
-    /// Creates a new Archive with the given backend
+    /// Creates a new Archive with the given local storage.
     pub fn new(local: PlatformStorage<Backend>) -> Self {
         Self {
             local: Arc::new(local),
@@ -260,7 +260,7 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
         };
 
         if let Some(remote) = connection.as_ref() {
-            if let Some(bytes) = remote.get(&key).await.map_err(|e| {
+            if let Some(bytes) = remote.get(&hash.to_vec()).await.map_err(|e| {
                 dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
             })? {
                 // Cache the remote value to local storage
@@ -395,8 +395,8 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                     Upstream::open(state, issuer.clone(), storage.clone(), subject.clone()).await?;
 
                 if let Upstream::Remote(branch) = &upstream {
-                    if let Some(connection) = branch.connection() {
-                        archive.set_remote(connection).await;
+                    if let Some(archive_storage) = branch.archive_connection() {
+                        archive.set_remote(archive_storage).await;
                     }
                 }
 
@@ -773,8 +773,10 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         // remote so tree changes will be replicated; if local, clear the remote
         match &upstream {
             Upstream::Remote(remote) => {
-                if let Some(connection) = remote.connection() {
-                    self.archive.set_remote(connection).await;
+                // Use archive_connection which points to the archive/index bucket,
+                // not connection which points to the memory bucket
+                if let Some(archive_storage) = remote.archive_connection() {
+                    self.archive.set_remote(archive_storage).await;
                 }
             }
             Upstream::Local(_) => {
@@ -1662,10 +1664,10 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
                     Ok(Upstream::Local(branch))
                 }
                 UpstreamState::Remote { site, branch } => {
-                    let remote_branch =
+                    let mut remote_branch =
                         RemoteBranch::new(site, branch.id(), storage.clone(), issuer, subject)
                             .await?;
-                    let remote_branch = remote_branch.open().await?;
+                    remote_branch.open().await?;
                     Ok(Upstream::Remote(remote_branch))
                 }
             }
@@ -1687,10 +1689,10 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
                     Ok(Upstream::Local(branch))
                 }
                 UpstreamState::Remote { site, branch } => {
-                    let remote_branch =
+                    let mut remote_branch =
                         RemoteBranch::new(site, branch.id(), storage.clone(), issuer, subject)
                             .await?;
-                    let remote_branch = remote_branch.open().await?;
+                    remote_branch.open().await?;
                     Ok(Upstream::Remote(remote_branch))
                 }
             }
@@ -1715,7 +1717,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
 
     /// Returns site of the branch. If local returns None otherwise
     /// returns site identifier
-    pub fn site(&self) -> Option<&Site> {
+    pub fn site(&self) -> Option<&str> {
         match self {
             Upstream::Local(_) => None,
             Upstream::Remote(branch) => Some(branch.site()),
@@ -1734,7 +1736,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
                 branch: branch.id().clone(),
             },
             Upstream::Remote(remote) => UpstreamState::Remote {
-                site: remote.site().clone(),
+                site: remote.site().to_string(),
                 branch: BranchId::new(remote.id().to_string()),
             },
         }
@@ -1776,7 +1778,7 @@ impl<Backend: PlatformBackend> From<Upstream<Backend>> for UpstreamState {
                 branch: branch.id().clone(),
             },
             Upstream::Remote(branch) => UpstreamState::Remote {
-                site: branch.site().clone(),
+                site: branch.site().to_string(),
                 branch: BranchId::new(branch.id().to_string()),
             },
         }
@@ -1931,6 +1933,13 @@ pub enum ReplicaError {
     BranchUpstreamIsItself {
         /// Branch identifier
         id: BranchId,
+    },
+
+    /// Invalid internal state (should never happen in normal operation)
+    #[error("Invalid state: {message}")]
+    InvalidState {
+        /// Description of the invalid state
+        message: String,
     },
 }
 
@@ -2263,11 +2272,11 @@ mod tests {
         .await
         .expect("Failed to load remote site");
         let remote_repo = remote_site.repository(&subject);
-        let remote_branch = remote_repo
-            .branch(main_id.to_string())
+        let mut remote_branch = remote_repo.branch(main_id.to_string());
+        remote_branch
             .open()
             .await
-            .expect("Failed to create remote branch");
+            .expect("Failed to open remote branch");
 
         // Note: Opening a remote branch doesn't write to storage yet.
         // The remote/main record will be created when we push to it.
@@ -2458,9 +2467,10 @@ mod tests {
         )
         .await
         .expect("Failed to load Alice's remote site");
-        let alice_remote_branch = alice_remote_site
+        let mut alice_remote_branch = alice_remote_site
             .repository(&subject)
-            .branch(main_id.to_string())
+            .branch(main_id.to_string());
+        alice_remote_branch
             .open()
             .await
             .expect("Failed to create remote branch");
@@ -2505,9 +2515,10 @@ mod tests {
         )
         .await
         .expect("Failed to load Bob's remote site");
-        let bob_remote_branch = bob_remote_site
+        let mut bob_remote_branch = bob_remote_site
             .repository(&subject)
-            .branch(main_id.to_string())
+            .branch(main_id.to_string());
+        bob_remote_branch
             .open()
             .await
             .expect("Failed to create remote branch");
@@ -2612,9 +2623,10 @@ mod tests {
         )
         .await
         .expect("Failed to load Alice's remote site");
-        let alice_remote_branch = alice_remote_site
+        let mut alice_remote_branch = alice_remote_site
             .repository(&subject)
-            .branch(main_id.to_string())
+            .branch(main_id.to_string());
+        alice_remote_branch
             .open()
             .await
             .expect("Failed to create Alice's remote branch");
@@ -2665,9 +2677,10 @@ mod tests {
         )
         .await
         .expect("Failed to load Bob's remote site");
-        let bob_remote_branch = bob_remote_site
+        let mut bob_remote_branch = bob_remote_site
             .repository(&subject)
-            .branch(main_id.to_string())
+            .branch(main_id.to_string());
+        bob_remote_branch
             .open()
             .await
             .expect("Failed to create Bob's remote branch");
@@ -2881,9 +2894,10 @@ mod tests {
         )
         .await
         .expect("Failed to load Alice's remote site");
-        let alice_remote_branch = alice_remote_site
+        let mut alice_remote_branch = alice_remote_site
             .repository(&subject)
-            .branch(main_id.to_string())
+            .branch(main_id.to_string());
+        alice_remote_branch
             .open()
             .await
             .expect("Failed to open Alice's remote branch");
@@ -2931,9 +2945,10 @@ mod tests {
         )
         .await
         .expect("Failed to load Bob's remote site");
-        let bob_remote_branch = bob_remote_site
+        let mut bob_remote_branch = bob_remote_site
             .repository(&subject)
-            .branch(main_id.to_string())
+            .branch(main_id.to_string());
+        bob_remote_branch
             .open()
             .await
             .expect("Failed to open Bob's remote branch");
@@ -3076,11 +3091,10 @@ mod tests {
             subject.clone(),
         )
         .await?;
-        let alice_remote_branch = alice_remote_site
+        let mut alice_remote_branch = alice_remote_site
             .repository(&subject)
-            .branch(main_id.to_string())
-            .open()
-            .await?;
+            .branch(main_id.to_string());
+        alice_remote_branch.open().await?;
         alice_main.set_upstream(alice_remote_branch).await?;
 
         // Alice commits and pushes
@@ -3118,11 +3132,10 @@ mod tests {
             subject.clone(),
         )
         .await?;
-        let bob_remote_branch = bob_remote_site
+        let mut bob_remote_branch = bob_remote_site
             .repository(&subject)
-            .branch(main_id.to_string())
-            .open()
-            .await?;
+            .branch(main_id.to_string());
+        bob_remote_branch.open().await?;
         bob_main.set_upstream(bob_remote_branch).await?;
 
         let bob_revision_before_fetch = bob_main.revision();
@@ -3406,8 +3419,8 @@ mod tests {
         .expect("Failed to load remote site");
 
         let remote_repo = remote_site.repository(&subject);
-        let remote_branch = remote_repo
-            .branch(main_id.to_string())
+        let mut remote_branch = remote_repo.branch(main_id.to_string());
+        remote_branch
             .open()
             .await
             .expect("Failed to open remote main branch");
@@ -3511,9 +3524,10 @@ mod tests {
         .await
         .expect("Failed to load second remote site");
 
-        let second_remote_branch = second_remote_site
+        let mut second_remote_branch = second_remote_site
             .repository(&subject)
-            .branch(main_id.to_string())
+            .branch(main_id.to_string());
+        second_remote_branch
             .open()
             .await
             .expect("Failed to open second remote branch");
@@ -3551,13 +3565,6 @@ mod tests {
             crate::Value::String("Test User".to_string()),
             "Artifact value should match what was pushed"
         );
-
-        println!("✓ UCAN end-to-end workflow completed successfully:");
-        println!("  - Created local replica with 'main' branch");
-        println!("  - Added remote 'origin' with UCAN credentials");
-        println!("  - Set remote branch as upstream");
-        println!("  - Committed and pushed changes");
-        println!("  - Verified changes propagated to second replica via pull");
 
         Ok(())
     }

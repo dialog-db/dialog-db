@@ -146,6 +146,12 @@ where
     }
 }
 
+#[derive(Clone)]
+pub struct PrefixStorage<Backend: StorageBackend> {
+    prefix: Vec<u8>,
+    backend: Backend,
+}
+
 /// A transactional storage wraps a backend and encoder, providing
 /// a foundation for creating typed stores.
 #[derive(Clone)]

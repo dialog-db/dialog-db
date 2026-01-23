@@ -273,7 +273,7 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
     }
 
     /// Get the site name.
-    pub fn site(&self) -> &Site {
+    pub fn site(&self) -> &str {
         match self {
             Self::Reference { site_name, .. } => site_name,
             #[cfg(feature = "s3")]
@@ -295,7 +295,8 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
         }
     }
 
-    /// Get the connection to the remote storage (only available when open).
+    /// Get the connection to the remote memory storage (only available when open).
+    /// This is used for storing branch revision state.
     #[cfg(feature = "s3")]
     pub fn connection(&self) -> Option<PlatformStorage<RemoteBackend>> {
         match self {
@@ -304,9 +305,40 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
         }
     }
 
-    /// Open a connection to the remote branch.
+    /// Get the connection to the remote archive/index storage (only available when open).
+    /// This is used by the Archive for storing and retrieving tree blocks.
     #[cfg(feature = "s3")]
-    pub async fn open(self) -> Result<Self, ReplicaError> {
+    pub fn archive_connection(&self) -> Option<PlatformStorage<RemoteBackend>> {
+        match self {
+            Self::Reference { .. } => None,
+            Self::Open { index, .. } => Some(PlatformStorage::new(
+                ErrorMappingBackend::new(index.clone()),
+                CborEncoder,
+            )),
+        }
+    }
+
+    /// Open a connection to the remote branch and return a mutable reference for chaining.
+    ///
+    /// If already open, this is a no-op. If in Reference state, opens the connection
+    /// and transitions to Open state. On error, self remains unchanged.
+    #[cfg(feature = "s3")]
+    pub async fn open(&mut self) -> Result<&mut Self, ReplicaError> {
+        // If already open, nothing to do
+        if matches!(self, Self::Open { .. }) {
+            return Ok(self);
+        }
+
+        // Clone and try to open - if successful, replace self
+        // This avoids unsafe code and keeps self valid on error
+        let opened = self.clone().into_open().await?;
+        *self = opened;
+        Ok(self)
+    }
+
+    /// Internal: consume self and return Open variant or error.
+    #[cfg(feature = "s3")]
+    async fn into_open(self) -> Result<Self, ReplicaError> {
         match self {
             Self::Reference {
                 name,
@@ -316,7 +348,7 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
                 issuer,
                 state,
             } => {
-                let state = state.ok_or_else(|| ReplicaError::RemoteNotFound {
+                let remote_state = state.ok_or_else(|| ReplicaError::RemoteNotFound {
                     remote: site_name.clone(),
                 })?;
 
@@ -324,7 +356,7 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
                 let down = Self::mount_local(&site_name, &subject, &name, &mut storage).await?;
 
                 // Connect to remote
-                let s3 = S3::new(state.credentials.clone(), issuer.clone());
+                let s3 = S3::new(remote_state.credentials.clone(), issuer.clone());
                 let memory_bucket = Bucket::new(s3.clone(), &subject, "memory");
                 let mut connection =
                     PlatformStorage::new(ErrorMappingBackend::new(memory_bucket), CborEncoder);
@@ -372,8 +404,7 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
     #[cfg(feature = "s3")]
     pub async fn resolve(&mut self) -> Result<Option<Revision>, ReplicaError> {
         // Ensure we're open
-        let this = std::mem::replace(self, unsafe { std::mem::zeroed() });
-        *self = this.open().await?;
+        self.open().await?;
 
         match self {
             Self::Open {
@@ -394,7 +425,9 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
 
                 Ok(down.read())
             }
-            _ => unreachable!("We just opened"),
+            Self::Reference { .. } => Err(ReplicaError::InvalidState {
+                message: "Branch should be open after successful open() call".to_string(),
+            }),
         }
     }
 
@@ -402,8 +435,7 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
     #[cfg(feature = "s3")]
     pub async fn publish(&mut self, revision: Revision) -> Result<(), ReplicaError> {
         // Ensure we're open
-        let this = std::mem::replace(self, unsafe { std::mem::zeroed() });
-        *self = this.open().await?;
+        self.open().await?;
 
         match self {
             Self::Open {
@@ -433,7 +465,9 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
 
                 Ok(())
             }
-            _ => unreachable!("We just opened"),
+            Self::Reference { .. } => Err(ReplicaError::InvalidState {
+                message: "Branch should be open after successful open() call".to_string(),
+            }),
         }
     }
 
@@ -453,8 +487,7 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
         use futures_util::pin_mut;
 
         // Ensure we're open
-        let this = std::mem::replace(self, unsafe { std::mem::zeroed() });
-        *self = this.open().await?;
+        self.open().await?;
 
         match self {
             Self::Open { index, .. } => {
@@ -465,8 +498,8 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
                     let node =
                         result.map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
-                    // Build the key for this block
-                    let hash = *node.hash();
+                    // Use hash directly as key - the bucket path already includes "archive/index"
+                    let key = node.hash().to_vec();
 
                     // Encode the block using the standard encoder
                     let (_hash, bytes) = CborEncoder.encode(node.block()).await.map_err(|e| {
@@ -479,7 +512,7 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
                     // Spawn concurrent upload task
                     queue.spawn(async move {
                         store
-                            .set(hash.as_slice().to_vec(), bytes)
+                            .set(key, bytes)
                             .await
                             .map_err(|_| DialogAsyncError::JoinError)
                     });
@@ -493,7 +526,9 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
 
                 Ok(())
             }
-            _ => unreachable!("We just opened"),
+            Self::Reference { .. } => Err(ReplicaError::InvalidState {
+                message: "Branch should be open after successful open() call".to_string(),
+            }),
         }
     }
 
