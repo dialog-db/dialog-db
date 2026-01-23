@@ -6,6 +6,7 @@ use super::{PublicS3Address, S3Address};
 use async_trait::async_trait;
 use bytes::Bytes;
 use dialog_common::helpers::{Provider, Service};
+use hyper::Response;
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
@@ -74,7 +75,6 @@ impl LocalS3 {
         }
         let s3_service = builder.build();
 
-        // Wrap with CORS layer for browser-based testing (web-integration-tests)
         let service = ServiceBuilder::new()
             .layer(CorsLayer::very_permissive().expose_headers([
                 hyper::header::ETAG,
@@ -83,6 +83,12 @@ impl LocalS3 {
                 hyper::header::HeaderName::from_static("x-amz-checksum-sha256"),
                 hyper::header::HeaderName::from_static("x-amz-request-id"),
             ]))
+            .map_response(|mut response: Response<s3s::Body>| {
+                response
+                    .headers_mut()
+                    .insert(hyper::header::CACHE_CONTROL, "no-store".parse().unwrap());
+                response
+            })
             .service(s3_service);
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
