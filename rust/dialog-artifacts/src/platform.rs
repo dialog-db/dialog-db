@@ -146,10 +146,51 @@ where
     }
 }
 
-#[derive(Clone)]
-pub struct PrefixStorage<Backend: StorageBackend> {
+/// A storage backend wrapper that prepends a prefix to all keys.
+/// This allows namespacing storage without modifying the underlying backend.
+#[derive(Clone, Debug)]
+pub struct PrefixedBackend<Backend> {
     prefix: Vec<u8>,
     backend: Backend,
+}
+
+impl<Backend> PrefixedBackend<Backend> {
+    /// Creates a new prefixed backend with the given prefix.
+    pub fn new(prefix: impl Into<Vec<u8>>, backend: Backend) -> Self {
+        Self {
+            prefix: prefix.into(),
+            backend,
+        }
+    }
+
+    /// Prepends the prefix to a key.
+    fn prefixed_key(&self, key: &[u8]) -> Vec<u8> {
+        let mut prefixed = self.prefix.clone();
+        prefixed.extend_from_slice(key);
+        prefixed
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Backend> StorageBackend for PrefixedBackend<Backend>
+where
+    Backend: StorageBackend<Key = Vec<u8>, Value = Vec<u8>> + ConditionalSync,
+    Backend::Error: ConditionalSync,
+{
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
+    type Error = Backend::Error;
+
+    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        let prefixed = self.prefixed_key(&key);
+        self.backend.set(prefixed, value).await
+    }
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        let prefixed = self.prefixed_key(key);
+        self.backend.get(&prefixed).await
+    }
 }
 
 /// A transactional storage wraps a backend and encoder, providing
@@ -239,6 +280,11 @@ where
     /// Creates a new transactional storage with the given backend and encoder
     pub fn new(backend: Backend, codec: Codec) -> Self {
         Self { backend, codec }
+    }
+
+    /// Consumes self and returns the underlying backend
+    pub fn into_backend(self) -> Backend {
+        self.backend
     }
 
     /// Opens a transactional memory at the given key.

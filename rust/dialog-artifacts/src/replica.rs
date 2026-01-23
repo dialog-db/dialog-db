@@ -1,5 +1,5 @@
 use super::platform::PlatformStorage;
-use super::platform::{ErrorMappingBackend, PlatformBackend, TypedStoreResource};
+use super::platform::{ErrorMappingBackend, PlatformBackend, PrefixedBackend, TypedStoreResource};
 pub use super::uri::Uri;
 use crate::artifacts::selector::Constrained;
 use crate::artifacts::{
@@ -58,11 +58,10 @@ pub use repository::Remotes;
 
 // TryFrom<Principal> for VerifyingKey is implemented in principal.rs
 
-/// Type alias for the prolly tree index used to store artifacts
-/// Uses dialog_storage::Storage directly (not platform::Storage) because content-addressed
-/// storage doesn't need key prefixing/namespacing
+/// Type alias for the prolly tree index used to store artifacts.
+/// The Archive wraps the backend with PrefixedBackend to namespace index storage.
 pub type Index<Backend> =
-    Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash, Archive<Backend>>;
+    Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash, Archive<PrefixedBackend<Backend>>>;
 
 /// We reference a tree by the root hash.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -197,17 +196,45 @@ impl<Backend: PlatformBackend + 'static> Branches<Backend> {
 /// Archive represents content addressed storage where search tree
 /// nodes are stored. It supports optional remote fallback for on
 /// demand replication. Uses Arc to share remote state across clones.
-#[derive(Clone, Debug)]
-pub struct Archive<Backend: PlatformBackend> {
-    local: Arc<PlatformStorage<Backend>>,
+///
+/// Archive is storage-agnostic and uses whatever backend you give it.
+/// If you want prefixed keys, wrap your backend with PrefixedBackend before
+/// passing it to Archive.
+#[derive(Clone)]
+pub struct Archive<Backend>
+where
+    Backend: StorageBackend<Key = Vec<u8>, Value = Vec<u8>> + Clone,
+{
+    local: Arc<dialog_storage::Storage<CborEncoder, Backend>>,
     remote: Arc<RwLock<Option<PlatformStorage<RemoteBackend>>>>,
 }
 
-impl<Backend: PlatformBackend> Archive<Backend> {
-    /// Creates a new Archive with the given local storage.
-    pub fn new(local: PlatformStorage<Backend>) -> Self {
+impl<Backend> std::fmt::Debug for Archive<Backend>
+where
+    Backend: StorageBackend<Key = Vec<u8>, Value = Vec<u8>> + Clone,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Archive")
+            .field("local", &"<Storage>")
+            .field("remote", &"<RwLock>")
+            .finish()
+    }
+}
+
+impl<Backend> Archive<Backend>
+where
+    Backend:
+        StorageBackend<Key = Vec<u8>, Value = Vec<u8>> + Clone + dialog_common::ConditionalSync,
+    Backend::Error: Into<dialog_storage::DialogStorageError>,
+{
+    /// Creates a new Archive with the given backend.
+    pub fn new(backend: Backend) -> Self {
+        let storage = dialog_storage::Storage {
+            encoder: CborEncoder,
+            backend,
+        };
         Self {
-            local: Arc::new(local),
+            local: Arc::new(storage),
             remote: Arc::new(RwLock::new(None)),
         }
     }
@@ -230,8 +257,13 @@ impl<Backend: PlatformBackend> Archive<Backend> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
-    for Archive<Backend>
+impl<Backend> dialog_storage::ContentAddressedStorage for Archive<Backend>
+where
+    Backend: StorageBackend<Key = Vec<u8>, Value = Vec<u8>>
+        + Clone
+        + dialog_common::ConditionalSync
+        + 'static,
+    Backend::Error: Into<dialog_storage::DialogStorageError> + std::fmt::Debug,
 {
     type Hash = [u8; 32];
     type Error = dialog_storage::DialogStorageError;
@@ -240,9 +272,8 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
     where
         T: serde::de::DeserializeOwned + dialog_common::ConditionalSync,
     {
-        // Convert hash to key with "index/" prefix
-        let mut key = b"index/".to_vec();
-        key.extend_from_slice(hash);
+        // Use hash directly as key - prefixing is handled by the storage layer
+        let key = hash.to_vec();
 
         // Try local first
         if let Some(bytes) =
@@ -260,13 +291,15 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
         };
 
         if let Some(remote) = connection.as_ref() {
-            if let Some(bytes) = remote.get(&hash.to_vec()).await.map_err(|e| {
+            if let Some(bytes) = remote.get(&key).await.map_err(|e| {
                 dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
             })? {
                 // Cache the remote value to local storage
                 // Clone the Arc to get a mutable copy that shares the backend's interior state
                 let mut local = (*self.local).clone();
-                local.set(key, bytes.clone()).await?;
+                local.set(key, bytes.clone()).await.map_err(|e| {
+                    dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
+                })?;
 
                 return remote.decode(&bytes).await.map(Some);
             }
@@ -282,9 +315,8 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
         // Encode and hash the block
         let (hash, bytes) = self.local.encode(block).await?;
 
-        // Prefix key with "index/"
-        let mut key = b"index/".to_vec();
-        key.extend_from_slice(&hash);
+        // Use hash directly as key - prefixing is handled by the storage layer
+        let key = hash.to_vec();
 
         // Write to local storage only - remote sync happens during push()
         // and that is when new blocks will be propagated to the remote.
@@ -301,7 +333,14 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend: PlatformBackend + 'static> dialog_storage::Encoder for Archive<Backend> {
+impl<Backend> dialog_storage::Encoder for Archive<Backend>
+where
+    Backend: StorageBackend<Key = Vec<u8>, Value = Vec<u8>>
+        + Clone
+        + dialog_common::ConditionalSync
+        + 'static,
+    Backend::Error: Into<dialog_storage::DialogStorageError> + std::fmt::Debug,
+{
     type Bytes = Vec<u8>;
     type Hash = [u8; 32];
     type Error = dialog_storage::DialogStorageError;
@@ -327,7 +366,7 @@ pub struct Branch<Backend: PlatformBackend + 'static> {
     issuer: Operator,
     id: BranchId,
     storage: PlatformStorage<Backend>,
-    archive: Archive<Backend>,
+    archive: Archive<PrefixedBackend<Backend>>,
     memory: TypedStoreResource<BranchState, Backend>,
     tree: Arc<RwLock<Index<Backend>>>,
     upstream: Arc<std::sync::RwLock<Option<Upstream<Backend>>>>,
@@ -378,7 +417,8 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         default_state: Option<BranchState>,
     ) -> Result<Branch<Backend>, ReplicaError> {
         let memory = Self::mount(id, &mut storage, default_state).await?;
-        let archive = Archive::new(storage.clone());
+        let prefixed_backend = PrefixedBackend::new(b"index/", storage.clone().into_backend());
+        let archive = Archive::new(prefixed_backend);
 
         // if we have a memory of tis branch we initialize it otherwise
         // we produce an error.
@@ -3302,7 +3342,7 @@ mod tests {
         );
         let connection = PlatformStorage::new(ErrorMappingBackend::new(s3_storage), CborEncoder);
 
-        let archive = Archive::new(local_storage.clone());
+        let archive = Archive::new(local_storage.clone().into_backend());
         archive.set_remote(connection.clone()).await;
 
         // Create a test block
@@ -3310,15 +3350,19 @@ mod tests {
             value: "test data from remote".to_string(),
         };
 
-        // Write directly to remote storage (simulating remote-only data)
+        // Write directly to remote storage (simulating remote-only data).
+        // In real usage, the remote bucket path "archive/index" provides namespacing,
+        // so we write with raw hash as key (no "index/" prefix).
         let hash = {
-            let mut remote_archive = Archive::new(connection.clone());
-            remote_archive.write(&test_block).await?
+            let (hash, bytes) = connection.encode(&test_block).await?;
+            let mut conn = connection.clone();
+            conn.set(hash.to_vec(), bytes).await?;
+            hash
         };
 
         // Verify it's NOT in local storage yet
         {
-            let local_archive_check = Archive::new(local_storage.clone());
+            let local_archive_check = Archive::new(local_storage.clone().into_backend());
             let result: Option<TestBlock> = local_archive_check.read(&hash).await?;
             assert_eq!(result, None, "Block should not be in local storage yet");
         }
@@ -3333,7 +3377,7 @@ mod tests {
 
         // Verify it's NOW in local storage (cached)
         {
-            let local_archive_check = Archive::new(local_storage.clone());
+            let local_archive_check = Archive::new(local_storage.clone().into_backend());
             let cached_result: Option<TestBlock> = local_archive_check.read(&hash).await?;
             assert_eq!(
                 cached_result,
