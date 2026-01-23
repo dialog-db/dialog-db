@@ -426,6 +426,21 @@ impl Credentials {
     }
 }
 
+/// Constant DID used as the principal for S3 credentials.
+///
+/// S3 credentials don't have an inherent identity, so we use a constant
+/// placeholder. This is used as the `audience` when acquiring authorization.
+const S3_PRINCIPAL_DID: &str = "did:s3:credentials";
+
+impl dialog_common::capability::Principal for Credentials {
+    fn did(&self) -> &dialog_common::capability::Did {
+        // S3 credentials use a constant DID since they don't have a cryptographic identity
+        // This is safe because S3 authorization doesn't verify delegation chains
+        static DID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        DID.get_or_init(|| S3_PRINCIPAL_DID.to_string())
+    }
+}
+
 /// AWS SigV4 signing key.
 struct SigningKey(Hmac<Sha256>);
 

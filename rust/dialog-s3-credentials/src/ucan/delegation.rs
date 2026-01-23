@@ -337,7 +337,7 @@ impl<'de> Deserialize<'de> for DelegationChain {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "helpers"))]
 pub mod tests {
     use super::*;
     use ucan::delegation::builder::DelegationBuilder;

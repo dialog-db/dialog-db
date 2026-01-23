@@ -50,7 +50,7 @@ impl Policy for Store {
 ///
 /// The key should be already encoded for S3 compatibility
 /// (e.g., using base58 for binary keys).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Get {
     /// The key to look up.
     pub key: Bytes,
@@ -87,7 +87,7 @@ impl S3Request for Capability<Get> {
 /// Set value with key and checksum.
 ///
 /// The key should be already encoded for S3 compatibility.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Set {
     /// The storage key (already encoded).
     pub key: Bytes,
@@ -132,7 +132,7 @@ impl S3Request for Capability<Set> {
 /// Delete value by key.
 ///
 /// The key should be already encoded for S3 compatibility.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Delete {
     /// The storage key
     pub key: Bytes,

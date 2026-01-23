@@ -80,7 +80,7 @@ impl S3Request for Capability<Get> {
 }
 
 /// Put content with digest and checksum.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Put {
     /// Content digest (Blake3 hash, used as S3 key).
     pub digest: Blake3Hash,

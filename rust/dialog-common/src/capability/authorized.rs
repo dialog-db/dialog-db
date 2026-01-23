@@ -80,14 +80,15 @@ impl<C: Constraint, A: Authorization> Authorized<C, A> {
 }
 
 /// Error type for capability execution failures.
-pub enum PerformError<E: Error> {
+#[derive(Debug)]
+pub enum PerformError<E: Error + std::fmt::Debug> {
     /// Error during effect execution.
     Excution(E),
     /// Error during authorization verification.
     Authorization(AuthorizationError),
 }
 
-impl<Ok, E: Error, Fx: super::effect::Effect<Output = Result<Ok, E>> + Constraint, A: Authorization>
+impl<Ok, E: Error + std::fmt::Debug, Fx: super::effect::Effect<Output = Result<Ok, E>> + Constraint, A: Authorization>
     Authorized<Fx, A>
 {
     /// Perform the invocation directly without authorization verification.

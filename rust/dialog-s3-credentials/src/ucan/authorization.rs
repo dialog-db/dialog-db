@@ -164,11 +164,20 @@ impl UcanAuthorization {
             )))?;
         }
 
-        // Serialize authorization
-        let ucan = self
-            .chain()
-            .ok_or(AccessError::Invocation("Authorization is not valid".into()))
-            .map(|ch| ch.to_bytes())??;
+        // Serialize authorization - must be an Invocation variant after invoke() is called
+        let ucan = match self {
+            Self::Invocation { chain, .. } => chain.to_bytes()?,
+            Self::Delegated { .. } => {
+                return Err(AccessError::Invocation(
+                    "Authorization not invoked - call invoke() before grant()".into(),
+                ))
+            }
+            Self::Owned { .. } => {
+                return Err(AccessError::Invocation(
+                    "Owned authorization cannot be granted via UCAN service".into(),
+                ))
+            }
+        };
 
         // POST to access service
         let response = reqwest::Client::new()

@@ -16,7 +16,7 @@
 mod authorization;
 mod container;
 mod credentials;
-mod delegation;
+pub mod delegation;
 mod invocation;
 mod provider;
 
@@ -26,3 +26,10 @@ pub use credentials::Credentials;
 pub use delegation::DelegationChain;
 pub use invocation::InvocationChain;
 pub use provider::UcanAuthorizer;
+
+/// Test helpers for creating UCAN delegations.
+/// Only available with the `helpers` feature.
+#[cfg(feature = "helpers")]
+pub mod test_helpers {
+    pub use super::delegation::tests::{create_delegation, generate_signer};
+}

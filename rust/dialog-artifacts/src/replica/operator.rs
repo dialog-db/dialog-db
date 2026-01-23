@@ -6,6 +6,8 @@ use super::{
     SigningKey,
 };
 pub use dialog_common::capability::Did;
+use dialog_common::capability::Principal as PrincipalTrait;
+use dialog_common::Authority;
 
 /// Represents a principal operating a replica.
 #[derive(Clone, PartialEq, Eq)]
@@ -60,12 +62,33 @@ impl Operator {
         &self.principal
     }
 
+    /// Returns the raw secret key bytes.
+    pub fn secret_key_bytes(&self) -> [u8; SECRET_KEY_LENGTH] {
+        self.key.to_bytes()
+    }
+
     pub fn open<Backend: PlatformBackend + 'static>(
         &self,
         subject: impl Into<Did>,
         backend: Backend,
     ) -> Result<impl Repository, ReplicaError> {
         Replica::open(self.clone(), subject.into(), backend)
+    }
+}
+
+impl PrincipalTrait for Operator {
+    fn did(&self) -> &Did {
+        &self.id
+    }
+}
+
+impl Authority for Operator {
+    fn sign(&mut self, payload: &[u8]) -> Vec<u8> {
+        self.key.sign(payload).to_bytes().to_vec()
+    }
+
+    fn secret_key_bytes(&self) -> Option<[u8; 32]> {
+        Some(self.key.to_bytes())
     }
 }
 

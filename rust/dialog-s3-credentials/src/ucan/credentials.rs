@@ -74,14 +74,23 @@ pub struct Credentials {
     /// The delegation chain proving authority from subject to operator.
     /// Order: first delegation's `aud` matches operator, last delegation's `iss` matches subject.
     delegation: DelegationChain,
+    /// Cached DID string of the operator (audience of first delegation).
+    audience_did: String,
 }
 
 impl Credentials {
     pub fn new(endpoint: String, delegation: DelegationChain) -> Self {
+        let audience_did = delegation.audience().to_string();
         Self {
             endpoint,
             delegation,
+            audience_did,
         }
+    }
+
+    /// Returns the operator's DID (audience of the delegation chain).
+    pub fn audience_did(&self) -> &String {
+        &self.audience_did
     }
 
     /// Returns the access service URL.
@@ -226,10 +235,10 @@ pub mod tests {
         let signer = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
         let operator = Ed25519Signer::from(signer);
 
-        let credentials = Credentials {
-            endpoint: "https://access.ucan.com".into(),
-            delegation: test_delegation_chain(&operator, &operator.did(), &["archive"]),
-        };
+        let credentials = Credentials::new(
+            "https://access.ucan.com".into(),
+            test_delegation_chain(&operator, &operator.did(), &["archive"]),
+        );
 
         let mut session = Session::new(credentials, &[0u8; 32]);
 

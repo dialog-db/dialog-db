@@ -18,6 +18,7 @@ ucan = [
     "dep:ucan",
     "dialog-common/ucan",
 ]
+helpers = ["ucan"]
 
 [dependencies]
 async-trait = "0.1"
@@ -51,4 +52,4 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(feature, values(\"web-integration-tests\"))"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(feature, values(\"web-integration-tests\", \"helpers\"))"] }

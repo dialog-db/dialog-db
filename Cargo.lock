@@ -909,6 +909,7 @@ dependencies = [
  "clap",
  "dialog-common",
  "dialog-s3-credentials",
+ "ed25519-dalek",
  "futures-util",
  "getrandom 0.2.16",
  "http-body-util",

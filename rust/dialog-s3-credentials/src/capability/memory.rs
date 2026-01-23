@@ -63,7 +63,7 @@ impl Policy for Cell {
 pub type Edition = String;
 
 /// Resolve current cell content and edition.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Resolve;
 
 /// Resolve is an effect that produces `RequestDescriptor` that can
@@ -129,7 +129,7 @@ impl S3Request for Capability<Publish> {
 ///
 /// Delete only succeeds if current edition matches `when`.
 /// If `when` doesn't match, the delete is a no-op.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Retract {
     /// Required current edition. Delete is no-op if edition doesn't match.
     pub when: Edition,

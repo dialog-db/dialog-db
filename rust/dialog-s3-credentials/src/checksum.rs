@@ -61,7 +61,23 @@ impl serde::Serialize for Checksum {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_bytes(self.as_bytes())
+        use serde::ser::SerializeMap;
+
+        // Wrapper to serialize bytes properly for IPLD
+        struct BytesWrapper<'a>(&'a [u8]);
+        impl serde::Serialize for BytesWrapper<'_> {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.serialize_bytes(self.0)
+            }
+        }
+
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("algorithm", self.name())?;
+        map.serialize_entry("value", &BytesWrapper(self.as_bytes()))?;
+        map.end()
     }
 }
 
@@ -70,7 +86,7 @@ impl<'de> serde::Deserialize<'de> for Checksum {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Visitor;
+        use serde::de::{MapAccess, Visitor};
 
         struct ChecksumVisitor;
 
@@ -78,7 +94,7 @@ impl<'de> serde::Deserialize<'de> for Checksum {
             type Value = Checksum;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("32 bytes or a sequence of 32 bytes")
+                formatter.write_str("32 bytes, a sequence of 32 bytes, or a map with algorithm and value")
             }
 
             fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
@@ -104,6 +120,36 @@ impl<'de> serde::Deserialize<'de> for Checksum {
                     bytes.push(byte);
                 }
                 Checksum::try_from(bytes).map_err(serde::de::Error::custom)
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut algorithm: Option<String> = None;
+                let mut value: Option<Vec<u8>> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "algorithm" => algorithm = Some(map.next_value()?),
+                        "value" => value = Some(map.next_value()?),
+                        _ => {
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                let algorithm =
+                    algorithm.ok_or_else(|| serde::de::Error::missing_field("algorithm"))?;
+                let value = value.ok_or_else(|| serde::de::Error::missing_field("value"))?;
+
+                match algorithm.as_str() {
+                    "sha256" => Checksum::try_from(value).map_err(serde::de::Error::custom),
+                    other => Err(serde::de::Error::custom(format!(
+                        "unsupported algorithm: {}",
+                        other
+                    ))),
+                }
             }
         }
 
