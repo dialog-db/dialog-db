@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
 use url::Url;
@@ -20,14 +21,35 @@ use web_time::{SystemTime, web::SystemTimeExt};
 /// Public S3 credentials for unsigned access.
 ///
 /// Use this for publicly accessible buckets that don't require authentication.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicCredentials {
     /// S3 address (endpoint, region, bucket)
     address: Address,
     /// Parsed endpoint URL
+    #[allow(dead_code)]
     endpoint: Url,
     /// Whether to use path-style URLs
     path_style: bool,
+}
+
+impl Serialize for PublicCredentials {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Only serialize the address - endpoint and path_style are derived
+        self.address.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicCredentials {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let address = Address::deserialize(deserializer)?;
+        PublicCredentials::new(address).map_err(serde::de::Error::custom)
+    }
 }
 
 impl PublicCredentials {
@@ -103,10 +125,18 @@ impl PublicCredentials {
     }
 }
 
+/// Serialization helper for PrivateCredentials.
+#[derive(Serialize, Deserialize)]
+struct PrivateCredentialsSerde {
+    address: Address,
+    access_key_id: String,
+    secret_access_key: String,
+}
+
 /// Private S3 credentials with AWS SigV4 signing.
 ///
 /// Use this for authenticated access to S3 buckets.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivateCredentials {
     /// AWS Access Key ID
     access_key_id: String,
@@ -115,9 +145,35 @@ pub struct PrivateCredentials {
     /// S3 address (endpoint, region, bucket)
     address: Address,
     /// Parsed endpoint URL
+    #[allow(dead_code)]
     endpoint: Url,
     /// Whether to use path-style URLs
     path_style: bool,
+}
+
+impl Serialize for PrivateCredentials {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let helper = PrivateCredentialsSerde {
+            address: self.address.clone(),
+            access_key_id: self.access_key_id.clone(),
+            secret_access_key: self.secret_access_key.clone(),
+        };
+        helper.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PrivateCredentials {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let helper = PrivateCredentialsSerde::deserialize(deserializer)?;
+        PrivateCredentials::new(helper.address, helper.access_key_id, helper.secret_access_key)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl PrivateCredentials {
@@ -355,7 +411,7 @@ impl PrivateCredentials {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Credentials {
     /// Public access without signing.
     Public(PublicCredentials),

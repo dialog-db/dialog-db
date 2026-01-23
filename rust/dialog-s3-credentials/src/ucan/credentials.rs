@@ -67,7 +67,7 @@ use dialog_common::capability::{
 /// );
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct Credentials {
     /// The access service URL to POST invocations to.
     endpoint: String,

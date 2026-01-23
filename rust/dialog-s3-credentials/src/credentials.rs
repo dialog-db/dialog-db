@@ -9,7 +9,7 @@ use dialog_common::Authority;
 use dialog_common::{Capability, ConditionalSend};
 
 /// Unified credentials enum supporting multiple authorization backends.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum Credentials {
     /// Direct S3 credentials (public or private).
     S3(s3::Credentials),
