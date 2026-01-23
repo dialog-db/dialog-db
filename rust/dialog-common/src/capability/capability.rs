@@ -21,6 +21,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::error::Error;
 
+/// Parameters for UCAN capability invocations, mapping string keys to IPLD values.
 #[cfg(feature = "ucan")]
 pub type Parameters = BTreeMap<String, Ipld>;
 
@@ -316,8 +317,11 @@ impl<C: Constraint, A: Authorization> Authorized<C, A> {
     }
 }
 
+/// Error type for capability execution failures.
 pub enum PerformError<E: Error> {
+    /// Error during effect execution.
     Excution(E),
+    /// Error during authorization verification.
     Authorization(AuthorizationError),
 }
 

@@ -31,7 +31,7 @@
 
 use super::authorization::UcanAuthorization;
 use super::delegation::DelegationChain;
-use crate::capability::{AccessError, AuthorizedRequest, S3Request, archive, memory, storage};
+use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
 use dialog_common::ConditionalSend;
 use dialog_common::Effect;
@@ -153,8 +153,9 @@ where
 
 #[cfg(test)]
 pub mod tests {
-    use super::super::delegation::tests::{create_delegation, generate_signer};
+    use super::super::delegation::tests::create_delegation;
     use super::*;
+    use crate::capability::archive;
     use anyhow;
     use dialog_common::capability::{Did, Principal, Subject};
     use dialog_common::{Authority, Authorization, Blake3Hash};

@@ -51,7 +51,6 @@ use super::invocation::InvocationChain;
 use crate::capability::{AccessError, AuthorizedRequest};
 use crate::capability::{archive, memory, storage};
 use crate::s3::Credentials;
-use base58::ToBase58;
 use dialog_common::capability::{Capability, Subject};
 
 /// UCAN authorizer that wraps credentials and handles UCAN invocations.
@@ -398,7 +397,8 @@ mod tests {
     use super::*;
     use crate::ucan::InvocationChain;
     use crate::{Address, s3};
-    use dialog_common::capability::{Ability, Access, Authority, Did, Principal};
+    use base58::ToBase58;
+    use dialog_common::capability::Principal;
     use dialog_common::{Authorization, Blake3Hash};
     use std::collections::BTreeMap;
     use ucan::delegation::builder::DelegationBuilder;
@@ -458,7 +458,6 @@ mod tests {
         use crate::{Address, s3::Credentials};
 
         let subject_signer = test_signer();
-        let subject_did = subject_signer.did().to_string();
 
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
@@ -496,7 +495,6 @@ mod tests {
         use crate::{Address, s3::Credentials};
 
         let subject_signer = test_signer();
-        let subject_did = subject_signer.did().to_string();
 
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
@@ -541,7 +539,6 @@ mod tests {
         use crate::{Address, s3::Credentials};
 
         let subject_signer = test_signer();
-        let subject_did = subject_signer.did().to_string();
 
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
@@ -672,7 +669,7 @@ mod tests {
         let credentials =
             s3::Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
 
-        let mut provider = UcanAuthorizer::new(credentials);
+        let provider = UcanAuthorizer::new(credentials);
 
         let credentials = Credentials::new(
             "https://access.ucan.com".into(),
