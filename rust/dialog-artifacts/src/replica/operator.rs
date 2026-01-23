@@ -90,31 +90,3 @@ impl Authority for Operator {
         Some(self.key.to_bytes())
     }
 }
-
-// TODO: Re-enable tests once the Remotes trait is fully working
-// #[cfg(test)]
-// mod tests {
-//     use super::super::remote::RemoteCredentials;
-//     use super::super::repository::Remotes;
-//     use super::*;
-//     use dialog_common::{self, Blake3Hash};
-//     use dialog_storage::{CborEncoder, MemoryStorageBackend};
-//
-//     #[dialog_common::test]
-//     async fn it_opens_repository() -> anyhow::Result<()> {
-//         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
-//
-//         let operator = Operator::from_passphrase("secret");
-//         let subject = Operator::from_passphrase("repo").did().to_string();
-//         let mut repository = operator.open(subject, backend)?;
-//
-//         let origin = repository
-//             .add_remote(RemoteState {
-//                 site: "origin".to_string(),
-//                 credentials: RemoteCredentials::ucan("https://ucan.tonk.workers.dev", None),
-//             })
-//             .await?;
-//
-//         Ok(())
-//     }
-// }
