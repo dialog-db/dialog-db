@@ -18,7 +18,7 @@ pub use indexeddb::*;
 #[cfg(feature = "s3")]
 pub mod s3;
 #[cfg(feature = "s3")]
-pub use s3::{Bucket, S3Bucket, S3StorageError};
+pub use s3::{Bucket, S3, S3StorageError};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod fs;

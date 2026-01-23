@@ -17,7 +17,7 @@
 //!
 //! ```no_run
 //! use dialog_common::{Authority, capability::{Did, Principal}};
-//! use dialog_storage::s3::{Address, S3Bucket, S3Credentials};
+//! use dialog_storage::s3::{Address, S3, S3Credentials};
 //! use dialog_storage::capability::{storage, Provider, Subject};
 //!
 //! // Define an issuer type for capability-based access
@@ -40,7 +40,7 @@
 //! );
 //! let credentials = S3Credentials::public(address)?;
 //! let issuer = Issuer("did:key:zMyIssuer".into());
-//! let mut bucket = S3Bucket::from_s3(credentials, issuer);
+//! let mut bucket = S3::from_s3(credentials, issuer);
 //!
 //! // Use capability-based access with subject DID as the root
 //! let subject = "did:key:zMySubject";
@@ -61,7 +61,7 @@
 //!
 //! ```no_run
 //! use dialog_common::{Authority, capability::{Did, Principal}};
-//! use dialog_storage::s3::{Address, S3Credentials, S3Bucket};
+//! use dialog_storage::s3::{Address, S3Credentials, S3};
 //! use dialog_storage::capability::{storage, Provider, Subject};
 //!
 //! # #[derive(Clone)]
@@ -86,7 +86,7 @@
 //! )?;
 //!
 //! let issuer = Issuer("did:key:zMyIssuer".into());
-//! let mut bucket = S3Bucket::from_s3(credentials, issuer);
+//! let mut bucket = S3::from_s3(credentials, issuer);
 //!
 //! // Subject DID identifies whose data we're accessing
 //! let subject = "did:key:zMySubject";
@@ -107,7 +107,7 @@
 //!
 //! ```no_run
 //! use dialog_common::{Authority, capability::{Did, Principal}};
-//! use dialog_storage::s3::{Address, S3Credentials, S3Bucket};
+//! use dialog_storage::s3::{Address, S3Credentials, S3};
 //!
 //! # #[derive(Clone)]
 //! # struct Issuer(String);
@@ -132,7 +132,7 @@
 //! )?;
 //!
 //! let issuer = Issuer("did:key:zMyIssuer".into());
-//! let bucket = S3Bucket::from_s3(credentials, issuer);
+//! let bucket = S3::from_s3(credentials, issuer);
 //! # Ok(())
 //! # }
 //! ```
@@ -141,7 +141,7 @@
 //!
 //! ```no_run
 //! use dialog_common::{Authority, capability::{Did, Principal}};
-//! use dialog_storage::s3::{Address, S3Credentials, S3Bucket};
+//! use dialog_storage::s3::{Address, S3Credentials, S3};
 //!
 //! # #[derive(Clone)]
 //! # struct Issuer(String);
@@ -157,7 +157,7 @@
 //! let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
 //! let credentials = S3Credentials::private(address, "minioadmin", "minioadmin")?;
 //! let issuer = Issuer("did:key:zMyIssuer".into());
-//! let bucket = S3Bucket::from_s3(credentials, issuer);
+//! let bucket = S3::from_s3(credentials, issuer);
 //! // path_style is true by default for IP addresses and localhost
 //! # Ok(())
 //! # }
@@ -174,10 +174,8 @@
 use async_trait::async_trait;
 use dialog_common::{
     Authority, Bytes, ConditionalSend, ConditionalSync,
-    capability::{Ability, Access, Authorized, Capability, Claim, Did, Effect, Policy, Principal, Provider, Subject},
+    capability::{Ability, Access, Authorized, Capability, Claim, Did, Effect, Principal, Provider, Subject},
 };
-use futures_util::{Stream, StreamExt, TryStreamExt};
-use std::marker::PhantomData;
 use thiserror::Error;
 
 // Re-export core types from dialog-s3-credentials crate
@@ -237,9 +235,11 @@ pub mod helpers;
 #[cfg(all(feature = "helpers", not(target_arch = "wasm32")))]
 pub use helpers::{LocalS3, PublicS3Settings, S3Settings};
 #[cfg(any(feature = "helpers", test))]
-pub use helpers::{PublicS3Address, S3Address, UcanS3Address};
+pub use helpers::{PublicS3Address, S3Address, Session, UcanS3Address};
 #[cfg(all(feature = "helpers", feature = "ucan", not(target_arch = "wasm32")))]
-pub use helpers::{UcanAccessServer, UcanS3Settings};
+pub use helpers::{Operator, UcanAccessServer, UcanS3Settings};
+#[cfg(all(feature = "helpers", feature = "ucan", target_arch = "wasm32"))]
+pub use helpers::Operator;
 
 use self::archive::ArchiveError;
 
@@ -317,20 +317,20 @@ impl<P: Provider<archive::AuthorizeGet> + Provider<archive::AuthorizePut>> Archi
 /// For simple S3 usage, this can be any type implementing `Authority`.
 /// For UCAN-based access, this would typically be an `Operator` from dialog-artifacts.
 #[derive(Debug, Clone)]
-pub struct S3Bucket<Issuer> {
+pub struct S3<Issuer> {
     credentials: Credentials,
     issuer: Issuer,
 }
 
-impl<Issuer> S3Bucket<Issuer> {
-    /// Create a new S3Bucket with the given credentials and issuer.
+impl<Issuer> S3<Issuer> {
+    /// Create a new S3 with the given credentials and issuer.
     pub fn new(credentials: Credentials, issuer: Issuer) -> Self {
         Self { credentials, issuer }
     }
 }
 
-impl<Issuer: Clone> S3Bucket<Issuer> {
-    /// Create a new S3Bucket from S3 credentials and issuer.
+impl<Issuer: Clone> S3<Issuer> {
+    /// Create a new S3 from S3 credentials and issuer.
     pub fn from_s3(credentials: dialog_s3_credentials::s3::Credentials, issuer: Issuer) -> Self {
         Self {
             credentials: Credentials::S3(credentials),
@@ -339,15 +339,15 @@ impl<Issuer: Clone> S3Bucket<Issuer> {
     }
 }
 
-// Implement Principal for S3Bucket by delegating to the issuer
-impl<Issuer: Principal> Principal for S3Bucket<Issuer> {
+// Implement Principal for S3 by delegating to the issuer
+impl<Issuer: Principal> Principal for S3<Issuer> {
     fn did(&self) -> &Did {
         self.issuer.did()
     }
 }
 
-// Implement Authority for S3Bucket by delegating to the issuer
-impl<Issuer: Authority> Authority for S3Bucket<Issuer> {
+// Implement Authority for S3 by delegating to the issuer
+impl<Issuer: Authority> Authority for S3<Issuer> {
     fn sign(&mut self, payload: &[u8]) -> Vec<u8> {
         self.issuer.sign(payload)
     }
@@ -357,10 +357,10 @@ impl<Issuer: Authority> Authority for S3Bucket<Issuer> {
     }
 }
 
-// Implement Access for S3Bucket by delegating to credentials
+// Implement Access for S3 by delegating to credentials
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer: ConditionalSend + ConditionalSync> Access for S3Bucket<Issuer> {
+impl<Issuer: ConditionalSend + ConditionalSync> Access for S3<Issuer> {
     type Authorization = dialog_s3_credentials::Authorization;
     type Error = AccessError;
 
@@ -372,10 +372,10 @@ impl<Issuer: ConditionalSend + ConditionalSync> Access for S3Bucket<Issuer> {
     }
 }
 
-// Implement Provider<Authorized<...>> for S3Bucket by delegating to credentials
+// Implement Provider<Authorized<...>> for S3 by delegating to credentials
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer, Do> Provider<Authorized<Do, dialog_s3_credentials::Authorization>> for S3Bucket<Issuer>
+impl<Issuer, Do> Provider<Authorized<Do, dialog_s3_credentials::Authorization>> for S3<Issuer>
 where
     Issuer: ConditionalSend + ConditionalSync,
     Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
@@ -391,7 +391,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<archive::Get> for S3Bucket<Issuer>
+impl<Issuer> Provider<archive::Get> for S3<Issuer>
 where
     Issuer: Authority + ConditionalSend + ConditionalSync,
 {
@@ -446,7 +446,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<archive::Put> for S3Bucket<Issuer>
+impl<Issuer> Provider<archive::Put> for S3<Issuer>
 where
     Issuer: Authority + ConditionalSend + ConditionalSync,
 {
@@ -499,7 +499,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<memory::Resolve> for S3Bucket<Issuer>
+impl<Issuer> Provider<memory::Resolve> for S3<Issuer>
 where
     Issuer: Authority + ConditionalSend + ConditionalSync,
 {
@@ -567,7 +567,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<memory::Publish> for S3Bucket<Issuer>
+impl<Issuer> Provider<memory::Publish> for S3<Issuer>
 where
     Issuer: Authority + ConditionalSend + ConditionalSync,
 {
@@ -634,7 +634,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<memory::Retract> for S3Bucket<Issuer>
+impl<Issuer> Provider<memory::Retract> for S3<Issuer>
 where
     Issuer: Authority + ConditionalSend + ConditionalSync,
 {
@@ -688,7 +688,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<storage::Get> for S3Bucket<Issuer>
+impl<Issuer> Provider<storage::Get> for S3<Issuer>
 where
     Issuer: Authority + ConditionalSend + ConditionalSync,
 {
@@ -743,7 +743,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<storage::Set> for S3Bucket<Issuer>
+impl<Issuer> Provider<storage::Set> for S3<Issuer>
 where
     Issuer: Authority + ConditionalSend + ConditionalSync,
 {
@@ -796,7 +796,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<storage::Delete> for S3Bucket<Issuer>
+impl<Issuer> Provider<storage::Delete> for S3<Issuer>
 where
     Issuer: Authority + ConditionalSend + ConditionalSync,
 {
@@ -845,23 +845,35 @@ where
 
 /// A scoped S3 storage backend implementing `StorageBackend` and `TransactionalMemoryBackend`.
 ///
-/// This is a wrapper around [`S3Bucket`] that adds the subject DID and namespace path
+/// This is a wrapper around [`S3`] that adds the subject DID and namespace path
 /// required for the `StorageBackend` and `TransactionalMemoryBackend` traits.
 ///
 /// # Example
 ///
-/// ```ignore
-/// // This example requires an Issuer that implements Authority
-/// use dialog_storage::s3::{S3Bucket, S3Credentials, Address, ScopedS3Bucket};
+/// ```no_run
+/// use dialog_common::{Authority, capability::{Did, Principal}};
+/// use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
 /// use dialog_storage::StorageBackend;
+///
+/// // Define an issuer type for capability-based access
+/// #[derive(Clone)]
+/// struct Issuer(String);
+/// impl Principal for Issuer {
+///     fn did(&self) -> &Did { &self.0 }
+/// }
+/// impl Authority for Issuer {
+///     fn sign(&mut self, _: &[u8]) -> Vec<u8> { Vec::new() }
+///     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
+/// }
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
 /// let credentials = S3Credentials::public(address)?;
-/// let bucket = S3Bucket::from_s3(credentials, issuer); // issuer must implement Authority
+/// let issuer = Issuer("did:key:zMyIssuer".into());
+/// let bucket = S3::from_s3(credentials, issuer);
 ///
 /// // Create a scoped bucket for StorageBackend operations
-/// let mut storage = ScopedS3Bucket::new(bucket, "did:key:zMySubject", "my-store");
+/// let mut storage = Bucket::new(bucket, "did:key:zMySubject", "my-store");
 ///
 /// // Now you can use StorageBackend methods
 /// storage.set(b"key".to_vec(), b"value".to_vec()).await?;
@@ -870,21 +882,21 @@ where
 /// # }
 /// ```
 #[derive(Debug, Clone)]
-pub struct ScopedS3Bucket<Issuer> {
-    bucket: S3Bucket<Issuer>,
+pub struct Bucket<Issuer> {
+    bucket: S3<Issuer>,
     /// The subject DID (whose data we're accessing)
     subject: Did,
     /// The namespace path (store for StorageBackend, space for TransactionalMemoryBackend)
     path: String,
 }
 
-impl<Issuer> ScopedS3Bucket<Issuer> {
+impl<Issuer> Bucket<Issuer> {
     /// Create a new scoped S3 bucket.
     ///
-    /// - `bucket`: The underlying S3Bucket
+    /// - `bucket`: The underlying S3
     /// - `subject`: The subject DID (whose data we're accessing)
     /// - `path`: The namespace path (store for storage, space for memory)
-    pub fn new(bucket: S3Bucket<Issuer>, subject: impl Into<Did>, path: impl Into<String>) -> Self {
+    pub fn new(bucket: S3<Issuer>, subject: impl Into<Did>, path: impl Into<String>) -> Self {
         Self {
             bucket,
             subject: subject.into(),
@@ -903,7 +915,7 @@ impl<Issuer> ScopedS3Bucket<Issuer> {
     }
 }
 
-impl<Issuer: Clone> ScopedS3Bucket<Issuer> {
+impl<Issuer: Clone> Bucket<Issuer> {
     /// Create a new scoped bucket with a different path (nested namespace).
     pub fn at(&self, path: impl Into<String>) -> Self {
         Self {
@@ -915,7 +927,7 @@ impl<Issuer: Clone> ScopedS3Bucket<Issuer> {
 }
 
 // Forward Principal trait to the underlying bucket
-impl<Issuer: Principal> Principal for ScopedS3Bucket<Issuer> {
+impl<Issuer: Principal> Principal for Bucket<Issuer> {
     fn did(&self) -> &Did {
         self.bucket.did()
     }
@@ -935,7 +947,7 @@ impl<Issuer: Authority> Authority for ScopedS3Bucket<Issuer> {
 // Forward Access trait to the underlying bucket
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer: ConditionalSend + ConditionalSync> Access for ScopedS3Bucket<Issuer> {
+impl<Issuer: ConditionalSend + ConditionalSync> Access for Bucket<Issuer> {
     type Authorization = dialog_s3_credentials::Authorization;
     type Error = AccessError;
 
@@ -951,7 +963,7 @@ impl<Issuer: ConditionalSend + ConditionalSync> Access for ScopedS3Bucket<Issuer
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer, Do> Provider<Authorized<Do, dialog_s3_credentials::Authorization>>
-    for ScopedS3Bucket<Issuer>
+    for Bucket<Issuer>
 where
     Issuer: ConditionalSend + ConditionalSync,
     Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
@@ -965,10 +977,10 @@ where
     }
 }
 
-// Implement StorageBackend for ScopedS3Bucket
+// Implement StorageBackend for Bucket
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> StorageBackend for ScopedS3Bucket<Issuer>
+impl<Issuer> StorageBackend for Bucket<Issuer>
 where
     Issuer: Authority + Clone + ConditionalSend + ConditionalSync,
 {
@@ -1010,10 +1022,10 @@ where
     }
 }
 
-// Implement TransactionalMemoryBackend for ScopedS3Bucket
+// Implement TransactionalMemoryBackend for Bucket
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> TransactionalMemoryBackend for ScopedS3Bucket<Issuer>
+impl<Issuer> TransactionalMemoryBackend for Bucket<Issuer>
 where
     Issuer: Authority + Clone + ConditionalSend + ConditionalSync,
 {
@@ -1103,560 +1115,6 @@ where
                 Ok(None)
             }
         }
-    }
-}
-
-/// S3/R2-compatible storage backend (legacy API).
-///
-/// **Note**: This is the legacy API using the `Authorizer` trait. For new code,
-/// prefer using [`S3Bucket`] with the `Provider` trait for capability-based access.
-///
-/// The `Bucket` is configured entirely through its credentials, which provides:
-/// - The S3 endpoint, region, and bucket
-/// - URL building logic
-/// - Request signing/authorization via the [`Signer`] trait
-///
-/// # Example
-///
-/// ```ignore
-/// // Legacy Bucket type - use ScopedS3Bucket with Provider-based API instead
-/// use dialog_storage::s3::{Address, S3Bucket, S3Credentials};
-/// use dialog_storage::capability::{storage, Provider, Subject};
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// // For the new capability-based API, use S3Bucket with an Issuer:
-/// let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "my-bucket");
-/// let credentials = S3Credentials::public(address)?;
-/// let mut bucket = S3Bucket::from_s3(credentials, issuer);
-///
-/// // Use capability-based access
-/// let subject = "did:key:zMySubject";
-/// Subject::from(subject)
-///     .attenuate(storage::Storage)
-///     .attenuate(storage::Store::new("data"))
-///     .invoke(storage::Set {
-///         key: b"key".to_vec().into(),
-///         value: b"value".to_vec().into(),
-///     })
-///     .perform(&mut bucket)
-///     .await?;
-/// # Ok(())
-/// # }
-/// ```
-#[derive(Debug, Clone)]
-pub struct Bucket<Key, Value, C>
-where
-    Key: AsRef<[u8]> + Clone + ConditionalSync,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-    C: Authorizer,
-{
-    /// Optional prefix/directory within the bucket
-    path: Option<String>,
-    /// Credentials for authorizing requests and building URLs
-    credentials: C,
-    /// Hasher for computing checksums
-    hasher: Hasher,
-    /// HTTP client
-    client: reqwest::Client,
-    key_type: PhantomData<Key>,
-    value_type: PhantomData<Value>,
-}
-
-impl<Key, Value, C> Bucket<Key, Value, C>
-where
-    Key: AsRef<[u8]> + Clone + ConditionalSync,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-    C: Authorizer,
-{
-    /// Open an S3 storage bucket with the given credentials.
-    ///
-    /// The credentials provide all configuration including endpoint, region, bucket,
-    /// and signing logic. Use:
-    /// - [`Credentials::public(address)`](Credentials::public) for public/unsigned access
-    /// - [`Credentials::private(address, key, secret)`](Credentials::private) for AWS SigV4 signing
-    /// - [`UcanCredentials`] for UCAN-based access via an access service
-    ///
-    /// By default uses SHA-256 for checksums. Use [`with_hasher`](Self::with_hasher)
-    /// to configure a different algorithm.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// // Legacy Bucket API - use ScopedS3Bucket with Provider-based API instead
-    /// use dialog_storage::s3::{Address, S3Bucket, S3Credentials};
-    ///
-    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// // Public access (no signing)
-    /// let address = Address::new("https://s3.us-east-1.amazonaws.com", "us-east-1", "my-bucket");
-    /// let bucket = S3Bucket::from_s3(S3Credentials::public(address)?, issuer);
-    ///
-    /// // AWS credentials
-    /// let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
-    /// let credentials = S3Credentials::private(address, "minioadmin", "minioadmin")?;
-    /// let bucket = S3Bucket::from_s3(credentials, issuer);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn open(credentials: C) -> Result<Self, S3StorageError> {
-        Ok(Self {
-            path: None,
-            credentials,
-            hasher: Hasher::Sha256,
-            client: reqwest::Client::new(),
-            key_type: PhantomData,
-            value_type: PhantomData,
-        })
-    }
-
-    /// Returns a new `Bucket` scoped to the given prefix/directory.
-    ///
-    /// All keys will be resolved from this path. Can be chained to create
-    /// nested paths.
-    ///
-    /// # Examples
-    ///
-    /// For the new capability-based API, scoping is done via the capability chain
-    /// using `storage::Store::new("path")` to specify the store/prefix.
-    pub fn at(&self, path: impl Into<String>) -> Self {
-        let new_path = path.into();
-        let prefix = match &self.path {
-            Some(existing) => Some(format!("{}/{}", existing, new_path)),
-            None => Some(new_path),
-        };
-
-        Self {
-            path: prefix,
-            credentials: self.credentials.clone(),
-            hasher: self.hasher,
-            client: self.client.clone(),
-            key_type: PhantomData,
-            value_type: PhantomData,
-        }
-    }
-
-    /// Get the prefix/directory path, if any.
-    pub fn prefix(&self) -> Option<&str> {
-        self.path.as_deref()
-    }
-
-    /// Set the hasher for computing checksums.
-    pub fn with_hasher(mut self, hasher: Hasher) -> Self {
-        self.hasher = hasher;
-        self
-    }
-
-    /// Encode a key and build the full path including any prefix.
-    ///
-    /// This handles:
-    /// - Key encoding (base58 for binary/unsafe characters)
-    /// - Prefix prepending
-    pub fn encode_path(&self, key: &[u8]) -> String {
-        let encoded_key = encode_s3_key(key);
-        match &self.path {
-            Some(prefix) => format!("{}/{}", prefix, encoded_key),
-            None => encoded_key,
-        }
-    }
-
-    /// Get the prefix path (used for listing operations).
-    pub fn prefix_path(&self) -> String {
-        self.path.clone().unwrap_or_default()
-    }
-
-    /// Send an authorized HTTP request using the Provider trait.
-    ///
-    /// This is the core method that:
-    /// 1. Uses the pre-authorized RequestDescriptor from Provider::execute
-    /// 2. Builds the reqwest request with headers via `into_request`
-    /// 3. Optionally adds body and precondition headers
-    /// 4. Sends the request
-    async fn send_request(
-        &self,
-        descriptor: AuthorizedRequest,
-        body: Option<&[u8]>,
-        precondition: Precondition,
-    ) -> Result<reqwest::Response, S3StorageError> {
-        // Build the HTTP request using the pre-authorized descriptor
-        let mut builder = descriptor.into_request(&self.client);
-
-        // Add precondition headers for CAS semantics
-        match &precondition {
-            Precondition::None => {}
-            Precondition::IfMatch(etag) => {
-                builder = builder.header("If-Match", format!("\"{}\"", etag));
-            }
-            Precondition::IfNoneMatch => {
-                builder = builder.header("If-None-Match", "*");
-            }
-        }
-
-        // Add body if present
-        if let Some(body) = body {
-            builder = builder.body(body.to_vec());
-        }
-
-        // Send the request
-        Ok(builder.send().await?)
-    }
-
-    /// Delete an object from S3.
-    ///
-    /// Note: S3 DELETE always returns 204 No Content, even if the object didn't exist.
-    /// This method always returns `Ok(())` on success.
-    pub async fn delete(&mut self, key: &Key) -> Result<(), S3StorageError> {
-        let subject = self.credentials.subject();
-        let store = self.prefix_path();
-        let encoded_key = encode_s3_key(key.as_ref());
-        todo!("disable");
-        // let descriptor = self
-        //     .credentials
-        //     .authorize(&claim)
-        //     .map_err(S3StorageError::from)?;
-
-        // let response = self
-        //     .send_request(descriptor, None, Precondition::None)
-        //     .await?;
-
-        // if response.status().is_success() {
-        //     Ok(())
-        // } else {
-        //     Err(S3StorageError::ServiceError(format!(
-        //         "Failed to delete object: {}",
-        //         response.status()
-        //     )))
-        // }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Key, Value, C> StorageBackend for Bucket<Key, Value, C>
-where
-    Key: AsRef<[u8]> + Clone + ConditionalSync,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-    C: Authorizer,
-{
-    type Key = Key;
-    type Value = Value;
-    type Error = S3StorageError;
-
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        todo!("disable")
-        // {
-        //     let subject = self.credentials.subject();
-        //     let store = self.prefix_path();
-        //     let encoded_key = encode_s3_key(key.as_ref());
-        //     let checksum = self.hasher.checksum(value.as_ref());
-        //     let claim = StorageClaim::set(subject, store, encoded_key.as_bytes(), checksum);
-        //     let descriptor = self
-        //         .credentials
-        //         .authorize(&claim)
-        //         .map_err(S3StorageError::from)?;
-
-        //     let response = self
-        //         .send_request(descriptor, Some(value.as_ref()), Precondition::None)
-        //         .await?;
-
-        //     if response.status().is_success() {
-        //         Ok(())
-        //     } else {
-        //         Err(S3StorageError::ServiceError(format!(
-        //             "Failed to set value: {}",
-        //             response.status()
-        //         )))
-        //     }
-        // }
-    }
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        let subject = self.credentials.subject();
-        let store = self.prefix_path();
-        let encoded_key = encode_s3_key(key.as_ref());
-        todo!("disable")
-        // let claim = StorageClaim::get(subject, store, encoded_key.as_bytes());
-        // let descriptor = self
-        //     .credentials
-        //     .authorize(&claim)
-        //     .map_err(S3StorageError::from)?;
-
-        // let response = self
-        //     .send_request(descriptor, None, Precondition::None)
-        //     .await?;
-
-        // if response.status().is_success() {
-        //     let bytes = response
-        //         .bytes()
-        //         .await
-        //         .map_err(|e| S3StorageError::TransportError(e.to_string()))?;
-        //     Ok(Some(Value::from(bytes.to_vec())))
-        // } else if response.status() == reqwest::StatusCode::NOT_FOUND {
-        //     Ok(None)
-        // } else {
-        //     Err(S3StorageError::ServiceError(format!(
-        //         "Failed to get value: {}",
-        //         response.status()
-        //     )))
-        // }
-    }
-}
-
-/// Maximum number of concurrent S3 PUT requests when writing.
-/// Modern mainstream browsers typically enforce a limit of 6 concurrent
-/// requests on HTTP/1.1 which is what S3 is.
-const MAX_CONCURRENT_WRITES: usize = 6;
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Key, Value, C> StorageSink for Bucket<Key, Value, C>
-where
-    Key: AsRef<[u8]> + Clone + ConditionalSync,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-    C: Authorizer,
-{
-    async fn write<S>(&mut self, source: S) -> Result<(), Self::Error>
-    where
-        S: Stream<Item = Result<(Self::Key, Self::Value), Self::Error>> + ConditionalSend,
-    {
-        let storage = self.clone();
-
-        // Map each item to a set operation, then run up to MAX_CONCURRENT_WRITES in parallel
-        source
-            .map(|result| {
-                let mut storage = storage.clone();
-                async move {
-                    let (key, value) = result?;
-                    storage.set(key, value).await
-                }
-            })
-            .buffer_unordered(MAX_CONCURRENT_WRITES)
-            .try_collect()
-            .await
-    }
-}
-
-#[cfg(feature = "s3-list")]
-impl<Key, Value, C> StorageSource for Bucket<Key, Value, C>
-where
-    Key: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-    C: Authorizer,
-{
-    fn read(&self) -> impl Stream<Item = Result<(Self::Key, Self::Value), Self::Error>> {
-        let storage = self.clone();
-        let prefix = self.prefix().map(String::from);
-        use async_stream::try_stream;
-
-        try_stream! {
-            let mut continuation_token: Option<String> = None;
-
-            loop {
-                // Use the S3 ListObjectsV2 API with proper authorization
-                let result = storage.list(continuation_token.as_deref()).await?;
-
-                for encoded_key in result.keys {
-                    // Strip the prefix from the key if present
-                    let key_without_prefix = match &prefix {
-                        Some(p) => {
-                            let prefix_with_slash = format!("{}/", p);
-                            encoded_key.strip_prefix(&prefix_with_slash)
-                                .unwrap_or(&encoded_key)
-                                .to_string()
-                        }
-                        None => encoded_key,
-                    };
-
-                    // Decode and fetch the value
-                    let decoded = decode_s3_key(&key_without_prefix)?;
-
-                    if let Some(value) = storage.get(&Key::from(decoded.clone())).await? {
-                        yield (Key::from(decoded), value);
-                    }
-                }
-
-                // Check if there are more results
-                if result.is_truncated {
-                    continuation_token = result.next_continuation_token;
-                } else {
-                    break;
-                }
-            }
-        }
-    }
-
-    fn drain(&mut self) -> impl Stream<Item = Result<(Self::Key, Self::Value), Self::Error>> {
-        // S3 doesn't support draining, so just read
-        self.read()
-    }
-}
-
-/// Transactional memory backend implementation for S3-compatible storage.
-///
-/// This implementation provides Compare-And-Swap (CAS) semantics using S3's native
-/// conditional request headers, enabling safe concurrent access to objects across
-/// multiple processes or replicas.
-///
-/// # Edition Tracking with ETags
-///
-/// S3 automatically assigns an [ETag] (entity tag) to each object version. This
-/// implementation uses ETags as editions for optimistic concurrency control:
-///
-/// - **resolve**: Returns the object's current ETag along with its content
-/// - **replace**: Uses `If-Match` header to ensure the object hasn't changed since
-///   it was read. If the ETag doesn't match, the request fails with 412 Precondition
-///   Failed, indicating a concurrent modification.
-///
-/// # Conditional Operations
-///
-/// - **Create new**: Uses `If-None-Match: *` to ensure the object doesn't exist
-/// - **Update existing**: Uses `If-Match: <etag>` to ensure no concurrent changes
-/// - **Delete**: Uses `If-Match: <etag>` for safe deletion (when edition provided)
-///
-/// [ETag]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/ETag
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Key, Value, C> TransactionalMemoryBackend for Bucket<Key, Value, C>
-where
-    Key: AsRef<[u8]> + Clone + ConditionalSync,
-    Value: AsRef<[u8]> + From<Vec<u8>> + Clone + ConditionalSync,
-    C: Authorizer + Authorizer,
-{
-    type Address = Key;
-    type Value = Value;
-    type Error = S3StorageError;
-    type Edition = String;
-
-    async fn resolve(
-        &mut self,
-        address: &Self::Address,
-    ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
-        let _subject_did = self.credentials.subject();
-        let _space = self.path.clone().unwrap_or_default();
-        let _cell = encode_s3_key(address.as_ref());
-        todo!("disable");
-        // let claim = MemoryClaim::resolve(subject_did, &space, &cell);
-        // let descriptor = self
-        //     .credentials
-        //     .authorize(&claim)
-        //     .map_err(S3StorageError::from)?;
-
-        // let response = self
-        //     .send_request(descriptor, None, Precondition::None)
-        //     .await?;
-
-        // if response.status().is_success() {
-        //     // Extract ETag from response headers
-        //     let etag = response
-        //         .headers()
-        //         .get("etag")
-        //         .and_then(|v| v.to_str().ok())
-        //         .map(|s| s.trim_matches('"').to_string())
-        //         .ok_or_else(|| {
-        //             S3StorageError::ServiceError("Response missing ETag header".to_string())
-        //         })?;
-
-        //     let bytes = response
-        //         .bytes()
-        //         .await
-        //         .map_err(|e| S3StorageError::TransportError(e.to_string()))?;
-        //     Ok(Some((Value::from(bytes.to_vec()), etag)))
-        // } else if response.status() == reqwest::StatusCode::NOT_FOUND {
-        //     Ok(None)
-        // } else {
-        //     Err(S3StorageError::ServiceError(format!(
-        //         "Failed to resolve value: {}",
-        //         response.status()
-        //     )))
-        // }
-    }
-
-    async fn replace(
-        &mut self,
-        address: &Self::Address,
-        edition: Option<&Self::Edition>,
-        _content: Option<Self::Value>,
-    ) -> Result<Option<Self::Edition>, Self::Error> {
-        let _subject_did = self.credentials.subject();
-        let _space = self.path.clone().unwrap_or_default();
-        let _cell = encode_s3_key(address.as_ref());
-        // Edition is now String (memory::Edition = String)
-        let _when = edition.cloned();
-
-        todo!("disable");
-        // match content {
-        //     Some(new_value) => {
-        //         let checksum = self.hasher.checksum(new_value.as_ref());
-        //         let claim =
-        //             MemoryClaim::publish(subject_did, &space, &cell, checksum, when.clone());
-        //         let descriptor = self
-        //             .credentials
-        //             .authorize(&claim)
-        //             .map_err(S3StorageError::from)?;
-
-        //         // Convert edition to local Precondition for send_request
-        //         let local_precondition = match edition {
-        //             Some(etag) => Precondition::IfMatch(etag.clone()),
-        //             None => Precondition::IfNoneMatch,
-        //         };
-
-        //         let response = self
-        //             .send_request(descriptor, Some(new_value.as_ref()), local_precondition)
-        //             .await?;
-
-        //         match response.status() {
-        //             status if status.is_success() => {
-        //                 // Extract new ETag from response
-        //                 let new_etag = response
-        //                     .headers()
-        //                     .get("etag")
-        //                     .and_then(|v| v.to_str().ok())
-        //                     .map(|s| s.trim_matches('"').to_string())
-        //                     .ok_or_else(|| {
-        //                         S3StorageError::ServiceError(
-        //                             "Response missing ETag header".to_string(),
-        //                         )
-        //                     })?;
-        //                 Ok(Some(new_etag))
-        //             }
-        //             reqwest::StatusCode::PRECONDITION_FAILED => Err(S3StorageError::ServiceError(
-        //                 "CAS condition failed: edition mismatch".to_string(),
-        //             )),
-        //             status => Err(S3StorageError::ServiceError(format!(
-        //                 "Failed to replace value: {}",
-        //                 status
-        //             ))),
-        //         }
-        //     }
-        //     None => {
-        //         // DELETE requires edition (when) - delete with None is a no-op
-        //         let Some(when) = when else {
-        //             return Ok(None);
-        //         };
-
-        //         let claim = MemoryClaim::retract(subject_did, &space, &cell, when);
-        //         let descriptor = self
-        //             .credentials
-        //             .authorize(&claim)
-        //             .map_err(S3StorageError::from)?;
-
-        //         let precondition = match edition {
-        //             Some(etag) => Precondition::IfMatch(etag.clone()),
-        //             None => Precondition::None,
-        //         };
-
-        //         let response = self.send_request(descriptor, None, precondition).await?;
-
-        //         match response.status() {
-        //             status if status.is_success() => Ok(None),
-        //             reqwest::StatusCode::PRECONDITION_FAILED => Err(S3StorageError::ServiceError(
-        //                 "CAS condition failed: edition mismatch".to_string(),
-        //             )),
-        //             status => Err(S3StorageError::ServiceError(format!(
-        //                 "Failed to delete value: {}",
-        //                 status
-        //             ))),
-        //         }
-        //     }
-        // }
     }
 }
 
