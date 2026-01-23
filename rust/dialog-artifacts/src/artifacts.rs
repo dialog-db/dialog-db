@@ -40,7 +40,7 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, GeometricDistribution, Tree};
 pub use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, HashType,
-    Storage, StorageBackend,
+    MemoryStorageBackend, Storage, StorageBackend,
 };
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use std::{ops::Range, sync::Arc};

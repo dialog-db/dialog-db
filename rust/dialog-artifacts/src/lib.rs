@@ -8,8 +8,7 @@
 //! ```rust
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::str::FromStr;
-//! use dialog_storage::MemoryStorageBackend;
-//! use dialog_artifacts::{Entity, Attribute, Value, Artifacts, Artifact, ArtifactSelector, Instruction, ArtifactStore, ArtifactStoreMut};
+//! use dialog_artifacts::{Entity, Attribute, Value, Artifacts, Artifact, ArtifactSelector, Instruction, ArtifactStore, ArtifactStoreMut, MemoryStorageBackend};
 //! use futures_util::{StreamExt, stream};
 //!
 //! // Substitute with your storage backend of choice:

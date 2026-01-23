@@ -92,9 +92,7 @@ impl UcanAccessServer {
 }
 
 /// Add CORS headers to a response builder.
-fn add_cors_headers(
-    builder: hyper::http::response::Builder,
-) -> hyper::http::response::Builder {
+fn add_cors_headers(builder: hyper::http::response::Builder) -> hyper::http::response::Builder {
     builder
         .header("Access-Control-Allow-Origin", "*")
         .header("Access-Control-Allow-Methods", "POST, OPTIONS")
