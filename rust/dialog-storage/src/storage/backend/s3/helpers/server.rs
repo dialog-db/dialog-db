@@ -210,19 +210,26 @@ impl S3 for InMemoryS3 {
         if let Some(bucket_contents) = buckets.get_mut(&bucket) {
             // Handle If-Match precondition (CAS: only update if ETag matches)
             if let Some(ref expected_etag) = if_match {
-                let expected = expected_etag.as_str();
-                match bucket_contents.get(&key) {
-                    Some(existing) => {
-                        // Compare ETags (strip quotes if present)
-                        let existing_etag = existing.e_tag.trim_matches('"');
-                        let expected_clean = expected.trim_matches('"');
-                        if existing_etag != expected_clean {
+                // ETagCondition can be either an ETag value or the wildcard "*"
+                if expected_etag.is_any() {
+                    // Wildcard "*" means "any existing object matches"
+                    if !bucket_contents.contains_key(&key) {
+                        return Err(s3_error!(PreconditionFailed));
+                    }
+                } else if let Some(etag) = expected_etag.as_etag() {
+                    match bucket_contents.get(&key) {
+                        Some(existing) => {
+                            // Compare ETags (strip quotes if present)
+                            let existing_etag = existing.e_tag.trim_matches('"');
+                            let expected_clean = etag.value().trim_matches('"');
+                            if existing_etag != expected_clean {
+                                return Err(s3_error!(PreconditionFailed));
+                            }
+                        }
+                        None => {
+                            // Object doesn't exist but If-Match was specified
                             return Err(s3_error!(PreconditionFailed));
                         }
-                    }
-                    None => {
-                        // Object doesn't exist but If-Match was specified
-                        return Err(s3_error!(PreconditionFailed));
                     }
                 }
             }
