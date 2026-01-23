@@ -1168,12 +1168,13 @@ mod tests {
     mod s3bucket_provider_tests {
         use super::*;
 
-        fn create_test_bucket(env: &helpers::PublicS3Address) -> S3Bucket<TestIssuer> {
+        #[allow(dead_code)]
+        fn create_test_bucket(env: &helpers::PublicS3Address) -> S3<helpers::Session> {
             let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
             let s3_creds = S3Credentials::public(address)
                 .unwrap()
                 .with_path_style(true);
-            S3Bucket::from_s3(s3_creds, TestIssuer::new(TEST_SUBJECT))
+            S3::from_s3(s3_creds, helpers::Session::new(TEST_SUBJECT))
         }
 
         #[dialog_common::test]
@@ -1249,55 +1250,21 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "helpers", feature = "integration-tests", feature = "ucan"))]
+    #[cfg(feature = "ucan")]
     mod ucan_provider_tests {
         use super::*;
+        #[allow(unused_imports)]
         use dialog_common::capability::Subject;
         use dialog_s3_credentials::ucan::{
             Credentials as UcanCredentials, DelegationChain,
-            test_helpers::{create_delegation, generate_signer},
+            test_helpers::create_delegation,
         };
-        use ucan::did::Ed25519Signer;
-
-        /// Operator wraps a signing key and provides Principal + Authority.
-        /// This is compatible with the Operator from dialog-artifacts.
-        #[derive(Clone)]
-        struct Operator {
-            signer: Ed25519Signer,
-            did: String,
-        }
-
-        impl Operator {
-            fn new(signer: Ed25519Signer) -> Self {
-                let did = signer.did().to_string();
-                Self { signer, did }
-            }
-
-            fn generate() -> Self {
-                Self::new(generate_signer())
-            }
-        }
-
-        impl dialog_common::capability::Principal for Operator {
-            fn did(&self) -> &dialog_common::capability::Did {
-                &self.did
-            }
-        }
-
-        impl Authority for Operator {
-            fn sign(&mut self, payload: &[u8]) -> Vec<u8> {
-                use ed25519_dalek::Signer;
-                self.signer.signer().sign(payload).to_vec()
-            }
-
-            fn secret_key_bytes(&self) -> Option<[u8; 32]> {
-                Some(self.signer.signer().to_bytes())
-            }
-        }
+        use helpers::Operator;
 
         /// Helper to create a test delegation chain from subject to operator.
+        #[allow(dead_code)]
         fn create_test_delegation_chain(
-            subject_signer: &Ed25519Signer,
+            subject_signer: &ucan::did::Ed25519Signer,
             operator_did: &ucan::did::Ed25519Did,
             can: &[&str],
         ) -> DelegationChain {
@@ -1307,34 +1274,36 @@ mod tests {
             DelegationChain::new(delegation)
         }
 
+        #[allow(dead_code)]
         fn create_ucan_bucket(
             env: &helpers::UcanS3Address,
             operator: Operator,
             delegation: DelegationChain,
-        ) -> S3Bucket<Operator> {
+        ) -> S3<Operator> {
             let ucan_credentials = UcanCredentials::new(
                 env.access_service_url.clone(),
                 delegation,
             );
-            S3Bucket::new(Credentials::Ucan(ucan_credentials), operator)
+            S3::new(Credentials::Ucan(ucan_credentials), operator)
         }
 
         #[dialog_common::test]
         async fn it_performs_archive_get_and_put_with_ucan(
             env: helpers::UcanS3Address,
         ) -> anyhow::Result<()> {
+            use dialog_common::capability::Principal;
             // Create operator
             let operator = Operator::generate();
 
             // Create delegation chain: subject delegates to operator
             // For this test, subject and operator are the same
             let delegation = create_test_delegation_chain(
-                &operator.signer,
-                &operator.signer.did(),
+                operator.signer(),
+                &operator.signer().did(),
                 &["archive"],
             );
 
-            let subject_did = operator.did.clone();
+            let subject_did = operator.did().to_string();
 
             // Create bucket with UCAN credentials and operator
             let mut bucket = create_ucan_bucket(&env, operator, delegation);
