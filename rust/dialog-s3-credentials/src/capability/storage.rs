@@ -167,7 +167,7 @@ impl S3Request for Capability<Delete> {
 }
 
 /// List keys in store.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct List {
     /// Continuation token for pagination.
     pub continuation_token: Option<String>,

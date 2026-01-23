@@ -19,7 +19,8 @@ pub use dialog_common::capability::{Attenuation, Capability, Effect, Policy, Sub
 // S3 authorization types (only available with s3 feature)
 #[cfg(feature = "s3")]
 pub use dialog_s3_credentials::storage::{
-    Delete as AuthorizeDelete, Get as AuthorizeGet, Set as AuthorizeSet, Storage, Store,
+    Delete as AuthorizeDelete, Get as AuthorizeGet, List as AuthorizeList, Set as AuthorizeSet,
+    Storage, Store,
 };
 
 use thiserror::Error;
@@ -121,6 +122,54 @@ impl DeleteCapability for Capability<Delete> {
 
     fn key(&self) -> &Bytes {
         &Delete::of(self).key
+    }
+}
+
+/// List operation - lists keys in a store.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct List {
+    /// Continuation token for pagination.
+    pub continuation_token: Option<String>,
+}
+
+impl List {
+    /// Create a new List operation.
+    pub fn new(continuation_token: Option<String>) -> Self {
+        Self { continuation_token }
+    }
+}
+
+impl Effect for List {
+    type Of = Store;
+    type Output = Result<ListResult, StorageError>;
+}
+
+/// Result of a list operation.
+#[derive(Debug, Clone)]
+pub struct ListResult {
+    /// Object keys returned in this response.
+    pub keys: Vec<String>,
+    /// If true, there are more results to fetch.
+    pub is_truncated: bool,
+    /// Token to use for fetching the next page of results.
+    pub next_continuation_token: Option<String>,
+}
+
+/// Extension trait for `Capability<List>` to access its fields.
+pub trait ListCapability {
+    /// Get the store name from the capability chain.
+    fn store(&self) -> &str;
+    /// Get the continuation token from the capability chain.
+    fn continuation_token(&self) -> Option<&str>;
+}
+
+impl ListCapability for Capability<List> {
+    fn store(&self) -> &str {
+        &Store::of(self).store
+    }
+
+    fn continuation_token(&self) -> Option<&str> {
+        List::of(self).continuation_token.as_deref()
     }
 }
 
