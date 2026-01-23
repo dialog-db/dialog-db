@@ -13,8 +13,8 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use base58::ToBase58;
 use blake3;
+use dialog_common::ConditionalSend;
 use dialog_common::capability::Did;
-use dialog_common::{ConditionalSend, DialogAsyncError, TaskQueue};
 use dialog_prolly_tree::{
     Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Node, Tree, TreeDifference,
 };
@@ -42,9 +42,13 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
+/// Operator module for signing and identity management.
 pub mod operator;
+/// Principal type definitions.
 pub mod principal;
+/// Remote repository and branch management.
 pub mod remote;
+/// Repository trait for managing remotes.
 pub mod repository;
 
 pub use operator::Operator;
@@ -1017,30 +1021,6 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
     }
 }
 
-/// Manages remote repositories for synchronization.
-// #[derive(Debug)]
-// pub struct Remotes<Backend: PlatformBackend> {
-//     storage: PlatformStorage<Backend>,
-// }
-
-// impl<Backend: PlatformBackend> Remotes<Backend> {
-//     /// Creates a new remotes manager for the given backend.
-//     pub fn new(backend: Backend) -> Self {
-//         let storage = PlatformStorage::new(backend, CborEncoder);
-//         Self { storage }
-//     }
-
-//     /// Loads an existing remote repository by name.
-//     pub async fn load(&self, site: &Site) -> Result<Remote<Backend>, ReplicaError> {
-//         Remote::setup(site, self.storage.clone()).await
-//     }
-
-//     /// Adds a new remote repository with the given name and address.
-//     pub async fn add(&mut self, state: RemoteState) -> Result<Remote<Backend>, ReplicaError> {
-//         Remote::add(state, self.storage.clone()).await
-//     }
-// }
-
 /// Represents remote storage
 #[cfg(feature = "s3")]
 pub type RemoteBackend = ErrorMappingBackend<S3Bucket<Operator>>;
@@ -1048,23 +1028,6 @@ pub type RemoteBackend = ErrorMappingBackend<S3Bucket<Operator>>;
 #[cfg(not(feature = "s3"))]
 pub type RemoteBackend =
     ErrorMappingBackend<dialog_storage::MemoryStorageBackend<Vec<u8>, Vec<u8>>>;
-
-/// Represents a connection to a remote repository.
-pub struct Remote<Backend: PlatformBackend> {
-    /// Site of the remote
-    pub site: Site,
-    memory: TypedStoreResource<RemoteState, Backend>,
-    storage: PlatformStorage<Backend>,
-    connection: PlatformStorage<RemoteBackend>,
-}
-
-impl<Backend: PlatformBackend> std::fmt::Debug for Remote<Backend> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Remote")
-            .field("site", &self.site)
-            .finish_non_exhaustive()
-    }
-}
 
 // impl<Backend: PlatformBackend> Remote<Backend> {
 //     /// Returns the site identifier for this remote.
@@ -1675,6 +1638,7 @@ impl BranchState {
 /// Upstream branch that is used to push & pull changes
 /// to / from. It can be local or remote.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Upstream<Backend: PlatformBackend + 'static> {
     /// A local branch upstream
     Local(Branch<Backend>),

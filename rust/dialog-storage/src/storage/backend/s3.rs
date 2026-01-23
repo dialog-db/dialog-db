@@ -301,8 +301,8 @@ pub trait Authorizer: Clone + std::fmt::Debug + Send + Sync {
     fn authorize<C: S3Request>(&self, claim: &C) -> Result<AuthorizedRequest, AccessError>;
 }
 
-trait ArchiveProvider: Provider<archive::AuthorizeGet> + Provider<archive::AuthorizePut> {}
-impl<P: Provider<archive::AuthorizeGet> + Provider<archive::AuthorizePut>> ArchiveProvider for P {}
+// Note: ArchiveProvider trait was removed as it was unused. If needed in the future,
+// define a trait alias for Provider<archive::AuthorizeGet> + Provider<archive::AuthorizePut>.
 
 /// S3-backed storage that implements Provider for capability-based operations.
 ///

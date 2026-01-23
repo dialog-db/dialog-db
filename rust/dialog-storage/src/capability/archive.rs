@@ -113,9 +113,11 @@ pub enum ArchiveError {
         actual: String,
     },
 
+    /// Authorization error occurred.
     #[error("Unauthorized error: {0}")]
     AuthorizationError(String),
 
+    /// Execution error occurred during operation.
     #[error("Executions error: {0}")]
     ExecutionError(String),
 

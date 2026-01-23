@@ -65,6 +65,7 @@ impl Operator {
         self.key.to_bytes()
     }
 
+    /// Opens a replica with this operator as the issuer.
     pub fn open<Backend: PlatformBackend + 'static>(
         &self,
         subject: impl Into<Did>,

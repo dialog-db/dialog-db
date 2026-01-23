@@ -38,6 +38,7 @@ pub struct RemoteSite<Backend: PlatformBackend> {
     /// Issuer for signing requests.
     issuer: Operator,
     /// Subject DID for this replica.
+    #[allow(dead_code)]
     subject: Did,
 }
 
@@ -186,7 +187,9 @@ impl<Backend: PlatformBackend + 'static> RemoteRepository<Backend> {
 ///
 /// This is the final builder step that identifies a specific branch.
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum RemoteBranch<Backend: PlatformBackend> {
+    /// A reference to a remote branch that hasn't been opened yet.
     Reference {
         /// The branch name.
         name: String,
@@ -201,6 +204,7 @@ pub enum RemoteBranch<Backend: PlatformBackend> {
         /// The remote state (credentials).
         state: Option<RemoteState>,
     },
+    /// An open connection to a remote branch.
     #[cfg(feature = "s3")]
     Open {
         /// The branch name.
@@ -475,7 +479,7 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
                     // Spawn concurrent upload task
                     queue.spawn(async move {
                         store
-                            .set(hash.as_slice().to_vec(), bytes.into())
+                            .set(hash.as_slice().to_vec(), bytes)
                             .await
                             .map_err(|_| DialogAsyncError::JoinError)
                     });
