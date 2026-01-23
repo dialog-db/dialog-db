@@ -14,7 +14,7 @@ mod provider;
 
 pub use crate::Address;
 pub use authorization::S3Authorization;
-pub use credentials::{Authorizer, Credentials, PrivateCredentials, PublicCredentials};
+pub use credentials::{Credentials, PrivateCredentials, PublicCredentials};
 use url::Url;
 
 /// Determine if path-style URLs should be used by default for this endpoint.

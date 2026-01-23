@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use dialog_common::ConditionalSend;
 use dialog_common::capability::{Ability, Access, Capability, Claim, Effect, Provider};
 
-use super::{Authorizer, Credentials, S3Authorization};
+use super::{Credentials, S3Authorization};
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

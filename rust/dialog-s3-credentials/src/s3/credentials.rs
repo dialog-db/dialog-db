@@ -7,7 +7,6 @@ use std::fmt::Write;
 use url::Url;
 
 use crate::capability::{AuthorizedRequest, S3Request};
-pub use crate::credentials::Authorizer;
 use crate::{AccessError, Address};
 
 use super::{build_url, extract_host, is_path_style_default};
@@ -518,7 +517,7 @@ mod tests {
     use super::*;
     use crate::Checksum;
     // Use capability module for Storage/Store hierarchy, access module for effects
-    use crate::capability::storage::{Get, List, Set, Storage, Store};
+    use crate::capability::storage::{Get, Set, Storage, Store};
     use dialog_common::capability::{Capability, Subject};
 
     const TEST_SUBJECT: &str = "did:key:zTestSubject";

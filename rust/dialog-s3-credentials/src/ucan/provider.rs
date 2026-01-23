@@ -50,10 +50,9 @@ use std::collections::BTreeMap;
 use super::invocation::InvocationChain;
 use crate::capability::{AccessError, AuthorizedRequest};
 use crate::capability::{archive, memory, storage};
-use crate::credentials::Authorizer;
 use crate::s3::Credentials;
 use base58::ToBase58;
-use dialog_common::capability::{Ability, Capability, Subject};
+use dialog_common::capability::{Capability, Subject};
 
 /// UCAN authorizer that wraps credentials and handles UCAN invocations.
 ///

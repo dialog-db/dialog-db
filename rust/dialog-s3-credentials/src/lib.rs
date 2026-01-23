@@ -14,7 +14,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use dialog_s3_credentials::{Address, s3, capability, Authorizer};
+//! use dialog_s3_credentials::{Address, s3, capability};
 //! use dialog_s3_credentials::capability::storage::{Storage, Store, Get, Set};
 //! use dialog_common::capability::{Capability, Subject};
 //!
@@ -53,10 +53,10 @@
 //! ```
 
 pub mod address;
+pub mod authorization;
 pub mod capability;
 pub mod checksum;
 pub mod credentials;
-pub mod provider;
 pub mod s3;
 
 #[cfg(feature = "ucan")]
@@ -64,6 +64,7 @@ pub mod ucan;
 
 // Primary exports
 pub use address::Address;
-pub use capability::{AccessError, AuthorizedRequest, memory, storage};
+pub use authorization::Authorization;
+pub use capability::{AccessError, AuthorizedRequest, S3Request, archive, memory, storage};
 pub use checksum::{Checksum, Hasher};
-pub use credentials::Authorizer;
+pub use credentials::Credentials;
