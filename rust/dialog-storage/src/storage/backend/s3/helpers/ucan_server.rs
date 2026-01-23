@@ -91,6 +91,17 @@ impl UcanAccessServer {
     }
 }
 
+/// Add CORS headers to a response builder.
+fn add_cors_headers(
+    builder: hyper::http::response::Builder,
+) -> hyper::http::response::Builder {
+    builder
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        .header("Access-Control-Allow-Headers", "Content-Type")
+        .header("Access-Control-Max-Age", "86400")
+}
+
 /// Handle an incoming UCAN access service request.
 async fn handle_request(
     req: Request<Incoming>,
@@ -99,9 +110,17 @@ async fn handle_request(
     use bytes::Bytes;
     use http_body_util::Full;
 
+    // Handle CORS preflight requests
+    if req.method() == Method::OPTIONS {
+        return Ok(add_cors_headers(Response::builder())
+            .status(StatusCode::NO_CONTENT)
+            .body(Full::new(Bytes::new()))
+            .unwrap());
+    }
+
     // Only accept POST requests
     if req.method() != Method::POST {
-        return Ok(Response::builder()
+        return Ok(add_cors_headers(Response::builder())
             .status(StatusCode::METHOD_NOT_ALLOWED)
             .body(Full::new(Bytes::from("Method not allowed")))
             .unwrap());
@@ -112,7 +131,7 @@ async fn handle_request(
     let body_bytes = match req.into_body().collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
-            return Ok(Response::builder()
+            return Ok(add_cors_headers(Response::builder())
                 .status(StatusCode::BAD_REQUEST)
                 .body(Full::new(Bytes::from(format!(
                     "Failed to read body: {}",
@@ -130,13 +149,13 @@ async fn handle_request(
             match serde_ipld_dagcbor::to_vec(&descriptor) {
                 Ok(cbor_bytes) => {
                     // Return raw CBOR bytes
-                    Ok(Response::builder()
+                    Ok(add_cors_headers(Response::builder())
                         .status(StatusCode::OK)
                         .header("Content-Type", "application/cbor")
                         .body(Full::new(Bytes::from(cbor_bytes)))
                         .unwrap())
                 }
-                Err(e) => Ok(Response::builder()
+                Err(e) => Ok(add_cors_headers(Response::builder())
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(Full::new(Bytes::from(format!(
                         "Failed to encode response: {}",
@@ -145,7 +164,7 @@ async fn handle_request(
                     .unwrap()),
             }
         }
-        Err(e) => Ok(Response::builder()
+        Err(e) => Ok(add_cors_headers(Response::builder())
             .status(StatusCode::FORBIDDEN)
             .body(Full::new(Bytes::from(format!(
                 "Authorization failed: {}",
