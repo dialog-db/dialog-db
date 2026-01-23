@@ -5,9 +5,9 @@ use super::{
     Formatter, PlatformBackend, RemoteSite, ReplicaError, SECRET_KEY_LENGTH, Signature, SignerMut,
     SigningKey,
 };
+use dialog_common::Authority;
 pub use dialog_common::capability::Did;
 use dialog_common::capability::Principal as PrincipalTrait;
-use dialog_common::Authority;
 
 /// Represents a principal operating a replica.
 #[derive(Clone, PartialEq, Eq)]
@@ -101,50 +101,35 @@ impl<Backend: PlatformBackend> Repository for Replica<Backend> {
     }
 }
 
+/// Manages remote repositories for synchronization.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-trait Remotes {
-    async fn add(
-        &mut self,
-        name: impl Into<String>,
-        credentials: RemoteCredentials,
-    ) -> Result<RemoteSite, ReplicaError>;
+pub trait Remotes<Backend: PlatformBackend> {
+    /// Adds a new remote repository with the given name and address.
+    async fn add<'a>(
+        &'a mut self,
+        remote: RemoteState,
+    ) -> Result<RemoteSite<'a, Backend>, ReplicaError>;
+    /// Loads an existing remote repository by name.
+    async fn load<'a>(&'a self, site: &Site) -> Result<RemoteSite<'a, Backend>, ReplicaError>;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Backend: PlatformBackend> Remotes for Replica<Backend> {
+impl<Backend: PlatformBackend + 'static> Remotes for Replica<Backend> {
+    /// Adds a new remote repository with the given name and address.
     async fn add(
-        &mut self,
-        name: impl Into<String>,
-        credentials: RemoteCredentials,
-    ) -> Result<RemoteSite, ReplicaError> {
-        let site = RemoteSite::new(name, credentials, self.issuer.clone());
-        let address = format!("site/{}", site.name);
-        let memory = self
-            .storage
-            .open::<RemoteSite>(&address.into_bytes())
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+        &'a mut self,
+        remote: RemoteState,
+    ) -> Result<RemoteSite<'a, Backend>, ReplicaError> {
+        RemoteSite::add(remote, &mut self).await
+    }
 
-        // Check if remote already exists with different config
-        if let Some(existing) = memory.read().clone() {
-            if existing.credentials != site.credentials {
-                return Err(ReplicaError::RemoteAlreadyExists {
-                    remote: site.name.clone(),
-                });
-            }
-            // Already exists with same config, return it
-            return Ok(existing);
-        }
-
-        // Store the new remote site
-        memory
-            .replace(Some(site.clone()), &self.storage)
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-
-        Ok(site)
+    async fn load(
+        &'a self,
+        site: impl Into<Site>,
+    ) -> Result<RemoteSite<'a, Backend>, ReplicaError> {
+        RemoteSite::load(site, &mut self).await
     }
 }
 

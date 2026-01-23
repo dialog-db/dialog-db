@@ -4,16 +4,24 @@
 //! repositories for synchronization.
 
 use dialog_common::capability::{Capability, Subject};
+use dialog_common::{ConditionalSend, DialogAsyncError, TaskQueue};
+use dialog_prolly_tree::{
+    Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Node, Tree, TreeDifference,
+};
 use dialog_s3_credentials::capability::{archive, memory};
 use dialog_s3_credentials::{AccessError, credentials, s3};
-use dialog_storage::Blake3Hash;
+#[cfg(feature = "ucan")]
+pub use dialog_s3_credentials::{ucan, ucan::DelegationChain};
+#[cfg(feature = "s3")]
+use dialog_storage::s3::{Bucket, S3};
+use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-#[cfg(feature = "ucan")]
-pub use dialog_s3_credentials::{ucan, ucan::DelegationChain};
-
-use super::Operator;
+use super::{Operator, RemoteBackend, RemoteState, Replica};
+use crate::replica::{ReplicaError, Revision};
+use crate::{ErrorMappingBackend, PlatformBackend, PlatformStorage, TypedStoreResource};
 
 /// A named remote site identifier.
 pub type Site = String;
@@ -23,56 +31,115 @@ pub type Site = String;
 /// This is the persisted state for a remote, storing the site name
 /// and the credentials needed to connect to it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteSite {
-    /// The name of this remote (e.g., "origin", "backup").
-    pub name: Site,
-    /// Credentials for connecting to this remote.
-    pub credentials: RemoteCredentials,
+pub struct RemoteSite<'a, Backend: PlatformBackend> {
+    pub name: String,
+    pub memory: TypedStoreResource<RemoteState, Backend>,
 
-    issuer: Operator,
+    session: &'a mut Replica<Backend>,
 }
 
-impl RemoteSite {
-    /// Create a new remote site with the given name and credentials.
-    pub fn new(name: impl Into<Site>, credentials: RemoteCredentials, issuer: Operator) -> Self {
-        Self {
-            name: name.into(),
-            issuer,
-            credentials,
+impl<'a, Backend: PlatformBackend> RemoteSite<'a, Backend> {
+    pub async fn add(
+        state: RemoteState,
+        session: &'a mut Replica<Backend>,
+    ) -> Result<Self, ReplicaError> {
+        let memory = Self::mount(&state.site, &session.storage).await?;
+        let mut alread_exists = false;
+        if let Some(existing_state) = memory.read() {
+            alread_exists = true;
+            if state != existing_state {
+                return Err(ReplicaError::RemoteAlreadyExists {
+                    remote: state.site.to_string(),
+                });
+            }
         }
+
+        let site = Self {
+            name: state.site,
+            memory,
+            session,
+        };
+
+        if !alread_exists {
+            memory
+                .replace(Some(state.clone()), &mut session.storage)
+                .await
+                .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+        }
+
+        Ok(site)
+    }
+
+    pub async fn load(
+        site: impl Into<Site>,
+        session: &'a mut Replica<Backend>,
+    ) -> Result<Self, ReplicaError> {
+        let memory = Self::mount(site, &session.storage).await?;
+        if let Some(state) = memory.read().clone() {
+            Ok(Self {
+                name: site.into(),
+                memory,
+                session,
+            })
+        } else {
+            Err(ReplicaError::RemoteNotFound {
+                remote: site.into(),
+            })
+        }
+    }
+
+    #[cfg(feature = "s3")]
+    pub async fn connect(&mut self) -> Result<S3<Operator>, ReplicaError> {
+        if let Some(state) = self.memory.read() {
+            let s3 = S3::new(state.credentials.clone(), self.session.issuer.clone());
+            Ok(s3)
+        } else {
+            ReplicaError::RemoteNotFound { remote: self.name }
+        }
+    }
+
+    /// Mounts the transactional memory for a remote site from storage.
+    pub async fn mount(
+        site: impl Into<Site>,
+        storage: &PlatformStorage<Backend>,
+    ) -> Result<TypedStoreResource<RemoteState, Backend>, ReplicaError> {
+        let address = format!("site/{}", site);
+        let memory = storage
+            .open::<RemoteState>(&address.into_bytes())
+            .await
+            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+
+        Ok(memory)
     }
 
     /// Start building a reference to a repository at this remote site.
     ///
     /// The `subject` is the DID identifying the repository owner.
-    pub fn repository(&self, subject: impl Into<String>) -> RemoteRepository {
+    pub fn repository(&'a self, subject: impl Into<String>) -> RemoteRepository<'a, Backend> {
         RemoteRepository {
-            issuer: self.issuer.clone(),
-            site: self.clone(),
+            site: self,
             subject: subject.into(),
         }
     }
 }
 
-/// A reference to a repository at a remote site.
+/// A reference to a repository on a remote site.
 ///
 /// This is a builder step for accessing remote branches.
 #[derive(Debug, Clone)]
-pub struct RemoteRepository {
-    /// The remote site this repository is on.
-    pub site: RemoteSite,
+pub struct RemoteRepository<'a, Backend: PlatformBackend> {
     /// The subject DID identifying the repository owner.
     pub subject: String,
-
-    pub issuer: Operator,
+    /// The remote site this repository is on.
+    pub site: RemoteSite<'a, Backend>,
 }
 
-impl RemoteRepository {
+impl<'a, Backend: PlatformBackend> RemoteRepository<'a, Backend> {
     /// Reference a branch within this remote repository.
-    pub fn branch(&self, name: impl Into<String>) -> RemoteBranchRef {
-        RemoteBranchRef {
-            repository: self.clone(),
+    pub fn branch(&'a self, name: impl Into<String>) -> RemoteBranch<'a, Backend> {
+        RemoteBranch::Reference {
             name: name.into(),
+            repository: self,
         }
     }
 }
@@ -83,35 +150,229 @@ impl RemoteRepository {
 /// Named `RemoteBranchRef` to distinguish from `RemoteBranch<Backend>`
 /// which is the actual connected branch.
 #[derive(Debug, Clone)]
-pub struct RemoteBranchRef {
-    /// The remote repository this branch is in.
-    pub repository: RemoteRepository,
-    /// The branch name.
-    pub name: String,
+pub enum RemoteBranch<'a, Backend: PlatformBackend> {
+    Reference {
+        /// The branch name.
+        name: String,
+        /// The remote repository this branch is in.
+        repository: &'a RemoteRepository<'a, Backend>,
+    },
+    Open {
+        /// The branch name.
+        name: String,
+        /// The remote repository this branch is in.
+        repository: &'a RemoteRepository<'a, Backend>,
+
+        /// Remote connnection
+        connection: PlatformStorage<RemoteBackend>,
+
+        /// Remote tree index store
+        index: Bucket<Operator>,
+
+        /// Local cache for the revision currently branch has
+        down: TypedStoreResource<Revision, Backend>,
+
+        /// Canonical revision, which is created lazily on fetch.
+        up: TypedStoreResource<Revision, RemoteBackend>,
+    },
 }
 
-impl RemoteBranchRef {
-    /// Returns a capability for the archive catalog (content-addressed storage).
-    ///
-    /// The catalog path is: `{subject}/archive/index`
-    pub fn index(&self) -> Index {
-        Index {
-            issuer: self.repository.issuer.clone(),
-            credentials: self.repository.site.credentials.clone(),
-            archive: Subject::from(self.repository.subject.as_str())
-                .attenuate(archive::Archive)
-                .attenuate(archive::Catalog::new("index")),
+impl<'a, Backend: PlatformBackend> RemoteBranch<'a, Backend> {
+    pub fn name(&self) {
+        match self {
+            Self::Reference { name, .. } => name,
+            Self::Open { name, .. } => name,
+        }
+    }
+    pub async fn open(mut self) -> Result<Self, ReplicaError> {
+        Ok(match self {
+            Self::Reference { name, repository } => {
+                let down = Self::mount(
+                    &repository.site.name,
+                    &repository.subject,
+                    name,
+                    &mut repository.site.session.storage,
+                )
+                .await?;
+
+                let remote = repository.site.connect().await?;
+                let memory = Bucket::new(remote.clone(), &repository.subject, "memory");
+                let connection =
+                    PlatformStorage::new(ErrorMappingBackend::new(memory), CborEncoder);
+                let index = Bucket::new(remote, &repository.subject, "archive/index");
+
+                let up = connection
+                    .open::<Revision>(&format!("local/{}", &name).into_bytes())
+                    .await
+                    .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+
+                *self = Self::Open {
+                    name,
+                    repository,
+                    connection,
+                    index,
+                    down,
+                    up,
+                };
+
+                self
+            }
+            Self::Open { .. } => self,
+        })
+    }
+
+    /// Mounts the transactional memory for a remote branch from local storage.
+    async fn mount(
+        site: impl Into<Site>,
+        repository: impl Into<Did>,
+        branch: impl Into<String>,
+        storage: &PlatformStorage<Backend>,
+    ) -> Result<TypedStoreResource<Revision, Backend>, ReplicaError> {
+        // Open a localy stored revision for this branch
+        let address = format!("remote/{}/{}/{}", site, repository, branch);
+        let memory = storage
+            .open::<Revision>(&address.into_bytes())
+            .await
+            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+
+        Ok(memory)
+    }
+
+    /// Resolves remote revision for this branch. If remote revision is different
+    /// from local revision updates local one to match the remote. Returns
+    /// revision of this branch.
+    pub async fn resolve(&mut self) -> Result<Option<Revision>, ReplicaError> {
+        match self.open().await? {
+            Self::Open {
+                name,
+                repository,
+                connection,
+                index,
+                down,
+                up,
+            } => {
+                // Force reload from storage to ensure we get fresh data
+                let _ = up.reload(&connection).await;
+                let revision = up.read().clone();
+                // update local record for the revision.
+                down.replace_with(|_| revision.clone(), &repository.site.session.storage)
+                    .await
+                    .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+
+                Ok(down.read())
+            }
+            _ => unreachable!("We just opened"),
         }
     }
 
-    /// Returns a capability for the memory cell (revision pointer).
+    /// Publishes new canonical revision. Returns error if publishing fails.
+    pub async fn publish(&mut self, revision: Revision) -> Result<(), ReplicaError> {
+        match self.open().await? {
+            Self::Open {
+                name,
+                repository,
+                connection,
+                index,
+                down,
+                up,
+            } => {
+                let prior = down.read();
+
+                // we only need to publish to upstream if desired revision is different
+                // from the last revision we have read from upstream.
+                if up.read().as_ref() != Some(&revision) {
+                    up.replace(Some(revision.clone()), &mut connection)
+                        .await
+                        .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+                }
+
+                // if revision for the remote branch is different from one published
+                // we got to update local revision. We return revision we replaced
+                if prior.as_ref() != Some(&revision) {
+                    down.replace_with(
+                        |_| Some(revision.clone()),
+                        &mut repository.site.session.storage,
+                    )
+                    .await
+                    .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+                }
+
+                Ok(())
+            }
+            _ => unreachable!("We just opened"),
+        }
+    }
+
+    /// Uploads novel nodes from a stream into remote storage.
     ///
-    /// The cell path is: `{subject}/memory/{subject}/{branch_name}`
-    pub fn revision(&self) -> Capability<memory::Cell> {
-        Subject::from(self.repository.subject.as_str())
-            .attenuate(memory::Memory)
-            .attenuate(memory::Space::new("local"))
-            .attenuate(memory::Cell::new(&self.name))
+    /// This method takes a stream of tree nodes (typically from `TreeDifference::novel_nodes()`)
+    /// and pushes them concurrently to the remote storage. Use this before publishing a new
+    /// revision to ensure all tree blocks are available on the remote.
+    ///
+    /// # Arguments
+    /// * `nodes` - A stream of nodes to import
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// // After computing a TreeDifference, import novel nodes:
+    /// remote.upload(diff.novel_nodes()).await?;
+    /// ```
+    pub async fn upload<Key, Value, E, S>(&mut self, nodes: S) -> Result<(), ReplicaError>
+    where
+        Key: KeyType + 'static,
+        Value: dialog_prolly_tree::ValueType,
+        E: std::fmt::Debug,
+        S: Stream<Item = Result<Node<Key, Value, Blake3Hash>, E>>,
+    {
+        use futures_util::pin_mut;
+
+        match self.open().await? {
+            Self::Open {
+                name,
+                repository,
+                connection,
+                index,
+                down,
+                up,
+            } => {
+                let mut queue = TaskQueue::default();
+                pin_mut!(nodes);
+
+                while let Some(result) = nodes.next().await {
+                    let node =
+                        result.map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+
+                    // Build the key for this block
+                    let hash = node.hash();
+
+                    // Encode the block using the standard encoder
+                    let (_hash, bytes) = CborEncoder.encode(node.block()).await.map_err(|e| {
+                        ReplicaError::StorageError(format!("Failed to encode block: {:?}", e))
+                    })?;
+
+                    // Clone what we need for the spawned task
+                    let mut store = index.clone();
+
+                    // Spawn concurrent upload task
+                    queue.spawn(async move {
+                        index
+                            .set(hash, bytes)
+                            .await
+                            .map_err(|_| DialogAsyncError::JoinError)
+                    });
+                }
+
+                // Wait for all uploads to complete
+                queue
+                    .join()
+                    .await
+                    .map_err(|e| ReplicaError::StorageError(format!("Import failed: {:?}", e)))?;
+
+                Ok(())
+            }
+            _ => unreachable!("Just opened"),
+        }
     }
 }
 
