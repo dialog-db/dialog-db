@@ -94,7 +94,9 @@ impl<'de> serde::Deserialize<'de> for Checksum {
             type Value = Checksum;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("32 bytes, a sequence of 32 bytes, or a map with algorithm and value")
+                formatter.write_str(
+                    "32 bytes, a sequence of 32 bytes, or a map with algorithm and value",
+                )
             }
 
             fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>

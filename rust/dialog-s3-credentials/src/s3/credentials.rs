@@ -171,8 +171,12 @@ impl<'de> Deserialize<'de> for PrivateCredentials {
         D: serde::Deserializer<'de>,
     {
         let helper = PrivateCredentialsSerde::deserialize(deserializer)?;
-        PrivateCredentials::new(helper.address, helper.access_key_id, helper.secret_access_key)
-            .map_err(serde::de::Error::custom)
+        PrivateCredentials::new(
+            helper.address,
+            helper.access_key_id,
+            helper.secret_access_key,
+        )
+        .map_err(serde::de::Error::custom)
     }
 }
 

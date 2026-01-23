@@ -3,7 +3,7 @@
 use super::constraint::Constraint;
 use super::interface::Capability;
 use super::provider::Provider;
-use super::{Authorization, AuthorizationError, Authority};
+use super::{Authority, Authorization, AuthorizationError};
 use std::error::Error;
 
 /// A capability paired with its authorization proof.
@@ -88,8 +88,12 @@ pub enum PerformError<E: Error + std::fmt::Debug> {
     Authorization(AuthorizationError),
 }
 
-impl<Ok, E: Error + std::fmt::Debug, Fx: super::effect::Effect<Output = Result<Ok, E>> + Constraint, A: Authorization>
-    Authorized<Fx, A>
+impl<
+    Ok,
+    E: Error + std::fmt::Debug,
+    Fx: super::effect::Effect<Output = Result<Ok, E>> + Constraint,
+    A: Authorization,
+> Authorized<Fx, A>
 {
     /// Perform the invocation directly without authorization verification.
     /// For operations that require authorization, use `acquire` first.

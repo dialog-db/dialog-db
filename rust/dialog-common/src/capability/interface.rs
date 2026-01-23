@@ -1,5 +1,6 @@
 //! Capability wrapper type.
 
+use super::Claim;
 use super::ability::Ability;
 use super::access::Access;
 use super::authority::Principal;
@@ -11,7 +12,6 @@ use super::policy::Policy;
 use super::provider::Provider;
 use super::selector::Selector;
 use super::subject::Did;
-use super::Claim;
 use crate::ConditionalSend;
 
 #[cfg(feature = "ucan")]
@@ -352,7 +352,11 @@ mod tests {
             // Get should contribute "digest" parameter (serialized as list of integers)
             assert_eq!(
                 params.get("digest"),
-                Some(&Ipld::List(vec![Ipld::Integer(1), Ipld::Integer(2), Ipld::Integer(3)]))
+                Some(&Ipld::List(vec![
+                    Ipld::Integer(1),
+                    Ipld::Integer(2),
+                    Ipld::Integer(3)
+                ]))
             );
         }
 
@@ -372,7 +376,8 @@ mod tests {
             // Store should contribute "name" parameter
             assert_eq!(params.get("name"), Some(&Ipld::String("index".into())));
             // Lookup should contribute "key" parameter (serialized as list of integers)
-            let hello_bytes: Vec<Ipld> = b"hello".iter().map(|&b| Ipld::Integer(b as i128)).collect();
+            let hello_bytes: Vec<Ipld> =
+                b"hello".iter().map(|&b| Ipld::Integer(b as i128)).collect();
             assert_eq!(params.get("key"), Some(&Ipld::List(hello_bytes)));
         }
     }

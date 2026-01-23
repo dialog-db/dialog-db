@@ -174,7 +174,9 @@
 use async_trait::async_trait;
 use dialog_common::{
     Authority, Bytes, ConditionalSend, ConditionalSync,
-    capability::{Ability, Access, Authorized, Capability, Claim, Did, Effect, Principal, Provider, Subject},
+    capability::{
+        Ability, Access, Authorized, Capability, Claim, Did, Effect, Principal, Provider, Subject,
+    },
 };
 use thiserror::Error;
 
@@ -230,14 +232,14 @@ use crate::{DialogStorageError, StorageBackend, TransactionalMemoryBackend};
 // - Server implementation is native-only (internal to the helpers module)
 #[cfg(any(feature = "helpers", test))]
 pub mod helpers;
-#[cfg(all(feature = "helpers", not(target_arch = "wasm32")))]
-pub use helpers::{LocalS3, PublicS3Settings, S3Settings};
-#[cfg(any(feature = "helpers", test))]
-pub use helpers::{PublicS3Address, S3Address, Session, UcanS3Address};
-#[cfg(all(feature = "helpers", feature = "ucan", not(target_arch = "wasm32")))]
-pub use helpers::{Operator, UcanAccessServer, UcanS3Settings};
 #[cfg(all(feature = "helpers", feature = "ucan", target_arch = "wasm32"))]
 pub use helpers::Operator;
+#[cfg(all(feature = "helpers", not(target_arch = "wasm32")))]
+pub use helpers::{LocalS3, PublicS3Settings, S3Settings};
+#[cfg(all(feature = "helpers", feature = "ucan", not(target_arch = "wasm32")))]
+pub use helpers::{Operator, UcanAccessServer, UcanS3Settings};
+#[cfg(any(feature = "helpers", test))]
+pub use helpers::{PublicS3Address, S3Address, Session, UcanS3Address};
 
 use self::archive::ArchiveError;
 
@@ -323,7 +325,10 @@ pub struct S3<Issuer> {
 impl<Issuer> S3<Issuer> {
     /// Create a new S3 with the given credentials and issuer.
     pub fn new(credentials: Credentials, issuer: Issuer) -> Self {
-        Self { credentials, issuer }
+        Self {
+            credentials,
+            issuer,
+        }
     }
 }
 
@@ -577,7 +582,10 @@ where
         let cell: &memory::Cell = input.policy();
         let publish: &memory::Publish = input.policy();
         let content = publish.content.clone();
-        let when = publish.when.as_ref().map(|b| String::from_utf8_lossy(b).to_string());
+        let when = publish
+            .when
+            .as_ref()
+            .map(|b| String::from_utf8_lossy(b).to_string());
         let checksum = Hasher::Sha256.checksum(&content);
 
         // Build the authorization capability
@@ -585,7 +593,10 @@ where
             .attenuate(memory::Memory)
             .attenuate(space.clone())
             .attenuate(cell.clone())
-            .invoke(memory::AuthorizePublish { checksum, when: when.clone() });
+            .invoke(memory::AuthorizePublish {
+                checksum,
+                when: when.clone(),
+            });
 
         // Acquire authorization and perform
         let authorized = capability
@@ -885,11 +896,13 @@ where
                 .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
 
             // Parse the XML response
-            list::parse_list_response(&body).map(|result| storage::ListResult {
-                keys: result.keys,
-                is_truncated: result.is_truncated,
-                next_continuation_token: result.next_continuation_token,
-            }).map_err(|e| storage::StorageError::Storage(e.to_string()))
+            list::parse_list_response(&body)
+                .map(|result| storage::ListResult {
+                    keys: result.keys,
+                    is_truncated: result.is_truncated,
+                    next_continuation_token: result.next_continuation_token,
+                })
+                .map_err(|e| storage::StorageError::Storage(e.to_string()))
         } else {
             Err(storage::StorageError::Storage(format!(
                 "Failed to list objects: {}",
@@ -1069,8 +1082,7 @@ impl<Issuer: ConditionalSend + ConditionalSync> Access for Bucket<Issuer> {
 // Forward Provider<Authorized<...>> to the underlying bucket
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer, Do> Provider<Authorized<Do, dialog_s3_credentials::Authorization>>
-    for Bucket<Issuer>
+impl<Issuer, Do> Provider<Authorized<Do, dialog_s3_credentials::Authorization>> for Bucket<Issuer>
 where
     Issuer: ConditionalSend + ConditionalSync,
     Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
@@ -1160,7 +1172,12 @@ where
             .await
             .map_err(|e| S3StorageError::ServiceError(e.to_string()))?;
 
-        Ok(result.map(|pub_| (pub_.content.to_vec(), String::from_utf8_lossy(&pub_.edition).to_string())))
+        Ok(result.map(|pub_| {
+            (
+                pub_.content.to_vec(),
+                String::from_utf8_lossy(&pub_.edition).to_string(),
+            )
+        }))
     }
 
     async fn replace(
@@ -1184,22 +1201,26 @@ where
                         when: edition.map(|e| e.as_bytes().to_vec().into()),
                     });
 
-                let new_edition = Provider::<memory::Publish>::execute(&mut self.bucket, capability)
-                    .await
-                    .map_err(|e| match e {
-                        memory::MemoryError::EditionMismatch { .. } => S3StorageError::EditionMismatch {
-                            expected: edition.map(|e| e.to_string()),
-                            actual: None,
-                        },
-                        e => S3StorageError::ServiceError(e.to_string()),
-                    })?;
+                let new_edition =
+                    Provider::<memory::Publish>::execute(&mut self.bucket, capability)
+                        .await
+                        .map_err(|e| match e {
+                            memory::MemoryError::EditionMismatch { .. } => {
+                                S3StorageError::EditionMismatch {
+                                    expected: edition.map(|e| e.to_string()),
+                                    actual: None,
+                                }
+                            }
+                            e => S3StorageError::ServiceError(e.to_string()),
+                        })?;
 
                 Ok(Some(String::from_utf8_lossy(&new_edition).to_string()))
             }
             None => {
                 // Retract (delete)
-                let when = edition
-                    .ok_or_else(|| S3StorageError::ServiceError("Edition required for delete".into()))?;
+                let when = edition.ok_or_else(|| {
+                    S3StorageError::ServiceError("Edition required for delete".into())
+                })?;
 
                 let capability: Capability<memory::Retract> = Subject::from(self.subject.clone())
                     .attenuate(memory::Memory)
@@ -1212,10 +1233,12 @@ where
                 Provider::<memory::Retract>::execute(&mut self.bucket, capability)
                     .await
                     .map_err(|e| match e {
-                        memory::MemoryError::EditionMismatch { .. } => S3StorageError::EditionMismatch {
-                            expected: edition.map(|e| e.to_string()),
-                            actual: None,
-                        },
+                        memory::MemoryError::EditionMismatch { .. } => {
+                            S3StorageError::EditionMismatch {
+                                expected: edition.map(|e| e.to_string()),
+                                actual: None,
+                            }
+                        }
                         e => S3StorageError::ServiceError(e.to_string()),
                     })?;
 
@@ -1335,8 +1358,7 @@ mod tests {
         #[allow(unused_imports)]
         use dialog_common::capability::Subject;
         use dialog_s3_credentials::ucan::{
-            Credentials as UcanCredentials, DelegationChain,
-            test_helpers::create_delegation,
+            Credentials as UcanCredentials, DelegationChain, test_helpers::create_delegation,
         };
         use helpers::Operator;
 
@@ -1359,10 +1381,7 @@ mod tests {
             operator: Operator,
             delegation: DelegationChain,
         ) -> S3<Operator> {
-            let ucan_credentials = UcanCredentials::new(
-                env.access_service_url.clone(),
-                delegation,
-            );
+            let ucan_credentials = UcanCredentials::new(env.access_service_url.clone(), delegation);
             S3::new(Credentials::Ucan(ucan_credentials), operator)
         }
 
@@ -1796,13 +1815,10 @@ mod tests {
         #[allow(dead_code)]
         fn create_signed_bucket(env: &helpers::S3Address) -> Bucket<helpers::Session> {
             let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-            let s3_creds = S3Credentials::private(
-                address,
-                &env.access_key_id,
-                &env.secret_access_key,
-            )
-            .unwrap()
-            .with_path_style(true);
+            let s3_creds =
+                S3Credentials::private(address, &env.access_key_id, &env.secret_access_key)
+                    .unwrap()
+                    .with_path_style(true);
             let s3 = S3::from_s3(s3_creds, helpers::Session::new(TEST_SUBJECT));
             Bucket::new(s3, TEST_SUBJECT, "signed-test")
         }
@@ -1871,7 +1887,9 @@ mod tests {
         ) -> anyhow::Result<()> {
             // Client uses no credentials but server requires authentication
             let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-            let s3_creds = S3Credentials::public(address).unwrap().with_path_style(true);
+            let s3_creds = S3Credentials::public(address)
+                .unwrap()
+                .with_path_style(true);
             let s3 = S3::from_s3(s3_creds, helpers::Session::new(TEST_SUBJECT));
             let mut bucket = Bucket::new(s3, TEST_SUBJECT, "test");
 
@@ -1935,13 +1953,16 @@ mod tests {
         ) -> Bucket<Operator> {
             let delegation = {
                 let subject_did = operator.signer().did().clone();
-                let delegation =
-                    create_delegation(operator.signer(), &operator.signer().did(), &subject_did, can)
-                        .expect("Failed to create test delegation");
+                let delegation = create_delegation(
+                    operator.signer(),
+                    &operator.signer().did(),
+                    &subject_did,
+                    can,
+                )
+                .expect("Failed to create test delegation");
                 DelegationChain::new(delegation)
             };
-            let ucan_credentials =
-                UcanCredentials::new(env.access_service_url.clone(), delegation);
+            let ucan_credentials = UcanCredentials::new(env.access_service_url.clone(), delegation);
             let s3 = S3::new(Credentials::Ucan(ucan_credentials), operator.clone());
             Bucket::new(s3, operator.did().to_string(), "test-store")
         }
@@ -1985,8 +2006,7 @@ mod tests {
                 .expect("Failed to create test delegation");
                 DelegationChain::new(delegation)
             };
-            let ucan_credentials =
-                UcanCredentials::new(env.access_service_url.clone(), delegation);
+            let ucan_credentials = UcanCredentials::new(env.access_service_url.clone(), delegation);
             let mut bucket = S3::new(Credentials::Ucan(ucan_credentials), operator);
 
             let store_name = "test-store";
@@ -2060,7 +2080,10 @@ mod tests {
         use super::*;
 
         #[allow(dead_code)]
-        fn create_test_bucket(env: &helpers::PublicS3Address, store: &str) -> Bucket<helpers::Session> {
+        fn create_test_bucket(
+            env: &helpers::PublicS3Address,
+            store: &str,
+        ) -> Bucket<helpers::Session> {
             let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
             let s3_creds = S3Credentials::public(address)
                 .unwrap()
@@ -2072,13 +2095,10 @@ mod tests {
         #[allow(dead_code)]
         fn create_signed_bucket(env: &helpers::S3Address, store: &str) -> Bucket<helpers::Session> {
             let address = Address::new(&env.endpoint, "us-east-1", &env.bucket);
-            let s3_creds = S3Credentials::private(
-                address,
-                &env.access_key_id,
-                &env.secret_access_key,
-            )
-            .unwrap()
-            .with_path_style(true);
+            let s3_creds =
+                S3Credentials::private(address, &env.access_key_id, &env.secret_access_key)
+                    .unwrap()
+                    .with_path_style(true);
             let s3 = S3::from_s3(s3_creds, helpers::Session::new(TEST_SUBJECT));
             Bucket::new(s3, TEST_SUBJECT, store)
         }
@@ -2225,13 +2245,16 @@ mod tests {
         ) -> Bucket<Operator> {
             let delegation = {
                 let subject_did = operator.signer().did().clone();
-                let delegation =
-                    create_delegation(operator.signer(), &operator.signer().did(), &subject_did, can)
-                        .expect("Failed to create test delegation");
+                let delegation = create_delegation(
+                    operator.signer(),
+                    &operator.signer().did(),
+                    &subject_did,
+                    can,
+                )
+                .expect("Failed to create test delegation");
                 DelegationChain::new(delegation)
             };
-            let ucan_credentials =
-                UcanCredentials::new(env.access_service_url.clone(), delegation);
+            let ucan_credentials = UcanCredentials::new(env.access_service_url.clone(), delegation);
             let s3 = S3::new(Credentials::Ucan(ucan_credentials), operator.clone());
             Bucket::new(s3, operator.did().to_string(), store)
         }
@@ -2260,12 +2283,8 @@ mod tests {
             env: helpers::UcanS3Address,
         ) -> anyhow::Result<()> {
             let operator = Operator::generate();
-            let bucket = create_ucan_bucket(
-                &env,
-                &operator,
-                "nonexistent-ucan-prefix",
-                &["storage"],
-            );
+            let bucket =
+                create_ucan_bucket(&env, &operator, "nonexistent-ucan-prefix", &["storage"]);
 
             // List objects with a prefix that has no objects - should return empty list
             let result = bucket.list(None).await?;
@@ -2283,8 +2302,10 @@ mod tests {
             let operator = Operator::generate();
 
             // Create two buckets with different prefixes but same operator
-            let mut bucket_a = create_ucan_bucket(&env, &operator, "ucan-list-prefix-a", &["storage"]);
-            let mut bucket_b = create_ucan_bucket(&env, &operator, "ucan-list-prefix-b", &["storage"]);
+            let mut bucket_a =
+                create_ucan_bucket(&env, &operator, "ucan-list-prefix-a", &["storage"]);
+            let mut bucket_b =
+                create_ucan_bucket(&env, &operator, "ucan-list-prefix-b", &["storage"]);
 
             // Add objects to each bucket
             bucket_a.set(b"key1".to_vec(), b"value-a1".to_vec()).await?;

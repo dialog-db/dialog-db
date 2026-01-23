@@ -156,9 +156,8 @@ pub(crate) fn parse_list_response(xml: &str) -> Result<ListResult, S3StorageErro
     }
 
     // Parse as ListBucketResult
-    let result: ListBucketResult = quick_xml::de::from_str(xml).map_err(|e| {
-        S3StorageError::SerializationError(format!("Failed to parse XML: {}", e))
-    })?;
+    let result: ListBucketResult = quick_xml::de::from_str(xml)
+        .map_err(|e| S3StorageError::SerializationError(format!("Failed to parse XML: {}", e)))?;
 
     Ok(ListResult {
         keys: result.contents.into_iter().map(|c| c.key).collect(),

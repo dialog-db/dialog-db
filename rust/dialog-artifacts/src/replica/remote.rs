@@ -232,7 +232,10 @@ impl<Backend: PlatformBackend> Debug for RemoteBranch<Backend> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Reference {
-                name, site_name, subject, ..
+                name,
+                site_name,
+                subject,
+                ..
             } => f
                 .debug_struct("RemoteBranch::Reference")
                 .field("name", name)
@@ -241,7 +244,10 @@ impl<Backend: PlatformBackend> Debug for RemoteBranch<Backend> {
                 .finish_non_exhaustive(),
             #[cfg(feature = "s3")]
             Self::Open {
-                name, site_name, subject, ..
+                name,
+                site_name,
+                subject,
+                ..
             } => f
                 .debug_struct("RemoteBranch::Open")
                 .field("name", name)
@@ -497,7 +503,8 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
         subject: Did,
     ) -> Result<Self, ReplicaError> {
         // Load the remote site to get credentials
-        let site_obj = RemoteSite::load(site, storage.clone(), issuer.clone(), subject.clone()).await?;
+        let site_obj =
+            RemoteSite::load(site, storage.clone(), issuer.clone(), subject.clone()).await?;
         let state = site_obj.state();
 
         Ok(Self::Reference {

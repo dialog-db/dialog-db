@@ -58,7 +58,9 @@ async fn it_updates_existing_value() -> anyhow::Result<()> {
     let mut backend = bucket::open_unique_at("it_updates_existing_value");
     let memory: TransactionalMemory<TestData, _> = TransactionalMemory::new();
 
-    let cell = memory.open(b"test-update-key".to_vec(), &mut backend).await?;
+    let cell = memory
+        .open(b"test-update-key".to_vec(), &mut backend)
+        .await?;
 
     let initial_data = TestData {
         name: "initial".to_string(),
@@ -72,12 +74,15 @@ async fn it_updates_existing_value() -> anyhow::Result<()> {
         value: 2,
     };
 
-    cell.replace(Some(updated_data.clone()), &mut backend).await?;
+    cell.replace(Some(updated_data.clone()), &mut backend)
+        .await?;
 
     assert_eq!(cell.read(), Some(updated_data.clone()));
 
     // Open again to verify the update persisted
-    let cell2 = memory.open(b"test-update-key".to_vec(), &mut backend).await?;
+    let cell2 = memory
+        .open(b"test-update-key".to_vec(), &mut backend)
+        .await?;
     assert_eq!(cell2.read(), Some(updated_data));
     Ok(())
 }
@@ -96,7 +101,9 @@ async fn it_detects_cas_conflict() -> anyhow::Result<()> {
         value: 1,
     };
 
-    cell1.replace(Some(initial_data.clone()), &mut backend).await?;
+    cell1
+        .replace(Some(initial_data.clone()), &mut backend)
+        .await?;
 
     // Open cell2 from different memory - gets the current state
     let cell2 = memory2.open(b"test-cas-key".to_vec(), &mut backend).await?;

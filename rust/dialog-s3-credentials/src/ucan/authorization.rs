@@ -170,12 +170,12 @@ impl UcanAuthorization {
             Self::Delegated { .. } => {
                 return Err(AccessError::Invocation(
                     "Authorization not invoked - call invoke() before grant()".into(),
-                ))
+                ));
             }
             Self::Owned { .. } => {
                 return Err(AccessError::Invocation(
                     "Owned authorization cannot be granted via UCAN service".into(),
-                ))
+                ));
             }
         };
 

@@ -23,8 +23,8 @@
 
 use super::bucket;
 use anyhow::Result;
-use dialog_storage::s3::encode_s3_key;
 use dialog_storage::StorageBackend;
+use dialog_storage::s3::encode_s3_key;
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);

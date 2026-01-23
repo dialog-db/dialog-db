@@ -168,13 +168,25 @@ impl<Backend: PlatformBackend + 'static> Branches<Backend> {
     /// Loads a branch with given identifier, produces an error if it does not
     /// exists.
     pub async fn load(&self, id: &BranchId) -> Result<Branch<Backend>, ReplicaError> {
-        Branch::load(id, self.issuer.clone(), self.storage.clone(), self.subject.clone()).await
+        Branch::load(
+            id,
+            self.issuer.clone(),
+            self.storage.clone(),
+            self.subject.clone(),
+        )
+        .await
     }
 
     /// Loads a branch with the given identifier or creates a new one if
     /// it does not already exist.
     pub async fn open(&self, id: impl Into<BranchId>) -> Result<Branch<Backend>, ReplicaError> {
-        Branch::open(id, self.issuer.clone(), self.storage.clone(), self.subject.clone()).await
+        Branch::open(
+            id,
+            self.issuer.clone(),
+            self.storage.clone(),
+            self.subject.clone(),
+        )
+        .await
     }
 }
 
@@ -1682,8 +1694,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
         Box::pin(async move {
             match state {
                 UpstreamState::Local { branch } => {
-                    let branch =
-                        Branch::load(branch, issuer, storage, subject).await?;
+                    let branch = Branch::load(branch, issuer, storage, subject).await?;
                     Ok(Upstream::Local(branch))
                 }
                 UpstreamState::Remote { site, branch } => {
@@ -1708,8 +1719,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
         Box::pin(async move {
             match state {
                 UpstreamState::Local { branch } => {
-                    let branch =
-                        Branch::load(branch, issuer, storage, subject).await?;
+                    let branch = Branch::load(branch, issuer, storage, subject).await?;
                     Ok(Upstream::Local(branch))
                 }
                 UpstreamState::Remote { site, branch } => {
@@ -2030,8 +2040,7 @@ mod tests {
         let issuer = Operator::from_secret(&seed());
         let mut branch =
             Branch::open(&branch_id, issuer.clone(), storage.clone(), subject.clone()).await?;
-        let target =
-            Branch::open(&upstream_branch_id, issuer, storage.clone(), subject).await?;
+        let target = Branch::open(&upstream_branch_id, issuer, storage.clone(), subject).await?;
 
         // Set up upstream as a local branch
         branch.set_upstream(target).await?;
@@ -3205,8 +3214,7 @@ mod tests {
             ErrorMappingBackend::new(MemoryStorageBackend::default()),
             CborEncoder,
         );
-        let connection =
-            PlatformStorage::new(ErrorMappingBackend::new(s3_storage), CborEncoder);
+        let connection = PlatformStorage::new(ErrorMappingBackend::new(s3_storage), CborEncoder);
 
         let archive = Archive::new(local_storage.clone());
         archive.set_remote(connection.clone()).await;

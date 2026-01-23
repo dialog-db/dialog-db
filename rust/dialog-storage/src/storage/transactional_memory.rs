@@ -442,7 +442,11 @@ where
     /// Calls `f` with the current cached value to compute a new value, then
     /// attempts CAS. On conflict, reloads fresh data and retries according to
     /// the policy (`MaxRetries(n)` = 1 optimistic attempt + up to n retries).
-    pub async fn replace_with<F>(&self, f: F, backend: &mut Backend) -> Result<(), DialogStorageError>
+    pub async fn replace_with<F>(
+        &self,
+        f: F,
+        backend: &mut Backend,
+    ) -> Result<(), DialogStorageError>
     where
         F: Fn(&Option<T>) -> Option<T> + ConditionalSend,
     {
@@ -593,7 +597,8 @@ mod tests {
             value: 2,
         };
 
-        cell.replace(Some(updated_data.clone()), &mut backend).await?;
+        cell.replace(Some(updated_data.clone()), &mut backend)
+            .await?;
 
         assert_eq!(cell.read(), Some(updated_data.clone()));
 
@@ -649,7 +654,9 @@ mod tests {
             value: 100,
         };
 
-        cell2.replace(Some(updated_data.clone()), &mut backend).await?;
+        cell2
+            .replace(Some(updated_data.clone()), &mut backend)
+            .await?;
 
         // cell1 still has stale data
         assert_eq!(cell1.read(), Some(data));
@@ -727,7 +734,9 @@ mod tests {
             // Use a separate memory to write
             let memory2: TransactionalMemory<TestData, _> = TransactionalMemory::new();
             let cell2 = memory2.open(b"test-key".to_vec(), &mut backend).await?;
-            cell2.replace(Some(updated_data.clone()), &mut backend).await?;
+            cell2
+                .replace(Some(updated_data.clone()), &mut backend)
+                .await?;
         }
 
         // Open again - should fetch fresh from backend since old cell was dropped

@@ -8,7 +8,10 @@
 //! - Server implementation (native-only, in the `server` submodule)
 //! - UCAN access service (native-only, requires `ucan` feature)
 //! - Test issuer types for capability-based testing
-use dialog_common::{Authority, capability::{Did, Principal}};
+use dialog_common::{
+    Authority,
+    capability::{Did, Principal},
+};
 use serde::{Deserialize, Serialize};
 
 /// S3 test server connection info with credentials, passed to inner tests.
