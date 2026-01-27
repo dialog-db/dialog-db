@@ -30,13 +30,20 @@ pub type Site = String;
 /// and the credentials needed to connect to it.
 pub struct RemoteSite<Backend: PlatformBackend> {
     /// The site name.
-    pub name: Site,
+    name: Site,
     /// Memory cell storing the remote state.
     memory: TypedStoreResource<RemoteState, Backend>,
     /// Storage for persistence (cloned, cheap).
     storage: PlatformStorage<Backend>,
     /// Issuer for signing requests.
     issuer: Operator,
+}
+
+impl<Backend: PlatformBackend> RemoteSite<Backend> {
+    /// Returns the site name.
+    pub fn name(&self) -> &Site {
+        &self.name
+    }
 }
 
 impl<Backend: PlatformBackend + 'static> RemoteSite<Backend> {
@@ -154,15 +161,27 @@ impl<Backend: PlatformBackend + 'static> RemoteSite<Backend> {
 #[derive(Clone)]
 pub struct RemoteRepository<Backend: PlatformBackend> {
     /// The subject DID identifying the repository owner.
-    pub subject: Did,
+    subject: Did,
     /// The remote site name.
-    pub site_name: Site,
+    site_name: Site,
     /// Storage for persistence (cloned, cheap).
     storage: PlatformStorage<Backend>,
     /// Issuer for signing requests.
     issuer: Operator,
     /// The remote state (credentials).
     state: Option<RemoteState>,
+}
+
+impl<Backend: PlatformBackend> RemoteRepository<Backend> {
+    /// Returns the subject DID identifying the repository owner.
+    pub fn subject(&self) -> &Did {
+        &self.subject
+    }
+
+    /// Returns the remote site name.
+    pub fn site_name(&self) -> &Site {
+        &self.site_name
+    }
 }
 
 impl<Backend: PlatformBackend + 'static> RemoteRepository<Backend> {
@@ -332,7 +351,7 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
         Ok(self)
     }
 
-    /// Internal: consume self and return Open variant or error.
+    /// Consume self and return Open variant or error.
     #[cfg(feature = "s3")]
     async fn into_open(self) -> Result<Self, ReplicaError> {
         match self {
@@ -410,11 +429,13 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
                 up,
                 ..
             } => {
-                // Force reload from storage to ensure we get fresh data
-                let _ = up.reload(connection).await;
+                // Reload from upstream to get latest revision before we read.
+                up.reload(connection)
+                    .await
+                    .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
                 let revision = up.read();
 
-                // Update local record for the revision
+                // Update local record for the upstream revision
                 down.replace_with(|_| revision.clone(), storage)
                     .await
                     .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
@@ -480,15 +501,13 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
         E: std::fmt::Debug,
         S: Stream<Item = Result<Node<Key, Value, Blake3Hash>, E>>,
     {
-        use futures_util::pin_mut;
-
         // Ensure we're open
         self.open().await?;
 
         match self {
             Self::Open { index, .. } => {
                 let mut queue = TaskQueue::default();
-                pin_mut!(nodes);
+                tokio::pin!(nodes);
 
                 while let Some(result) = nodes.next().await {
                     let node =
@@ -564,36 +583,27 @@ pub enum RemoteCredentials {
     Ucan(ucan::Credentials),
 }
 
-impl RemoteCredentials {
-    /// Create S3 credentials for public access.
-    pub fn s3_public(
-        endpoint: impl Into<String>,
-        region: impl Into<String>,
-        bucket: impl Into<String>,
-    ) -> Result<Self, ReplicaError> {
-        let address = s3::Address::new(endpoint, region, bucket);
-        s3::Credentials::public(address)
-            .map(Self::S3)
-            .map_err(|e| ReplicaError::StorageError(e.to_string()))
+impl From<s3::Credentials> for RemoteCredentials {
+    fn from(credentials: s3::Credentials) -> Self {
+        Self::S3(credentials)
     }
+}
 
-    /// Create S3 credentials with signing keys.
-    pub fn s3_private(
-        endpoint: impl Into<String>,
-        region: impl Into<String>,
-        bucket: impl Into<String>,
-        access_key_id: impl Into<String>,
-        secret_access_key: impl Into<String>,
-    ) -> Result<Self, ReplicaError> {
-        let address = s3::Address::new(endpoint, region, bucket);
-        s3::Credentials::private(address, access_key_id, secret_access_key)
-            .map(Self::S3)
-            .map_err(|e| ReplicaError::StorageError(e.to_string()))
+impl From<s3::PublicCredentials> for RemoteCredentials {
+    fn from(credentials: s3::PublicCredentials) -> Self {
+        Self::S3(credentials.into())
     }
+}
 
-    /// Create UCAN credentials from an optional delegation chain.
-    #[cfg(feature = "ucan")]
-    pub fn ucan(endpoint: impl Into<String>, delegation: DelegationChain) -> Self {
-        Self::Ucan(ucan::Credentials::new(endpoint.into(), delegation))
+impl From<s3::PrivateCredentials> for RemoteCredentials {
+    fn from(credentials: s3::PrivateCredentials) -> Self {
+        Self::S3(credentials.into())
+    }
+}
+
+#[cfg(feature = "ucan")]
+impl From<ucan::Credentials> for RemoteCredentials {
+    fn from(credentials: ucan::Credentials) -> Self {
+        Self::Ucan(credentials)
     }
 }
