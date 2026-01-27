@@ -102,8 +102,6 @@ pub struct Replica<Backend: PlatformBackend> {
     issuer: Operator,
     subject: Did,
     storage: PlatformStorage<Backend>,
-    // /// Remote repositories for synchronization
-    // pub remotes: Remotes<Backend>,
     /// Local branches in this replica
     pub branches: Branches<Backend>,
 }
