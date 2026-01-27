@@ -38,7 +38,7 @@ impl Operator {
     }
     /// Creates a new issuer from a signing key.
     pub fn new(key: SigningKey) -> Self {
-        let principal = Principal(key.verifying_key().to_bytes());
+        let principal = Principal::new(key.verifying_key().to_bytes());
 
         Self {
             did: principal.did().into(),
