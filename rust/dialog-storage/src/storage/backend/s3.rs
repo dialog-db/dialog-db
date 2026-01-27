@@ -22,7 +22,7 @@
 //!
 //! // Define an issuer type for capability-based access
 //! #[derive(Clone)]
-//! struct Issuer(String);
+//! struct Issuer(Did);
 //! impl Principal for Issuer {
 //!     fn did(&self) -> &Did { &self.0 }
 //! }
@@ -39,7 +39,7 @@
 //!     "my-bucket",
 //! );
 //! let credentials = S3Credentials::public(address)?;
-//! let issuer = Issuer("did:key:zMyIssuer".into());
+//! let issuer = Issuer(Did::from("did:key:zMyIssuer"));
 //! let mut bucket = S3::from_s3(credentials, issuer);
 //!
 //! // Use capability-based access with subject DID as the root
@@ -65,7 +65,7 @@
 //! use dialog_storage::capability::{storage, Provider, Subject};
 //!
 //! # #[derive(Clone)]
-//! # struct Issuer(String);
+//! # struct Issuer(Did);
 //! # impl Principal for Issuer {
 //! #     fn did(&self) -> &Did { &self.0 }
 //! # }
@@ -85,7 +85,7 @@
 //!     std::env::var("AWS_SECRET_ACCESS_KEY")?,
 //! )?;
 //!
-//! let issuer = Issuer("did:key:zMyIssuer".into());
+//! let issuer = Issuer(Did::from("did:key:zMyIssuer"));
 //! let mut bucket = S3::from_s3(credentials, issuer);
 //!
 //! // Subject DID identifies whose data we're accessing
@@ -110,7 +110,7 @@
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //!
 //! # #[derive(Clone)]
-//! # struct Issuer(String);
+//! # struct Issuer(Did);
 //! # impl Principal for Issuer {
 //! #     fn did(&self) -> &Did { &self.0 }
 //! # }
@@ -131,7 +131,7 @@
 //!     std::env::var("R2_SECRET_ACCESS_KEY")?,
 //! )?;
 //!
-//! let issuer = Issuer("did:key:zMyIssuer".into());
+//! let issuer = Issuer(Did::from("did:key:zMyIssuer"));
 //! let bucket = S3::from_s3(credentials, issuer);
 //! # Ok(())
 //! # }
@@ -144,7 +144,7 @@
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //!
 //! # #[derive(Clone)]
-//! # struct Issuer(String);
+//! # struct Issuer(Did);
 //! # impl Principal for Issuer {
 //! #     fn did(&self) -> &Did { &self.0 }
 //! # }
@@ -156,7 +156,7 @@
 //! // IP addresses and localhost automatically use path-style URLs
 //! let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
 //! let credentials = S3Credentials::private(address, "minioadmin", "minioadmin")?;
-//! let issuer = Issuer("did:key:zMyIssuer".into());
+//! let issuer = Issuer(Did::from("did:key:zMyIssuer"));
 //! let bucket = S3::from_s3(credentials, issuer);
 //! // path_style is true by default for IP addresses and localhost
 //! # Ok(())
@@ -926,7 +926,7 @@ where
 ///
 /// // Define an issuer type for capability-based access
 /// #[derive(Clone)]
-/// struct Issuer(String);
+/// struct Issuer(Did);
 /// impl Principal for Issuer {
 ///     fn did(&self) -> &Did { &self.0 }
 /// }
@@ -938,7 +938,7 @@ where
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
 /// let credentials = S3Credentials::public(address)?;
-/// let issuer = Issuer("did:key:zMyIssuer".into());
+/// let issuer = Issuer(Did::from("did:key:zMyIssuer"));
 /// let bucket = S3::from_s3(credentials, issuer);
 ///
 /// // Create a scoped bucket for StorageBackend operations
@@ -1009,7 +1009,7 @@ where
     /// # use dialog_common::{Authority, capability::{Did, Principal}};
     /// #
     /// # #[derive(Clone)]
-    /// # struct Issuer(String);
+    /// # struct Issuer(Did);
     /// # impl Principal for Issuer { fn did(&self) -> &Did { &self.0 } }
     /// # impl Authority for Issuer {
     /// #     fn sign(&mut self, _: &[u8]) -> Vec<u8> { Vec::new() }
@@ -1018,7 +1018,7 @@ where
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
     /// # let credentials = S3Credentials::public(address)?;
-    /// # let issuer = Issuer("did:key:zMyIssuer".into());
+    /// # let issuer = Issuer(Did::from("did:key:zMyIssuer"));
     /// # let s3 = S3::from_s3(credentials, issuer);
     /// # let mut bucket = Bucket::new(s3, "did:key:zSubject", "store");
     /// // First set a value

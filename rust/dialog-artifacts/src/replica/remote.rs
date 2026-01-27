@@ -37,18 +37,17 @@ pub struct RemoteSite<Backend: PlatformBackend> {
     storage: PlatformStorage<Backend>,
     /// Issuer for signing requests.
     issuer: Operator,
-    /// Subject DID for this replica.
-    #[allow(dead_code)]
-    subject: Did,
 }
 
 impl<Backend: PlatformBackend + 'static> RemoteSite<Backend> {
-    /// Add a new remote site, persisting its state to storage.
+    /// Adds a new remote site configuration and persists it. If site with
+    /// conflicting name is already configured produces an error, unless
+    /// persisted configuration is identical to passed one, in which case
+    /// operation is a noop upholding idempotence.
     pub async fn add(
         state: RemoteState,
-        mut storage: PlatformStorage<Backend>,
         issuer: Operator,
-        subject: Did,
+        mut storage: PlatformStorage<Backend>,
     ) -> Result<Self, ReplicaError> {
         let memory = Self::mount(&state.site, &mut storage).await?;
 
@@ -65,7 +64,6 @@ impl<Backend: PlatformBackend + 'static> RemoteSite<Backend> {
                 memory,
                 storage,
                 issuer,
-                subject,
             });
         }
 
@@ -80,16 +78,15 @@ impl<Backend: PlatformBackend + 'static> RemoteSite<Backend> {
             memory,
             storage,
             issuer,
-            subject,
         })
     }
 
-    /// Load an existing remote site from storage.
+    /// Load remote site that has previously being added. If site with
+    /// a given name does not exists produces an error.
     pub async fn load(
         site: &Site,
-        mut storage: PlatformStorage<Backend>,
         issuer: Operator,
-        subject: Did,
+        mut storage: PlatformStorage<Backend>,
     ) -> Result<Self, ReplicaError> {
         let memory = Self::mount(site, &mut storage).await?;
 
@@ -99,7 +96,6 @@ impl<Backend: PlatformBackend + 'static> RemoteSite<Backend> {
                 memory,
                 storage,
                 issuer,
-                subject,
             })
         } else {
             Err(ReplicaError::RemoteNotFound {
@@ -542,8 +538,7 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
         subject: Did,
     ) -> Result<Self, ReplicaError> {
         // Load the remote site to get credentials
-        let site_obj =
-            RemoteSite::load(site, storage.clone(), issuer.clone(), subject.clone()).await?;
+        let site_obj = RemoteSite::load(site, issuer.clone(), storage.clone()).await?;
         let state = site_obj.state();
 
         Ok(Self::Reference {

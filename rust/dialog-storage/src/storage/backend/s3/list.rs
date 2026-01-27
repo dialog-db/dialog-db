@@ -79,7 +79,7 @@ where
     /// use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
     ///
     /// #[derive(Clone)]
-    /// struct Issuer(String);
+    /// struct Issuer(Did);
     /// impl Principal for Issuer {
     ///     fn did(&self) -> &Did { &self.0 }
     /// }
@@ -91,7 +91,7 @@ where
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
     /// let credentials = S3Credentials::public(address)?;
-    /// let issuer = Issuer("did:key:zMyIssuer".into());
+    /// let issuer = Issuer(Did::from("did:key:zMyIssuer"));
     /// let s3 = S3::from_s3(credentials, issuer);
     /// let bucket = Bucket::new(s3, "did:key:zMySubject", "my-store");
     ///

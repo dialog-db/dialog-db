@@ -101,7 +101,6 @@ impl From<NodeReference> for Blake3Hash {
 pub struct Replica<Backend: PlatformBackend> {
     issuer: Operator,
     subject: Did,
-    #[allow(dead_code)]
     storage: PlatformStorage<Backend>,
     // /// Remote repositories for synchronization
     // pub remotes: Remotes<Backend>,
@@ -1665,7 +1664,7 @@ mod tests {
 
     /// Helper to get a test subject DID
     fn test_subject() -> Did {
-        "did:test:subject".to_string()
+        "did:test:subject".into()
     }
 
     /// Helper to create a test branch with upstream
@@ -1858,7 +1857,7 @@ mod tests {
 
         // Step 1: Generate issuer
         let issuer = Operator::from_passphrase("test_end_to_end_remote_upstream");
-        let subject = issuer.did().to_string();
+        let subject = issuer.did().clone();
 
         // Step 2: Create a replica with that issuer and journaled in-memory backend
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
@@ -1936,9 +1935,8 @@ mod tests {
         // Step 5: Create a remote branch for the main
         let remote_site = RemoteSite::load(
             &remote_state.site,
-            replica.storage().clone(),
             issuer.clone(),
-            subject.clone(),
+            replica.storage().clone(),
         )
         .await
         .expect("Failed to load remote site");
@@ -2085,7 +2083,7 @@ mod tests {
         use futures_util::stream;
 
         // Both Alice and Bob share the same subject for this test
-        let subject = "did:test:shared_repo".to_string();
+        let subject: Did = "did:test:shared_repo".into();
 
         // Create Alice's replica
         let alice_issuer = Operator::from_passphrase("alice");
@@ -2132,9 +2130,8 @@ mod tests {
             .expect("Failed to add remote");
         let alice_remote_site = RemoteSite::load(
             &"origin".to_string(),
-            alice_replica.storage().clone(),
             alice_issuer.clone(),
-            subject.clone(),
+            alice_replica.storage().clone(),
         )
         .await
         .expect("Failed to load Alice's remote site");
@@ -2180,9 +2177,8 @@ mod tests {
             .expect("Failed to add remote");
         let bob_remote_site = RemoteSite::load(
             &"origin".to_string(),
-            bob_replica.storage().clone(),
             bob_issuer.clone(),
-            subject.clone(),
+            bob_replica.storage().clone(),
         )
         .await
         .expect("Failed to load Bob's remote site");
@@ -2232,7 +2228,7 @@ mod tests {
         use futures_util::stream;
 
         // Both Alice and Bob share the same subject for this test
-        let subject = "did:test:shared_repo".to_string();
+        let subject: Did = "did:test:shared_repo".into();
 
         // Step 1: Create Alice's replica with her own issuer and backend
         let alice_issuer = Operator::from_passphrase("alice");
@@ -2288,9 +2284,8 @@ mod tests {
 
         let alice_remote_site = RemoteSite::load(
             &"origin".to_string(),
-            alice_replica.storage().clone(),
             alice_issuer.clone(),
-            subject.clone(),
+            alice_replica.storage().clone(),
         )
         .await
         .expect("Failed to load Alice's remote site");
@@ -2342,9 +2337,8 @@ mod tests {
 
         let bob_remote_site = RemoteSite::load(
             &"origin".to_string(),
-            bob_replica.storage().clone(),
             bob_issuer.clone(),
-            subject.clone(),
+            bob_replica.storage().clone(),
         )
         .await
         .expect("Failed to load Bob's remote site");
@@ -2503,7 +2497,7 @@ mod tests {
         use futures_util::stream;
 
         // Both Alice and Bob share the same subject for this test
-        let subject = "did:test:shared_repo".to_string();
+        let subject: Did = "did:test:shared_repo".into();
 
         // Create Alice's replica
         let alice_issuer = Operator::from_passphrase("alice");
@@ -2559,9 +2553,8 @@ mod tests {
 
         let alice_remote_site = RemoteSite::load(
             &"origin".to_string(),
-            alice_replica.storage().clone(),
             alice_issuer.clone(),
-            subject.clone(),
+            alice_replica.storage().clone(),
         )
         .await
         .expect("Failed to load Alice's remote site");
@@ -2610,9 +2603,8 @@ mod tests {
 
         let bob_remote_site = RemoteSite::load(
             &"origin".to_string(),
-            bob_replica.storage().clone(),
             bob_issuer.clone(),
-            subject.clone(),
+            bob_replica.storage().clone(),
         )
         .await
         .expect("Failed to load Bob's remote site");
@@ -2726,7 +2718,7 @@ mod tests {
         use futures_util::stream;
 
         // Both Alice and Bob share the same subject for this test
-        let subject = "did:test:shared_repo".to_string();
+        let subject: Did = "did:test:shared_repo".into();
 
         // Create Alice's replica
         let alice_issuer = Operator::from_passphrase("alice");
@@ -2757,9 +2749,8 @@ mod tests {
         alice_replica.add_remote(alice_remote_state).await?;
         let alice_remote_site = RemoteSite::load(
             &"origin".to_string(),
-            alice_replica.storage().clone(),
             alice_issuer.clone(),
-            subject.clone(),
+            alice_replica.storage().clone(),
         )
         .await?;
         let mut alice_remote_branch = alice_remote_site
@@ -2798,9 +2789,8 @@ mod tests {
         bob_replica.add_remote(bob_remote_state).await?;
         let bob_remote_site = RemoteSite::load(
             &"origin".to_string(),
-            bob_replica.storage().clone(),
             bob_issuer.clone(),
-            subject.clone(),
+            bob_replica.storage().clone(),
         )
         .await?;
         let mut bob_remote_branch = bob_remote_site
@@ -2854,7 +2844,7 @@ mod tests {
         use dialog_storage::JournaledStorage;
 
         let issuer = Operator::from_passphrase("multi-remote-user");
-        let subject = issuer.did().to_string();
+        let subject = issuer.did().clone();
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let journaled = JournaledStorage::new(backend);
         let mut replica = Replica::open(issuer.clone(), subject.clone(), journaled.clone())?;
@@ -2956,7 +2946,7 @@ mod tests {
 
         let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
         let issuer = Operator::from_passphrase("test-archive-cache");
-        let subject = issuer.did().to_string();
+        let subject = issuer.did().clone();
         let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
             address,
             &s3_address.access_key_id,
@@ -3030,7 +3020,7 @@ mod tests {
         let operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
         let operator_did = operator_signer.did().clone();
         let operator = Operator::from_secret(&operator_signer.signer().to_bytes());
-        let subject = operator.did().to_string();
+        let subject = operator.did().clone();
 
         // Create a delegation chain
         let delegation = create_delegation(
@@ -3108,7 +3098,7 @@ mod tests {
         // with the delegation chain.
         let operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
         let operator_did = operator_signer.did().clone();
-        let subject = operator_did.to_string();
+        let subject: Did = operator_did.into();
 
         // Create an Operator wrapper that uses the UCAN signer's key
         // Note: Operator::did() may produce a different DID format than Ed25519Did,
@@ -3162,9 +3152,8 @@ mod tests {
         // Step 7: Open remote repository with same DID and create remote branch
         let remote_site = RemoteSite::load(
             &"origin".to_string(),
-            local_replica.storage().clone(),
             operator.clone(),
-            subject.clone(),
+            local_replica.storage().clone(),
         )
         .await
         .expect("Failed to load remote site");
@@ -3269,9 +3258,8 @@ mod tests {
 
         let second_remote_site = RemoteSite::load(
             &"origin".to_string(),
-            second_replica.storage().clone(),
             second_operator.clone(),
-            subject.clone(),
+            second_replica.storage().clone(),
         )
         .await
         .expect("Failed to load second remote site");

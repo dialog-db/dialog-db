@@ -127,7 +127,7 @@ pub struct Operator {
 impl Operator {
     /// Create a new operator from an existing signer.
     pub fn new(signer: ucan::did::Ed25519Signer) -> Self {
-        let did = signer.did().to_string();
+        let did: Did = signer.did().into();
         Self { signer, did }
     }
 

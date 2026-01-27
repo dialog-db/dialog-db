@@ -110,12 +110,9 @@ impl UcanAuthorization {
         can: impl Into<String>,
         parameters: Parameters,
     ) -> Self {
-        // Pre-compute and cache the string representations
-        let subject = chain
-            .subject()
-            .map(|did| did.to_string())
-            .unwrap_or_default();
-        let audience = chain.audience().to_string();
+        // Pre-compute and cache the DID representations
+        let subject: Did = chain.subject().map(|did| did.into()).unwrap_or_default();
+        let audience: Did = chain.audience().into();
 
         Self::Delegated {
             endpoint,

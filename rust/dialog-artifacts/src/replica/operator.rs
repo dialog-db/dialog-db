@@ -7,16 +7,22 @@ use dialog_common::Authority;
 pub use dialog_common::capability::Did;
 use dialog_common::capability::Principal as PrincipalTrait;
 
-/// Represents a principal operating a replica.
+/// Operator represents some authorized principal that can operate one or many
+/// replicas through the authorization session. Currently it is used to sign
+/// writes to remotes, but in the future I expect to also be used for signing
+/// db commits to provide provenance.
+///
+/// Operator also offers an entry point interface for working with replicas by
+/// providing `open` method that is used to open specific replica.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Operator {
-    id: String,
+    did: Did,
     key: SigningKey,
     principal: Principal,
 }
 impl std::fmt::Debug for Operator {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.did())
+        write!(f, "{}", self.did())
     }
 }
 
@@ -35,7 +41,7 @@ impl Operator {
         let principal = Principal(key.verifying_key().to_bytes());
 
         Self {
-            id: principal.did(),
+            did: principal.did().into(),
             key,
             principal,
         }
@@ -51,8 +57,8 @@ impl Operator {
     }
 
     /// Returns the DID (Decentralized Identifier) for this issuer.
-    pub fn did(&self) -> &str {
-        &self.id
+    pub fn did(&self) -> &Did {
+        &self.did
     }
 
     /// Returns the principal (public key bytes) for this issuer.
@@ -65,7 +71,9 @@ impl Operator {
         self.key.to_bytes()
     }
 
-    /// Opens a replica with this operator as the issuer.
+    /// Opens a replica with this operator acting as an issuer. If replice with
+    /// a given `subject` already persisted in the given `backend` loads it,
+    /// otherwise creates one and persists it in the given `backend`.
     pub fn open<Backend: PlatformBackend + 'static>(
         &self,
         subject: impl Into<Did>,
@@ -77,7 +85,7 @@ impl Operator {
 
 impl PrincipalTrait for Operator {
     fn did(&self) -> &Did {
-        &self.id
+        &self.did
     }
 }
 

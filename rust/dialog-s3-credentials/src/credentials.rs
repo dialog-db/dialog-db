@@ -4,10 +4,7 @@ use super::s3;
 use super::ucan;
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
-use dialog_common::Authority;
-use dialog_common::capability::{
-    Ability, Access, Authorized, Claim, Did, Effect, Principal, Provider,
-};
+use dialog_common::capability::{Ability, Access, Authorized, Claim, Effect, Provider};
 use dialog_common::{Capability, ConditionalSend};
 
 /// Unified credentials enum supporting multiple authorization backends.
@@ -58,40 +55,3 @@ where
     }
 }
 
-/// Credentials enum acts as its own principal.
-///
-/// For S3 credentials, returns a placeholder DID since S3 doesn't have
-/// cryptographic identity. For UCAN credentials, returns the operator's DID
-/// (the audience of the delegation chain).
-impl Principal for Credentials {
-    fn did(&self) -> &Did {
-        // Use a static string for S3 - it's a placeholder since S3 auth
-        // doesn't depend on the audience DID.
-        static S3_DID: String = String::new();
-        match self {
-            Self::S3(_) => &S3_DID,
-            #[cfg(feature = "ucan")]
-            Self::Ucan(credentials) => credentials.audience_did(),
-        }
-    }
-}
-
-/// Credentials enum implements Authority for the perform() flow.
-///
-/// For S3 credentials, sign() is a no-op since S3 uses its own signing.
-/// For UCAN credentials, this would need actual signing capability.
-impl Authority for Credentials {
-    fn sign(&mut self, _payload: &[u8]) -> Vec<u8> {
-        match self {
-            // S3 doesn't need external signing - it uses AWS SigV4 internally
-            Self::S3(_) => Vec::new(),
-            #[cfg(feature = "ucan")]
-            Self::Ucan(_) => {
-                // UCAN signing requires the operator's secret key, which is
-                // not stored in Credentials. This path should not be reached
-                // in normal usage - UCAN should use a Session with Authority.
-                panic!("UCAN credentials require a Session with Authority for signing")
-            }
-        }
-    }
-}

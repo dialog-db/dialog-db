@@ -36,7 +36,7 @@ use async_trait::async_trait;
 use dialog_common::ConditionalSend;
 use dialog_common::Effect;
 use dialog_common::capability::{
-    Ability, Access, Authorized, Capability, Claim, Parameters, Provider,
+    Ability, Access, Authorized, Capability, Claim, Did, Parameters, Provider,
 };
 
 /// UCAN-based authorizer that delegates to an external access service.
@@ -74,27 +74,26 @@ pub struct Credentials {
     /// The delegation chain proving authority from subject to operator.
     /// Order: first delegation's `aud` matches operator, last delegation's `iss` matches subject.
     delegation: DelegationChain,
-    /// Cached DID string of the operator (audience of first delegation).
-    audience_did: String,
+    /// Cached DID of the operator (audience of first delegation).
+    audience: Did,
 }
 
 impl Credentials {
     pub fn new(endpoint: String, delegation: DelegationChain) -> Self {
-        let audience_did = delegation.audience().to_string();
         Self {
             endpoint,
+            audience: delegation.audience().into(),
             delegation,
-            audience_did,
         }
     }
 
     /// Returns the operator's DID (audience of the delegation chain).
-    pub fn audience_did(&self) -> &String {
-        &self.audience_did
+    pub fn audience(&self) -> &Did {
+        &self.audience
     }
 
     /// Returns the access service URL.
-    pub fn service_url(&self) -> &str {
+    pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
@@ -196,7 +195,7 @@ pub mod tests {
             let signer = ed25519_dalek::SigningKey::from_bytes(secret);
 
             Session {
-                did: Ed25519Signer::from(signer.clone()).did().to_string(),
+                did: Ed25519Signer::from(signer.clone()).did().into(),
                 signer,
                 credentials,
             }

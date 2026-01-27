@@ -2,40 +2,29 @@ pub use super::Replica;
 use super::remote::Site;
 use super::{PlatformBackend, RemoteSite, RemoteState, ReplicaError};
 
-/// Manages remote repositories for synchronization.
+/// Manages remote sites that used for synchronization. Repository may have zero
+/// or more sites configured that can be used to obtain references to remote
+/// branches which in turn can be configured as upstream of the local branches.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Remotes<Backend: PlatformBackend> {
-    /// Adds a new remote repository with the given name and address.
+    /// Adds a new remote site with the given name and credentials.
     async fn add_remote(&mut self, remote: RemoteState) -> Result<Site, ReplicaError>;
-    /// Loads an existing remote repository by name.
+    /// Loads already added remote site by name.
     async fn load_remote(&mut self, site: &Site) -> Result<RemoteState, ReplicaError>;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<Backend: PlatformBackend + 'static> Remotes<Backend> for Replica<Backend> {
-    /// Adds a new remote repository with the given name and address.
     async fn add_remote(&mut self, state: RemoteState) -> Result<Site, ReplicaError> {
         let site = state.site.clone();
-        RemoteSite::add(
-            state,
-            self.storage().clone(),
-            self.issuer().clone(),
-            self.subject().clone(),
-        )
-        .await?;
+        RemoteSite::add(state, self.issuer().clone(), self.storage().clone()).await?;
         Ok(site)
     }
 
     async fn load_remote(&mut self, site: &Site) -> Result<RemoteState, ReplicaError> {
-        let remote = RemoteSite::load(
-            site,
-            self.storage().clone(),
-            self.issuer().clone(),
-            self.subject().clone(),
-        )
-        .await?;
+        let remote = RemoteSite::load(site, self.issuer().clone(), self.storage().clone()).await?;
         remote.state().ok_or_else(|| ReplicaError::RemoteNotFound {
             remote: site.clone(),
         })
