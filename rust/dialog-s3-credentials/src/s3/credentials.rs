@@ -431,35 +431,31 @@ pub enum Credentials {
     Private(PrivateCredentials),
 }
 
+impl From<PublicCredentials> for Credentials {
+    fn from(credentials: PublicCredentials) -> Self {
+        Self::Public(credentials)
+    }
+}
+
+impl From<PrivateCredentials> for Credentials {
+    fn from(credentials: PrivateCredentials) -> Self {
+        Self::Private(credentials)
+    }
+}
+
 impl Credentials {
     /// Create public credentials for unsigned access.
-    ///
-    /// # Arguments
-    ///
-    /// * `address` - S3 address (endpoint, region, bucket)
-    /// * `subject` - Subject DID used as path prefix within the bucket
     pub fn public(address: Address) -> Result<Self, AccessError> {
-        Ok(Self::Public(PublicCredentials::new(address)?))
+        Ok(PublicCredentials::new(address)?.into())
     }
 
     /// Create private credentials with AWS SigV4 signing.
-    ///
-    /// # Arguments
-    ///
-    /// * `address` - S3 address (endpoint, region, bucket)
-    /// * `subject` - Subject DID used as path prefix within the bucket
-    /// * `access_key_id` - AWS Access Key ID
-    /// * `secret_access_key` - AWS Secret Access Key
     pub fn private(
         address: Address,
         access_key_id: impl Into<String>,
         secret_access_key: impl Into<String>,
     ) -> Result<Self, AccessError> {
-        Ok(Self::Private(PrivateCredentials::new(
-            address,
-            access_key_id,
-            secret_access_key,
-        )?))
+        Ok(PrivateCredentials::new(address, access_key_id, secret_access_key)?.into())
     }
 
     /// Set whether to use path-style URLs.
