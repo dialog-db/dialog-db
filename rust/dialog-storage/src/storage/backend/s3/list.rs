@@ -75,7 +75,8 @@ where
     /// # Example
     ///
     /// ```no_run
-    /// use dialog_common::{Authority, capability::{Did, Principal}};
+    /// # use async_trait::async_trait;
+    /// use dialog_common::{Authority, capability::{Did, Principal, SignError}};
     /// use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
     ///
     /// #[derive(Clone)]
@@ -83,8 +84,10 @@ where
     /// impl Principal for Issuer {
     ///     fn did(&self) -> &Did { &self.0 }
     /// }
+    /// # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    /// # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     /// impl Authority for Issuer {
-    ///     fn sign(&mut self, _: &[u8]) -> Vec<u8> { Vec::new() }
+    ///     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, SignError> { Ok(Vec::new()) }
     ///     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
     /// }
     ///

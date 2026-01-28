@@ -3,9 +3,10 @@ use super::principal::Principal;
 use super::{
     Formatter, PlatformBackend, ReplicaError, SECRET_KEY_LENGTH, Signature, SignerMut, SigningKey,
 };
+use async_trait::async_trait;
 use dialog_common::Authority;
 pub use dialog_common::capability::Did;
-use dialog_common::capability::Principal as PrincipalTrait;
+use dialog_common::capability::{Principal as PrincipalTrait, SignError};
 
 /// Operator represents some authorized principal that can operate one or many
 /// replicas through the authorization session. Currently it is used to sign
@@ -89,9 +90,11 @@ impl PrincipalTrait for Operator {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Authority for Operator {
-    fn sign(&mut self, payload: &[u8]) -> Vec<u8> {
-        self.key.sign(payload).to_bytes().to_vec()
+    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, SignError> {
+        Ok(self.key.sign(payload).to_bytes().to_vec())
     }
 
     fn secret_key_bytes(&self) -> Option<[u8; 32]> {

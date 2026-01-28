@@ -8,9 +8,10 @@
 //! - Server implementation (native-only, in the `server` submodule)
 //! - UCAN access service (native-only, requires `ucan` feature)
 //! - Test issuer types for capability-based testing
+use async_trait::async_trait;
 use dialog_common::{
     Authority,
-    capability::{Did, Principal},
+    capability::{Did, Principal, SignError},
 };
 use serde::{Deserialize, Serialize};
 
@@ -89,10 +90,12 @@ impl Principal for Session {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Authority for Session {
-    fn sign(&mut self, _payload: &[u8]) -> Vec<u8> {
+    async fn sign(&mut self, _payload: &[u8]) -> Result<Vec<u8>, SignError> {
         // S3 direct access uses SigV4 signing, not external signatures
-        Vec::new()
+        Ok(Vec::new())
     }
 
     fn secret_key_bytes(&self) -> Option<[u8; 32]> {
@@ -151,10 +154,12 @@ impl Principal for Operator {
 }
 
 #[cfg(feature = "ucan")]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Authority for Operator {
-    fn sign(&mut self, payload: &[u8]) -> Vec<u8> {
+    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, SignError> {
         use ed25519_dalek::Signer;
-        self.signer.signer().sign(payload).to_vec()
+        Ok(self.signer.signer().sign(payload).to_vec())
     }
 
     fn secret_key_bytes(&self) -> Option<[u8; 32]> {
