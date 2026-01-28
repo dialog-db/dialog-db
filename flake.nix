@@ -41,7 +41,7 @@
           with pkgs;
           rustPlatform.buildRustPackage rec {
             pname = "wasm-bindgen-cli";
-            version = "0.2.100";
+            version = "0.2.108";
             buildInputs =
               [ rust-bin.stable.latest.default ]
               ++ lib.optionals stdenv.isDarwin [
@@ -51,10 +51,10 @@
 
             src = fetchCrate {
               inherit pname version;
-              sha256 = "sha256-3RJzK7mkYFrs7C/WkhW9Rr4LdP5ofb2FdYGz1P7Uxog=";
+              sha256 = "sha256-UsuxILm1G6PkmVw0I/JF12CRltAfCJQFOaT4hFwvR8E=";
             };
 
-            cargoHash = "sha256-qsO12332HSjWCVKtf1cUePWWb9IdYUmT+8OPj/XP2WE=";
+            cargoHash = "sha256-iqQiWbsKlLBiJFeqIYiXo3cqxGLSjNM8SOWXGM9u43E=";
             useFetchCargoVendor = true;
           };
 
@@ -134,7 +134,10 @@
             nativeBuildInputs = common-build-inputs "stable";
             cargoLock = {
               lockFile = ./Cargo.lock;
-              outputHashes = { };
+              outputHashes = {
+                "ucan-0.5.0" = "sha256-5KQ7wIXv7PHgd6y1pq0+aUU/VFW7BLxECmVUNk1JfGw=";
+                "varsig-0.1.0" = "sha256-5KQ7wIXv7PHgd6y1pq0+aUU/VFW7BLxECmVUNk1JfGw=";
+              };
             };
           };
 

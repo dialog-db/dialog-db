@@ -39,7 +39,7 @@ macro_rules! reference_type {
                 Ok(Self(value.try_into().map_err(|value: Vec<u8>| {
                     crate::DialogArtifactsError::InvalidReference(format!(
                         "Incorrect length (expected {}, got {})",
-                        crate::HASH_SIZE,
+                        Blake3Hash::SIZE,
                         value.len()
                     ))
                 })?))

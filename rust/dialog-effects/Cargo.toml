@@ -1,0 +1,27 @@
+[package]
+name = "dialog-effects"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+ucan = ["dep:ipld-core", "dep:ucan"]
+
+[dependencies]
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+
+# Optional UCAN support
+ipld-core = { workspace = true, optional = true }
+ucan = { workspace = true, optional = true }
+
+[dev-dependencies]
+ipld-core = { workspace = true }
+
+[lints.rust]
+missing_docs = "warn"

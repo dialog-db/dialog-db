@@ -239,7 +239,7 @@ where
     type Edition = ContentHash;
 
     async fn resolve(
-        &self,
+        &mut self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
         let path = self.make_path(address)?;
@@ -255,7 +255,7 @@ where
     }
 
     async fn replace(
-        &self,
+        &mut self,
         address: &Self::Address,
         edition: Option<&Self::Edition>,
         content: Option<Self::Value>,
@@ -384,7 +384,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_none_for_non_existent_key() -> Result<()> {
-        let (backend, _tempdir) = make_backend().await?;
+        let (mut backend, _tempdir) = make_backend().await?;
 
         let result = backend.get(&"missing".to_string()).await?;
         assert!(result.is_none());
@@ -491,7 +491,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_resolves_non_existent_address() -> Result<()> {
-        let (backend, _tempdir) = make_backend().await?;
+        let (mut backend, _tempdir) = make_backend().await?;
 
         let result = backend.resolve(&"missing".to_string()).await?;
         assert!(result.is_none());
@@ -500,7 +500,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_creates_new_value() -> Result<()> {
-        let (backend, _tempdir) = make_backend().await?;
+        let (mut backend, _tempdir) = make_backend().await?;
 
         // Create new value (edition = None means "expect not to exist")
         let content = b"hello world".to_vec();
@@ -521,7 +521,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_updates_existing_value() -> Result<()> {
-        let (backend, _tempdir) = make_backend().await?;
+        let (mut backend, _tempdir) = make_backend().await?;
 
         // Create initial value
         let initial = b"initial".to_vec();
@@ -551,7 +551,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_on_edition_mismatch() -> Result<()> {
-        let (backend, _tempdir) = make_backend().await?;
+        let (mut backend, _tempdir) = make_backend().await?;
 
         // Create initial value
         let initial = b"initial".to_vec();
@@ -576,7 +576,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_creating_when_exists() -> Result<()> {
-        let (backend, _tempdir) = make_backend().await?;
+        let (mut backend, _tempdir) = make_backend().await?;
 
         // Create initial value
         backend
@@ -594,7 +594,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_deletes_value() -> Result<()> {
-        let (backend, _tempdir) = make_backend().await?;
+        let (mut backend, _tempdir) = make_backend().await?;
 
         // Create value
         let edition = backend
@@ -617,7 +617,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_subdirectory_addresses() -> Result<()> {
-        let (backend, tempdir) = make_backend().await?;
+        let (mut backend, tempdir) = make_backend().await?;
 
         // Create subdirectory structure
         let subdir = tempdir.path().join("subdir");
@@ -646,7 +646,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_rejects_invalid_utf8_address() -> Result<()> {
         let tempdir = tempfile::tempdir()?;
-        let backend = FileSystemStorageBackend::<Vec<u8>, Vec<u8>>::new(tempdir.path()).await?;
+        let mut backend = FileSystemStorageBackend::<Vec<u8>, Vec<u8>>::new(tempdir.path()).await?;
 
         // Invalid UTF-8 bytes
         let invalid_address = vec![0xff, 0xfe];
@@ -659,7 +659,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_succeeds_with_stale_edition_when_value_matches() -> Result<()> {
-        let (backend, _tempdir) = make_backend().await?;
+        let (mut backend, _tempdir) = make_backend().await?;
 
         // Create initial value
         let content = b"desired value".to_vec();
@@ -685,7 +685,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_succeeds_deleting_already_deleted() -> Result<()> {
-        let (backend, _tempdir) = make_backend().await?;
+        let (mut backend, _tempdir) = make_backend().await?;
 
         // Try to delete non-existent key with wrong edition - should succeed
         let wrong_edition = content_hash(b"wrong");
