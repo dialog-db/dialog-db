@@ -26,7 +26,6 @@ pub struct PublicCredentials {
     /// S3 address (endpoint, region, bucket)
     address: Address,
     /// Parsed endpoint URL
-    #[allow(dead_code)]
     endpoint: Url,
     /// Whether to use path-style URLs
     path_style: bool,
@@ -91,6 +90,11 @@ impl PublicCredentials {
         self.address.bucket()
     }
 
+    /// Get the endpoint URL.
+    pub fn endpoint(&self) -> &str {
+        self.address.endpoint()
+    }
+
     /// Build a URL for the given key path.
     pub fn build_url(&self, path: &str) -> Result<Url, AccessError> {
         build_url(&self.endpoint, self.address.bucket(), path, self.path_style)
@@ -145,7 +149,6 @@ pub struct PrivateCredentials {
     /// S3 address (endpoint, region, bucket)
     address: Address,
     /// Parsed endpoint URL
-    #[allow(dead_code)]
     endpoint: Url,
     /// Whether to use path-style URLs
     path_style: bool,
@@ -230,6 +233,11 @@ impl PrivateCredentials {
     /// Get the bucket name.
     pub fn bucket(&self) -> &str {
         self.address.bucket()
+    }
+
+    /// Get the endpoint URL.
+    pub fn endpoint(&self) -> &str {
+        self.address.endpoint()
     }
 
     /// Build a URL for the given key path.
@@ -423,35 +431,31 @@ pub enum Credentials {
     Private(PrivateCredentials),
 }
 
+impl From<PublicCredentials> for Credentials {
+    fn from(credentials: PublicCredentials) -> Self {
+        Self::Public(credentials)
+    }
+}
+
+impl From<PrivateCredentials> for Credentials {
+    fn from(credentials: PrivateCredentials) -> Self {
+        Self::Private(credentials)
+    }
+}
+
 impl Credentials {
     /// Create public credentials for unsigned access.
-    ///
-    /// # Arguments
-    ///
-    /// * `address` - S3 address (endpoint, region, bucket)
-    /// * `subject` - Subject DID used as path prefix within the bucket
     pub fn public(address: Address) -> Result<Self, AccessError> {
-        Ok(Self::Public(PublicCredentials::new(address)?))
+        Ok(PublicCredentials::new(address)?.into())
     }
 
     /// Create private credentials with AWS SigV4 signing.
-    ///
-    /// # Arguments
-    ///
-    /// * `address` - S3 address (endpoint, region, bucket)
-    /// * `subject` - Subject DID used as path prefix within the bucket
-    /// * `access_key_id` - AWS Access Key ID
-    /// * `secret_access_key` - AWS Secret Access Key
     pub fn private(
         address: Address,
         access_key_id: impl Into<String>,
         secret_access_key: impl Into<String>,
     ) -> Result<Self, AccessError> {
-        Ok(Self::Private(PrivateCredentials::new(
-            address,
-            access_key_id,
-            secret_access_key,
-        )?))
+        Ok(PrivateCredentials::new(address, access_key_id, secret_access_key)?.into())
     }
 
     /// Set whether to use path-style URLs.
@@ -478,6 +482,14 @@ impl Credentials {
         }
     }
 
+    /// Get the endpoint URL.
+    pub fn endpoint(&self) -> &str {
+        match self {
+            Self::Public(c) => c.endpoint(),
+            Self::Private(c) => c.endpoint(),
+        }
+    }
+
     /// Build a URL for the given key path.
     pub fn build_url(&self, path: &str) -> Result<Url, AccessError> {
         match self {
@@ -493,21 +505,6 @@ impl Credentials {
             Self::Public(public) => public.grant(request).await,
             Self::Private(private) => private.grant(request).await,
         }
-    }
-}
-
-/// Constant DID used as the principal for S3 credentials.
-///
-/// S3 credentials don't have an inherent identity, so we use a constant
-/// placeholder. This is used as the `audience` when acquiring authorization.
-const S3_PRINCIPAL_DID: &str = "did:s3:credentials";
-
-impl dialog_common::capability::Principal for Credentials {
-    fn did(&self) -> &dialog_common::capability::Did {
-        // S3 credentials use a constant DID since they don't have a cryptographic identity
-        // This is safe because S3 authorization doesn't verify delegation chains
-        static DID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        DID.get_or_init(|| S3_PRINCIPAL_DID.to_string())
     }
 }
 

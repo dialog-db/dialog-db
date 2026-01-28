@@ -1,15 +1,12 @@
 //! Authorized capability type.
 
-use super::constraint::Constraint;
-use super::interface::Capability;
-use super::provider::Provider;
-use super::{Authority, Authorization, AuthorizationError};
+use super::{Authority, Authorization, AuthorizationError, Capability, Constraint, Provider};
 use std::error::Error;
 
 /// A capability paired with its authorization proof.
 ///
 /// `Authorized` bundles a capability with proof that the invoker has
-/// permission to execute it. This is the input to authorized `Provider`
+/// permission to execute it. This is the input to authorized [`Provider`]
 /// implementations.
 ///
 /// - `C` is the constraint type (e.g., `storage::Get`)

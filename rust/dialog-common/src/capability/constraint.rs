@@ -1,9 +1,6 @@
 //! Constraint trait for deriving capability chain types.
 
-use super::ability::Ability;
-use super::constrained::Constrained;
-use super::policy::Policy;
-use super::subject::Subject;
+use super::{Ability, Constrained, Policy, Subject};
 
 /// Trait for deriving capability constrain chain type from an individual
 /// constraints of the chain.

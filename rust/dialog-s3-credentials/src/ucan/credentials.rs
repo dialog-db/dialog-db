@@ -29,14 +29,13 @@
 //! # }
 //! ```
 
-use super::authorization::UcanAuthorization;
-use super::delegation::DelegationChain;
+use super::{DelegationChain, UcanAuthorization};
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
 use dialog_common::ConditionalSend;
 use dialog_common::Effect;
 use dialog_common::capability::{
-    Ability, Access, Authorized, Capability, Claim, Parameters, Provider,
+    Ability, Access, Authorized, Capability, Claim, Did, Parameters, Provider,
 };
 
 /// UCAN-based authorizer that delegates to an external access service.
@@ -74,27 +73,26 @@ pub struct Credentials {
     /// The delegation chain proving authority from subject to operator.
     /// Order: first delegation's `aud` matches operator, last delegation's `iss` matches subject.
     delegation: DelegationChain,
-    /// Cached DID string of the operator (audience of first delegation).
-    audience_did: String,
+    /// Cached DID of the operator (audience of first delegation).
+    audience: Did,
 }
 
 impl Credentials {
     pub fn new(endpoint: String, delegation: DelegationChain) -> Self {
-        let audience_did = delegation.audience().to_string();
         Self {
             endpoint,
+            audience: delegation.audience().into(),
             delegation,
-            audience_did,
         }
     }
 
     /// Returns the operator's DID (audience of the delegation chain).
-    pub fn audience_did(&self) -> &String {
-        &self.audience_did
+    pub fn audience(&self) -> &Did {
+        &self.audience
     }
 
     /// Returns the access service URL.
-    pub fn service_url(&self) -> &str {
+    pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
@@ -138,7 +136,7 @@ impl Access for Credentials {
         Ok(UcanAuthorization::delegated(
             self.endpoint.clone(),
             self.delegation.clone(),
-            claim.capability().command(),
+            claim.capability().ability(),
             parameters,
         ))
     }
@@ -164,9 +162,9 @@ where
 
 #[cfg(test)]
 pub mod tests {
-    use super::super::delegation::tests::create_delegation;
     use super::*;
     use crate::capability::archive;
+    use crate::ucan::delegation::tests::create_delegation;
     use anyhow;
     use dialog_common::capability::{Did, Principal, Subject};
     use dialog_common::{Authority, Authorization, Blake3Hash};
@@ -178,10 +176,10 @@ pub mod tests {
     pub fn test_delegation_chain(
         subject_signer: &ucan::did::Ed25519Signer,
         operator_did: &Ed25519Did,
-        can: &[&str],
+        ability: &[&str],
     ) -> DelegationChain {
         let subject_did = subject_signer.did().clone();
-        let delegation = create_delegation(subject_signer, operator_did, &subject_did, can)
+        let delegation = create_delegation(subject_signer, operator_did, &subject_did, ability)
             .expect("Failed to create test delegation");
         DelegationChain::new(delegation)
     }
@@ -196,7 +194,7 @@ pub mod tests {
             let signer = ed25519_dalek::SigningKey::from_bytes(secret);
 
             Session {
-                did: Ed25519Signer::from(signer.clone()).did().to_string(),
+                did: Ed25519Signer::from(signer.clone()).did().into(),
                 signer,
                 credentials,
             }
@@ -221,9 +219,14 @@ pub mod tests {
             &self.did
         }
     }
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl Authority for Session {
-        fn sign(&mut self, payload: &[u8]) -> Vec<u8> {
-            self.signer.sign(payload).to_vec()
+        async fn sign(
+            &mut self,
+            payload: &[u8],
+        ) -> Result<Vec<u8>, dialog_common::capability::SignError> {
+            Ok(self.signer.sign(payload).to_vec())
         }
         fn secret_key_bytes(&self) -> Option<[u8; 32]> {
             self.signer.to_bytes().into()

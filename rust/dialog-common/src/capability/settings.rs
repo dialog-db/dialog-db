@@ -1,5 +1,3 @@
-//! Settings trait for capability parameter serialization.
-
 #[cfg(feature = "ucan")]
 use ipld_core::{ipld::Ipld, serde::to_ipld};
 use serde::Serialize;

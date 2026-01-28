@@ -5,7 +5,7 @@
 
 use std::marker::PhantomData;
 
-use super::subject::Subject;
+use super::Subject;
 
 /// Using an empty enum makes it impossible to construct, clearly indicating
 /// values that can not exist.

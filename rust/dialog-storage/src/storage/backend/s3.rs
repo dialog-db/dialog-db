@@ -16,18 +16,21 @@
 //! For publicly accessible buckets that don't require authentication:
 //!
 //! ```no_run
-//! use dialog_common::{Authority, capability::{Did, Principal}};
+//! # use async_trait::async_trait;
+//! use dialog_common::{Authority, capability::{Did, Principal, SignError}};
 //! use dialog_storage::s3::{Address, S3, S3Credentials};
 //! use dialog_storage::capability::{storage, Provider, Subject};
 //!
 //! // Define an issuer type for capability-based access
 //! #[derive(Clone)]
-//! struct Issuer(String);
+//! struct Issuer(Did);
 //! impl Principal for Issuer {
 //!     fn did(&self) -> &Did { &self.0 }
 //! }
+//! # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+//! # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 //! impl Authority for Issuer {
-//!     fn sign(&mut self, _: &[u8]) -> Vec<u8> { Vec::new() }
+//!     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, SignError> { Ok(Vec::new()) }
 //!     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
 //! }
 //!
@@ -39,7 +42,7 @@
 //!     "my-bucket",
 //! );
 //! let credentials = S3Credentials::public(address)?;
-//! let issuer = Issuer("did:key:zMyIssuer".into());
+//! let issuer = Issuer(Did::from("did:key:zMyIssuer"));
 //! let mut bucket = S3::from_s3(credentials, issuer);
 //!
 //! // Use capability-based access with subject DID as the root
@@ -60,17 +63,20 @@
 //! ## Authorized Access (Credentials based Authentication)
 //!
 //! ```no_run
-//! use dialog_common::{Authority, capability::{Did, Principal}};
+//! # use async_trait::async_trait;
+//! use dialog_common::{Authority, capability::{Did, Principal, SignError}};
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //! use dialog_storage::capability::{storage, Provider, Subject};
 //!
 //! # #[derive(Clone)]
-//! # struct Issuer(String);
+//! # struct Issuer(Did);
 //! # impl Principal for Issuer {
 //! #     fn did(&self) -> &Did { &self.0 }
 //! # }
+//! # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+//! # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 //! # impl Authority for Issuer {
-//! #     fn sign(&mut self, _: &[u8]) -> Vec<u8> { Vec::new() }
+//! #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, SignError> { Ok(Vec::new()) }
 //! #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
 //! # }
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -85,7 +91,7 @@
 //!     std::env::var("AWS_SECRET_ACCESS_KEY")?,
 //! )?;
 //!
-//! let issuer = Issuer("did:key:zMyIssuer".into());
+//! let issuer = Issuer(Did::from("did:key:zMyIssuer"));
 //! let mut bucket = S3::from_s3(credentials, issuer);
 //!
 //! // Subject DID identifies whose data we're accessing
@@ -106,16 +112,19 @@
 //! ## Cloudflare R2
 //!
 //! ```no_run
-//! use dialog_common::{Authority, capability::{Did, Principal}};
+//! # use async_trait::async_trait;
+//! use dialog_common::{Authority, capability::{Did, Principal, SignError}};
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //!
 //! # #[derive(Clone)]
-//! # struct Issuer(String);
+//! # struct Issuer(Did);
 //! # impl Principal for Issuer {
 //! #     fn did(&self) -> &Did { &self.0 }
 //! # }
+//! # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+//! # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 //! # impl Authority for Issuer {
-//! #     fn sign(&mut self, _: &[u8]) -> Vec<u8> { Vec::new() }
+//! #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, SignError> { Ok(Vec::new()) }
 //! #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
 //! # }
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -131,7 +140,7 @@
 //!     std::env::var("R2_SECRET_ACCESS_KEY")?,
 //! )?;
 //!
-//! let issuer = Issuer("did:key:zMyIssuer".into());
+//! let issuer = Issuer(Did::from("did:key:zMyIssuer"));
 //! let bucket = S3::from_s3(credentials, issuer);
 //! # Ok(())
 //! # }
@@ -140,23 +149,26 @@
 //! ## Local Development (MinIO)
 //!
 //! ```no_run
-//! use dialog_common::{Authority, capability::{Did, Principal}};
+//! # use async_trait::async_trait;
+//! use dialog_common::{Authority, capability::{Did, Principal, SignError}};
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //!
 //! # #[derive(Clone)]
-//! # struct Issuer(String);
+//! # struct Issuer(Did);
 //! # impl Principal for Issuer {
 //! #     fn did(&self) -> &Did { &self.0 }
 //! # }
+//! # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+//! # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 //! # impl Authority for Issuer {
-//! #     fn sign(&mut self, _: &[u8]) -> Vec<u8> { Vec::new() }
+//! #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, SignError> { Ok(Vec::new()) }
 //! #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
 //! # }
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // IP addresses and localhost automatically use path-style URLs
 //! let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
 //! let credentials = S3Credentials::private(address, "minioadmin", "minioadmin")?;
-//! let issuer = Issuer("did:key:zMyIssuer".into());
+//! let issuer = Issuer(Did::from("did:key:zMyIssuer"));
 //! let bucket = S3::from_s3(credentials, issuer);
 //! // path_style is true by default for IP addresses and localhost
 //! # Ok(())
@@ -175,7 +187,8 @@ use async_trait::async_trait;
 use dialog_common::{
     Authority, Bytes, ConditionalSend, ConditionalSync,
     capability::{
-        Ability, Access, Authorized, Capability, Claim, Did, Effect, Principal, Provider, Subject,
+        Ability, Access, Authorized, Capability, Claim, Did, Effect, Principal, Provider,
+        SignError, Subject,
     },
 };
 use thiserror::Error;
@@ -350,9 +363,11 @@ impl<Issuer: Principal> Principal for S3<Issuer> {
 }
 
 // Implement Authority for S3 by delegating to the issuer
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer: Authority> Authority for S3<Issuer> {
-    fn sign(&mut self, payload: &[u8]) -> Vec<u8> {
-        self.issuer.sign(payload)
+    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, SignError> {
+        self.issuer.sign(payload).await
     }
 
     fn secret_key_bytes(&self) -> Option<[u8; 32]> {
@@ -920,25 +935,28 @@ where
 /// # Example
 ///
 /// ```no_run
-/// use dialog_common::{Authority, capability::{Did, Principal}};
+/// # use async_trait::async_trait;
+/// use dialog_common::{Authority, capability::{Did, Principal, SignError}};
 /// use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
 /// use dialog_storage::StorageBackend;
 ///
 /// // Define an issuer type for capability-based access
 /// #[derive(Clone)]
-/// struct Issuer(String);
+/// struct Issuer(Did);
 /// impl Principal for Issuer {
 ///     fn did(&self) -> &Did { &self.0 }
 /// }
+/// # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+/// # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 /// impl Authority for Issuer {
-///     fn sign(&mut self, _: &[u8]) -> Vec<u8> { Vec::new() }
+///     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, SignError> { Ok(Vec::new()) }
 ///     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
 /// }
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
 /// let credentials = S3Credentials::public(address)?;
-/// let issuer = Issuer("did:key:zMyIssuer".into());
+/// let issuer = Issuer(Did::from("did:key:zMyIssuer"));
 /// let bucket = S3::from_s3(credentials, issuer);
 ///
 /// // Create a scoped bucket for StorageBackend operations
@@ -1004,21 +1022,24 @@ where
     /// # Example
     ///
     /// ```no_run
+    /// # use async_trait::async_trait;
     /// # use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
     /// # use dialog_storage::StorageBackend;
-    /// # use dialog_common::{Authority, capability::{Did, Principal}};
+    /// # use dialog_common::{Authority, capability::{Did, Principal, SignError}};
     /// #
     /// # #[derive(Clone)]
-    /// # struct Issuer(String);
+    /// # struct Issuer(Did);
     /// # impl Principal for Issuer { fn did(&self) -> &Did { &self.0 } }
+    /// # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    /// # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     /// # impl Authority for Issuer {
-    /// #     fn sign(&mut self, _: &[u8]) -> Vec<u8> { Vec::new() }
+    /// #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, SignError> { Ok(Vec::new()) }
     /// #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
     /// # }
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
     /// # let credentials = S3Credentials::public(address)?;
-    /// # let issuer = Issuer("did:key:zMyIssuer".into());
+    /// # let issuer = Issuer(Did::from("did:key:zMyIssuer"));
     /// # let s3 = S3::from_s3(credentials, issuer);
     /// # let mut bucket = Bucket::new(s3, "did:key:zSubject", "store");
     /// // First set a value
@@ -1054,9 +1075,11 @@ impl<Issuer: Principal> Principal for Bucket<Issuer> {
 }
 
 // Forward Authority trait to the underlying bucket
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer: Authority> Authority for Bucket<Issuer> {
-    fn sign(&mut self, payload: &[u8]) -> Vec<u8> {
-        self.bucket.sign(payload)
+    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, SignError> {
+        self.bucket.sign(payload).await
     }
 
     fn secret_key_bytes(&self) -> Option<[u8; 32]> {

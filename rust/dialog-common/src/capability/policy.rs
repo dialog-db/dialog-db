@@ -1,10 +1,5 @@
-//! Policy trait for capability restrictions.
-
-use super::ability::Ability;
-use super::constrained::Constrained;
-use super::constraint::Constraint;
-use super::selector::Selector;
 use super::settings::Settings;
+use super::{Ability, Constrained, Constraint, Selector};
 
 /// Trait for policy types that restrict capabilities.
 ///
@@ -12,7 +7,7 @@ use super::settings::Settings;
 /// with a capability. Implement this for types that don't contribute to
 /// the command path.
 ///
-/// For types that contribute to the command path, implement `Attenuation`
+/// For types that contribute to the command path, implement [`Attenuation`]
 /// instead (which provides `Policy` via blanket impl).
 pub trait Policy: Sized + Settings {
     /// The capability this policy restricts.

@@ -3,13 +3,9 @@
 //! `Constrained` wraps a constraint with its parent capability,
 //! forming a chain from Subject through policies and abilities.
 
-use super::ability::Ability;
-use super::constraint::Constraint;
-use super::effect::Effect;
-use super::interface::Capability;
-use super::policy::Policy;
-use super::provider::Provider;
-use super::selector::{Here, Selector, There};
+use super::{
+    Ability, Capability, Constraint, Did, Effect, Here, Policy, Provider, Selector, There,
+};
 
 /// A capability chain element - constraint applied to a parent capability.
 ///
@@ -61,15 +57,13 @@ impl<P: Policy, Of: Ability> Constrained<P, Of> {
     }
 
     /// Get the subject DID from the capability chain.
-    pub fn subject(&self) -> &super::subject::Did {
+    pub fn subject(&self) -> &Did {
         Ability::subject(self)
     }
 
-    /// Get the command path (ability).
-    ///
-    /// Alias for the `Ability::command()` method.
+    /// Get the ability path (e.g., `/storage/get`).
     pub fn ability(&self) -> String {
-        Ability::command(self)
+        Ability::ability(self)
     }
 
     /// Add an effect to create an invocation capability.

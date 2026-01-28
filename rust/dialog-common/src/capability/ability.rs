@@ -1,16 +1,9 @@
-//! Ability trait for capability chains.
-//!
-//! The `Ability` trait is the abstract interface for all capability chain types,
-//! providing access to the subject DID and command path.
-
-use super::constrained::Constrained;
-use super::policy::Policy;
-use super::subject::{Did, Subject};
+use super::{Constrained, Did, Policy, Subject};
 
 #[cfg(feature = "ucan")]
-use super::settings::Parameters;
+use super::Parameters;
 
-/// Trait for representing an abstract capability (subject + command path).
+/// Trait for representing an abstract capability (subject + ability path).
 ///
 /// Implemented by `Subject` and all the `Constrained<P, Of>` chains
 /// that stem from it.
@@ -19,9 +12,9 @@ pub trait Ability: Sized {
     /// and a root issuer of this capability.
     fn subject(&self) -> &Did;
 
-    /// Command path representing a level of access this capability
-    /// has over the `subject` resource.
-    fn command(&self) -> String;
+    /// Ability path representing a level of access this capability
+    /// has over the `subject` resource (e.g., `/storage/get`, `/memory/publish`).
+    fn ability(&self) -> String;
 
     /// Collects parameters into given settings
     #[cfg(feature = "ucan")]
@@ -29,13 +22,13 @@ pub trait Ability: Sized {
 }
 
 /// Subject represents unconstrained capability, hence
-/// the `/` for command.
+/// the `/` for ability.
 impl Ability for Subject {
     fn subject(&self) -> &Did {
         &self.0
     }
 
-    fn command(&self) -> String {
+    fn ability(&self) -> String {
         "/".into()
     }
 
@@ -54,17 +47,17 @@ where
         self.capability.subject()
     }
 
-    fn command(&self) -> String {
-        let command = self.capability.command();
-        // policy may restrinct capability space or just
+    fn ability(&self) -> String {
+        let ability = self.capability.ability();
+        // policy may restrict capability space or just
         if let Some(segment) = P::attenuation() {
-            if command == "/" {
+            if ability == "/" {
                 format!("/{}", segment.to_lowercase())
             } else {
-                format!("{}/{}", command, segment.to_lowercase())
+                format!("{}/{}", ability, segment.to_lowercase())
             }
         } else {
-            command
+            ability
         }
     }
 

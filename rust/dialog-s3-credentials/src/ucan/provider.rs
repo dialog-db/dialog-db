@@ -63,7 +63,7 @@
 
 use std::collections::BTreeMap;
 
-use super::invocation::InvocationChain;
+use super::InvocationChain;
 use crate::capability::{AccessError, AuthorizedRequest};
 use crate::capability::{archive, memory, storage};
 use crate::s3::Credentials;
@@ -407,10 +407,10 @@ fn parse_checksum(
 
 #[cfg(test)]
 mod tests {
-    use super::super::credentials::tests::{Session, test_delegation_chain};
-    use super::super::{Credentials, UcanAuthorization};
     use super::*;
     use crate::ucan::InvocationChain;
+    use crate::ucan::credentials::tests::{Session, test_delegation_chain};
+    use crate::ucan::{Credentials, UcanAuthorization};
     use crate::{Address, s3};
     use base58::ToBase58;
     use dialog_common::capability::Principal;

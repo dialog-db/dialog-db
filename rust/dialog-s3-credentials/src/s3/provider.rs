@@ -20,13 +20,13 @@ impl Access for Credentials {
         &self,
         claim: Claim<C>,
     ) -> Result<Self::Authorization, Self::Error> {
-        // Authorization captures credentials so that pre-singed URL can
+        // Authorization captures credentials so that pre-signed URL can
         // be issued when requested
         Ok(S3Authorization::new(
             self.clone(),
             claim.subject().clone(),
             claim.audience().clone(),
-            claim.command(),
+            claim.ability(),
         ))
     }
 }
@@ -90,8 +90,6 @@ mod tests {
         let address = Address::new("http://localhost:9000", "us-east-1", "test-bucket");
         Credentials::public(address).unwrap()
     }
-
-    // ==================== Storage Operations ====================
 
     #[dialog_common::test]
     async fn it_generates_correct_url_for_storage_get() {
@@ -236,8 +234,6 @@ mod tests {
         assert_eq!(cont_token.unwrap().1, token);
     }
 
-    // ==================== Memory Operations ====================
-
     #[dialog_common::test]
     async fn it_generates_correct_url_for_memory_resolve() {
         let mut creds = public_creds();
@@ -330,8 +326,6 @@ mod tests {
             format!("/{}/did:key:zOwner/temp", TEST_SUBJECT)
         );
     }
-
-    // ==================== Archive Operations ====================
 
     #[dialog_common::test]
     async fn it_generates_correct_url_for_archive_get() {
@@ -463,8 +457,6 @@ mod tests {
         assert!(query.iter().any(|(k, _)| k == "X-Amz-Signature"));
     }
 
-    // ==================== URL Styles ====================
-
     #[dialog_common::test]
     async fn it_uses_virtual_hosted_style_for_aws() {
         let mut creds = public_creds();
@@ -496,8 +488,6 @@ mod tests {
         assert!(req.url.path().starts_with("/test-bucket/"));
     }
 
-    // ==================== Different Stores ====================
-
     #[dialog_common::test]
     async fn it_supports_different_store_names() {
         let mut creds = public_creds();
@@ -522,8 +512,6 @@ mod tests {
             }
         }
     }
-
-    // ==================== Different Catalogs ====================
 
     #[dialog_common::test]
     async fn it_supports_different_catalog_names() {

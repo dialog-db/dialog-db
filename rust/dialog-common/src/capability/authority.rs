@@ -2,7 +2,9 @@
 //!
 //! These traits define the identity model for capability-based access control.
 
-use super::subject::Did;
+use super::Did;
+use crate::ConditionalSend;
+use async_trait::async_trait;
 
 /// A principal with a DID identity.
 pub trait Principal {
@@ -10,12 +12,26 @@ pub trait Principal {
     fn did(&self) -> &Did;
 }
 
+/// Error that can occur during signing operations.
+#[derive(Debug, thiserror::Error)]
+pub enum SignError {
+    /// The signing key is not available or cannot be used.
+    #[error("Signing key unavailable: {0}")]
+    KeyUnavailable(String),
+
+    /// An error occurred during the signing operation.
+    #[error("Signing failed: {0}")]
+    SigningFailed(String),
+}
+
 /// An authority that can sign data.
 ///
 /// Extends `Principal` with the ability to sign payloads.
-pub trait Authority: Principal {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait Authority: Principal + ConditionalSend {
     /// Sign the given payload.
-    fn sign(&mut self, payload: &[u8]) -> Vec<u8>;
+    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, SignError>;
 
     /// Try to export the raw Ed25519 secret key bytes for delegation purposes.
     ///

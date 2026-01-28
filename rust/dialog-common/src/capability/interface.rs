@@ -1,21 +1,11 @@
-//! Capability wrapper type.
-
-use super::Claim;
-use super::ability::Ability;
-use super::access::Access;
-use super::authority::Principal;
-use super::authorized::Authorized;
-use super::constrained::Constrained;
-use super::constraint::Constraint;
-use super::effect::Effect;
-use super::policy::Policy;
-use super::provider::Provider;
-use super::selector::Selector;
-use super::subject::Did;
+use super::{
+    Ability, Access, Authorized, Claim, Constrained, Constraint, Did, Effect, Policy, Principal,
+    Provider, Selector,
+};
 use crate::ConditionalSend;
 
 #[cfg(feature = "ucan")]
-use super::settings::Parameters;
+use super::Parameters;
 
 /// Newtype wrapper for describing a capability chain from the constraint type.
 /// It enables defining convenience methods for working with that capability.
@@ -54,12 +44,12 @@ impl<T: Constraint> Capability<T> {
         self.0.subject()
     }
 
-    /// Get the command path (abilities covered by this capability).
+    /// Get the ability path (e.g., `/storage/get`, `/memory/publish`).
     pub fn ability(&self) -> String
     where
         T::Capability: Ability,
     {
-        self.0.command()
+        self.0.ability()
     }
 
     /// Creates an invocation of the effect derived from this capability.
@@ -133,8 +123,8 @@ where
         self.0.subject()
     }
 
-    fn command(&self) -> String {
-        self.0.command()
+    fn ability(&self) -> String {
+        self.0.ability()
     }
 
     #[cfg(feature = "ucan")]
@@ -243,10 +233,10 @@ mod tests {
     }
 
     #[test]
-    fn it_returns_root_command_for_subject() {
+    fn it_returns_root_ability_for_subject() {
         let subject = Subject::from("did:key:zSpace");
         assert_eq!(subject.subject(), "did:key:zSpace");
-        assert_eq!(subject.command(), "/");
+        assert_eq!(subject.ability(), "/");
     }
 
     #[test]
@@ -258,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn it_does_not_add_policy_to_command_path() {
+    fn it_does_not_add_policy_to_ability_path() {
         let cap = Subject::from("did:key:zSpace")
             .attenuate(Archive)
             .attenuate(Catalog {
@@ -266,13 +256,13 @@ mod tests {
             });
 
         assert_eq!(cap.subject(), "did:key:zSpace");
-        // Catalog is a Policy, not Attenuation, so command stays /archive
+        // Catalog is a Policy, not Attenuation, so ability stays /archive
         assert_eq!(cap.ability(), "/archive");
         assert_eq!(Catalog::of(&cap).name, "blobs");
     }
 
     #[test]
-    fn it_adds_effect_to_command_path() {
+    fn it_adds_effect_to_ability_path() {
         let cap: Capability<Get> = Subject::from("did:key:zSpace")
             .attenuate(Archive)
             .attenuate(Catalog {

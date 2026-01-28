@@ -18,17 +18,17 @@ pub struct S3Authorization {
     credentials: Credentials,
     subject: Did,
     audience: Did,
-    can: String,
+    ability: String,
 }
 
 impl S3Authorization {
     /// Create a new S3 authorization.
-    pub fn new(credentials: Credentials, subject: Did, audience: Did, can: String) -> Self {
+    pub fn new(credentials: Credentials, subject: Did, audience: Did, ability: String) -> Self {
         Self {
             credentials,
             subject,
             audience,
-            can,
+            ability,
         }
     }
 
@@ -50,8 +50,8 @@ impl Authorization for S3Authorization {
         &self.audience
     }
 
-    fn can(&self) -> &str {
-        &self.can
+    fn ability(&self) -> &str {
+        &self.ability
     }
 
     fn invoke<A: dialog_common::Authority>(
