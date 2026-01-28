@@ -45,8 +45,7 @@
             buildInputs =
               [ rust-bin.stable.latest.default ]
               ++ lib.optionals stdenv.isDarwin [
-                darwin.apple_sdk.frameworks.SystemConfiguration
-                darwin.apple_sdk.frameworks.Security
+                apple-sdk
               ];
 
             src = fetchCrate {
@@ -55,7 +54,6 @@
             };
 
             cargoHash = "sha256-iqQiWbsKlLBiJFeqIYiXo3cqxGLSjNM8SOWXGM9u43E=";
-            useFetchCargoVendor = true;
           };
 
         common-build-inputs =
@@ -76,8 +74,7 @@
               wasm-pack
             ]
             ++ lib.optionals stdenv.isDarwin [
-              darwin.apple_sdk.frameworks.SystemConfiguration
-              darwin.apple_sdk.frameworks.Security
+              apple-sdk
             ];
 
         common-dev-tools = with pkgs; [
@@ -135,8 +132,8 @@
             cargoLock = {
               lockFile = ./Cargo.lock;
               outputHashes = {
-                "ucan-0.5.0" = "sha256-5KQ7wIXv7PHgd6y1pq0+aUU/VFW7BLxECmVUNk1JfGw=";
-                "varsig-0.1.0" = "sha256-5KQ7wIXv7PHgd6y1pq0+aUU/VFW7BLxECmVUNk1JfGw=";
+                "ucan-0.5.0" = "sha256-a7s88AANPRedAcJiLTrd9WEsEZGn6Imf/IhWQMN7tQE=";
+                "varsig-0.1.0" = "sha256-a7s88AANPRedAcJiLTrd9WEsEZGn6Imf/IhWQMN7tQE=";
               };
             };
           };
