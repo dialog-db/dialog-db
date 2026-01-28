@@ -302,7 +302,7 @@ pub enum Chain {
     #[default]
     Empty,
     /// Recursive case - joins a plan with the rest of the join chain.
-    Join(Box<Chain>, Plan),
+    Join(Box<Chain>, Box<Plan>),
 }
 
 impl Chain {
@@ -313,7 +313,7 @@ impl Chain {
 
     /// Adds a plan to this join chain.
     pub fn and(self, plan: Plan) -> Self {
-        Chain::Join(Box::new(self), plan)
+        Chain::Join(Box::new(self), Box::new(plan))
     }
 
     /// Creates a join from a vector of plans by chaining them together.

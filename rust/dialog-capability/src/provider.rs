@@ -23,7 +23,8 @@ use crate::Invocation;
 /// // Implement Provider for your environment
 /// struct MyEnv;
 ///
-/// #[async_trait]
+/// #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+/// #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 /// impl Provider<MyInvocation> for MyEnv {
 ///     async fn execute(&mut self, input: String) -> usize {
 ///         input.len()
