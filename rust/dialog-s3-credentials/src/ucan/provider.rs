@@ -67,7 +67,7 @@ use super::InvocationChain;
 use crate::capability::{AccessError, AuthorizedRequest};
 use crate::capability::{archive, memory, storage};
 use crate::s3::Credentials;
-use dialog_common::capability::{Capability, Subject};
+use dialog_capability::{Capability, Subject};
 
 /// UCAN authorizer that wraps credentials and handles UCAN invocations.
 ///
@@ -269,7 +269,7 @@ fn build_storage_capability<E>(
     effect: E,
 ) -> Result<Capability<E>, AccessError>
 where
-    E: dialog_common::capability::Effect<Of = storage::Store>,
+    E: dialog_capability::Effect<Of = storage::Store>,
 {
     let store_name = get_string_arg(args, "store")?;
     Ok(Subject::from(subject_did)
@@ -413,8 +413,8 @@ mod tests {
     use crate::ucan::{Credentials, UcanAuthorization};
     use crate::{Address, s3};
     use base58::ToBase58;
-    use dialog_common::capability::Principal;
-    use dialog_common::{Authorization, Blake3Hash};
+    use dialog_capability::{Authorization, Principal};
+    use dialog_common::Blake3Hash;
     use std::collections::BTreeMap;
     use ucan::delegation::builder::DelegationBuilder;
     use ucan::delegation::subject::DelegatedSubject;

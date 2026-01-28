@@ -7,7 +7,7 @@
 //! Without any remote features enabled, this enum cannot be constructed,
 //! preventing the creation of remote configurations at compile time.
 
-use dialog_common::capability::Did;
+use dialog_capability::Did;
 #[cfg(feature = "s3")]
 use dialog_s3_credentials::s3;
 #[cfg(feature = "ucan")]

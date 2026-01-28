@@ -4,7 +4,7 @@
 //! without requiring actual remote infrastructure.
 
 use super::super::{Connect, Connection, Operator, PlatformStorage, RemoteBackend};
-use dialog_common::capability::Did;
+use dialog_capability::Did;
 use dialog_storage::{CborEncoder, MemoryStorageBackend};
 
 /// An active connection to an in-memory storage backend.

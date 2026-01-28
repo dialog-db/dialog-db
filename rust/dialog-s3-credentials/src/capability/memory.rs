@@ -1,73 +1,20 @@
-//! Memory access commands.
+//! Memory S3 request implementations.
 //!
-//! Request types for transactional memory (CAS) operations.
-//! Each type implements `Claim` to provide HTTP method, path, and other request details.
-//!
-//! # Two APIs
-//!
-//! 1. **Direct API**: Use `MemoryClaim::resolve(subject, space, cell)` for direct S3 access
-//! 2. **Capability API**: Use `Capability<Resolve>` with the capability hierarchy for UCAN flows
+//! This module provides S3-specific effect types and `S3Request` implementations
+//! for memory (CAS cell) operations, enabling them to be translated into presigned S3 URLs.
 
 use super::{AccessError, AuthorizedRequest, Precondition, S3Request};
 use crate::Checksum;
-use dialog_common::capability::{Attenuation, Capability, Effect, Policy, Subject};
+use dialog_capability::{Capability, Effect, Policy};
 use serde::{Deserialize, Serialize};
 
-/// Root attenuation for memory operations.
-///
-/// Attaches to Subject and provides the `/memory` command path segment.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Memory;
+// Re-export hierarchy types from dialog-effects
+pub use dialog_effects::memory::{Cell, Edition, Memory, Space};
 
-impl Attenuation for Memory {
-    type Of = Subject;
-}
-
-/// Space policy that scopes operations to a memory space.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Space {
-    /// The space name (typically a DID).
-    pub space: String,
-}
-
-impl Space {
-    /// Create a new Space policy.
-    pub fn new(name: impl Into<String>) -> Self {
-        Self { space: name.into() }
-    }
-}
-
-impl Policy for Space {
-    type Of = Memory;
-}
-
-/// Cell policy that scopes operations to a specific cell within a space.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Cell {
-    /// The cell name.
-    pub cell: String,
-}
-
-impl Cell {
-    /// Create a new Cell policy.
-    pub fn new(name: impl Into<String>) -> Self {
-        Self { cell: name.into() }
-    }
-}
-
-impl Policy for Cell {
-    type Of = Space;
-}
-
-/// Edition identifier for CAS operations.
-pub type Edition = String;
-
-/// Resolve current cell content and edition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Resolve current cell content and edition (S3 authorization).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Resolve;
 
-/// Resolve is an effect that produces `RequestDescriptor` that can
-/// be used to perform get from the s3 bucket.
 impl Effect for Resolve {
     type Of = Cell;
     type Output = Result<AuthorizedRequest, AccessError>;
@@ -87,16 +34,22 @@ impl S3Request for Capability<Resolve> {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Publish content to a cell with CAS semantics (S3 authorization).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Publish {
-    /// The content to publish.
+    /// The checksum of the content to publish.
     pub checksum: Checksum,
     /// The expected current edition, or None if expecting empty cell.
     pub when: Option<Edition>,
 }
 
-/// Publish is an effect that produces `RequestDescriptor` that can
-/// be used to perform preconditioned put in the s3 bucket.
+impl Publish {
+    /// Create a new Publish effect.
+    pub fn new(checksum: Checksum, when: Option<Edition>) -> Self {
+        Self { checksum, when }
+    }
+}
+
 impl Effect for Publish {
     type Of = Cell;
     type Output = Result<AuthorizedRequest, AccessError>;
@@ -125,28 +78,23 @@ impl S3Request for Capability<Publish> {
     }
 }
 
-/// Delete cell with CAS semantics.
-///
-/// Delete only succeeds if current edition matches `when`.
-/// If `when` doesn't match, the delete is a no-op.
+/// Retract (delete) cell content with CAS semantics (S3 authorization).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Retract {
     /// Required current edition. Delete is no-op if edition doesn't match.
     pub when: Edition,
 }
 
-/// Retract is an effect that produces `RequestDescriptor` that can
-/// be used to perform delete in the s3 bucket.
-impl Effect for Retract {
-    type Of = Cell;
-    type Output = Result<AuthorizedRequest, AccessError>;
-}
-
 impl Retract {
-    /// Create a new Retract command.
+    /// Create a new Retract effect.
     pub fn new(when: impl Into<Edition>) -> Self {
         Self { when: when.into() }
     }
+}
+
+impl Effect for Retract {
+    type Of = Cell;
+    type Output = Result<AuthorizedRequest, AccessError>;
 }
 
 impl S3Request for Capability<Retract> {

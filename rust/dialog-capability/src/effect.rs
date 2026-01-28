@@ -1,7 +1,5 @@
-//! Effect trait for types that can be performed.
-
-use super::{Constraint, Settings};
-use crate::ConditionalSend;
+use crate::{Constraint, Settings};
+use dialog_common::ConditionalSend;
 
 /// Trait for effect types that can be performed.
 ///
@@ -11,6 +9,6 @@ use crate::ConditionalSend;
 pub trait Effect: Sized + Settings {
     /// The capability this effect requires (the parent in the chain).
     type Of: Constraint;
-    /// The output type produced by the invoaction of this effect when performed.
+    /// The output type produced by the invocation of this effect when performed.
     type Output: ConditionalSend;
 }

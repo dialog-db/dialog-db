@@ -1,6 +1,6 @@
 //! Remote site configuration and management.
 
-use dialog_common::capability::Did;
+use dialog_capability::Did;
 
 use super::{
     Connection, Operator, PlatformBackend, PlatformStorage, RemoteRepository, RemoteState, Site,

@@ -21,6 +21,7 @@ integration-tests = ["helpers", "dialog-common/integration-tests"]
 web-integration-tests = ["dialog-common/web-integration-tests"]
 
 [dependencies]
+dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-prolly-tree = { workspace = true }

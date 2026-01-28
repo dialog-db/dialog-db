@@ -6,30 +6,62 @@
 //!
 //! ```text
 //! Subject (repository DID)
-//!   └── Storage (cmd: /storage)
+//!   └── Storage (ability: /storage)
 //!         └── Store { store: String }
 //!               ├── Get { key } → Effect → Result<Option<Bytes>, StorageError>
 //!               ├── Set { key, value } → Effect → Result<(), StorageError>
-//!               └── Delete { key } → Effect → Result<(), StorageError>
+//!               ├── Delete { key } → Effect → Result<(), StorageError>
+//!               └── List { continuation_token } → Effect → Result<ListResult, StorageError>
 //! ```
 
+pub use dialog_capability::{Attenuation, Capability, Effect, Policy, Subject};
 use dialog_common::Bytes;
-pub use dialog_common::capability::{Attenuation, Capability, Effect, Policy, Subject};
-
-// S3 authorization types (only available with s3 feature)
-#[cfg(feature = "s3")]
-pub use dialog_s3_credentials::storage::{
-    Delete as AuthorizeDelete, Get as AuthorizeGet, List as AuthorizeList, Set as AuthorizeSet,
-    Storage, Store,
-};
-
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Root attenuation for storage operations.
+///
+/// Attaches to Subject and provides the `/storage` ability path segment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Storage;
+
+impl Attenuation for Storage {
+    type Of = Subject;
+}
+
+/// Store policy that scopes operations to a named store.
+///
+/// This is a policy (not attenuation) so it doesn't contribute to the ability path.
+/// It restricts operations to a specific store (e.g., "index", "blob").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Store {
+    /// The store name (e.g., "index", "blob").
+    pub store: String,
+}
+
+impl Store {
+    /// Create a new Store policy.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { store: name.into() }
+    }
+}
+
+impl Policy for Store {
+    type Of = Storage;
+}
+
 /// Get operation - retrieves a value by key.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Get {
     /// The key to look up.
     pub key: Bytes,
+}
+
+impl Get {
+    /// Create a new Get effect.
+    pub fn new(key: impl Into<Bytes>) -> Self {
+        Self { key: key.into() }
+    }
 }
 
 impl Effect for Get {
@@ -55,15 +87,23 @@ impl GetCapability for Capability<Get> {
     }
 }
 
-// Update Effect
-
-/// Update operation - sets a value for a key.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Set operation - sets a value for a key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Set {
     /// The key to update.
     pub key: Bytes,
     /// The value to set.
     pub value: Bytes,
+}
+
+impl Set {
+    /// Create a new Set effect.
+    pub fn new(key: impl Into<Bytes>, value: impl Into<Bytes>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
 }
 
 impl Effect for Set {
@@ -96,10 +136,17 @@ impl SetCapability for Capability<Set> {
 }
 
 /// Delete operation - removes a key.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Delete {
     /// The key to delete.
     pub key: Bytes,
+}
+
+impl Delete {
+    /// Create a new Delete effect.
+    pub fn new(key: impl Into<Bytes>) -> Self {
+        Self { key: key.into() }
+    }
 }
 
 impl Effect for Delete {
@@ -126,14 +173,14 @@ impl DeleteCapability for Capability<Delete> {
 }
 
 /// List operation - lists keys in a store.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct List {
     /// Continuation token for pagination.
     pub continuation_token: Option<String>,
 }
 
 impl List {
-    /// Create a new List operation.
+    /// Create a new List effect.
     pub fn new(continuation_token: Option<String>) -> Self {
         Self { continuation_token }
     }
@@ -173,8 +220,6 @@ impl ListCapability for Capability<List> {
     }
 }
 
-// Storage Error
-
 /// Errors that can occur during storage operations.
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -187,7 +232,7 @@ pub enum StorageError {
     Io(#[from] std::io::Error),
 }
 
-#[cfg(all(test, feature = "s3"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -203,9 +248,7 @@ mod tests {
     fn it_builds_store_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Storage)
-            .attenuate(Store {
-                store: "index".into(),
-            });
+            .attenuate(Store::new("index"));
 
         assert_eq!(claim.subject(), "did:key:zSpace");
         // Store is Policy, not Ability, so it doesn't add to path
@@ -216,12 +259,8 @@ mod tests {
     fn it_builds_get_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Storage)
-            .attenuate(Store {
-                store: "index".into(),
-            })
-            .invoke(Get {
-                key: vec![1, 2, 3].into(),
-            });
+            .attenuate(Store::new("index"))
+            .invoke(Get::new(vec![1, 2, 3]));
 
         assert_eq!(claim.ability(), "/storage/get");
     }
@@ -230,13 +269,8 @@ mod tests {
     fn it_builds_set_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Storage)
-            .attenuate(Store {
-                store: "index".into(),
-            })
-            .attenuate(Set {
-                key: vec![1, 2, 3].into(),
-                value: vec![4, 5, 6].into(),
-            });
+            .attenuate(Store::new("index"))
+            .invoke(Set::new(vec![1, 2, 3], vec![4, 5, 6]));
 
         assert_eq!(claim.ability(), "/storage/set");
 
@@ -263,9 +297,7 @@ mod tests {
         fn it_collects_store_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
-                .attenuate(Store {
-                    store: "index".into(),
-                });
+                .attenuate(Store::new("index"));
             let params = cap.parameters();
 
             assert_eq!(params.get("store"), Some(&Ipld::String("index".into())));
@@ -275,12 +307,8 @@ mod tests {
         fn it_collects_get_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
-                .attenuate(Store {
-                    store: "index".into(),
-                })
-                .attenuate(Get {
-                    key: vec![1, 2, 3].into(),
-                });
+                .attenuate(Store::new("index"))
+                .invoke(Get::new(vec![1, 2, 3]));
             let params = cap.parameters();
 
             assert_eq!(params.get("store"), Some(&Ipld::String("index".into())));
@@ -291,13 +319,8 @@ mod tests {
         fn it_collects_set_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
-                .attenuate(Store {
-                    store: "mystore".into(),
-                })
-                .attenuate(Set {
-                    key: vec![10, 20].into(),
-                    value: vec![30, 40, 50].into(),
-                });
+                .attenuate(Store::new("mystore"))
+                .invoke(Set::new(vec![10, 20], vec![30, 40, 50]));
             let params = cap.parameters();
 
             assert_eq!(params.get("store"), Some(&Ipld::String("mystore".into())));
@@ -309,12 +332,8 @@ mod tests {
         fn it_collects_delete_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
-                .attenuate(Store {
-                    store: "trash".into(),
-                })
-                .attenuate(Delete {
-                    key: vec![99].into(),
-                });
+                .attenuate(Store::new("trash"))
+                .invoke(Delete::new(vec![99]));
             let params = cap.parameters();
 
             assert_eq!(params.get("store"), Some(&Ipld::String("trash".into())));

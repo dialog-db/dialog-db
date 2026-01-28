@@ -1,11 +1,11 @@
-use super::{
+use crate::{
     Ability, Access, Authorized, Claim, Constrained, Constraint, Did, Effect, Policy, Principal,
     Provider, Selector,
 };
-use crate::ConditionalSend;
+use dialog_common::ConditionalSend;
 
 #[cfg(feature = "ucan")]
-use super::Parameters;
+use crate::Parameters;
 
 /// Newtype wrapper for describing a capability chain from the constraint type.
 /// It enables defining convenience methods for working with that capability.
@@ -165,8 +165,8 @@ impl<T: Constraint> AsRef<T::Capability> for Capability<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::capability::{Attenuation, Subject};
+    use crate::*;
+    use crate::{Attenuation, Subject};
     use serde::{Deserialize, Serialize};
 
     // Test types for capability chains

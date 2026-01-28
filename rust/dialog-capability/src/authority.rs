@@ -2,9 +2,9 @@
 //!
 //! These traits define the identity model for capability-based access control.
 
-use super::Did;
-use crate::ConditionalSend;
+use crate::Did;
 use async_trait::async_trait;
+use dialog_common::ConditionalSend;
 
 /// A principal with a DID identity.
 pub trait Principal {

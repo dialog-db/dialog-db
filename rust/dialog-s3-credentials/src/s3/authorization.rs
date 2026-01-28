@@ -4,10 +4,10 @@ use crate::capability::{AccessError, S3Request};
 
 use async_trait::async_trait;
 
-use dialog_common::{
-    ConditionalSend,
-    capability::{Authorization, AuthorizationError, Capability, Did, Effect, Provider},
+use dialog_capability::{
+    Authority, Authorization, AuthorizationError, Capability, Did, Effect, Provider,
 };
+use dialog_common::ConditionalSend;
 
 /// Self-issued authorization for direct S3 access.
 ///
@@ -54,10 +54,7 @@ impl Authorization for S3Authorization {
         &self.ability
     }
 
-    fn invoke<A: dialog_common::Authority>(
-        &self,
-        authority: &A,
-    ) -> Result<Self, AuthorizationError> {
+    fn invoke<A: Authority>(&self, authority: &A) -> Result<Self, AuthorizationError> {
         if &self.audience != authority.did() {
             Err(AuthorizationError::NotAudience {
                 audience: self.audience.clone(),

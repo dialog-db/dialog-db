@@ -4,8 +4,8 @@
 //! S3 credentials self-issue authorization when they own the bucket (subject DID matches).
 
 use async_trait::async_trait;
+use dialog_capability::{Ability, Access, Capability, Claim, Effect, Provider};
 use dialog_common::ConditionalSend;
-use dialog_common::capability::{Ability, Access, Capability, Claim, Effect, Provider};
 
 use super::{Credentials, S3Authorization};
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
@@ -59,7 +59,7 @@ mod tests {
     use crate::Address;
     use crate::capability::{archive, memory, storage};
     use base58::ToBase58;
-    use dialog_common::capability::Subject;
+    use dialog_capability::Subject;
 
     const TEST_SUBJECT: &str = "did:key:zTestSubject";
 

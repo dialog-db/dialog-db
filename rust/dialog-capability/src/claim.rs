@@ -1,9 +1,4 @@
-//! Claim type for capability authorization queries.
-//!
-//! A `Claim` wraps a capability with an audience (who needs authorization).
-//! It represents a query to an `Access` for authorization.
-
-use super::{Ability, Did};
+use crate::{Ability, Did};
 
 /// A capability claim requesting authorization.
 ///
@@ -56,8 +51,8 @@ impl<C: Ability> Claim<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::capability::{Attenuation, Subject};
+    use crate::*;
+    use crate::{Attenuation, Subject};
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

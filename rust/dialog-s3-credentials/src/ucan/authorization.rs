@@ -6,10 +6,10 @@
 use super::{DelegationChain, InvocationChain};
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
-use dialog_common::capability::{
-    Authority, Authorization, AuthorizationError, Did, Effect, Parameters, Provider,
+use dialog_capability::{
+    Authority, Authorization, AuthorizationError, Capability, Did, Effect, Parameters, Provider,
 };
-use dialog_common::{Capability, ConditionalSend};
+use dialog_common::ConditionalSend;
 use ed25519_dalek::SigningKey;
 use ipld_core::ipld::Ipld;
 use std::collections::BTreeMap;

@@ -1,48 +1,19 @@
-//! Archive access commands.
+//! Archive S3 request implementations.
 //!
-//! Request types for content-addressed storage operations.
-//! Each type implements `Claim` to provide HTTP method, path, and other request details.
+//! This module provides S3-specific effect types and `S3Request` implementations
+//! for archive (content-addressed) operations, enabling them to be translated into presigned S3 URLs.
 
 use super::{AccessError, AuthorizedRequest, S3Request};
 use crate::Checksum;
 use base58::ToBase58;
+use dialog_capability::{Capability, Effect, Policy};
 use dialog_common::Blake3Hash;
-use dialog_common::capability::{Attenuation, Capability, Effect, Policy, Subject};
 use serde::{Deserialize, Serialize};
 
-/// Archive ability - restricts to archive operations.
-///
-/// Attaches to Subject and provides the `/archive` command path segment.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Archive;
+// Re-export hierarchy types from dialog-effects
+pub use dialog_effects::archive::{Archive, Catalog};
 
-impl Attenuation for Archive {
-    type Of = Subject;
-}
-
-/// Catalog policy that scopes operations to a named catalog.
-///
-/// Does not add to command path but constrains invocation arguments.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Catalog {
-    /// The catalog name (e.g., "index", "blobs").
-    pub catalog: String,
-}
-
-impl Catalog {
-    /// Create a new Catalog policy.
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            catalog: name.into(),
-        }
-    }
-}
-
-impl Policy for Catalog {
-    type Of = Archive;
-}
-
-/// Get content by digest.
+/// Get content by digest (S3 authorization).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Get {
     /// The blake3 digest of the content to retrieve.
@@ -50,7 +21,7 @@ pub struct Get {
 }
 
 impl Get {
-    /// Create a new Get command.
+    /// Create a new Get effect.
     pub fn new(digest: impl Into<Blake3Hash>) -> Self {
         Self {
             digest: digest.into(),
@@ -58,8 +29,6 @@ impl Get {
     }
 }
 
-/// Get is an effect that produces `RequestDescriptor` that can
-/// be used to perform actual get from the s3 bucket.
 impl Effect for Get {
     type Of = Catalog;
     type Output = Result<AuthorizedRequest, AccessError>;
@@ -79,7 +48,7 @@ impl S3Request for Capability<Get> {
     }
 }
 
-/// Put content with digest and checksum.
+/// Put content with digest and checksum (S3 authorization).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Put {
     /// Content digest (Blake3 hash, used as S3 key).
@@ -89,7 +58,7 @@ pub struct Put {
 }
 
 impl Put {
-    /// Create a new Put command.
+    /// Create a new Put effect.
     pub fn new(digest: impl Into<Blake3Hash>, checksum: Checksum) -> Self {
         Self {
             digest: digest.into(),
@@ -98,8 +67,6 @@ impl Put {
     }
 }
 
-/// Put is an effect that produces `RequestDescriptor` that can
-/// be used to perform actual put into the s3 bucket.
 impl Effect for Put {
     type Of = Catalog;
     type Output = Result<AuthorizedRequest, AccessError>;

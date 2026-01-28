@@ -600,7 +600,7 @@ mod tests {
     use crate::Checksum;
     // Use capability module for Storage/Store hierarchy, access module for effects
     use crate::capability::storage::{Get, Set, Storage, Store};
-    use dialog_common::capability::{Capability, Subject};
+    use dialog_capability::{Capability, Subject};
 
     const TEST_SUBJECT: &str = "did:key:zTestSubject";
 

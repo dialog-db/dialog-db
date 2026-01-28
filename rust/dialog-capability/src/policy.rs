@@ -1,5 +1,5 @@
-use super::settings::Settings;
-use super::{Ability, Constrained, Constraint, Selector};
+use crate::settings::Settings;
+use crate::{Ability, Constrained, Constraint, Selector};
 
 /// Trait for policy types that restrict capabilities.
 ///
