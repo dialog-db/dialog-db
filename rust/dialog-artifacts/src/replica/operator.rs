@@ -17,7 +17,6 @@ use dialog_common::capability::{Principal as PrincipalTrait, SignError};
 /// providing `open` method that is used to open specific replica.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Operator {
-    did: Did,
     key: SigningKey,
     principal: Principal,
 }
@@ -41,11 +40,7 @@ impl Operator {
     pub fn new(key: SigningKey) -> Self {
         let principal = Principal::new(key.verifying_key().to_bytes());
 
-        Self {
-            did: principal.did().into(),
-            key,
-            principal,
-        }
+        Self { key, principal }
     }
     /// Generates a new issuer with a random signing key.
     pub fn generate() -> Result<Self, ReplicaError> {
@@ -59,7 +54,7 @@ impl Operator {
 
     /// Returns the DID (Decentralized Identifier) for this issuer.
     pub fn did(&self) -> &Did {
-        &self.did
+        self.principal.did()
     }
 
     /// Returns the principal (public key bytes) for this issuer.
@@ -86,7 +81,7 @@ impl Operator {
 
 impl PrincipalTrait for Operator {
     fn did(&self) -> &Did {
-        &self.did
+        self.principal.did()
     }
 }
 

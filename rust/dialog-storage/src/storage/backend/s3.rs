@@ -187,8 +187,8 @@ use async_trait::async_trait;
 use dialog_common::{
     Authority, Bytes, ConditionalSend, ConditionalSync,
     capability::{
-        Ability, Access, Authorized, Capability, Claim, Did, Effect, Principal, Provider, SignError,
-        Subject,
+        Ability, Access, Authorized, Capability, Claim, Did, Effect, Principal, Provider,
+        SignError, Subject,
     },
 };
 use thiserror::Error;
