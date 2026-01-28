@@ -290,8 +290,8 @@ impl Authorization for UcanAuthorization {
 }
 
 /// Blanket implementation provider ability to
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
 impl<Do> Provider<Do> for UcanAuthorization
 where
     Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
@@ -332,13 +332,13 @@ mod tests {
     #[test]
     fn it_creates_delegated_authorization() {
         let subject_signer = generate_signer();
-        let subject_did = subject_signer.did().clone();
+        let subject_did = subject_signer.did();
         let operator_signer = generate_signer();
 
         let delegation = create_delegation(
             &subject_signer,
             operator_signer.did(),
-            &subject_did,
+            subject_did,
             &["storage", "get"],
         )
         .unwrap();

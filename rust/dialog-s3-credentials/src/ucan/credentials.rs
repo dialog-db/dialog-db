@@ -105,8 +105,11 @@ impl Credentials {
 ///
 /// This allows Credentials to find authorization proofs for capability claims
 /// by looking up delegation chains for the subject.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
 impl Access for Credentials {
     type Authorization = UcanAuthorization;
     type Error = AccessError;
@@ -141,8 +144,8 @@ impl Access for Credentials {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
 impl<Do> Provider<Authorized<Do, UcanAuthorization>> for Credentials
 where
     Do: Effect<Output = Result<AuthorizedRequest, AccessError>> + 'static,
@@ -177,8 +180,8 @@ pub mod tests {
         operator_did: &Ed25519Did,
         ability: &[&str],
     ) -> DelegationChain {
-        let subject_did = subject_signer.did().clone();
-        let delegation = create_delegation(subject_signer, operator_did, &subject_did, ability)
+        let subject_did = subject_signer.did();
+        let delegation = create_delegation(subject_signer, operator_did, subject_did, ability)
             .expect("Failed to create test delegation");
         DelegationChain::new(delegation)
     }
@@ -200,8 +203,11 @@ pub mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(
+        not(all(target_arch = "wasm32", target_os = "unknown")),
+        async_trait::async_trait
+    )]
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
     impl Access for Session {
         type Authorization = UcanAuthorization;
         type Error = AccessError;
@@ -218,8 +224,11 @@ pub mod tests {
             &self.did
         }
     }
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(
+        not(all(target_arch = "wasm32", target_os = "unknown")),
+        async_trait::async_trait
+    )]
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
     impl Authority for Session {
         async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, dialog_capability::SignError> {
             Ok(self.signer.sign(payload).to_vec())
@@ -236,7 +245,7 @@ pub mod tests {
 
         let credentials = Credentials::new(
             "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, &operator.did(), &["archive"]),
+            test_delegation_chain(&operator, operator.did(), &["archive"]),
         );
 
         let mut session = Session::new(credentials, &[0u8; 32]);
@@ -278,5 +287,167 @@ pub mod tests {
         );
 
         Ok(())
+    }
+
+    /// WebCrypto-specific tests for browser WASM.
+    ///
+    /// These tests verify that the UCAN authorization flow works correctly
+    /// with WebCrypto-backed signers in browser environments. They exercise
+    /// non-extractable key generation, async signing, and signature verification
+    /// using the Web Crypto API.
+    ///
+    /// Run with: `wasm-pack test --headless --chrome rust/dialog-s3-credentials`
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    mod webcrypto_tests {
+        use signature::Verifier;
+        use std::collections::BTreeMap;
+        use ucan::did::Did;
+        use ucan::invocation::builder::InvocationBuilder;
+        use ucan::{AsyncDidSigner, WebCryptoEd25519Signer};
+        use wasm_bindgen_test::wasm_bindgen_test_configure;
+
+        wasm_bindgen_test_configure!(run_in_service_worker);
+
+        #[dialog_common::test]
+        async fn it_generates_webcrypto_signer() {
+            let signer = WebCryptoEd25519Signer::generate()
+                .await
+                .expect("Failed to generate WebCrypto signer");
+
+            let did_str = signer.did().to_string();
+            assert!(
+                did_str.starts_with("did:key:z"),
+                "DID should start with 'did:key:z', got: {}",
+                did_str
+            );
+        }
+
+        #[dialog_common::test]
+        async fn it_produces_valid_webcrypto_signature() {
+            let signer = WebCryptoEd25519Signer::generate()
+                .await
+                .expect("Failed to generate signer");
+            let msg = b"test message for WebCrypto signing";
+
+            let signature = signer
+                .sign_async(msg)
+                .await
+                .expect("Failed to sign message");
+
+            let verifier = signer.did().verifier();
+            verifier
+                .verify(msg, &signature)
+                .expect("Signature verification failed");
+        }
+
+        #[dialog_common::test]
+        async fn it_rejects_wrong_message() {
+            let signer = WebCryptoEd25519Signer::generate()
+                .await
+                .expect("Failed to generate signer");
+            let msg = b"original message";
+            let wrong_msg = b"wrong message";
+
+            let signature = signer
+                .sign_async(msg)
+                .await
+                .expect("Failed to sign message");
+
+            let verifier = signer.did().verifier();
+            assert!(
+                verifier.verify(wrong_msg, &signature).is_err(),
+                "Verification should fail for wrong message"
+            );
+        }
+
+        #[dialog_common::test]
+        async fn it_produces_different_signatures_from_different_signers() {
+            let signer1 = WebCryptoEd25519Signer::generate()
+                .await
+                .expect("Failed to generate signer 1");
+            let signer2 = WebCryptoEd25519Signer::generate()
+                .await
+                .expect("Failed to generate signer 2");
+            let msg = b"same message";
+
+            let sig1 = signer1
+                .sign_async(msg)
+                .await
+                .expect("Failed to sign with signer 1");
+            let sig2 = signer2
+                .sign_async(msg)
+                .await
+                .expect("Failed to sign with signer 2");
+
+            assert_ne!(
+                sig1, sig2,
+                "Different signers should produce different signatures"
+            );
+
+            // Cross-verification should fail
+            assert!(
+                signer1.did().verifier().verify(msg, &sig2).is_err(),
+                "Signature 2 should not verify with signer 1's key"
+            );
+        }
+
+        #[dialog_common::test]
+        async fn it_builds_invocation_with_webcrypto_signer() {
+            let operator_signer = WebCryptoEd25519Signer::generate()
+                .await
+                .expect("Failed to generate operator signer");
+            let subject_signer = WebCryptoEd25519Signer::generate()
+                .await
+                .expect("Failed to generate subject signer");
+            let subject_did = *subject_signer.did();
+
+            let invocation = InvocationBuilder::new()
+                .issuer(operator_signer.clone())
+                .audience(subject_did)
+                .subject(subject_did)
+                .command(vec!["storage".to_string(), "get".to_string()])
+                .arguments(BTreeMap::new())
+                .proofs(vec![])
+                .try_build_async(&operator_signer)
+                .await
+                .expect("Failed to build invocation");
+
+            assert_eq!(invocation.issuer(), operator_signer.did());
+            assert_eq!(invocation.audience(), &subject_did);
+            assert_eq!(invocation.subject(), &subject_did);
+
+            invocation
+                .verify_signature()
+                .expect("Signature verification failed");
+        }
+
+        #[dialog_common::test]
+        async fn it_serializes_webcrypto_invocation() {
+            let signer = WebCryptoEd25519Signer::generate()
+                .await
+                .expect("Failed to generate signer");
+            let subject_did = *signer.did();
+
+            let invocation = InvocationBuilder::new()
+                .issuer(signer.clone())
+                .audience(subject_did)
+                .subject(subject_did)
+                .command(vec!["archive".to_string(), "get".to_string()])
+                .arguments(BTreeMap::new())
+                .proofs(vec![])
+                .try_build_async(&signer)
+                .await
+                .expect("Failed to build invocation");
+
+            // Test serialization roundtrip
+            let bytes =
+                serde_ipld_dagcbor::to_vec(&invocation).expect("Failed to serialize invocation");
+
+            let roundtripped: ucan::Invocation<ucan::did::Ed25519Did> =
+                serde_ipld_dagcbor::from_slice(&bytes).expect("Failed to deserialize invocation");
+
+            assert_eq!(roundtripped.issuer(), invocation.issuer());
+            assert_eq!(roundtripped.command(), invocation.command());
+        }
     }
 }

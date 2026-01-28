@@ -23,9 +23,9 @@ pub use s3::S3Connection;
 pub enum Connection {
     /// S3-compatible storage connection (includes both direct S3 and UCAN-based access).
     #[cfg(feature = "s3")]
-    S3(S3Connection),
+    S3(Box<S3Connection>),
     /// In-memory storage connection (useful for testing).
-    Memory(MemoryConnection),
+    Memory(Box<MemoryConnection>),
 }
 
 impl Connection {
@@ -50,13 +50,13 @@ impl Connection {
 
 impl From<MemoryConnection> for Connection {
     fn from(connection: MemoryConnection) -> Self {
-        Self::Memory(connection)
+        Self::Memory(Box::new(connection))
     }
 }
 
 #[cfg(feature = "s3")]
 impl From<S3Connection> for Connection {
     fn from(connection: S3Connection) -> Self {
-        Self::S3(connection)
+        Self::S3(Box::new(connection))
     }
 }

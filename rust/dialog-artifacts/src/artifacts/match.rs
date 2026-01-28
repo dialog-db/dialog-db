@@ -18,28 +18,28 @@ fn match_selector_and_key_view<K>(selector: &ArtifactSelector<Constrained>, key:
 where
     K: KeyView,
 {
-    if let Some(entity) = selector.entity() {
-        if entity.key_bytes() != key.entity().raw() {
-            return false;
-        }
+    if let Some(entity) = selector.entity()
+        && entity.key_bytes() != key.entity().raw()
+    {
+        return false;
     }
 
-    if let Some(attribute) = selector.attribute() {
-        if attribute.key_bytes() != key.attribute().raw() {
-            return false;
-        }
+    if let Some(attribute) = selector.attribute()
+        && attribute.key_bytes() != key.attribute().raw()
+    {
+        return false;
     }
 
-    if let Some(value) = selector.value() {
-        if value.data_type() != key.value_type() {
-            return false;
-        }
+    if let Some(value) = selector.value()
+        && value.data_type() != key.value_type()
+    {
+        return false;
     }
 
-    if let Some(value_reference) = selector.value_reference() {
-        if value_reference != key.value_reference().raw() {
-            return false;
-        }
+    if let Some(value_reference) = selector.value_reference()
+        && value_reference != key.value_reference().raw()
+    {
+        return false;
     }
 
     true

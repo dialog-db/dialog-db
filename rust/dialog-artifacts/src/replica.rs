@@ -284,19 +284,19 @@ where
             remote_guard.clone()
         };
 
-        if let Some(remote) = connection.as_ref() {
-            if let Some(bytes) = remote.get(&key).await.map_err(|e| {
+        if let Some(remote) = connection.as_ref()
+            && let Some(bytes) = remote.get(&key).await.map_err(|e| {
                 dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
-            })? {
-                // Cache the remote value to local storage
-                // Clone the Arc to get a mutable copy that shares the backend's interior state
-                let mut local = (*self.local).clone();
-                local.set(key, bytes.clone()).await.map_err(|e| {
-                    dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
-                })?;
+            })?
+        {
+            // Cache the remote value to local storage
+            // Clone the Arc to get a mutable copy that shares the backend's interior state
+            let mut local = (*self.local).clone();
+            local.set(key, bytes.clone()).await.map_err(|e| {
+                dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
+            })?;
 
-                return remote.decode(&bytes).await.map(Some);
-            }
+            return remote.decode(&bytes).await.map(Some);
         }
 
         Ok(None)
@@ -428,10 +428,10 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                 let upstream =
                     Upstream::open(state, issuer.clone(), storage.clone(), subject.clone()).await?;
 
-                if let Upstream::Remote(branch) = &upstream {
-                    if let Some(archive_storage) = branch.archive_connection() {
-                        archive.set_remote(archive_storage).await;
-                    }
+                if let Upstream::Remote(branch) = &upstream
+                    && let Some(archive_storage) = branch.archive_connection()
+                {
+                    archive.set_remote(archive_storage).await;
                 }
 
                 Some(upstream)
@@ -849,10 +849,10 @@ impl<Backend: PlatformBackend + 'static> ArtifactStore for Branch<Backend> {
                 for await item in stream {
                     let entry = item?;
 
-                    if entry.matches_selector(&selector) {
-                        if let Entry { value: State::Added(datum), .. } = entry {
-                            yield Artifact::try_from(datum)?;
-                        }
+                    if entry.matches_selector(&selector)
+                        && let Entry { value: State::Added(datum), .. } = entry
+                    {
+                        yield Artifact::try_from(datum)?;
                     }
                 }
             } else if selector.value().is_some() {
@@ -866,10 +866,10 @@ impl<Backend: PlatformBackend + 'static> ArtifactStore for Branch<Backend> {
                 for await item in stream {
                     let entry = item?;
 
-                    if entry.matches_selector(&selector) {
-                        if let Entry { value: State::Added(datum), .. } = entry {
-                            yield Artifact::try_from(datum)?;
-                        }
+                    if entry.matches_selector(&selector)
+                        && let Entry { value: State::Added(datum), .. } = entry
+                    {
+                        yield Artifact::try_from(datum)?;
                     }
                 }
             } else if selector.attribute().is_some() {
@@ -883,10 +883,10 @@ impl<Backend: PlatformBackend + 'static> ArtifactStore for Branch<Backend> {
                 for await item in stream {
                     let entry = item?;
 
-                    if entry.matches_selector(&selector) {
-                        if let Entry { value: State::Added(datum), .. } = entry {
-                            yield Artifact::try_from(datum)?;
-                        }
+                    if entry.matches_selector(&selector)
+                        && let Entry { value: State::Added(datum), .. } = entry
+                    {
+                        yield Artifact::try_from(datum)?;
                     }
                 }
             } else {

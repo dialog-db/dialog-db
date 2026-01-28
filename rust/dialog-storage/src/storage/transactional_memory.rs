@@ -219,15 +219,15 @@ where
         // Check for existing cell
         {
             let cells = self.cells.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(weak) = cells.get(&address) {
-                if let Some(state) = weak.upgrade() {
-                    return Ok(TransactionalMemoryCell::new(
-                        address,
-                        state,
-                        self.codec.clone(),
-                        self.policy.clone(),
-                    ));
-                }
+            if let Some(weak) = cells.get(&address)
+                && let Some(state) = weak.upgrade()
+            {
+                return Ok(TransactionalMemoryCell::new(
+                    address,
+                    state,
+                    self.codec.clone(),
+                    self.policy.clone(),
+                ));
             }
         }
 
