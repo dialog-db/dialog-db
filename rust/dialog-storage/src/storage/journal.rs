@@ -398,7 +398,7 @@ where
     type Edition = <Backend as super::TransactionalMemoryBackend>::Edition;
 
     async fn resolve(
-        &self,
+        &mut self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
         // Record the read operation
@@ -410,7 +410,7 @@ where
     }
 
     async fn replace(
-        &self,
+        &mut self,
         address: &Self::Address,
         edition: Option<&Self::Edition>,
         content: Option<Self::Value>,

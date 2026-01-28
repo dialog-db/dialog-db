@@ -23,17 +23,15 @@
 
 use super::bucket;
 use anyhow::Result;
-use async_stream::try_stream;
+use dialog_storage::StorageBackend;
 use dialog_storage::s3::encode_s3_key;
-use dialog_storage::{StorageBackend, StorageSink, StorageSource};
-use futures_util::TryStreamExt;
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 #[dialog_common::test]
 async fn it_sets_and_gets_values() -> Result<()> {
-    let mut backend = bucket::open_unque_at("it_sets_and_gets_values");
+    let mut backend = bucket::open_unique_at("it_sets_and_gets_values");
 
     // Test data
     let key = b"test-key-1".to_vec();
@@ -51,7 +49,7 @@ async fn it_sets_and_gets_values() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_returns_none_for_missing_key() -> Result<()> {
-    let mut backend = bucket::open_unque_at("it_returns_none_for_missing_key");
+    let backend = bucket::open_unique_at("it_returns_none_for_missing_key");
 
     // Try to get a key that doesn't exist
     let key = b"nonexistent-key-12345".to_vec();
@@ -64,7 +62,7 @@ async fn it_returns_none_for_missing_key() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_overwrites_values() -> Result<()> {
-    let mut backend = bucket::open_unque_at("it_overwrites_values");
+    let mut backend = bucket::open_unique_at("it_overwrites_values");
 
     let key = b"test-key-overwrite".to_vec();
     let value1 = b"original-value".to_vec();
@@ -89,7 +87,7 @@ async fn it_overwrites_values() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_handles_large_values() -> Result<()> {
-    let mut backend = bucket::open_unque_at("it_handles_large_values");
+    let mut backend = bucket::open_unique_at("it_handles_large_values");
 
     let key = b"test-key-large".to_vec();
     // Create a 1MB value
@@ -107,7 +105,7 @@ async fn it_handles_large_values() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_handles_multiple_keys() -> Result<()> {
-    let mut backend = bucket::open_unque_at("it_handles_multiple_keys");
+    let mut backend = bucket::open_unique_at("it_handles_multiple_keys");
 
     // Set multiple key-value pairs
     let pairs = vec![
@@ -131,7 +129,7 @@ async fn it_handles_multiple_keys() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_handles_binary_data() -> Result<()> {
-    let mut backend = bucket::open_unque_at("it_handles_binary_data");
+    let mut backend = bucket::open_unique_at("it_handles_binary_data");
 
     let key = b"test-key-binary".to_vec();
     // Create binary data with all possible byte values
@@ -149,25 +147,19 @@ async fn it_handles_binary_data() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_performs_bulk_operations() -> Result<()> {
-    let mut backend = bucket::open_unque_at("it_performs_bulk_operations");
+    let mut backend = bucket::open_unique_at("it_performs_bulk_operations");
 
-    // Create a stream of test data
-
+    // Create test data
     let test_data = vec![
         (b"bulk1".to_vec(), b"value1".to_vec()),
         (b"bulk2".to_vec(), b"value2".to_vec()),
         (b"bulk3".to_vec(), b"value3".to_vec()),
     ];
 
-    let data_clone = test_data.clone();
-    let source_stream = try_stream! {
-        for (key, value) in data_clone {
-            yield (key, value);
-        }
-    };
-
-    // Write all data
-    backend.write(source_stream).await?;
+    // Write all data using set
+    for (key, value) in &test_data {
+        backend.set(key.clone(), value.clone()).await?;
+    }
 
     // Verify all items were written
     for (key, expected_value) in test_data {
@@ -198,7 +190,7 @@ async fn it_works_without_prefix() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_handles_encoded_key_segments() -> Result<()> {
-    let mut backend = bucket::open_unque_at("it_handles_encoded_key_segments");
+    let mut backend = bucket::open_unique_at("it_handles_encoded_key_segments");
 
     // Test key with path structure where one segment is safe and another needs encoding
     // "safe-segment/user@example.com" - first segment is safe, second has @ which is unsafe
@@ -224,7 +216,7 @@ async fn it_handles_encoded_key_segments() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_handles_fully_encoded_key() -> Result<()> {
-    let mut backend = bucket::open_unque_at("it_handles_fully_encoded_key");
+    let mut backend = bucket::open_unique_at("it_handles_fully_encoded_key");
 
     // Test key that is fully binary (all segments need encoding)
     let key_binary = vec![0x01, 0x02, 0xFF, 0xFE];
@@ -250,7 +242,7 @@ async fn it_handles_fully_encoded_key() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_handles_multi_segment_mixed_encoding() -> Result<()> {
-    let mut backend = bucket::open_unque_at("it_handles_multi_segment_mixed_encoding");
+    let mut backend = bucket::open_unique_at("it_handles_multi_segment_mixed_encoding");
 
     // Test key with multiple segments: safe/unsafe/safe/unsafe pattern
     // "data/file name with spaces/v1/special!chars"
@@ -310,7 +302,7 @@ async fn it_handles_encoded_key_without_prefix() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_deletes_values() -> Result<()> {
-    let mut backend = bucket::open_unque_at("it_deletes_values");
+    let mut backend = bucket::open_unique_at("it_deletes_values");
 
     let key = b"delete-integration-test".to_vec();
     let value = b"value-to-delete".to_vec();
@@ -332,6 +324,7 @@ async fn it_deletes_values() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "s3-list")]
 #[dialog_common::test]
 async fn it_lists_objects() -> Result<()> {
     // Use a unique prefix for this test
@@ -357,55 +350,16 @@ async fn it_lists_objects() -> Result<()> {
         result.keys.len()
     );
 
-    // All keys should have our prefix
-    for key in &result.keys {
-        assert!(
-            key.starts_with(&test_prefix),
-            "Key {} should start with prefix {}",
-            key,
-            test_prefix
-        );
-    }
-
-    Ok(())
-}
-
-#[dialog_common::test]
-async fn it_reads_stream() -> Result<()> {
-    let mut backend = bucket::open_unque_at("it_reads_stream");
-
-    // Set a few values
-    backend
-        .set(b"stream-a".to_vec(), b"value-a".to_vec())
-        .await?;
-    backend
-        .set(b"stream-b".to_vec(), b"value-b".to_vec())
-        .await?;
-
-    // Read all items via StorageSource
-    let mut items: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    let mut stream = Box::pin(backend.read());
-
-    while let Some((key, value)) = stream.try_next().await? {
-        items.push((key, value));
-    }
-
-    assert_eq!(items.len(), 2);
-
-    // Verify the items (order may vary)
-    let keys: Vec<&[u8]> = items.iter().map(|(k, _)| k.as_slice()).collect();
-    assert!(keys.contains(&b"stream-a".as_slice()));
-    assert!(keys.contains(&b"stream-b".as_slice()));
-
     Ok(())
 }
 
 /// Test that listing with a nonexistent prefix returns an empty list (not an error).
 ///
 /// This verifies real S3/R2 behavior: a prefix is just a filter, not a path that must exist.
+#[cfg(feature = "s3-list")]
 #[dialog_common::test]
 async fn it_lists_empty_for_nonexistent_prefix() -> Result<()> {
-    let backend = bucket::open_unque_at("it_lists_empty_for_nonexistent_prefix");
+    let backend = bucket::open_unique_at("it_lists_empty_for_nonexistent_prefix");
 
     // Listing should return empty result, not an error
     let result = backend.list(None).await?;

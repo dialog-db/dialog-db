@@ -1,5 +1,5 @@
 use super::platform::PlatformStorage;
-use super::platform::{ErrorMappingBackend, PlatformBackend, TypedStoreResource};
+use super::platform::{PlatformBackend, PrefixedBackend, TypedStoreResource};
 pub use super::uri::Uri;
 use crate::artifacts::selector::Constrained;
 use crate::artifacts::{
@@ -13,7 +13,8 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use base58::ToBase58;
 use blake3;
-use dialog_common::{ConditionalSend, DialogAsyncError, TaskQueue};
+use dialog_capability::Did;
+use dialog_common::ConditionalSend;
 use dialog_prolly_tree::{
     Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Node, Tree, TreeDifference,
 };
@@ -26,8 +27,6 @@ use std::fmt::Debug;
 
 use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
 
-#[cfg(feature = "s3")]
-use dialog_storage::s3::Bucket as S3Bucket;
 use ed25519_dalek::ed25519::signature::SignerMut;
 use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, SignatureError, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -40,37 +39,26 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-/// Cryptographic identifier like Ed25519 public key representing
-/// a principal that produced a change.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Principal([u8; 32]);
-impl Principal {
-    /// Formats principal as did:key
-    pub fn did(&self) -> String {
-        const PREFIX: &str = "z6Mk";
-        let id = [PREFIX, self.0.as_ref().to_base58().as_str()].concat();
+/// Operator module for signing and identity management.
+pub mod operator;
+/// Principal type definitions.
+pub mod principal;
+/// Remote repository and branch management.
+pub mod remote;
+/// Repository trait for managing remotes.
+pub mod repository;
 
-        format!("did:key:{id}")
-    }
-}
-impl Debug for Principal {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.did())
-    }
-}
+pub use operator::Operator;
+pub use principal::Principal;
+pub use remote::{RemoteBranch, RemoteCredentials, RemoteRepository, RemoteSite, Site};
+pub use repository::Remotes;
 
-impl TryFrom<Principal> for VerifyingKey {
-    type Error = SignatureError;
-    fn try_from(value: Principal) -> Result<Self, Self::Error> {
-        VerifyingKey::from_bytes(&value.0)
-    }
-}
+// TryFrom<Principal> for VerifyingKey is implemented in principal.rs
 
-/// Type alias for the prolly tree index used to store artifacts
-/// Uses dialog_storage::Storage directly (not platform::Storage) because content-addressed
-/// storage doesn't need key prefixing/namespacing
+/// Type alias for the prolly tree index used to store artifacts.
+/// The Archive wraps the backend with PrefixedBackend to namespace index storage.
 pub type Index<Backend> =
-    Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash, Archive<Backend>>;
+    Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash, Archive<PrefixedBackend<Backend>>>;
 
 /// We reference a tree by the root hash.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -105,86 +93,26 @@ impl From<NodeReference> for Blake3Hash {
     }
 }
 
-/// Site identifier used to reference remotes.
-pub type Site = String;
-
-/// Represents a principal operating a replica.
-#[derive(Clone, PartialEq, Eq)]
-pub struct Issuer {
-    id: String,
-    key: SigningKey,
-    principal: Principal,
-}
-impl std::fmt::Debug for Issuer {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.did())
-    }
-}
-
-impl Issuer {
-    /// Creates a new issuer from a passphrase by hashing it to derive a signing key.
-    pub fn from_passphrase(passphrase: &str) -> Self {
-        let bytes = passphrase.as_bytes();
-        Self::from_secret(blake3::hash(bytes).as_bytes())
-    }
-    /// Creates a new issuer from a secret key.
-    pub fn from_secret(secret: &[u8; SECRET_KEY_LENGTH]) -> Self {
-        Issuer::new(SigningKey::from_bytes(secret))
-    }
-    /// Creates a new issuer from a signing key.
-    pub fn new(key: SigningKey) -> Self {
-        let principal = Principal(key.verifying_key().to_bytes());
-
-        Self {
-            id: principal.did(),
-            key,
-            principal,
-        }
-    }
-    /// Generates a new issuer with a random signing key.
-    pub fn generate() -> Result<Self, ReplicaError> {
-        Ok(Self::new(SigningKey::generate(&mut rand::thread_rng())))
-    }
-
-    /// Signs a payload with this issuer's signing key.
-    pub fn sign(&mut self, payload: &[u8]) -> Signature {
-        self.key.sign(payload)
-    }
-
-    /// Returns the DID (Decentralized Identifier) for this issuer.
-    pub fn did(&self) -> &str {
-        &self.id
-    }
-
-    /// Returns the principal (public key bytes) for this issuer.
-    pub fn principal(&self) -> &Principal {
-        &self.principal
-    }
-}
-
 /// A replica represents a local instance of a distributed database.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Replica<Backend: PlatformBackend> {
-    issuer: Issuer,
-    #[allow(dead_code)]
+    issuer: Operator,
+    subject: Did,
     storage: PlatformStorage<Backend>,
-    /// Remote repositories for synchronization
-    pub remotes: Remotes<Backend>,
     /// Local branches in this replica
     pub branches: Branches<Backend>,
 }
 
 impl<Backend: PlatformBackend + 'static> Replica<Backend> {
     /// Creates a new replica with the given issuer and storage backend.
-    pub fn open(issuer: Issuer, backend: Backend) -> Result<Self, ReplicaError> {
+    pub fn open(issuer: Operator, subject: Did, backend: Backend) -> Result<Self, ReplicaError> {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
-        let branches = Branches::new(issuer.clone(), backend.clone());
-        let remotes = Remotes::new(backend.clone());
+        let branches = Branches::new(issuer.clone(), subject.clone(), backend.clone());
         Ok(Replica {
             issuer,
+            subject,
             storage,
-            remotes,
             branches,
         })
     }
@@ -193,49 +121,114 @@ impl<Backend: PlatformBackend + 'static> Replica<Backend> {
     pub fn principal(&self) -> &Principal {
         self.issuer.principal()
     }
+
+    /// Returns a reference to the storage.
+    pub fn storage(&self) -> &PlatformStorage<Backend> {
+        &self.storage
+    }
+
+    /// Returns a mutable reference to the storage.
+    pub fn storage_mut(&mut self) -> &mut PlatformStorage<Backend> {
+        &mut self.storage
+    }
+
+    /// Returns a reference to the issuer (operator).
+    pub fn issuer(&self) -> &Operator {
+        &self.issuer
+    }
+
+    /// Returns a reference to the subject DID.
+    pub fn subject(&self) -> &Did {
+        &self.subject
+    }
 }
 
 /// Manages multiple branches within a replica.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Branches<Backend: PlatformBackend> {
-    issuer: Issuer,
+    issuer: Operator,
+    subject: Did,
     storage: PlatformStorage<Backend>,
 }
 
 impl<Backend: PlatformBackend + 'static> Branches<Backend> {
     /// Creates a new instance for the given backend
-    pub fn new(issuer: Issuer, backend: Backend) -> Self {
+    pub fn new(issuer: Operator, subject: Did, backend: Backend) -> Self {
         let storage = PlatformStorage::new(backend, CborEncoder);
-        Self { issuer, storage }
+        Self {
+            issuer,
+            subject,
+            storage,
+        }
     }
 
     /// Loads a branch with given identifier, produces an error if it does not
     /// exists.
     pub async fn load(&self, id: &BranchId) -> Result<Branch<Backend>, ReplicaError> {
-        Branch::load(id, self.issuer.clone(), self.storage.clone()).await
+        Branch::load(
+            id,
+            self.issuer.clone(),
+            self.storage.clone(),
+            self.subject.clone(),
+        )
+        .await
     }
 
     /// Loads a branch with the given identifier or creates a new one if
     /// it does not already exist.
-    pub async fn open(&self, id: &BranchId) -> Result<Branch<Backend>, ReplicaError> {
-        Branch::open(id, self.issuer.clone(), self.storage.clone()).await
+    pub async fn open(&self, id: impl Into<BranchId>) -> Result<Branch<Backend>, ReplicaError> {
+        Branch::open(
+            id,
+            self.issuer.clone(),
+            self.storage.clone(),
+            self.subject.clone(),
+        )
+        .await
     }
 }
 
 /// Archive represents content addressed storage where search tree
 /// nodes are stored. It supports optional remote fallback for on
 /// demand replication. Uses Arc to share remote state across clones.
-#[derive(Clone, Debug)]
-pub struct Archive<Backend: PlatformBackend> {
-    local: Arc<PlatformStorage<Backend>>,
+///
+/// Archive is storage-agnostic and uses whatever backend you give it.
+/// If you want prefixed keys, wrap your backend with PrefixedBackend before
+/// passing it to Archive.
+#[derive(Clone)]
+pub struct Archive<Backend>
+where
+    Backend: StorageBackend<Key = Vec<u8>, Value = Vec<u8>> + Clone,
+{
+    local: Arc<dialog_storage::Storage<CborEncoder, Backend>>,
     remote: Arc<RwLock<Option<PlatformStorage<RemoteBackend>>>>,
 }
 
-impl<Backend: PlatformBackend> Archive<Backend> {
-    /// Creates a new Archive with the given backend
-    pub fn new(local: PlatformStorage<Backend>) -> Self {
+impl<Backend> std::fmt::Debug for Archive<Backend>
+where
+    Backend: StorageBackend<Key = Vec<u8>, Value = Vec<u8>> + Clone,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Archive")
+            .field("local", &"<Storage>")
+            .field("remote", &"<RwLock>")
+            .finish()
+    }
+}
+
+impl<Backend> Archive<Backend>
+where
+    Backend:
+        StorageBackend<Key = Vec<u8>, Value = Vec<u8>> + Clone + dialog_common::ConditionalSync,
+    Backend::Error: Into<dialog_storage::DialogStorageError>,
+{
+    /// Creates a new Archive with the given backend.
+    pub fn new(backend: Backend) -> Self {
+        let storage = dialog_storage::Storage {
+            encoder: CborEncoder,
+            backend,
+        };
         Self {
-            local: Arc::new(local),
+            local: Arc::new(storage),
             remote: Arc::new(RwLock::new(None)),
         }
     }
@@ -258,8 +251,13 @@ impl<Backend: PlatformBackend> Archive<Backend> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
-    for Archive<Backend>
+impl<Backend> dialog_storage::ContentAddressedStorage for Archive<Backend>
+where
+    Backend: StorageBackend<Key = Vec<u8>, Value = Vec<u8>>
+        + Clone
+        + dialog_common::ConditionalSync
+        + 'static,
+    Backend::Error: Into<dialog_storage::DialogStorageError> + std::fmt::Debug,
 {
     type Hash = [u8; 32];
     type Error = dialog_storage::DialogStorageError;
@@ -268,9 +266,8 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
     where
         T: serde::de::DeserializeOwned + dialog_common::ConditionalSync,
     {
-        // Convert hash to key with "index/" prefix
-        let mut key = b"index/".to_vec();
-        key.extend_from_slice(hash);
+        // Use hash directly as key - prefixing is handled by the storage layer
+        let key = hash.to_vec();
 
         // Try local first
         if let Some(bytes) =
@@ -282,19 +279,21 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
         }
 
         // Fall back to remote if available - clone to avoid holding lock across await
-        let remote_storage = {
+        let connection = {
             let remote_guard = self.remote.read().await;
             remote_guard.clone()
         };
 
-        if let Some(remote) = remote_storage.as_ref() {
+        if let Some(remote) = connection.as_ref() {
             if let Some(bytes) = remote.get(&key).await.map_err(|e| {
                 dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
             })? {
                 // Cache the remote value to local storage
                 // Clone the Arc to get a mutable copy that shares the backend's interior state
                 let mut local = (*self.local).clone();
-                local.set(key, bytes.clone()).await?;
+                local.set(key, bytes.clone()).await.map_err(|e| {
+                    dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
+                })?;
 
                 return remote.decode(&bytes).await.map(Some);
             }
@@ -310,9 +309,8 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
         // Encode and hash the block
         let (hash, bytes) = self.local.encode(block).await?;
 
-        // Prefix key with "index/"
-        let mut key = b"index/".to_vec();
-        key.extend_from_slice(&hash);
+        // Use hash directly as key - prefixing is handled by the storage layer
+        let key = hash.to_vec();
 
         // Write to local storage only - remote sync happens during push()
         // and that is when new blocks will be propagated to the remote.
@@ -329,7 +327,14 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::ContentAddressedStorage
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend: PlatformBackend + 'static> dialog_storage::Encoder for Archive<Backend> {
+impl<Backend> dialog_storage::Encoder for Archive<Backend>
+where
+    Backend: StorageBackend<Key = Vec<u8>, Value = Vec<u8>>
+        + Clone
+        + dialog_common::ConditionalSync
+        + 'static,
+    Backend::Error: Into<dialog_storage::DialogStorageError> + std::fmt::Debug,
+{
     type Bytes = Vec<u8>;
     type Hash = [u8; 32];
     type Error = dialog_storage::DialogStorageError;
@@ -352,10 +357,10 @@ impl<Backend: PlatformBackend + 'static> dialog_storage::Encoder for Archive<Bac
 /// A branch represents a named line of development within a replica.
 #[derive(Clone)]
 pub struct Branch<Backend: PlatformBackend + 'static> {
-    issuer: Issuer,
+    issuer: Operator,
     id: BranchId,
     storage: PlatformStorage<Backend>,
-    archive: Archive<Backend>,
+    archive: Archive<PrefixedBackend<Backend>>,
     memory: TypedStoreResource<BranchState, Backend>,
     tree: Arc<RwLock<Index<Backend>>>,
     upstream: Arc<std::sync::RwLock<Option<Upstream<Backend>>>>,
@@ -373,7 +378,7 @@ impl<Backend: PlatformBackend + 'static> std::fmt::Debug for Branch<Backend> {
 impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     async fn mount(
         id: &BranchId,
-        storage: &PlatformStorage<Backend>,
+        storage: &mut PlatformStorage<Backend>,
         default_state: Option<BranchState>,
     ) -> Result<TypedStoreResource<BranchState, Backend>, ReplicaError> {
         let key = format!("local/{}", id);
@@ -400,12 +405,14 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// Loads a branch from storage, creating it with the provided default state if it doesn't exist.
     pub async fn load_with_default(
         id: &BranchId,
-        issuer: Issuer,
-        storage: PlatformStorage<Backend>,
+        issuer: Operator,
+        mut storage: PlatformStorage<Backend>,
+        subject: Did,
         default_state: Option<BranchState>,
     ) -> Result<Branch<Backend>, ReplicaError> {
-        let memory = Self::mount(id, &storage, default_state).await?;
-        let archive = Archive::new(storage.clone());
+        let memory = Self::mount(id, &mut storage, default_state).await?;
+        let prefixed_backend = PrefixedBackend::new(b"index/", storage.clone().into_backend());
+        let archive = Archive::new(prefixed_backend);
 
         // if we have a memory of tis branch we initialize it otherwise
         // we produce an error.
@@ -418,10 +425,13 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             // If branch has an upstream setup we load it up and configure
             // archive's remote
             let upstream = if let Some(state) = &state.upstream {
-                let upstream = Upstream::open(state, issuer.clone(), storage.clone()).await?;
+                let upstream =
+                    Upstream::open(state, issuer.clone(), storage.clone(), subject.clone()).await?;
 
                 if let Upstream::Remote(branch) = &upstream {
-                    archive.set_remote(branch.remote_storage.clone()).await;
+                    if let Some(archive_storage) = branch.archive_connection() {
+                        archive.set_remote(archive_storage).await;
+                    }
                 }
 
                 Some(upstream)
@@ -446,10 +456,12 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// Mounts a typed store for branch state at the appropriate storage location.
     /// Loads a branch with a given id or creates one if it does not exist.
     pub async fn open(
-        id: &BranchId,
-        issuer: Issuer,
+        id: impl Into<BranchId>,
+        issuer: Operator,
         storage: PlatformStorage<Backend>,
+        subject: Did,
     ) -> Result<Branch<Backend>, ReplicaError> {
+        let id = id.into();
         let default_state = Some(BranchState::new(
             id.clone(),
             #[allow(clippy::clone_on_copy)]
@@ -457,7 +469,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             None,
         ));
 
-        let branch = Self::load_with_default(id, issuer, storage, default_state).await?;
+        let branch = Self::load_with_default(&id, issuer, storage, subject, default_state).await?;
 
         Ok(branch)
     }
@@ -466,10 +478,11 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// given id does not exists it produces an error.
     pub async fn load(
         id: &BranchId,
-        issuer: Issuer,
+        issuer: Operator,
         storage: PlatformStorage<Backend>,
+        subject: Did,
     ) -> Result<Branch<Backend>, ReplicaError> {
-        let branch = Self::load_with_default(id, issuer, storage, None).await?;
+        let branch = Self::load_with_default(id, issuer, storage, subject, None).await?;
 
         Ok(branch)
     }
@@ -504,7 +517,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                         })
                     }
                 },
-                &self.storage,
+                &mut self.storage,
             )
             .await
             .map_err(|_| ReplicaError::StorageError("Updating branch failed".into()))?;
@@ -667,7 +680,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                     let after = self.revision().clone();
                     if before.as_ref() != Some(&after) {
                         // Replicate novel blocks to a remote target
-                        target.import(self.novelty()).await?;
+                        target.upload(self.novelty()).await?;
                         // Now that all blocks are synced, publish the revision
                         target.publish(after.clone()).await?;
                         self.reset(after).await?;
@@ -785,7 +798,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                         ..branch.clone()
                     })
                 },
-                &self.storage,
+                &mut self.storage,
             )
             .await
             .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
@@ -794,7 +807,11 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         // remote so tree changes will be replicated; if local, clear the remote
         match &upstream {
             Upstream::Remote(remote) => {
-                self.archive.set_remote(remote.remote_storage.clone()).await;
+                // Use archive_connection which points to the archive/index bucket,
+                // not connection which points to the memory bucket
+                if let Some(archive_storage) = remote.archive_connection() {
+                    self.archive.set_remote(archive_storage).await;
+                }
             }
             Upstream::Local(_) => {
                 self.archive.clear_remote().await;
@@ -1015,7 +1032,7 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
                         revision: new_revision.clone(),
                         ..self.state()
                     }),
-                    &self.storage,
+                    &mut self.storage,
                 )
                 .await
                 .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
@@ -1040,465 +1057,7 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
     }
 }
 
-/// Manages remote repositories for synchronization.
-#[derive(Debug)]
-pub struct Remotes<Backend: PlatformBackend> {
-    storage: PlatformStorage<Backend>,
-}
-
-impl<Backend: PlatformBackend> Remotes<Backend> {
-    /// Creates a new remotes manager for the given backend.
-    pub fn new(backend: Backend) -> Self {
-        let storage = PlatformStorage::new(backend, CborEncoder);
-        Self { storage }
-    }
-
-    /// Loads an existing remote repository by name.
-    pub async fn load(&self, site: &Site) -> Result<Remote<Backend>, ReplicaError> {
-        Remote::setup(site, self.storage.clone()).await
-    }
-
-    /// Adds a new remote repository with the given name and address.
-    pub async fn add(&mut self, state: RemoteState) -> Result<Remote<Backend>, ReplicaError> {
-        Remote::add(state, self.storage.clone()).await
-    }
-}
-
-/// Represents remote storage
-#[cfg(feature = "s3")]
-pub type RemoteBackend = ErrorMappingBackend<S3Bucket<Vec<u8>, Vec<u8>>>;
-
-#[cfg(not(feature = "s3"))]
-pub type RemoteBackend =
-    ErrorMappingBackend<dialog_storage::MemoryStorageBackend<Vec<u8>, Vec<u8>>>;
-
-/// Represents a connection to a remote repository.
-pub struct Remote<Backend: PlatformBackend> {
-    /// Site of the remote
-    pub site: Site,
-    memory: TypedStoreResource<RemoteState, Backend>,
-    storage: PlatformStorage<Backend>,
-    connection: PlatformStorage<RemoteBackend>,
-}
-
-impl<Backend: PlatformBackend> std::fmt::Debug for Remote<Backend> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Remote")
-            .field("site", &self.site)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<Backend: PlatformBackend> Remote<Backend> {
-    /// Returns the site identifier for this remote.
-    pub fn site(&self) -> &Site {
-        &self.site
-    }
-
-    /// Mounts the transactional memory for a remote site from storage.
-    pub async fn mount(
-        site: &Site,
-        storage: &PlatformStorage<Backend>,
-    ) -> Result<TypedStoreResource<RemoteState, Backend>, ReplicaError> {
-        let address = format!("site/{}", site);
-        let memory = storage
-            .open::<RemoteState>(&address.into_bytes())
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-
-        Ok(memory)
-    }
-    /// Loads a remote repository by the site name.
-    pub async fn setup(
-        site: &Site,
-        storage: PlatformStorage<Backend>,
-    ) -> Result<Remote<Backend>, ReplicaError> {
-        let memory = Self::mount(site, &storage).await?;
-        if let Some(state) = memory.read().clone() {
-            Ok(Remote {
-                site: state.site.clone(),
-                connection: state.connect()?,
-                memory,
-                storage,
-            })
-        } else {
-            Err(ReplicaError::RemoteNotFound {
-                remote: site.into(),
-            })
-        }
-    }
-
-    /// Adds a new remote repository with the given configuration.
-    pub async fn add(
-        state: RemoteState,
-        storage: PlatformStorage<Backend>,
-    ) -> Result<Remote<Backend>, ReplicaError> {
-        let memory = Self::mount(&state.site, &storage).await?;
-        let mut alread_exists = false;
-
-        if let Some(existing_state) = memory.read() {
-            alread_exists = true;
-            if state != existing_state {
-                return Err(ReplicaError::RemoteAlreadyExists {
-                    remote: state.site.to_string(),
-                });
-            }
-        }
-
-        let state = RemoteState {
-            site: state.site.to_string(),
-            address: state.address,
-        };
-        let site = state.site.clone();
-        let connection = state.connect()?;
-
-        if !alread_exists {
-            memory
-                .replace(Some(state.clone()), &storage)
-                .await
-                .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-        }
-
-        Ok(Remote {
-            site,
-            connection,
-            memory,
-            storage,
-        })
-    }
-
-    /// Updates the remote address configuration.
-    ///
-    /// This allows changing the endpoint or authentication details for an existing remote.
-    pub async fn update_address(&mut self, address: RemoteConfig) -> Result<(), ReplicaError> {
-        let new_state = RemoteState {
-            site: self.site.clone(),
-            address,
-        };
-
-        // Update the stored state
-        self.memory
-            .replace(Some(new_state.clone()), &self.storage)
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-
-        // Update the connection
-        self.connection = new_state.connect()?;
-
-        Ok(())
-    }
-
-    /// Opens a branch at this remote
-    pub async fn open(&self, id: &BranchId) -> Result<RemoteBranch<Backend>, ReplicaError> {
-        RemoteBranch::open(self.site(), id, self.storage.clone()).await
-    }
-}
-
-/// Represents a branch on a remote repository.
-#[derive(Clone)]
-pub struct RemoteBranch<Backend: PlatformBackend> {
-    /// Name of the remote this branch is part of
-    pub site: Site,
-    /// Branch id on the remote it's on
-    pub id: BranchId,
-
-    /// Local storage where updates are stored
-    pub storage: PlatformStorage<Backend>,
-
-    /// Remote storage for canonical operations
-    pub remote_storage: PlatformStorage<RemoteBackend>,
-
-    /// Local cache for the revision currently branch has
-    pub cache: TypedStoreResource<Revision, Backend>,
-    /// Canonical revision, which is created lazily on fetch.
-    pub canonical: Option<TypedStoreResource<Revision, RemoteBackend>>,
-}
-
-impl<Backend: PlatformBackend> std::fmt::Debug for RemoteBranch<Backend> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RemoteBranch")
-            .field("site", &self.site)
-            .field("id", &self.id)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<Backend: PlatformBackend> RemoteBranch<Backend> {
-    /// Mounts the transactional memory for a remote branch from local storage.
-    pub async fn mount(
-        site: &Site,
-        id: &BranchId,
-        storage: &PlatformStorage<Backend>,
-    ) -> Result<TypedStoreResource<Revision, Backend>, ReplicaError> {
-        // Open a localy stored revision for this branch
-        let address = format!("remote/{}/{}", site, id);
-        let memory = storage
-            .open::<Revision>(&address.into_bytes())
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-
-        Ok(memory)
-    }
-
-    /// Opens a remote branch, creating it if it doesn't exist.
-    pub async fn open(
-        site: &Site,
-        id: &BranchId,
-        storage: PlatformStorage<Backend>,
-    ) -> Result<RemoteBranch<Backend>, ReplicaError> {
-        // Open a localy stored revision for this branch
-        let memory = Self::mount(site, id, &storage).await?;
-        let remote = Remote::setup(site, storage.clone()).await?;
-
-        Ok(Self {
-            site: site.clone(),
-            id: id.clone(),
-            storage,
-            cache: memory,
-            canonical: None,
-            remote_storage: remote.connection,
-        })
-    }
-
-    /// Returns the site for this remote branch
-    pub fn site(&self) -> &Site {
-        &self.site
-    }
-
-    /// Returns the branch id
-    pub fn id(&self) -> &BranchId {
-        &self.id
-    }
-
-    /// Returns the current revision
-    pub fn revision(&self) -> Option<Revision> {
-        self.cache.read()
-    }
-
-    /// Connects to the canonical remote storage for this branch.
-    pub async fn connect(
-        &mut self,
-    ) -> Result<&TypedStoreResource<Revision, RemoteBackend>, ReplicaError> {
-        if self.canonical.is_none() {
-            // Load a remote for this branch
-
-            let address = format!("local/{}", self.id);
-            let canonical = self
-                .remote_storage
-                .open::<Revision>(&address.into_bytes())
-                .await
-                .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-
-            self.canonical = Some(canonical);
-        }
-
-        Ok(self
-            .canonical
-            .as_ref()
-            .expect("canonical was initialized above"))
-    }
-
-    /// Fetcher remote revision for this branch. If remote revision is different
-    /// from local revision updates local one to match the remote. Returns
-    /// revision of this branch.
-    pub async fn fetch(&mut self) -> Result<Option<Revision>, ReplicaError> {
-        self.connect().await?;
-        let canonical = self.canonical.as_mut().expect("connected");
-
-        // Force reload from storage to ensure we get fresh data
-        let _ = canonical.reload(&self.remote_storage).await;
-
-        let revision = canonical.read().clone();
-
-        // update local record for the revision.
-        self.cache
-            .replace_with(|_| revision.clone(), &self.storage)
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-
-        Ok(self.revision())
-    }
-
-    /// Publishes new canonical revision. Returns error if publishing fails.
-    pub async fn publish(&mut self, revision: Revision) -> Result<(), ReplicaError> {
-        self.connect().await?;
-        let prior = self.revision().clone();
-        let canonical = self.canonical.as_mut().expect("connected");
-
-        // we only need to publish to upstream if desired revision is different
-        // from the last revision we have read from upstream.
-        if canonical.read().as_ref() != Some(&revision) {
-            canonical
-                .replace(Some(revision.clone()), &self.remote_storage)
-                .await
-                .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-        }
-
-        // if revision for the remote branch is different from one published
-        // we got to update local revision. We return revision we replaced
-        if prior.as_ref() != Some(&revision) {
-            self.cache
-                .replace_with(|_| Some(revision.clone()), &self.storage)
-                .await
-                .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-        }
-
-        Ok(())
-    }
-
-    /// Imports novel nodes from a stream into remote storage.
-    ///
-    /// This method takes a stream of tree nodes (typically from `TreeDifference::novel_nodes()`)
-    /// and pushes them concurrently to the remote storage. Use this before publishing a new
-    /// revision to ensure all tree blocks are available on the remote.
-    ///
-    /// # Arguments
-    /// * `nodes` - A stream of nodes to import
-    ///
-    /// # Example
-    ///
-    /// ```text
-    /// // After computing a TreeDifference, import novel nodes:
-    /// remote.import(diff.novel_nodes()).await?;
-    /// ```
-    pub async fn import<Key, Value, E, S>(&mut self, nodes: S) -> Result<(), ReplicaError>
-    where
-        Key: KeyType + 'static,
-        Value: dialog_prolly_tree::ValueType,
-        E: std::fmt::Debug,
-        S: Stream<Item = Result<Node<Key, Value, Blake3Hash>, E>>,
-    {
-        use futures_util::pin_mut;
-
-        let mut queue = TaskQueue::default();
-        pin_mut!(nodes);
-
-        while let Some(result) = nodes.next().await {
-            let node = result.map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
-
-            // Build the key for this block
-            let hash = node.hash();
-            let mut key = b"index/".to_vec();
-            key.extend_from_slice(hash);
-
-            // Encode the block using the standard encoder
-            let (_hash, bytes) = CborEncoder.encode(node.block()).await.map_err(|e| {
-                ReplicaError::StorageError(format!("Failed to encode block: {:?}", e))
-            })?;
-
-            // Clone what we need for the spawned task
-            let mut remote = self.remote_storage.clone();
-
-            // Spawn concurrent upload task
-            queue.spawn(async move {
-                remote
-                    .set(key, bytes)
-                    .await
-                    .map_err(|_| DialogAsyncError::JoinError)
-            });
-        }
-
-        // Wait for all uploads to complete
-        queue
-            .join()
-            .await
-            .map_err(|e| ReplicaError::StorageError(format!("Import failed: {:?}", e)))?;
-
-        Ok(())
-    }
-}
-
-/// State of the remote branch
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RemoteBranchState {
-    /// Site of the branch
-    pub site: Site,
-    /// branch id
-    pub id: BranchId,
-    /// Revision that was fetched last
-    pub revision: Revision,
-}
-
-/// Configuration for connecting to a remote S3/R2 storage.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RemoteConfig {
-    /// S3/R2 endpoint URL
-    pub endpoint: String,
-    /// AWS region for signing (use "auto" for R2)
-    pub region: String,
-    /// Bucket name
-    pub bucket: String,
-    /// Optional key prefix within the bucket
-    pub prefix: Option<String>,
-    /// Optional AWS access key ID (None for public access)
-    pub access_key_id: Option<String>,
-    /// Optional AWS secret access key (None for public access)
-    pub secret_access_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-/// State information for a remote repository connection.
-pub struct RemoteState {
-    /// Name for this remote.
-    pub site: Site,
-
-    /// Address used to configure this remote
-    pub address: RemoteConfig,
-}
-
-impl RemoteState {
-    /// Creates a storage connection using this remote's configuration.
-    #[cfg(feature = "s3")]
-    pub fn connect(&self) -> Result<PlatformStorage<RemoteBackend>, ReplicaError> {
-        use dialog_storage::s3::{Address, Credentials, Public};
-
-        let address = Address::new(
-            &self.address.endpoint,
-            &self.address.region,
-            &self.address.bucket,
-        );
-
-        let bucket = match (&self.address.access_key_id, &self.address.secret_access_key) {
-            (Some(key_id), Some(secret)) => {
-                let authorizer = Credentials::new(address, key_id, secret).map_err(|_| {
-                    ReplicaError::RemoteConnectionError {
-                        remote: self.site.clone(),
-                    }
-                })?;
-                S3Bucket::open(authorizer)
-            }
-            _ => {
-                let authorizer =
-                    Public::new(address).map_err(|_| ReplicaError::RemoteConnectionError {
-                        remote: self.site.clone(),
-                    })?;
-                S3Bucket::open(authorizer)
-            }
-        }
-        .map_err(|_| ReplicaError::RemoteConnectionError {
-            remote: self.site.clone(),
-        });
-
-        let backend = if let Some(prefix) = &self.address.prefix {
-            bucket?.at(prefix)
-        } else {
-            bucket?
-        };
-
-        Ok(PlatformStorage::new(
-            ErrorMappingBackend::new(backend),
-            CborEncoder,
-        ))
-    }
-
-    /// Creates a storage connection using this remote's configuration (fallback for non-s3).
-    #[cfg(not(feature = "s3"))]
-    pub fn connect(&self) -> Result<PlatformStorage<RemoteBackend>, ReplicaError> {
-        Err(ReplicaError::RemoteConnectionError {
-            remote: self.site.clone(),
-        })
-    }
-}
+pub use remote::{RemoteBackend, RemoteState};
 
 /// Logical timestamp used to denote dialog transactions. It takes inspiration
 /// from automerge which tags lamport timestamps with origin information. It
@@ -1674,6 +1233,12 @@ impl Display for BranchId {
     }
 }
 
+impl From<&BranchId> for BranchId {
+    fn from(value: &BranchId) -> Self {
+        value.clone()
+    }
+}
+
 impl BranchState {
     /// Create a new fork from the given revision.
     pub fn new(id: BranchId, revision: Revision, description: Option<String>) -> Self {
@@ -1715,6 +1280,7 @@ impl BranchState {
 /// Upstream branch that is used to push & pull changes
 /// to / from. It can be local or remote.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Upstream<Backend: PlatformBackend + 'static> {
     /// A local branch upstream
     Local(Branch<Backend>),
@@ -1727,17 +1293,21 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open(
         state: &UpstreamState,
-        issuer: Issuer,
+        issuer: Operator,
         storage: PlatformStorage<Backend>,
+        subject: Did,
     ) -> BoxFuture<'_, Result<Self, ReplicaError>> {
         Box::pin(async move {
             match state {
                 UpstreamState::Local { branch } => {
-                    let branch = Branch::load(branch, issuer, storage).await?;
+                    let branch = Branch::load(branch, issuer, storage, subject).await?;
                     Ok(Upstream::Local(branch))
                 }
                 UpstreamState::Remote { site, branch } => {
-                    let remote_branch = RemoteBranch::open(site, branch, storage).await?;
+                    let mut remote_branch =
+                        RemoteBranch::new(site, branch.id(), storage.clone(), issuer, subject)
+                            .await?;
+                    remote_branch.open().await?;
                     Ok(Upstream::Remote(remote_branch))
                 }
             }
@@ -1748,28 +1318,32 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
     #[cfg(target_arch = "wasm32")]
     pub fn open(
         state: &UpstreamState,
-        issuer: Issuer,
+        issuer: Operator,
         storage: PlatformStorage<Backend>,
+        subject: Did,
     ) -> LocalBoxFuture<'_, Result<Self, ReplicaError>> {
         Box::pin(async move {
             match state {
                 UpstreamState::Local { branch } => {
-                    let branch = Branch::open(branch, issuer, storage).await?;
+                    let branch = Branch::load(branch, issuer, storage, subject).await?;
                     Ok(Upstream::Local(branch))
                 }
                 UpstreamState::Remote { site, branch } => {
-                    let remote_branch = RemoteBranch::open(site, branch, storage).await?;
+                    let mut remote_branch =
+                        RemoteBranch::new(site, branch.id(), storage.clone(), issuer, subject)
+                            .await?;
+                    remote_branch.open().await?;
                     Ok(Upstream::Remote(remote_branch))
                 }
             }
         })
     }
 
-    /// Returns the branch id of this upstream
-    pub fn id(&self) -> &BranchId {
+    /// Returns the branch id of this upstream as a string
+    pub fn id(&self) -> String {
         match self {
-            Upstream::Local(branch) => branch.id(),
-            Upstream::Remote(branch) => branch.id(),
+            Upstream::Local(branch) => branch.id().to_string(),
+            Upstream::Remote(branch) => branch.id().to_string(),
         }
     }
 
@@ -1783,7 +1357,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
 
     /// Returns site of the branch. If local returns None otherwise
     /// returns site identifier
-    pub fn site(&self) -> Option<&Site> {
+    pub fn site(&self) -> Option<&str> {
         match self {
             Upstream::Local(_) => None,
             Upstream::Remote(branch) => Some(branch.site()),
@@ -1802,8 +1376,8 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
                 branch: branch.id().clone(),
             },
             Upstream::Remote(remote) => UpstreamState::Remote {
-                site: remote.site().clone(),
-                branch: remote.id().clone(),
+                site: remote.site().to_string(),
+                branch: BranchId::new(remote.id().to_string()),
             },
         }
     }
@@ -1812,7 +1386,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
     pub async fn fetch(&mut self) -> Result<Option<Revision>, ReplicaError> {
         match self {
             Upstream::Local(branch) => Ok(Some(branch.revision())),
-            Upstream::Remote(remote) => Ok(remote.fetch().await?.to_owned()),
+            Upstream::Remote(remote) => Ok(remote.resolve().await?.to_owned()),
         }
     }
 
@@ -1844,8 +1418,8 @@ impl<Backend: PlatformBackend> From<Upstream<Backend>> for UpstreamState {
                 branch: branch.id().clone(),
             },
             Upstream::Remote(branch) => UpstreamState::Remote {
-                site: branch.site.clone(),
-                branch: branch.id().clone(),
+                site: branch.site().to_string(),
+                branch: BranchId::new(branch.id().to_string()),
             },
         }
     }
@@ -2000,6 +1574,13 @@ pub enum ReplicaError {
         /// Branch identifier
         id: BranchId,
     },
+
+    /// Invalid internal state (should never happen in normal operation)
+    #[error("Invalid state: {message}")]
+    InvalidState {
+        /// Description of the invalid state
+        message: String,
+    },
 }
 
 impl ReplicaError {
@@ -2041,6 +1622,7 @@ impl Display for Capability {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ErrorMappingBackend;
     use dialog_storage::MemoryStorageBackend;
 
     #[cfg(target_arch = "wasm32")]
@@ -2049,6 +1631,11 @@ mod tests {
     /// Helper to create a test issuer
     fn seed() -> [u8; 32] {
         [1u8; 32]
+    }
+
+    /// Helper to get a test subject DID
+    fn test_subject() -> Did {
+        "did:test:subject".into()
     }
 
     /// Helper to create a test branch with upstream
@@ -2062,10 +1649,12 @@ mod tests {
     {
         let branch_id = BranchId::new(id.to_string());
         let upstream_branch_id = BranchId::new(upstream_id.to_string());
+        let subject = test_subject();
 
-        let issuer = Issuer::from_secret(&seed());
-        let mut branch = Branch::open(&branch_id, issuer.clone(), storage.clone()).await?;
-        let target = Branch::open(&upstream_branch_id, issuer, storage.clone()).await?;
+        let issuer = Operator::from_secret(&seed());
+        let mut branch =
+            Branch::open(&branch_id, issuer.clone(), storage.clone(), subject.clone()).await?;
+        let target = Branch::open(&upstream_branch_id, issuer, storage.clone(), subject).await?;
 
         // Set up upstream as a local branch
         branch.set_upstream(target).await?;
@@ -2082,10 +1671,12 @@ mod tests {
 
         // Create main branch
         let main_id = BranchId::new("main".to_string());
-        let issuer = Issuer::from_secret(&seed());
-        let mut main_branch = Branch::open(&main_id, issuer.clone(), storage.clone())
-            .await
-            .expect("Failed to create main branch");
+        let issuer = Operator::from_secret(&seed());
+        let subject = test_subject();
+        let mut main_branch =
+            Branch::open(&main_id, issuer.clone(), storage.clone(), subject.clone())
+                .await
+                .expect("Failed to create main branch");
 
         // Create a revision for main
         let main_revision = Revision {
@@ -2122,7 +1713,7 @@ mod tests {
         feature_branch.push().await.expect("Push failed");
 
         // Verify main branch was updated
-        let updated_main = Branch::load(&main_id, issuer, storage)
+        let updated_main = Branch::load(&main_id, issuer, storage, subject)
             .await
             .expect("Failed to load main branch");
 
@@ -2155,8 +1746,9 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branch_id = BranchId::new("no-upstream".to_string());
-        let issuer = Issuer::from_secret(&seed());
-        let mut branch = Branch::open(&branch_id, issuer, storage)
+        let issuer = Operator::from_secret(&seed());
+        let subject = test_subject();
+        let mut branch = Branch::open(&branch_id, issuer, storage, subject)
             .await
             .expect("Failed to create branch");
 
@@ -2173,10 +1765,12 @@ mod tests {
 
         // Create main and feature branches
         let main_id = BranchId::new("main".to_string());
-        let issuer = Issuer::from_secret(&seed());
-        let mut main_branch = Branch::open(&main_id, issuer.clone(), storage.clone())
-            .await
-            .expect("Failed to create main branch");
+        let issuer = Operator::from_secret(&seed());
+        let subject = test_subject();
+        let mut main_branch =
+            Branch::open(&main_id, issuer.clone(), storage.clone(), subject.clone())
+                .await
+                .expect("Failed to create main branch");
 
         let main_revision = Revision {
             issuer: main_branch.principal().clone(),
@@ -2213,8 +1807,9 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branch_id = BranchId::new("no-upstream".to_string());
-        let issuer = Issuer::from_secret(&seed());
-        let mut branch = Branch::open(&branch_id, issuer, storage)
+        let issuer = Operator::from_secret(&seed());
+        let subject = test_subject();
+        let mut branch = Branch::open(&branch_id, issuer, storage, subject)
             .await
             .expect("Failed to create branch");
 
@@ -2227,16 +1822,19 @@ mod tests {
     async fn test_end_to_end_remote_upstream(
         s3_address: dialog_storage::s3::helpers::S3Address,
     ) -> anyhow::Result<()> {
+        use dialog_s3_credentials::Address;
         use dialog_storage::JournaledStorage;
         use futures_util::stream;
 
         // Step 1: Generate issuer
-        let issuer = Issuer::from_passphrase("test_end_to_end_remote_upstream");
+        let issuer = Operator::from_passphrase("test_end_to_end_remote_upstream");
+        let subject = issuer.did().clone();
 
         // Step 2: Create a replica with that issuer and journaled in-memory backend
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let journaled_backend = JournaledStorage::new(backend);
-        let mut replica = Replica::open(issuer.clone(), journaled_backend.clone())
+        let mut replica = issuer
+            .open(issuer.did(), journaled_backend.clone())
             .expect("Failed to create replica");
 
         // Step 3: Create a branch e.g. main
@@ -2269,20 +1867,19 @@ mod tests {
         );
 
         // Step 4: Add a remote to the replica
+        let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
+        let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
+            address,
+            &s3_address.access_key_id,
+            &s3_address.secret_access_key,
+        )?
+        .with_path_style(true);
         let remote_state = RemoteState {
             site: "origin".to_string(),
-            address: RemoteConfig {
-                endpoint: s3_address.endpoint.clone(),
-                region: "auto".to_string(),
-                bucket: s3_address.bucket.clone(),
-                prefix: Some("test".to_string()),
-                access_key_id: Some(s3_address.access_key_id.clone()),
-                secret_access_key: Some(s3_address.secret_access_key.clone()),
-            },
+            credentials: RemoteCredentials::S3(s3_credentials),
         };
-        let remote = replica
-            .remotes
-            .add(remote_state)
+        let _site = replica
+            .add_remote(remote_state.clone())
             .await
             .expect("Failed to add remote");
 
@@ -2305,16 +1902,21 @@ mod tests {
             decoded_remote_state.site, "origin",
             "Remote state should contain site name 'origin'"
         );
-        assert_eq!(
-            decoded_remote_state.address.endpoint, s3_address.endpoint,
-            "Remote state should contain correct endpoint"
-        );
 
         // Step 5: Create a remote branch for the main
-        let remote_branch = remote
-            .open(&main_id)
+        let remote_site = RemoteSite::load(
+            &remote_state.site,
+            issuer.clone(),
+            replica.storage().clone(),
+        )
+        .await
+        .expect("Failed to load remote site");
+        let remote_repo = remote_site.repository(&subject);
+        let mut remote_branch = remote_repo.branch(main_id.to_string());
+        remote_branch
+            .open()
             .await
-            .expect("Failed to create remote branch");
+            .expect("Failed to open remote branch");
 
         // Note: Opening a remote branch doesn't write to storage yet.
         // The remote/main record will be created when we push to it.
@@ -2411,7 +2013,7 @@ mod tests {
 
         // Verify remote branch record was created with a cached revision
         // The key uses the branch ID as bytes
-        let remote_branch_key = format!("remote/{}/{}", remote.site(), main_id)
+        let remote_branch_key = format!("remote/{}/{}/{}", remote_state.site, subject, main_id)
             .as_bytes()
             .to_vec();
 
@@ -2420,8 +2022,9 @@ mod tests {
         let was_written = all_written_keys.iter().any(|k| k == &remote_branch_key);
         assert!(
             was_written,
-            "Remote branch key 'remote/{}/{}' should have been written during push. All keys: {:?}",
-            remote.site(),
+            "Remote branch key 'remote/{}/{}/{}' should have been written during push. All keys: {:?}",
+            remote_state.site,
+            subject,
             main_id,
             all_written_keys
                 .iter()
@@ -2447,19 +2050,23 @@ mod tests {
     async fn test_push_and_pull_simple(
         s3_address: dialog_storage::s3::helpers::S3Address,
     ) -> anyhow::Result<()> {
+        use dialog_s3_credentials::Address;
         use futures_util::stream;
 
+        // Both Alice and Bob share the same subject for this test
+        let subject: Did = "did:test:shared_repo".into();
+
         // Create Alice's replica
-        let alice_issuer = Issuer::from_passphrase("alice");
-        let alice_backend = MemoryStorageBackend::default();
-        let mut alice_replica = Replica::open(alice_issuer.clone(), alice_backend)
+        let alice_issuer = Operator::from_passphrase("alice");
+        let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let mut alice_replica = Replica::open(alice_issuer.clone(), subject.clone(), alice_backend)
             .expect("Failed to create Alice's replica");
 
         // Create Bob's replica
-        let bob_issuer = Issuer::from_passphrase("bob");
-        let bob_backend = MemoryStorageBackend::default();
-        let mut bob_replica =
-            Replica::open(bob_issuer.clone(), bob_backend).expect("Failed to create Bob's replica");
+        let bob_issuer = Operator::from_passphrase("bob");
+        let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let mut bob_replica = Replica::open(bob_issuer.clone(), subject.clone(), bob_backend)
+            .expect("Failed to create Bob's replica");
 
         // Both create main branches
         let main_id = BranchId::new("main".to_string());
@@ -2474,28 +2081,36 @@ mod tests {
             .await
             .expect("Failed to create Bob's branch");
 
-        // Configure shared remote
-        let remote_config = RemoteConfig {
-            endpoint: s3_address.endpoint.clone(),
-            region: "auto".to_string(),
-            bucket: s3_address.bucket.clone(),
-            prefix: Some("collab".to_string()),
-            access_key_id: Some(s3_address.access_key_id.clone()),
-            secret_access_key: Some(s3_address.secret_access_key.clone()),
-        };
+        // Configure shared remote credentials
+        let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
+        let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
+            address,
+            &s3_address.access_key_id,
+            &s3_address.secret_access_key,
+        )?
+        .with_path_style(true);
 
         // Alice adds remote and sets upstream
         let alice_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config.clone(),
+            credentials: RemoteCredentials::S3(s3_credentials.clone()),
         };
-        let alice_remote = alice_replica
-            .remotes
-            .add(alice_remote_state)
+        alice_replica
+            .add_remote(alice_remote_state.clone())
             .await
             .expect("Failed to add remote");
-        let alice_remote_branch = alice_remote
-            .open(&main_id)
+        let alice_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            alice_issuer.clone(),
+            alice_replica.storage().clone(),
+        )
+        .await
+        .expect("Failed to load Alice's remote site");
+        let mut alice_remote_branch = alice_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string());
+        alice_remote_branch
+            .open()
             .await
             .expect("Failed to create remote branch");
         alice_main
@@ -2525,15 +2140,24 @@ mod tests {
         // Bob adds same remote and sets upstream
         let bob_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config,
+            credentials: RemoteCredentials::S3(s3_credentials),
         };
-        let bob_remote = bob_replica
-            .remotes
-            .add(bob_remote_state)
+        bob_replica
+            .add_remote(bob_remote_state)
             .await
             .expect("Failed to add remote");
-        let bob_remote_branch = bob_remote
-            .open(&main_id)
+        let bob_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            bob_issuer.clone(),
+            bob_replica.storage().clone(),
+        )
+        .await
+        .expect("Failed to load Bob's remote site");
+        let mut bob_remote_branch = bob_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string());
+        bob_remote_branch
+            .open()
             .await
             .expect("Failed to create remote branch");
         bob_main
@@ -2570,22 +2194,31 @@ mod tests {
     async fn test_collaborative_workflow_alice_and_bob(
         s3_address: dialog_storage::s3::helpers::S3Address,
     ) -> anyhow::Result<()> {
+        use dialog_s3_credentials::Address;
         use dialog_storage::JournaledStorage;
         use futures_util::stream;
 
+        // Both Alice and Bob share the same subject for this test
+        let subject: Did = "did:test:shared_repo".into();
+
         // Step 1: Create Alice's replica with her own issuer and backend
-        let alice_issuer = Issuer::from_passphrase("alice");
-        let alice_backend = MemoryStorageBackend::default();
+        let alice_issuer = Operator::from_passphrase("alice");
+        let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
-        let mut alice_replica = Replica::open(alice_issuer.clone(), alice_journaled.clone())
-            .expect("Failed to create Alice's replica");
+        let mut alice_replica = Replica::open(
+            alice_issuer.clone(),
+            subject.clone(),
+            alice_journaled.clone(),
+        )
+        .expect("Failed to create Alice's replica");
 
         // Step 2: Create Bob's replica with his own issuer and backend
-        let bob_issuer = Issuer::from_passphrase("bob");
-        let bob_backend = MemoryStorageBackend::default();
+        let bob_issuer = Operator::from_passphrase("bob");
+        let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
-        let mut bob_replica = Replica::open(bob_issuer.clone(), bob_journaled.clone())
-            .expect("Failed to create Bob's replica");
+        let mut bob_replica =
+            Replica::open(bob_issuer.clone(), subject.clone(), bob_journaled.clone())
+                .expect("Failed to create Bob's replica");
 
         // Step 3: Both create a "main" branch
         let main_id = BranchId::new("main".to_string());
@@ -2601,29 +2234,37 @@ mod tests {
             .await
             .expect("Failed to create Bob's main branch");
 
-        // Step 4: Configure shared remote for both replicas
-        let remote_config = RemoteConfig {
-            endpoint: s3_address.endpoint.clone(),
-            region: "auto".to_string(),
-            bucket: s3_address.bucket.clone(),
-            prefix: Some("collab".to_string()),
-            access_key_id: Some(s3_address.access_key_id.clone()),
-            secret_access_key: Some(s3_address.secret_access_key.clone()),
-        };
+        // Step 4: Configure shared remote credentials
+        let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
+        let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
+            address,
+            &s3_address.access_key_id,
+            &s3_address.secret_access_key,
+        )?
+        .with_path_style(true);
 
         // Alice adds the remote
         let alice_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config.clone(),
+            credentials: RemoteCredentials::S3(s3_credentials.clone()),
         };
-        let alice_remote = alice_replica
-            .remotes
-            .add(alice_remote_state)
+        alice_replica
+            .add_remote(alice_remote_state)
             .await
             .expect("Failed to add remote for Alice");
 
-        let alice_remote_branch = alice_remote
-            .open(&main_id)
+        let alice_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            alice_issuer.clone(),
+            alice_replica.storage().clone(),
+        )
+        .await
+        .expect("Failed to load Alice's remote site");
+        let mut alice_remote_branch = alice_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string());
+        alice_remote_branch
+            .open()
             .await
             .expect("Failed to create Alice's remote branch");
 
@@ -2658,16 +2299,25 @@ mod tests {
         // Step 6: Bob adds the remote and sets upstream (after Alice has pushed)
         let bob_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config,
+            credentials: RemoteCredentials::S3(s3_credentials),
         };
-        let bob_remote = bob_replica
-            .remotes
-            .add(bob_remote_state)
+        bob_replica
+            .add_remote(bob_remote_state)
             .await
             .expect("Failed to add remote for Bob");
 
-        let bob_remote_branch = bob_remote
-            .open(&main_id)
+        let bob_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            bob_issuer.clone(),
+            bob_replica.storage().clone(),
+        )
+        .await
+        .expect("Failed to load Bob's remote site");
+        let mut bob_remote_branch = bob_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string());
+        bob_remote_branch
+            .open()
             .await
             .expect("Failed to create Bob's remote branch");
 
@@ -2813,22 +2463,31 @@ mod tests {
     ) -> anyhow::Result<()> {
         // This test verifies that when pulling with no local changes,
         // we adopt the upstream revision directly without creating a new one
+        use dialog_s3_credentials::Address;
         use dialog_storage::JournaledStorage;
         use futures_util::stream;
 
+        // Both Alice and Bob share the same subject for this test
+        let subject: Did = "did:test:shared_repo".into();
+
         // Create Alice's replica
-        let alice_issuer = Issuer::from_passphrase("alice");
-        let alice_backend = MemoryStorageBackend::default();
+        let alice_issuer = Operator::from_passphrase("alice");
+        let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
-        let mut alice_replica = Replica::open(alice_issuer.clone(), alice_journaled.clone())
-            .expect("Failed to create Alice's replica");
+        let mut alice_replica = Replica::open(
+            alice_issuer.clone(),
+            subject.clone(),
+            alice_journaled.clone(),
+        )
+        .expect("Failed to create Alice's replica");
 
         // Create Bob's replica
-        let bob_issuer = Issuer::from_passphrase("bob");
-        let bob_backend = MemoryStorageBackend::default();
+        let bob_issuer = Operator::from_passphrase("bob");
+        let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
-        let mut bob_replica = Replica::open(bob_issuer.clone(), bob_journaled.clone())
-            .expect("Failed to create Bob's replica");
+        let mut bob_replica =
+            Replica::open(bob_issuer.clone(), subject.clone(), bob_journaled.clone())
+                .expect("Failed to create Bob's replica");
 
         // Both create a "main" branch
         let main_id = BranchId::new("main".to_string());
@@ -2844,29 +2503,37 @@ mod tests {
             .await
             .expect("Failed to create Bob's main branch");
 
-        // Configure shared remote
-        let remote_config = RemoteConfig {
-            endpoint: s3_address.endpoint.clone(),
-            region: "auto".to_string(),
-            bucket: s3_address.bucket.clone(),
-            prefix: Some("noop-pull".to_string()),
-            access_key_id: Some(s3_address.access_key_id.clone()),
-            secret_access_key: Some(s3_address.secret_access_key.clone()),
-        };
+        // Configure shared remote credentials
+        let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
+        let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
+            address,
+            &s3_address.access_key_id,
+            &s3_address.secret_access_key,
+        )?
+        .with_path_style(true);
 
         // Alice adds and configures remote
         let alice_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config.clone(),
+            credentials: RemoteCredentials::S3(s3_credentials.clone()),
         };
-        let alice_remote = alice_replica
-            .remotes
-            .add(alice_remote_state)
+        alice_replica
+            .add_remote(alice_remote_state)
             .await
             .expect("Failed to add remote for Alice");
 
-        let alice_remote_branch = alice_remote
-            .open(&main_id)
+        let alice_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            alice_issuer.clone(),
+            alice_replica.storage().clone(),
+        )
+        .await
+        .expect("Failed to load Alice's remote site");
+        let mut alice_remote_branch = alice_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string());
+        alice_remote_branch
+            .open()
             .await
             .expect("Failed to open Alice's remote branch");
 
@@ -2898,16 +2565,25 @@ mod tests {
         // Bob adds the same remote
         let bob_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config,
+            credentials: RemoteCredentials::S3(s3_credentials),
         };
-        let bob_remote = bob_replica
-            .remotes
-            .add(bob_remote_state)
+        bob_replica
+            .add_remote(bob_remote_state)
             .await
             .expect("Failed to add remote for Bob");
 
-        let bob_remote_branch = bob_remote
-            .open(&main_id)
+        let bob_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            bob_issuer.clone(),
+            bob_replica.storage().clone(),
+        )
+        .await
+        .expect("Failed to load Bob's remote site");
+        let mut bob_remote_branch = bob_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string());
+        bob_remote_branch
+            .open()
             .await
             .expect("Failed to open Bob's remote branch");
 
@@ -2976,25 +2652,28 @@ mod tests {
     #[tokio::test]
     async fn test_branch_load_vs_open() -> anyhow::Result<()> {
         // Test the difference between load (expects existing) and open (creates if missing)
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
-        let issuer = Issuer::from_passphrase("test-user");
+        let issuer = Operator::from_passphrase("test-user");
+        let subject = test_subject();
 
         let branch_id = BranchId::new("test-branch".to_string());
 
         // load() should fail when branch doesn't exist
-        let load_result = Branch::load(&branch_id, issuer.clone(), storage.clone()).await;
+        let load_result =
+            Branch::load(&branch_id, issuer.clone(), storage.clone(), subject.clone()).await;
         assert!(
             load_result.is_err(),
             "load() should fail for non-existent branch"
         );
 
         // open() should succeed and create the branch
-        let branch = Branch::open(&branch_id, issuer.clone(), storage.clone()).await?;
+        let branch =
+            Branch::open(&branch_id, issuer.clone(), storage.clone(), subject.clone()).await?;
         assert_eq!(branch.id(), &branch_id);
 
         // Now load() should succeed
-        let loaded = Branch::load(&branch_id, issuer.clone(), storage.clone()).await?;
+        let loaded = Branch::load(&branch_id, issuer.clone(), storage.clone(), subject).await?;
         assert_eq!(loaded.id(), &branch_id);
 
         Ok(())
@@ -3005,34 +2684,50 @@ mod tests {
         s3_address: dialog_storage::s3::helpers::S3Address,
     ) -> anyhow::Result<()> {
         // Test that fetch() retrieves upstream state without merging
+        use dialog_s3_credentials::Address;
         use dialog_storage::JournaledStorage;
         use futures_util::stream;
 
+        // Both Alice and Bob share the same subject for this test
+        let subject: Did = "did:test:shared_repo".into();
+
         // Create Alice's replica
-        let alice_issuer = Issuer::from_passphrase("alice");
-        let alice_backend = MemoryStorageBackend::default();
+        let alice_issuer = Operator::from_passphrase("alice");
+        let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
-        let mut alice_replica = Replica::open(alice_issuer.clone(), alice_journaled.clone())?;
+        let mut alice_replica = Replica::open(
+            alice_issuer.clone(),
+            subject.clone(),
+            alice_journaled.clone(),
+        )?;
 
         let main_id = BranchId::new("main".to_string());
         let mut alice_main = alice_replica.branches.open(&main_id).await?;
 
-        // Configure remote
-        let remote_config = RemoteConfig {
-            endpoint: s3_address.endpoint.clone(),
-            region: "auto".to_string(),
-            bucket: s3_address.bucket.clone(),
-            prefix: Some("fetch".to_string()),
-            access_key_id: Some(s3_address.access_key_id.clone()),
-            secret_access_key: Some(s3_address.secret_access_key.clone()),
-        };
+        // Configure remote credentials
+        let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
+        let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
+            address,
+            &s3_address.access_key_id,
+            &s3_address.secret_access_key,
+        )?
+        .with_path_style(true);
 
         let alice_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config.clone(),
+            credentials: RemoteCredentials::S3(s3_credentials.clone()),
         };
-        let alice_remote = alice_replica.remotes.add(alice_remote_state).await?;
-        let alice_remote_branch = alice_remote.open(&main_id).await?;
+        alice_replica.add_remote(alice_remote_state).await?;
+        let alice_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            alice_issuer.clone(),
+            alice_replica.storage().clone(),
+        )
+        .await?;
+        let mut alice_remote_branch = alice_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string());
+        alice_remote_branch.open().await?;
         alice_main.set_upstream(alice_remote_branch).await?;
 
         // Alice commits and pushes
@@ -3050,19 +2745,29 @@ mod tests {
         let alice_revision_after_push = alice_main.revision();
 
         // Create Bob's replica
-        let bob_issuer = Issuer::from_passphrase("bob");
-        let bob_backend = MemoryStorageBackend::default();
+        let bob_issuer = Operator::from_passphrase("bob");
+        let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
-        let mut bob_replica = Replica::open(bob_issuer.clone(), bob_journaled.clone())?;
+        let mut bob_replica =
+            Replica::open(bob_issuer.clone(), subject.clone(), bob_journaled.clone())?;
 
         let mut bob_main = bob_replica.branches.open(&main_id).await?;
 
         let bob_remote_state = RemoteState {
             site: "origin".to_string(),
-            address: remote_config,
+            credentials: RemoteCredentials::S3(s3_credentials),
         };
-        let bob_remote = bob_replica.remotes.add(bob_remote_state).await?;
-        let bob_remote_branch = bob_remote.open(&main_id).await?;
+        bob_replica.add_remote(bob_remote_state).await?;
+        let bob_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            bob_issuer.clone(),
+            bob_replica.storage().clone(),
+        )
+        .await?;
+        let mut bob_remote_branch = bob_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string());
+        bob_remote_branch.open().await?;
         bob_main.set_upstream(bob_remote_branch).await?;
 
         let bob_revision_before_fetch = bob_main.revision();
@@ -3106,53 +2811,46 @@ mod tests {
         s3_address: dialog_storage::s3::helpers::S3Address,
     ) -> anyhow::Result<()> {
         // Test managing multiple remote upstreams
+        use dialog_s3_credentials::Address;
         use dialog_storage::JournaledStorage;
 
-        let issuer = Issuer::from_passphrase("multi-remote-user");
-        let backend = MemoryStorageBackend::default();
+        let issuer = Operator::from_passphrase("multi-remote-user");
+        let subject = issuer.did().clone();
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let journaled = JournaledStorage::new(backend);
-        let mut replica = Replica::open(issuer.clone(), journaled.clone())?;
+        let mut replica = Replica::open(issuer.clone(), subject.clone(), journaled.clone())?;
+
+        // Create S3 credentials
+        let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
+        let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
+            address,
+            &s3_address.access_key_id,
+            &s3_address.secret_access_key,
+        )?
+        .with_path_style(true);
 
         // Add first remote (origin)
-        let origin_config = RemoteConfig {
-            endpoint: s3_address.endpoint.clone(),
-            region: "auto".to_string(),
-            bucket: s3_address.bucket.clone(),
-            prefix: Some("origin".to_string()),
-            access_key_id: Some(s3_address.access_key_id.clone()),
-            secret_access_key: Some(s3_address.secret_access_key.clone()),
-        };
-
         let origin_state = RemoteState {
             site: "origin".to_string(),
-            address: origin_config,
+            credentials: RemoteCredentials::S3(s3_credentials.clone()),
         };
-        let origin = replica.remotes.add(origin_state.clone()).await?;
-        assert_eq!(origin.site(), "origin");
+        let origin = replica.add_remote(origin_state.clone()).await?;
+        assert_eq!(origin, "origin");
 
         // Add second remote (backup)
-        let backup_config = RemoteConfig {
-            endpoint: s3_address.endpoint.clone(),
-            region: "auto".to_string(),
-            bucket: s3_address.bucket.clone(),
-            prefix: Some("backup".to_string()),
-            access_key_id: Some(s3_address.access_key_id.clone()),
-            secret_access_key: Some(s3_address.secret_access_key.clone()),
-        };
-
         let backup_state = RemoteState {
             site: "backup".to_string(),
-            address: backup_config,
+            credentials: RemoteCredentials::S3(s3_credentials),
         };
-        let backup = replica.remotes.add(backup_state.clone()).await?;
-        assert_eq!(backup.site(), "backup");
+        let backup = replica.add_remote(backup_state.clone()).await?;
+        assert_eq!(backup, "backup");
 
         // Load remotes back
-        let loaded_origin = replica.remotes.load(&"origin".to_string()).await?;
-        assert_eq!(loaded_origin.site(), "origin");
+        let loaded_origin = replica.load_remote(&"origin".to_string()).await?;
+        assert_eq!(loaded_origin.site, "origin");
 
-        let loaded_backup = replica.remotes.load(&"backup".to_string()).await?;
-        assert_eq!(loaded_backup.site(), "backup");
+        let loaded_backup = replica.load_remote(&"backup".to_string()).await?;
+        assert_eq!(loaded_backup.site, "backup");
 
         println!("✓ Multiple remotes work correctly");
 
@@ -3163,20 +2861,22 @@ mod tests {
     #[tokio::test]
     async fn test_branch_description() -> anyhow::Result<()> {
         // Test branch description getting and setting
-        let backend = MemoryStorageBackend::default();
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
-        let issuer = Issuer::from_passphrase("test-user");
+        let issuer = Operator::from_passphrase("test-user");
+        let subject = test_subject();
 
         let branch_id = BranchId::new("feature-x".to_string());
 
         // Create branch with description
-        let branch = Branch::open(&branch_id, issuer.clone(), storage.clone()).await?;
+        let branch =
+            Branch::open(&branch_id, issuer.clone(), storage.clone(), subject.clone()).await?;
 
         // Default description should be branch id
         assert_eq!(branch.description(), "feature-x");
 
         // Load and verify description persists
-        let loaded = Branch::load(&branch_id, issuer.clone(), storage.clone()).await?;
+        let loaded = Branch::load(&branch_id, issuer.clone(), storage.clone(), subject).await?;
         assert_eq!(loaded.description(), "feature-x");
 
         Ok(())
@@ -3186,8 +2886,8 @@ mod tests {
     #[tokio::test]
     async fn test_issuer_generate() -> anyhow::Result<()> {
         // Test generating random issuer keys
-        let issuer1 = Issuer::generate()?;
-        let issuer2 = Issuer::generate()?;
+        let issuer1 = Operator::generate()?;
+        let issuer2 = Operator::generate()?;
 
         // Each generated issuer should be unique
         assert_ne!(issuer1.did(), issuer2.did());
@@ -3204,7 +2904,8 @@ mod tests {
     async fn test_archive_caches_remote_reads_to_local(
         s3_address: dialog_storage::s3::helpers::S3Address,
     ) -> anyhow::Result<()> {
-        use dialog_storage::s3::{Address, Bucket, Credentials};
+        use dialog_s3_credentials::Address;
+        use dialog_storage::s3::{Bucket, S3};
         use dialog_storage::{ContentAddressedStorage, MemoryStorageBackend};
         use serde::{Deserialize, Serialize};
 
@@ -3215,38 +2916,46 @@ mod tests {
         }
 
         let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
-        let authorizer = Credentials::new(
+        let issuer = Operator::from_passphrase("test-archive-cache");
+        let subject = issuer.did().clone();
+        let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
             address,
             &s3_address.access_key_id,
             &s3_address.secret_access_key,
-        )?;
-        let s3_storage = Bucket::<Vec<u8>, Vec<u8>>::open(authorizer)?;
+        )?
+        .with_path_style(true);
+        let s3 = S3::from_s3(s3_credentials, issuer.clone());
+        let s3_storage = Bucket::new(s3, subject.clone(), "memory");
 
-        // Create local and remote archives
+        // Create local and remote archives using the RemoteBackend enum
         let local_storage = PlatformStorage::new(
-            ErrorMappingBackend::new(MemoryStorageBackend::default()),
+            ErrorMappingBackend::new(MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default()),
             CborEncoder,
         );
-        let remote_storage =
-            PlatformStorage::new(ErrorMappingBackend::new(s3_storage), CborEncoder);
+        let remote_backend = remote::RemoteBackend::S3(ErrorMappingBackend::new(s3_storage));
+        let connection = PlatformStorage::new(remote_backend, CborEncoder);
 
-        let archive = Archive::new(local_storage.clone());
-        archive.set_remote(remote_storage.clone()).await;
+        let archive = Archive::new(local_storage.clone().into_backend());
+        archive.set_remote(connection.clone()).await;
 
         // Create a test block
         let test_block = TestBlock {
             value: "test data from remote".to_string(),
         };
 
-        // Write directly to remote storage (simulating remote-only data)
+        // Write directly to remote storage (simulating remote-only data).
+        // In real usage, the remote bucket path "archive/index" provides namespacing,
+        // so we write with raw hash as key (no "index/" prefix).
         let hash = {
-            let mut remote_archive = Archive::new(remote_storage.clone());
-            remote_archive.write(&test_block).await?
+            let (hash, bytes) = connection.encode(&test_block).await?;
+            let mut conn = connection.clone();
+            conn.set(hash.to_vec(), bytes).await?;
+            hash
         };
 
         // Verify it's NOT in local storage yet
         {
-            let local_archive_check = Archive::new(local_storage.clone());
+            let local_archive_check = Archive::new(local_storage.clone().into_backend());
             let result: Option<TestBlock> = local_archive_check.read(&hash).await?;
             assert_eq!(result, None, "Block should not be in local storage yet");
         }
@@ -3261,7 +2970,7 @@ mod tests {
 
         // Verify it's NOW in local storage (cached)
         {
-            let local_archive_check = Archive::new(local_storage.clone());
+            let local_archive_check = Archive::new(local_storage.clone().into_backend());
             let cached_result: Option<TestBlock> = local_archive_check.read(&hash).await?;
             assert_eq!(
                 cached_result,
@@ -3269,6 +2978,305 @@ mod tests {
                 "Block should now be cached in local storage"
             );
         }
+
+        Ok(())
+    }
+
+    /// Test that RemoteState with UCAN credentials can be stored and loaded.
+    #[cfg(feature = "ucan")]
+    #[dialog_common::test]
+    async fn test_ucan_remote_state_persistence() -> anyhow::Result<()> {
+        use dialog_s3_credentials::ucan::{self, DelegationChain, test_helpers::create_delegation};
+
+        // Create operator and subject
+        let operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
+        let operator_did = operator_signer.did().clone();
+        let operator = Operator::from_secret(&operator_signer.signer().to_bytes());
+        let subject = operator.did().clone();
+
+        // Create a delegation chain
+        let delegation = create_delegation(
+            &operator_signer,
+            &operator_did,
+            operator_signer.did(),
+            &["archive", "memory"],
+        )?;
+        let delegation_chain = DelegationChain::new(delegation);
+
+        // Create UCAN credentials
+        let ucan_credentials =
+            ucan::Credentials::new("https://example.com/access".to_string(), delegation_chain);
+
+        // Create remote state with UCAN credentials
+        let remote_state = RemoteState {
+            site: "origin".to_string(),
+            credentials: RemoteCredentials::Ucan(ucan_credentials.clone()),
+        };
+
+        // Test direct serialization/deserialization first
+        let encoded = serde_ipld_dagcbor::to_vec(&remote_state)?;
+        let decoded: RemoteState = serde_ipld_dagcbor::from_slice(&encoded)?;
+        assert_eq!(decoded.site, "origin");
+
+        // Now test via storage
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let journaled_backend = dialog_storage::JournaledStorage::new(backend);
+        let mut replica =
+            Replica::open(operator.clone(), subject.clone(), journaled_backend.clone())
+                .expect("Failed to create replica");
+
+        // Store the remote
+        replica
+            .add_remote(remote_state.clone())
+            .await
+            .expect("Failed to add remote");
+
+        // Load it back
+        let loaded_state = replica
+            .load_remote(&"origin".to_string())
+            .await
+            .expect("Failed to load remote");
+
+        // Verify it matches
+        assert_eq!(loaded_state.site, "origin");
+        assert_eq!(
+            loaded_state.credentials,
+            RemoteCredentials::Ucan(ucan_credentials)
+        );
+
+        Ok(())
+    }
+
+    /// End-to-end test demonstrating the full UCAN-based workflow:
+    /// 1. Setup UCAN service & S3
+    /// 2. Create local repository with "main" branch
+    /// 3. Add remote "origin" with UCAN credentials
+    /// 4. Open remote repository with same DID and "main" branch
+    /// 5. Set remote branch as upstream to local "main"
+    /// 6. Add local changes and push
+    /// 7. Verify changes propagate to remote
+    #[cfg(all(feature = "ucan", feature = "helpers"))]
+    #[dialog_common::test]
+    async fn test_ucan_end_to_end_workflow(
+        env: dialog_storage::s3::helpers::UcanS3Address,
+    ) -> anyhow::Result<()> {
+        use crate::artifacts::ArtifactStore;
+        use dialog_s3_credentials::ucan::{self, DelegationChain, test_helpers::create_delegation};
+        use dialog_storage::JournaledStorage;
+        use futures_util::stream;
+
+        // Step 1: Generate operator (issuer) with signing capability
+        // We use the UCAN signer as the authority since it has consistent DID encoding
+        // with the delegation chain.
+        let operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
+        let operator_did = operator_signer.did().clone();
+        let subject: Did = operator_did.into();
+
+        // Create an Operator wrapper that uses the UCAN signer's key
+        // Note: Operator::did() may produce a different DID format than Ed25519Did,
+        // but the UCAN invocation system uses the Authority trait which gets the
+        // secret key bytes for signing, not the DID for identity.
+        let operator = Operator::from_secret(&operator_signer.signer().to_bytes());
+
+        // Step 2: Create a delegation chain from subject to operator
+        // In this test, the subject and operator are the same (self-signed)
+        // Grant root capability (/) which encompasses all operations:
+        // - /memory/resolve (branch resolution)
+        // - /storage/get, /storage/set (KV storage)
+        // - /archive/get, /archive/put (content-addressed storage)
+        let delegation = create_delegation(
+            &operator_signer,
+            &operator_did,
+            operator_signer.did(),
+            &[], // Empty command = root capability (/)
+        )?;
+        let delegation_chain = DelegationChain::new(delegation);
+
+        // Step 3: Create UCAN credentials
+        let ucan_credentials =
+            ucan::Credentials::new(env.access_service_url.clone(), delegation_chain);
+
+        // Step 4: Create local replica with journaled backend
+        let local_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let journaled_backend = JournaledStorage::new(local_backend);
+        let mut local_replica =
+            Replica::open(operator.clone(), subject.clone(), journaled_backend.clone())
+                .expect("Failed to create local replica");
+
+        // Step 5: Create local "main" branch
+        let main_id = BranchId::new("main".to_string());
+        let mut local_main = local_replica
+            .branches
+            .open(&main_id)
+            .await
+            .expect("Failed to create local main branch");
+
+        // Step 6: Add remote "origin" with UCAN credentials
+        let remote_state = RemoteState {
+            site: "origin".to_string(),
+            credentials: RemoteCredentials::Ucan(ucan_credentials),
+        };
+        local_replica
+            .add_remote(remote_state.clone())
+            .await
+            .expect("Failed to add remote 'origin'");
+
+        // Step 7: Open remote repository with same DID and create remote branch
+        let remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            operator.clone(),
+            local_replica.storage().clone(),
+        )
+        .await
+        .expect("Failed to load remote site");
+
+        let remote_repo = remote_site.repository(&subject);
+        let mut remote_branch = remote_repo.branch(main_id.to_string());
+        remote_branch
+            .open()
+            .await
+            .expect("Failed to open remote main branch");
+
+        // Step 8: Set remote branch as upstream to local "main"
+        local_main
+            .set_upstream(remote_branch)
+            .await
+            .expect("Failed to set upstream");
+
+        // Verify upstream is configured
+        assert!(
+            local_main.upstream().is_some(),
+            "Upstream should be configured"
+        );
+
+        // Verify archive has remote storage configured
+        let has_remote = {
+            let archive_remote = local_main.archive.remote.read().await;
+            archive_remote.is_some()
+        };
+        assert!(has_remote, "Archive should have remote storage configured");
+
+        // Step 9: Add local changes (commit artifacts)
+        let test_artifact = Artifact {
+            the: "user/name".parse().expect("Invalid attribute"),
+            of: "user:test".parse().expect("Invalid entity"),
+            is: crate::Value::String("Test User".to_string()),
+            cause: None,
+        };
+
+        let instructions = vec![Instruction::Assert(test_artifact.clone())];
+        let tree_hash = local_main
+            .commit(stream::iter(instructions))
+            .await
+            .expect("Commit failed");
+
+        assert_ne!(
+            tree_hash, EMPT_TREE_HASH,
+            "Tree should have content after commit"
+        );
+
+        // Step 10: Push changes to remote
+        let push_result = local_main.push().await.expect("Push failed");
+
+        // First push to a new remote branch returns None (no previous revision)
+        assert_eq!(
+            push_result, None,
+            "First push should return None (no previous revision)"
+        );
+
+        // Step 11: Verify changes propagate - create a second replica and pull
+        let second_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let second_journaled = JournaledStorage::new(second_backend);
+
+        // Generate a second operator for the second replica
+        let second_operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
+        let second_operator_did = second_operator_signer.did().clone();
+        let second_operator = Operator::from_secret(&second_operator_signer.signer().to_bytes());
+
+        // Create delegation from the original subject to the second operator
+        // Grant root capability (/) to allow all operations for the pull test
+        let second_delegation = create_delegation(
+            &operator_signer,
+            &second_operator_did,
+            operator_signer.did(),
+            &[], // Empty command = root capability (/)
+        )?;
+        let second_delegation_chain = DelegationChain::new(second_delegation);
+        let second_ucan_credentials =
+            ucan::Credentials::new(env.access_service_url.clone(), second_delegation_chain);
+
+        let mut second_replica = Replica::open(
+            second_operator.clone(),
+            subject.clone(),
+            second_journaled.clone(),
+        )
+        .expect("Failed to create second replica");
+
+        let mut second_main = second_replica
+            .branches
+            .open(&main_id)
+            .await
+            .expect("Failed to create second main branch");
+
+        // Add remote to second replica
+        let second_remote_state = RemoteState {
+            site: "origin".to_string(),
+            credentials: RemoteCredentials::Ucan(second_ucan_credentials),
+        };
+        second_replica
+            .add_remote(second_remote_state)
+            .await
+            .expect("Failed to add remote to second replica");
+
+        let second_remote_site = RemoteSite::load(
+            &"origin".to_string(),
+            second_operator.clone(),
+            second_replica.storage().clone(),
+        )
+        .await
+        .expect("Failed to load second remote site");
+
+        let mut second_remote_branch = second_remote_site
+            .repository(&subject)
+            .branch(main_id.to_string());
+        second_remote_branch
+            .open()
+            .await
+            .expect("Failed to open second remote branch");
+
+        second_main
+            .set_upstream(second_remote_branch)
+            .await
+            .expect("Failed to set upstream for second replica");
+
+        // Pull changes from remote
+        let pull_result = second_main.pull().await.expect("Pull failed");
+        assert!(
+            pull_result.is_some(),
+            "Pull should return a revision with the pushed changes"
+        );
+
+        // Verify the artifact is now available in the second replica
+        let selector = ArtifactSelector::new()
+            .the("user/name".parse().unwrap())
+            .of("user:test".parse().unwrap());
+
+        let facts: Vec<_> = second_main
+            .select(selector)
+            .try_collect()
+            .await
+            .expect("Failed to query artifacts");
+
+        assert_eq!(
+            facts.len(),
+            1,
+            "Second replica should have the pushed artifact after pull"
+        );
+        assert_eq!(
+            facts[0].is,
+            crate::Value::String("Test User".to_string()),
+            "Artifact value should match what was pushed"
+        );
 
         Ok(())
     }

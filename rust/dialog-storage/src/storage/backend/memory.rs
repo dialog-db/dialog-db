@@ -113,7 +113,7 @@ where
     type Edition = Blake3Hash;
 
     async fn resolve(
-        &self,
+        &mut self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
         let entries = self.entries.read().await;
@@ -124,7 +124,7 @@ where
     }
 
     async fn replace(
-        &self,
+        &mut self,
         address: &Self::Address,
         edition: Option<&Self::Edition>,
         content: Option<Self::Value>,
