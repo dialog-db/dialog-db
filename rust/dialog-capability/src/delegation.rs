@@ -1,10 +1,4 @@
-//! Delegation type for authorized capabilities.
-//!
-//! A `Delegation` represents proof of authority over a capability.
-//! It contains the capability, who issued the delegation, who it's for,
-//! and the authorization proof.
-
-use super::{Ability, Authorization, Did};
+use crate::{Ability, Authorization, Did};
 
 /// A delegation granting authority over a capability.
 ///

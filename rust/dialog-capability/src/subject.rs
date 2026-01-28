@@ -1,9 +1,4 @@
-//! Subject type - the root anchor of capability chains.
-//!
-//! The `Subject` represents the resource owner (identified by a DID) and serves
-//! as the starting point for building capability chains.
-
-use super::{Capability, Constrained, Policy};
+use crate::{Capability, Constrained, Policy};
 
 /// A DID (Decentralized Identifier).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]

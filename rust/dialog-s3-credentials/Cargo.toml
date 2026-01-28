@@ -16,7 +16,7 @@ ucan = [
     "dep:serde_ipld_dagcbor",
     "dep:serde_json",
     "dep:ucan",
-    "dialog-common/ucan",
+    "dialog-capability/ucan",
 ]
 helpers = ["ucan"]
 
@@ -25,7 +25,9 @@ async-trait = "0.1"
 base58 = { workspace = true }
 base64 = { workspace = true }
 chrono = "0.4"
+dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
+dialog-effects = { workspace = true }
 hmac = "0.12"
 serde = { workspace = true, features = ["derive"] }
 sha2 = "0.10"

@@ -1,7 +1,7 @@
-use super::{Constrained, Did, Policy, Subject};
+use crate::{Constrained, Did, Policy, Subject};
 
 #[cfg(feature = "ucan")]
-use super::Parameters;
+use crate::Parameters;
 
 /// Trait for representing an abstract capability (subject + ability path).
 ///

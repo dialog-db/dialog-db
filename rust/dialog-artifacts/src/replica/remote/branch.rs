@@ -2,7 +2,7 @@
 
 use std::fmt::Debug;
 
-use dialog_common::capability::Did;
+use dialog_capability::Did;
 use dialog_prolly_tree::{KeyType, Node};
 use dialog_storage::{Blake3Hash, CborEncoder, Encoder, StorageBackend};
 use futures_util::{Stream, StreamExt};

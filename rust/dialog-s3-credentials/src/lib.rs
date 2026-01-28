@@ -16,7 +16,7 @@
 //! ```no_run
 //! use dialog_s3_credentials::{Address, s3, capability};
 //! use dialog_s3_credentials::capability::storage::{Storage, Store, Get, Set};
-//! use dialog_common::capability::{Capability, Subject};
+//! use dialog_capability::{Capability, Subject};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create address for S3 bucket

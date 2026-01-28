@@ -9,10 +9,7 @@
 //! - UCAN access service (native-only, requires `ucan` feature)
 //! - Test issuer types for capability-based testing
 use async_trait::async_trait;
-use dialog_common::{
-    Authority,
-    capability::{Did, Principal, SignError},
-};
+use dialog_capability::{Authority, Did, Principal, SignError};
 use serde::{Deserialize, Serialize};
 
 /// S3 test server connection info with credentials, passed to inner tests.

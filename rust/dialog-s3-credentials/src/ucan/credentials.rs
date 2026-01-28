@@ -32,11 +32,10 @@
 use super::{DelegationChain, UcanAuthorization};
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
-use dialog_common::ConditionalSend;
-use dialog_common::Effect;
-use dialog_common::capability::{
-    Ability, Access, Authorized, Capability, Claim, Did, Parameters, Provider,
+use dialog_capability::{
+    Ability, Access, Authorized, Capability, Claim, Did, Effect, Parameters, Provider,
 };
+use dialog_common::ConditionalSend;
 
 /// UCAN-based authorizer that delegates to an external access service.
 ///
@@ -166,8 +165,8 @@ pub mod tests {
     use crate::capability::archive;
     use crate::ucan::delegation::tests::create_delegation;
     use anyhow;
-    use dialog_common::capability::{Did, Principal, Subject};
-    use dialog_common::{Authority, Authorization, Blake3Hash};
+    use dialog_capability::{Authority, Authorization, Did, Principal, Subject};
+    use dialog_common::Blake3Hash;
     use ed25519_dalek::ed25519::signature::SignerMut;
     use ucan::did::{Ed25519Did, Ed25519Signer};
     use ucan::promise::Promised;
@@ -222,10 +221,7 @@ pub mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl Authority for Session {
-        async fn sign(
-            &mut self,
-            payload: &[u8],
-        ) -> Result<Vec<u8>, dialog_common::capability::SignError> {
+        async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, dialog_capability::SignError> {
             Ok(self.signer.sign(payload).to_vec())
         }
         fn secret_key_bytes(&self) -> Option<[u8; 32]> {

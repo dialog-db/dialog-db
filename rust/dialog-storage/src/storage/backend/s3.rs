@@ -17,7 +17,7 @@
 //!
 //! ```no_run
 //! # use async_trait::async_trait;
-//! use dialog_common::{Authority, capability::{Did, Principal, SignError}};
+//! use dialog_capability::{Authority, Did, Principal, SignError};
 //! use dialog_storage::s3::{Address, S3, S3Credentials};
 //! use dialog_storage::capability::{storage, Provider, Subject};
 //!
@@ -64,7 +64,7 @@
 //!
 //! ```no_run
 //! # use async_trait::async_trait;
-//! use dialog_common::{Authority, capability::{Did, Principal, SignError}};
+//! use dialog_capability::{Authority, Did, Principal, SignError};
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //! use dialog_storage::capability::{storage, Provider, Subject};
 //!
@@ -113,7 +113,7 @@
 //!
 //! ```no_run
 //! # use async_trait::async_trait;
-//! use dialog_common::{Authority, capability::{Did, Principal, SignError}};
+//! use dialog_capability::{Authority, Did, Principal, SignError};
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //!
 //! # #[derive(Clone)]
@@ -150,7 +150,7 @@
 //!
 //! ```no_run
 //! # use async_trait::async_trait;
-//! use dialog_common::{Authority, capability::{Did, Principal, SignError}};
+//! use dialog_capability::{Authority, Did, Principal, SignError};
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //!
 //! # #[derive(Clone)]
@@ -184,13 +184,11 @@
 //! - Path separators (`/`) preserve the S3 key hierarchy
 
 use async_trait::async_trait;
-use dialog_common::{
-    Authority, Bytes, ConditionalSend, ConditionalSync,
-    capability::{
-        Ability, Access, Authorized, Capability, Claim, Did, Effect, Principal, Provider,
-        SignError, Subject,
-    },
+use dialog_capability::{
+    Ability, Access, Authority, Authorized, Capability, Claim, Did, Effect, Principal, Provider,
+    SignError, Subject,
 };
+use dialog_common::{ConditionalSend, ConditionalSync};
 use thiserror::Error;
 
 // Re-export core types from dialog-s3-credentials crate
@@ -202,7 +200,26 @@ pub use dialog_s3_credentials::s3::Credentials as S3Credentials;
 // Use access module types for direct S3 authorization
 pub use dialog_s3_credentials::capability::{Precondition, S3Request};
 
-pub use crate::capability::{archive, memory, storage};
+use crate::{DialogStorageError, StorageBackend, TransactionalMemoryBackend};
+
+// Re-export capability modules with Provider implementations
+pub mod archive;
+pub mod memory;
+pub mod storage;
+
+mod key;
+#[cfg(feature = "s3-list")]
+mod list;
+
+pub use key::{decode as decode_s3_key, encode as encode_s3_key};
+#[cfg(feature = "s3-list")]
+pub use list::ListResult;
+
+// Testing helpers module
+#[cfg(any(feature = "helpers", test))]
+pub mod helpers;
+#[cfg(any(feature = "helpers", test))]
+pub use helpers::*;
 
 /// Extension trait for RequestDescriptor to convert to reqwest RequestBuilder.
 pub trait RequestDescriptorExt {
@@ -229,32 +246,6 @@ impl RequestDescriptorExt for AuthorizedRequest {
         builder
     }
 }
-
-mod key;
-pub use key::{decode as decode_s3_key, encode as encode_s3_key};
-
-#[cfg(feature = "s3-list")]
-mod list;
-#[cfg(feature = "s3-list")]
-pub use list::ListResult;
-
-use crate::{DialogStorageError, StorageBackend, TransactionalMemoryBackend};
-
-// Testing helpers module:
-// - Address types (S3Address, PublicS3Address, UcanS3Address) are available on all platforms
-// - Server implementation is native-only (internal to the helpers module)
-#[cfg(any(feature = "helpers", test))]
-pub mod helpers;
-#[cfg(all(feature = "helpers", feature = "ucan", target_arch = "wasm32"))]
-pub use helpers::Operator;
-#[cfg(all(feature = "helpers", not(target_arch = "wasm32")))]
-pub use helpers::{LocalS3, PublicS3Settings, S3Settings};
-#[cfg(all(feature = "helpers", feature = "ucan", not(target_arch = "wasm32")))]
-pub use helpers::{Operator, UcanAccessServer, UcanS3Settings};
-#[cfg(any(feature = "helpers", test))]
-pub use helpers::{PublicS3Address, S3Address, Session, UcanS3Address};
-
-use self::archive::ArchiveError;
 
 /// Errors that can occur when using the S3 storage backend.
 #[derive(Error, Debug)]
@@ -315,7 +306,7 @@ pub trait Authorizer: Clone + std::fmt::Debug + Send + Sync {
 }
 
 // Note: ArchiveProvider trait was removed as it was unused. If needed in the future,
-// define a trait alias for Provider<archive::AuthorizeGet> + Provider<archive::AuthorizePut>.
+// define a trait alias for Provider<AuthorizeGet> + Provider<AuthorizePut>.
 
 /// S3-backed storage that implements Provider for capability-based operations.
 ///
@@ -407,526 +398,6 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<archive::Get> for S3<Issuer>
-where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
-{
-    async fn execute(
-        &mut self,
-        input: Capability<archive::Get>,
-    ) -> Result<Option<Bytes>, archive::ArchiveError> {
-        // Build the authorization capability
-        let catalog: &archive::Catalog = input.policy();
-        let get: &archive::Get = input.policy();
-        let capability = Subject::from(input.subject().to_string())
-            .attenuate(archive::Archive)
-            .attenuate(catalog.clone())
-            .invoke(archive::AuthorizeGet {
-                digest: get.digest.clone(),
-            });
-
-        // Acquire authorization and perform using self (which implements Access + Authority)
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| ArchiveError::AuthorizationError(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| ArchiveError::ExecutionError(format!("{:?}", e)))?;
-
-        let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client);
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| ArchiveError::Io(e.to_string()))?;
-
-        if response.status().is_success() {
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| ArchiveError::Io(e.to_string()))?;
-            Ok(Some(bytes.to_vec().into()))
-        } else if response.status() == reqwest::StatusCode::NOT_FOUND {
-            Ok(None)
-        } else {
-            Err(archive::ArchiveError::Storage(format!(
-                "Failed to get value: {}",
-                response.status()
-            )))
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<archive::Put> for S3<Issuer>
-where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
-{
-    async fn execute(
-        &mut self,
-        input: Capability<archive::Put>,
-    ) -> Result<(), archive::ArchiveError> {
-        let catalog: &archive::Catalog = input.policy();
-        let put: &archive::Put = input.policy();
-        let content = put.content.clone();
-        let checksum = Hasher::Sha256.checksum(&content);
-
-        // Build the authorization capability
-        let capability = Subject::from(input.subject().to_string())
-            .attenuate(archive::Archive)
-            .attenuate(catalog.clone())
-            .invoke(archive::AuthorizePut {
-                digest: put.digest.clone(),
-                checksum,
-            });
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| ArchiveError::AuthorizationError(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| ArchiveError::ExecutionError(format!("{:?}", e)))?;
-
-        let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client).body(content.to_vec());
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| ArchiveError::Io(e.to_string()))?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(archive::ArchiveError::Storage(format!(
-                "Failed to put value: {}",
-                response.status()
-            )))
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<memory::Resolve> for S3<Issuer>
-where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
-{
-    async fn execute(
-        &mut self,
-        input: Capability<memory::Resolve>,
-    ) -> Result<Option<memory::Publication>, memory::MemoryError> {
-        // Build the authorization capability
-        let space: &memory::Space = input.policy();
-        let cell: &memory::Cell = input.policy();
-        let capability = Subject::from(input.subject().to_string())
-            .attenuate(memory::Memory)
-            .attenuate(space.clone())
-            .attenuate(cell.clone())
-            .invoke(memory::AuthorizeResolve);
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| memory::MemoryError::Storage(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| memory::MemoryError::Storage(format!("{:?}", e)))?;
-
-        let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client);
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| memory::MemoryError::Storage(e.to_string()))?;
-
-        if response.status().is_success() {
-            // Extract ETag from response headers as the edition
-            let edition = response
-                .headers()
-                .get("etag")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim_matches('"').to_string())
-                .ok_or_else(|| {
-                    memory::MemoryError::Storage("Response missing ETag header".to_string())
-                })?;
-
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| memory::MemoryError::Storage(e.to_string()))?;
-
-            Ok(Some(memory::Publication {
-                content: bytes.to_vec().into(),
-                edition: edition.into_bytes().into(),
-            }))
-        } else if response.status() == reqwest::StatusCode::NOT_FOUND {
-            Ok(None)
-        } else {
-            Err(memory::MemoryError::Storage(format!(
-                "Failed to resolve value: {}",
-                response.status()
-            )))
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<memory::Publish> for S3<Issuer>
-where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
-{
-    async fn execute(
-        &mut self,
-        input: Capability<memory::Publish>,
-    ) -> Result<Bytes, memory::MemoryError> {
-        let space: &memory::Space = input.policy();
-        let cell: &memory::Cell = input.policy();
-        let publish: &memory::Publish = input.policy();
-        let content = publish.content.clone();
-        let when = publish
-            .when
-            .as_ref()
-            .map(|b| String::from_utf8_lossy(b).to_string());
-        let checksum = Hasher::Sha256.checksum(&content);
-
-        // Build the authorization capability
-        let capability = Subject::from(input.subject().to_string())
-            .attenuate(memory::Memory)
-            .attenuate(space.clone())
-            .attenuate(cell.clone())
-            .invoke(memory::AuthorizePublish {
-                checksum,
-                when: when.clone(),
-            });
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| memory::MemoryError::Storage(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| memory::MemoryError::Storage(format!("{:?}", e)))?;
-
-        let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client).body(content.to_vec());
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| memory::MemoryError::Storage(e.to_string()))?;
-
-        match response.status() {
-            status if status.is_success() => {
-                // Extract new ETag from response as the new edition
-                let new_edition = response
-                    .headers()
-                    .get("etag")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.trim_matches('"').to_string())
-                    .ok_or_else(|| {
-                        memory::MemoryError::Storage("Response missing ETag header".to_string())
-                    })?;
-                Ok(new_edition.into_bytes().into())
-            }
-            reqwest::StatusCode::PRECONDITION_FAILED => Err(memory::MemoryError::EditionMismatch {
-                expected: when,
-                actual: None,
-            }),
-            status => Err(memory::MemoryError::Storage(format!(
-                "Failed to publish value: {}",
-                status
-            ))),
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<memory::Retract> for S3<Issuer>
-where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
-{
-    async fn execute(
-        &mut self,
-        input: Capability<memory::Retract>,
-    ) -> Result<(), memory::MemoryError> {
-        let space: &memory::Space = input.policy();
-        let cell: &memory::Cell = input.policy();
-        let retract: &memory::Retract = input.policy();
-        let when = String::from_utf8_lossy(&retract.when).to_string();
-
-        // Build the authorization capability
-        let capability = Subject::from(input.subject().to_string())
-            .attenuate(memory::Memory)
-            .attenuate(space.clone())
-            .attenuate(cell.clone())
-            .invoke(memory::AuthorizeRetract { when: when.clone() });
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| memory::MemoryError::Storage(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| memory::MemoryError::Storage(format!("{:?}", e)))?;
-
-        let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client);
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| memory::MemoryError::Storage(e.to_string()))?;
-
-        match response.status() {
-            status if status.is_success() => Ok(()),
-            reqwest::StatusCode::PRECONDITION_FAILED => Err(memory::MemoryError::EditionMismatch {
-                expected: Some(when),
-                actual: None,
-            }),
-            status => Err(memory::MemoryError::Storage(format!(
-                "Failed to retract value: {}",
-                status
-            ))),
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<storage::Get> for S3<Issuer>
-where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
-{
-    async fn execute(
-        &mut self,
-        input: Capability<storage::Get>,
-    ) -> Result<Option<Bytes>, storage::StorageError> {
-        // Build the authorization capability
-        let store: &storage::Store = input.policy();
-        let get: &storage::Get = input.policy();
-        let capability = Subject::from(input.subject().to_string())
-            .attenuate(storage::Storage)
-            .attenuate(store.clone())
-            .invoke(storage::AuthorizeGet {
-                key: get.key.clone(),
-            });
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| storage::StorageError::Storage(format!("{:?}", e)))?;
-
-        let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client);
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
-
-        if response.status().is_success() {
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
-            Ok(Some(bytes.to_vec().into()))
-        } else if response.status() == reqwest::StatusCode::NOT_FOUND {
-            Ok(None)
-        } else {
-            Err(storage::StorageError::Storage(format!(
-                "Failed to get value: {}",
-                response.status()
-            )))
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<storage::Set> for S3<Issuer>
-where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
-{
-    async fn execute(
-        &mut self,
-        input: Capability<storage::Set>,
-    ) -> Result<(), storage::StorageError> {
-        let store: &storage::Store = input.policy();
-        let set: &storage::Set = input.policy();
-        let value = set.value.clone();
-        let checksum = Hasher::Sha256.checksum(&value);
-
-        // Build the authorization capability
-        let capability = Subject::from(input.subject().to_string())
-            .attenuate(storage::Storage)
-            .attenuate(store.clone())
-            .invoke(storage::AuthorizeSet {
-                key: set.key.clone(),
-                checksum,
-            });
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| storage::StorageError::Storage(format!("{:?}", e)))?;
-
-        let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client).body(value.to_vec());
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(storage::StorageError::Storage(format!(
-                "Failed to set value: {}",
-                response.status()
-            )))
-        }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<storage::Delete> for S3<Issuer>
-where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
-{
-    async fn execute(
-        &mut self,
-        input: Capability<storage::Delete>,
-    ) -> Result<(), storage::StorageError> {
-        // Build the authorization capability
-        let store: &storage::Store = input.policy();
-        let delete: &storage::Delete = input.policy();
-        let capability = Subject::from(input.subject().to_string())
-            .attenuate(storage::Storage)
-            .attenuate(store.clone())
-            .invoke(storage::AuthorizeDelete {
-                key: delete.key.clone(),
-            });
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| storage::StorageError::Storage(format!("{:?}", e)))?;
-
-        let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client);
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(storage::StorageError::Storage(format!(
-                "Failed to delete value: {}",
-                response.status()
-            )))
-        }
-    }
-}
-
-#[cfg(feature = "s3-list")]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer> Provider<storage::List> for S3<Issuer>
-where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
-{
-    async fn execute(
-        &mut self,
-        input: Capability<storage::List>,
-    ) -> Result<storage::ListResult, storage::StorageError> {
-        // Build the authorization capability
-        let store: &storage::Store = input.policy();
-        let list: &storage::List = input.policy();
-        let capability = Subject::from(input.subject().to_string())
-            .attenuate(storage::Storage)
-            .attenuate(store.clone())
-            .invoke(storage::AuthorizeList::new(list.continuation_token.clone()));
-
-        // Acquire authorization and perform
-        let authorized = capability
-            .acquire(self)
-            .await
-            .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
-
-        let authorization = authorized
-            .perform(self)
-            .await
-            .map_err(|e| storage::StorageError::Storage(format!("{:?}", e)))?;
-
-        let client = reqwest::Client::new();
-        let builder = authorization.into_request(&client);
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
-
-        if response.status().is_success() {
-            let body = response
-                .text()
-                .await
-                .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
-
-            // Parse the XML response
-            list::parse_list_response(&body)
-                .map(|result| storage::ListResult {
-                    keys: result.keys,
-                    is_truncated: result.is_truncated,
-                    next_continuation_token: result.next_continuation_token,
-                })
-                .map_err(|e| storage::StorageError::Storage(e.to_string()))
-        } else {
-            Err(storage::StorageError::Storage(format!(
-                "Failed to list objects: {}",
-                response.status()
-            )))
-        }
-    }
-}
-
 /// A scoped S3 storage backend implementing `StorageBackend` and `TransactionalMemoryBackend`.
 ///
 /// This is a wrapper around [`S3`] that adds the subject DID and namespace path
@@ -936,7 +407,7 @@ where
 ///
 /// ```no_run
 /// # use async_trait::async_trait;
-/// use dialog_common::{Authority, capability::{Did, Principal, SignError}};
+/// use dialog_capability::{Authority, Did, Principal, SignError};
 /// use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
 /// use dialog_storage::StorageBackend;
 ///
@@ -1025,7 +496,7 @@ where
     /// # use async_trait::async_trait;
     /// # use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
     /// # use dialog_storage::StorageBackend;
-    /// # use dialog_common::{Authority, capability::{Did, Principal, SignError}};
+    /// # use dialog_capability::{Authority, Did, Principal, SignError};
     /// #
     /// # #[derive(Clone)]
     /// # struct Issuer(Did);
@@ -1379,7 +850,7 @@ mod tests {
     mod ucan_provider_tests {
         use super::*;
         #[allow(unused_imports)]
-        use dialog_common::capability::Subject;
+        use dialog_capability::Subject;
         use dialog_s3_credentials::ucan::{
             Credentials as UcanCredentials, DelegationChain, test_helpers::create_delegation,
         };
@@ -1412,7 +883,7 @@ mod tests {
         async fn it_performs_archive_get_and_put_with_ucan(
             env: helpers::UcanS3Address,
         ) -> anyhow::Result<()> {
-            use dialog_common::capability::Principal;
+            use dialog_capability::Principal;
             // Create operator
             let operator = Operator::generate();
 
@@ -1962,7 +1433,7 @@ mod tests {
     mod ucan_storage_tests {
         use super::*;
         #[allow(unused_imports)]
-        use dialog_common::capability::{Principal, Subject};
+        use dialog_capability::{Principal, Subject};
         use dialog_s3_credentials::ucan::{
             Credentials as UcanCredentials, DelegationChain, test_helpers::create_delegation,
         };
@@ -2253,7 +1724,7 @@ mod tests {
     #[cfg(all(feature = "s3-list", feature = "ucan"))]
     mod ucan_list_tests {
         use super::*;
-        use dialog_common::capability::Principal;
+        use dialog_capability::Principal;
         use dialog_s3_credentials::ucan::{
             Credentials as UcanCredentials, DelegationChain, test_helpers::create_delegation,
         };

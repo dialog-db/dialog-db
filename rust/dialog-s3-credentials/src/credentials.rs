@@ -4,8 +4,8 @@ use super::s3;
 use super::ucan;
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
-use dialog_common::capability::{Ability, Access, Authorized, Claim, Effect, Provider};
-use dialog_common::{Capability, ConditionalSend};
+use dialog_capability::{Ability, Access, Authorized, Capability, Claim, Effect, Provider};
+use dialog_common::ConditionalSend;
 
 /// Unified credentials enum supporting multiple authorization backends.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]

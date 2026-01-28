@@ -1,9 +1,4 @@
-//! Access trait for managing access to capability authorizations.
-//!
-//! The `Access` trait abstracts over stores that can find authorization
-//! proofs for capability claims.
-
-use super::{Ability, Authorization, Claim};
+use crate::{Ability, Authorization, Claim};
 use dialog_common::ConditionalSend;
 
 /// The `Access` trait abstracts over stores that can find authorization

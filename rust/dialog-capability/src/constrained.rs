@@ -1,9 +1,4 @@
-//! Constrained capability type for building capability chains.
-//!
-//! `Constrained` wraps a constraint with its parent capability,
-//! forming a chain from Subject through policies and abilities.
-
-use super::{
+use crate::{
     Ability, Capability, Constraint, Did, Effect, Here, Policy, Provider, Selector, There,
 };
 
@@ -12,16 +7,15 @@ use super::{
 /// Build capability chains by constraining from a Subject:
 ///
 /// ```
-/// use dialog_common::capability::{Subject, Policy, Capability};
+/// use dialog_capability::{Subject, Policy, Capability, Attenuation};
 /// use serde::{Serialize, Deserialize};
 ///
-/// // Define a policy type
+/// // Define an attenuation type
 /// #[derive(Debug, Clone, Serialize, Deserialize)]
 /// struct Storage;
 ///
-/// impl Policy for Storage {
+/// impl Attenuation for Storage {
 ///     type Of = Subject;
-///     fn attenuation() -> Option<&'static str> { Some("storage") }
 /// }
 ///
 /// // Build a capability chain

@@ -1,5 +1,5 @@
 use super::{Formatter, SignatureError, ToBase58, VerifyingKey};
-use dialog_common::capability::Did;
+use dialog_capability::Did;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::sync::OnceLock;

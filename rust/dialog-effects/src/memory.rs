@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! Subject (repository DID)
-//!   └── Memory (cmd: /memory)
+//!   └── Memory (ability: /memory)
 //!         └── Space { space: String }
 //!               └── Cell { cell: String }
 //!                     ├── Resolve → Effect → Result<Option<Publication>, MemoryError>
@@ -14,22 +14,64 @@
 //!                     └── Retract { when } → Effect → Result<(), MemoryError>
 //! ```
 
+pub use dialog_capability::{Attenuation, Capability, Effect, Policy, Subject};
 pub use dialog_common::Bytes;
-pub use dialog_common::capability::{Attenuation, Capability, Effect, Policy, Subject};
-
-// S3 authorization types (only available with s3 feature)
-#[cfg(feature = "s3")]
-pub use dialog_s3_credentials::capability::memory::{
-    Cell, Memory, Publish as AuthorizePublish, Resolve as AuthorizeResolve,
-    Retract as AuthorizeRetract, Space,
-};
-
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Root attenuation for memory operations.
+///
+/// Attaches to Subject and provides the `/memory` ability path segment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Memory;
+
+impl Attenuation for Memory {
+    type Of = Subject;
+}
+
+/// Space policy that scopes operations to a memory space.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Space {
+    /// The space name (typically a DID).
+    pub space: String,
+}
+
+impl Space {
+    /// Create a new Space policy.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { space: name.into() }
+    }
+}
+
+impl Policy for Space {
+    type Of = Memory;
+}
+
+/// Cell policy that scopes operations to a specific cell within a space.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Cell {
+    /// The cell name.
+    pub cell: String,
+}
+
+impl Cell {
+    /// Create a new Cell policy.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { cell: name.into() }
+    }
+}
+
+impl Policy for Cell {
+    type Of = Space;
+}
+
+/// Edition identifier for CAS operations.
+pub type Edition = String;
 
 /// A cell's current state: content and its edition.
 ///
 /// Returned by [`Resolve`] when the cell has content.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Publication {
     /// The cell's current content.
     pub content: Bytes,
@@ -40,7 +82,7 @@ pub struct Publication {
 /// Resolve operation - reads current cell content and edition.
 ///
 /// Returns `None` if the cell has no content (empty/uninitialized).
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Resolve;
 
 impl Effect for Resolve {
@@ -72,12 +114,22 @@ impl ResolveCapability for Capability<Resolve> {
 /// - If `when` is `Some(edition)`, expects current edition to match
 /// - Returns new edition on success
 /// - Returns `MemoryError::EditionMismatch` if expectation doesn't match
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Publish {
     /// The content to publish.
     pub content: Bytes,
     /// The expected current edition, or None if expecting empty cell.
     pub when: Option<Bytes>,
+}
+
+impl Publish {
+    /// Create a new Publish effect.
+    pub fn new(content: impl Into<Bytes>, when: Option<Bytes>) -> Self {
+        Self {
+            content: content.into(),
+            when,
+        }
+    }
 }
 
 impl Effect for Publish {
@@ -115,16 +167,21 @@ impl PublishCapability for Capability<Publish> {
     }
 }
 
-// Retract Effect
-
 /// Retract operation - removes cell content with CAS semantics.
 ///
 /// - Requires `when` to match current edition
 /// - Returns `MemoryError::EditionMismatch` if edition doesn't match
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Retract {
     /// The expected current edition.
     pub when: Bytes,
+}
+
+impl Retract {
+    /// Create a new Retract effect.
+    pub fn new(when: impl Into<Bytes>) -> Self {
+        Self { when: when.into() }
+    }
 }
 
 impl Effect for Retract {
@@ -156,8 +213,6 @@ impl RetractCapability for Capability<Retract> {
     }
 }
 
-// Memory Error
-
 /// Errors that can occur during memory operations.
 #[derive(Debug, Error)]
 pub enum MemoryError {
@@ -179,7 +234,7 @@ pub enum MemoryError {
     Io(#[from] std::io::Error),
 }
 
-#[cfg(all(test, feature = "s3"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -195,9 +250,7 @@ mod tests {
     fn it_builds_space_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Memory)
-            .attenuate(Space {
-                space: "local".into(),
-            });
+            .attenuate(Space::new("local"));
 
         assert_eq!(claim.subject(), "did:key:zSpace");
         // Space is Policy, not Ability, so it doesn't add to path
@@ -208,12 +261,8 @@ mod tests {
     fn it_builds_cell_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Memory)
-            .attenuate(Space {
-                space: "local".into(),
-            })
-            .attenuate(Cell {
-                cell: "main".into(),
-            });
+            .attenuate(Space::new("local"))
+            .attenuate(Cell::new("main"));
 
         assert_eq!(claim.subject(), "did:key:zSpace");
         // Cell is Policy, not Ability, so it doesn't add to path
@@ -224,13 +273,9 @@ mod tests {
     fn it_builds_resolve_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Memory)
-            .attenuate(Space {
-                space: "local".into(),
-            })
-            .attenuate(Cell {
-                cell: "main".into(),
-            })
-            .attenuate(Resolve);
+            .attenuate(Space::new("local"))
+            .attenuate(Cell::new("main"))
+            .invoke(Resolve);
 
         assert_eq!(claim.ability(), "/memory/resolve");
     }
@@ -239,16 +284,9 @@ mod tests {
     fn it_builds_publish_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Memory)
-            .attenuate(Space {
-                space: "local".into(),
-            })
-            .attenuate(Cell {
-                cell: "main".into(),
-            })
-            .attenuate(Publish {
-                content: b"test".to_vec().into(),
-                when: None,
-            });
+            .attenuate(Space::new("local"))
+            .attenuate(Cell::new("main"))
+            .invoke(Publish::new(b"test", None));
 
         assert_eq!(claim.ability(), "/memory/publish");
     }
@@ -257,15 +295,9 @@ mod tests {
     fn it_builds_retract_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Memory)
-            .attenuate(Space {
-                space: "local".into(),
-            })
-            .attenuate(Cell {
-                cell: "main".into(),
-            })
-            .attenuate(Retract {
-                when: b"v1".to_vec().into(),
-            });
+            .attenuate(Space::new("local"))
+            .attenuate(Cell::new("main"))
+            .invoke(Retract::new(b"v1"));
 
         assert_eq!(claim.ability(), "/memory/retract");
     }
@@ -277,14 +309,10 @@ mod tests {
 
         #[test]
         fn it_collects_resolve_capability_parameters() {
-            let cap: Capability<Resolve> = Subject::from("did:key:zSpace")
+            let cap = Subject::from("did:key:zSpace")
                 .attenuate(Memory)
-                .attenuate(Space {
-                    space: "remote".into(),
-                })
-                .attenuate(Cell {
-                    cell: "config".into(),
-                })
+                .attenuate(Space::new("remote"))
+                .attenuate(Cell::new("config"))
                 .invoke(Resolve);
             let params = cap.parameters();
 
@@ -294,14 +322,10 @@ mod tests {
 
         #[test]
         fn it_collects_publish_capability_parameters() {
-            let cap: Capability<Publish> = Subject::from("did:key:zSpace")
+            let cap = Subject::from("did:key:zSpace")
                 .attenuate(Memory)
-                .attenuate(Space {
-                    space: "local".into(),
-                })
-                .attenuate(Cell {
-                    cell: "main".into(),
-                })
+                .attenuate(Space::new("local"))
+                .attenuate(Cell::new("main"))
                 .invoke(Publish {
                     content: b"hello".to_vec().into(),
                     when: Some(b"v1".to_vec().into()),
@@ -316,17 +340,11 @@ mod tests {
 
         #[test]
         fn it_collects_retract_capability_parameters() {
-            let cap: Capability<Retract> = Subject::from("did:key:zSpace")
+            let cap = Subject::from("did:key:zSpace")
                 .attenuate(Memory)
-                .attenuate(Space {
-                    space: "local".into(),
-                })
-                .attenuate(Cell {
-                    cell: "main".into(),
-                })
-                .invoke(Retract {
-                    when: b"v1".to_vec().into(),
-                });
+                .attenuate(Space::new("local"))
+                .attenuate(Cell::new("main"))
+                .invoke(Retract::new(b"v1"));
             let params = cap.parameters();
 
             assert_eq!(params.get("space"), Some(&Ipld::String("local".into())));

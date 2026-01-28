@@ -1,9 +1,4 @@
-//! Provider trait for executing invocations.
-//!
-//! The `Provider` trait defines how environments execute invocations
-//! to produce effect outputs.
-
-use super::Invocation;
+use crate::Invocation;
 
 /// Trait for environments that can execute invocations.
 ///
@@ -14,7 +9,7 @@ use super::Invocation;
 /// # Example
 ///
 /// ```
-/// use dialog_common::capability::{Provider, Invocation};
+/// use dialog_capability::{Provider, Invocation};
 /// use async_trait::async_trait;
 ///
 /// // Define an invocation type

@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! Subject (repository DID)
-//!   └── Archive (cmd: /archive)
+//!   └── Archive (ability: /archive)
 //!         └── Catalog { catalog: String }
 //!               ├── Get { digest } → Effect → Result<Option<Bytes>, ArchiveError>
 //!               └── Put { digest, content } → Effect → Result<(), ArchiveError>
@@ -14,24 +14,59 @@
 
 use std::error::Error;
 
-pub use dialog_common::capability::{Capability, Effect, PerformError, Policy, Subject};
+pub use dialog_capability::{Attenuation, Capability, Effect, PerformError, Policy, Subject};
 pub use dialog_common::{Blake3Hash, Bytes};
-
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-// S3 authorization types (only available with s3 feature)
-#[cfg(feature = "s3")]
-pub use dialog_s3_credentials::{
-    AccessError,
-    capability::archive::{Archive, Catalog, Get as AuthorizeGet, Put as AuthorizePut},
-};
+/// Archive ability - restricts to archive operations.
+///
+/// Attaches to Subject and provides the `/archive` ability path segment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Archive;
+
+impl Attenuation for Archive {
+    type Of = Subject;
+}
+
+/// Catalog policy that scopes operations to a named catalog.
+///
+/// Does not add to ability path but constrains invocation arguments.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Catalog {
+    /// The catalog name (e.g., "index", "blobs").
+    pub catalog: String,
+}
+
+impl Catalog {
+    /// Create a new Catalog policy.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            catalog: name.into(),
+        }
+    }
+}
+
+impl Policy for Catalog {
+    type Of = Archive;
+}
+
 /// Get operation - retrieves content by digest.
 ///
 /// Requires `Capability<Catalog>` access level.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Get {
     /// The blake3 digest of the content to retrieve.
     pub digest: Blake3Hash,
+}
+
+impl Get {
+    /// Create a new Get effect.
+    pub fn new(digest: impl Into<Blake3Hash>) -> Self {
+        Self {
+            digest: digest.into(),
+        }
+    }
 }
 
 impl Effect for Get {
@@ -57,17 +92,25 @@ impl GetCapability for Capability<Get> {
     }
 }
 
-// Put Effect
-
 /// Put operation - stores content by digest.
 ///
 /// Requires `Capability<Catalog>` access level.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Put {
     /// The blake3 digest of the content (must match hash of content).
     pub digest: Blake3Hash,
     /// The content to store.
     pub content: Bytes,
+}
+
+impl Put {
+    /// Create a new Put effect.
+    pub fn new(digest: impl Into<Blake3Hash>, content: impl Into<Bytes>) -> Self {
+        Self {
+            digest: digest.into(),
+            content: content.into(),
+        }
+    }
 }
 
 impl Effect for Put {
@@ -99,8 +142,6 @@ impl PutCapability for Capability<Put> {
     }
 }
 
-// Archive Error
-
 /// Errors that can occur during archive operations.
 #[derive(Debug, Error)]
 pub enum ArchiveError {
@@ -130,15 +171,8 @@ pub enum ArchiveError {
     Io(String),
 }
 
-#[cfg(feature = "s3")]
-impl From<AccessError> for ArchiveError {
-    fn from(value: AccessError) -> Self {
-        ArchiveError::AuthorizationError(value.to_string())
-    }
-}
-
-impl From<dialog_common::capability::AuthorizationError> for ArchiveError {
-    fn from(value: dialog_common::capability::AuthorizationError) -> Self {
+impl From<dialog_capability::AuthorizationError> for ArchiveError {
+    fn from(value: dialog_capability::AuthorizationError) -> Self {
         ArchiveError::AuthorizationError(value.to_string())
     }
 }
@@ -153,7 +187,8 @@ impl<E: Error> From<PerformError<E>> for ArchiveError {
         }
     }
 }
-#[cfg(all(test, feature = "s3"))]
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -169,9 +204,7 @@ mod tests {
     fn it_builds_catalog_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Archive)
-            .attenuate(Catalog {
-                catalog: "index".into(),
-            });
+            .attenuate(Catalog::new("index"));
 
         assert_eq!(claim.subject(), "did:key:zSpace");
         // Catalog is Policy, not Ability, so it doesn't add to path
@@ -182,12 +215,8 @@ mod tests {
     fn it_builds_get_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Archive)
-            .attenuate(Catalog {
-                catalog: "index".into(),
-            })
-            .attenuate(Get {
-                digest: Blake3Hash::from([0u8; 32]),
-            });
+            .attenuate(Catalog::new("index"))
+            .invoke(Get::new([0u8; 32]));
 
         assert_eq!(claim.ability(), "/archive/get");
     }
@@ -196,13 +225,8 @@ mod tests {
     fn it_builds_put_claim_path() {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Archive)
-            .attenuate(Catalog {
-                catalog: "index".into(),
-            })
-            .attenuate(Put {
-                digest: Blake3Hash::from([0u8; 32]),
-                content: Bytes::new(),
-            });
+            .attenuate(Catalog::new("index"))
+            .invoke(Put::new([0u8; 32], Bytes::new()));
 
         assert_eq!(claim.ability(), "/archive/put");
     }
@@ -225,9 +249,7 @@ mod tests {
         fn it_collects_catalog_parameters() {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Archive)
-                .attenuate(Catalog {
-                    catalog: "blobs".into(),
-                });
+                .attenuate(Catalog::new("blobs"));
             let params = cap.parameters();
 
             assert_eq!(params.get("catalog"), Some(&Ipld::String("blobs".into())));
@@ -238,10 +260,8 @@ mod tests {
             let digest = Blake3Hash::from([1u8; 32]);
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Archive)
-                .attenuate(Catalog {
-                    catalog: "index".into(),
-                })
-                .attenuate(Get { digest });
+                .attenuate(Catalog::new("index"))
+                .invoke(Get::new(digest));
             let params = cap.parameters();
 
             assert_eq!(params.get("catalog"), Some(&Ipld::String("index".into())));
@@ -254,13 +274,8 @@ mod tests {
             let content = b"hello world".to_vec();
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Archive)
-                .attenuate(Catalog {
-                    catalog: "data".into(),
-                })
-                .attenuate(Put {
-                    digest,
-                    content: content.clone().into(),
-                });
+                .attenuate(Catalog::new("data"))
+                .invoke(Put::new(digest, content.clone()));
             let params = cap.parameters();
 
             assert_eq!(params.get("catalog"), Some(&Ipld::String("data".into())));

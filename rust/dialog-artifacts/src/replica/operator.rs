@@ -4,9 +4,8 @@ use super::{
     Formatter, PlatformBackend, ReplicaError, SECRET_KEY_LENGTH, Signature, SignerMut, SigningKey,
 };
 use async_trait::async_trait;
-use dialog_common::Authority;
-pub use dialog_common::capability::Did;
-use dialog_common::capability::{Principal as PrincipalTrait, SignError};
+pub use dialog_capability::Did;
+use dialog_capability::{Authority, Principal as PrincipalTrait, SignError};
 
 /// Operator represents some authorized principal that can operate one or many
 /// replicas through the authorization session. Currently it is used to sign

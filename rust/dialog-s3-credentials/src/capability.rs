@@ -16,7 +16,7 @@
 //! # Example: Storage Operations
 //!
 //! ```
-//! use dialog_common::capability::Subject;
+//! use dialog_capability::Subject;
 //! use dialog_s3_credentials::capability::storage::{Storage, Store, Get, Set};
 //! use dialog_s3_credentials::Checksum;
 //!
@@ -39,7 +39,7 @@
 //! # Example: Memory Operations (CAS cells)
 //!
 //! ```
-//! use dialog_common::capability::Subject;
+//! use dialog_capability::Subject;
 //! use dialog_s3_credentials::capability::memory::{Memory, Space, Cell, Resolve, Publish};
 //! use dialog_s3_credentials::Checksum;
 //!

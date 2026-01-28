@@ -1,15 +1,18 @@
 //! S3 ListObjectsV2 operations.
 //!
 //! This module provides the [`ListResult`] response type for listing objects
-//! in an S3 bucket using the [ListObjectsV2] API.
+//! in an S3 bucket using the [ListObjectsV2] API, as well as the
+//! `Provider<storage::List>` implementation for [`S3`].
 //!
 //! [ListObjectsV2]: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
 
-use dialog_common::capability::Subject;
-use dialog_common::{Authority, ConditionalSend, ConditionalSync, Provider};
+use async_trait::async_trait;
+use dialog_capability::{Authority, Capability, Provider, Subject};
+use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_s3_credentials::capability::storage::List as AuthorizeList;
 use serde::Deserialize;
 
-use super::{Bucket, S3StorageError};
+use super::{Bucket, RequestDescriptorExt, S3, S3StorageError};
 use crate::capability::storage;
 
 /// Response from S3 ListObjectsV2 API.
@@ -76,7 +79,7 @@ where
     ///
     /// ```no_run
     /// # use async_trait::async_trait;
-    /// use dialog_common::{Authority, capability::{Did, Principal, SignError}};
+    /// use dialog_capability::{Authority, Did, Principal, SignError};
     /// use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
     ///
     /// #[derive(Clone)]
@@ -133,6 +136,68 @@ where
             is_truncated: result.is_truncated,
             next_continuation_token: result.next_continuation_token,
         })
+    }
+}
+
+// Provider<storage::List> implementation for S3
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Issuer> Provider<storage::List> for S3<Issuer>
+where
+    Issuer: Authority + ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &mut self,
+        input: Capability<storage::List>,
+    ) -> Result<storage::ListResult, storage::StorageError> {
+        use dialog_capability::Policy;
+
+        // Build the authorization capability
+        let store: &storage::Store = input.policy();
+        let list: &storage::List = input.policy();
+        let capability = Subject::from(input.subject().to_string())
+            .attenuate(storage::Storage)
+            .attenuate(store.clone())
+            .invoke(AuthorizeList::new(list.continuation_token.clone()));
+
+        // Acquire authorization and perform
+        let authorized = capability
+            .acquire(self)
+            .await
+            .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
+
+        let authorization = authorized
+            .perform(self)
+            .await
+            .map_err(|e| storage::StorageError::Storage(format!("{:?}", e)))?;
+
+        let client = reqwest::Client::new();
+        let builder = authorization.into_request(&client);
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
+
+        if response.status().is_success() {
+            let body = response
+                .text()
+                .await
+                .map_err(|e| storage::StorageError::Storage(e.to_string()))?;
+
+            // Parse the XML response
+            parse_list_response(&body)
+                .map(|result| storage::ListResult {
+                    keys: result.keys,
+                    is_truncated: result.is_truncated,
+                    next_continuation_token: result.next_continuation_token,
+                })
+                .map_err(|e| storage::StorageError::Storage(e.to_string()))
+        } else {
+            Err(storage::StorageError::Storage(format!(
+                "Failed to list objects: {}",
+                response.status()
+            )))
+        }
     }
 }
 

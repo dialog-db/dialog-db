@@ -1,7 +1,7 @@
-//! Capability commands for archive and memory operations.
+//! Capability commands for storage operations.
 //!
-//! This module defines command types for storage operations. The [`Effect`] and
-//! [`Provider`] traits are re-exported from [`dialog_common`].
+//! This module re-exports the capability hierarchy and effect types from
+//! [`dialog_effects`], providing archive, memory, and storage operations.
 //!
 //! # Example
 //!
@@ -14,13 +14,10 @@
 //! { ... }
 //! ```
 
-// The archive, memory, and storage capability modules require the S3 feature
-// because they depend on types from dialog_s3_credentials.
-#[cfg(feature = "s3")]
-pub mod archive;
-#[cfg(feature = "s3")]
-pub mod memory;
-#[cfg(feature = "s3")]
-pub mod storage;
+// Re-export all capability types from dialog-effects
+pub use dialog_effects::archive;
+pub use dialog_effects::memory;
+pub use dialog_effects::storage;
 
-pub use dialog_common::capability::*;
+// Re-export capability primitives
+pub use dialog_capability::*;

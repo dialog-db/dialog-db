@@ -1,6 +1,6 @@
 //! Remote repository reference.
 
-use dialog_common::capability::Did;
+use dialog_capability::Did;
 
 use super::{Operator, PlatformBackend, PlatformStorage, RemoteBranch, RemoteState, Site};
 

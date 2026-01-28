@@ -1,5 +1,5 @@
-use super::settings::Settings;
-use super::{Constraint, Effect, Policy};
+use crate::settings::Settings;
+use crate::{Constraint, Effect, Policy};
 
 /// Trait for constraints that narrow the ability path.
 ///
@@ -14,7 +14,7 @@ use super::{Constraint, Effect, Policy};
 /// You can override this by implementing the `attenuation()` method:
 ///
 /// ```rust
-/// use dialog_common::capability::{Attenuation, Subject};
+/// use dialog_capability::{Attenuation, Subject};
 /// use serde::{Serialize, Deserialize};
 ///
 /// #[derive(Debug, Clone, Serialize, Deserialize)]

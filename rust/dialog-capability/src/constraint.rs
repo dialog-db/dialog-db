@@ -1,6 +1,4 @@
-//! Constraint trait for deriving capability chain types.
-
-use super::{Ability, Constrained, Policy, Subject};
+use crate::{Ability, Constrained, Policy, Subject};
 
 /// Trait for deriving capability constrain chain type from an individual
 /// constraints of the chain.

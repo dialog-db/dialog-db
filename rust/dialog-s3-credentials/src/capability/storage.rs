@@ -1,55 +1,19 @@
-//! Storage access commands.
+//! Storage S3 request implementations.
 //!
-//! Request types for key-value storage operations.
-//! Each type implements `Claim` to provide HTTP method, path, and other request details.
-//!
-//! # Two APIs
-//!
-//! 1. **Direct API**: Use `StorageClaim::get(subject, store, key)` for direct S3 access
-//! 2. **Capability API**: Use `Capability<Get>` with the capability hierarchy for UCAN flows
+//! This module provides S3-specific effect types and `S3Request` implementations
+//! for storage operations, enabling them to be translated into presigned S3 URLs.
 
 use super::{AccessError, AuthorizedRequest, S3Request};
 use crate::Checksum;
 use base58::ToBase58;
+use dialog_capability::{Capability, Effect, Policy};
 use dialog_common::Bytes;
-use dialog_common::capability::{Attenuation, Capability, Effect, Policy, Subject};
 use serde::{Deserialize, Serialize};
 
-/// Root attenuation for storage operations.
-///
-/// Attaches to Subject and provides the `/storage` command path segment.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Storage;
+// Re-export hierarchy types from dialog-effects
+pub use dialog_effects::storage::{Storage, Store};
 
-impl Attenuation for Storage {
-    type Of = Subject;
-}
-
-/// Store policy that scopes operations to a named store.
-///
-/// This is a policy (not attenuation) so it doesn't contribute to the command path.
-/// It restricts operations to a specific store (e.g., "index", "blob").
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Store {
-    /// The store name (e.g., "index", "blob").
-    pub store: String,
-}
-
-impl Store {
-    /// Create a new Store policy.
-    pub fn new(name: impl Into<String>) -> Self {
-        Self { store: name.into() }
-    }
-}
-
-impl Policy for Store {
-    type Of = Storage;
-}
-
-/// Get value by key.
-///
-/// The key should be already encoded for S3 compatibility
-/// (e.g., using base58 for binary keys).
+/// Get value by key (S3 authorization).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Get {
     /// The key to look up.
@@ -57,14 +21,12 @@ pub struct Get {
 }
 
 impl Get {
-    /// Create a new Get command.
+    /// Create a new Get effect.
     pub fn new(key: impl Into<Bytes>) -> Self {
         Self { key: key.into() }
     }
 }
 
-/// Get is an effect that produces `RequestDescriptor` that can
-/// be used to perform actual get from the s3 bucket.
 impl Effect for Get {
     type Of = Store;
     type Output = Result<AuthorizedRequest, AccessError>;
@@ -84,32 +46,28 @@ impl S3Request for Capability<Get> {
     }
 }
 
-/// Set value with key and checksum.
-///
-/// The key should be already encoded for S3 compatibility.
+/// Set value with key and checksum (S3 authorization).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Set {
-    /// The storage key (already encoded).
+    /// The storage key.
     pub key: Bytes,
-    /// Checksum for integrity verification (32 bytes SHA-256).
+    /// Checksum for integrity verification (SHA-256).
     pub checksum: Checksum,
 }
 
-/// Set is an effect that produces `RequestDescriptor` that can
-/// be used to perform actual set is in the s3 bucket.
-impl Effect for Set {
-    type Of = Store;
-    type Output = Result<AuthorizedRequest, AccessError>;
-}
-
 impl Set {
-    /// Create a new Set command.
+    /// Create a new Set effect.
     pub fn new(key: impl Into<Bytes>, checksum: Checksum) -> Self {
         Self {
             key: key.into(),
             checksum,
         }
     }
+}
+
+impl Effect for Set {
+    type Of = Store;
+    type Output = Result<AuthorizedRequest, AccessError>;
 }
 
 impl S3Request for Capability<Set> {
@@ -129,27 +87,23 @@ impl S3Request for Capability<Set> {
     }
 }
 
-/// Delete value by key.
-///
-/// The key should be already encoded for S3 compatibility.
+/// Delete value by key (S3 authorization).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Delete {
-    /// The storage key
+    /// The storage key to delete.
     pub key: Bytes,
 }
 
-/// Get is an effect that produces `RequestDescriptor` that can
-/// be used to perform actual get from the s3 bucket.
-impl Effect for Delete {
-    type Of = Store;
-    type Output = Result<AuthorizedRequest, AccessError>;
-}
-
 impl Delete {
-    /// Create a new Delete command.
+    /// Create a new Delete effect.
     pub fn new(key: impl Into<Bytes>) -> Self {
         Self { key: key.into() }
     }
+}
+
+impl Effect for Delete {
+    type Of = Store;
+    type Output = Result<AuthorizedRequest, AccessError>;
 }
 
 impl S3Request for Capability<Delete> {
@@ -166,7 +120,7 @@ impl S3Request for Capability<Delete> {
     }
 }
 
-/// List keys in store.
+/// List keys in store (S3 authorization).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct List {
     /// Continuation token for pagination.
@@ -174,7 +128,7 @@ pub struct List {
 }
 
 impl List {
-    /// Create a new List command.
+    /// Create a new List effect.
     pub fn new(continuation_token: Option<String>) -> Self {
         Self { continuation_token }
     }

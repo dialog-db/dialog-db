@@ -13,8 +13,8 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use base58::ToBase58;
 use blake3;
+use dialog_capability::Did;
 use dialog_common::ConditionalSend;
-use dialog_common::capability::Did;
 use dialog_prolly_tree::{
     Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Node, Tree, TreeDifference,
 };

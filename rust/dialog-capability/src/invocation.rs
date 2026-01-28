@@ -1,8 +1,4 @@
-//! Invocation trait and types for requesting effect execution.
-//!
-//! The `Invocation` trait defines what can be passed to `Provider::execute`.
-
-use super::{Authorization, Authorized, Capability, Constraint, Effect};
+use crate::{Authorization, Authorized, Capability, Constraint, Effect};
 
 /// Trait for types that can be invoked via a Provider.
 ///

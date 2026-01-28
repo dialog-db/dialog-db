@@ -17,7 +17,9 @@ strip = "debuginfo"
 [workspace]
 members = [
     "rust/dialog-artifacts",
+    "rust/dialog-capability",
     "rust/dialog-common",
+    "rust/dialog-effects",
     "rust/dialog-macros",
     "rust/dialog-diagnose",
     "rust/dialog-dbsp",
@@ -118,6 +120,12 @@ path = "./rust/dialog-macros"
 
 [workspace.dependencies.dialog-s3-credentials]
 path = "./rust/dialog-s3-credentials"
+
+[workspace.dependencies.dialog-capability]
+path = "./rust/dialog-capability"
+
+[workspace.dependencies.dialog-effects]
+path = "./rust/dialog-effects"
 
 # [patch.crates-io]
 # # TODO: https://github.com/gwierzchowski/csv-async/issues/27

@@ -1,6 +1,6 @@
 //! Capability-based authorization system.
 //!
-//! This module provides a hierarchical capability system for authorization and
+//! This crate provides a hierarchical capability system for authorization and
 //! access control. Capabilities form chains from a root [`Subject`]
 //! _(represented by [did:key](https://w3c-ccg.github.io/did-method-key/))_
 //! through any number of constraints down to [`Effect`]s that perform actual
@@ -10,7 +10,7 @@
 //!
 //! ```rust
 //! # mod example {
-//! use dialog_common::capability::{Subject, Ability, Attenuation, Policy, Effect};
+//! use dialog_capability::{Subject, Ability, Attenuation, Policy, Effect};
 //! use serde::{Serialize, Deserialize};
 //!
 //! // Attenuation: narrows ability (adds "/storage" to path) and adds parameters
@@ -121,23 +121,7 @@
 //!
 //! Only capabilities ending in an [`Effect`] are **invocable** - they can be
 //! passed to a [`Provider`] to produce an output. Effects define an associated
-//! `Output` type that specifies what the operation returns:
-//!
-//! ```rust
-//! # use dialog_common::capability::Effect;
-//! # use serde::{Serialize, Deserialize};
-//! # #[derive(Debug, Clone, Serialize, Deserialize)]
-//! # struct Store;
-//! # impl dialog_common::capability::Policy for Store { type Of = dialog_common::capability::Subject; }
-//! #[derive(Debug, Clone, Serialize, Deserialize)]
-//! struct Get { key: Vec<u8> }
-//!
-//! impl Effect for Get {
-//!     type Of = Store;
-//!     // What this effect produces when invoked
-//!     type Output = Result<Option<Vec<u8>>, std::io::Error>;
-//! }
-//! ```
+//! `Output` type that specifies what the operation returns.
 //!
 //! Use `.invoke(effect)` to create an invocable capability, then
 //! `.perform(provider)` to execute it.
@@ -170,41 +154,56 @@
 //! | [`Delegation<C, A>`] | Grants capability to another principal |
 //! | [`Access`] | Looks up authorization proofs |
 
-// Core modules
-mod ability;
-mod access;
-mod attenuation;
-mod authority;
-mod authorization;
-mod authorized;
-mod claim;
-mod constrained;
-mod constraint;
-mod delegation;
-mod effect;
-mod interface;
-mod invocation;
-mod policy;
-mod provider;
 mod selector;
-mod settings;
-mod subject;
-
-pub use ability::*;
-pub use access::*;
-pub use attenuation::*;
-pub use authority::*;
-pub use authorization::*;
-pub use authorized::*;
-pub use claim::*;
-pub use constrained::*;
-pub use constraint::*;
-pub use delegation::*;
-pub use effect::*;
-pub use interface::*;
-pub use invocation::*;
-pub use policy::*;
-pub use provider::*;
 pub use selector::*;
+
+mod settings;
 pub use settings::*;
+
+mod ability;
+pub use ability::*;
+
+mod constraint;
+pub use constraint::*;
+
+mod policy;
+pub use policy::*;
+
+mod attenuation;
+pub use attenuation::*;
+
+mod effect;
+pub use effect::*;
+
+mod subject;
 pub use subject::*;
+
+mod constrained;
+pub use constrained::*;
+
+mod capability;
+pub use capability::*;
+
+mod provider;
+pub use provider::*;
+
+mod authority;
+pub use authority::*;
+
+mod authorization;
+pub use authorization::*;
+
+mod access;
+pub use access::*;
+
+mod claim;
+pub use claim::*;
+
+mod authorized;
+pub use authorized::*;
+
+mod invocation;
+pub use invocation::*;
+
+mod delegation;
+pub use delegation::*;

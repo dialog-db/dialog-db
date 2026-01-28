@@ -2,8 +2,9 @@ use super::s3;
 #[cfg(feature = "ucan")]
 use super::ucan;
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
-use dialog_common::Capability;
-use dialog_common::{capability, capability::Effect};
+use dialog_capability::{
+    Authority, Authorization as Auth, AuthorizationError, Capability, Did, Effect,
+};
 
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -29,15 +30,15 @@ impl Authorization {
     }
 }
 
-impl capability::Authorization for Authorization {
-    fn subject(&self) -> &dialog_common::capability::Did {
+impl Auth for Authorization {
+    fn subject(&self) -> &Did {
         match self {
             Self::S3(auth) => auth.subject(),
             #[cfg(feature = "ucan")]
             Self::Ucan(auth) => auth.subject(),
         }
     }
-    fn audience(&self) -> &dialog_common::capability::Did {
+    fn audience(&self) -> &Did {
         match self {
             Self::S3(auth) => auth.audience(),
             #[cfg(feature = "ucan")]
@@ -51,10 +52,7 @@ impl capability::Authorization for Authorization {
             Self::Ucan(auth) => auth.ability(),
         }
     }
-    fn invoke<A: dialog_common::Authority>(
-        &self,
-        authority: &A,
-    ) -> Result<Self, dialog_common::capability::AuthorizationError> {
+    fn invoke<A: Authority>(&self, authority: &A) -> Result<Self, AuthorizationError> {
         Ok(match self {
             Self::S3(auth) => Self::S3(auth.invoke(authority)?),
             #[cfg(feature = "ucan")]

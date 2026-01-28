@@ -5,7 +5,7 @@
 
 use std::marker::PhantomData;
 
-use super::Subject;
+use crate::Subject;
 
 /// Using an empty enum makes it impossible to construct, clearly indicating
 /// values that can not exist.
@@ -37,8 +37,8 @@ impl Selector<Subject, Here> for Subject {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::capability::{Attenuation, Effect};
+    use crate::*;
+    use crate::{Attenuation, Effect};
     use serde::{Deserialize, Serialize};
 
     // Test types

@@ -1,6 +1,4 @@
-//! Authorized capability type.
-
-use super::{Authority, Authorization, AuthorizationError, Capability, Constraint, Provider};
+use crate::{Authority, Authorization, AuthorizationError, Capability, Constraint, Provider};
 use std::error::Error;
 
 /// A capability paired with its authorization proof.

@@ -2,7 +2,7 @@
 //!
 //! The `Authorization` trait represents proof of authority over a capability.
 
-use super::{Authority, subject::Did};
+use crate::{Authority, subject::Did};
 
 /// Errors that can occur during authorization.
 #[derive(Debug, thiserror::Error)]
