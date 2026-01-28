@@ -44,11 +44,11 @@ impl capability::Authorization for Authorization {
             Self::Ucan(auth) => auth.audience(),
         }
     }
-    fn can(&self) -> &str {
+    fn ability(&self) -> &str {
         match self {
-            Self::S3(auth) => auth.can(),
+            Self::S3(auth) => auth.ability(),
             #[cfg(feature = "ucan")]
-            Self::Ucan(auth) => auth.can(),
+            Self::Ucan(auth) => auth.ability(),
         }
     }
     fn invoke<A: dialog_common::Authority>(

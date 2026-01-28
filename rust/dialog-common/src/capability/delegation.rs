@@ -4,9 +4,7 @@
 //! It contains the capability, who issued the delegation, who it's for,
 //! and the authorization proof.
 
-use super::ability::Ability;
-use super::authorization::Authorization;
-use super::subject::Did;
+use super::{Ability, Authorization, Did};
 
 /// A delegation granting authority over a capability.
 ///

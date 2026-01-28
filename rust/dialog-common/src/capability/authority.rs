@@ -2,7 +2,7 @@
 //!
 //! These traits define the identity model for capability-based access control.
 
-use super::subject::Did;
+use super::Did;
 
 /// A principal with a DID identity.
 pub trait Principal {

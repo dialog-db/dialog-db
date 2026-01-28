@@ -1,23 +1,45 @@
-//! Attenuation trait for command path segments.
-
-use super::constraint::Constraint;
-use super::effect::Effect;
-use super::policy::Policy;
 use super::settings::Settings;
+use super::{Constraint, Effect, Policy};
 
-/// Marker trait for policies that also constrain a command path.
+/// Trait for constraints that narrow the ability path.
 ///
-/// Attenuation implies `Policy` via blanket impl. The `attenuation()` method
-/// provides the path segment for the command path.
+/// Attenuation implies [`Policy`] via blanket impl. The `attenuation()` method
+/// provides the path segment added to the ability path.
 ///
-/// Note: `Effect` types automatically implement `Attenuation` via blanket impl.
+/// # Ability Path Segment
+///
+/// By default, the ability path segment is derived from the struct name
+/// (lowercased). For example, `struct Storage;` adds `/storage` to the path.
+///
+/// You can override this by implementing the `attenuation()` method:
+///
+/// ```rust
+/// use dialog_common::capability::{Attenuation, Subject};
+/// use serde::{Serialize, Deserialize};
+///
+/// #[derive(Debug, Clone, Serialize, Deserialize)]
+/// struct BlobStore;
+///
+/// impl Attenuation for BlobStore {
+///     type Of = Subject;
+///
+///     // Custom path segment instead of default "blobstore"
+///     fn attenuation() -> &'static str {
+///         "blob"
+///     }
+/// }
+/// ```
+///
+/// Note: [`Effect`] types automatically implement `Attenuation` via blanket impl.
 pub trait Attenuation: Sized + Settings {
     /// The capability this type constrains.
-    /// Must implement `Constraint` so the blanket `Policy` impl works.
+    /// Must implement [`Constraint`] so the blanket [`Policy`] impl works.
     type Of: Constraint;
 
-    /// Get the attenuation segment for this type.
-    /// Attenuation types contribute to the command path.
+    /// Returns the path segment this attenuation adds to the ability path.
+    ///
+    /// By default, derives the segment from the struct name (lowercased).
+    /// Override this method to use a custom segment.
     fn attenuation() -> &'static str {
         let full = std::any::type_name::<Self>();
         full.rsplit("::").next().unwrap_or(full)

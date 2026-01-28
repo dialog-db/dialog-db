@@ -1,4 +1,4 @@
-use super::authorization::Authorization;
+use super::Authorization;
 use super::s3;
 #[cfg(feature = "ucan")]
 use super::ucan;

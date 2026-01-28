@@ -3,8 +3,7 @@
 //! A `Claim` wraps a capability with an audience (who needs authorization).
 //! It represents a query to an `Access` for authorization.
 
-use super::ability::Ability;
-use super::subject::Did;
+use super::{Ability, Did};
 
 /// A capability claim requesting authorization.
 ///
@@ -49,9 +48,9 @@ impl<C: Ability> Claim<C> {
         self.capability.subject()
     }
 
-    /// Get the command path from the capability.
-    pub fn command(&self) -> String {
-        self.capability.command()
+    /// Get the ability path from the capability (e.g., `/storage/get`).
+    pub fn ability(&self) -> String {
+        self.capability.ability()
     }
 }
 
@@ -75,7 +74,7 @@ mod tests {
 
         assert_eq!(claim.audience(), "did:key:zAudience");
         assert_eq!(claim.subject(), "did:key:zSubject");
-        assert_eq!(claim.command(), "/testability");
+        assert_eq!(claim.ability(), "/testability");
     }
 
     #[test]

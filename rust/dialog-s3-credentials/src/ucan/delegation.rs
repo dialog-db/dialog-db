@@ -14,7 +14,7 @@
 //! Where tokens are DAG-CBOR serialized delegations, ordered from closest to invoker
 //! (index 0) to closest to subject (last index).
 
-use super::container::Container;
+use super::Container;
 use crate::capability::AccessError;
 use ipld_core::cid::Cid;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -140,11 +140,11 @@ impl DelegationChain {
         }
     }
 
-    /// Get the command (ability) path of the first delegation.
+    /// Get the ability path of the first delegation.
     ///
-    /// Returns the command as a string path (e.g., "/storage/get").
+    /// Returns the ability as a string path (e.g., "/storage/get").
     /// The first delegation (closest to invoker) defines the most attenuated capability.
-    pub fn can(&self) -> String {
+    pub fn ability(&self) -> String {
         // Safe because chain is guaranteed non-empty
         let cid = &self.proof_cids[0];
         let delegation = self.delegations.get(cid).unwrap();
@@ -629,15 +629,15 @@ pub mod tests {
 
         let chain = DelegationChain::new(delegation);
 
-        // Verify command path
-        assert_eq!(chain.can(), "/archive");
+        // Verify ability path
+        assert_eq!(chain.ability(), "/archive");
 
         // Serialize and deserialize
         let bytes = chain.to_bytes().unwrap();
         let restored = DelegationChain::try_from(bytes.as_slice()).unwrap();
 
         assert_eq!(chain, restored);
-        assert_eq!(restored.can(), "/archive");
+        assert_eq!(restored.ability(), "/archive");
     }
 
     /// Test that a delegation for archive/put capability roundtrips correctly.
@@ -659,14 +659,14 @@ pub mod tests {
 
         let chain = DelegationChain::new(delegation);
 
-        // Verify command path
-        assert_eq!(chain.can(), "/archive/put");
+        // Verify ability path
+        assert_eq!(chain.ability(), "/archive/put");
 
         // Serialize via serde to DAG-CBOR
         let cbor_bytes = serde_ipld_dagcbor::to_vec(&chain).unwrap();
         let restored: DelegationChain = serde_ipld_dagcbor::from_slice(&cbor_bytes).unwrap();
 
         assert_eq!(chain, restored);
-        assert_eq!(restored.can(), "/archive/put");
+        assert_eq!(restored.ability(), "/archive/put");
     }
 }

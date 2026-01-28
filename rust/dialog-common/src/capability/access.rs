@@ -3,12 +3,11 @@
 //! The `Access` trait abstracts over stores that can find authorization
 //! proofs for capability claims.
 
-use super::ability::Ability;
-use super::authorization::Authorization;
-use super::claim::Claim;
-use crate::ConditionalSend;
+use super::{Ability, Authorization, Claim};
+use dialog_common::ConditionalSend;
 
-/// Store abstraction that finds delegation chains for capability claims.
+/// The `Access` trait abstracts over stores that can find authorization
+/// proofs for capability claims.
 ///
 /// Implementors provide a way to look up authorization proofs. For example,
 /// one might search stored delegations to establish a chain from subject

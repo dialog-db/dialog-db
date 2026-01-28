@@ -3,7 +3,7 @@
 //! The `Provider` trait defines how environments execute invocations
 //! to produce effect outputs.
 
-use super::invocation::Invocation;
+use super::Invocation;
 
 /// Trait for environments that can execute invocations.
 ///

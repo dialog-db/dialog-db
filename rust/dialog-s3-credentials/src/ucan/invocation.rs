@@ -15,7 +15,7 @@
 //! The first token is the invocation, followed by the delegation chain from
 //! closest to invoker to root.
 
-use super::container::Container;
+use super::Container;
 use crate::capability::AccessError;
 use ipld_core::cid::Cid;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -255,8 +255,8 @@ impl From<InvocationError> for AccessError {
 
 #[cfg(test)]
 mod tests {
-    use super::super::delegation::tests::{create_delegation, generate_signer};
     use super::*;
+    use crate::ucan::delegation::tests::{create_delegation, generate_signer};
     use ucan::delegation::builder::DelegationBuilder;
     use ucan::delegation::subject::DelegatedSubject;
     use ucan::invocation::builder::InvocationBuilder;

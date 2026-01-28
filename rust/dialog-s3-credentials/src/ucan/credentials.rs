@@ -29,8 +29,7 @@
 //! # }
 //! ```
 
-use super::authorization::UcanAuthorization;
-use super::delegation::DelegationChain;
+use super::{DelegationChain, UcanAuthorization};
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
 use dialog_common::ConditionalSend;
@@ -137,7 +136,7 @@ impl Access for Credentials {
         Ok(UcanAuthorization::delegated(
             self.endpoint.clone(),
             self.delegation.clone(),
-            claim.capability().command(),
+            claim.capability().ability(),
             parameters,
         ))
     }
@@ -163,9 +162,9 @@ where
 
 #[cfg(test)]
 pub mod tests {
-    use super::super::delegation::tests::create_delegation;
     use super::*;
     use crate::capability::archive;
+    use crate::ucan::delegation::tests::create_delegation;
     use anyhow;
     use dialog_common::capability::{Did, Principal, Subject};
     use dialog_common::{Authority, Authorization, Blake3Hash};
@@ -177,10 +176,10 @@ pub mod tests {
     pub fn test_delegation_chain(
         subject_signer: &ucan::did::Ed25519Signer,
         operator_did: &Ed25519Did,
-        can: &[&str],
+        ability: &[&str],
     ) -> DelegationChain {
         let subject_did = subject_signer.did().clone();
-        let delegation = create_delegation(subject_signer, operator_did, &subject_did, can)
+        let delegation = create_delegation(subject_signer, operator_did, &subject_did, ability)
             .expect("Failed to create test delegation");
         DelegationChain::new(delegation)
     }

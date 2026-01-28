@@ -60,8 +60,8 @@ pub trait Authorization: Sized {
     /// The audience who has been granted authority.
     fn audience(&self) -> &Did;
 
-    /// The command path (ability) this authorization permits.
-    fn can(&self) -> &str;
+    /// The ability path this authorization permits.
+    fn ability(&self) -> &str;
 
     /// Creates authorized invocation
     fn invoke<A: Authority>(&self, authority: &A) -> Result<Self, AuthorizationError>;

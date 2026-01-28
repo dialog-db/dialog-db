@@ -2,9 +2,14 @@ pub use super::Replica;
 use super::remote::Site;
 use super::{PlatformBackend, RemoteSite, RemoteState, ReplicaError};
 
-/// Manages remote sites that used for synchronization. Repository may have zero
-/// or more sites configured that can be used to obtain references to remote
-/// branches which in turn can be configured as upstream of the local branches.
+/// Manages remote sites used for synchronization. Repository (a.k.a Replica)
+/// may have zero or more sites configured that can be used to obtain references
+/// to remote branches which in turn can be configured as upstream of the local
+/// branches.
+///
+/// Trait is meant to be implemented by `Replica` or other similar abstraction
+/// that needs to manage remotes e.g. `Operator` could potentially implement
+/// `Remotes` to have remotes configured level higher.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Remotes<Backend: PlatformBackend> {

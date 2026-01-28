@@ -3,12 +3,11 @@
 //! This module provides [`UcanAuthorization`], which represents a proof of authority
 //! for a specific capability claim using UCAN delegations.
 
-use super::delegation::DelegationChain;
-use super::invocation::InvocationChain;
+use super::{DelegationChain, InvocationChain};
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
 use dialog_common::capability::{
-    Ability, Authority, Authorization, AuthorizationError, Did, Effect, Parameters, Provider,
+    Authority, Authorization, AuthorizationError, Did, Effect, Parameters, Provider,
 };
 use dialog_common::{Capability, ConditionalSend};
 use ed25519_dalek::SigningKey;
@@ -59,8 +58,8 @@ pub enum UcanAuthorization {
         endpoint: String,
         /// The subject DID (also the audience).
         subject: Did,
-        /// The command path this authorization permits.
-        can: String,
+        /// The ability path this authorization permits.
+        ability: String,
         /// Constraints of the delegation
         parameters: Parameters,
     },
@@ -73,8 +72,8 @@ pub enum UcanAuthorization {
         subject: Did,
         /// Cached audience DID string.
         audience: Did,
-        /// Cached command path.
-        can: String,
+        /// Cached ability path.
+        ability: String,
         /// Constraints of the delegation
         parameters: Parameters,
     },
@@ -82,7 +81,7 @@ pub enum UcanAuthorization {
         endpoint: String,
         chain: InvocationChain,
         subject: Did,
-        can: String,
+        ability: String,
         parameters: Parameters,
     },
 }
@@ -92,13 +91,13 @@ impl UcanAuthorization {
     pub fn owned(
         endpoint: String,
         subject: impl Into<Did>,
-        can: impl Into<String>,
+        ability: impl Into<String>,
         parameters: Parameters,
     ) -> Self {
         Self::Owned {
             endpoint,
             subject: subject.into(),
-            can: can.into(),
+            ability: ability.into(),
             parameters,
         }
     }
@@ -107,7 +106,7 @@ impl UcanAuthorization {
     pub fn delegated(
         endpoint: String,
         chain: DelegationChain,
-        can: impl Into<String>,
+        ability: impl Into<String>,
         parameters: Parameters,
     ) -> Self {
         // Pre-compute and cache the DID representations
@@ -116,7 +115,7 @@ impl UcanAuthorization {
 
         Self::Delegated {
             endpoint,
-            can: can.into(),
+            ability: ability.into(),
             chain,
             subject,
             audience,
@@ -154,10 +153,10 @@ impl UcanAuthorization {
         &self,
         capability: &Capability<C>,
     ) -> Result<AuthorizedRequest, AccessError> {
-        if capability.command() != self.can() {
+        if capability.ability() != self.ability() {
             Err(AccessError::Invocation(format!(
                 "Authorization error: {} not authorized",
-                capability.command(),
+                capability.ability(),
             )))?;
         }
 
@@ -223,11 +222,11 @@ impl Authorization for UcanAuthorization {
         }
     }
 
-    fn can(&self) -> &str {
+    fn ability(&self) -> &str {
         match self {
-            Self::Owned { can, .. } => can,
-            Self::Delegated { can, .. } => can,
-            Self::Invocation { can, .. } => can,
+            Self::Owned { ability, .. } => ability,
+            Self::Delegated { ability, .. } => ability,
+            Self::Invocation { ability, .. } => ability,
         }
     }
 
@@ -243,7 +242,7 @@ impl Authorization for UcanAuthorization {
             })?;
 
             let command: Vec<String> = self
-                .can()
+                .ability()
                 .trim_start_matches('/')
                 .split('/')
                 .map(|s| s.to_string())
@@ -281,7 +280,7 @@ impl Authorization for UcanAuthorization {
                 endpoint: self.endpoint().into(),
                 chain: invocation,
                 subject: self.subject().clone(),
-                can: self.can().into(),
+                ability: self.ability().into(),
                 parameters: self.parameters().clone(),
             };
 
@@ -325,7 +324,7 @@ mod tests {
 
         assert_eq!(auth.subject(), "did:key:zTest");
         assert_eq!(auth.audience(), "did:key:zTest");
-        assert_eq!(auth.can(), "/storage/get");
+        assert_eq!(auth.ability(), "/storage/get");
         assert!(auth.chain().is_none());
         assert_eq!(auth.parameters(), &BTreeMap::default());
     }
@@ -354,7 +353,7 @@ mod tests {
 
         assert_eq!(auth.subject(), &subject_did.to_string());
         assert_eq!(auth.audience(), &operator_signer.did().to_string());
-        assert_eq!(auth.can(), "/storage/get");
+        assert_eq!(auth.ability(), "/storage/get");
         assert_eq!(
             auth.parameters(),
             &BTreeMap::from([("key".to_string(), Ipld::Bytes(b"hello".into()))])
