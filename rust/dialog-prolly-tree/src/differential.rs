@@ -282,47 +282,46 @@ where
                         Node::from_hash(reference.hash().clone(), self.storage).await?;
 
                     // If it's a branch (index node), expand it
-                    if node.is_branch() {
-                        if let Ok(refs) = node.references() {
-                            // Track this loaded node (only for branches that we splice out)
-                            self.expanded.push(node.clone());
+                    if node.is_branch()
+                        && let Ok(refs) = node.references()
+                    {
+                        // Track this loaded node (only for branches that we splice out)
+                        self.expanded.push(node.clone());
 
-                            // Convert references to SparseTreeNode::Ref
-                            let children: Vec<SparseTreeNode<Key, Value, Hash>> = refs
-                                .iter()
-                                .map(|r| SparseTreeNode::Ref(r.clone()))
-                                .collect();
+                        // Convert references to SparseTreeNode::Ref
+                        let children: Vec<SparseTreeNode<Key, Value, Hash>> = refs
+                            .iter()
+                            .map(|r| SparseTreeNode::Ref(r.clone()))
+                            .collect();
 
-                            let num_children = children.len();
-                            // Replace the Ref with its child references
-                            self.nodes.splice(offset..offset + 1, children);
-                            offset += num_children; // Skip past the children we just added
-                            expanded = true;
-                            continue;
-                        }
+                        let num_children = children.len();
+                        // Replace the Ref with its child references
+                        self.nodes.splice(offset..offset + 1, children);
+                        offset += num_children; // Skip past the children we just added
+                        expanded = true;
+                        continue;
                     }
                     // If it's a leaf (segment node), leave it in nodes
                     offset += 1;
                 }
                 SparseTreeNode::Node(node) => {
-                    if node.is_branch() {
-                        if let Ok(refs) = node.references() {
-                            // Track this branch node before splicing out
-                            self.expanded.push(node.clone());
+                    if node.is_branch()
+                        && let Ok(refs) = node.references()
+                    {
+                        self.expanded.push(node.clone());
 
-                            // Convert references to SparseTreeNode::Ref
-                            let children: Vec<SparseTreeNode<Key, Value, Hash>> = refs
-                                .iter()
-                                .map(|r| SparseTreeNode::Ref(r.clone()))
-                                .collect();
+                        // Convert references to SparseTreeNode::Ref
+                        let children: Vec<SparseTreeNode<Key, Value, Hash>> = refs
+                            .iter()
+                            .map(|r| SparseTreeNode::Ref(r.clone()))
+                            .collect();
 
-                            let count = children.len();
-                            // Replace the branch node with its child references
-                            self.nodes.splice(offset..offset + 1, children);
-                            offset += count; // Skip past the children we just added
-                            expanded = true;
-                            continue;
-                        }
+                        let count = children.len();
+                        // Replace the branch node with its child references
+                        self.nodes.splice(offset..offset + 1, children);
+                        offset += count; // Skip past the children we just added
+                        expanded = true;
+                        continue;
                     }
                     offset += 1;
                 }
