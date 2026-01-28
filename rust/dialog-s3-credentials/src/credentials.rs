@@ -17,6 +17,19 @@ pub enum Credentials {
     Ucan(ucan::Credentials),
 }
 
+impl From<s3::Credentials> for Credentials {
+    fn from(credentials: s3::Credentials) -> Self {
+        Self::S3(credentials)
+    }
+}
+
+#[cfg(feature = "ucan")]
+impl From<ucan::Credentials> for Credentials {
+    fn from(credentials: ucan::Credentials) -> Self {
+        Self::Ucan(credentials)
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Access for Credentials {

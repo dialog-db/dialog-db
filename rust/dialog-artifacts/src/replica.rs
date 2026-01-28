@@ -1,5 +1,5 @@
 use super::platform::PlatformStorage;
-use super::platform::{ErrorMappingBackend, PlatformBackend, PrefixedBackend, TypedStoreResource};
+use super::platform::{PlatformBackend, PrefixedBackend, TypedStoreResource};
 pub use super::uri::Uri;
 use crate::artifacts::selector::Constrained;
 use crate::artifacts::{
@@ -18,7 +18,6 @@ use dialog_common::capability::Did;
 use dialog_prolly_tree::{
     Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Node, Tree, TreeDifference,
 };
-use dialog_s3_credentials::Credentials;
 #[cfg(not(target_arch = "wasm32"))]
 use futures_util::future::BoxFuture;
 #[cfg(target_arch = "wasm32")]
@@ -28,8 +27,6 @@ use std::fmt::Debug;
 
 use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
 
-#[cfg(feature = "s3")]
-use dialog_storage::s3::Bucket as S3Bucket;
 use ed25519_dalek::ed25519::signature::SignerMut;
 use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, SignatureError, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -1060,32 +1057,7 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
     }
 }
 
-/// Represents remote storage
-#[cfg(feature = "s3")]
-pub type RemoteBackend = ErrorMappingBackend<S3Bucket<Operator>>;
-
-#[cfg(not(feature = "s3"))]
-pub type RemoteBackend =
-    ErrorMappingBackend<dialog_storage::MemoryStorageBackend<Vec<u8>, Vec<u8>>>;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-/// State information for a remote repository connection.
-pub struct RemoteState {
-    /// Name for this remote.
-    pub site: Site,
-
-    /// Address used to configure this remote
-    pub credentials: Credentials,
-}
-
-impl RemoteState {
-    #[cfg(not(feature = "s3"))]
-    pub fn connect(&self) -> Result<PlatformStorage<RemoteBackend>, ReplicaError> {
-        Err(ReplicaError::RemoteConnectionError {
-            remote: self.site.clone(),
-        })
-    }
-}
+pub use remote::{RemoteBackend, RemoteState};
 
 /// Logical timestamp used to denote dialog transactions. It takes inspiration
 /// from automerge which tags lamport timestamps with origin information. It
@@ -1650,6 +1622,7 @@ impl Display for Capability {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ErrorMappingBackend;
     use dialog_storage::MemoryStorageBackend;
 
     #[cfg(target_arch = "wasm32")]
@@ -1903,7 +1876,7 @@ mod tests {
         .with_path_style(true);
         let remote_state = RemoteState {
             site: "origin".to_string(),
-            credentials: Credentials::S3(s3_credentials),
+            credentials: RemoteCredentials::S3(s3_credentials),
         };
         let _site = replica
             .add_remote(remote_state.clone())
@@ -2120,7 +2093,7 @@ mod tests {
         // Alice adds remote and sets upstream
         let alice_remote_state = RemoteState {
             site: "origin".to_string(),
-            credentials: Credentials::S3(s3_credentials.clone()),
+            credentials: RemoteCredentials::S3(s3_credentials.clone()),
         };
         alice_replica
             .add_remote(alice_remote_state.clone())
@@ -2167,7 +2140,7 @@ mod tests {
         // Bob adds same remote and sets upstream
         let bob_remote_state = RemoteState {
             site: "origin".to_string(),
-            credentials: Credentials::S3(s3_credentials),
+            credentials: RemoteCredentials::S3(s3_credentials),
         };
         bob_replica
             .add_remote(bob_remote_state)
@@ -2273,7 +2246,7 @@ mod tests {
         // Alice adds the remote
         let alice_remote_state = RemoteState {
             site: "origin".to_string(),
-            credentials: Credentials::S3(s3_credentials.clone()),
+            credentials: RemoteCredentials::S3(s3_credentials.clone()),
         };
         alice_replica
             .add_remote(alice_remote_state)
@@ -2326,7 +2299,7 @@ mod tests {
         // Step 6: Bob adds the remote and sets upstream (after Alice has pushed)
         let bob_remote_state = RemoteState {
             site: "origin".to_string(),
-            credentials: Credentials::S3(s3_credentials),
+            credentials: RemoteCredentials::S3(s3_credentials),
         };
         bob_replica
             .add_remote(bob_remote_state)
@@ -2542,7 +2515,7 @@ mod tests {
         // Alice adds and configures remote
         let alice_remote_state = RemoteState {
             site: "origin".to_string(),
-            credentials: Credentials::S3(s3_credentials.clone()),
+            credentials: RemoteCredentials::S3(s3_credentials.clone()),
         };
         alice_replica
             .add_remote(alice_remote_state)
@@ -2592,7 +2565,7 @@ mod tests {
         // Bob adds the same remote
         let bob_remote_state = RemoteState {
             site: "origin".to_string(),
-            credentials: Credentials::S3(s3_credentials),
+            credentials: RemoteCredentials::S3(s3_credentials),
         };
         bob_replica
             .add_remote(bob_remote_state)
@@ -2742,7 +2715,7 @@ mod tests {
 
         let alice_remote_state = RemoteState {
             site: "origin".to_string(),
-            credentials: Credentials::S3(s3_credentials.clone()),
+            credentials: RemoteCredentials::S3(s3_credentials.clone()),
         };
         alice_replica.add_remote(alice_remote_state).await?;
         let alice_remote_site = RemoteSite::load(
@@ -2782,7 +2755,7 @@ mod tests {
 
         let bob_remote_state = RemoteState {
             site: "origin".to_string(),
-            credentials: Credentials::S3(s3_credentials),
+            credentials: RemoteCredentials::S3(s3_credentials),
         };
         bob_replica.add_remote(bob_remote_state).await?;
         let bob_remote_site = RemoteSite::load(
@@ -2859,7 +2832,7 @@ mod tests {
         // Add first remote (origin)
         let origin_state = RemoteState {
             site: "origin".to_string(),
-            credentials: Credentials::S3(s3_credentials.clone()),
+            credentials: RemoteCredentials::S3(s3_credentials.clone()),
         };
         let origin = replica.add_remote(origin_state.clone()).await?;
         assert_eq!(origin, "origin");
@@ -2867,7 +2840,7 @@ mod tests {
         // Add second remote (backup)
         let backup_state = RemoteState {
             site: "backup".to_string(),
-            credentials: Credentials::S3(s3_credentials),
+            credentials: RemoteCredentials::S3(s3_credentials),
         };
         let backup = replica.add_remote(backup_state.clone()).await?;
         assert_eq!(backup, "backup");
@@ -2951,15 +2924,16 @@ mod tests {
             &s3_address.secret_access_key,
         )?
         .with_path_style(true);
-        let s3 = S3::new(Credentials::S3(s3_credentials), issuer.clone());
+        let s3 = S3::from_s3(s3_credentials, issuer.clone());
         let s3_storage = Bucket::new(s3, subject.clone(), "memory");
 
-        // Create local and remote archives
+        // Create local and remote archives using the RemoteBackend enum
         let local_storage = PlatformStorage::new(
             ErrorMappingBackend::new(MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default()),
             CborEncoder,
         );
-        let connection = PlatformStorage::new(ErrorMappingBackend::new(s3_storage), CborEncoder);
+        let remote_backend = remote::RemoteBackend::S3(ErrorMappingBackend::new(s3_storage));
+        let connection = PlatformStorage::new(remote_backend, CborEncoder);
 
         let archive = Archive::new(local_storage.clone().into_backend());
         archive.set_remote(connection.clone()).await;
@@ -3036,7 +3010,7 @@ mod tests {
         // Create remote state with UCAN credentials
         let remote_state = RemoteState {
             site: "origin".to_string(),
-            credentials: Credentials::Ucan(ucan_credentials.clone()),
+            credentials: RemoteCredentials::Ucan(ucan_credentials.clone()),
         };
 
         // Test direct serialization/deserialization first
@@ -3067,7 +3041,7 @@ mod tests {
         assert_eq!(loaded_state.site, "origin");
         assert_eq!(
             loaded_state.credentials,
-            Credentials::Ucan(ucan_credentials)
+            RemoteCredentials::Ucan(ucan_credentials)
         );
 
         Ok(())
@@ -3140,7 +3114,7 @@ mod tests {
         // Step 6: Add remote "origin" with UCAN credentials
         let remote_state = RemoteState {
             site: "origin".to_string(),
-            credentials: Credentials::Ucan(ucan_credentials),
+            credentials: RemoteCredentials::Ucan(ucan_credentials),
         };
         local_replica
             .add_remote(remote_state.clone())
@@ -3247,7 +3221,7 @@ mod tests {
         // Add remote to second replica
         let second_remote_state = RemoteState {
             site: "origin".to_string(),
-            credentials: Credentials::Ucan(second_ucan_credentials),
+            credentials: RemoteCredentials::Ucan(second_ucan_credentials),
         };
         second_replica
             .add_remote(second_remote_state)
