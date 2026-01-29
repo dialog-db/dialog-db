@@ -3015,7 +3015,8 @@ mod tests {
             &operator_did,
             operator_signer.did(),
             &["archive", "memory"],
-        )?;
+        )
+        .await?;
         let delegation_chain = DelegationChain::new(delegation);
 
         // Create UCAN credentials
@@ -3104,7 +3105,8 @@ mod tests {
             &operator_did,
             operator_signer.did(),
             &[], // Empty command = root capability (/)
-        )?;
+        )
+        .await?;
         let delegation_chain = DelegationChain::new(delegation);
 
         // Step 3: Create UCAN credentials
@@ -3215,7 +3217,8 @@ mod tests {
             &second_operator_did,
             operator_signer.did(),
             &[], // Empty command = root capability (/)
-        )?;
+        )
+        .await?;
         let second_delegation_chain = DelegationChain::new(second_delegation);
         let second_ucan_credentials =
             ucan::Credentials::new(env.access_service_url.clone(), second_delegation_chain);

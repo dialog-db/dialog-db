@@ -858,13 +858,14 @@ mod tests {
 
         /// Helper to create a test delegation chain from subject to operator.
         #[allow(dead_code)]
-        fn create_test_delegation_chain(
+        async fn create_test_delegation_chain(
             subject_signer: &ucan::did::Ed25519Signer,
             operator_did: &ucan::did::Ed25519Did,
             can: &[&str],
         ) -> DelegationChain {
             let subject_did = subject_signer.did().clone();
             let delegation = create_delegation(subject_signer, operator_did, &subject_did, can)
+                .await
                 .expect("Failed to create test delegation");
             DelegationChain::new(delegation)
         }
@@ -893,7 +894,8 @@ mod tests {
                 operator.signer(),
                 &operator.signer().did(),
                 &["archive"],
-            );
+            )
+            .await;
 
             let subject_did = operator.did().to_string();
 
@@ -1440,7 +1442,7 @@ mod tests {
         use helpers::Operator;
 
         #[allow(dead_code)]
-        fn create_ucan_bucket(
+        async fn create_ucan_bucket(
             env: &helpers::UcanS3Address,
             operator: &Operator,
             can: &[&str],
@@ -1453,6 +1455,7 @@ mod tests {
                     &subject_did,
                     can,
                 )
+                .await
                 .expect("Failed to create test delegation");
                 DelegationChain::new(delegation)
             };
@@ -1466,7 +1469,7 @@ mod tests {
             env: helpers::UcanS3Address,
         ) -> anyhow::Result<()> {
             let operator = Operator::generate();
-            let mut bucket = create_ucan_bucket(&env, &operator, &["storage"]);
+            let mut bucket = create_ucan_bucket(&env, &operator, &["storage"]).await;
 
             let key = b"ucan-test-key".to_vec();
             let value = b"ucan-test-value".to_vec();
@@ -1497,6 +1500,7 @@ mod tests {
                     &subject_did_clone,
                     &["storage"],
                 )
+                .await
                 .expect("Failed to create test delegation");
                 DelegationChain::new(delegation)
             };
@@ -1558,7 +1562,7 @@ mod tests {
             env: helpers::UcanS3Address,
         ) -> anyhow::Result<()> {
             let operator = Operator::generate();
-            let bucket = create_ucan_bucket(&env, &operator, &["storage"]);
+            let bucket = create_ucan_bucket(&env, &operator, &["storage"]).await;
 
             // Try to get a key that doesn't exist
             let result = bucket.get(&b"nonexistent-ucan-key".to_vec()).await?;
@@ -1731,7 +1735,7 @@ mod tests {
         use helpers::Operator;
 
         #[allow(dead_code)]
-        fn create_ucan_bucket(
+        async fn create_ucan_bucket(
             env: &helpers::UcanS3Address,
             operator: &Operator,
             store: &str,
@@ -1745,6 +1749,7 @@ mod tests {
                     &subject_did,
                     can,
                 )
+                .await
                 .expect("Failed to create test delegation");
                 DelegationChain::new(delegation)
             };
@@ -1756,7 +1761,8 @@ mod tests {
         #[dialog_common::test]
         async fn it_lists_objects_via_ucan(env: helpers::UcanS3Address) -> anyhow::Result<()> {
             let operator = Operator::generate();
-            let mut bucket = create_ucan_bucket(&env, &operator, "ucan-list-test", &["storage"]);
+            let mut bucket =
+                create_ucan_bucket(&env, &operator, "ucan-list-test", &["storage"]).await;
 
             // Set multiple values
             bucket.set(b"key1".to_vec(), b"value1".to_vec()).await?;
@@ -1778,7 +1784,7 @@ mod tests {
         ) -> anyhow::Result<()> {
             let operator = Operator::generate();
             let bucket =
-                create_ucan_bucket(&env, &operator, "nonexistent-ucan-prefix", &["storage"]);
+                create_ucan_bucket(&env, &operator, "nonexistent-ucan-prefix", &["storage"]).await;
 
             // List objects with a prefix that has no objects - should return empty list
             let result = bucket.list(None).await?;
@@ -1797,9 +1803,9 @@ mod tests {
 
             // Create two buckets with different prefixes but same operator
             let mut bucket_a =
-                create_ucan_bucket(&env, &operator, "ucan-list-prefix-a", &["storage"]);
+                create_ucan_bucket(&env, &operator, "ucan-list-prefix-a", &["storage"]).await;
             let mut bucket_b =
-                create_ucan_bucket(&env, &operator, "ucan-list-prefix-b", &["storage"]);
+                create_ucan_bucket(&env, &operator, "ucan-list-prefix-b", &["storage"]).await;
 
             // Add objects to each bucket
             bucket_a.set(b"key1".to_vec(), b"value-a1".to_vec()).await?;

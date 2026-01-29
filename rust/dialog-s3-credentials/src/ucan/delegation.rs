@@ -338,8 +338,12 @@ impl<'de> Deserialize<'de> for DelegationChain {
     }
 }
 
+/// Helper functions for testing delegation chains.
+///
+/// These are exported when the `helpers` feature is enabled so that
+/// other crates can use them in their tests.
 #[cfg(any(test, feature = "helpers"))]
-pub mod tests {
+pub mod helpers {
     use super::*;
     use ucan::delegation::builder::DelegationBuilder;
     use ucan::delegation::subject::DelegatedSubject;
@@ -356,7 +360,7 @@ pub mod tests {
     /// Create a delegation from issuer to audience for a subject with the given command.
     ///
     /// This is a convenience function for building simple delegations in tests.
-    pub fn create_delegation(
+    pub async fn create_delegation(
         issuer: &Ed25519Signer,
         audience: &Ed25519Did,
         subject: &Ed25519Did,
@@ -372,9 +376,23 @@ pub mod tests {
                     .map(|&s| s.to_string()) // or .map(String::from)
                     .collect(),
             )
-            .try_build()
+            .try_build(issuer)
+            .await
             .map_err(|e| AccessError::Invocation(format!("Failed to build delegation: {:?}", e)))
     }
+}
+
+/// Tests for delegation chains.
+///
+/// These are only compiled when running tests (not when `helpers` feature is enabled),
+/// because they use `#[dialog_common::test]` which requires dev-dependencies like
+/// `wasm-bindgen-test` and `tokio` that are only available in test builds.
+#[cfg(test)]
+mod tests {
+    use super::helpers::*;
+    use super::*;
+    use ucan::delegation::builder::DelegationBuilder;
+    use ucan::delegation::subject::DelegatedSubject;
 
     #[test]
     fn it_requires_non_empty_chain() {
@@ -383,18 +401,19 @@ pub mod tests {
         assert!(result.unwrap_err().to_string().contains("at least one"));
     }
 
-    #[test]
-    fn it_creates_chain_from_single_delegation() {
+    #[dialog_common::test]
+    async fn it_creates_chain_from_single_delegation() {
         let space_signer = generate_signer();
         let space_did = space_signer.did().clone();
         let operator_signer = generate_signer();
 
         let delegation = DelegationBuilder::new()
-            .issuer(space_signer)
+            .issuer(space_signer.clone())
             .audience(operator_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build()
+            .try_build(&space_signer)
+            .await
             .unwrap();
 
         let chain = DelegationChain::new(delegation);
@@ -404,8 +423,8 @@ pub mod tests {
         assert_eq!(chain.subject(), Some(&space_did));
     }
 
-    #[test]
-    fn it_creates_chain_from_vec() {
+    #[dialog_common::test]
+    async fn it_creates_chain_from_vec() {
         let space_signer = generate_signer();
         let space_did = space_signer.did().clone();
         let operator1_signer = generate_signer();
@@ -413,20 +432,22 @@ pub mod tests {
 
         // First delegation: space -> operator1
         let delegation1 = DelegationBuilder::new()
-            .issuer(space_signer)
+            .issuer(space_signer.clone())
             .audience(operator1_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build()
+            .try_build(&space_signer)
+            .await
             .unwrap();
 
         // Second delegation: operator1 -> operator2
         let delegation2 = DelegationBuilder::new()
-            .issuer(operator1_signer)
+            .issuer(operator1_signer.clone())
             .audience(operator2_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build()
+            .try_build(&operator1_signer)
+            .await
             .unwrap();
 
         // Note: order matters - first in vec is first in proof chain (closest to invoker)
@@ -435,19 +456,20 @@ pub mod tests {
         assert_eq!(chain.delegations().len(), 2);
     }
 
-    #[test]
-    fn it_extends_chain_with_new_delegation() {
+    #[dialog_common::test]
+    async fn it_extends_chain_with_new_delegation() {
         // Create initial delegation: space -> operator1
         let space_signer = generate_signer();
         let space_did = space_signer.did().clone();
         let operator1_signer = generate_signer();
 
         let initial_delegation = DelegationBuilder::new()
-            .issuer(space_signer)
+            .issuer(space_signer.clone())
             .audience(operator1_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build()
+            .try_build(&space_signer)
+            .await
             .unwrap();
 
         let chain = DelegationChain::new(initial_delegation);
@@ -457,11 +479,12 @@ pub mod tests {
         let operator2_signer = generate_signer();
 
         let second_delegation = DelegationBuilder::new()
-            .issuer(operator1_signer)
+            .issuer(operator1_signer.clone())
             .audience(operator2_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did))
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build()
+            .try_build(&operator1_signer)
+            .await
             .unwrap();
 
         let extended_chain = chain.extend(second_delegation).unwrap();
@@ -474,19 +497,20 @@ pub mod tests {
         assert_eq!(chain.proof_cids().len(), 1);
     }
 
-    #[test]
-    fn it_fails_extend_on_principal_misalignment() {
+    #[dialog_common::test]
+    async fn it_fails_extend_on_principal_misalignment() {
         // Create initial delegation: space -> operator1
         let space_signer = generate_signer();
         let space_did = space_signer.did().clone();
         let operator1_signer = generate_signer();
 
         let initial_delegation = DelegationBuilder::new()
-            .issuer(space_signer)
+            .issuer(space_signer.clone())
             .audience(operator1_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build()
+            .try_build(&space_signer)
+            .await
             .unwrap();
 
         let chain = DelegationChain::new(initial_delegation);
@@ -496,11 +520,12 @@ pub mod tests {
         let operator3_signer = generate_signer();
 
         let bad_delegation = DelegationBuilder::new()
-            .issuer(operator2_signer) // Wrong! Should be operator1
+            .issuer(operator2_signer.clone()) // Wrong! Should be operator1
             .audience(operator3_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did))
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build()
+            .try_build(&operator2_signer)
+            .await
             .unwrap();
 
         let result = chain.extend(bad_delegation);
@@ -513,8 +538,8 @@ pub mod tests {
         );
     }
 
-    #[test]
-    fn it_fails_try_from_on_principal_misalignment() {
+    #[dialog_common::test]
+    async fn it_fails_try_from_on_principal_misalignment() {
         // Create delegations that don't align
         let space_signer = generate_signer();
         let space_did = space_signer.did().clone();
@@ -528,17 +553,19 @@ pub mod tests {
             .audience(operator3_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build()
+            .try_build(&operator2_signer)
+            .await
             .unwrap();
 
         // Second delegation: space -> operator1 (closest to subject)
         // This should fail because operator2 != operator1
         let delegation2 = DelegationBuilder::new()
-            .issuer(space_signer)
+            .issuer(space_signer.clone())
             .audience(operator1_signer.did().clone()) // Wrong! Should be operator2
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build()
+            .try_build(&space_signer)
+            .await
             .unwrap();
 
         // Order: [delegation1, delegation2] means delegation1.issuer should == delegation2.audience
@@ -553,18 +580,19 @@ pub mod tests {
         );
     }
 
-    #[test]
-    fn it_serializes_and_deserializes_roundtrip() {
+    #[dialog_common::test]
+    async fn it_serializes_and_deserializes_roundtrip() {
         let space_signer = generate_signer();
         let space_did = space_signer.did().clone();
         let operator_signer = generate_signer();
 
         let delegation = DelegationBuilder::new()
-            .issuer(space_signer)
+            .issuer(space_signer.clone())
             .audience(operator_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build()
+            .try_build(&space_signer)
+            .await
             .unwrap();
 
         let chain = DelegationChain::new(delegation);
@@ -581,18 +609,19 @@ pub mod tests {
         assert_eq!(chain.subject(), restored.subject());
     }
 
-    #[test]
-    fn it_serde_roundtrips_via_dagcbor() {
+    #[dialog_common::test]
+    async fn it_serde_roundtrips_via_dagcbor() {
         let space_signer = generate_signer();
         let space_did = space_signer.did().clone();
         let operator_signer = generate_signer();
 
         let delegation = DelegationBuilder::new()
-            .issuer(space_signer)
+            .issuer(space_signer.clone())
             .audience(operator_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build()
+            .try_build(&space_signer)
+            .await
             .unwrap();
 
         let chain = DelegationChain::new(delegation);
@@ -612,19 +641,20 @@ pub mod tests {
 
     /// Test that a delegation for archive capability roundtrips correctly.
     /// This tests creating a delegation that grants /archive access.
-    #[test]
-    fn it_roundtrips_archive_delegation() {
+    #[dialog_common::test]
+    async fn it_roundtrips_archive_delegation() {
         let subject_signer = generate_signer();
         let subject_did = subject_signer.did().clone();
         let operator_signer = generate_signer();
 
         // Create delegation granting /archive capability
         let delegation = DelegationBuilder::new()
-            .issuer(subject_signer)
+            .issuer(subject_signer.clone())
             .audience(operator_signer.did().clone())
             .subject(DelegatedSubject::Specific(subject_did.clone()))
             .command(vec!["archive".to_string()])
-            .try_build()
+            .try_build(&subject_signer)
+            .await
             .unwrap();
 
         let chain = DelegationChain::new(delegation);
@@ -642,19 +672,20 @@ pub mod tests {
 
     /// Test that a delegation for archive/put capability roundtrips correctly.
     /// This tests the more specific command path.
-    #[test]
-    fn it_roundtrips_archive_put_delegation() {
+    #[dialog_common::test]
+    async fn it_roundtrips_archive_put_delegation() {
         let subject_signer = generate_signer();
         let subject_did = subject_signer.did().clone();
         let operator_signer = generate_signer();
 
         // Create delegation granting /archive/put capability
         let delegation = DelegationBuilder::new()
-            .issuer(subject_signer)
+            .issuer(subject_signer.clone())
             .audience(operator_signer.did().clone())
             .subject(DelegatedSubject::Specific(subject_did.clone()))
             .command(vec!["archive".to_string(), "put".to_string()])
-            .try_build()
+            .try_build(&subject_signer)
+            .await
             .unwrap();
 
         let chain = DelegationChain::new(delegation);

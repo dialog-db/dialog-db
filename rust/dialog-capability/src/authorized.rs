@@ -1,4 +1,5 @@
 use crate::{Authority, Authorization, AuthorizationError, Capability, Constraint, Provider};
+use dialog_common::{ConditionalSend, ConditionalSync};
 use std::error::Error;
 
 /// A capability paired with its authorization proof.
@@ -94,9 +95,9 @@ impl<
     /// For operations that require authorization, use `acquire` first.
     pub async fn perform<Env>(self, env: &mut Env) -> Result<Ok, PerformError<E>>
     where
-        Env: Provider<Self> + Authority,
+        Env: Provider<Self> + Authority + ConditionalSend + ConditionalSync,
     {
-        match self.authorization.invoke(env) {
+        match self.authorization.invoke(env).await {
             Ok(authorization) => env
                 .execute(Authorized {
                     capability: self.capability,

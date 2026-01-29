@@ -56,8 +56,6 @@ getrandom = { workspace = true, features = ["js"] }
 dialog-common = { workspace = true, features = ["helpers"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
-
-[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 wasm-bindgen-test = { workspace = true }
 
 [lints.rust]

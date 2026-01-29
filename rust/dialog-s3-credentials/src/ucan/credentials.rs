@@ -175,7 +175,7 @@ where
 pub mod tests {
     use super::*;
     use crate::capability::archive;
-    use crate::ucan::delegation::tests::create_delegation;
+    use crate::ucan::delegation::helpers::create_delegation;
     use anyhow;
     use dialog_capability::{Authority, Authorization, Did, Principal, Subject};
     use dialog_common::Blake3Hash;
@@ -184,13 +184,14 @@ pub mod tests {
     use ucan::promise::Promised;
 
     /// Helper to create a test delegation chain from subject to operator.
-    pub fn test_delegation_chain(
+    pub async fn test_delegation_chain(
         subject_signer: &ucan::did::Ed25519Signer,
         operator_did: &Ed25519Did,
         ability: &[&str],
     ) -> DelegationChain {
         let subject_did = subject_signer.did();
         let delegation = create_delegation(subject_signer, operator_did, subject_did, ability)
+            .await
             .expect("Failed to create test delegation");
         DelegationChain::new(delegation)
     }
@@ -254,7 +255,7 @@ pub mod tests {
 
         let credentials = Credentials::new(
             "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, operator.did(), &["archive"]),
+            test_delegation_chain(&operator, operator.did(), &["archive"]).await,
         );
 
         let mut session = Session::new(credentials, &[0u8; 32]);
@@ -270,7 +271,7 @@ pub mod tests {
             .acquire(&mut session)
             .await?;
 
-        let authorization = read.authorization().invoke(&session)?;
+        let authorization = read.authorization().invoke(&session).await?;
 
         let ucan = match authorization {
             UcanAuthorization::Invocation { chain, .. } => chain,
@@ -307,7 +308,7 @@ pub mod tests {
         // Create credentials with a delegation (won't be used for self-auth)
         let credentials = Credentials::new(
             "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, operator.did(), &["archive"]),
+            test_delegation_chain(&operator, operator.did(), &["archive"]).await,
         );
 
         let mut session = Session::new(credentials, &[0u8; 32]);
@@ -344,7 +345,7 @@ pub mod tests {
 
         let credentials = Credentials::new(
             "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, operator.did(), &["archive"]),
+            test_delegation_chain(&operator, operator.did(), &["archive"]).await,
         );
 
         let mut session = Session::new(credentials, &[0u8; 32]);
@@ -362,7 +363,7 @@ pub mod tests {
             .await?;
 
         // Invoke the authorization - should create an Invocation with empty proofs
-        let authorization = authorized.authorization().invoke(&session)?;
+        let authorization = authorized.authorization().invoke(&session).await?;
 
         let ucan = match authorization {
             UcanAuthorization::Invocation { chain, .. } => chain,
@@ -402,6 +403,7 @@ pub mod tests {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     mod webcrypto_tests {
         use signature::Verifier;
+        use ucan::did::Did;
         use ucan::{AsyncDidSigner, WebCryptoEd25519Signer};
         use wasm_bindgen_test::wasm_bindgen_test_configure;
 
@@ -428,10 +430,7 @@ pub mod tests {
                 .expect("Failed to generate signer");
             let msg = b"test message for WebCrypto signing";
 
-            let signature = signer
-                .sign_async(msg)
-                .await
-                .expect("Failed to sign message");
+            let signature = signer.sign(msg).await.expect("Failed to sign message");
 
             let verifier = signer.did().verifier();
             verifier
@@ -447,10 +446,7 @@ pub mod tests {
             let msg = b"original message";
             let wrong_msg = b"wrong message";
 
-            let signature = signer
-                .sign_async(msg)
-                .await
-                .expect("Failed to sign message");
+            let signature = signer.sign(msg).await.expect("Failed to sign message");
 
             let verifier = signer.did().verifier();
             assert!(

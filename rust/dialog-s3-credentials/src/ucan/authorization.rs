@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use dialog_capability::{
     Authority, Authorization, AuthorizationError, Capability, Did, Effect, Parameters, Provider,
 };
-use dialog_common::ConditionalSend;
+use dialog_common::{ConditionalSend, ConditionalSync};
 use ed25519_dalek::SigningKey;
 use ipld_core::ipld::Ipld;
 use std::collections::BTreeMap;
@@ -205,6 +205,8 @@ impl UcanAuthorization {
     }
 }
 
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
 impl Authorization for UcanAuthorization {
     fn subject(&self) -> &Did {
         match self {
@@ -230,7 +232,10 @@ impl Authorization for UcanAuthorization {
         }
     }
 
-    fn invoke<A: Authority>(&self, authority: &A) -> Result<Self, AuthorizationError> {
+    async fn invoke<A: Authority + ConditionalSend + ConditionalSync>(
+        &self,
+        authority: &A,
+    ) -> Result<Self, AuthorizationError> {
         if self.audience() != authority.did() {
             Err(AuthorizationError::NotAudience {
                 audience: self.audience().into(),
@@ -260,13 +265,14 @@ impl Authorization for UcanAuthorization {
                 .unwrap_or_default();
 
             let invocation = InvocationBuilder::new()
-                .issuer(issuer)
+                .issuer(issuer.clone())
                 .audience(subject)
                 .subject(subject)
                 .command(command)
                 .arguments(args)
                 .proofs(proofs)
-                .try_build()
+                .try_build(&issuer)
+                .await
                 .map_err(|e| AuthorizationError::Serialization(format!("{:?}", e)))?;
 
             let delegations = self
@@ -310,7 +316,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::ucan::delegation::tests::{create_delegation, generate_signer};
+    use crate::ucan::delegation::helpers::{create_delegation, generate_signer};
     use ipld_core::ipld::Ipld;
 
     #[test]
@@ -329,8 +335,8 @@ mod tests {
         assert_eq!(auth.parameters(), &BTreeMap::default());
     }
 
-    #[test]
-    fn it_creates_delegated_authorization() {
+    #[dialog_common::test]
+    async fn it_creates_delegated_authorization() {
         let subject_signer = generate_signer();
         let subject_did = subject_signer.did();
         let operator_signer = generate_signer();
@@ -341,6 +347,7 @@ mod tests {
             subject_did,
             &["storage", "get"],
         )
+        .await
         .unwrap();
 
         let chain = DelegationChain::new(delegation);

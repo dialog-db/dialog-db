@@ -429,7 +429,7 @@ mod tests {
     }
 
     /// Build a valid UCAN container with invocation and delegation for testing
-    fn build_test_container(
+    async fn build_test_container(
         subject_signer: &Ed25519Signer,
         operator_signer: &Ed25519Signer,
         command: Vec<String>,
@@ -444,7 +444,8 @@ mod tests {
             .audience(operator_did)
             .subject(DelegatedSubject::Specific(subject_did))
             .command(command.clone())
-            .try_build()
+            .try_build(subject_signer)
+            .await
             .expect("Failed to build delegation");
 
         let delegation_cid = delegation.to_cid();
@@ -457,7 +458,8 @@ mod tests {
             .command(command)
             .arguments(args)
             .proofs(vec![delegation_cid])
-            .try_build()
+            .try_build(operator_signer)
+            .await
             .expect("Failed to build invocation");
 
         // Build InvocationChain
@@ -496,7 +498,8 @@ mod tests {
             &operator_signer,
             vec!["storage".to_string(), "get".to_string()],
             args,
-        );
+        )
+        .await;
 
         let result = authorizer.authorize(&container).await;
         assert!(result.is_ok());
@@ -541,7 +544,8 @@ mod tests {
             &operator_signer,
             vec!["storage".to_string(), "set".to_string()],
             args,
-        );
+        )
+        .await;
 
         let result = authorizer.authorize(&container).await;
         assert!(result.is_ok());
@@ -583,7 +587,8 @@ mod tests {
             &operator_signer,
             vec!["memory".to_string(), "resolve".to_string()],
             args,
-        );
+        )
+        .await;
 
         let result = authorizer.authorize(&container).await;
         assert!(result.is_ok());
@@ -619,7 +624,8 @@ mod tests {
             &operator_signer,
             vec!["archive".to_string(), "get".to_string()],
             args,
-        );
+        )
+        .await;
 
         let result = authorizer.authorize(&container).await;
         assert!(result.is_ok());
@@ -663,7 +669,8 @@ mod tests {
             &operator_signer,
             vec!["archive".to_string(), "put".to_string()],
             args,
-        );
+        )
+        .await;
 
         let result = authorizer.authorize(&container).await;
         assert!(result.is_ok());
@@ -688,7 +695,7 @@ mod tests {
 
         let credentials = Credentials::new(
             "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, operator.did(), &["archive"]),
+            test_delegation_chain(&operator, operator.did(), &["archive"]).await,
         );
 
         let mut session = Session::new(credentials, &[0u8; 32]);
@@ -704,7 +711,7 @@ mod tests {
             .acquire(&mut session)
             .await?;
 
-        let authorization = read.authorization().invoke(&session)?;
+        let authorization = read.authorization().invoke(&session).await?;
         let ucan = match authorization {
             UcanAuthorization::Invocation { chain, .. } => chain,
             _ => panic!("expected invocation"),
@@ -727,7 +734,7 @@ mod tests {
 
     /// Build a self-invocation container (issuer == subject, no delegation).
     /// This is used when a subject acts on itself, which is inherently authorized.
-    fn build_self_invocation_container(
+    async fn build_self_invocation_container(
         signer: &Ed25519Signer,
         command: Vec<String>,
         args: BTreeMap<String, Promised>,
@@ -742,7 +749,8 @@ mod tests {
             .command(command)
             .arguments(args)
             .proofs(vec![]) // Empty proofs for self-auth
-            .try_build()
+            .try_build(signer)
+            .await
             .expect("Failed to build invocation");
 
         let chain = InvocationChain::new(invocation, std::collections::HashMap::new());
@@ -774,7 +782,8 @@ mod tests {
             &signer,
             vec!["storage".to_string(), "get".to_string()],
             args,
-        );
+        )
+        .await;
 
         let result = authorizer.authorize(&container).await;
         assert!(
@@ -821,7 +830,8 @@ mod tests {
             &signer,
             vec!["storage".to_string(), "set".to_string()],
             args,
-        );
+        )
+        .await;
 
         let result = authorizer.authorize(&container).await;
         assert!(
@@ -862,7 +872,8 @@ mod tests {
             &signer,
             vec!["archive".to_string(), "get".to_string()],
             args,
-        );
+        )
+        .await;
 
         let result = authorizer.authorize(&container).await;
         assert!(

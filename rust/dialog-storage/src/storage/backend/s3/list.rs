@@ -150,8 +150,6 @@ where
         &mut self,
         input: Capability<storage::List>,
     ) -> Result<storage::ListResult, storage::StorageError> {
-        use dialog_capability::Policy;
-
         // Build the authorization capability
         let store: &storage::Store = input.policy();
         let list: &storage::List = input.policy();

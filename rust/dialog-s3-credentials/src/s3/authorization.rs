@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use dialog_capability::{
     Authority, Authorization, AuthorizationError, Capability, Did, Effect, Provider,
 };
-use dialog_common::ConditionalSend;
+use dialog_common::{ConditionalSend, ConditionalSync};
 
 /// Self-issued authorization for direct S3 access.
 ///
@@ -41,6 +41,8 @@ impl S3Authorization {
     }
 }
 
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
 impl Authorization for S3Authorization {
     fn subject(&self) -> &Did {
         &self.subject
@@ -54,7 +56,10 @@ impl Authorization for S3Authorization {
         &self.ability
     }
 
-    fn invoke<A: Authority>(&self, authority: &A) -> Result<Self, AuthorizationError> {
+    async fn invoke<A: Authority + ConditionalSend + ConditionalSync>(
+        &self,
+        authority: &A,
+    ) -> Result<Self, AuthorizationError> {
         if &self.audience != authority.did() {
             Err(AuthorizationError::NotAudience {
                 audience: self.audience.clone(),
