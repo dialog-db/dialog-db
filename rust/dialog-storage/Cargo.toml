@@ -111,6 +111,11 @@ tower-http = { version = "0.6", features = ["cors"] }
 getrandom = { workspace = true, features = ["js"] }
 wasm-bindgen-test = { workspace = true }
 
+[[test]]
+name = "s3_integration_tests"
+path = "tests/s3_integration_tests/main.rs"
+required-features = ["s3-integration-tests"]
+
 [lints.rust]
 # This cfg is used by the dialog_common::test proc macro for wasm inner tests
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)"] }
