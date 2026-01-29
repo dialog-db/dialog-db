@@ -724,4 +724,154 @@ mod tests {
 
         Ok(())
     }
+
+    /// Build a self-invocation container (issuer == subject, no delegation).
+    /// This is used when a subject acts on itself, which is inherently authorized.
+    fn build_self_invocation_container(
+        signer: &Ed25519Signer,
+        command: Vec<String>,
+        args: BTreeMap<String, Promised>,
+    ) -> Vec<u8> {
+        let did = *signer.did();
+
+        // Self-invocation: issuer == subject, no proofs needed
+        let invocation = InvocationBuilder::new()
+            .issuer(signer.clone())
+            .audience(did)
+            .subject(did)
+            .command(command)
+            .arguments(args)
+            .proofs(vec![]) // Empty proofs for self-auth
+            .try_build()
+            .expect("Failed to build invocation");
+
+        let chain = InvocationChain::new(invocation, std::collections::HashMap::new());
+        chain.to_bytes().expect("Failed to serialize container")
+    }
+
+    #[dialog_common::test]
+    async fn it_authorizes_self_invocation_for_storage_get() {
+        use crate::{Address, s3::Credentials};
+
+        let signer = test_signer();
+
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "test-bucket",
+        );
+        let credentials =
+            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
+
+        let authorizer = UcanAuthorizer::new(credentials);
+
+        let mut args = BTreeMap::new();
+        args.insert("store".to_string(), Promised::String("index".to_string()));
+        args.insert("key".to_string(), Promised::Bytes(b"test-key".to_vec()));
+
+        // Build self-invocation (issuer == subject, no delegation)
+        let container = build_self_invocation_container(
+            &signer,
+            vec!["storage".to_string(), "get".to_string()],
+            args,
+        );
+
+        let result = authorizer.authorize(&container).await;
+        assert!(
+            result.is_ok(),
+            "Self-invocation should be authorized: {:?}",
+            result
+        );
+
+        let descriptor = result.unwrap();
+        assert_eq!(descriptor.method, "GET");
+        assert!(descriptor.url.as_str().contains("test-bucket"));
+    }
+
+    #[dialog_common::test]
+    async fn it_authorizes_self_invocation_for_storage_set() {
+        use crate::{Address, s3::Credentials};
+
+        let signer = test_signer();
+
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "test-bucket",
+        );
+        let credentials =
+            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
+
+        let authorizer = UcanAuthorizer::new(credentials);
+
+        let mut checksum_map = BTreeMap::new();
+        checksum_map.insert(
+            "algorithm".to_string(),
+            Promised::String("sha256".to_string()),
+        );
+        checksum_map.insert("value".to_string(), Promised::Bytes([0u8; 32].to_vec()));
+
+        let mut args = BTreeMap::new();
+        args.insert("store".to_string(), Promised::String("index".to_string()));
+        args.insert("key".to_string(), Promised::Bytes(b"test-key".to_vec()));
+        args.insert("checksum".to_string(), Promised::Map(checksum_map));
+
+        // Build self-invocation (issuer == subject, no delegation)
+        let container = build_self_invocation_container(
+            &signer,
+            vec!["storage".to_string(), "set".to_string()],
+            args,
+        );
+
+        let result = authorizer.authorize(&container).await;
+        assert!(
+            result.is_ok(),
+            "Self-invocation for storage/set should be authorized: {:?}",
+            result
+        );
+
+        let descriptor = result.unwrap();
+        assert_eq!(descriptor.method, "PUT");
+    }
+
+    #[dialog_common::test]
+    async fn it_authorizes_self_invocation_for_archive_get() {
+        use crate::{Address, s3::Credentials};
+
+        let signer = test_signer();
+
+        let address = Address::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "test-bucket",
+        );
+        let credentials =
+            Credentials::private(address, "access-key-id", "secret-access-key").unwrap();
+
+        let authorizer = UcanAuthorizer::new(credentials);
+
+        let mut args = BTreeMap::new();
+        args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
+        args.insert(
+            "digest".to_string(),
+            Promised::Bytes(Blake3Hash::hash(b"test").as_bytes().to_vec()),
+        );
+
+        // Build self-invocation (issuer == subject, no delegation)
+        let container = build_self_invocation_container(
+            &signer,
+            vec!["archive".to_string(), "get".to_string()],
+            args,
+        );
+
+        let result = authorizer.authorize(&container).await;
+        assert!(
+            result.is_ok(),
+            "Self-invocation for archive/get should be authorized: {:?}",
+            result
+        );
+
+        let descriptor = result.unwrap();
+        assert_eq!(descriptor.method, "GET");
+    }
 }

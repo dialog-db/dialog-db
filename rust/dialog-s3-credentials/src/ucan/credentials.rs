@@ -118,10 +118,8 @@ impl Access for Credentials {
         &self,
         claim: Claim<C>,
     ) -> Result<Self::Authorization, Self::Error> {
-        // Verify the claim's subject matches our delegation's subject
-
-        // Verify the claim's audience matches the first delegation's audience
-        // Per UCAN spec: first delegation's `aud` should match the invoker
+        // Delegated authorization: verify the claim's audience matches the delegation chain.
+        // Per UCAN spec: first delegation's `aud` should match the invoker.
         let audience = self.delegation.audience().to_string();
         if claim.audience() != &audience {
             return Err(AccessError::Configuration(format!(
@@ -133,6 +131,17 @@ impl Access for Credentials {
 
         let mut parameters = Parameters::new();
         claim.capability().parametrize(&mut parameters);
+
+        // Self-authorization: when subject == audience, no delegation needed.
+        // The subject is acting on itself, which is inherently authorized.
+        if claim.subject() == claim.audience() {
+            return Ok(UcanAuthorization::owned(
+                self.endpoint.clone(),
+                claim.subject().clone(),
+                claim.capability().ability(),
+                parameters,
+            ));
+        }
 
         // Return authorization from the delegation chain
         Ok(UcanAuthorization::delegated(
@@ -285,6 +294,99 @@ pub mod tests {
                 Blake3Hash::hash(b"hello").as_bytes().into()
             ))
         );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_returns_owned_authorization_for_self_claim() -> anyhow::Result<()> {
+        // Create a signer where subject == operator (self-authorization)
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
+        let operator = Ed25519Signer::from(signer);
+
+        // Create credentials with a delegation (won't be used for self-auth)
+        let credentials = Credentials::new(
+            "https://access.ucan.com".into(),
+            test_delegation_chain(&operator, operator.did(), &["archive"]),
+        );
+
+        let mut session = Session::new(credentials, &[0u8; 32]);
+
+        // Create a capability where subject == session.did() (self-authorization)
+        let capability = Subject::from(session.did().to_string())
+            .attenuate(archive::Archive)
+            .attenuate(archive::Catalog {
+                catalog: "blobs".into(),
+            })
+            .invoke(archive::Get {
+                digest: Blake3Hash::hash(b"hello"),
+            });
+
+        // Acquire authorization - should return Owned since subject == audience
+        let authorized = capability.acquire(&mut session).await?;
+
+        // Verify it's an Owned authorization
+        match authorized.authorization() {
+            UcanAuthorization::Owned { subject, .. } => {
+                assert_eq!(subject, session.did());
+            }
+            _ => panic!("Expected Owned authorization for self-claim"),
+        }
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_invokes_and_verifies_self_authorization() -> anyhow::Result<()> {
+        // Create a signer where subject == operator (self-authorization)
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
+        let operator = Ed25519Signer::from(signer);
+
+        let credentials = Credentials::new(
+            "https://access.ucan.com".into(),
+            test_delegation_chain(&operator, operator.did(), &["archive"]),
+        );
+
+        let mut session = Session::new(credentials, &[0u8; 32]);
+
+        // Create a capability where subject == session.did() (self-authorization)
+        let authorized = Subject::from(session.did().to_string())
+            .attenuate(archive::Archive)
+            .attenuate(archive::Catalog {
+                catalog: "blobs".into(),
+            })
+            .invoke(archive::Get {
+                digest: Blake3Hash::hash(b"hello"),
+            })
+            .acquire(&mut session)
+            .await?;
+
+        // Invoke the authorization - should create an Invocation with empty proofs
+        let authorization = authorized.authorization().invoke(&session)?;
+
+        let ucan = match authorization {
+            UcanAuthorization::Invocation { chain, .. } => chain,
+            _ => panic!("Expected Invocation after invoke()"),
+        };
+
+        // Verify the invocation properties
+        assert_eq!(ucan.invocation.command().to_string(), "/archive/get");
+        assert_eq!(
+            ucan.invocation.subject().to_string(),
+            session.did().to_string()
+        );
+        assert_eq!(
+            ucan.invocation.issuer().to_string(),
+            session.did().to_string()
+        );
+        // Self-invocation should have empty proofs
+        assert!(
+            ucan.invocation.proofs().is_empty(),
+            "Self-invocation should have empty proofs"
+        );
+
+        // Verify the chain - self-invocation (issuer == subject) should pass
+        assert_eq!(ucan.verify().await?, ());
 
         Ok(())
     }

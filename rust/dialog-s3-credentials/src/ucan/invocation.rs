@@ -930,4 +930,60 @@ mod tests {
         assert_eq!(restored_chain.subject(), original_chain.subject());
         assert_eq!(restored_chain.proofs().len(), original_chain.proofs().len());
     }
+
+    #[dialog_common::test]
+    async fn it_verifies_self_invocation_with_empty_proofs() {
+        // Self-invocation: issuer == subject, no delegation needed.
+        // This is the case when a subject is acting on itself (e.g., a Space
+        // accessing its own storage), which is inherently authorized.
+        let signer = generate_signer();
+        let did = signer.did().clone();
+
+        // Create invocation where issuer == subject, empty proofs
+        let invocation = InvocationBuilder::new()
+            .issuer(signer)
+            .audience(did)
+            .subject(did)
+            .command(vec!["storage".to_string(), "get".to_string()])
+            .proofs(vec![]) // Empty proofs for self-auth
+            .try_build()
+            .expect("Failed to build invocation");
+
+        let chain = InvocationChain::new(invocation, HashMap::new());
+
+        // Should verify successfully - subject acting on itself
+        let result = chain.verify().await;
+        assert!(
+            result.is_ok(),
+            "Self-invocation (issuer == subject, empty proofs) should verify: {:?}",
+            result
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_fails_self_invocation_with_wrong_subject() {
+        // Self-invocation fails if the issuer claims to act on a different subject
+        let signer = generate_signer();
+        let other_subject = generate_signer().did().clone();
+
+        // Create invocation where issuer != subject but no proofs
+        // This should fail because the issuer has no authority over other_subject
+        let invocation = InvocationBuilder::new()
+            .issuer(signer)
+            .audience(other_subject)
+            .subject(other_subject) // Different from issuer!
+            .command(vec!["storage".to_string(), "get".to_string()])
+            .proofs(vec![]) // No proofs to establish authority
+            .try_build()
+            .expect("Failed to build invocation");
+
+        let chain = InvocationChain::new(invocation, HashMap::new());
+
+        // Should fail - issuer has no authority over other_subject
+        let result = chain.verify().await;
+        assert!(
+            result.is_err(),
+            "Invocation with issuer != subject and no proofs should fail verification"
+        );
+    }
 }
