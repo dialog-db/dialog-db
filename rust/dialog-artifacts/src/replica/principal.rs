@@ -1,4 +1,5 @@
 use super::{Formatter, SignatureError, ToBase58, VerifyingKey};
+use base58::FromBase58;
 use dialog_capability::Did;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -22,6 +23,36 @@ impl Principal {
             bytes,
             did: OnceLock::new(),
         }
+    }
+
+    /// Creates a Principal from a DID string.
+    ///
+    /// Parses `did:key:z...` format to extract the Ed25519 public key bytes.
+    /// Returns `None` if the DID is not a valid Ed25519 did:key.
+    pub fn from_did(did: &Did) -> Option<Self> {
+        let did_str: &str = did.as_ref();
+
+        // Must start with "did:key:z"
+        let encoded = did_str.strip_prefix("did:key:z")?;
+
+        // Base58 decode
+        let decoded = encoded.from_base58().ok()?;
+
+        // Must be exactly 34 bytes (2-byte multicodec + 32-byte key)
+        if decoded.len() != 34 {
+            return None;
+        }
+
+        // Verify Ed25519 multicodec prefix [0xed, 0x01]
+        if decoded[0] != 0xed || decoded[1] != 0x01 {
+            return None;
+        }
+
+        // Extract 32-byte public key
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&decoded[2..]);
+
+        Some(Self::new(bytes))
     }
 
     /// Returns the raw public key bytes.
