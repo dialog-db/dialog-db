@@ -1,6 +1,8 @@
 //! Remote repository reference.
 
-use dialog_capability::Did;
+use std::fmt::Debug;
+
+use dialog_capability::{Authority, Did};
 
 use super::{Operator, PlatformBackend, PlatformStorage, RemoteBranch, RemoteCredentials, Site};
 
@@ -8,7 +10,7 @@ use super::{Operator, PlatformBackend, PlatformStorage, RemoteBranch, RemoteCred
 ///
 /// This is a builder step for accessing remote branches.
 #[derive(Clone)]
-pub struct RemoteRepository<Backend: PlatformBackend> {
+pub struct RemoteRepository<Backend: PlatformBackend, A: Authority + Clone + Debug = Operator> {
     /// The subject DID identifying the repository owner.
     subject: Did,
     /// The remote site name.
@@ -16,18 +18,20 @@ pub struct RemoteRepository<Backend: PlatformBackend> {
     /// Storage for persistence (cloned, cheap).
     storage: PlatformStorage<Backend>,
     /// Issuer for signing requests.
-    issuer: Operator,
+    issuer: A,
     /// Credentials for connecting to the remote.
     credentials: Option<RemoteCredentials>,
 }
 
-impl<Backend: PlatformBackend> RemoteRepository<Backend> {
+impl<Backend: PlatformBackend, A: Authority + Clone + Debug + 'static>
+    RemoteRepository<Backend, A>
+{
     /// Create a new remote repository reference.
     pub(super) fn new(
         site_name: Site,
         subject: Did,
         storage: PlatformStorage<Backend>,
-        issuer: Operator,
+        issuer: A,
         credentials: Option<RemoteCredentials>,
     ) -> Self {
         Self {
@@ -50,9 +54,11 @@ impl<Backend: PlatformBackend> RemoteRepository<Backend> {
     }
 }
 
-impl<Backend: PlatformBackend + 'static> RemoteRepository<Backend> {
+impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static>
+    RemoteRepository<Backend, A>
+{
     /// Reference a branch within this remote repository.
-    pub fn branch(&self, name: impl Into<String>) -> RemoteBranch<Backend> {
+    pub fn branch(&self, name: impl Into<String>) -> RemoteBranch<Backend, A> {
         RemoteBranch::reference(
             name.into(),
             self.site_name.clone(),

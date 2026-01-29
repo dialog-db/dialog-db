@@ -13,8 +13,8 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use base58::ToBase58;
 use blake3;
-use dialog_capability::Did;
-use dialog_common::ConditionalSend;
+use dialog_capability::{Authority, Did};
+use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_prolly_tree::{
     Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Node, Tree, TreeDifference,
 };
@@ -90,18 +90,23 @@ impl From<NodeReference> for Blake3Hash {
 }
 
 /// A replica represents a local instance of a distributed database.
+///
+/// The type parameter `A` represents the authority used for signing operations.
+/// It defaults to `Operator` for backward compatibility.
 #[derive(Debug, Clone)]
-pub struct Replica<Backend: PlatformBackend> {
-    issuer: Operator,
+pub struct Replica<Backend: PlatformBackend, A: Authority + Clone + Debug = Operator> {
+    issuer: A,
     subject: Did,
     storage: PlatformStorage<Backend>,
     /// Local branches in this replica
-    pub branches: Branches<Backend>,
+    pub branches: Branches<Backend, A>,
 }
 
-impl<Backend: PlatformBackend + 'static> Replica<Backend> {
+impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + ConditionalSync + 'static>
+    Replica<Backend, A>
+{
     /// Creates a new replica with the given issuer and storage backend.
-    pub fn open(issuer: Operator, subject: Did, backend: Backend) -> Result<Self, ReplicaError> {
+    pub fn open(issuer: A, subject: Did, backend: Backend) -> Result<Self, ReplicaError> {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branches = Branches::new(issuer.clone(), subject.clone(), backend.clone());
@@ -114,8 +119,10 @@ impl<Backend: PlatformBackend + 'static> Replica<Backend> {
     }
 
     /// Returns the principal (public key) of the issuer for this replica.
-    pub fn principal(&self) -> &Principal {
-        self.issuer.principal()
+    ///
+    /// This constructs a `Principal` from the issuer's DID.
+    pub fn principal(&self) -> Principal {
+        Principal::from_did(self.issuer.did()).expect("Authority DID must be valid did:key format")
     }
 
     /// Returns a reference to the storage.
@@ -128,8 +135,8 @@ impl<Backend: PlatformBackend + 'static> Replica<Backend> {
         &mut self.storage
     }
 
-    /// Returns a reference to the issuer (operator).
-    pub fn issuer(&self) -> &Operator {
+    /// Returns a reference to the issuer (authority).
+    pub fn issuer(&self) -> &A {
         &self.issuer
     }
 
@@ -141,15 +148,17 @@ impl<Backend: PlatformBackend + 'static> Replica<Backend> {
 
 /// Manages multiple branches within a replica.
 #[derive(Debug, Clone)]
-pub struct Branches<Backend: PlatformBackend> {
-    issuer: Operator,
+pub struct Branches<Backend: PlatformBackend, A: Authority + Clone + Debug = Operator> {
+    issuer: A,
     subject: Did,
     storage: PlatformStorage<Backend>,
 }
 
-impl<Backend: PlatformBackend + 'static> Branches<Backend> {
+impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + ConditionalSync + 'static>
+    Branches<Backend, A>
+{
     /// Creates a new instance for the given backend
-    pub fn new(issuer: Operator, subject: Did, backend: Backend) -> Self {
+    pub fn new(issuer: A, subject: Did, backend: Backend) -> Self {
         let storage = PlatformStorage::new(backend, CborEncoder);
         Self {
             issuer,
@@ -160,7 +169,7 @@ impl<Backend: PlatformBackend + 'static> Branches<Backend> {
 
     /// Loads a branch with given identifier, produces an error if it does not
     /// exists.
-    pub async fn load(&self, id: &BranchId) -> Result<Branch<Backend>, ReplicaError> {
+    pub async fn load(&self, id: &BranchId) -> Result<Branch<Backend, A>, ReplicaError> {
         Branch::load(
             id,
             self.issuer.clone(),
@@ -172,7 +181,7 @@ impl<Backend: PlatformBackend + 'static> Branches<Backend> {
 
     /// Loads a branch with the given identifier or creates a new one if
     /// it does not already exist.
-    pub async fn open(&self, id: impl Into<BranchId>) -> Result<Branch<Backend>, ReplicaError> {
+    pub async fn open(&self, id: impl Into<BranchId>) -> Result<Branch<Backend, A>, ReplicaError> {
         Branch::open(
             id,
             self.issuer.clone(),
@@ -352,27 +361,34 @@ where
 
 /// A branch represents a named line of development within a replica.
 #[derive(Clone)]
-pub struct Branch<Backend: PlatformBackend + 'static> {
-    issuer: Operator,
+pub struct Branch<
+    Backend: PlatformBackend + 'static,
+    A: Authority + Clone + Debug + 'static = Operator,
+> {
+    issuer: A,
     id: BranchId,
     subject: Did,
     storage: PlatformStorage<Backend>,
     archive: Archive<PrefixedBackend<Backend>>,
     memory: TypedStoreResource<BranchState, Backend>,
     tree: Arc<RwLock<Index<Backend>>>,
-    upstream: Arc<std::sync::RwLock<Option<Upstream<Backend>>>>,
+    upstream: Arc<std::sync::RwLock<Option<Upstream<Backend, A>>>>,
 }
 
-impl<Backend: PlatformBackend + 'static> std::fmt::Debug for Branch<Backend> {
+impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static> std::fmt::Debug
+    for Branch<Backend, A>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Branch")
             .field("id", &self.id)
-            .field("issuer", &self.issuer)
+            .field("issuer", &self.issuer.did())
             .finish_non_exhaustive()
     }
 }
 
-impl<Backend: PlatformBackend + 'static> Branch<Backend> {
+impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + ConditionalSync + 'static>
+    Branch<Backend, A>
+{
     async fn mount(
         id: &BranchId,
         storage: &mut PlatformStorage<Backend>,
@@ -402,11 +418,11 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// Loads a branch from storage, creating it with the provided default state if it doesn't exist.
     pub async fn load_with_default(
         id: &BranchId,
-        issuer: Operator,
+        issuer: A,
         mut storage: PlatformStorage<Backend>,
         subject: Did,
         default_state: Option<BranchState>,
-    ) -> Result<Branch<Backend>, ReplicaError> {
+    ) -> Result<Branch<Backend, A>, ReplicaError> {
         let memory = Self::mount(id, &mut storage, default_state).await?;
         let prefixed_backend = PrefixedBackend::new(b"index/", storage.clone().into_backend());
         let archive = Archive::new(prefixed_backend);
@@ -455,15 +471,17 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// Loads a branch with a given id or creates one if it does not exist.
     pub async fn open(
         id: impl Into<BranchId>,
-        issuer: Operator,
+        issuer: A,
         storage: PlatformStorage<Backend>,
         subject: Did,
-    ) -> Result<Branch<Backend>, ReplicaError> {
+    ) -> Result<Branch<Backend, A>, ReplicaError> {
         let id = id.into();
+        let principal =
+            Principal::from_did(issuer.did()).expect("Authority DID must be valid did:key format");
         let default_state = Some(BranchState::new(
             id.clone(),
             #[allow(clippy::clone_on_copy)]
-            Revision::new(issuer.principal().clone()),
+            Revision::new(principal),
             None,
         ));
 
@@ -476,10 +494,10 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// given id does not exists it produces an error.
     pub async fn load(
         id: &BranchId,
-        issuer: Operator,
+        issuer: A,
         storage: PlatformStorage<Backend>,
         subject: Did,
-    ) -> Result<Branch<Backend>, ReplicaError> {
+    ) -> Result<Branch<Backend, A>, ReplicaError> {
         let branch = Self::load_with_default(id, issuer, storage, subject, None).await?;
 
         Ok(branch)
@@ -545,7 +563,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
     /// Lazily initializes and returns a mutable reference to the upstream.
     /// Returns None if no upstream is configured.
-    pub fn upstream(&self) -> Option<Upstream<Backend>> {
+    pub fn upstream(&self) -> Option<Upstream<Backend, A>> {
         self.upstream
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -568,11 +586,9 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
     fn state(&self) -> BranchState {
         self.memory.read().unwrap_or_else(|| {
-            BranchState::new(
-                self.id.clone(),
-                Revision::new(self.issuer.principal().to_owned()),
-                None,
-            )
+            let principal = Principal::from_did(self.issuer.did())
+                .expect("Authority DID must be valid did:key format");
+            BranchState::new(self.id.clone(), Revision::new(principal), None)
         })
     }
     /// Returns the branch identifier.
@@ -580,9 +596,11 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         &self.id
     }
 
-    /// Returns principal issuing changes on this branch
-    pub fn principal(&self) -> &Principal {
-        self.issuer.principal()
+    /// Returns principal issuing changes on this branch.
+    ///
+    /// This constructs a `Principal` from the issuer's DID.
+    pub fn principal(&self) -> Principal {
+        Principal::from_did(self.issuer.did()).expect("Authority DID must be valid did:key format")
     }
 
     /// Returns the current revision of this branch.
@@ -746,9 +764,10 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                         Ok(Some(revision))
                     } else {
                         // Create new revision with integrated changes
-                        #[allow(clippy::clone_on_copy)]
+                        let principal = Principal::from_did(self.issuer.did())
+                            .expect("Authority DID must be valid did:key format");
                         let new_revision = Revision {
-                            issuer: self.issuer.principal().clone(),
+                            issuer: principal,
                             tree: NodeReference(hash),
                             cause: HashSet::from([revision.edition()?]),
                             // period is max between local and remote periods + 1
@@ -777,7 +796,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
     /// Sets the upstream for this branch and persists the change.
     /// Accepts either a Branch or RemoteBranch via Into<Upstream>.
-    pub async fn set_upstream<U: Into<Upstream<Backend>>>(
+    pub async fn set_upstream<U: Into<Upstream<Backend, A>>>(
         &mut self,
         target: U,
     ) -> Result<(), ReplicaError> {
@@ -827,7 +846,9 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 }
 
 // Implement ArtifactStore for Branch
-impl<Backend: PlatformBackend + 'static> ArtifactStore for Branch<Backend> {
+impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static> ArtifactStore
+    for Branch<Backend, A>
+{
     fn select(
         &self,
         selector: ArtifactSelector<Constrained>,
@@ -900,7 +921,9 @@ impl<Backend: PlatformBackend + 'static> ArtifactStore for Branch<Backend> {
 // Implement ArtifactStoreMut for Branch
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
+impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + ConditionalSync + 'static>
+    ArtifactStoreMut for Branch<Backend, A>
+{
     async fn commit<Instructions>(
         &mut self,
         instructions: Instructions,
@@ -1000,12 +1023,14 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
             let tree_reference = NodeReference(tree_hash);
 
             // Calculate the new period and moment based on the base revision
+            let principal = Principal::from_did(self.issuer.did())
+                .expect("Authority DID must be valid did:key format");
             let (period, moment) = {
                 let base_period = *base_revision.period();
                 let base_moment = *base_revision.moment();
                 let base_issuer = base_revision.issuer();
 
-                if base_issuer == self.issuer.principal() {
+                if base_issuer == &principal {
                     // Same issuer - increment moment
                     (base_period, base_moment + 1)
                 } else {
@@ -1014,9 +1039,8 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
                 }
             };
 
-            #[allow(clippy::clone_on_copy)]
             let new_revision = Revision {
-                issuer: self.issuer.principal().clone(),
+                issuer: principal,
                 tree: tree_reference.clone(),
                 cause: HashSet::from([base_revision.edition().expect("Failed to create edition")]),
                 period,
@@ -1280,14 +1304,19 @@ impl BranchState {
 
 /// Descriptor for a local upstream branch (lazy loaded).
 #[derive(Clone)]
-pub struct LocalUpstream<Backend: PlatformBackend + 'static> {
+pub struct LocalUpstream<
+    Backend: PlatformBackend + 'static,
+    A: Authority + Clone + Debug = Operator,
+> {
     branch_id: BranchId,
-    issuer: Operator,
+    issuer: A,
     storage: PlatformStorage<Backend>,
     subject: Did,
 }
 
-impl<Backend: PlatformBackend + 'static> std::fmt::Debug for LocalUpstream<Backend> {
+impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug> std::fmt::Debug
+    for LocalUpstream<Backend, A>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LocalUpstream")
             .field("branch_id", &self.branch_id)
@@ -1295,9 +1324,11 @@ impl<Backend: PlatformBackend + 'static> std::fmt::Debug for LocalUpstream<Backe
     }
 }
 
-impl<Backend: PlatformBackend + 'static> LocalUpstream<Backend> {
+impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + ConditionalSync + 'static>
+    LocalUpstream<Backend, A>
+{
     /// Load the branch on demand.
-    async fn load(&self) -> Result<Branch<Backend>, ReplicaError> {
+    async fn load(&self) -> Result<Branch<Backend, A>, ReplicaError> {
         Branch::load(
             &self.branch_id,
             self.issuer.clone(),
@@ -1317,21 +1348,26 @@ impl<Backend: PlatformBackend + 'static> LocalUpstream<Backend> {
 /// to / from. It can be local or remote.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
-pub enum Upstream<Backend: PlatformBackend + 'static> {
+pub enum Upstream<
+    Backend: PlatformBackend + 'static,
+    A: Authority + Clone + Debug + 'static = Operator,
+> {
     /// A local branch upstream (lazy - loaded on fetch/publish)
-    Local(LocalUpstream<Backend>),
+    Local(LocalUpstream<Backend, A>),
     /// A remote branch upstream
-    Remote(RemoteBranch<Backend>),
+    Remote(RemoteBranch<Backend, A>),
 }
 
-impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
+impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + ConditionalSync + 'static>
+    Upstream<Backend, A>
+{
     /// Creates an upstream from its state descriptor.
     ///
     /// For local upstreams, this stores a descriptor for lazy loading.
     /// For remote upstreams, this creates the remote branch reference.
     pub async fn open(
         state: &UpstreamState,
-        issuer: Operator,
+        issuer: A,
         storage: PlatformStorage<Backend>,
         subject: Did,
     ) -> Result<Self, ReplicaError> {
@@ -1430,8 +1466,10 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
     }
 }
 
-impl<Backend: PlatformBackend + 'static> From<Branch<Backend>> for Upstream<Backend> {
-    fn from(branch: Branch<Backend>) -> Self {
+impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static>
+    From<Branch<Backend, A>> for Upstream<Backend, A>
+{
+    fn from(branch: Branch<Backend, A>) -> Self {
         Self::Local(LocalUpstream {
             branch_id: branch.id.clone(),
             issuer: branch.issuer.clone(),
@@ -1441,14 +1479,18 @@ impl<Backend: PlatformBackend + 'static> From<Branch<Backend>> for Upstream<Back
     }
 }
 
-impl<Backend: PlatformBackend + 'static> From<RemoteBranch<Backend>> for Upstream<Backend> {
-    fn from(branch: RemoteBranch<Backend>) -> Self {
+impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static>
+    From<RemoteBranch<Backend, A>> for Upstream<Backend, A>
+{
+    fn from(branch: RemoteBranch<Backend, A>) -> Self {
         Self::Remote(branch)
     }
 }
 
-impl<Backend: PlatformBackend> From<Upstream<Backend>> for UpstreamState {
-    fn from(upstream: Upstream<Backend>) -> Self {
+impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + ConditionalSync + 'static>
+    From<Upstream<Backend, A>> for UpstreamState
+{
+    fn from(upstream: Upstream<Backend, A>) -> Self {
         match upstream {
             Upstream::Local(branch) => UpstreamState::Local {
                 branch: branch.id().clone(),

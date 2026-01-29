@@ -1,6 +1,8 @@
 //! Remote site configuration and management.
 
-use dialog_capability::Did;
+use std::fmt::Debug;
+
+use dialog_capability::{Authority, Did};
 
 use super::{
     Connection, Operator, PlatformBackend, PlatformStorage, RemoteRepository, RemoteState, Site,
@@ -12,7 +14,7 @@ use crate::replica::ReplicaError;
 ///
 /// This is the persisted state for a remote, storing the site name
 /// and the credentials needed to connect to it.
-pub struct RemoteSite<Backend: PlatformBackend> {
+pub struct RemoteSite<Backend: PlatformBackend, A: Authority + Clone + Debug = Operator> {
     /// The site name.
     name: Site,
     /// Memory cell storing the remote state.
@@ -20,24 +22,26 @@ pub struct RemoteSite<Backend: PlatformBackend> {
     /// Storage for persistence (cloned, cheap).
     storage: PlatformStorage<Backend>,
     /// Issuer for signing requests.
-    issuer: Operator,
+    issuer: A,
 }
 
-impl<Backend: PlatformBackend> RemoteSite<Backend> {
+impl<Backend: PlatformBackend, A: Authority + Clone + Debug> RemoteSite<Backend, A> {
     /// Returns the site name.
     pub fn name(&self) -> &Site {
         &self.name
     }
 }
 
-impl<Backend: PlatformBackend + 'static> RemoteSite<Backend> {
+impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static>
+    RemoteSite<Backend, A>
+{
     /// Adds a new remote site configuration and persists it. If site with
     /// conflicting name is already configured produces an error, unless
     /// persisted configuration is identical to passed one, in which case
     /// operation is a noop upholding idempotence.
     pub async fn add(
         state: RemoteState,
-        issuer: Operator,
+        issuer: A,
         mut storage: PlatformStorage<Backend>,
     ) -> Result<Self, ReplicaError> {
         let memory = Self::mount(&state.site, &mut storage).await?;
@@ -76,7 +80,7 @@ impl<Backend: PlatformBackend + 'static> RemoteSite<Backend> {
     /// a given name does not exists produces an error.
     pub async fn load(
         site: &Site,
-        issuer: Operator,
+        issuer: A,
         mut storage: PlatformStorage<Backend>,
     ) -> Result<Self, ReplicaError> {
         let memory = Self::mount(site, &mut storage).await?;
@@ -101,9 +105,22 @@ impl<Backend: PlatformBackend + 'static> RemoteSite<Backend> {
     }
 
     /// Connect to the remote storage.
+    ///
+    /// Remote S3 operations require an Operator with secret key access.
+    /// Construct one from the Authority's secret key bytes if available.
     pub fn connect(&self, subject: &Did) -> Result<Connection, ReplicaError> {
         if let Some(state) = self.memory.read() {
-            state.credentials.connect(self.issuer.clone(), subject)
+            // Remote S3 operations require an Operator with secret key access.
+            let operator = match self.issuer.secret_key_bytes() {
+                Some(bytes) => Operator::from_secret(&bytes),
+                None => {
+                    return Err(ReplicaError::StorageError(
+                        "Remote operations require an authority with extractable key material"
+                            .to_string(),
+                    ));
+                }
+            };
+            state.credentials.connect(operator, subject)
         } else {
             Err(ReplicaError::RemoteNotFound {
                 remote: self.name.clone(),
@@ -126,7 +143,7 @@ impl<Backend: PlatformBackend + 'static> RemoteSite<Backend> {
     /// Start building a reference to a repository at this remote site.
     ///
     /// The `subject` is the DID identifying the repository owner.
-    pub fn repository(&self, subject: impl Into<Did>) -> RemoteRepository<Backend> {
+    pub fn repository(&self, subject: impl Into<Did>) -> RemoteRepository<Backend, A> {
         RemoteRepository::new(
             self.name.clone(),
             subject.into(),
