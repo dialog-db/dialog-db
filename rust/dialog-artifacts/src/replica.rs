@@ -427,7 +427,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
                 // Configure archive's remote for fallback reads
                 if let Upstream::Remote(branch) = &mut upstream {
-                    let connection = branch.connect().await?;
+                    let connection = branch.open().await?;
                     archive.set_remote(connection.archive()).await;
                 }
 
@@ -675,7 +675,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                     }
                 }
                 Upstream::Remote(target) => {
-                    let connection = target.connect().await?;
+                    let connection = target.open().await?;
                     let before = connection.resolve().await?;
                     let after = self.revision().clone();
 
@@ -809,7 +809,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         // Configure archive's remote for fallback reads
         let upstream = match upstream {
             Upstream::Remote(mut remote) => {
-                let connection = remote.connect().await?;
+                let connection = remote.open().await?;
                 self.archive.set_remote(connection.archive()).await;
                 Upstream::Remote(remote)
             }
@@ -1345,7 +1345,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
             UpstreamState::Remote { site, branch } => {
                 let mut remote_branch =
                     RemoteBranch::new(site, branch.id(), storage.clone(), issuer, subject).await?;
-                remote_branch.connect().await?;
+                remote_branch.open().await?;
                 Ok(Upstream::Remote(remote_branch))
             }
         }
@@ -1393,7 +1393,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
                 let branch = local.load().await?;
                 Ok(Some(branch.revision()))
             }
-            Upstream::Remote(remote) => Ok(remote.connect().await?.resolve().await?.to_owned()),
+            Upstream::Remote(remote) => Ok(remote.open().await?.resolve().await?.to_owned()),
         }
     }
 
@@ -1404,7 +1404,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
                 let mut branch = local.load().await?;
                 branch.reset(revision).await
             }
-            Upstream::Remote(remote) => remote.connect().await?.publish(revision).await,
+            Upstream::Remote(remote) => remote.open().await?.publish(revision).await,
         }
     }
 }
@@ -1637,6 +1637,7 @@ impl Display for Capability {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ErrorMappingBackend;
     use dialog_storage::MemoryStorageBackend;
 
     #[cfg(target_arch = "wasm32")]
@@ -2741,7 +2742,7 @@ mod tests {
         let mut alice_remote_branch = alice_remote_site
             .repository(&subject)
             .branch(main_id.to_string());
-        alice_remote_branch.connect().await?;
+        alice_remote_branch.open().await?;
         alice_main.set_upstream(alice_remote_branch).await?;
 
         // Alice commits and pushes
@@ -2781,7 +2782,7 @@ mod tests {
         let mut bob_remote_branch = bob_remote_site
             .repository(&subject)
             .branch(main_id.to_string());
-        bob_remote_branch.connect().await?;
+        bob_remote_branch.open().await?;
         bob_main.set_upstream(bob_remote_branch).await?;
 
         let bob_revision_before_fetch = bob_main.revision();

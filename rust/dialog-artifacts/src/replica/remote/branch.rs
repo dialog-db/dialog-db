@@ -290,16 +290,11 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
         self.descriptor().name()
     }
 
-    /// Check if the branch is connected.
-    pub fn is_connected(&self) -> bool {
-        matches!(self, Self::Open(_))
-    }
-
     /// Connect to the remote and return the connection.
     ///
     /// This establishes the connection if needed (transitioning from Reference to Open)
     /// and returns a reference to the connection.
-    pub async fn connect(&mut self) -> Result<&mut RemoteBranchConnection<Backend>, ReplicaError> {
+    pub async fn open(&mut self) -> Result<&mut RemoteBranchConnection<Backend>, ReplicaError> {
         if let Self::Reference(desc) = self {
             let credentials =
                 desc.credentials
@@ -337,7 +332,7 @@ impl<Backend: PlatformBackend + 'static> RemoteBranch<Backend> {
         }
 
         match self {
-            Self::Open(conn) => Ok(conn),
+            Self::Open(connection) => Ok(connection),
             Self::Reference(_) => unreachable!("Should be Open after connection"),
         }
     }
