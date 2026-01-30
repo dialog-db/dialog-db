@@ -338,6 +338,56 @@ pub mod tests {
     }
 
     #[dialog_common::test]
+    async fn it_allows_self_authorization_with_different_delegation_audience() -> anyhow::Result<()>
+    {
+        // Create an operator signer for the delegation chain
+        let operator_signer = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+        let operator = Ed25519Signer::from(operator_signer);
+
+        // Create credentials with delegation chain audience = operator_did
+        let credentials = Credentials::new(
+            "https://access.ucan.com".into(),
+            test_delegation_chain(&operator, operator.did(), &["archive"]).await,
+        );
+
+        // Create a session with a DIFFERENT key (session.did() != operator_did)
+        let mut session = Session::new(credentials, &[2u8; 32]);
+
+        // Verify the DIDs are different
+        let session_did = session.did().to_string();
+        let operator_did = operator.did().to_string();
+        assert_ne!(
+            session_did, operator_did,
+            "Session DID should differ from operator DID for this test"
+        );
+
+        // Create a capability where subject == session.did() (self-authorization case)
+        // This means: subject == claim.audience (since acquire sets audience = session.did())
+        let capability = Subject::from(session.did().to_string())
+            .attenuate(archive::Archive)
+            .attenuate(archive::Catalog {
+                catalog: "blobs".into(),
+            })
+            .invoke(archive::Get {
+                digest: Blake3Hash::hash(b"hello"),
+            });
+
+        // This should succeed because subject == audience (self-authorization),
+        // but currently fails because claim.audience != delegation.audience
+        let result = capability.acquire(&mut session).await;
+
+        // Assert this is an error due to the current implementation order
+        // The error message shows it's checking delegation audience before self-auth
+        assert!(
+            result.is_ok(),
+            "Self-authorization should work regardless of delegation chain audience. Error: {:?}",
+            result.err()
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
     async fn it_invokes_and_verifies_self_authorization() -> anyhow::Result<()> {
         // Create a signer where subject == operator (self-authorization)
         let signer = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
