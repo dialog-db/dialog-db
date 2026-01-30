@@ -45,8 +45,7 @@
             buildInputs =
               [ rust-bin.stable.latest.default ]
               ++ lib.optionals stdenv.isDarwin [
-                darwin.apple_sdk.frameworks.SystemConfiguration
-                darwin.apple_sdk.frameworks.Security
+                apple-sdk_15
               ];
 
             src = fetchCrate {
@@ -55,7 +54,6 @@
             };
 
             cargoHash = "sha256-qsO12332HSjWCVKtf1cUePWWb9IdYUmT+8OPj/XP2WE=";
-            useFetchCargoVendor = true;
           };
 
         common-build-inputs =
@@ -76,8 +74,7 @@
               wasm-pack
             ]
             ++ lib.optionals stdenv.isDarwin [
-              darwin.apple_sdk.frameworks.SystemConfiguration
-              darwin.apple_sdk.frameworks.Security
+              apple-sdk_15
             ];
 
         common-dev-tools = with pkgs; [
