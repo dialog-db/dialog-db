@@ -33,7 +33,7 @@ use super::{DelegationChain, UcanAuthorization};
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
 use dialog_capability::{
-    ucan::parameters, Ability, Access, Authorized, Capability, Claim, Did, Effect, Provider,
+    Ability, Access, Authorized, Capability, Claim, Did, Effect, Provider, ucan::parameters,
 };
 use dialog_common::ConditionalSend;
 

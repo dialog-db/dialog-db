@@ -1,6 +1,6 @@
 use crate::{
-    Ability, Access, Authorized, PolicyBuilder, Claim, Constrained, Constraint, Did, Effect,
-    Policy, Principal, Provider, Selector,
+    Ability, Access, Authorized, Claim, Constrained, Constraint, Did, Effect, Policy,
+    PolicyBuilder, Principal, Provider, Selector,
 };
 use dialog_common::ConditionalSend;
 
@@ -128,7 +128,6 @@ where
         self.0.constrain(builder)
     }
 }
-
 
 impl<T: Constraint> std::ops::Deref for Capability<T> {
     type Target = T::Capability;

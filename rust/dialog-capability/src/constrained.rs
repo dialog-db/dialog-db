@@ -67,7 +67,6 @@ impl<P: Policy, Of: Ability> Constrained<P, Of> {
             capability: self,
         }
     }
-
 }
 
 /// Implementation for effect capabilities.
