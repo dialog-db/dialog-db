@@ -31,5 +31,5 @@ pub use provider::UcanAuthorizer;
 /// Only available with the `helpers` feature.
 #[cfg(feature = "helpers")]
 pub mod test_helpers {
-    pub use super::delegation::tests::{create_delegation, generate_signer};
+    pub use super::delegation::helpers::{create_delegation, generate_signer};
 }

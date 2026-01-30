@@ -256,13 +256,13 @@ impl From<InvocationError> for AccessError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ucan::delegation::tests::{create_delegation, generate_signer};
+    use crate::ucan::delegation::helpers::{create_delegation, generate_signer};
     use ucan::delegation::builder::DelegationBuilder;
     use ucan::delegation::subject::DelegatedSubject;
     use ucan::invocation::builder::InvocationBuilder;
 
     /// Create a test invocation chain with a valid delegation.
-    fn create_test_invocation_chain() -> (InvocationChain, Ed25519Did) {
+    async fn create_test_invocation_chain() -> (InvocationChain, Ed25519Did) {
         let subject_signer = generate_signer();
         let subject_did = subject_signer.did().clone();
         let operator_signer = generate_signer();
@@ -274,18 +274,20 @@ mod tests {
             &subject_did,
             &["storage", "get"],
         )
+        .await
         .expect("Failed to create delegation");
 
         let delegation_cid = delegation.to_cid();
 
         // Create invocation from operator
         let invocation = InvocationBuilder::new()
-            .issuer(operator_signer)
+            .issuer(operator_signer.clone())
             .audience(subject_did.clone())
             .subject(subject_did.clone())
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![delegation_cid])
-            .try_build()
+            .try_build(&operator_signer)
+            .await
             .expect("Failed to build invocation");
 
         let mut delegations = HashMap::new();
@@ -294,18 +296,18 @@ mod tests {
         (InvocationChain::new(invocation, delegations), subject_did)
     }
 
-    #[test]
-    fn it_creates_invocation_chain() {
-        let (chain, subject_did) = create_test_invocation_chain();
+    #[dialog_common::test]
+    async fn it_creates_invocation_chain() {
+        let (chain, subject_did) = create_test_invocation_chain().await;
 
         assert_eq!(chain.subject(), &subject_did);
         assert_eq!(chain.proofs().len(), 1);
         assert_eq!(chain.command().to_string(), "/storage/get");
     }
 
-    #[test]
-    fn it_serializes_and_deserializes_roundtrip() {
-        let (chain, subject_did) = create_test_invocation_chain();
+    #[dialog_common::test]
+    async fn it_serializes_and_deserializes_roundtrip() {
+        let (chain, subject_did) = create_test_invocation_chain().await;
 
         // Serialize to bytes
         let bytes = chain.to_bytes().expect("Failed to serialize");
@@ -319,9 +321,9 @@ mod tests {
         assert_eq!(restored.command().to_string(), chain.command().to_string());
     }
 
-    #[test]
-    fn it_serde_roundtrips_via_dagcbor() {
-        let (chain, subject_did) = create_test_invocation_chain();
+    #[dialog_common::test]
+    async fn it_serde_roundtrips_via_dagcbor() {
+        let (chain, subject_did) = create_test_invocation_chain().await;
 
         // Serialize via serde to DAG-CBOR (this uses serialize_bytes internally)
         let cbor_bytes = serde_ipld_dagcbor::to_vec(&chain).expect("Failed to serialize");
@@ -338,7 +340,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_verifies_valid_chain() {
-        let (chain, _) = create_test_invocation_chain();
+        let (chain, _) = create_test_invocation_chain().await;
 
         // Should verify successfully
         let result = chain.verify().await;
@@ -362,18 +364,20 @@ mod tests {
             &subject_did,
             &["storage"],
         )
+        .await
         .expect("Failed to create delegation");
 
         let delegation_cid = delegation.to_cid();
 
         // Create invocation referencing the delegation
         let invocation = InvocationBuilder::new()
-            .issuer(operator_signer)
+            .issuer(operator_signer.clone())
             .audience(subject_did.clone())
             .subject(subject_did)
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![delegation_cid])
-            .try_build()
+            .try_build(&operator_signer)
+            .await
             .expect("Failed to build invocation");
 
         // Create chain WITHOUT the delegation
@@ -399,18 +403,20 @@ mod tests {
             &subject_did,
             &["storage"],
         )
+        .await
         .expect("Failed to create delegation");
 
         let delegation_cid = delegation.to_cid();
 
         // Create invocation from WRONG operator (not the delegation audience)
         let invocation = InvocationBuilder::new()
-            .issuer(wrong_operator_signer)
+            .issuer(wrong_operator_signer.clone())
             .audience(subject_did.clone())
             .subject(subject_did)
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![delegation_cid])
-            .try_build()
+            .try_build(&wrong_operator_signer)
+            .await
             .expect("Failed to build invocation");
 
         let mut delegations = HashMap::new();
@@ -464,11 +470,12 @@ mod tests {
 
         // Root delegation: subject -> device1 (with specific subject)
         let root_delegation = DelegationBuilder::new()
-            .issuer(subject_signer)
+            .issuer(subject_signer.clone())
             .audience(device1_signer.did().clone())
             .subject(DelegatedSubject::Specific(subject_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build()
+            .try_build(&subject_signer)
+            .await
             .expect("Failed to build root delegation");
 
         let root_cid = root_delegation.to_cid();
@@ -476,11 +483,12 @@ mod tests {
         // Powerline delegation: device1 -> device2 (with sub: null)
         // This allows device1 to delegate to device2 for ANY subject it has access to
         let powerline_delegation = DelegationBuilder::new()
-            .issuer(device1_signer)
+            .issuer(device1_signer.clone())
             .audience(device2_signer.did().clone())
             .subject(DelegatedSubject::Any) // 👈 Powerline: sub: null
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build()
+            .try_build(&device1_signer)
+            .await
             .expect("Failed to build powerline delegation");
 
         let powerline_cid = powerline_delegation.to_cid();
@@ -488,12 +496,13 @@ mod tests {
         // Invocation from device2
         // Proofs ordered: root (subject->device1), then powerline (device1->device2)
         let invocation = InvocationBuilder::new()
-            .issuer(device2_signer)
+            .issuer(device2_signer.clone())
             .audience(subject_did.clone())
             .subject(subject_did.clone())
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![root_cid, powerline_cid]) // 👈 root first, then powerline
-            .try_build()
+            .try_build(&device2_signer)
+            .await
             .expect("Failed to build invocation");
 
         let mut delegations = HashMap::new();
@@ -533,7 +542,8 @@ mod tests {
             .audience(device2_signer.did().clone())
             .subject(DelegatedSubject::Any) // 👈 Powerline at root
             .command(vec!["storage".to_string()])
-            .try_build()
+            .try_build(&device1_signer)
+            .await
             .expect("Failed to build powerline delegation");
 
         let powerline_cid = powerline_root.to_cid();
@@ -541,12 +551,13 @@ mod tests {
         // Invocation from device2 trying to act on a DIFFERENT subject
         // This should fail because powerline at root implies subject = device1
         let invocation = InvocationBuilder::new()
-            .issuer(device2_signer)
+            .issuer(device2_signer.clone())
             .audience(some_other_subject.clone())
             .subject(some_other_subject) // 👈 Wrong! Should be device1
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![powerline_cid])
-            .try_build()
+            .try_build(&device2_signer)
+            .await
             .expect("Failed to build invocation");
 
         let mut delegations = HashMap::new();
@@ -574,23 +585,25 @@ mod tests {
         // Powerline delegation at root: device1 -> device2 (sub: null)
         // At root, this means subject = device1 (the issuer)
         let powerline_root = DelegationBuilder::new()
-            .issuer(device1_signer)
+            .issuer(device1_signer.clone())
             .audience(device2_signer.did().clone())
             .subject(DelegatedSubject::Any) // 👈 Powerline at root
             .command(vec!["storage".to_string()])
-            .try_build()
+            .try_build(&device1_signer)
+            .await
             .expect("Failed to build powerline delegation");
 
         let powerline_cid = powerline_root.to_cid();
 
         // Invocation from device2 with subject = device1 (the powerline issuer)
         let invocation = InvocationBuilder::new()
-            .issuer(device2_signer)
+            .issuer(device2_signer.clone())
             .audience(device1_did.clone())
             .subject(device1_did.clone()) // 👈 Matches powerline issuer
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![powerline_cid])
-            .try_build()
+            .try_build(&device2_signer)
+            .await
             .expect("Failed to build invocation");
 
         let mut delegations = HashMap::new();
@@ -627,11 +640,12 @@ mod tests {
         // Powerline delegation at root: device1 -> device2 (sub: null)
         // This grants device2 authority to act on behalf of device1
         let powerline_root = DelegationBuilder::new()
-            .issuer(device1_signer)
+            .issuer(device1_signer.clone())
             .audience(device2_signer.did().clone())
             .subject(DelegatedSubject::Any) // 👈 Powerline at root
             .command(vec!["storage".to_string()])
-            .try_build()
+            .try_build(&device1_signer)
+            .await
             .expect("Failed to build powerline delegation");
 
         let powerline_cid = powerline_root.to_cid();
@@ -639,23 +653,25 @@ mod tests {
         // Invalid redelegation: device2 -> device3 with a DIFFERENT subject
         // device2 only has authority for device1, not some_other_resource
         let bad_redelegation = DelegationBuilder::new()
-            .issuer(device2_signer)
+            .issuer(device2_signer.clone())
             .audience(device3_signer.did().clone())
             .subject(DelegatedSubject::Specific(some_other_resource.clone())) // 👈 Wrong subject!
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build()
+            .try_build(&device2_signer)
+            .await
             .expect("Failed to build redelegation");
 
         let bad_cid = bad_redelegation.to_cid();
 
         // Invocation from device3 trying to act on some_other_resource
         let invocation = InvocationBuilder::new()
-            .issuer(device3_signer)
+            .issuer(device3_signer.clone())
             .audience(some_other_resource.clone())
             .subject(some_other_resource)
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![powerline_cid, bad_cid]) // root first, then redelegation
-            .try_build()
+            .try_build(&device3_signer)
+            .await
             .expect("Failed to build invocation");
 
         let mut delegations = HashMap::new();
@@ -690,34 +706,37 @@ mod tests {
 
         // Powerline delegation at root: device1 -> device2 (sub: null)
         let powerline_root = DelegationBuilder::new()
-            .issuer(device1_signer)
+            .issuer(device1_signer.clone())
             .audience(device2_signer.did().clone())
             .subject(DelegatedSubject::Any) // 👈 Powerline at root
             .command(vec!["storage".to_string()])
-            .try_build()
+            .try_build(&device1_signer)
+            .await
             .expect("Failed to build powerline delegation");
 
         let powerline_cid = powerline_root.to_cid();
 
         // Valid redelegation: device2 -> device3 with correct subject (device1)
         let valid_redelegation = DelegationBuilder::new()
-            .issuer(device2_signer)
+            .issuer(device2_signer.clone())
             .audience(device3_signer.did().clone())
             .subject(DelegatedSubject::Specific(device1_did.clone())) // 👈 Correct subject
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build()
+            .try_build(&device2_signer)
+            .await
             .expect("Failed to build redelegation");
 
         let valid_cid = valid_redelegation.to_cid();
 
         // Invocation from device3 acting on device1
         let invocation = InvocationBuilder::new()
-            .issuer(device3_signer)
+            .issuer(device3_signer.clone())
             .audience(device1_did.clone())
             .subject(device1_did.clone())
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![powerline_cid, valid_cid]) // root first, then redelegation
-            .try_build()
+            .try_build(&device3_signer)
+            .await
             .expect("Failed to build invocation");
 
         let mut delegations = HashMap::new();
@@ -736,8 +755,8 @@ mod tests {
     }
 
     /// Test invocation chain with archive/put command roundtrips correctly.
-    #[test]
-    fn it_roundtrips_archive_put_invocation() {
+    #[dialog_common::test]
+    async fn it_roundtrips_archive_put_invocation() {
         let subject_signer = generate_signer();
         let subject_did = subject_signer.did().clone();
         let operator_signer = generate_signer();
@@ -749,18 +768,20 @@ mod tests {
             &subject_did,
             &["archive"],
         )
+        .await
         .expect("Failed to create delegation");
 
         let delegation_cid = delegation.to_cid();
 
         // Create invocation for /archive/put
         let invocation = InvocationBuilder::new()
-            .issuer(operator_signer)
+            .issuer(operator_signer.clone())
             .audience(subject_did.clone())
             .subject(subject_did.clone())
             .command(vec!["archive".to_string(), "put".to_string()])
             .proofs(vec![delegation_cid])
-            .try_build()
+            .try_build(&operator_signer)
+            .await
             .expect("Failed to build invocation");
 
         let mut delegations = HashMap::new();
@@ -780,8 +801,8 @@ mod tests {
     }
 
     /// Test invocation chain with serde DAG-CBOR roundtrip for archive/put.
-    #[test]
-    fn it_serde_roundtrips_archive_put_invocation() {
+    #[dialog_common::test]
+    async fn it_serde_roundtrips_archive_put_invocation() {
         let subject_signer = generate_signer();
         let subject_did = subject_signer.did().clone();
         let operator_signer = generate_signer();
@@ -793,18 +814,20 @@ mod tests {
             &subject_did,
             &["archive"],
         )
+        .await
         .expect("Failed to create delegation");
 
         let delegation_cid = delegation.to_cid();
 
         // Create invocation for /archive/put
         let invocation = InvocationBuilder::new()
-            .issuer(operator_signer)
+            .issuer(operator_signer.clone())
             .audience(subject_did.clone())
             .subject(subject_did.clone())
             .command(vec!["archive".to_string(), "put".to_string()])
             .proofs(vec![delegation_cid])
-            .try_build()
+            .try_build(&operator_signer)
+            .await
             .expect("Failed to build invocation");
 
         let mut delegations = HashMap::new();
@@ -839,18 +862,20 @@ mod tests {
             &subject_did,
             &["archive"],
         )
+        .await
         .expect("Failed to create delegation");
 
         let delegation_cid = delegation.to_cid();
 
         // Create invocation for /archive/put (child capability - more specific)
         let invocation = InvocationBuilder::new()
-            .issuer(operator_signer)
+            .issuer(operator_signer.clone())
             .audience(subject_did.clone())
             .subject(subject_did.clone())
             .command(vec!["archive".to_string(), "put".to_string()])
             .proofs(vec![delegation_cid])
-            .try_build()
+            .try_build(&operator_signer)
+            .await
             .expect("Failed to build invocation");
 
         let mut delegations = HashMap::new();
@@ -882,18 +907,20 @@ mod tests {
             &subject_did,
             &["archive"],
         )
+        .await
         .expect("Failed to create delegation");
 
         let delegation_cid = delegation.to_cid();
 
         // Create invocation for /archive/put
         let invocation = InvocationBuilder::new()
-            .issuer(operator_signer)
+            .issuer(operator_signer.clone())
             .audience(subject_did.clone())
             .subject(subject_did.clone())
             .command(vec!["archive".to_string(), "put".to_string()])
             .proofs(vec![delegation_cid])
-            .try_build()
+            .try_build(&operator_signer)
+            .await
             .expect("Failed to build invocation");
 
         let mut delegations = HashMap::new();
@@ -929,5 +956,63 @@ mod tests {
         );
         assert_eq!(restored_chain.subject(), original_chain.subject());
         assert_eq!(restored_chain.proofs().len(), original_chain.proofs().len());
+    }
+
+    #[dialog_common::test]
+    async fn it_verifies_self_invocation_with_empty_proofs() {
+        // Self-invocation: issuer == subject, no delegation needed.
+        // This is the case when a subject is acting on itself (e.g., a Space
+        // accessing its own storage), which is inherently authorized.
+        let signer = generate_signer();
+        let did = signer.did().clone();
+
+        // Create invocation where issuer == subject, empty proofs
+        let invocation = InvocationBuilder::new()
+            .issuer(signer.clone())
+            .audience(did.clone())
+            .subject(did)
+            .command(vec!["storage".to_string(), "get".to_string()])
+            .proofs(vec![]) // Empty proofs for self-auth
+            .try_build(&signer)
+            .await
+            .expect("Failed to build invocation");
+
+        let chain = InvocationChain::new(invocation, HashMap::new());
+
+        // Should verify successfully - subject acting on itself
+        let result = chain.verify().await;
+        assert!(
+            result.is_ok(),
+            "Self-invocation (issuer == subject, empty proofs) should verify: {:?}",
+            result
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_fails_self_invocation_with_wrong_subject() {
+        // Self-invocation fails if the issuer claims to act on a different subject
+        let signer = generate_signer();
+        let other_subject = generate_signer().did().clone();
+
+        // Create invocation where issuer != subject but no proofs
+        // This should fail because the issuer has no authority over other_subject
+        let invocation = InvocationBuilder::new()
+            .issuer(signer.clone())
+            .audience(other_subject.clone())
+            .subject(other_subject) // Different from issuer!
+            .command(vec!["storage".to_string(), "get".to_string()])
+            .proofs(vec![]) // No proofs to establish authority
+            .try_build(&signer)
+            .await
+            .expect("Failed to build invocation");
+
+        let chain = InvocationChain::new(invocation, HashMap::new());
+
+        // Should fail - issuer has no authority over other_subject
+        let result = chain.verify().await;
+        assert!(
+            result.is_err(),
+            "Invocation with issuer != subject and no proofs should fail verification"
+        );
     }
 }

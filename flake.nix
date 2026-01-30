@@ -8,10 +8,11 @@
   };
 
   outputs =
-    { nixpkgs
-    , flake-utils
-    , rust-overlay
-    , ...
+    {
+      nixpkgs,
+      flake-utils,
+      rust-overlay,
+      ...
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -42,12 +43,12 @@
           rustPlatform.buildRustPackage rec {
             pname = "wasm-bindgen-cli";
             version = "0.2.108";
-            buildInputs =
-              [ rust-bin.stable.latest.default ]
-              ++ lib.optionals stdenv.isDarwin [
-                darwin.apple_sdk.frameworks.SystemConfiguration
-                darwin.apple_sdk.frameworks.Security
-              ];
+            buildInputs = [
+              rust-bin.stable.latest.default
+            ]
+            ++ lib.optionals stdenv.isDarwin [
+              apple-sdk
+            ];
 
             src = fetchCrate {
               inherit pname version;
@@ -55,30 +56,28 @@
             };
 
             cargoHash = "sha256-iqQiWbsKlLBiJFeqIYiXo3cqxGLSjNM8SOWXGM9u43E=";
-            useFetchCargoVendor = true;
           };
 
         common-build-inputs =
           toolchain:
-            with pkgs;
-            let
-              rust-toolchain = rustToolchain toolchain;
-            in
-            with pkgs;
-            [
-              binaryen
-              gnused
-              pkg-config
-              protobuf
-              rust-toolchain
-              trunk
-              wasm-bindgen-cli
-              wasm-pack
-            ]
-            ++ lib.optionals stdenv.isDarwin [
-              darwin.apple_sdk.frameworks.SystemConfiguration
-              darwin.apple_sdk.frameworks.Security
-            ];
+          with pkgs;
+          let
+            rust-toolchain = rustToolchain toolchain;
+          in
+          with pkgs;
+          [
+            binaryen
+            gnused
+            pkg-config
+            protobuf
+            rust-toolchain
+            trunk
+            wasm-bindgen-cli
+            wasm-pack
+          ]
+          ++ lib.optionals stdenv.isDarwin [
+            apple-sdk
+          ];
 
         common-dev-tools = with pkgs; [
           cargo-nextest
@@ -135,14 +134,14 @@
             cargoLock = {
               lockFile = ./Cargo.lock;
               outputHashes = {
-                "ucan-0.5.0" = "sha256-5KQ7wIXv7PHgd6y1pq0+aUU/VFW7BLxECmVUNk1JfGw=";
-                "varsig-0.1.0" = "sha256-5KQ7wIXv7PHgd6y1pq0+aUU/VFW7BLxECmVUNk1JfGw=";
+                "ucan-0.5.0" = "sha256-NRTTW//7NLhnLH7T8ue13AQHm5Jq7ViZIAC0ud6SdBo=";
+                "varsig-0.1.0" = "sha256-NRTTW//7NLhnLH7T8ue13AQHm5Jq7ViZIAC0ud6SdBo=";
               };
             };
           };
 
-
-        dialog-artifacts-web-tests = with pkgs;
+        dialog-artifacts-web-tests =
+          with pkgs;
           buildNpmPackage {
             pname = "dialog-artifacts-web-tests";
             version = "0.1.0";
@@ -174,7 +173,8 @@
             doCheck = false;
           };
 
-        dialog-experimental = with pkgs;
+        dialog-experimental =
+          with pkgs;
           buildNpmPackage {
             pname = "@dialog-db/experimental";
             version = "0.1.0";
@@ -220,21 +220,23 @@
             doCheck = false;
           };
 
-        npm-packages = with pkgs; stdenv.mkDerivation {
-          pname = "npm_packages";
-          version = "0.1.0";
-          buildInputs = [
-            dialog-artifacts-web
-            dialog-experimental
-          ];
-          src = ./.;
-          buildPhase = "";
-          installPhase = ''
-            mkdir -p $out/@dialog-db
-            cp -r ${dialog-artifacts-web}/@dialog-db/dialog-artifacts $out/@dialog-db
-            cp -r ${dialog-experimental}/@dialog-db/experimental $out/@dialog-db
-          '';
-        };
+        npm-packages =
+          with pkgs;
+          stdenv.mkDerivation {
+            pname = "npm_packages";
+            version = "0.1.0";
+            buildInputs = [
+              dialog-artifacts-web
+              dialog-experimental
+            ];
+            src = ./.;
+            buildPhase = "";
+            installPhase = ''
+              mkdir -p $out/@dialog-db
+              cp -r ${dialog-artifacts-web}/@dialog-db/dialog-artifacts $out/@dialog-db
+              cp -r ${dialog-experimental}/@dialog-db/experimental $out/@dialog-db
+            '';
+          };
 
       in
       {
@@ -259,10 +261,9 @@
           inherit dialog-experimental dialog-artifacts-web-tests;
         };
 
-        packages =
-          {
-            inherit dialog-artifacts-web dialog-experimental npm-packages;
-          };
+        packages = {
+          inherit dialog-artifacts-web dialog-experimental npm-packages;
+        };
       }
     );
 }

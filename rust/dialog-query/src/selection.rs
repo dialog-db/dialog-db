@@ -337,7 +337,7 @@ pub enum Evidence<'a> {
     /// Derived using formula application.
     Derived {
         term: &'a Term<Value>,
-        value: Value,
+        value: Box<Value>,
         /// The facts that were read to produce this derived value, keyed by parameter name
         from: HashMap<String, Factors>,
         /// The formula application that produced this value
@@ -497,7 +497,7 @@ impl Answer {
             } => self.assign(
                 term,
                 &Factor::Derived {
-                    value,
+                    value: *value,
                     from,
                     formula: Arc::new(formula.to_owned()),
                 },

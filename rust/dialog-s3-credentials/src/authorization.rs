@@ -2,9 +2,11 @@ use super::s3;
 #[cfg(feature = "ucan")]
 use super::ucan;
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
+use async_trait::async_trait;
 use dialog_capability::{
     Authority, Authorization as Auth, AuthorizationError, Capability, Did, Effect,
 };
+use dialog_common::{ConditionalSend, ConditionalSync};
 
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -30,6 +32,8 @@ impl Authorization {
     }
 }
 
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
 impl Auth for Authorization {
     fn subject(&self) -> &Did {
         match self {
@@ -52,11 +56,14 @@ impl Auth for Authorization {
             Self::Ucan(auth) => auth.ability(),
         }
     }
-    fn invoke<A: Authority>(&self, authority: &A) -> Result<Self, AuthorizationError> {
+    async fn invoke<A: Authority + ConditionalSend + ConditionalSync>(
+        &self,
+        authority: &A,
+    ) -> Result<Self, AuthorizationError> {
         Ok(match self {
-            Self::S3(auth) => Self::S3(auth.invoke(authority)?),
+            Self::S3(auth) => Self::S3(auth.invoke(authority).await?),
             #[cfg(feature = "ucan")]
-            Self::Ucan(auth) => Self::Ucan(auth.invoke(authority)?),
+            Self::Ucan(auth) => Self::Ucan(auth.invoke(authority).await?),
         })
     }
 }
