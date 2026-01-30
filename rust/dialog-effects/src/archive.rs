@@ -234,12 +234,13 @@ mod tests {
     #[cfg(feature = "ucan")]
     mod parameters_tests {
         use super::*;
+        use dialog_capability::ucan::parameters;
         use ipld_core::ipld::Ipld;
 
         #[test]
         fn it_collects_archive_parameters() {
             let cap = Subject::from("did:key:zSpace").attenuate(Archive);
-            let params = cap.parameters();
+            let params = parameters(&cap);
 
             // Archive is a unit struct, should produce empty map
             assert!(params.is_empty());
@@ -250,7 +251,7 @@ mod tests {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Archive)
                 .attenuate(Catalog::new("blobs"));
-            let params = cap.parameters();
+            let params = parameters(&cap);
 
             assert_eq!(params.get("catalog"), Some(&Ipld::String("blobs".into())));
         }
@@ -262,7 +263,7 @@ mod tests {
                 .attenuate(Archive)
                 .attenuate(Catalog::new("index"))
                 .invoke(Get::new(digest));
-            let params = cap.parameters();
+            let params = parameters(&cap);
 
             assert_eq!(params.get("catalog"), Some(&Ipld::String("index".into())));
             assert_eq!(params.get("digest"), Some(&Ipld::Bytes([1u8; 32].to_vec())));
@@ -276,7 +277,7 @@ mod tests {
                 .attenuate(Archive)
                 .attenuate(Catalog::new("data"))
                 .invoke(Put::new(digest, content.clone()));
-            let params = cap.parameters();
+            let params = parameters(&cap);
 
             assert_eq!(params.get("catalog"), Some(&Ipld::String("data".into())));
             assert_eq!(params.get("digest"), Some(&Ipld::Bytes([2u8; 32].to_vec())));

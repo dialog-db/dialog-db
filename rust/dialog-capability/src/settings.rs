@@ -1,33 +1,25 @@
-#[cfg(feature = "ucan")]
-use ipld_core::{ipld::Ipld, serde::to_ipld};
 use serde::Serialize;
-#[cfg(feature = "ucan")]
-use std::collections::BTreeMap;
 
-/// Parameters for UCAN capability invocations, mapping string keys to IPLD values.
-#[cfg(feature = "ucan")]
-pub type Parameters = BTreeMap<String, Ipld>;
-
-/// Trait for types that can contribute parameters to capability invocations.
+/// Builder for collecting constrains from a capability chain.
 ///
-/// This trait is auto-implemented for all `Serialize` types via a blanket impl.
-/// The `parametrize` method serializes the type's fields into an IPLD map and
-/// extends the given parameters.
-///
-/// **Note**: For capability chains (types implementing `Ability`), use
-/// `Ability::parameters()` instead, which properly walks the chain and collects
-/// parameters from each constraint.
-pub trait Settings {
-    /// Serialize this type's fields into the given parameters map.
-    #[cfg(feature = "ucan")]
-    fn parametrize(&self, settings: &mut Parameters);
+/// Implement this trait to collect constrains in your preferred format.
+/// For example, UCAN implements this to serialize constrains to IPLD.
+pub trait PolicyBuilder {
+    /// Add a constrain to the collection.
+    fn push<T: Serialize>(&mut self, constrain: &T);
 }
 
-impl<P: Serialize> Settings for P {
-    #[cfg(feature = "ucan")]
-    fn parametrize(&self, settings: &mut Parameters) {
-        if let Ok(Ipld::Map(constraint_map)) = to_ipld(self) {
-            settings.extend(constraint_map)
-        }
+/// Trait for types that can contribute constrains to capability invocations.
+///
+/// Caveats are conditions or restrictions attached to a capability delegation.
+/// This trait is auto-implemented for all `Serialize` types via a blanket impl.
+pub trait Caveat: Serialize {
+    /// Push this constrain to the builder.
+    fn constrain(&self, builder: &mut impl PolicyBuilder);
+}
+
+impl<T: Serialize> Caveat for T {
+    fn constrain(&self, builder: &mut impl PolicyBuilder) {
+        builder.push(self);
     }
 }

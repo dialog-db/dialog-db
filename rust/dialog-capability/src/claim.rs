@@ -69,7 +69,7 @@ mod tests {
 
         assert_eq!(claim.audience(), "did:key:zAudience");
         assert_eq!(claim.subject(), "did:key:zSubject");
-        assert_eq!(claim.ability(), "/testability");
+        assert_eq!(claim.ability(), "/test-ability");
     }
 
     #[test]

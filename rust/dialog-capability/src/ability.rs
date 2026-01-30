@@ -1,7 +1,20 @@
-use crate::{Constrained, Did, Policy, Subject};
+use crate::{Constrained, Did, Policy, PolicyBuilder, Subject};
 
-#[cfg(feature = "ucan")]
-use crate::Parameters;
+/// Convert a PascalCase or camelCase string to kebab-case.
+fn to_kebab_case(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 4);
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                result.push('-');
+            }
+            result.push(c.to_ascii_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
 
 /// Trait for representing an abstract capability (subject + ability path).
 ///
@@ -16,9 +29,12 @@ pub trait Ability: Sized {
     /// has over the `subject` resource (e.g., `/storage/get`, `/memory/publish`).
     fn ability(&self) -> String;
 
-    /// Collects parameters into given settings
-    #[cfg(feature = "ucan")]
-    fn parametrize(&self, parameters: &mut Parameters);
+    /// Collects all constrains from this capability chain into the policy builder.
+    ///
+    /// Each member of the chain calls `builder.push(self)` to contribute
+    /// its serializable data. Consumers (like UCAN) implement `PolicyBuilder`
+    /// to collect caveats in their preferred format.
+    fn constrain(&self, builder: &mut impl PolicyBuilder);
 }
 
 /// Subject represents unconstrained capability, hence
@@ -32,15 +48,16 @@ impl Ability for Subject {
         "/".into()
     }
 
-    #[cfg(feature = "ucan")]
-    fn parametrize(&self, _: &mut Parameters) {}
+    fn constrain(&self, _builder: &mut impl PolicyBuilder) {
+        // Subject has no caveats
+    }
 }
 
 /// Constrained capabilities are also capabilities
 /// that share subject with the root.
-impl<P, Of> Ability for Constrained<P, Of>
+impl<C, Of> Ability for Constrained<C, Of>
 where
-    P: Policy,
+    C: Policy,
     Of: Ability,
 {
     fn subject(&self) -> &Did {
@@ -49,21 +66,20 @@ where
 
     fn ability(&self) -> String {
         let ability = self.capability.ability();
-        // policy may restrict capability space or just
-        if let Some(segment) = P::attenuation() {
+        if let Some(segment) = C::attenuation() {
+            let kebab = to_kebab_case(segment);
             if ability == "/" {
-                format!("/{}", segment.to_lowercase())
+                format!("/{}", kebab)
             } else {
-                format!("{}/{}", ability, segment.to_lowercase())
+                format!("{}/{}", ability, kebab)
             }
         } else {
             ability
         }
     }
 
-    #[cfg(feature = "ucan")]
-    fn parametrize(&self, parameters: &mut Parameters) {
-        self.capability.parametrize(parameters);
-        self.constraint.parametrize(parameters);
+    fn constrain(&self, builder: &mut impl PolicyBuilder) {
+        self.capability.constrain(builder);
+        self.constraint.constrain(builder);
     }
 }
