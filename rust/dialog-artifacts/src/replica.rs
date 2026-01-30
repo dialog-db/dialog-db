@@ -3280,4 +3280,67 @@ mod tests {
 
         Ok(())
     }
+
+    /// Test that archive has remote configured after set_upstream.
+    ///
+    /// This is a bug where the archive's remote wasn't configured because
+    /// RemoteBranch was in Reference state (not connected) when set_upstream
+    /// was called. The fix ensures connect() is called before accessing archive().
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_archive_has_remote_after_set_upstream() {
+        use crate::replica::remote::{RemoteCredentials, RemoteSite, RemoteState};
+
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let storage = PlatformStorage::new(backend.clone(), CborEncoder);
+        let issuer = Operator::from_secret(&seed());
+        let subject = test_subject();
+
+        let mut replica = Replica::open(issuer.clone(), subject.clone(), backend.clone())
+            .expect("Failed to create replica");
+
+        // Add memory remote
+        let remote_state = RemoteState {
+            site: "origin".to_string(),
+            credentials: RemoteCredentials::Memory,
+        };
+        replica
+            .add_remote(remote_state)
+            .await
+            .expect("Failed to add remote");
+
+        let branch_id = BranchId::new("main".to_string());
+        let mut branch = replica
+            .branches
+            .open(&branch_id)
+            .await
+            .expect("Failed to open branch");
+
+        // Before set_upstream: archive has no remote
+        assert!(
+            !branch.archive.has_remote().await,
+            "Archive should NOT have remote before set_upstream"
+        );
+
+        // Set upstream
+        let remote_site = RemoteSite::load(&"origin".to_string(), issuer.clone(), storage)
+            .await
+            .expect("Failed to load remote site");
+        let remote_branch = remote_site
+            .repository(&subject)
+            .branch(branch_id.to_string());
+
+        branch
+            .set_upstream(remote_branch)
+            .await
+            .expect("Failed to set upstream");
+
+        // After set_upstream: archive MUST have remote configured
+        // With the old bug, this would be false because archive_connection()
+        // returned None when RemoteBranch was in Reference state.
+        assert!(
+            branch.archive.has_remote().await,
+            "Archive MUST have remote after set_upstream - this was the bug!"
+        );
+    }
 }
