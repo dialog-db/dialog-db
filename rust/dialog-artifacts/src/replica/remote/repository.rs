@@ -2,7 +2,7 @@
 
 use dialog_capability::Did;
 
-use super::{Operator, PlatformBackend, PlatformStorage, RemoteBranch, RemoteState, Site};
+use super::{Operator, PlatformBackend, PlatformStorage, RemoteBranch, RemoteCredentials, Site};
 
 /// A reference to a repository on a remote site.
 ///
@@ -17,8 +17,8 @@ pub struct RemoteRepository<Backend: PlatformBackend> {
     storage: PlatformStorage<Backend>,
     /// Issuer for signing requests.
     issuer: Operator,
-    /// The remote state (credentials).
-    state: Option<RemoteState>,
+    /// Credentials for connecting to the remote.
+    credentials: Option<RemoteCredentials>,
 }
 
 impl<Backend: PlatformBackend> RemoteRepository<Backend> {
@@ -28,14 +28,14 @@ impl<Backend: PlatformBackend> RemoteRepository<Backend> {
         subject: Did,
         storage: PlatformStorage<Backend>,
         issuer: Operator,
-        state: Option<RemoteState>,
+        credentials: Option<RemoteCredentials>,
     ) -> Self {
         Self {
             subject,
             site_name,
             storage,
             issuer,
-            state,
+            credentials,
         }
     }
 
@@ -59,7 +59,7 @@ impl<Backend: PlatformBackend + 'static> RemoteRepository<Backend> {
             self.subject.clone(),
             self.storage.clone(),
             self.issuer.clone(),
-            self.state.clone(),
+            self.credentials.clone(),
         )
     }
 }

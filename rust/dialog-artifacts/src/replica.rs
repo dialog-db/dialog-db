@@ -18,10 +18,6 @@ use dialog_common::ConditionalSend;
 use dialog_prolly_tree::{
     Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Node, Tree, TreeDifference,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use futures_util::future::BoxFuture;
-#[cfg(target_arch = "wasm32")]
-use futures_util::future::LocalBoxFuture;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use std::fmt::Debug;
 
@@ -359,6 +355,7 @@ where
 pub struct Branch<Backend: PlatformBackend + 'static> {
     issuer: Operator,
     id: BranchId,
+    subject: Did,
     storage: PlatformStorage<Backend>,
     archive: Archive<PrefixedBackend<Backend>>,
     memory: TypedStoreResource<BranchState, Backend>,
@@ -425,13 +422,13 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             // If branch has an upstream setup we load it up and configure
             // archive's remote
             let upstream = if let Some(state) = &state.upstream {
-                let upstream =
+                let mut upstream =
                     Upstream::open(state, issuer.clone(), storage.clone(), subject.clone()).await?;
 
-                if let Upstream::Remote(branch) = &upstream {
-                    if let Some(archive_storage) = branch.archive_connection() {
-                        archive.set_remote(archive_storage).await;
-                    }
+                // Configure archive's remote for fallback reads
+                if let Upstream::Remote(branch) = &mut upstream {
+                    let connection = branch.connect().await?;
+                    archive.set_remote(connection.archive()).await;
                 }
 
                 Some(upstream)
@@ -442,6 +439,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             Ok(Branch {
                 id: id.clone(),
                 issuer: issuer.clone(),
+                subject,
                 memory,
                 archive,
                 storage: storage.clone(),
@@ -665,9 +663,10 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                             id: target.id().clone(),
                         })
                     } else {
-                        let before = target.revision();
+                        let mut branch = target.load().await?;
+                        let before = branch.revision();
                         if before.tree() == &self.base() {
-                            target.reset(self.revision()).await?;
+                            branch.reset(self.revision()).await?;
                             self.reset(self.revision()).await?;
                             Ok(Some(before))
                         } else {
@@ -676,13 +675,15 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                     }
                 }
                 Upstream::Remote(target) => {
-                    let before = target.revision();
+                    let connection = target.connect().await?;
+                    let before = connection.resolve().await?;
                     let after = self.revision().clone();
+
                     if before.as_ref() != Some(&after) {
                         // Replicate novel blocks to a remote target
-                        target.upload(self.novelty()).await?;
+                        connection.upload(self.novelty()).await?;
                         // Now that all blocks are synced, publish the revision
-                        target.publish(after.clone()).await?;
+                        connection.publish(after.clone()).await?;
                         self.reset(after).await?;
                     }
 
@@ -805,18 +806,18 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
         // Set the archive remote to the upstream store if it is a
         // remote so tree changes will be replicated; if local, clear the remote
-        match &upstream {
-            Upstream::Remote(remote) => {
-                // Use archive_connection which points to the archive/index bucket,
-                // not connection which points to the memory bucket
-                if let Some(archive_storage) = remote.archive_connection() {
-                    self.archive.set_remote(archive_storage).await;
-                }
+        // Configure archive's remote for fallback reads
+        let upstream = match upstream {
+            Upstream::Remote(mut remote) => {
+                let connection = remote.connect().await?;
+                self.archive.set_remote(connection.archive()).await;
+                Upstream::Remote(remote)
             }
             Upstream::Local(_) => {
                 self.archive.clear_remote().await;
+                upstream
             }
-        }
+        };
 
         // Update the cached upstream on the branch
         *self.upstream.write().unwrap_or_else(|e| e.into_inner()) = Some(upstream);
@@ -1277,66 +1278,77 @@ impl BranchState {
     }
 }
 
+/// Descriptor for a local upstream branch (lazy loaded).
+#[derive(Clone)]
+pub struct LocalUpstream<Backend: PlatformBackend + 'static> {
+    branch_id: BranchId,
+    issuer: Operator,
+    storage: PlatformStorage<Backend>,
+    subject: Did,
+}
+
+impl<Backend: PlatformBackend + 'static> std::fmt::Debug for LocalUpstream<Backend> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalUpstream")
+            .field("branch_id", &self.branch_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<Backend: PlatformBackend + 'static> LocalUpstream<Backend> {
+    /// Load the branch on demand.
+    async fn load(&self) -> Result<Branch<Backend>, ReplicaError> {
+        Branch::load(
+            &self.branch_id,
+            self.issuer.clone(),
+            self.storage.clone(),
+            self.subject.clone(),
+        )
+        .await
+    }
+
+    /// Get the branch ID.
+    pub fn id(&self) -> &BranchId {
+        &self.branch_id
+    }
+}
+
 /// Upstream branch that is used to push & pull changes
 /// to / from. It can be local or remote.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum Upstream<Backend: PlatformBackend + 'static> {
-    /// A local branch upstream
-    Local(Branch<Backend>),
+    /// A local branch upstream (lazy - loaded on fetch/publish)
+    Local(LocalUpstream<Backend>),
     /// A remote branch upstream
     Remote(RemoteBranch<Backend>),
 }
 
 impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
-    /// Loads an upstream from its state descriptor
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn open(
+    /// Creates an upstream from its state descriptor.
+    ///
+    /// For local upstreams, this stores a descriptor for lazy loading.
+    /// For remote upstreams, this creates the remote branch reference.
+    pub async fn open(
         state: &UpstreamState,
         issuer: Operator,
         storage: PlatformStorage<Backend>,
         subject: Did,
-    ) -> BoxFuture<'_, Result<Self, ReplicaError>> {
-        Box::pin(async move {
-            match state {
-                UpstreamState::Local { branch } => {
-                    let branch = Branch::load(branch, issuer, storage, subject).await?;
-                    Ok(Upstream::Local(branch))
-                }
-                UpstreamState::Remote { site, branch } => {
-                    let mut remote_branch =
-                        RemoteBranch::new(site, branch.id(), storage.clone(), issuer, subject)
-                            .await?;
-                    remote_branch.open().await?;
-                    Ok(Upstream::Remote(remote_branch))
-                }
+    ) -> Result<Self, ReplicaError> {
+        match state {
+            UpstreamState::Local { branch } => Ok(Upstream::Local(LocalUpstream {
+                branch_id: branch.clone(),
+                issuer,
+                storage,
+                subject,
+            })),
+            UpstreamState::Remote { site, branch } => {
+                let mut remote_branch =
+                    RemoteBranch::new(site, branch.id(), storage.clone(), issuer, subject).await?;
+                remote_branch.connect().await?;
+                Ok(Upstream::Remote(remote_branch))
             }
-        })
-    }
-
-    /// Loads an upstream from its state descriptor
-    #[cfg(target_arch = "wasm32")]
-    pub fn open(
-        state: &UpstreamState,
-        issuer: Operator,
-        storage: PlatformStorage<Backend>,
-        subject: Did,
-    ) -> LocalBoxFuture<'_, Result<Self, ReplicaError>> {
-        Box::pin(async move {
-            match state {
-                UpstreamState::Local { branch } => {
-                    let branch = Branch::load(branch, issuer, storage, subject).await?;
-                    Ok(Upstream::Local(branch))
-                }
-                UpstreamState::Remote { site, branch } => {
-                    let mut remote_branch =
-                        RemoteBranch::new(site, branch.id(), storage.clone(), issuer, subject)
-                            .await?;
-                    remote_branch.open().await?;
-                    Ok(Upstream::Remote(remote_branch))
-                }
-            }
-        })
+        }
     }
 
     /// Returns the branch id of this upstream as a string
@@ -1344,14 +1356,6 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
         match self {
             Upstream::Local(branch) => branch.id().to_string(),
             Upstream::Remote(branch) => branch.id().to_string(),
-        }
-    }
-
-    /// Returns revision this branch is at
-    pub fn revision(&self) -> Option<Revision> {
-        match self {
-            Upstream::Local(branch) => Some(branch.revision()),
-            Upstream::Remote(branch) => branch.revision(),
         }
     }
 
@@ -1385,23 +1389,34 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
     /// Fetches the current revision from the upstream
     pub async fn fetch(&mut self) -> Result<Option<Revision>, ReplicaError> {
         match self {
-            Upstream::Local(branch) => Ok(Some(branch.revision())),
-            Upstream::Remote(remote) => Ok(remote.resolve().await?.to_owned()),
+            Upstream::Local(local) => {
+                let branch = local.load().await?;
+                Ok(Some(branch.revision()))
+            }
+            Upstream::Remote(remote) => Ok(remote.connect().await?.resolve().await?.to_owned()),
         }
     }
 
     /// Pushes a revision to the upstream, returning the previous revision if any
     pub async fn publish(&mut self, revision: Revision) -> Result<(), ReplicaError> {
         match self {
-            Upstream::Local(branch) => branch.reset(revision).await,
-            Upstream::Remote(remote) => remote.publish(revision).await,
+            Upstream::Local(local) => {
+                let mut branch = local.load().await?;
+                branch.reset(revision).await
+            }
+            Upstream::Remote(remote) => remote.connect().await?.publish(revision).await,
         }
     }
 }
 
 impl<Backend: PlatformBackend + 'static> From<Branch<Backend>> for Upstream<Backend> {
     fn from(branch: Branch<Backend>) -> Self {
-        Self::Local(branch)
+        Self::Local(LocalUpstream {
+            branch_id: branch.id.clone(),
+            issuer: branch.issuer.clone(),
+            storage: branch.storage.clone(),
+            subject: branch.subject.clone(),
+        })
     }
 }
 
@@ -1622,7 +1637,6 @@ impl Display for Capability {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ErrorMappingBackend;
     use dialog_storage::MemoryStorageBackend;
 
     #[cfg(target_arch = "wasm32")]
@@ -2727,7 +2741,7 @@ mod tests {
         let mut alice_remote_branch = alice_remote_site
             .repository(&subject)
             .branch(main_id.to_string());
-        alice_remote_branch.open().await?;
+        alice_remote_branch.connect().await?;
         alice_main.set_upstream(alice_remote_branch).await?;
 
         // Alice commits and pushes
@@ -2767,7 +2781,7 @@ mod tests {
         let mut bob_remote_branch = bob_remote_site
             .repository(&subject)
             .branch(main_id.to_string());
-        bob_remote_branch.open().await?;
+        bob_remote_branch.connect().await?;
         bob_main.set_upstream(bob_remote_branch).await?;
 
         let bob_revision_before_fetch = bob_main.revision();
