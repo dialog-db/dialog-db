@@ -1,6 +1,6 @@
 use crate::{
-    Ability, Access, Authorized, Claim, Constrained, Constraint, Did, Effect, Parameters, Policy,
-    Principal, Provider, Selector,
+    Ability, Access, Authorized, PolicyBuilder, Claim, Constrained, Constraint, Did, Effect,
+    Policy, Principal, Provider, Selector,
 };
 use dialog_common::ConditionalSend;
 
@@ -124,8 +124,8 @@ where
         self.0.ability()
     }
 
-    fn parametrize<P: Parameters>(&self, params: &mut P) {
-        self.0.parametrize(params)
+    fn constrain(&self, builder: &mut impl PolicyBuilder) {
+        self.0.constrain(builder)
     }
 }
 

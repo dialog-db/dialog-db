@@ -1,29 +1,31 @@
 //! UCAN-specific parameter collection using IPLD.
 
-use crate::{Ability, Parameters};
+use crate::{Ability, PolicyBuilder};
 use ipld_core::ipld::Ipld;
 use ipld_core::serde::to_ipld;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-/// IPLD-based parameter collector for UCAN invocations.
-///
-/// This type implements [`Parameters`] by serializing values to IPLD format.
-pub type IpldParameters = BTreeMap<String, Ipld>;
+/// IPLD-based parameter map for UCAN invocations.
+pub type Parameters = BTreeMap<String, Ipld>;
 
-impl Parameters for IpldParameters {
-    fn set<V: Serialize + ?Sized>(&mut self, key: &str, value: &V) {
-        if let Ok(ipld) = to_ipld(value) {
-            self.insert(key.to_string(), ipld);
+/// Builder that collects caveats as IPLD parameters.
+struct ParametersBuilder(Parameters);
+
+impl PolicyBuilder for ParametersBuilder {
+    fn push<T: Serialize>(&mut self, caveat: &T) {
+        if let Ok(Ipld::Map(map)) = to_ipld(caveat) {
+            self.0.extend(map);
         }
     }
 }
 
 /// Collect parameters from a capability into an IPLD map.
 ///
-/// This is a convenience function for UCAN invocations.
-pub fn parameters<T: Ability>(capability: &T) -> IpldParameters {
-    let mut params = IpldParameters::new();
-    capability.parametrize(&mut params);
-    params
+/// This function iterates over all caveats in the capability chain,
+/// serializes each to IPLD, and merges their fields into a single map.
+pub fn parameters<T: Ability>(capability: &T) -> Parameters {
+    let mut builder = ParametersBuilder(Parameters::new());
+    capability.constrain(&mut builder);
+    builder.0
 }

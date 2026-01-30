@@ -1,5 +1,4 @@
-use crate::{Constrained, Did, Parameters, Policy, Subject};
-use crate::settings::Settings;
+use crate::{Constrained, Did, Policy, PolicyBuilder, Subject};
 
 /// Trait for representing an abstract capability (subject + ability path).
 ///
@@ -14,12 +13,12 @@ pub trait Ability: Sized {
     /// has over the `subject` resource (e.g., `/storage/get`, `/memory/publish`).
     fn ability(&self) -> String;
 
-    /// Collects parameters into the given collector.
+    /// Collects all constrains from this capability chain into the policy builder.
     ///
-    /// This method walks the capability chain and calls `params.set()` for each
-    /// constraint's fields. The `Parameters` trait allows consumers to decide
-    /// the output format (e.g., IPLD for UCAN invocations).
-    fn parametrize<P: Parameters>(&self, params: &mut P);
+    /// Each member of the chain calls `builder.push(self)` to contribute
+    /// its serializable data. Consumers (like UCAN) implement `PolicyBuilder`
+    /// to collect caveats in their preferred format.
+    fn constrain(&self, builder: &mut impl PolicyBuilder);
 }
 
 /// Subject represents unconstrained capability, hence
@@ -33,7 +32,9 @@ impl Ability for Subject {
         "/".into()
     }
 
-    fn parametrize<P: Parameters>(&self, _params: &mut P) {}
+    fn constrain(&self, _builder: &mut impl PolicyBuilder) {
+        // Subject has no caveats
+    }
 }
 
 /// Constrained capabilities are also capabilities
@@ -49,7 +50,6 @@ where
 
     fn ability(&self) -> String {
         let ability = self.capability.ability();
-        // policy may restrict capability space or just
         if let Some(segment) = C::attenuation() {
             if ability == "/" {
                 format!("/{}", segment.to_lowercase())
@@ -61,8 +61,8 @@ where
         }
     }
 
-    fn parametrize<P: Parameters>(&self, params: &mut P) {
-        self.capability.parametrize(params);
-        Settings::parametrize(&self.constraint, params);
+    fn constrain(&self, builder: &mut impl PolicyBuilder) {
+        self.capability.constrain(builder);
+        self.constraint.constrain(builder);
     }
 }
