@@ -118,17 +118,6 @@ impl Access for Credentials {
         &self,
         claim: Claim<C>,
     ) -> Result<Self::Authorization, Self::Error> {
-        // Delegated authorization: verify the claim's audience matches the delegation chain.
-        // Per UCAN spec: first delegation's `aud` should match the invoker.
-        let audience = self.delegation.audience().to_string();
-        if claim.audience() != &audience {
-            return Err(AccessError::Configuration(format!(
-                "Claim audience '{}' does not match delegation chain audience '{}'",
-                claim.audience(),
-                audience
-            )));
-        }
-
         let mut parameters = Parameters::new();
         claim.capability().parametrize(&mut parameters);
 
@@ -141,6 +130,17 @@ impl Access for Credentials {
                 claim.capability().ability(),
                 parameters,
             ));
+        }
+
+        // Delegated authorization: verify the claim's audience matches the delegation chain.
+        // Per UCAN spec: first delegation's `aud` should match the invoker.
+        let audience = self.delegation.audience().to_string();
+        if claim.audience() != &audience {
+            return Err(AccessError::Configuration(format!(
+                "Claim audience '{}' does not match delegation chain audience '{}'",
+                claim.audience(),
+                audience
+            )));
         }
 
         // Return authorization from the delegation chain
