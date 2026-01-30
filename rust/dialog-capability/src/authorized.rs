@@ -1,5 +1,10 @@
-use crate::{Authority, Authorization, AuthorizationError, Capability, Constraint, Provider};
-use std::error::Error;
+use crate::{
+    Authority, Authorization, AuthorizationError, Capability, Constraint, Effect, Provider,
+};
+use std::{
+    error::Error,
+    fmt::{Debug, Formatter},
+};
 
 /// A capability paired with its authorization proof.
 ///
@@ -26,12 +31,11 @@ where
     }
 }
 
-impl<C: Constraint + std::fmt::Debug, A: Authorization + std::fmt::Debug> std::fmt::Debug
-    for Authorized<C, A>
+impl<C: Constraint + Debug, A: Authorization + Debug> Debug for Authorized<C, A>
 where
-    C::Capability: std::fmt::Debug,
+    C::Capability: Debug,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Authorized")
             .field("capability", &self.capability)
             .field("authorization", &self.authorization)
@@ -76,19 +80,15 @@ impl<C: Constraint, A: Authorization> Authorized<C, A> {
 
 /// Error type for capability execution failures.
 #[derive(Debug)]
-pub enum PerformError<E: Error + std::fmt::Debug> {
+pub enum PerformError<E: Error> {
     /// Error during effect execution.
     Excution(E),
     /// Error during authorization verification.
     Authorization(AuthorizationError),
 }
 
-impl<
-    Ok,
-    E: Error + std::fmt::Debug,
-    Fx: super::effect::Effect<Output = Result<Ok, E>> + Constraint,
-    A: Authorization,
-> Authorized<Fx, A>
+impl<Ok, E: Error, Fx: Effect<Output = Result<Ok, E>> + Constraint, A: Authorization>
+    Authorized<Fx, A>
 {
     /// Perform the invocation directly without authorization verification.
     /// For operations that require authorization, use `acquire` first.

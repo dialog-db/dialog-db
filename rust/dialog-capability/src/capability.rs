@@ -168,7 +168,7 @@ mod tests {
     impl Policy for Catalog {
         type Of = Archive;
         fn attenuation() -> Option<&'static str> {
-            None // Policy, not attenuation
+            None
         }
     }
 

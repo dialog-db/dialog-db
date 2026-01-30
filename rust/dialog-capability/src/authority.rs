@@ -1,7 +1,3 @@
-//! Principal and Authority traits for identity and signing.
-//!
-//! These traits define the identity model for capability-based access control.
-
 use crate::Did;
 use async_trait::async_trait;
 use dialog_common::ConditionalSend;
