@@ -7,6 +7,31 @@
 // Allow the crate to refer to itself as `dialog_common`
 extern crate self as dialog_common;
 
+/// Cross-platform logging macro that uses `console.log` on web and `println!` on native.
+///
+/// # Examples
+///
+/// ```
+/// use dialog_common::log;
+///
+/// log!("Hello, world!");
+/// log!("Value: {}", 42);
+/// log!("Multiple values: {} and {}", "foo", "bar");
+/// ```
+#[macro_export]
+macro_rules! log {
+    ($($arg:tt)*) => {{
+        #[cfg(target_arch = "wasm32")]
+        {
+            web_sys::console::log_1(&format!($($arg)*).into());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            println!($($arg)*);
+        }
+    }};
+}
+
 mod sync;
 pub use sync::*;
 
