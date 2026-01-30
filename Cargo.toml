@@ -17,13 +17,18 @@ strip = "debuginfo"
 [workspace]
 members = [
     "rust/dialog-artifacts",
+    "rust/dialog-capability",
     "rust/dialog-common",
+    "rust/dialog-effects",
     "rust/dialog-macros",
     "rust/dialog-diagnose",
     "rust/dialog-dbsp",
     "rust/dialog-encoding",
     "rust/dialog-prolly-tree",
+    "rust/dialog-query",
+    "rust/dialog-query-macros",
     "rust/dialog-storage",
+    "rust/dialog-s3-credentials",
 ]
 resolver = "2"
 
@@ -47,6 +52,9 @@ console_error_panic_hook = "0.1"
 csv-async = { version = "1", features = ["tokio"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures-core = "0.3"
+ipld-core = { version = "0.4", features = ["serde"] }
+ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "tonk", package = "ucan" }
+varsig = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "tonk", package = "varsig" }
 futures-util = "0.3"
 # getrandom = "0.3"
 getrandom = "0.2"
@@ -79,8 +87,8 @@ thiserror = "2"
 throbber-widgets-tui = "0.8"
 tokio = "1"
 ulid = "1"
-url = "2"
-wasm-bindgen = "=0.2.100"
+url = { version = "2", features = ["serde"] }
+wasm-bindgen = "=0.2.108"
 wasm-bindgen-futures = "0.4"
 wasm-bindgen-test = "0.3"
 web-sys = "0.3"
@@ -99,11 +107,26 @@ path = "./rust/dialog-encoding"
 [workspace.dependencies.dialog-prolly-tree]
 path = "./rust/dialog-prolly-tree"
 
+[workspace.dependencies.dialog-query]
+path = "./rust/dialog-query"
+
 [workspace.dependencies.dialog-storage]
 path = "./rust/dialog-storage"
 
+[workspace.dependencies.dialog-query-macros]
+path = "./rust/dialog-query-macros"
+
 [workspace.dependencies.dialog-macros]
 path = "./rust/dialog-macros"
+
+[workspace.dependencies.dialog-s3-credentials]
+path = "./rust/dialog-s3-credentials"
+
+[workspace.dependencies.dialog-capability]
+path = "./rust/dialog-capability"
+
+[workspace.dependencies.dialog-effects]
+path = "./rust/dialog-effects"
 
 # [patch.crates-io]
 # # TODO: https://github.com/gwierzchowski/csv-async/issues/27

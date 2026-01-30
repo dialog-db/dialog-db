@@ -109,14 +109,14 @@ impl StatefulWidget for &DiagnoseTreeExplore {
 
                     let mut spans = vec![indentation, bullet, hash_span, " · ".into(), label];
 
-                    if let Promise::Resolved(stats) = &stats {
-                        if is_root {
-                            spans.push(" · ".into());
-                            spans.push(
-                                Span::from(format!("Max. depth {}", stats.depth - 1))
-                                    .style(Style::new().fg(Color::Green)),
-                            );
-                        }
+                    if let Promise::Resolved(stats) = &stats
+                        && is_root
+                    {
+                        spans.push(" · ".into());
+                        spans.push(
+                            Span::from(format!("Max. depth {}", stats.depth - 1))
+                                .style(Style::new().fg(Color::Green)),
+                        );
                     }
 
                     lines.push(Line::from(spans));

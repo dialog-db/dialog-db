@@ -49,12 +49,14 @@ fn read_crate_features() -> Vec<String> {
         let t = line.trim();
         if t.starts_with('[') {
             in_features = t == "[features]";
-        } else if in_features && !t.is_empty() && !t.starts_with('#') {
-            if let Some(i) = t.find('=') {
-                let name = t[..i].trim();
-                if name != "default" {
-                    features.push(name.to_string());
-                }
+        } else if in_features
+            && !t.is_empty()
+            && !t.starts_with('#')
+            && let Some(i) = t.find('=')
+        {
+            let name = t[..i].trim();
+            if name != "default" {
+                features.push(name.to_string());
             }
         }
     }

@@ -4,16 +4,23 @@
 //! types that can be stored as the object part of semantic triples, along with
 //! type information and serialization utilities.
 
-use std::{fmt::Display, str::FromStr};
+use std::{
+    fmt::{Display, Formatter},
+    hash::Hash,
+    marker::PhantomData,
+    mem,
+    str::FromStr,
+};
 
-use crate::{Attribute, DialogArtifactsError, Entity, make_reference};
-
+use crate::{Attribute, Cause, DialogArtifactsError, Entity, make_reference};
 use base58::{FromBase58, ToBase58};
 use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use thiserror::Error;
 
 /// All value type representations that may be stored by [`Artifacts`]
-#[derive(Debug, Clone, PartialOrd, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialOrd, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum Value {
     /// A byte buffer
     Bytes(Vec<u8>),
@@ -88,6 +95,45 @@ impl Value {
         make_reference(self.to_bytes())
     }
 }
+
+// We need to implement Hash because f64 does not implement it.
+impl Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Value::Float(f) => f.to_le_bytes().hash(state),
+            Value::Bytes(b) => b.hash(state),
+            Value::Entity(e) => e.hash(state),
+            Value::Boolean(b) => b.hash(state),
+            Value::String(s) => s.hash(state),
+            Value::UnsignedInt(u) => u.hash(state),
+            Value::SignedInt(i) => i.hash(state),
+            Value::Record(r) => r.hash(state),
+            Value::Symbol(s) => s.hash(state),
+        }
+    }
+}
+
+// We need to implement PartialEq / Eq because we can't derive Eq for f64
+// because of NaN equality
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Bytes(a), Value::Bytes(b)) => a == b,
+            (Value::Entity(a), Value::Entity(b)) => a == b,
+            (Value::Boolean(a), Value::Boolean(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::UnsignedInt(a), Value::UnsignedInt(b)) => a == b,
+            (Value::SignedInt(a), Value::SignedInt(b)) => a == b,
+            // NaN bitwise equal
+            (Value::Float(a), Value::Float(b)) => a.to_le_bytes() == b.to_le_bytes(),
+            (Value::Record(a), Value::Record(b)) => a == b,
+            (Value::Symbol(a), Value::Symbol(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
 
 pub(crate) fn to_utf8<S>(value: &Value, serializer: S) -> Result<S::Ok, S::Error>
 where
@@ -216,6 +262,290 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
     }
 }
 
+impl TryFrom<Value> for Attribute {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Symbol(attribute) => Ok(attribute),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::Symbol,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for Entity {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Entity(entity) => Ok(entity),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::Entity,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for String {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::String(string) => Ok(string),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::String,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for bool {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Boolean(boolean) => Ok(boolean),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::Boolean,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for usize {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::UnsignedInt(uint) => usize::try_from(uint).map_err(|_| {
+                TypeError::TypeMismatch(ValueDataType::UnsignedInt, value.data_type())
+            }),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::UnsignedInt,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for u128 {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::UnsignedInt(uint) => Ok(uint),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::UnsignedInt,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for u64 {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::UnsignedInt(uint) => u64::try_from(uint).map_err(|_| {
+                TypeError::TypeMismatch(ValueDataType::UnsignedInt, value.data_type())
+            }),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::UnsignedInt,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for u32 {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::UnsignedInt(uint) => u32::try_from(uint).map_err(|_| {
+                TypeError::TypeMismatch(ValueDataType::UnsignedInt, value.data_type())
+            }),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::UnsignedInt,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for u16 {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::UnsignedInt(uint) => u16::try_from(uint).map_err(|_| {
+                TypeError::TypeMismatch(ValueDataType::UnsignedInt, value.data_type())
+            }),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::UnsignedInt,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for u8 {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::UnsignedInt(uint) => u8::try_from(uint).map_err(|_| {
+                TypeError::TypeMismatch(ValueDataType::UnsignedInt, value.data_type())
+            }),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::UnsignedInt,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for isize {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::SignedInt(uint) => isize::try_from(uint)
+                .map_err(|_| TypeError::TypeMismatch(ValueDataType::SignedInt, value.data_type())),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::UnsignedInt,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for i128 {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::SignedInt(sint) => Ok(sint),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::SignedInt,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for i64 {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::SignedInt(sint) => i64::try_from(sint)
+                .map_err(|_| TypeError::TypeMismatch(ValueDataType::SignedInt, value.data_type())),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::SignedInt,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for i32 {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::SignedInt(sint) => i32::try_from(sint)
+                .map_err(|_| TypeError::TypeMismatch(ValueDataType::SignedInt, value.data_type())),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::SignedInt,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for i16 {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::SignedInt(sint) => i16::try_from(sint)
+                .map_err(|_| TypeError::TypeMismatch(ValueDataType::SignedInt, value.data_type())),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::SignedInt,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for i8 {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::SignedInt(sint) => i8::try_from(sint)
+                .map_err(|_| TypeError::TypeMismatch(ValueDataType::SignedInt, value.data_type())),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::SignedInt,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for f64 {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Float(float) => Ok(float),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::Float,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for f32 {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Float(float) => Ok(float as f32),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::Float,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for Vec<u8> {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Bytes(bytes) => Ok(bytes),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::Bytes,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+// Note: TryFrom<Value> for Value is automatically provided by the blanket implementation
+// impl<T, U> TryFrom<U> for T where U: Into<T>
+
 impl From<Vec<u8>> for Value {
     fn from(value: Vec<u8>) -> Self {
         Value::Bytes(value)
@@ -318,6 +648,166 @@ impl From<Attribute> for Value {
     }
 }
 
+impl From<Cause> for Value {
+    fn from(value: Cause) -> Self {
+        Value::Bytes(value.to_vec())
+    }
+}
+
+// PartialEq implementations for comparing types with Value
+impl PartialEq<Value> for Entity {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::Entity(entity) => self == entity,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for Attribute {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::Symbol(attr) => self == attr,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for String {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::String(s) => self == s,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for bool {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::Boolean(b) => self == b,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for u128 {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::UnsignedInt(u) => self == u,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for u64 {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::UnsignedInt(u) => *self as u128 == *u,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for u32 {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::UnsignedInt(u) => *self as u128 == *u,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for u16 {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::UnsignedInt(u) => *self as u128 == *u,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for u8 {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::UnsignedInt(u) => *self as u128 == *u,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for i128 {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::SignedInt(i) => self == i,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for i64 {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::SignedInt(i) => *self as i128 == *i,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for i32 {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::SignedInt(i) => *self as i128 == *i,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for i16 {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::SignedInt(i) => *self as i128 == *i,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for i8 {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::SignedInt(i) => *self as i128 == *i,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for f64 {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::Float(f) => self == f,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for f32 {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::Float(f) => *self as f64 == *f,
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for Vec<u8> {
+    fn eq(&self, other: &Value) -> bool {
+        match other {
+            Value::Bytes(bytes) => self == bytes,
+            _ => false,
+        }
+    }
+}
+
 impl From<&Value> for ValueDataType {
     fn from(value: &Value) -> Self {
         value.data_type()
@@ -330,6 +820,14 @@ impl From<Value> for ValueDataType {
     }
 }
 
+/// Errors created when types are used inconsistently with value.
+#[derive(Error, Debug, PartialEq)]
+pub enum TypeError {
+    /// Expected type and actual type mismatch.
+    #[error("Type mismatch: expected {0}, got {1}")]
+    TypeMismatch(ValueDataType, ValueDataType),
+}
+
 /// [`ValueDataType`] embodies all types that are able to be represented
 /// as a [`Value`].
 #[cfg_attr(
@@ -337,7 +835,9 @@ impl From<Value> for ValueDataType {
     wasm_bindgen::prelude::wasm_bindgen
 )]
 #[repr(u8)]
-#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash,
+)]
 pub enum ValueDataType {
     /// A byte buffer
     #[default]
@@ -369,6 +869,37 @@ impl ValueDataType {
     /// The largest [`ValueDataType`] in discriminant order
     pub fn max() -> Self {
         ValueDataType::Symbol
+    }
+
+    /// Check if the given value is of this type.
+    pub fn check(&self, value: &Value) -> Result<(), TypeError> {
+        let other = value.data_type();
+        self.unify(&other).and(Ok(()))
+    }
+
+    /// Unifies this type with the other type.
+    pub fn unify(&self, other: &ValueDataType) -> Result<ValueDataType, TypeError> {
+        if mem::discriminant(self) != mem::discriminant(other) {
+            Err(TypeError::TypeMismatch(*self, *other))
+        } else {
+            Ok(*self)
+        }
+    }
+}
+
+impl Display for ValueDataType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValueDataType::Bytes => write!(f, "Bytes"),
+            ValueDataType::Entity => write!(f, "Entity"),
+            ValueDataType::Boolean => write!(f, "Boolean"),
+            ValueDataType::String => write!(f, "String"),
+            ValueDataType::UnsignedInt => write!(f, "UnsignedInt"),
+            ValueDataType::SignedInt => write!(f, "SignedInt"),
+            ValueDataType::Float => write!(f, "Float"),
+            ValueDataType::Record => write!(f, "Record"),
+            ValueDataType::Symbol => write!(f, "Symbol"),
+        }
     }
 }
 
@@ -403,5 +934,23 @@ impl From<&u8> for ValueDataType {
 impl From<ValueDataType> for u8 {
     fn from(value: ValueDataType) -> Self {
         value as u8
+    }
+}
+
+impl From<String> for ValueDataType {
+    fn from(_: String) -> Self {
+        Self::String
+    }
+}
+
+impl From<bool> for ValueDataType {
+    fn from(_value: bool) -> Self {
+        Self::Boolean
+    }
+}
+
+impl From<ValueDataType> for PhantomData<ValueDataType> {
+    fn from(_value: ValueDataType) -> Self {
+        PhantomData
     }
 }

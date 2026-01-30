@@ -9,12 +9,12 @@ use serde::{Deserialize, Serialize};
 /// Combines endpoint, region, and bucket into a simple data struct that can be used
 /// with any S3-compatible service (AWS S3, Cloudflare R2, Wasabi, MinIO, etc.).
 ///
-/// This is a plain data type - URL validation happens when opening a [`Bucket`](super::Bucket).
+/// This is a plain data type - URL validation happens when building request URLs.
 ///
 /// # Examples
 ///
 /// ```
-/// use dialog_storage::s3::Address;
+/// use dialog_s3_credentials::Address;
 ///
 /// // AWS S3
 /// let addr = Address::new(
@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 ///     "my-bucket",
 /// );
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Address {
     /// The S3-compatible endpoint URL (e.g., "https://s3.us-east-1.amazonaws.com")
     endpoint: String,
@@ -50,7 +50,7 @@ pub struct Address {
 impl Address {
     /// Create a new address with the given endpoint, region, and bucket.
     ///
-    /// This is infallible - URL validation happens when opening a [`Bucket`](super::Bucket).
+    /// This is infallible - URL validation happens when building request URLs.
     ///
     /// # Arguments
     ///
@@ -61,7 +61,7 @@ impl Address {
     /// # Examples
     ///
     /// ```
-    /// use dialog_storage::s3::Address;
+    /// use dialog_s3_credentials::Address;
     ///
     /// // AWS S3
     /// let addr = Address::new(
@@ -110,7 +110,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_new_s3_address() {
+    fn it_creates_s3_address() {
         let addr = Address::new(
             "https://s3.us-east-1.amazonaws.com",
             "us-east-1",
@@ -123,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_r2_address() {
+    fn it_creates_r2_address() {
         let addr = Address::new(
             "https://account-id.r2.cloudflarestorage.com",
             "auto",
@@ -139,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn test_localhost_address() {
+    fn it_creates_localhost_address() {
         let addr = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
 
         assert_eq!(addr.endpoint(), "http://localhost:9000");
@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn test_serde_roundtrip() {
+    fn it_roundtrips_through_serde() {
         let addr = Address::new(
             "https://s3.us-east-1.amazonaws.com",
             "us-east-1",
