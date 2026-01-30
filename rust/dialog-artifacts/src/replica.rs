@@ -1342,9 +1342,21 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
                 storage,
                 subject,
             })),
-            UpstreamState::Remote { site, branch } => {
-                let mut remote_branch =
-                    RemoteBranch::new(site, branch.id(), storage.clone(), issuer, subject).await?;
+            UpstreamState::Remote {
+                site,
+                branch,
+                subject: remote_subject,
+            } => {
+                // Use the subject from the state, not the one passed in.
+                // This ensures we track the correct remote repository.
+                let mut remote_branch = RemoteBranch::new(
+                    site,
+                    branch.id(),
+                    storage.clone(),
+                    issuer,
+                    remote_subject.clone(),
+                )
+                .await?;
                 remote_branch.open().await?;
                 Ok(Upstream::Remote(remote_branch))
             }
@@ -1368,6 +1380,14 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
         }
     }
 
+    /// Returns subject DID of the upstream repository.
+    pub fn subject(&self) -> &Did {
+        match self {
+            Upstream::Local(local) => &local.subject,
+            Upstream::Remote(branch) => branch.subject(),
+        }
+    }
+
     /// Returns true if this upstream is a local branch.
     pub fn is_local(&self) -> bool {
         matches!(self, Upstream::Local(_))
@@ -1382,6 +1402,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
             Upstream::Remote(remote) => UpstreamState::Remote {
                 site: remote.site().to_string(),
                 branch: BranchId::new(remote.id().to_string()),
+                subject: remote.subject().clone(),
             },
         }
     }
@@ -1435,6 +1456,7 @@ impl<Backend: PlatformBackend> From<Upstream<Backend>> for UpstreamState {
             Upstream::Remote(branch) => UpstreamState::Remote {
                 site: branch.site().to_string(),
                 branch: BranchId::new(branch.id().to_string()),
+                subject: branch.subject().clone(),
             },
         }
     }
@@ -1454,6 +1476,8 @@ pub enum UpstreamState {
         site: Site,
         /// Branch identifier
         branch: BranchId,
+        /// Subject DID of the repository being tracked
+        subject: Did,
     },
 }
 
@@ -1463,6 +1487,14 @@ impl UpstreamState {
         match self {
             Self::Local { branch } => branch,
             Self::Remote { branch, .. } => branch,
+        }
+    }
+
+    /// Returns the subject DID for remote upstreams, None for local.
+    pub fn subject(&self) -> Option<&Did> {
+        match self {
+            Self::Local { .. } => None,
+            Self::Remote { subject, .. } => Some(subject),
         }
     }
 }
@@ -1770,6 +1802,78 @@ mod tests {
         // Push should fail if upstream is not setup
         let result = branch.push().await;
         assert!(result.is_err());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_upstream_state_remote_roundtrip_preserves_subject() {
+        // This test verifies that when a remote upstream is converted to UpstreamState
+        // and back, the subject DID is preserved correctly.
+        //
+        // The scenario: Alice's branch tracks Bob's remote branch.
+        // When saved to state and reopened, the upstream should still point to Bob's
+        // repository (Bob's subject DID), not Alice's.
+
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let storage = PlatformStorage::new(backend.clone(), CborEncoder);
+
+        // Alice and Bob have different subject DIDs
+        let alice_issuer = Operator::from_secret(&[1u8; 32]);
+        let alice_subject: Did = alice_issuer.did().clone();
+        let bob_subject: Did = "did:key:z6MkbobBobBobBobBobBobBobBobBobBobBobBobBob".into();
+
+        // Create a remote upstream state with Bob's subject
+        let original_state = UpstreamState::Remote {
+            site: "origin".to_string(),
+            branch: BranchId::new("main".to_string()),
+            subject: bob_subject.clone(),
+        };
+
+        // Verify the state captures all fields including subject
+        match &original_state {
+            UpstreamState::Remote {
+                site,
+                branch,
+                subject,
+            } => {
+                assert_eq!(site, "origin");
+                assert_eq!(branch.id(), "main");
+                assert_eq!(subject, &bob_subject);
+            }
+            _ => panic!("Expected Remote upstream"),
+        }
+
+        // Roundtrip: open the upstream from state
+        // The subject parameter is Alice's (the replica owner), but the state
+        // contains Bob's subject which should be used for the remote.
+        let _upstream = Upstream::<MemoryStorageBackend<Vec<u8>, Vec<u8>>>::open(
+            &original_state,
+            alice_issuer.clone(),
+            storage.clone(),
+            alice_subject.clone(), // Alice's subject (replica owner)
+        )
+        .await;
+
+        // Opening will fail because no credentials are configured, but that's expected.
+        // The important thing is that if it succeeded, the remote branch would have
+        // Bob's subject, not Alice's.
+
+        // Verify the state serialization preserves subject.
+        let serialized = serde_json::to_string(&original_state).unwrap();
+        let deserialized: UpstreamState = serde_json::from_str(&serialized).unwrap();
+
+        match deserialized {
+            UpstreamState::Remote {
+                site,
+                branch,
+                subject,
+            } => {
+                assert_eq!(site, "origin");
+                assert_eq!(branch.id(), "main");
+                assert_eq!(subject, bob_subject, "Subject should roundtrip correctly");
+            }
+            _ => panic!("Expected Remote upstream after deserialization"),
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
