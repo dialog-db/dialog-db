@@ -7,7 +7,8 @@ use super::{DelegationChain, InvocationChain};
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
 use dialog_capability::{
-    Authority, Authorization, AuthorizationError, Capability, Did, Effect, Parameters, Provider,
+    ucan::IpldParameters, Authority, Authorization, AuthorizationError, Capability, Did, Effect,
+    Provider,
 };
 use dialog_common::ConditionalSend;
 use ed25519_dalek::SigningKey;
@@ -39,7 +40,7 @@ fn ipld_to_promised(ipld: Ipld) -> Promised {
 }
 
 /// Convert IPLD Map to BTreeMap<String, Promised> for UCAN invocation.
-pub fn parameters_to_args(parameters: Parameters) -> Args {
+pub fn parameters_to_args(parameters: IpldParameters) -> Args {
     parameters
         .into_iter()
         .map(|(k, v)| (k, ipld_to_promised(v)))
@@ -61,7 +62,7 @@ pub enum UcanAuthorization {
         /// The ability path this authorization permits.
         ability: String,
         /// Constraints of the delegation
-        parameters: Parameters,
+        parameters: IpldParameters,
     },
     /// Authorization through a delegation chain.
     Delegated {
@@ -75,14 +76,14 @@ pub enum UcanAuthorization {
         /// Cached ability path.
         ability: String,
         /// Constraints of the delegation
-        parameters: Parameters,
+        parameters: IpldParameters,
     },
     Invocation {
         endpoint: String,
         chain: InvocationChain,
         subject: Did,
         ability: String,
-        parameters: Parameters,
+        parameters: IpldParameters,
     },
 }
 
@@ -92,7 +93,7 @@ impl UcanAuthorization {
         endpoint: String,
         subject: impl Into<Did>,
         ability: impl Into<String>,
-        parameters: Parameters,
+        parameters: IpldParameters,
     ) -> Self {
         Self::Owned {
             endpoint,
@@ -107,7 +108,7 @@ impl UcanAuthorization {
         endpoint: String,
         chain: DelegationChain,
         ability: impl Into<String>,
-        parameters: Parameters,
+        parameters: IpldParameters,
     ) -> Self {
         // Pre-compute and cache the DID representations
         let subject: Did = chain.subject().map(|did| did.into()).unwrap_or_default();
@@ -140,7 +141,7 @@ impl UcanAuthorization {
         }
     }
 
-    fn parameters(&self) -> &Parameters {
+    fn parameters(&self) -> &IpldParameters {
         match self {
             Self::Owned { parameters, .. } => parameters,
             Self::Delegated { parameters, .. } => parameters,

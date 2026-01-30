@@ -1,11 +1,8 @@
 use crate::{
-    Ability, Access, Authorized, Claim, Constrained, Constraint, Did, Effect, Policy, Principal,
-    Provider, Selector,
+    Ability, Access, Authorized, Claim, Constrained, Constraint, Did, Effect, Parameters, Policy,
+    Principal, Provider, Selector,
 };
 use dialog_common::ConditionalSend;
-
-#[cfg(feature = "ucan")]
-use crate::Parameters;
 
 /// Newtype wrapper for describing a capability chain from the constraint type.
 /// It enables defining convenience methods for working with that capability.
@@ -127,27 +124,11 @@ where
         self.0.ability()
     }
 
-    #[cfg(feature = "ucan")]
-    fn parametrize(&self, parameters: &mut Parameters) {
-        self.0.parametrize(parameters)
+    fn parametrize<P: Parameters>(&self, params: &mut P) {
+        self.0.parametrize(params)
     }
 }
 
-impl<T: Constraint> Capability<T>
-where
-    T::Capability: Ability,
-{
-    /// Collect all parameters from this capability chain into a new map.
-    ///
-    /// This walks the capability chain and collects parameters from each
-    /// constraint.
-    #[cfg(feature = "ucan")]
-    pub fn parameters(&self) -> Parameters {
-        let mut parameters = Parameters::new();
-        self.0.parametrize(&mut parameters);
-        parameters
-    }
-}
 
 impl<T: Constraint> std::ops::Deref for Capability<T> {
     type Target = T::Capability;
@@ -322,6 +303,7 @@ mod tests {
     #[cfg(feature = "ucan")]
     mod parameters_tests {
         use super::*;
+        use crate::ucan::parameters;
         use ipld_core::ipld::Ipld;
 
         #[test]
@@ -335,7 +317,7 @@ mod tests {
                     digest: vec![1, 2, 3],
                 });
 
-            let params = cap.parameters();
+            let params = parameters(&cap);
 
             // Catalog should contribute "name" parameter
             assert_eq!(params.get("name"), Some(&Ipld::String("blobs".into())));
@@ -361,7 +343,7 @@ mod tests {
                     key: b"hello".to_vec(),
                 });
 
-            let params = cap.parameters();
+            let params = parameters(&cap);
 
             // Store should contribute "name" parameter
             assert_eq!(params.get("name"), Some(&Ipld::String("index".into())));

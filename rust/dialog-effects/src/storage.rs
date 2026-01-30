@@ -282,12 +282,13 @@ mod tests {
     #[cfg(feature = "ucan")]
     mod parameters_tests {
         use super::*;
+        use dialog_capability::ucan::parameters;
         use ipld_core::ipld::Ipld;
 
         #[test]
         fn it_collects_storage_parameters() {
             let cap = Subject::from("did:key:zSpace").attenuate(Storage);
-            let params = cap.parameters();
+            let params = parameters(&cap);
 
             // Storage is a unit struct, should produce empty map
             assert!(params.is_empty());
@@ -298,7 +299,7 @@ mod tests {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
                 .attenuate(Store::new("index"));
-            let params = cap.parameters();
+            let params = parameters(&cap);
 
             assert_eq!(params.get("store"), Some(&Ipld::String("index".into())));
         }
@@ -309,7 +310,7 @@ mod tests {
                 .attenuate(Storage)
                 .attenuate(Store::new("index"))
                 .invoke(Get::new(vec![1, 2, 3]));
-            let params = cap.parameters();
+            let params = parameters(&cap);
 
             assert_eq!(params.get("store"), Some(&Ipld::String("index".into())));
             assert_eq!(params.get("key"), Some(&Ipld::Bytes(vec![1, 2, 3])));
@@ -321,7 +322,7 @@ mod tests {
                 .attenuate(Storage)
                 .attenuate(Store::new("mystore"))
                 .invoke(Set::new(vec![10, 20], vec![30, 40, 50]));
-            let params = cap.parameters();
+            let params = parameters(&cap);
 
             assert_eq!(params.get("store"), Some(&Ipld::String("mystore".into())));
             assert_eq!(params.get("key"), Some(&Ipld::Bytes(vec![10, 20])));
@@ -334,7 +335,7 @@ mod tests {
                 .attenuate(Storage)
                 .attenuate(Store::new("trash"))
                 .invoke(Delete::new(vec![99]));
-            let params = cap.parameters();
+            let params = parameters(&cap);
 
             assert_eq!(params.get("store"), Some(&Ipld::String("trash".into())));
             assert_eq!(params.get("key"), Some(&Ipld::Bytes(vec![99])));

@@ -33,7 +33,7 @@ use super::{DelegationChain, UcanAuthorization};
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
 use dialog_capability::{
-    Ability, Access, Authorized, Capability, Claim, Did, Effect, Parameters, Provider,
+    ucan::parameters, Ability, Access, Authorized, Capability, Claim, Did, Effect, Provider,
 };
 use dialog_common::ConditionalSend;
 
@@ -128,15 +128,12 @@ impl Access for Credentials {
             )));
         }
 
-        let mut parameters = Parameters::new();
-        claim.capability().parametrize(&mut parameters);
-
         // Return authorization from the delegation chain
         Ok(UcanAuthorization::delegated(
             self.endpoint.clone(),
             self.delegation.clone(),
             claim.capability().ability(),
-            parameters,
+            parameters(claim.capability()),
         ))
     }
 }
