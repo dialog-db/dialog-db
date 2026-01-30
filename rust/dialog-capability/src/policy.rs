@@ -1,4 +1,4 @@
-use crate::settings::Settings;
+use crate::settings::Caveat;
 use crate::{Ability, Constrained, Constraint, Selector};
 
 /// Trait for policy types that restrict capabilities.
@@ -9,7 +9,7 @@ use crate::{Ability, Constrained, Constraint, Selector};
 ///
 /// For types that contribute to the command path, implement [`Attenuation`]
 /// instead (which provides `Policy` via blanket impl).
-pub trait Policy: Sized + Settings {
+pub trait Policy: Sized + Caveat {
     /// The capability this policy restricts.
     /// Must implement `Constraint` so we can compute the full chain type.
     type Of: Constraint;

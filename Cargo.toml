@@ -17,6 +17,7 @@ strip = "debuginfo"
 [workspace]
 members = [
     "rust/dialog-artifacts",
+    "rust/dialog-capability",
     "rust/dialog-common",
     "rust/dialog-macros",
     "rust/dialog-diagnose",
@@ -48,6 +49,7 @@ csv-async = { version = "1", features = ["tokio"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures-core = "0.3"
 futures-util = "0.3"
+ipld-core = { version = "0.4", features = ["serde"] }
 # getrandom = "0.3"
 getrandom = "0.2"
 itertools = "0.14"
@@ -78,6 +80,7 @@ tempfile = "3"
 thiserror = "2"
 throbber-widgets-tui = "0.8"
 tokio = "1"
+ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "jackddouglas/feat/check" }
 ulid = "1"
 url = "2"
 wasm-bindgen = "=0.2.100"
@@ -89,6 +92,9 @@ zerocopy = "0.8"
 
 [workspace.dependencies.dialog-artifacts]
 path = "./rust/dialog-artifacts"
+
+[workspace.dependencies.dialog-capability]
+path = "./rust/dialog-capability"
 
 [workspace.dependencies.dialog-common]
 path = "./rust/dialog-common"
