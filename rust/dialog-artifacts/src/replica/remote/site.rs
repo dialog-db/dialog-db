@@ -1,11 +1,10 @@
 //! Remote site configuration and management.
 
-use std::fmt::Debug;
-
-use dialog_capability::{Authority, Did};
+use dialog_capability::Did;
 
 use super::{
-    Connection, Operator, PlatformBackend, PlatformStorage, RemoteRepository, RemoteState, Site,
+    Connection, OperatingAuthority, Operator, PlatformBackend, PlatformStorage, RemoteRepository,
+    RemoteState, Site,
 };
 use crate::TypedStoreResource;
 use crate::replica::ReplicaError;
@@ -14,7 +13,7 @@ use crate::replica::ReplicaError;
 ///
 /// This is the persisted state for a remote, storing the site name
 /// and the credentials needed to connect to it.
-pub struct RemoteSite<Backend: PlatformBackend, A: Authority + Clone + Debug = Operator> {
+pub struct RemoteSite<Backend: PlatformBackend, A: OperatingAuthority = Operator> {
     /// The site name.
     name: Site,
     /// Memory cell storing the remote state.
@@ -25,16 +24,14 @@ pub struct RemoteSite<Backend: PlatformBackend, A: Authority + Clone + Debug = O
     issuer: A,
 }
 
-impl<Backend: PlatformBackend, A: Authority + Clone + Debug> RemoteSite<Backend, A> {
+impl<Backend: PlatformBackend, A: OperatingAuthority> RemoteSite<Backend, A> {
     /// Returns the site name.
     pub fn name(&self) -> &Site {
         &self.name
     }
 }
 
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static>
-    RemoteSite<Backend, A>
-{
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> RemoteSite<Backend, A> {
     /// Adds a new remote site configuration and persists it. If site with
     /// conflicting name is already configured produces an error, unless
     /// persisted configuration is identical to passed one, in which case

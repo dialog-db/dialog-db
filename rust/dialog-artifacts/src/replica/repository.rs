@@ -1,9 +1,7 @@
 pub use super::Replica;
 use super::remote::Site;
-use super::{PlatformBackend, RemoteSite, RemoteState, ReplicaError};
-use dialog_capability::Authority;
+use super::{OperatingAuthority, PlatformBackend, RemoteSite, RemoteState, ReplicaError};
 use dialog_common::ConditionalSync;
-use std::fmt::Debug;
 
 /// Manages remote sites used for synchronization. Repository (a.k.a Replica)
 /// may have zero or more sites configured that can be used to obtain references
@@ -24,7 +22,7 @@ pub trait Remotes<Backend: PlatformBackend> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + ConditionalSync + 'static>
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
     Remotes<Backend> for Replica<Backend, A>
 {
     async fn add_remote(&mut self, state: RemoteState) -> Result<Site, ReplicaError> {

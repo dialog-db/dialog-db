@@ -27,6 +27,7 @@ pub use repository::*;
 pub use site::*;
 pub use state::*;
 
+pub use super::OperatingAuthority;
 use super::{Operator, PlatformBackend, Revision};
 use crate::PlatformStorage;
 

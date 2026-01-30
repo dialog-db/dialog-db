@@ -1,16 +1,17 @@
 //! Remote repository reference.
 
-use std::fmt::Debug;
+use dialog_capability::Did;
 
-use dialog_capability::{Authority, Did};
-
-use super::{Operator, PlatformBackend, PlatformStorage, RemoteBranch, RemoteCredentials, Site};
+use super::{
+    OperatingAuthority, Operator, PlatformBackend, PlatformStorage, RemoteBranch,
+    RemoteCredentials, Site,
+};
 
 /// A reference to a repository on a remote site.
 ///
 /// This is a builder step for accessing remote branches.
 #[derive(Clone)]
-pub struct RemoteRepository<Backend: PlatformBackend, A: Authority + Clone + Debug = Operator> {
+pub struct RemoteRepository<Backend: PlatformBackend, A: OperatingAuthority = Operator> {
     /// The subject DID identifying the repository owner.
     subject: Did,
     /// The remote site name.
@@ -23,9 +24,7 @@ pub struct RemoteRepository<Backend: PlatformBackend, A: Authority + Clone + Deb
     credentials: Option<RemoteCredentials>,
 }
 
-impl<Backend: PlatformBackend, A: Authority + Clone + Debug + 'static>
-    RemoteRepository<Backend, A>
-{
+impl<Backend: PlatformBackend, A: OperatingAuthority + 'static> RemoteRepository<Backend, A> {
     /// Create a new remote repository reference.
     pub(super) fn new(
         site_name: Site,
@@ -54,7 +53,7 @@ impl<Backend: PlatformBackend, A: Authority + Clone + Debug + 'static>
     }
 }
 
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static>
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static>
     RemoteRepository<Backend, A>
 {
     /// Reference a branch within this remote repository.

@@ -2,14 +2,14 @@
 
 use std::fmt::Debug;
 
-use dialog_capability::{Authority, Did};
+use dialog_capability::Did;
 use dialog_prolly_tree::{KeyType, Node};
 use dialog_storage::{Blake3Hash, CborEncoder, Encoder, StorageBackend};
 use futures_util::{Stream, StreamExt};
 
 use super::{
-    Connection, Operator, PlatformBackend, PlatformStorage, RemoteBackend, RemoteCredentials,
-    RemoteSite, Revision, Site,
+    Connection, OperatingAuthority, Operator, PlatformBackend, PlatformStorage, RemoteBackend,
+    RemoteCredentials, RemoteSite, Revision, Site,
 };
 use crate::TypedStoreResource;
 use crate::replica::ReplicaError;
@@ -18,8 +18,7 @@ use crate::replica::ReplicaError;
 ///
 /// This holds the configuration needed to establish a connection.
 #[derive(Clone)]
-pub struct RemoteBranchDescriptor<Backend: PlatformBackend, A: Authority + Clone + Debug = Operator>
-{
+pub struct RemoteBranchDescriptor<Backend: PlatformBackend, A: OperatingAuthority = Operator> {
     name: String,
     site_name: Site,
     subject: Did,
@@ -28,7 +27,7 @@ pub struct RemoteBranchDescriptor<Backend: PlatformBackend, A: Authority + Clone
     credentials: Option<RemoteCredentials>,
 }
 
-impl<Backend: PlatformBackend, A: Authority + Clone + Debug> RemoteBranchDescriptor<Backend, A> {
+impl<Backend: PlatformBackend, A: OperatingAuthority> RemoteBranchDescriptor<Backend, A> {
     /// Get the branch name.
     pub fn name(&self) -> &str {
         &self.name
@@ -45,9 +44,7 @@ impl<Backend: PlatformBackend, A: Authority + Clone + Debug> RemoteBranchDescrip
     }
 }
 
-impl<Backend: PlatformBackend, A: Authority + Clone + Debug> Debug
-    for RemoteBranchDescriptor<Backend, A>
-{
+impl<Backend: PlatformBackend, A: OperatingAuthority> Debug for RemoteBranchDescriptor<Backend, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RemoteBranchDescriptor")
             .field("name", &self.name)
@@ -60,17 +57,14 @@ impl<Backend: PlatformBackend, A: Authority + Clone + Debug> Debug
 /// An open connection to a remote branch.
 ///
 /// This holds the active connection and revision tracking resources.
-pub struct RemoteBranchConnection<Backend: PlatformBackend, A: Authority + Clone + Debug = Operator>
-{
+pub struct RemoteBranchConnection<Backend: PlatformBackend, A: OperatingAuthority = Operator> {
     descriptor: RemoteBranchDescriptor<Backend, A>,
     connection: Connection,
     down: TypedStoreResource<Revision, Backend>,
     up: TypedStoreResource<Revision, RemoteBackend>,
 }
 
-impl<Backend: PlatformBackend, A: Authority + Clone + Debug> Debug
-    for RemoteBranchConnection<Backend, A>
-{
+impl<Backend: PlatformBackend, A: OperatingAuthority> Debug for RemoteBranchConnection<Backend, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RemoteBranchConnection")
             .field("name", &self.descriptor.name)
@@ -80,9 +74,7 @@ impl<Backend: PlatformBackend, A: Authority + Clone + Debug> Debug
     }
 }
 
-impl<Backend: PlatformBackend, A: Authority + Clone + Debug> Clone
-    for RemoteBranchConnection<Backend, A>
-{
+impl<Backend: PlatformBackend, A: OperatingAuthority> Clone for RemoteBranchConnection<Backend, A> {
     fn clone(&self) -> Self {
         Self {
             descriptor: self.descriptor.clone(),
@@ -93,7 +85,7 @@ impl<Backend: PlatformBackend, A: Authority + Clone + Debug> Clone
     }
 }
 
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static>
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static>
     RemoteBranchConnection<Backend, A>
 {
     /// Get the branch name.
@@ -224,14 +216,14 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static>
 /// Can be either a descriptor (not yet connected) or an open connection.
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)]
-pub enum RemoteBranch<Backend: PlatformBackend, A: Authority + Clone + Debug = Operator> {
+pub enum RemoteBranch<Backend: PlatformBackend, A: OperatingAuthority = Operator> {
     /// A reference to a remote branch that hasn't been connected yet.
     Reference(RemoteBranchDescriptor<Backend, A>),
     /// An open connection to a remote branch.
     Open(RemoteBranchConnection<Backend, A>),
 }
 
-impl<Backend: PlatformBackend, A: Authority + Clone + Debug> Debug for RemoteBranch<Backend, A> {
+impl<Backend: PlatformBackend, A: OperatingAuthority> Debug for RemoteBranch<Backend, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Reference(desc) => f
@@ -250,7 +242,7 @@ impl<Backend: PlatformBackend, A: Authority + Clone + Debug> Debug for RemoteBra
     }
 }
 
-impl<Backend: PlatformBackend, A: Authority + Clone + Debug + 'static> RemoteBranch<Backend, A> {
+impl<Backend: PlatformBackend, A: OperatingAuthority + 'static> RemoteBranch<Backend, A> {
     /// Create a new reference to a remote branch.
     pub(super) fn reference(
         name: String,
@@ -279,9 +271,7 @@ impl<Backend: PlatformBackend, A: Authority + Clone + Debug + 'static> RemoteBra
     }
 }
 
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static>
-    RemoteBranch<Backend, A>
-{
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> RemoteBranch<Backend, A> {
     /// Get the branch name.
     pub fn name(&self) -> &str {
         self.descriptor().name()
