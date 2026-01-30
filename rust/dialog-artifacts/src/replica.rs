@@ -45,9 +45,18 @@ pub mod remote;
 pub mod repository;
 
 pub use operator::Operator;
-pub use principal::Principal;
+pub use principal::{Principal, PrincipalError};
 pub use remote::{RemoteBranch, RemoteCredentials, RemoteRepository, RemoteSite, Site};
 pub use repository::Remotes;
+
+/// An authority that can operate on a replica.
+///
+/// This trait alias bundles the required bounds for authorities used with Replica:
+/// - `Authority`: Provides DID identity and signing capability
+/// - `Clone`: Required for sharing authority across branches and operations
+/// - `Debug`: Required for error messages and debugging output
+pub trait OperatingAuthority: Authority + Clone + Debug {}
+impl<A: Authority + Clone + Debug> OperatingAuthority for A {}
 
 // TryFrom<Principal> for VerifyingKey is implemented in principal.rs
 
@@ -94,7 +103,7 @@ impl From<NodeReference> for Blake3Hash {
 /// The type parameter `A` represents the authority used for signing operations.
 /// It defaults to `Operator` for backward compatibility.
 #[derive(Debug, Clone)]
-pub struct Replica<Backend: PlatformBackend, A: Authority + Clone + Debug = Operator> {
+pub struct Replica<Backend: PlatformBackend, A: OperatingAuthority = Operator> {
     issuer: A,
     subject: Did,
     storage: PlatformStorage<Backend>,
@@ -102,7 +111,7 @@ pub struct Replica<Backend: PlatformBackend, A: Authority + Clone + Debug = Oper
     pub branches: Branches<Backend, A>,
 }
 
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + ConditionalSync + 'static>
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
     Replica<Backend, A>
 {
     /// Creates a new replica with the given issuer and storage backend.
@@ -118,11 +127,9 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + Conditio
         })
     }
 
-    /// Returns the principal (public key) of the issuer for this replica.
-    ///
-    /// This constructs a `Principal` from the issuer's DID.
-    pub fn principal(&self) -> Principal {
-        Principal::from_did(self.issuer.did()).expect("Authority DID must be valid did:key format")
+    /// Returns the DID of the authority for this replica.
+    pub fn did(&self) -> &Did {
+        self.issuer.did()
     }
 
     /// Returns a reference to the storage.
@@ -148,13 +155,13 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + Conditio
 
 /// Manages multiple branches within a replica.
 #[derive(Debug, Clone)]
-pub struct Branches<Backend: PlatformBackend, A: Authority + Clone + Debug = Operator> {
+pub struct Branches<Backend: PlatformBackend, A: OperatingAuthority = Operator> {
     issuer: A,
     subject: Did,
     storage: PlatformStorage<Backend>,
 }
 
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + ConditionalSync + 'static>
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
     Branches<Backend, A>
 {
     /// Creates a new instance for the given backend
@@ -361,10 +368,7 @@ where
 
 /// A branch represents a named line of development within a replica.
 #[derive(Clone)]
-pub struct Branch<
-    Backend: PlatformBackend + 'static,
-    A: Authority + Clone + Debug + 'static = Operator,
-> {
+pub struct Branch<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static = Operator> {
     issuer: A,
     id: BranchId,
     subject: Did,
@@ -375,7 +379,7 @@ pub struct Branch<
     upstream: Arc<std::sync::RwLock<Option<Upstream<Backend, A>>>>,
 }
 
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static> std::fmt::Debug
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> std::fmt::Debug
     for Branch<Backend, A>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -386,7 +390,7 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static>
     }
 }
 
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + ConditionalSync + 'static>
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
     Branch<Backend, A>
 {
     async fn mount(
@@ -476,12 +480,9 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + Conditio
         subject: Did,
     ) -> Result<Branch<Backend, A>, ReplicaError> {
         let id = id.into();
-        let principal =
-            Principal::from_did(issuer.did()).expect("Authority DID must be valid did:key format");
         let default_state = Some(BranchState::new(
             id.clone(),
-            #[allow(clippy::clone_on_copy)]
-            Revision::new(principal),
+            Revision::new(issuer.did().clone()),
             None,
         ));
 
@@ -586,9 +587,11 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + Conditio
 
     fn state(&self) -> BranchState {
         self.memory.read().unwrap_or_else(|| {
-            let principal = Principal::from_did(self.issuer.did())
-                .expect("Authority DID must be valid did:key format");
-            BranchState::new(self.id.clone(), Revision::new(principal), None)
+            BranchState::new(
+                self.id.clone(),
+                Revision::new(self.issuer.did().clone()),
+                None,
+            )
         })
     }
     /// Returns the branch identifier.
@@ -596,11 +599,9 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + Conditio
         &self.id
     }
 
-    /// Returns principal issuing changes on this branch.
-    ///
-    /// This constructs a `Principal` from the issuer's DID.
-    pub fn principal(&self) -> Principal {
-        Principal::from_did(self.issuer.did()).expect("Authority DID must be valid did:key format")
+    /// Returns the DID of the authority issuing changes on this branch.
+    pub fn did(&self) -> &Did {
+        self.issuer.did()
     }
 
     /// Returns the current revision of this branch.
@@ -764,10 +765,8 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + Conditio
                         Ok(Some(revision))
                     } else {
                         // Create new revision with integrated changes
-                        let principal = Principal::from_did(self.issuer.did())
-                            .expect("Authority DID must be valid did:key format");
                         let new_revision = Revision {
-                            issuer: principal,
+                            issuer: self.issuer.did().clone(),
                             tree: NodeReference(hash),
                             cause: HashSet::from([revision.edition()?]),
                             // period is max between local and remote periods + 1
@@ -846,7 +845,7 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + Conditio
 }
 
 // Implement ArtifactStore for Branch
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static> ArtifactStore
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> ArtifactStore
     for Branch<Backend, A>
 {
     fn select(
@@ -921,7 +920,7 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static>
 // Implement ArtifactStoreMut for Branch
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + ConditionalSync + 'static>
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
     ArtifactStoreMut for Branch<Backend, A>
 {
     async fn commit<Instructions>(
@@ -1023,14 +1022,13 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + Conditio
             let tree_reference = NodeReference(tree_hash);
 
             // Calculate the new period and moment based on the base revision
-            let principal = Principal::from_did(self.issuer.did())
-                .expect("Authority DID must be valid did:key format");
+            let issuer_did = self.issuer.did().clone();
             let (period, moment) = {
                 let base_period = *base_revision.period();
                 let base_moment = *base_revision.moment();
                 let base_issuer = base_revision.issuer();
 
-                if base_issuer == &principal {
+                if base_issuer == &issuer_did {
                     // Same issuer - increment moment
                     (base_period, base_moment + 1)
                 } else {
@@ -1040,7 +1038,7 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + Conditio
             };
 
             let new_revision = Revision {
-                issuer: principal,
+                issuer: issuer_did,
                 tree: tree_reference.clone(),
                 cause: HashSet::from([base_revision.edition().expect("Failed to create edition")]),
                 period,
@@ -1094,8 +1092,8 @@ pub use remote::{RemoteBackend, RemoteState};
 /// over those that are not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Occurence {
-    /// Site of this occurence.
-    pub site: Principal,
+    /// DID of the site where this occurence happened.
+    pub site: Did,
 
     /// Logical coordinated time component denoting a last synchronization
     /// cycle.
@@ -1110,10 +1108,11 @@ pub struct Occurence {
 /// kind of like git commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Revision {
-    /// Site where this revision was created.It as expected to be a signing
-    /// principal representing a tool acting on author's behalf. In the future
-    /// I expect we'll have signed delegation chain from user to this site.
-    pub issuer: Principal,
+    /// DID of the site where this revision was created. It is expected to be
+    /// the DID of a signing principal representing a tool acting on the
+    /// author's behalf. In the future we expect to have a signed delegation
+    /// chain from user to this site.
+    pub issuer: Did,
 
     /// Reference the root of the search tree.
     pub tree: NodeReference,
@@ -1143,8 +1142,8 @@ pub struct Revision {
 }
 
 impl Revision {
-    /// Creates new revision for with an empty tree
-    pub fn new(issuer: Principal) -> Self {
+    /// Creates new revision with an empty tree
+    pub fn new(issuer: Did) -> Self {
         Self {
             issuer,
             tree: NodeReference::default(),
@@ -1154,8 +1153,8 @@ impl Revision {
         }
     }
 
-    /// Issuer of this revision.
-    pub fn issuer(&self) -> &Principal {
+    /// DID of the issuer of this revision.
+    pub fn issuer(&self) -> &Did {
         &self.issuer
     }
 
@@ -1304,17 +1303,14 @@ impl BranchState {
 
 /// Descriptor for a local upstream branch (lazy loaded).
 #[derive(Clone)]
-pub struct LocalUpstream<
-    Backend: PlatformBackend + 'static,
-    A: Authority + Clone + Debug = Operator,
-> {
+pub struct LocalUpstream<Backend: PlatformBackend + 'static, A: OperatingAuthority = Operator> {
     branch_id: BranchId,
     issuer: A,
     storage: PlatformStorage<Backend>,
     subject: Did,
 }
 
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug> std::fmt::Debug
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority> std::fmt::Debug
     for LocalUpstream<Backend, A>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1324,7 +1320,7 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug> std::fmt:
     }
 }
 
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + ConditionalSync + 'static>
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
     LocalUpstream<Backend, A>
 {
     /// Load the branch on demand.
@@ -1348,17 +1344,14 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + Conditio
 /// to / from. It can be local or remote.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
-pub enum Upstream<
-    Backend: PlatformBackend + 'static,
-    A: Authority + Clone + Debug + 'static = Operator,
-> {
+pub enum Upstream<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static = Operator> {
     /// A local branch upstream (lazy - loaded on fetch/publish)
     Local(LocalUpstream<Backend, A>),
     /// A remote branch upstream
     Remote(RemoteBranch<Backend, A>),
 }
 
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + ConditionalSync + 'static>
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
     Upstream<Backend, A>
 {
     /// Creates an upstream from its state descriptor.
@@ -1466,8 +1459,8 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + Conditio
     }
 }
 
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static>
-    From<Branch<Backend, A>> for Upstream<Backend, A>
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> From<Branch<Backend, A>>
+    for Upstream<Backend, A>
 {
     fn from(branch: Branch<Backend, A>) -> Self {
         Self::Local(LocalUpstream {
@@ -1479,7 +1472,7 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static>
     }
 }
 
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static>
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static>
     From<RemoteBranch<Backend, A>> for Upstream<Backend, A>
 {
     fn from(branch: RemoteBranch<Backend, A>) -> Self {
@@ -1487,7 +1480,7 @@ impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + 'static>
     }
 }
 
-impl<Backend: PlatformBackend + 'static, A: Authority + Clone + Debug + ConditionalSync + 'static>
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
     From<Upstream<Backend, A>> for UpstreamState
 {
     fn from(upstream: Upstream<Backend, A>) -> Self {
@@ -1769,7 +1762,7 @@ mod tests {
 
         // Create a revision for main
         let main_revision = Revision {
-            issuer: issuer.principal().clone(),
+            issuer: issuer.did().clone(),
             tree: NodeReference(EMPT_TREE_HASH),
             cause: HashSet::new(),
             period: 0,
@@ -1787,7 +1780,7 @@ mod tests {
 
         // Create a new revision on feature branch with main_revision as cause
         let feature_revision = Revision {
-            issuer: issuer.principal().clone(),
+            issuer: issuer.did().clone(),
             tree: NodeReference(EMPT_TREE_HASH),
             cause: HashSet::from([main_revision.edition().expect("Failed to create edition")]),
             period: 0,
@@ -1934,7 +1927,7 @@ mod tests {
                 .expect("Failed to create main branch");
 
         let main_revision = Revision {
-            issuer: main_branch.principal().clone(),
+            issuer: main_branch.did().clone(),
             tree: NodeReference(EMPT_TREE_HASH),
             cause: HashSet::new(),
             period: 0,
