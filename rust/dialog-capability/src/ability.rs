@@ -1,5 +1,21 @@
 use crate::{Constrained, Did, Policy, PolicyBuilder, Subject};
 
+/// Convert a PascalCase or camelCase string to kebab-case.
+fn to_kebab_case(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 4);
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                result.push('-');
+            }
+            result.push(c.to_ascii_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 /// Trait for representing an abstract capability (subject + ability path).
 ///
 /// Implemented by `Subject` and all the `Constrained<P, Of>` chains
@@ -51,10 +67,11 @@ where
     fn ability(&self) -> String {
         let ability = self.capability.ability();
         if let Some(segment) = C::attenuation() {
+            let kebab = to_kebab_case(segment);
             if ability == "/" {
-                format!("/{}", segment.to_lowercase())
+                format!("/{}", kebab)
             } else {
-                format!("{}/{}", ability, segment.to_lowercase())
+                format!("{}/{}", ability, kebab)
             }
         } else {
             ability
