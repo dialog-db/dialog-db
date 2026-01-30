@@ -42,11 +42,6 @@
           rustPlatform.buildRustPackage rec {
             pname = "wasm-bindgen-cli";
             version = "0.2.100";
-            buildInputs =
-              [ rust-bin.stable.latest.default ]
-              ++ lib.optionals stdenv.isDarwin [
-                apple-sdk_15
-              ];
 
             src = fetchCrate {
               inherit pname version;
@@ -72,9 +67,6 @@
               trunk
               wasm-bindgen-cli
               wasm-pack
-            ]
-            ++ lib.optionals stdenv.isDarwin [
-              apple-sdk_15
             ];
 
         common-dev-tools = with pkgs; [
