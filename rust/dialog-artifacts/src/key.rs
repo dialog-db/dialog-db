@@ -226,18 +226,18 @@ pub trait KeyViewMut: KeyView {
 pub trait KeyView: Sized + Clone {
     /// Get an [`EntityKeyPart`] that refers to the [`Entity`] part of this
     /// [`KeyView`].
-    fn entity(&self) -> EntityKeyPart;
+    fn entity(&self) -> EntityKeyPart<'_>;
 
     /// Get an [`AttributeKeyPart`] that refers to the [`Attribute`] part of
     /// this [`KeyView`].
-    fn attribute(&self) -> AttributeKeyPart;
+    fn attribute(&self) -> AttributeKeyPart<'_>;
 
     /// Get the [`ValueDataType`] that is represented by this [`KeyView`].
     fn value_type(&self) -> ValueDataType;
 
     /// Get a [`ValueReferenceKeyPart`] that refers to the [`Value`] part of
     /// this [`KeyView`].
-    fn value_reference(&self) -> ValueReferenceKeyPart;
+    fn value_reference(&self) -> ValueReferenceKeyPart<'_>;
 }
 
 /// Trait for constructing key views from artifact selectors.

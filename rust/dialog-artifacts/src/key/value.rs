@@ -61,11 +61,11 @@ impl<K> KeyView for ValueKey<K>
 where
     K: AsRef<KeyBytes> + Clone,
 {
-    fn entity(&self) -> EntityKeyPart {
+    fn entity(&self) -> EntityKeyPart<'_> {
         EntityKeyPart(array_ref![self.0.as_ref(), ENTITY_OFFSET, ENTITY_LENGTH])
     }
 
-    fn attribute(&self) -> AttributeKeyPart {
+    fn attribute(&self) -> AttributeKeyPart<'_> {
         AttributeKeyPart(array_ref![
             self.0.as_ref(),
             ATTRIBUTE_OFFSET,
@@ -77,7 +77,7 @@ where
         self.0.as_ref()[VALUE_DATA_TYPE_OFFSET].into()
     }
 
-    fn value_reference(&self) -> ValueReferenceKeyPart {
+    fn value_reference(&self) -> ValueReferenceKeyPart<'_> {
         ValueReferenceKeyPart(array_ref![
             self.0.as_ref(),
             VALUE_REFERENCE_OFFSET,
