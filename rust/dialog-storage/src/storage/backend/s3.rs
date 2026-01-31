@@ -528,9 +528,7 @@ where
         let capability: Capability<storage::Delete> = Subject::from(self.subject.clone())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new(&self.path))
-            .invoke(storage::Delete {
-                key: key.to_vec().into(),
-            });
+            .invoke(storage::Delete { key: key.to_vec() });
 
         Provider::<storage::Delete>::execute(&mut self.bucket, capability)
             .await
@@ -607,8 +605,8 @@ where
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new(&self.path))
             .invoke(storage::Set {
-                key: key.into(),
-                value: value.clone().into(),
+                key,
+                value: value.clone(),
             });
 
         // Execute via Provider
@@ -622,9 +620,7 @@ where
         let capability: Capability<storage::Get> = Subject::from(self.subject.clone())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new(&self.path))
-            .invoke(storage::Get {
-                key: key.clone().into(),
-            });
+            .invoke(storage::Get { key: key.clone() });
 
         // We need a mutable reference for Provider, so clone the bucket
         let mut bucket = self.bucket.clone();
@@ -691,7 +687,7 @@ where
                     .attenuate(memory::Space::new(&self.path))
                     .attenuate(memory::Cell::new(&cell))
                     .invoke(memory::Publish {
-                        content: value.into(),
+                        content: value,
                         when: edition.map(|e| e.as_bytes().to_vec().into()),
                     });
 
@@ -721,7 +717,7 @@ where
                     .attenuate(memory::Space::new(&self.path))
                     .attenuate(memory::Cell::new(&cell))
                     .invoke(memory::Retract {
-                        when: when.as_bytes().to_vec().into(),
+                        when: when.as_bytes().to_vec(),
                     });
 
                 Provider::<memory::Retract>::execute(&mut self.bucket, capability)

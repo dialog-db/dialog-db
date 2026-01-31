@@ -50,7 +50,7 @@ where
                 .bytes()
                 .await
                 .map_err(|e| ArchiveError::Io(e.to_string()))?;
-            Ok(Some(bytes.to_vec().into()))
+            Ok(Some(bytes.to_vec()))
         } else if response.status() == reqwest::StatusCode::NOT_FOUND {
             Ok(None)
         } else {

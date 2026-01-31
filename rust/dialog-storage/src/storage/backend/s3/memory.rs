@@ -64,8 +64,8 @@ where
                 .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
             Ok(Some(Publication {
-                content: bytes.to_vec().into(),
-                edition: edition.into_bytes().into(),
+                content: bytes.to_vec(),
+                edition: edition.into_bytes(),
             }))
         } else if response.status() == reqwest::StatusCode::NOT_FOUND {
             Ok(None)
@@ -130,7 +130,7 @@ where
                     .ok_or_else(|| {
                         MemoryError::Storage("Response missing ETag header".to_string())
                     })?;
-                Ok(new_edition.into_bytes().into())
+                Ok(new_edition.into_bytes())
             }
             reqwest::StatusCode::PRECONDITION_FAILED => Err(MemoryError::EditionMismatch {
                 expected: when,
