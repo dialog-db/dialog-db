@@ -84,10 +84,7 @@ impl<Issuer> Provider<Publish> for S3<Issuer>
 where
     Issuer: Authority + ConditionalSend + ConditionalSync,
 {
-    async fn execute(
-        &mut self,
-        input: Capability<Publish>,
-    ) -> Result<dialog_common::Bytes, MemoryError> {
+    async fn execute(&mut self, input: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
         let Publish { content, when } = Publish::of(&input);
         let when = when
             .as_ref()

@@ -17,6 +17,7 @@ pub use dialog_effects::archive::{Archive, Catalog};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Get {
     /// The blake3 digest of the content to retrieve.
+    #[serde(with = "dialog_common::as_bytes")]
     pub digest: Blake3Hash,
 }
 
@@ -52,6 +53,7 @@ impl S3Request for Capability<Get> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Put {
     /// Content digest (Blake3 hash, used as S3 key).
+    #[serde(with = "dialog_common::as_bytes")]
     pub digest: Blake3Hash,
     /// Checksum for integrity verification.
     pub checksum: Checksum,
