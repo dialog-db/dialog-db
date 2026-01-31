@@ -30,6 +30,7 @@ dialog-common = { workspace = true }
 dialog-effects = { workspace = true }
 hmac = "0.12"
 serde = { workspace = true, features = ["derive"] }
+serde_bytes = { workspace = true }
 sha2 = "0.10"
 thiserror = { workspace = true }
 url = { workspace = true }

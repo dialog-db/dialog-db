@@ -15,7 +15,6 @@
 //! ```
 
 pub use dialog_capability::{Attenuation, Capability, Effect, Policy, Subject};
-use dialog_common::Bytes;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -54,19 +53,20 @@ impl Policy for Store {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Get {
     /// The key to look up.
-    pub key: Bytes,
+    #[serde(with = "serde_bytes")]
+    pub key: Vec<u8>,
 }
 
 impl Get {
     /// Create a new Get effect.
-    pub fn new(key: impl Into<Bytes>) -> Self {
+    pub fn new(key: impl Into<Vec<u8>>) -> Self {
         Self { key: key.into() }
     }
 }
 
 impl Effect for Get {
     type Of = Store;
-    type Output = Result<Option<Bytes>, StorageError>;
+    type Output = Result<Option<Vec<u8>>, StorageError>;
 }
 
 /// Extension trait for `Capability<Get>` to access its fields.
@@ -74,7 +74,7 @@ pub trait GetCapability {
     /// Get the store name from the capability chain.
     fn store(&self) -> &str;
     /// Get the key from the capability chain.
-    fn key(&self) -> &Bytes;
+    fn key(&self) -> &[u8];
 }
 
 impl GetCapability for Capability<Get> {
@@ -82,7 +82,7 @@ impl GetCapability for Capability<Get> {
         &Store::of(self).store
     }
 
-    fn key(&self) -> &Bytes {
+    fn key(&self) -> &[u8] {
         &Get::of(self).key
     }
 }
@@ -91,14 +91,16 @@ impl GetCapability for Capability<Get> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Set {
     /// The key to update.
-    pub key: Bytes,
+    #[serde(with = "serde_bytes")]
+    pub key: Vec<u8>,
     /// The value to set.
-    pub value: Bytes,
+    #[serde(with = "serde_bytes")]
+    pub value: Vec<u8>,
 }
 
 impl Set {
     /// Create a new Set effect.
-    pub fn new(key: impl Into<Bytes>, value: impl Into<Bytes>) -> Self {
+    pub fn new(key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self {
         Self {
             key: key.into(),
             value: value.into(),
@@ -116,9 +118,9 @@ pub trait SetCapability {
     /// Get the store name from the capability chain.
     fn store(&self) -> &str;
     /// Get the key from the capability chain.
-    fn key(&self) -> &Bytes;
+    fn key(&self) -> &[u8];
     /// Get the value from the capability chain.
-    fn value(&self) -> &Bytes;
+    fn value(&self) -> &[u8];
 }
 
 impl SetCapability for Capability<Set> {
@@ -126,11 +128,11 @@ impl SetCapability for Capability<Set> {
         &Store::of(self).store
     }
 
-    fn key(&self) -> &Bytes {
+    fn key(&self) -> &[u8] {
         &Set::of(self).key
     }
 
-    fn value(&self) -> &Bytes {
+    fn value(&self) -> &[u8] {
         &Set::of(self).value
     }
 }
@@ -139,12 +141,13 @@ impl SetCapability for Capability<Set> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Delete {
     /// The key to delete.
-    pub key: Bytes,
+    #[serde(with = "serde_bytes")]
+    pub key: Vec<u8>,
 }
 
 impl Delete {
     /// Create a new Delete effect.
-    pub fn new(key: impl Into<Bytes>) -> Self {
+    pub fn new(key: impl Into<Vec<u8>>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -159,7 +162,7 @@ pub trait DeleteCapability {
     /// Get the store name from the capability chain.
     fn store(&self) -> &str;
     /// Get the key from the capability chain.
-    fn key(&self) -> &Bytes;
+    fn key(&self) -> &[u8];
 }
 
 impl DeleteCapability for Capability<Delete> {
@@ -167,7 +170,7 @@ impl DeleteCapability for Capability<Delete> {
         &Store::of(self).store
     }
 
-    fn key(&self) -> &Bytes {
+    fn key(&self) -> &[u8] {
         &Delete::of(self).key
     }
 }
@@ -276,7 +279,7 @@ mod tests {
 
         // Use policy() method to extract nested constraints
         assert_eq!(claim.policy::<Store, _>().store, "index");
-        assert_eq!(claim.policy::<Set, _>().key.as_slice(), &[1, 2, 3]);
+        assert_eq!(&claim.policy::<Set, _>().key[..], &[1, 2, 3]);
     }
 
     #[cfg(feature = "ucan")]

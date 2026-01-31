@@ -15,7 +15,7 @@
 use std::error::Error;
 
 pub use dialog_capability::{Attenuation, Capability, Effect, PerformError, Policy, Subject};
-pub use dialog_common::{Blake3Hash, Bytes};
+pub use dialog_common::Blake3Hash;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -57,6 +57,7 @@ impl Policy for Catalog {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Get {
     /// The blake3 digest of the content to retrieve.
+    #[serde(with = "dialog_common::as_bytes")]
     pub digest: Blake3Hash,
 }
 
@@ -71,7 +72,7 @@ impl Get {
 
 impl Effect for Get {
     type Of = Catalog;
-    type Output = Result<Option<Bytes>, ArchiveError>;
+    type Output = Result<Option<Vec<u8>>, ArchiveError>;
 }
 
 /// Extension trait for `Capability<Get>` to access its fields.
@@ -98,14 +99,16 @@ impl GetCapability for Capability<Get> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Put {
     /// The blake3 digest of the content (must match hash of content).
+    #[serde(with = "dialog_common::as_bytes")]
     pub digest: Blake3Hash,
     /// The content to store.
-    pub content: Bytes,
+    #[serde(with = "serde_bytes")]
+    pub content: Vec<u8>,
 }
 
 impl Put {
     /// Create a new Put effect.
-    pub fn new(digest: impl Into<Blake3Hash>, content: impl Into<Bytes>) -> Self {
+    pub fn new(digest: impl Into<Blake3Hash>, content: impl Into<Vec<u8>>) -> Self {
         Self {
             digest: digest.into(),
             content: content.into(),
@@ -125,7 +128,7 @@ pub trait PutCapability {
     /// Get the digest from the capability chain.
     fn digest(&self) -> &Blake3Hash;
     /// Get the content from the capability chain.
-    fn content(&self) -> &Bytes;
+    fn content(&self) -> &[u8];
 }
 
 impl PutCapability for Capability<Put> {
@@ -137,7 +140,7 @@ impl PutCapability for Capability<Put> {
         &Put::of(self).digest
     }
 
-    fn content(&self) -> &Bytes {
+    fn content(&self) -> &[u8] {
         &Put::of(self).content
     }
 }
@@ -226,7 +229,7 @@ mod tests {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
-            .invoke(Put::new([0u8; 32], Bytes::new()));
+            .invoke(Put::new([0u8; 32], Vec::new()));
 
         assert_eq!(claim.ability(), "/archive/put");
     }

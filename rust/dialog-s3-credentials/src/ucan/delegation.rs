@@ -332,8 +332,8 @@ impl<'de> Deserialize<'de> for DelegationChain {
     where
         D: Deserializer<'de>,
     {
-        // Use dialog_common::Bytes to properly deserialize CBOR byte strings
-        let bytes: dialog_common::Bytes = dialog_common::Bytes::deserialize(deserializer)?;
+        // Use serde_bytes::ByteBuf to properly deserialize CBOR byte strings
+        let bytes: serde_bytes::ByteBuf = serde_bytes::ByteBuf::deserialize(deserializer)?;
         DelegationChain::try_from(bytes.as_slice()).map_err(serde::de::Error::custom)
     }
 }

@@ -7,7 +7,6 @@ use super::{AccessError, AuthorizedRequest, S3Request};
 use crate::Checksum;
 use base58::ToBase58;
 use dialog_capability::{Capability, Effect, Policy};
-use dialog_common::Bytes;
 use serde::{Deserialize, Serialize};
 
 // Re-export hierarchy types from dialog-effects
@@ -17,12 +16,13 @@ pub use dialog_effects::storage::{Storage, Store};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Get {
     /// The key to look up.
-    pub key: Bytes,
+    #[serde(with = "serde_bytes")]
+    pub key: Vec<u8>,
 }
 
 impl Get {
     /// Create a new Get effect.
-    pub fn new(key: impl Into<Bytes>) -> Self {
+    pub fn new(key: impl Into<Vec<u8>>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -41,7 +41,7 @@ impl S3Request for Capability<Get> {
             "{}/{}/{}",
             self.subject(),
             Store::of(self).store,
-            Get::of(self).key.as_slice().to_base58()
+            Get::of(self).key.to_base58()
         )
     }
 }
@@ -50,14 +50,15 @@ impl S3Request for Capability<Get> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Set {
     /// The storage key.
-    pub key: Bytes,
+    #[serde(with = "serde_bytes")]
+    pub key: Vec<u8>,
     /// Checksum for integrity verification (SHA-256).
     pub checksum: Checksum,
 }
 
 impl Set {
     /// Create a new Set effect.
-    pub fn new(key: impl Into<Bytes>, checksum: Checksum) -> Self {
+    pub fn new(key: impl Into<Vec<u8>>, checksum: Checksum) -> Self {
         Self {
             key: key.into(),
             checksum,
@@ -79,7 +80,7 @@ impl S3Request for Capability<Set> {
             "{}/{}/{}",
             self.subject(),
             &Store::of(self).store,
-            Set::of(self).key.as_slice().to_base58()
+            Set::of(self).key.to_base58()
         )
     }
     fn checksum(&self) -> Option<&Checksum> {
@@ -91,12 +92,13 @@ impl S3Request for Capability<Set> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Delete {
     /// The storage key to delete.
-    pub key: Bytes,
+    #[serde(with = "serde_bytes")]
+    pub key: Vec<u8>,
 }
 
 impl Delete {
     /// Create a new Delete effect.
-    pub fn new(key: impl Into<Bytes>) -> Self {
+    pub fn new(key: impl Into<Vec<u8>>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -115,7 +117,7 @@ impl S3Request for Capability<Delete> {
             "{}/{}/{}",
             self.subject(),
             &Store::of(self).store,
-            Delete::of(self).key.as_slice().to_base58()
+            Delete::of(self).key.to_base58()
         )
     }
 }

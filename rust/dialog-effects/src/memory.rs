@@ -15,7 +15,6 @@
 //! ```
 
 pub use dialog_capability::{Attenuation, Capability, Effect, Policy, Subject};
-pub use dialog_common::Bytes;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -74,9 +73,11 @@ pub type Edition = String;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Publication {
     /// The cell's current content.
-    pub content: Bytes,
+    #[serde(with = "serde_bytes")]
+    pub content: Vec<u8>,
     /// The edition identifier for this content.
-    pub edition: Bytes,
+    #[serde(with = "serde_bytes")]
+    pub edition: Vec<u8>,
 }
 
 /// Resolve operation - reads current cell content and edition.
@@ -117,24 +118,26 @@ impl ResolveCapability for Capability<Resolve> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Publish {
     /// The content to publish.
-    pub content: Bytes,
+    #[serde(with = "serde_bytes")]
+    pub content: Vec<u8>,
     /// The expected current edition, or None if expecting empty cell.
-    pub when: Option<Bytes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<serde_bytes::ByteBuf>,
 }
 
 impl Publish {
     /// Create a new Publish effect.
-    pub fn new(content: impl Into<Bytes>, when: Option<Bytes>) -> Self {
+    pub fn new(content: impl Into<Vec<u8>>, when: Option<Vec<u8>>) -> Self {
         Self {
             content: content.into(),
-            when,
+            when: when.map(serde_bytes::ByteBuf::from),
         }
     }
 }
 
 impl Effect for Publish {
     type Of = Cell;
-    type Output = Result<Bytes, MemoryError>;
+    type Output = Result<Vec<u8>, MemoryError>;
 }
 
 /// Extension trait for `Capability<Publish>` to access its fields.
@@ -144,9 +147,9 @@ pub trait PublishCapability {
     /// Get the cell name from the capability chain.
     fn cell(&self) -> &str;
     /// Get the content to publish.
-    fn content(&self) -> &Bytes;
+    fn content(&self) -> &[u8];
     /// Get the expected edition (when condition).
-    fn when(&self) -> Option<&Bytes>;
+    fn when(&self) -> Option<&[u8]>;
 }
 
 impl PublishCapability for Capability<Publish> {
@@ -158,12 +161,12 @@ impl PublishCapability for Capability<Publish> {
         &Cell::of(self).cell
     }
 
-    fn content(&self) -> &Bytes {
+    fn content(&self) -> &[u8] {
         &Publish::of(self).content
     }
 
-    fn when(&self) -> Option<&Bytes> {
-        Publish::of(self).when.as_ref()
+    fn when(&self) -> Option<&[u8]> {
+        Publish::of(self).when.as_ref().map(|b| b.as_ref())
     }
 }
 
@@ -174,12 +177,13 @@ impl PublishCapability for Capability<Publish> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Retract {
     /// The expected current edition.
-    pub when: Bytes,
+    #[serde(with = "serde_bytes")]
+    pub when: Vec<u8>,
 }
 
 impl Retract {
     /// Create a new Retract effect.
-    pub fn new(when: impl Into<Bytes>) -> Self {
+    pub fn new(when: impl Into<Vec<u8>>) -> Self {
         Self { when: when.into() }
     }
 }
@@ -196,7 +200,7 @@ pub trait RetractCapability {
     /// Get the cell name from the capability chain.
     fn cell(&self) -> &str;
     /// Get the expected edition (when condition).
-    fn when(&self) -> &Bytes;
+    fn when(&self) -> &[u8];
 }
 
 impl RetractCapability for Capability<Retract> {
@@ -208,7 +212,7 @@ impl RetractCapability for Capability<Retract> {
         &Cell::of(self).cell
     }
 
-    fn when(&self) -> &Bytes {
+    fn when(&self) -> &[u8] {
         &Retract::of(self).when
     }
 }
@@ -328,7 +332,7 @@ mod tests {
                 .attenuate(Space::new("local"))
                 .attenuate(Cell::new("main"))
                 .invoke(Publish {
-                    content: b"hello".to_vec().into(),
+                    content: b"hello".to_vec(),
                     when: Some(b"v1".to_vec().into()),
                 });
             let params = parameters(&cap);
