@@ -769,6 +769,7 @@ dependencies = [
  "dialog-macros",
  "futures-util",
  "serde",
+ "serde_bytes",
  "serde_json",
  "thiserror 2.0.17",
  "tokio",
@@ -800,6 +801,20 @@ dependencies = [
  "ratatui",
  "throbber-widgets-tui",
  "tokio",
+]
+
+[[package]]
+name = "dialog-effects"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dialog-capability",
+ "dialog-common",
+ "ipld-core",
+ "serde",
+ "serde_bytes",
+ "thiserror 2.0.17",
+ "ucan",
 ]
 
 [[package]]
