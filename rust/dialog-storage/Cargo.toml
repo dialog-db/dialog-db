@@ -33,6 +33,8 @@ web-integration-tests = ["dialog-common/web-integration-tests"]
 
 [dependencies]
 dialog-common = { workspace = true }
+dialog-capability = { workspace = true }
+dialog-effects = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
 async-stream = { workspace = true }
