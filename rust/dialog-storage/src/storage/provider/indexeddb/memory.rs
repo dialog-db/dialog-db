@@ -1,6 +1,7 @@
 //! Memory capability provider for IndexedDB.
 //!
 //! Implements transactional cell storage with CAS (Compare-And-Swap) semantics.
+//! Uses a single `memory` store with space and cell encoded in the key.
 
 use super::IndexedDb;
 use async_trait::async_trait;
@@ -11,8 +12,10 @@ use dialog_effects::memory::{
     RetractCapability,
 };
 use js_sys::Uint8Array;
-use rexie::TransactionMode;
 use wasm_bindgen::{JsCast, JsValue};
+
+/// The single object store used for all memory operations.
+const MEMORY_STORE: &str = "memory";
 
 /// Convert bytes to a JS Uint8Array.
 fn bytes_to_typed_array(bytes: &[u8]) -> JsValue {
@@ -26,6 +29,21 @@ fn format_edition(edition: Option<&[u8]>) -> Option<String> {
     edition.map(base58::ToBase58::to_base58)
 }
 
+/// Build a key from space and cell.
+fn make_key(space: &str, cell: &str) -> JsValue {
+    JsValue::from_str(&format!("{}/{}", space, cell))
+}
+
+fn storage_error(e: impl std::fmt::Display) -> MemoryError {
+    MemoryError::Storage(e.to_string())
+}
+
+impl From<super::IndexedDbError> for MemoryError {
+    fn from(e: super::IndexedDbError) -> Self {
+        MemoryError::Storage(e.to_string())
+    }
+}
+
 #[async_trait(?Send)]
 impl Provider<Resolve> for IndexedDb {
     async fn execute(
@@ -33,53 +51,34 @@ impl Provider<Resolve> for IndexedDb {
         effect: Capability<Resolve>,
     ) -> Result<Option<Publication>, MemoryError> {
         let subject = effect.subject().into();
-        let space = effect.space();
-        let cell = effect.cell();
+        let key = make_key(effect.space(), effect.cell());
 
-        let store_path = format!("memory/{}", space);
-        self.ensure_store(&store_path);
-
-        let db = self
-            .session(&subject)
+        let store = self
+            .store(&subject, MEMORY_STORE)
             .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            .map_err(storage_error)?;
 
-        let tx = db
-            .transaction(&[&store_path], TransactionMode::ReadOnly)
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        store
+            .query(|object_store| async move {
+                let value = object_store.get(key).await.map_err(storage_error)?;
 
-        let store = tx
-            .store(&store_path)
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+                let Some(value) = value else {
+                    return Ok(None);
+                };
 
-        // Use cell name as the key within the space store
-        let key = JsValue::from_str(cell);
+                let bytes = value
+                    .dyn_into::<Uint8Array>()
+                    .map_err(|_| MemoryError::Storage("Value is not Uint8Array".to_string()))?
+                    .to_vec();
 
-        let value = store
-            .get(key)
+                let edition = Blake3Hash::hash(&bytes);
+
+                Ok(Some(Publication {
+                    content: bytes,
+                    edition: edition.as_bytes().to_vec(),
+                }))
+            })
             .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        tx.done()
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        let Some(value) = value else {
-            return Ok(None);
-        };
-
-        let bytes = value
-            .dyn_into::<Uint8Array>()
-            .map_err(|_| MemoryError::Storage("Value is not Uint8Array".to_string()))?
-            .to_vec();
-
-        // Compute edition as BLAKE3 hash of content
-        let edition = Blake3Hash::hash(&bytes);
-
-        Ok(Some(Publication {
-            content: bytes,
-            edition: edition.as_bytes().to_vec(),
-        }))
     }
 }
 
@@ -87,97 +86,80 @@ impl Provider<Resolve> for IndexedDb {
 impl Provider<Publish> for IndexedDb {
     async fn execute(&mut self, effect: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
         let subject = effect.subject().into();
-        let space = effect.space();
-        let cell = effect.cell();
-        let content = effect.content();
-        let expected_edition = effect.when();
+        let key = make_key(effect.space(), effect.cell());
+        let content = effect.content().to_vec();
+        let expected_edition = effect.when().map(|e| e.to_vec());
 
-        let store_path = format!("memory/{}", space);
-        self.ensure_store(&store_path);
-
-        let db = self
-            .session(&subject)
+        let store = self
+            .store(&subject, MEMORY_STORE)
             .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            .map_err(storage_error)?;
 
-        let tx = db
-            .transaction(&[&store_path], TransactionMode::ReadWrite)
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        let store = tx
-            .store(&store_path)
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        let key = JsValue::from_str(cell);
-
-        // Read current value to check CAS condition
-        let current = store
-            .get(key.clone())
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        let current_edition = if let Some(value) = &current {
-            let bytes = value
-                .clone()
-                .dyn_into::<Uint8Array>()
-                .map_err(|_| MemoryError::Storage("Value is not Uint8Array".to_string()))?
-                .to_vec();
-            Some(Blake3Hash::hash(&bytes))
-        } else {
-            None
-        };
-
-        // Compute new edition
-        let new_edition = Blake3Hash::hash(content);
-
-        // If current value already matches desired value, succeed without writing
-        if current_edition.as_ref().map(|h| h.as_bytes()) == Some(new_edition.as_bytes()) {
-            return Ok(new_edition.as_bytes().to_vec());
-        }
-
-        // Check CAS condition
-        match (expected_edition, &current_edition) {
-            // Creating new: require cell doesn't exist
-            (None, Some(_)) => {
-                return Err(MemoryError::EditionMismatch {
-                    expected: None,
-                    actual: format_edition(
-                        current_edition.as_ref().map(|h| h.as_bytes().as_slice()),
-                    ),
-                });
-            }
-            // Updating existing: require edition matches
-            (Some(expected), Some(current)) => {
-                if expected != current.as_bytes() {
-                    return Err(MemoryError::EditionMismatch {
-                        expected: format_edition(Some(expected)),
-                        actual: format_edition(Some(current.as_bytes())),
-                    });
-                }
-            }
-            // Updating non-existent: fail
-            (Some(expected), None) => {
-                return Err(MemoryError::EditionMismatch {
-                    expected: format_edition(Some(expected)),
-                    actual: None,
-                });
-            }
-            // Creating new when cell doesn't exist: valid
-            (None, None) => {}
-        }
-
-        // Write the new value
-        let js_value = bytes_to_typed_array(content);
         store
-            .put(&js_value, Some(&key))
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            .transact(|object_store| async move {
+                // Read current value to check CAS condition
+                let current = object_store.get(key.clone()).await.map_err(storage_error)?;
 
-        tx.done()
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+                let current_edition = if let Some(value) = &current {
+                    let bytes = value
+                        .clone()
+                        .dyn_into::<Uint8Array>()
+                        .map_err(|_| MemoryError::Storage("Value is not Uint8Array".to_string()))?
+                        .to_vec();
+                    Some(Blake3Hash::hash(&bytes))
+                } else {
+                    None
+                };
 
-        Ok(new_edition.as_bytes().to_vec())
+                // Compute new edition
+                let new_edition = Blake3Hash::hash(&content);
+
+                // If current value already matches desired value, succeed without writing
+                if current_edition.as_ref().map(|h| h.as_bytes()) == Some(new_edition.as_bytes()) {
+                    return Ok(new_edition.as_bytes().to_vec());
+                }
+
+                // Check CAS condition
+                match (expected_edition.as_deref(), &current_edition) {
+                    // Creating new: require cell doesn't exist
+                    (None, Some(_)) => {
+                        return Err(MemoryError::EditionMismatch {
+                            expected: None,
+                            actual: format_edition(
+                                current_edition.as_ref().map(|h| h.as_bytes().as_slice()),
+                            ),
+                        });
+                    }
+                    // Updating existing: require edition matches
+                    (Some(expected), Some(current)) => {
+                        if expected != current.as_bytes() {
+                            return Err(MemoryError::EditionMismatch {
+                                expected: format_edition(Some(expected)),
+                                actual: format_edition(Some(current.as_bytes())),
+                            });
+                        }
+                    }
+                    // Updating non-existent: fail
+                    (Some(expected), None) => {
+                        return Err(MemoryError::EditionMismatch {
+                            expected: format_edition(Some(expected)),
+                            actual: None,
+                        });
+                    }
+                    // Creating new when cell doesn't exist: valid
+                    (None, None) => {}
+                }
+
+                // Write the new value
+                let js_value = bytes_to_typed_array(&content);
+                object_store
+                    .put(&js_value, Some(&key))
+                    .await
+                    .map_err(storage_error)?;
+
+                Ok(new_edition.as_bytes().to_vec())
+            })
+            .await
     }
 }
 
@@ -185,64 +167,44 @@ impl Provider<Publish> for IndexedDb {
 impl Provider<Retract> for IndexedDb {
     async fn execute(&mut self, effect: Capability<Retract>) -> Result<(), MemoryError> {
         let subject = effect.subject().into();
-        let space = effect.space();
-        let cell = effect.cell();
-        let expected_edition = effect.when();
+        let key = make_key(effect.space(), effect.cell());
+        let expected_edition = effect.when().to_vec();
 
-        let store_path = format!("memory/{}", space);
-        self.ensure_store(&store_path);
-
-        let db = self
-            .session(&subject)
+        let store = self
+            .store(&subject, MEMORY_STORE)
             .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            .map_err(storage_error)?;
 
-        let tx = db
-            .transaction(&[&store_path], TransactionMode::ReadWrite)
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        let store = tx
-            .store(&store_path)
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        let key = JsValue::from_str(cell);
-
-        // Read current value to check CAS condition
-        let current = store
-            .get(key.clone())
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        // If already deleted, succeed
-        let Some(value) = current else {
-            return Ok(());
-        };
-
-        let bytes = value
-            .dyn_into::<Uint8Array>()
-            .map_err(|_| MemoryError::Storage("Value is not Uint8Array".to_string()))?
-            .to_vec();
-        let current_edition = Blake3Hash::hash(&bytes);
-
-        // Check CAS condition
-        if expected_edition != current_edition.as_bytes() {
-            return Err(MemoryError::EditionMismatch {
-                expected: format_edition(Some(expected_edition)),
-                actual: format_edition(Some(current_edition.as_bytes())),
-            });
-        }
-
-        // Delete the value
         store
-            .delete(key)
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            .transact(|object_store| async move {
+                // Read current value to check CAS condition
+                let current = object_store.get(key.clone()).await.map_err(storage_error)?;
 
-        tx.done()
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+                // If already deleted, succeed
+                let Some(value) = current else {
+                    return Ok(());
+                };
 
-        Ok(())
+                let bytes = value
+                    .dyn_into::<Uint8Array>()
+                    .map_err(|_| MemoryError::Storage("Value is not Uint8Array".to_string()))?
+                    .to_vec();
+                let current_edition = Blake3Hash::hash(&bytes);
+
+                // Check CAS condition
+                if expected_edition != current_edition.as_bytes() {
+                    return Err(MemoryError::EditionMismatch {
+                        expected: format_edition(Some(&expected_edition)),
+                        actual: format_edition(Some(current_edition.as_bytes())),
+                    });
+                }
+
+                // Delete the value
+                object_store.delete(key).await.map_err(storage_error)?;
+
+                Ok(())
+            })
+            .await
     }
 }
 

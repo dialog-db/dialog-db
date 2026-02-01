@@ -7,7 +7,6 @@ use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::archive::{ArchiveError, Get, GetCapability, Put, PutCapability};
 use js_sys::Uint8Array;
-use rexie::TransactionMode;
 use wasm_bindgen::{JsCast, JsValue};
 
 /// Convert bytes to a JS Uint8Array.
@@ -15,6 +14,16 @@ fn bytes_to_typed_array(bytes: &[u8]) -> JsValue {
     let array = Uint8Array::new_with_length(bytes.len() as u32);
     array.copy_from(bytes);
     JsValue::from(array)
+}
+
+fn storage_error(e: impl std::fmt::Display) -> ArchiveError {
+    ArchiveError::Storage(e.to_string())
+}
+
+impl From<super::IndexedDbError> for ArchiveError {
+    fn from(e: super::IndexedDbError) -> Self {
+        ArchiveError::Storage(e.to_string())
+    }
 }
 
 #[async_trait(?Send)]
@@ -25,43 +34,29 @@ impl Provider<Get> for IndexedDb {
         let digest = effect.digest();
 
         let store_path = format!("archive/{}", catalog);
-        self.ensure_store(&store_path);
-
-        let db = self
-            .session(&subject)
-            .await
-            .map_err(|e| ArchiveError::Storage(e.to_string()))?;
-
-        let tx = db
-            .transaction(&[&store_path], TransactionMode::ReadOnly)
-            .map_err(|e| ArchiveError::Storage(e.to_string()))?;
-
-        let store = tx
-            .store(&store_path)
-            .map_err(|e| ArchiveError::Storage(e.to_string()))?;
-
-        // Use base58-encoded digest as the key
         let key = JsValue::from_str(&digest.as_bytes().to_base58());
 
-        let value = store
-            .get(key)
+        let store = self
+            .store(&subject, &store_path)
             .await
-            .map_err(|e| ArchiveError::Storage(e.to_string()))?;
+            .map_err(storage_error)?;
 
-        let Some(value) = value else {
-            return Ok(None);
-        };
+        store
+            .query(|object_store| async move {
+                let value = object_store.get(key).await.map_err(storage_error)?;
 
-        let bytes = value
-            .dyn_into::<Uint8Array>()
-            .map_err(|_| ArchiveError::Storage("Value is not Uint8Array".to_string()))?
-            .to_vec();
+                let Some(value) = value else {
+                    return Ok(None);
+                };
 
-        tx.done()
+                let bytes = value
+                    .dyn_into::<Uint8Array>()
+                    .map_err(|_| ArchiveError::Storage("Value is not Uint8Array".to_string()))?
+                    .to_vec();
+
+                Ok(Some(bytes))
+            })
             .await
-            .map_err(|e| ArchiveError::Storage(e.to_string()))?;
-
-        Ok(Some(bytes))
     }
 }
 
@@ -83,35 +78,23 @@ impl Provider<Put> for IndexedDb {
         }
 
         let store_path = format!("archive/{}", catalog);
-        self.ensure_store(&store_path);
-
-        let db = self
-            .session(&subject)
-            .await
-            .map_err(|e| ArchiveError::Storage(e.to_string()))?;
-
-        let tx = db
-            .transaction(&[&store_path], TransactionMode::ReadWrite)
-            .map_err(|e| ArchiveError::Storage(e.to_string()))?;
-
-        let store = tx
-            .store(&store_path)
-            .map_err(|e| ArchiveError::Storage(e.to_string()))?;
-
-        // Use base58-encoded digest as the key
         let key = JsValue::from_str(&digest.as_bytes().to_base58());
         let value = bytes_to_typed_array(content);
 
+        let store = self
+            .store(&subject, &store_path)
+            .await
+            .map_err(storage_error)?;
+
         store
-            .put(&value, Some(&key))
+            .transact(|object_store| async move {
+                object_store
+                    .put(&value, Some(&key))
+                    .await
+                    .map_err(storage_error)?;
+                Ok(())
+            })
             .await
-            .map_err(|e| ArchiveError::Storage(e.to_string()))?;
-
-        tx.done()
-            .await
-            .map_err(|e| ArchiveError::Storage(e.to_string()))?;
-
-        Ok(())
     }
 }
 

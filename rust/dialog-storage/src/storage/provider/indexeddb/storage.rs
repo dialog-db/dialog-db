@@ -1,4 +1,7 @@
 //! Storage capability provider for IndexedDB.
+//!
+//! This is a lower-level API where the store name maps directly to an IndexedDB
+//! object store. You can use any store path, including `archive/index` or `memory`.
 
 use super::IndexedDb;
 use async_trait::async_trait;
@@ -9,7 +12,6 @@ use dialog_effects::storage::{
     SetCapability, StorageError,
 };
 use js_sys::Uint8Array;
-use rexie::TransactionMode;
 use wasm_bindgen::{JsCast, JsValue};
 
 /// Convert bytes to a JS Uint8Array.
@@ -19,51 +21,44 @@ fn bytes_to_typed_array(bytes: &[u8]) -> JsValue {
     JsValue::from(array)
 }
 
+fn storage_error(e: impl std::fmt::Display) -> StorageError {
+    StorageError::Storage(e.to_string())
+}
+
+impl From<super::IndexedDbError> for StorageError {
+    fn from(e: super::IndexedDbError) -> Self {
+        StorageError::Storage(e.to_string())
+    }
+}
+
 #[async_trait(?Send)]
 impl Provider<Get> for IndexedDb {
     async fn execute(&mut self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, StorageError> {
         let subject = effect.subject().into();
         let store_name = effect.store();
-        let key = effect.key();
+        let js_key = JsValue::from_str(&effect.key().to_base58());
 
-        let store_path = format!("storage/{}", store_name);
-        self.ensure_store(&store_path);
-
-        let db = self
-            .session(&subject)
+        let store = self
+            .store(&subject, store_name)
             .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
+            .map_err(storage_error)?;
 
-        let tx = db
-            .transaction(&[&store_path], TransactionMode::ReadOnly)
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
+        store
+            .query(|object_store| async move {
+                let value = object_store.get(js_key).await.map_err(storage_error)?;
 
-        let store = tx
-            .store(&store_path)
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
+                let Some(value) = value else {
+                    return Ok(None);
+                };
 
-        // Use base58-encoded key for storage
-        let js_key = JsValue::from_str(&key.to_base58());
+                let bytes = value
+                    .dyn_into::<Uint8Array>()
+                    .map_err(|_| StorageError::Storage("Value is not Uint8Array".to_string()))?
+                    .to_vec();
 
-        let value = store
-            .get(js_key)
+                Ok(Some(bytes))
+            })
             .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        let Some(value) = value else {
-            return Ok(None);
-        };
-
-        let bytes = value
-            .dyn_into::<Uint8Array>()
-            .map_err(|_| StorageError::Storage("Value is not Uint8Array".to_string()))?
-            .to_vec();
-
-        tx.done()
-            .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        Ok(Some(bytes))
     }
 }
 
@@ -72,39 +67,23 @@ impl Provider<Set> for IndexedDb {
     async fn execute(&mut self, effect: Capability<Set>) -> Result<(), StorageError> {
         let subject = effect.subject().into();
         let store_name = effect.store();
-        let key = effect.key();
-        let value = effect.value();
+        let js_key = JsValue::from_str(&effect.key().to_base58());
+        let js_value = bytes_to_typed_array(effect.value());
 
-        let store_path = format!("storage/{}", store_name);
-        self.ensure_store(&store_path);
-
-        let db = self
-            .session(&subject)
+        let store = self
+            .store(&subject, store_name)
             .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        let tx = db
-            .transaction(&[&store_path], TransactionMode::ReadWrite)
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        let store = tx
-            .store(&store_path)
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        // Use base58-encoded key for storage
-        let js_key = JsValue::from_str(&key.to_base58());
-        let js_value = bytes_to_typed_array(value);
+            .map_err(storage_error)?;
 
         store
-            .put(&js_value, Some(&js_key))
+            .transact(|object_store| async move {
+                object_store
+                    .put(&js_value, Some(&js_key))
+                    .await
+                    .map_err(storage_error)?;
+                Ok(())
+            })
             .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        tx.done()
-            .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        Ok(())
     }
 }
 
@@ -113,37 +92,19 @@ impl Provider<Delete> for IndexedDb {
     async fn execute(&mut self, effect: Capability<Delete>) -> Result<(), StorageError> {
         let subject = effect.subject().into();
         let store_name = effect.store();
-        let key = effect.key();
+        let js_key = JsValue::from_str(&effect.key().to_base58());
 
-        let store_path = format!("storage/{}", store_name);
-        self.ensure_store(&store_path);
-
-        let db = self
-            .session(&subject)
+        let store = self
+            .store(&subject, store_name)
             .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        let tx = db
-            .transaction(&[&store_path], TransactionMode::ReadWrite)
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        let store = tx
-            .store(&store_path)
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        // Use base58-encoded key for storage
-        let js_key = JsValue::from_str(&key.to_base58());
+            .map_err(storage_error)?;
 
         store
-            .delete(js_key)
+            .transact(|object_store| async move {
+                object_store.delete(js_key).await.map_err(storage_error)?;
+                Ok(())
+            })
             .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        tx.done()
-            .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        Ok(())
     }
 }
 
@@ -152,67 +113,54 @@ impl Provider<List> for IndexedDb {
     async fn execute(&mut self, effect: Capability<List>) -> Result<ListResult, StorageError> {
         let subject = effect.subject().into();
         let store_name = effect.store();
-        let continuation_token = effect.continuation_token();
+        let continuation_token = effect.continuation_token().map(|s| s.to_string());
 
-        let store_path = format!("storage/{}", store_name);
-        self.ensure_store(&store_path);
-
-        let db = self
-            .session(&subject)
+        let store = self
+            .store(&subject, store_name)
             .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
+            .map_err(storage_error)?;
 
-        let tx = db
-            .transaction(&[&store_path], TransactionMode::ReadOnly)
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
+        store
+            .query(|object_store| async move {
+                let all_keys = object_store
+                    .get_all_keys(None, None)
+                    .await
+                    .map_err(storage_error)?;
 
-        let store = tx
-            .store(&store_path)
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
+                // Convert JS keys to strings
+                let mut keys: Vec<String> =
+                    all_keys.into_iter().filter_map(|k| k.as_string()).collect();
 
-        // Get all keys - IndexedDB doesn't have native pagination,
-        // so we fetch all and paginate in memory
-        let all_keys = store
-            .get_all_keys(None, None)
+                // Sort for consistent ordering
+                keys.sort();
+
+                // Apply pagination based on continuation token
+                let page_size = 1000;
+                let start_index = if let Some(ref token) = continuation_token {
+                    keys.iter()
+                        .position(|k| k.as_str() > token.as_str())
+                        .unwrap_or(keys.len())
+                } else {
+                    0
+                };
+
+                let end_index = (start_index + page_size).min(keys.len());
+                let is_truncated = end_index < keys.len();
+                let next_token = if is_truncated {
+                    keys.get(end_index - 1).cloned()
+                } else {
+                    None
+                };
+
+                let page_keys = keys[start_index..end_index].to_vec();
+
+                Ok(ListResult {
+                    keys: page_keys,
+                    is_truncated,
+                    next_continuation_token: next_token,
+                })
+            })
             .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        tx.done()
-            .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
-
-        // Convert JS keys to strings
-        let mut keys: Vec<String> = all_keys.into_iter().filter_map(|k| k.as_string()).collect();
-
-        // Sort for consistent ordering
-        keys.sort();
-
-        // Apply pagination based on continuation token
-        let page_size = 1000; // Default page size
-        let start_index = if let Some(token) = continuation_token {
-            // Find the position after the token
-            keys.iter()
-                .position(|k| k.as_str() > token)
-                .unwrap_or(keys.len())
-        } else {
-            0
-        };
-
-        let end_index = (start_index + page_size).min(keys.len());
-        let is_truncated = end_index < keys.len();
-        let next_token = if is_truncated {
-            keys.get(end_index - 1).cloned()
-        } else {
-            None
-        };
-
-        let page_keys = keys[start_index..end_index].to_vec();
-
-        Ok(ListResult {
-            keys: page_keys,
-            is_truncated,
-            next_continuation_token: next_token,
-        })
     }
 }
 
