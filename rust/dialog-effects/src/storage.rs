@@ -53,13 +53,12 @@ impl Policy for Store {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Get {
     /// The key to look up.
-    #[serde(with = "serde_bytes")]
-    pub key: Vec<u8>,
+    pub key: String,
 }
 
 impl Get {
     /// Create a new Get effect.
-    pub fn new(key: impl Into<Vec<u8>>) -> Self {
+    pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -74,7 +73,7 @@ pub trait GetCapability {
     /// Get the store name from the capability chain.
     fn store(&self) -> &str;
     /// Get the key from the capability chain.
-    fn key(&self) -> &[u8];
+    fn key(&self) -> &str;
 }
 
 impl GetCapability for Capability<Get> {
@@ -82,7 +81,7 @@ impl GetCapability for Capability<Get> {
         &Store::of(self).store
     }
 
-    fn key(&self) -> &[u8] {
+    fn key(&self) -> &str {
         &Get::of(self).key
     }
 }
@@ -91,8 +90,7 @@ impl GetCapability for Capability<Get> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Set {
     /// The key to update.
-    #[serde(with = "serde_bytes")]
-    pub key: Vec<u8>,
+    pub key: String,
     /// The value to set.
     #[serde(with = "serde_bytes")]
     pub value: Vec<u8>,
@@ -100,7 +98,7 @@ pub struct Set {
 
 impl Set {
     /// Create a new Set effect.
-    pub fn new(key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self {
+    pub fn new(key: impl Into<String>, value: impl Into<Vec<u8>>) -> Self {
         Self {
             key: key.into(),
             value: value.into(),
@@ -118,7 +116,7 @@ pub trait SetCapability {
     /// Get the store name from the capability chain.
     fn store(&self) -> &str;
     /// Get the key from the capability chain.
-    fn key(&self) -> &[u8];
+    fn key(&self) -> &str;
     /// Get the value from the capability chain.
     fn value(&self) -> &[u8];
 }
@@ -128,7 +126,7 @@ impl SetCapability for Capability<Set> {
         &Store::of(self).store
     }
 
-    fn key(&self) -> &[u8] {
+    fn key(&self) -> &str {
         &Set::of(self).key
     }
 
@@ -141,13 +139,12 @@ impl SetCapability for Capability<Set> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Delete {
     /// The key to delete.
-    #[serde(with = "serde_bytes")]
-    pub key: Vec<u8>,
+    pub key: String,
 }
 
 impl Delete {
     /// Create a new Delete effect.
-    pub fn new(key: impl Into<Vec<u8>>) -> Self {
+    pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -162,7 +159,7 @@ pub trait DeleteCapability {
     /// Get the store name from the capability chain.
     fn store(&self) -> &str;
     /// Get the key from the capability chain.
-    fn key(&self) -> &[u8];
+    fn key(&self) -> &str;
 }
 
 impl DeleteCapability for Capability<Delete> {
@@ -170,7 +167,7 @@ impl DeleteCapability for Capability<Delete> {
         &Store::of(self).store
     }
 
-    fn key(&self) -> &[u8] {
+    fn key(&self) -> &str {
         &Delete::of(self).key
     }
 }
@@ -263,7 +260,7 @@ mod tests {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Storage)
             .attenuate(Store::new("index"))
-            .invoke(Get::new(vec![1, 2, 3]));
+            .invoke(Get::new("my-key"));
 
         assert_eq!(claim.ability(), "/storage/get");
     }
@@ -273,13 +270,13 @@ mod tests {
         let claim = Subject::from("did:key:zSpace")
             .attenuate(Storage)
             .attenuate(Store::new("index"))
-            .invoke(Set::new(vec![1, 2, 3], vec![4, 5, 6]));
+            .invoke(Set::new("my-key", vec![4, 5, 6]));
 
         assert_eq!(claim.ability(), "/storage/set");
 
         // Use policy() method to extract nested constraints
         assert_eq!(claim.policy::<Store, _>().store, "index");
-        assert_eq!(&claim.policy::<Set, _>().key[..], &[1, 2, 3]);
+        assert_eq!(claim.policy::<Set, _>().key, "my-key");
     }
 
     #[cfg(feature = "ucan")]
@@ -312,11 +309,11 @@ mod tests {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
                 .attenuate(Store::new("index"))
-                .invoke(Get::new(vec![1, 2, 3]));
+                .invoke(Get::new("my-key"));
             let params = parameters(&cap);
 
             assert_eq!(params.get("store"), Some(&Ipld::String("index".into())));
-            assert_eq!(params.get("key"), Some(&Ipld::Bytes(vec![1, 2, 3])));
+            assert_eq!(params.get("key"), Some(&Ipld::String("my-key".into())));
         }
 
         #[test]
@@ -324,11 +321,11 @@ mod tests {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
                 .attenuate(Store::new("mystore"))
-                .invoke(Set::new(vec![10, 20], vec![30, 40, 50]));
+                .invoke(Set::new("my-key", vec![30, 40, 50]));
             let params = parameters(&cap);
 
             assert_eq!(params.get("store"), Some(&Ipld::String("mystore".into())));
-            assert_eq!(params.get("key"), Some(&Ipld::Bytes(vec![10, 20])));
+            assert_eq!(params.get("key"), Some(&Ipld::String("my-key".into())));
             assert_eq!(params.get("value"), Some(&Ipld::Bytes(vec![30, 40, 50])));
         }
 
@@ -337,11 +334,11 @@ mod tests {
             let cap = Subject::from("did:key:zSpace")
                 .attenuate(Storage)
                 .attenuate(Store::new("trash"))
-                .invoke(Delete::new(vec![99]));
+                .invoke(Delete::new("to-delete"));
             let params = parameters(&cap);
 
             assert_eq!(params.get("store"), Some(&Ipld::String("trash".into())));
-            assert_eq!(params.get("key"), Some(&Ipld::Bytes(vec![99])));
+            assert_eq!(params.get("key"), Some(&Ipld::String("to-delete".into())));
         }
     }
 }

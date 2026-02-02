@@ -5,7 +5,6 @@
 
 use super::{IndexedDb, to_uint8array};
 use async_trait::async_trait;
-use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_effects::storage::{
     Delete, DeleteCapability, Get, GetCapability, List, ListCapability, ListResult, Set,
@@ -29,7 +28,7 @@ impl Provider<Get> for IndexedDb {
     async fn execute(&mut self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, StorageError> {
         let subject = effect.subject().into();
         let store_name = effect.store();
-        let js_key = JsValue::from_str(&effect.key().to_base58());
+        let js_key = JsValue::from_str(effect.key());
 
         let store = self.open(&subject).await?.store(store_name).await?;
 
@@ -57,7 +56,7 @@ impl Provider<Set> for IndexedDb {
     async fn execute(&mut self, effect: Capability<Set>) -> Result<(), StorageError> {
         let subject = effect.subject().into();
         let store_name = effect.store();
-        let js_key = JsValue::from_str(&effect.key().to_base58());
+        let js_key = JsValue::from_str(effect.key());
         let js_value: JsValue = to_uint8array(effect.value()).into();
 
         let store = self.open(&subject).await?.store(store_name).await?;
@@ -79,7 +78,7 @@ impl Provider<Delete> for IndexedDb {
     async fn execute(&mut self, effect: Capability<Delete>) -> Result<(), StorageError> {
         let subject = effect.subject().into();
         let store_name = effect.store();
-        let js_key = JsValue::from_str(&effect.key().to_base58());
+        let js_key = JsValue::from_str(effect.key());
 
         let store = self.open(&subject).await?.store(store_name).await?;
 
@@ -167,7 +166,7 @@ mod tests {
         let effect = subject
             .attenuate(Storage)
             .attenuate(Store::new("index"))
-            .invoke(Get::new(b"missing-key".to_vec()));
+            .invoke(Get::new("missing-key"));
 
         let result = effect.perform(&mut provider).await?;
         assert!(result.is_none());
@@ -179,7 +178,7 @@ mod tests {
     async fn it_sets_and_gets_value() -> anyhow::Result<()> {
         let mut provider = IndexedDb::new();
         let subject = unique_subject("storage-set-get");
-        let key = b"test-key".to_vec();
+        let key = "test-key";
         let value = b"test-value".to_vec();
 
         // Set value
@@ -187,7 +186,7 @@ mod tests {
             .clone()
             .attenuate(Storage)
             .attenuate(Store::new("index"))
-            .invoke(Set::new(key.clone(), value.clone()))
+            .invoke(Set::new(key, value.clone()))
             .perform(&mut provider)
             .await?;
 
@@ -208,14 +207,14 @@ mod tests {
     async fn it_overwrites_existing_value() -> anyhow::Result<()> {
         let mut provider = IndexedDb::new();
         let subject = unique_subject("storage-overwrite");
-        let key = b"test-key".to_vec();
+        let key = "test-key";
 
         // Set initial value
         subject
             .clone()
             .attenuate(Storage)
             .attenuate(Store::new("index"))
-            .invoke(Set::new(key.clone(), b"value1".to_vec()))
+            .invoke(Set::new(key, b"value1".to_vec()))
             .perform(&mut provider)
             .await?;
 
@@ -224,7 +223,7 @@ mod tests {
             .clone()
             .attenuate(Storage)
             .attenuate(Store::new("index"))
-            .invoke(Set::new(key.clone(), b"value2".to_vec()))
+            .invoke(Set::new(key, b"value2".to_vec()))
             .perform(&mut provider)
             .await?;
 
@@ -245,14 +244,14 @@ mod tests {
     async fn it_deletes_value() -> anyhow::Result<()> {
         let mut provider = IndexedDb::new();
         let subject = unique_subject("storage-delete");
-        let key = b"test-key".to_vec();
+        let key = "test-key";
 
         // Set value
         subject
             .clone()
             .attenuate(Storage)
             .attenuate(Store::new("index"))
-            .invoke(Set::new(key.clone(), b"test-value".to_vec()))
+            .invoke(Set::new(key, b"test-value".to_vec()))
             .perform(&mut provider)
             .await?;
 
@@ -261,7 +260,7 @@ mod tests {
             .clone()
             .attenuate(Storage)
             .attenuate(Store::new("index"))
-            .invoke(Delete::new(key.clone()))
+            .invoke(Delete::new(key))
             .perform(&mut provider)
             .await?;
 
@@ -289,10 +288,7 @@ mod tests {
                 .clone()
                 .attenuate(Storage)
                 .attenuate(Store::new("index"))
-                .invoke(Set::new(
-                    format!("key-{}", i).into_bytes(),
-                    b"value".to_vec(),
-                ))
+                .invoke(Set::new(format!("key-{}", i), b"value".to_vec()))
                 .perform(&mut provider)
                 .await?;
         }
@@ -321,7 +317,7 @@ mod tests {
             .clone()
             .attenuate(Storage)
             .attenuate(Store::new("store1"))
-            .invoke(Set::new(b"key".to_vec(), b"value1".to_vec()))
+            .invoke(Set::new("key", b"value1".to_vec()))
             .perform(&mut provider)
             .await?;
 
@@ -329,7 +325,7 @@ mod tests {
             .clone()
             .attenuate(Storage)
             .attenuate(Store::new("store2"))
-            .invoke(Set::new(b"key".to_vec(), b"value2".to_vec()))
+            .invoke(Set::new("key", b"value2".to_vec()))
             .perform(&mut provider)
             .await?;
 
@@ -338,7 +334,7 @@ mod tests {
             .clone()
             .attenuate(Storage)
             .attenuate(Store::new("store1"))
-            .invoke(Get::new(b"key".to_vec()))
+            .invoke(Get::new("key"))
             .perform(&mut provider)
             .await?;
         assert_eq!(result1, Some(b"value1".to_vec()));
@@ -347,39 +343,10 @@ mod tests {
         let result2 = subject
             .attenuate(Storage)
             .attenuate(Store::new("store2"))
-            .invoke(Get::new(b"key".to_vec()))
+            .invoke(Get::new("key"))
             .perform(&mut provider)
             .await?;
         assert_eq!(result2, Some(b"value2".to_vec()));
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_handles_binary_keys() -> anyhow::Result<()> {
-        let mut provider = IndexedDb::new();
-        let subject = unique_subject("storage-binary-keys");
-
-        // Binary key with non-UTF8 bytes
-        let key = vec![0x00, 0xff, 0xfe, 0x01];
-        let value = b"binary key value".to_vec();
-
-        subject
-            .clone()
-            .attenuate(Storage)
-            .attenuate(Store::new("index"))
-            .invoke(Set::new(key.clone(), value.clone()))
-            .perform(&mut provider)
-            .await?;
-
-        let result = subject
-            .attenuate(Storage)
-            .attenuate(Store::new("index"))
-            .invoke(Get::new(key))
-            .perform(&mut provider)
-            .await?;
-
-        assert_eq!(result, Some(value));
 
         Ok(())
     }
@@ -389,14 +356,14 @@ mod tests {
         let mut provider = IndexedDb::new();
         let subject = unique_subject("storage-empty-value");
 
-        let key = b"empty-key".to_vec();
+        let key = "empty-key";
         let value = vec![];
 
         subject
             .clone()
             .attenuate(Storage)
             .attenuate(Store::new("index"))
-            .invoke(Set::new(key.clone(), value.clone()))
+            .invoke(Set::new(key, value.clone()))
             .perform(&mut provider)
             .await?;
 
@@ -417,9 +384,9 @@ mod tests {
         let mut provider = IndexedDb::new();
         let subject = unique_subject("storage-multiple-keys");
 
-        let key1 = b"key1".to_vec();
-        let key2 = b"key2".to_vec();
-        let key3 = b"key3".to_vec();
+        let key1 = "key1";
+        let key2 = "key2";
+        let key3 = "key3";
         let value1 = b"value1".to_vec();
         let value2 = b"value2".to_vec();
         let value3 = b"value3".to_vec();
@@ -428,7 +395,7 @@ mod tests {
             .clone()
             .attenuate(Storage)
             .attenuate(Store::new("index"))
-            .invoke(Set::new(key1.clone(), value1.clone()))
+            .invoke(Set::new(key1, value1.clone()))
             .perform(&mut provider)
             .await?;
 
@@ -436,7 +403,7 @@ mod tests {
             .clone()
             .attenuate(Storage)
             .attenuate(Store::new("index"))
-            .invoke(Set::new(key2.clone(), value2.clone()))
+            .invoke(Set::new(key2, value2.clone()))
             .perform(&mut provider)
             .await?;
 
@@ -444,7 +411,7 @@ mod tests {
             .clone()
             .attenuate(Storage)
             .attenuate(Store::new("index"))
-            .invoke(Set::new(key3.clone(), value3.clone()))
+            .invoke(Set::new(key3, value3.clone()))
             .perform(&mut provider)
             .await?;
 
@@ -482,7 +449,7 @@ mod tests {
         let mut provider = IndexedDb::new();
         let subject = unique_subject("storage-large-value");
 
-        let key = b"large-key".to_vec();
+        let key = "large-key";
         // 1MB value
         let value: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
 
@@ -490,7 +457,7 @@ mod tests {
             .clone()
             .attenuate(Storage)
             .attenuate(Store::new("index"))
-            .invoke(Set::new(key.clone(), value.clone()))
+            .invoke(Set::new(key, value.clone()))
             .perform(&mut provider)
             .await?;
 
