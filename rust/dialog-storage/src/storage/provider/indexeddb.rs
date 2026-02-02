@@ -41,7 +41,6 @@
 
 mod archive;
 mod memory;
-mod storage;
 
 use dialog_capability::Did;
 use js_sys::Uint8Array;
