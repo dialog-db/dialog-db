@@ -22,8 +22,15 @@ pub enum PrincipalError {
     InvalidBase58(String),
 
     /// The decoded key has wrong length.
-    #[error("Invalid key length: expected 34 bytes (2 prefix + 32 key), found {0}")]
-    InvalidKeyLength(usize),
+    #[error("Invalid key size for {key_type}: expected {expected_size} bytes, found {actual_size}")]
+    InvalidKeySize {
+        /// The expected key size in bytes.
+        expected_size: usize,
+        /// The actual key size found.
+        actual_size: usize,
+        /// The type of key (e.g., "Ed25519").
+        key_type: String,
+    },
 
     /// The multicodec prefix indicates an unsupported algorithm.
     #[error("Unsupported key algorithm: expected Ed25519 (0xed01), found [{0:#04x}, {1:#04x}]")]
@@ -176,7 +183,11 @@ impl TryFrom<&Did> for Principal {
 
         // Must be exactly 34 bytes (2-byte multicodec + 32-byte key)
         if decoded.len() != 34 {
-            return Err(PrincipalError::InvalidKeyLength(decoded.len()));
+            return Err(PrincipalError::InvalidKeySize {
+                expected_size: 34,
+                actual_size: decoded.len(),
+                key_type: "Ed25519".to_string(),
+            });
         }
 
         // Verify Ed25519 multicodec prefix [0xed, 0x01]

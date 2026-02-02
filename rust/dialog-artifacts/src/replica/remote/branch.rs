@@ -8,8 +8,8 @@ use dialog_storage::{Blake3Hash, CborEncoder, Encoder, StorageBackend};
 use futures_util::{Stream, StreamExt};
 
 use super::{
-    Connection, OperatingAuthority, Operator, PlatformBackend, PlatformStorage, RemoteBackend,
-    RemoteCredentials, RemoteSite, Revision, Site,
+    Connection, OperatingAuthority, PlatformBackend, PlatformStorage, RemoteBackend,
+    RemoteCredentials, RemoteSite, Revision, SigningAuthority, Site,
 };
 use crate::TypedStoreResource;
 use crate::replica::ReplicaError;
@@ -18,7 +18,10 @@ use crate::replica::ReplicaError;
 ///
 /// This holds the configuration needed to establish a connection.
 #[derive(Clone)]
-pub struct RemoteBranchDescriptor<Backend: PlatformBackend, A: OperatingAuthority = Operator> {
+pub struct RemoteBranchDescriptor<
+    Backend: PlatformBackend,
+    A: OperatingAuthority = SigningAuthority,
+> {
     name: String,
     site_name: Site,
     subject: Did,
@@ -57,7 +60,10 @@ impl<Backend: PlatformBackend, A: OperatingAuthority> Debug for RemoteBranchDesc
 /// An open connection to a remote branch.
 ///
 /// This holds the active connection and revision tracking resources.
-pub struct RemoteBranchConnection<Backend: PlatformBackend, A: OperatingAuthority = Operator> {
+pub struct RemoteBranchConnection<
+    Backend: PlatformBackend,
+    A: OperatingAuthority = SigningAuthority,
+> {
     descriptor: RemoteBranchDescriptor<Backend, A>,
     connection: Connection,
     down: TypedStoreResource<Revision, Backend>,
@@ -216,7 +222,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static>
 /// Can be either a descriptor (not yet connected) or an open connection.
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)]
-pub enum RemoteBranch<Backend: PlatformBackend, A: OperatingAuthority = Operator> {
+pub enum RemoteBranch<Backend: PlatformBackend, A: OperatingAuthority = SigningAuthority> {
     /// A reference to a remote branch that hasn't been connected yet.
     Reference(RemoteBranchDescriptor<Backend, A>),
     /// An open connection to a remote branch.
@@ -315,18 +321,10 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> Remote
                 .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
 
             // Connect to remote using credentials.
-            // Remote S3 operations require an Operator with secret key access.
-            // Construct one from the Authority's secret key bytes if available.
-            let operator = match desc.issuer.secret_key_bytes() {
-                Some(bytes) => Operator::from_secret(&bytes),
-                None => {
-                    return Err(ReplicaError::StorageError(
-                        "Remote operations require an authority with extractable key material"
-                            .to_string(),
-                    ));
-                }
-            };
-            let connection = credentials.connect(operator, &desc.subject)?;
+            // TODO: Remove this requirement once ucan-rs is more flexible with WebCrypto support,
+            // allowing us to use non-extractable keys for remote operations.
+            let authority = SigningAuthority::try_from_authority(&desc.issuer)?;
+            let connection = credentials.connect(authority, &desc.subject)?;
 
             // Open remote revision storage
             let mut memory = connection.memory();

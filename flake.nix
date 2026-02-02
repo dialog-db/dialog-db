@@ -26,6 +26,10 @@
           toolchain:
           let
             rustToolchain = pkgs.rust-bin.${toolchain}.latest.default.override {
+              extensions = [
+                "rust-src"
+                "rust-analyzer"
+              ];
               targets = [
                 "wasm32-wasip1"
                 "wasm32-unknown-unknown"

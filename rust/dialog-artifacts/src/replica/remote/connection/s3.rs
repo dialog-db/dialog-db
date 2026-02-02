@@ -7,7 +7,7 @@ use dialog_storage::CborEncoder;
 use dialog_storage::s3::Bucket;
 
 use crate::ErrorMappingBackend;
-use crate::replica::remote::{Operator, PlatformStorage, RemoteBackend};
+use crate::replica::remote::{PlatformStorage, RemoteBackend, SigningAuthority};
 
 /// An active connection to an S3-compatible storage backend.
 #[derive(Clone)]
@@ -15,7 +15,7 @@ pub struct S3Connection {
     /// Memory storage for branch revision state.
     memory: PlatformStorage<RemoteBackend>,
     /// Index storage bucket for tree blocks.
-    index: Bucket<Operator>,
+    index: Bucket<SigningAuthority>,
 }
 
 impl std::fmt::Debug for S3Connection {
@@ -26,7 +26,7 @@ impl std::fmt::Debug for S3Connection {
 
 impl S3Connection {
     /// Create a new S3 connection with the given memory and index storage.
-    pub fn new(memory: PlatformStorage<RemoteBackend>, index: Bucket<Operator>) -> Self {
+    pub fn new(memory: PlatformStorage<RemoteBackend>, index: Bucket<SigningAuthority>) -> Self {
         Self { memory, index }
     }
 

@@ -24,7 +24,7 @@ use std::fmt::Debug;
 use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
 
 use ed25519_dalek::ed25519::signature::SignerMut;
-use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, SignatureError, SigningKey, VerifyingKey};
+use ed25519_dalek::{SECRET_KEY_LENGTH, SignatureError, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
@@ -35,19 +35,23 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-/// Operator module for signing and identity management.
-pub mod operator;
 /// Principal type definitions.
 pub mod principal;
 /// Remote repository and branch management.
 pub mod remote;
 /// Repository trait for managing remotes.
 pub mod repository;
+/// SigningAuthority for signing and identity management.
+pub mod signing_authority;
 
-pub use operator::Operator;
+pub use signing_authority::{Signer, SigningAuthority};
+
+// Re-export WebCrypto types for WASM key storage
 pub use principal::{Principal, PrincipalError};
 pub use remote::{RemoteBranch, RemoteCredentials, RemoteRepository, RemoteSite, Site};
 pub use repository::Remotes;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
+pub use signing_authority::{CryptoKey, WebCryptoEd25519Signer};
 
 /// An authority that can operate on a replica.
 ///
@@ -101,9 +105,9 @@ impl From<NodeReference> for Blake3Hash {
 /// A replica represents a local instance of a distributed database.
 ///
 /// The type parameter `A` represents the authority used for signing operations.
-/// It defaults to `Operator` for backward compatibility.
+/// It defaults to `SigningAuthority` for convenience.
 #[derive(Debug, Clone)]
-pub struct Replica<Backend: PlatformBackend, A: OperatingAuthority = Operator> {
+pub struct Replica<Backend: PlatformBackend, A: OperatingAuthority = SigningAuthority> {
     issuer: A,
     subject: Did,
     storage: PlatformStorage<Backend>,
@@ -155,7 +159,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
 
 /// Manages multiple branches within a replica.
 #[derive(Debug, Clone)]
-pub struct Branches<Backend: PlatformBackend, A: OperatingAuthority = Operator> {
+pub struct Branches<Backend: PlatformBackend, A: OperatingAuthority = SigningAuthority> {
     issuer: A,
     subject: Did,
     storage: PlatformStorage<Backend>,
@@ -368,7 +372,10 @@ where
 
 /// A branch represents a named line of development within a replica.
 #[derive(Clone)]
-pub struct Branch<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static = Operator> {
+pub struct Branch<
+    Backend: PlatformBackend + 'static,
+    A: OperatingAuthority + 'static = SigningAuthority,
+> {
     issuer: A,
     id: BranchId,
     subject: Did,
@@ -1303,7 +1310,10 @@ impl BranchState {
 
 /// Descriptor for a local upstream branch (lazy loaded).
 #[derive(Clone)]
-pub struct LocalUpstream<Backend: PlatformBackend + 'static, A: OperatingAuthority = Operator> {
+pub struct LocalUpstream<
+    Backend: PlatformBackend + 'static,
+    A: OperatingAuthority = SigningAuthority,
+> {
     branch_id: BranchId,
     issuer: A,
     storage: PlatformStorage<Backend>,
@@ -1344,7 +1354,10 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
 /// to / from. It can be local or remote.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
-pub enum Upstream<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static = Operator> {
+pub enum Upstream<
+    Backend: PlatformBackend + 'static,
+    A: OperatingAuthority + 'static = SigningAuthority,
+> {
     /// A local branch upstream (lazy - loaded on fetch/publish)
     Local(LocalUpstream<Backend, A>),
     /// A remote branch upstream
@@ -1733,7 +1746,7 @@ mod tests {
         let upstream_branch_id = BranchId::new(upstream_id.to_string());
         let subject = test_subject();
 
-        let issuer = Operator::from_secret(&seed());
+        let issuer = SigningAuthority::from_secret(&seed());
         let mut branch =
             Branch::open(&branch_id, issuer.clone(), storage.clone(), subject.clone()).await?;
         let target = Branch::open(&upstream_branch_id, issuer, storage.clone(), subject).await?;
@@ -1753,7 +1766,7 @@ mod tests {
 
         // Create main branch
         let main_id = BranchId::new("main".to_string());
-        let issuer = Operator::from_secret(&seed());
+        let issuer = SigningAuthority::from_secret(&seed());
         let subject = test_subject();
         let mut main_branch =
             Branch::open(&main_id, issuer.clone(), storage.clone(), subject.clone())
@@ -1828,7 +1841,7 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branch_id = BranchId::new("no-upstream".to_string());
-        let issuer = Operator::from_secret(&seed());
+        let issuer = SigningAuthority::from_secret(&seed());
         let subject = test_subject();
         let mut branch = Branch::open(&branch_id, issuer, storage, subject)
             .await
@@ -1853,7 +1866,7 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         // Alice and Bob have different subject DIDs
-        let alice_issuer = Operator::from_secret(&[1u8; 32]);
+        let alice_issuer = SigningAuthority::from_secret(&[1u8; 32]);
         let alice_subject: Did = alice_issuer.did().clone();
         let bob_subject: Did = "did:key:z6MkbobBobBobBobBobBobBobBobBobBobBobBobBob".into();
 
@@ -1919,7 +1932,7 @@ mod tests {
 
         // Create main and feature branches
         let main_id = BranchId::new("main".to_string());
-        let issuer = Operator::from_secret(&seed());
+        let issuer = SigningAuthority::from_secret(&seed());
         let subject = test_subject();
         let mut main_branch =
             Branch::open(&main_id, issuer.clone(), storage.clone(), subject.clone())
@@ -1961,7 +1974,7 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branch_id = BranchId::new("no-upstream".to_string());
-        let issuer = Operator::from_secret(&seed());
+        let issuer = SigningAuthority::from_secret(&seed());
         let subject = test_subject();
         let mut branch = Branch::open(&branch_id, issuer, storage, subject)
             .await
@@ -1981,7 +1994,7 @@ mod tests {
         use futures_util::stream;
 
         // Step 1: Generate issuer
-        let issuer = Operator::from_passphrase("test_end_to_end_remote_upstream");
+        let issuer = SigningAuthority::from_passphrase("test_end_to_end_remote_upstream");
         let subject = issuer.did().clone();
 
         // Step 2: Create a replica with that issuer and journaled in-memory backend
@@ -2211,13 +2224,13 @@ mod tests {
         let subject: Did = "did:test:shared_repo".into();
 
         // Create Alice's replica
-        let alice_issuer = Operator::from_passphrase("alice");
+        let alice_issuer = SigningAuthority::from_passphrase("alice");
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let mut alice_replica = Replica::open(alice_issuer.clone(), subject.clone(), alice_backend)
             .expect("Failed to create Alice's replica");
 
         // Create Bob's replica
-        let bob_issuer = Operator::from_passphrase("bob");
+        let bob_issuer = SigningAuthority::from_passphrase("bob");
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let mut bob_replica = Replica::open(bob_issuer.clone(), subject.clone(), bob_backend)
             .expect("Failed to create Bob's replica");
@@ -2356,7 +2369,7 @@ mod tests {
         let subject: Did = "did:test:shared_repo".into();
 
         // Step 1: Create Alice's replica with her own issuer and backend
-        let alice_issuer = Operator::from_passphrase("alice");
+        let alice_issuer = SigningAuthority::from_passphrase("alice");
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
         let mut alice_replica = Replica::open(
@@ -2367,7 +2380,7 @@ mod tests {
         .expect("Failed to create Alice's replica");
 
         // Step 2: Create Bob's replica with his own issuer and backend
-        let bob_issuer = Operator::from_passphrase("bob");
+        let bob_issuer = SigningAuthority::from_passphrase("bob");
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
         let mut bob_replica =
@@ -2625,7 +2638,7 @@ mod tests {
         let subject: Did = "did:test:shared_repo".into();
 
         // Create Alice's replica
-        let alice_issuer = Operator::from_passphrase("alice");
+        let alice_issuer = SigningAuthority::from_passphrase("alice");
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
         let mut alice_replica = Replica::open(
@@ -2636,7 +2649,7 @@ mod tests {
         .expect("Failed to create Alice's replica");
 
         // Create Bob's replica
-        let bob_issuer = Operator::from_passphrase("bob");
+        let bob_issuer = SigningAuthority::from_passphrase("bob");
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
         let mut bob_replica =
@@ -2808,7 +2821,7 @@ mod tests {
         // Test the difference between load (expects existing) and open (creates if missing)
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
-        let issuer = Operator::from_passphrase("test-user");
+        let issuer = SigningAuthority::from_passphrase("test-user");
         let subject = test_subject();
 
         let branch_id = BranchId::new("test-branch".to_string());
@@ -2846,7 +2859,7 @@ mod tests {
         let subject: Did = "did:test:shared_repo".into();
 
         // Create Alice's replica
-        let alice_issuer = Operator::from_passphrase("alice");
+        let alice_issuer = SigningAuthority::from_passphrase("alice");
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
         let mut alice_replica = Replica::open(
@@ -2899,7 +2912,7 @@ mod tests {
         let alice_revision_after_push = alice_main.revision();
 
         // Create Bob's replica
-        let bob_issuer = Operator::from_passphrase("bob");
+        let bob_issuer = SigningAuthority::from_passphrase("bob");
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
         let mut bob_replica =
@@ -2968,7 +2981,7 @@ mod tests {
         use dialog_s3_credentials::Address;
         use dialog_storage::JournaledStorage;
 
-        let issuer = Operator::from_passphrase("multi-remote-user");
+        let issuer = SigningAuthority::from_passphrase("multi-remote-user");
         let subject = issuer.did().clone();
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let journaled = JournaledStorage::new(backend);
@@ -3017,7 +3030,7 @@ mod tests {
         // Test branch description getting and setting
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
-        let issuer = Operator::from_passphrase("test-user");
+        let issuer = SigningAuthority::from_passphrase("test-user");
         let subject = test_subject();
 
         let branch_id = BranchId::new("feature-x".to_string());
@@ -3040,8 +3053,8 @@ mod tests {
     #[tokio::test]
     async fn test_issuer_generate() -> anyhow::Result<()> {
         // Test generating random issuer keys
-        let issuer1 = Operator::generate()?;
-        let issuer2 = Operator::generate()?;
+        let issuer1 = SigningAuthority::generate().await?;
+        let issuer2 = SigningAuthority::generate().await?;
 
         // Each generated issuer should be unique
         assert_ne!(issuer1.did(), issuer2.did());
@@ -3070,7 +3083,7 @@ mod tests {
         }
 
         let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
-        let issuer = Operator::from_passphrase("test-archive-cache");
+        let issuer = SigningAuthority::from_passphrase("test-archive-cache");
         let subject = issuer.did().clone();
         let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
             address,
@@ -3145,7 +3158,7 @@ mod tests {
         // Create operator and subject
         let operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
         let operator_did = operator_signer.did().clone();
-        let operator = Operator::from_secret(&operator_signer.signer().to_bytes());
+        let operator = SigningAuthority::from_secret(&operator_signer.signer().to_bytes());
         let subject = operator.did().clone();
 
         // Create a delegation chain
@@ -3227,11 +3240,11 @@ mod tests {
         let operator_did = operator_signer.did().clone();
         let subject: Did = operator_did.into();
 
-        // Create an Operator wrapper that uses the UCAN signer's key
-        // Note: Operator::did() may produce a different DID format than Ed25519Did,
+        // Create a SigningAuthority that uses the UCAN signer's key
+        // Note: SigningAuthority::did() may produce a different DID format than Ed25519Did,
         // but the UCAN invocation system uses the Authority trait which gets the
         // secret key bytes for signing, not the DID for identity.
-        let operator = Operator::from_secret(&operator_signer.signer().to_bytes());
+        let operator = SigningAuthority::from_secret(&operator_signer.signer().to_bytes());
 
         // Step 2: Create a delegation chain from subject to operator
         // In this test, the subject and operator are the same (self-signed)
@@ -3347,7 +3360,8 @@ mod tests {
         // Generate a second operator for the second replica
         let second_operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
         let second_operator_did = second_operator_signer.did().clone();
-        let second_operator = Operator::from_secret(&second_operator_signer.signer().to_bytes());
+        let second_operator =
+            SigningAuthority::from_secret(&second_operator_signer.signer().to_bytes());
 
         // Create delegation from the original subject to the second operator
         // Grant root capability (/) to allow all operations for the pull test
@@ -3450,7 +3464,7 @@ mod tests {
 
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
-        let issuer = Operator::from_secret(&seed());
+        let issuer = SigningAuthority::from_secret(&seed());
         let subject = test_subject();
 
         let mut replica = Replica::open(issuer.clone(), subject.clone(), backend.clone())

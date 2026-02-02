@@ -3,8 +3,8 @@
 use dialog_capability::Did;
 
 use super::{
-    Connection, OperatingAuthority, Operator, PlatformBackend, PlatformStorage, RemoteRepository,
-    RemoteState, Site,
+    Connection, OperatingAuthority, PlatformBackend, PlatformStorage, RemoteRepository,
+    RemoteState, SigningAuthority, Site,
 };
 use crate::TypedStoreResource;
 use crate::replica::ReplicaError;
@@ -13,7 +13,7 @@ use crate::replica::ReplicaError;
 ///
 /// This is the persisted state for a remote, storing the site name
 /// and the credentials needed to connect to it.
-pub struct RemoteSite<Backend: PlatformBackend, A: OperatingAuthority = Operator> {
+pub struct RemoteSite<Backend: PlatformBackend, A: OperatingAuthority = SigningAuthority> {
     /// The site name.
     name: Site,
     /// Memory cell storing the remote state.
@@ -103,21 +103,12 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> Remote
 
     /// Connect to the remote storage.
     ///
-    /// Remote S3 operations require an Operator with secret key access.
+    /// Remote S3 operations require a SigningAuthority with secret key access.
     /// Construct one from the Authority's secret key bytes if available.
     pub fn connect(&self, subject: &Did) -> Result<Connection, ReplicaError> {
         if let Some(state) = self.memory.read() {
-            // Remote S3 operations require an Operator with secret key access.
-            let operator = match self.issuer.secret_key_bytes() {
-                Some(bytes) => Operator::from_secret(&bytes),
-                None => {
-                    return Err(ReplicaError::StorageError(
-                        "Remote operations require an authority with extractable key material"
-                            .to_string(),
-                    ));
-                }
-            };
-            state.credentials.connect(operator, subject)
+            let authority = SigningAuthority::try_from_authority(&self.issuer)?;
+            state.credentials.connect(authority, subject)
         } else {
             Err(ReplicaError::RemoteNotFound {
                 remote: self.name.clone(),

@@ -3,15 +3,15 @@
 use dialog_capability::Did;
 
 use super::{
-    OperatingAuthority, Operator, PlatformBackend, PlatformStorage, RemoteBranch,
-    RemoteCredentials, Site,
+    OperatingAuthority, PlatformBackend, PlatformStorage, RemoteBranch, RemoteCredentials,
+    SigningAuthority, Site,
 };
 
 /// A reference to a repository on a remote site.
 ///
 /// This is a builder step for accessing remote branches.
 #[derive(Clone)]
-pub struct RemoteRepository<Backend: PlatformBackend, A: OperatingAuthority = Operator> {
+pub struct RemoteRepository<Backend: PlatformBackend, A: OperatingAuthority = SigningAuthority> {
     /// The subject DID identifying the repository owner.
     subject: Did,
     /// The remote site name.

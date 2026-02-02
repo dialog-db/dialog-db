@@ -9,7 +9,7 @@ use dialog_common::ConditionalSync;
 /// branches.
 ///
 /// Trait is meant to be implemented by `Replica` or other similar abstraction
-/// that needs to manage remotes e.g. `Operator` could potentially implement
+/// that needs to manage remotes e.g. `SigningAuthority` could potentially implement
 /// `Remotes` to have remotes configured level higher.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
