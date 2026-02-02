@@ -651,4 +651,103 @@ mod tests {
 
         Ok(())
     }
+
+    #[dialog_common::test]
+    async fn it_handles_nested_spaces() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let subject = unique_subject("memory-nested-spaces");
+        let content = b"nested content".to_vec();
+
+        // Publish to nested space path
+        let edition = subject
+            .clone()
+            .attenuate(Memory)
+            .attenuate(Space::new("parent/child/grandchild"))
+            .attenuate(Cell::new("cell"))
+            .invoke(Publish::new(content.clone(), None))
+            .perform(&mut provider)
+            .await?;
+
+        assert!(!edition.is_empty());
+
+        // Resolve to verify
+        let resolved = subject
+            .attenuate(Memory)
+            .attenuate(Space::new("parent/child/grandchild"))
+            .attenuate(Cell::new("cell"))
+            .invoke(Resolve)
+            .perform(&mut provider)
+            .await?;
+
+        let publication = resolved.expect("should have content");
+        assert_eq!(publication.content, content);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_handles_empty_content() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let subject = unique_subject("memory-empty");
+        let content = vec![];
+
+        let edition = subject
+            .clone()
+            .attenuate(Memory)
+            .attenuate(Space::new("local"))
+            .attenuate(Cell::new("empty"))
+            .invoke(Publish::new(content.clone(), None))
+            .perform(&mut provider)
+            .await?;
+
+        assert!(!edition.is_empty());
+
+        let resolved = subject
+            .attenuate(Memory)
+            .attenuate(Space::new("local"))
+            .attenuate(Cell::new("empty"))
+            .invoke(Resolve)
+            .perform(&mut provider)
+            .await?;
+
+        let publication = resolved.expect("should have content");
+        assert_eq!(publication.content, content);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_handles_large_content() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let subject = unique_subject("memory-large");
+        // 1MB content
+        let content: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
+
+        let edition = subject
+            .clone()
+            .attenuate(Memory)
+            .attenuate(Space::new("local"))
+            .attenuate(Cell::new("large"))
+            .invoke(Publish::new(content.clone(), None))
+            .perform(&mut provider)
+            .await?;
+
+        assert!(!edition.is_empty());
+
+        let resolved = subject
+            .attenuate(Memory)
+            .attenuate(Space::new("local"))
+            .attenuate(Cell::new("large"))
+            .invoke(Resolve)
+            .perform(&mut provider)
+            .await?;
+
+        let publication = resolved.expect("should have content");
+        assert_eq!(publication.content, content);
+
+        Ok(())
+    }
 }

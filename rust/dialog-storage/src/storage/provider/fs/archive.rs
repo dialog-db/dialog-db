@@ -261,4 +261,59 @@ mod tests {
 
         Ok(())
     }
+
+    #[dialog_common::test]
+    async fn it_handles_empty_content() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let subject = unique_subject("archive-empty");
+        let content = vec![];
+        let digest = Blake3Hash::hash(&content);
+
+        subject
+            .clone()
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"))
+            .invoke(Put::new(digest.clone(), content.clone()))
+            .perform(&mut provider)
+            .await?;
+
+        let result = subject
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"))
+            .invoke(Get::new(digest))
+            .perform(&mut provider)
+            .await?;
+        assert_eq!(result, Some(content));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_handles_large_content() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let subject = unique_subject("archive-large");
+        // 1MB content
+        let content: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
+        let digest = Blake3Hash::hash(&content);
+
+        subject
+            .clone()
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"))
+            .invoke(Put::new(digest.clone(), content.clone()))
+            .perform(&mut provider)
+            .await?;
+
+        let result = subject
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"))
+            .invoke(Get::new(digest))
+            .perform(&mut provider)
+            .await?;
+        assert_eq!(result, Some(content));
+
+        Ok(())
+    }
 }
