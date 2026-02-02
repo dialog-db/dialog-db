@@ -3,7 +3,7 @@
 //! Implements transactional cell storage with CAS (Compare-And-Swap) semantics.
 //! Uses a single `memory` store with space and cell encoded in the key.
 
-use super::IndexedDb;
+use super::{IndexedDb, to_uint8array};
 use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
@@ -16,13 +16,6 @@ use wasm_bindgen::{JsCast, JsValue};
 
 /// The single object store used for all memory operations.
 const MEMORY_STORE: &str = "memory";
-
-/// Convert bytes to a JS Uint8Array.
-fn bytes_to_typed_array(bytes: &[u8]) -> JsValue {
-    let array = Uint8Array::new_with_length(bytes.len() as u32);
-    array.copy_from(bytes);
-    JsValue::from(array)
-}
 
 /// Format edition bytes for error messages.
 fn format_edition(edition: Option<&[u8]>) -> Option<String> {
@@ -53,10 +46,7 @@ impl Provider<Resolve> for IndexedDb {
         let subject = effect.subject().into();
         let key = make_key(effect.space(), effect.cell());
 
-        let store = self
-            .store(&subject, MEMORY_STORE)
-            .await
-            .map_err(storage_error)?;
+        let store = self.open(&subject).await?.store(MEMORY_STORE).await?;
 
         store
             .query(|object_store| async move {
@@ -90,10 +80,7 @@ impl Provider<Publish> for IndexedDb {
         let content = effect.content().to_vec();
         let expected_edition = effect.when().map(|e| e.to_vec());
 
-        let store = self
-            .store(&subject, MEMORY_STORE)
-            .await
-            .map_err(storage_error)?;
+        let store = self.open(&subject).await?.store(MEMORY_STORE).await?;
 
         store
             .transact(|object_store| async move {
@@ -151,7 +138,7 @@ impl Provider<Publish> for IndexedDb {
                 }
 
                 // Write the new value
-                let js_value = bytes_to_typed_array(&content);
+                let js_value: JsValue = to_uint8array(&content).into();
                 object_store
                     .put(&js_value, Some(&key))
                     .await
@@ -170,10 +157,7 @@ impl Provider<Retract> for IndexedDb {
         let key = make_key(effect.space(), effect.cell());
         let expected_edition = effect.when().to_vec();
 
-        let store = self
-            .store(&subject, MEMORY_STORE)
-            .await
-            .map_err(storage_error)?;
+        let store = self.open(&subject).await?.store(MEMORY_STORE).await?;
 
         store
             .transact(|object_store| async move {
@@ -522,6 +506,57 @@ mod tests {
             result.unwrap(),
             Blake3Hash::hash(&content).as_bytes().to_vec()
         );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_produces_deterministic_content_hash() -> anyhow::Result<()> {
+        let mut provider = IndexedDb::new();
+        let subject = unique_subject("memory-deterministic-hash");
+        let content = b"same content".to_vec();
+
+        // Create value at cell1
+        let edition1 = subject
+            .clone()
+            .attenuate(Memory)
+            .attenuate(Space::new("local"))
+            .attenuate(Cell::new("cell1"))
+            .invoke(Publish::new(content.clone(), None))
+            .perform(&mut provider)
+            .await?;
+
+        // Create same value at cell2
+        let edition2 = subject
+            .attenuate(Memory)
+            .attenuate(Space::new("local"))
+            .attenuate(Cell::new("cell2"))
+            .invoke(Publish::new(content, None))
+            .perform(&mut provider)
+            .await?;
+
+        // Same content should produce same edition (content hash)
+        assert_eq!(edition1, edition2);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_succeeds_retracting_already_retracted() -> anyhow::Result<()> {
+        let mut provider = IndexedDb::new();
+        let subject = unique_subject("memory-retract-already-retracted");
+
+        // Try to retract non-existent cell - should succeed
+        let wrong_edition = Blake3Hash::hash(b"wrong").as_bytes().to_vec();
+        let result = subject
+            .attenuate(Memory)
+            .attenuate(Space::new("local"))
+            .attenuate(Cell::new("nonexistent"))
+            .invoke(Retract::new(wrong_edition))
+            .perform(&mut provider)
+            .await;
+
+        assert!(result.is_ok());
 
         Ok(())
     }

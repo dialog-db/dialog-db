@@ -9,7 +9,7 @@
 //! For each subject DID, a database is created with object stores:
 //!
 //! - `archive/{catalog}` - Content-addressed blob storage (one store per catalog)
-//! - `memory` - Transactional cell storage (space is encoded in the key)
+//! - `memory` - Transactional memory storage (memory space is encoded in the key)
 //!
 //! # Dynamic Store Creation
 //!
@@ -19,12 +19,15 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use dialog_storage::provider::IndexedDb;
-//! use dialog_capability::{Subject, Provider};
+//! use dialog_capability::Subject;
 //! use dialog_effects::archive::{Archive, Catalog, Get};
+//! use dialog_common::Blake3Hash;
 //!
+//! # async fn example() -> anyhow::Result<()> {
 //! let mut provider = IndexedDb::new();
+//! let digest = Blake3Hash::hash(b"hello");
 //!
 //! let effect = Subject::from("did:key:z6Mk...")
 //!     .attenuate(Archive)
@@ -32,6 +35,8 @@
 //!     .invoke(Get::new(digest));
 //!
 //! let result = effect.perform(&mut provider).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 mod archive;
@@ -39,119 +44,55 @@ mod memory;
 mod storage;
 
 use dialog_capability::Did;
+use js_sys::Uint8Array;
 use rexie::{ObjectStore, Rexie, RexieBuilder, TransactionMode};
 use std::collections::{HashMap, HashSet};
+use wasm_bindgen::JsValue;
 
-/// Initial database version. Increment this when changing DEFAULT_STORES.
-const INITIAL_VERSION: u32 = 1;
-
-/// Default stores created when opening a new database.
-/// When adding stores here, increment INITIAL_VERSION.
-const DEFAULT_STORES: &[&str] = &["archive/index", "memory"];
-
-/// Database address containing name, version, and stores.
-///
-/// Used to open or upgrade an IndexedDB database with a specific configuration.
-#[derive(Clone)]
-struct Address {
-    /// Database name (subject DID).
-    name: String,
-    /// Database version.
-    version: u32,
-    /// Set of object stores in this database.
-    stores: HashSet<String>,
-}
-
-impl Address {
-    /// Creates a new address with default stores.
-    fn new(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            version: INITIAL_VERSION,
-            stores: DEFAULT_STORES.iter().map(|s| s.to_string()).collect(),
-        }
-    }
-
-    /// Creates an address at a specific version (stores will be populated on open).
-    fn at_version(name: &str, version: u32) -> Self {
-        Self {
-            name: name.to_string(),
-            version,
-            stores: HashSet::new(),
-        }
-    }
-
-    /// Opens the database at this address.
-    async fn open(mut self) -> Result<Session, IndexedDbError> {
-        loop {
-            let mut builder = RexieBuilder::new(&self.name).version(self.version);
-            for store in &self.stores {
-                builder = builder.add_object_store(ObjectStore::new(store).auto_increment(false));
-            }
-
-            match builder.build().await {
-                Ok(db) => {
-                    self.stores = db.store_names().into_iter().collect();
-                    return Ok(Session {
-                        address: self,
-                        db: Some(db),
-                    });
-                }
-                Err(e) => {
-                    let error_msg = e.to_string();
-                    // Check if this is a version error (database exists at higher version)
-                    // Error format: "The requested version (X) is less than the existing version (Y)."
-                    if let Some(existing_version) = Self::parse_existing_version(&error_msg) {
-                        // Retry with the existing version
-                        self.version = existing_version;
-                        self.stores.clear();
-                    } else {
-                        return Err(IndexedDbError::Database(error_msg));
-                    }
-                }
-            }
-        }
-    }
-
-    /// Parses the existing version from a VersionError message.
-    ///
-    /// When opening a database at a version lower than what exists, IndexedDB returns
-    /// a VersionError with the message format:
-    /// "The requested version (X) is less than the existing version (Y)."
-    ///
-    /// We parse the version from this message because:
-    /// - The `rexie` and `idb` crates wrap errors as opaque `JsValue` without structured data
-    /// - The `web-sys` `IdbFactory` doesn't expose the `databases()` method that would let
-    ///   us query database versions without opening (it's available in browsers but not bound)
-    /// - The error message format is stable across browsers
-    fn parse_existing_version(error_msg: &str) -> Option<u32> {
-        let marker = "existing version (";
-        let start = error_msg.find(marker)? + marker.len();
-        let end = error_msg[start..].find(')')? + start;
-        error_msg[start..end].parse().ok()
-    }
+/// Convert bytes to a JS Uint8Array.
+fn to_uint8array(bytes: &[u8]) -> Uint8Array {
+    let array = Uint8Array::new_with_length(bytes.len() as u32);
+    array.copy_from(bytes);
+    array
 }
 
 /// A session represents an open connection to a subject's IndexedDB database.
 ///
-/// Tracks the current version and available stores, allowing dynamic store
-/// creation when needed.
+/// Stores are populated from whatever exists in the database on open,
+/// and new stores are created via upgrade when needed.
 struct Session {
-    address: Address,
+    /// Database name (subject DID).
+    name: String,
+    /// Current database version.
+    version: u32,
+    /// Set of object stores in this database.
+    stores: HashSet<String>,
+    /// Open database connection. Option used to allow taking ownership for close().
     db: Option<Rexie>,
 }
 
 impl Session {
-    /// Creates a new session for the given address.
-    fn new(address: Address) -> Self {
-        Self { address, db: None }
-    }
+    /// Opens the database without specifying a version.
+    ///
+    /// This opens whatever version currently exists, or creates a new
+    /// database at version 1 if it doesn't exist.
+    async fn open(name: &str) -> Result<Self, IndexedDbError> {
+        let db = RexieBuilder::new(name)
+            .build()
+            .await
+            .map_err(|e| IndexedDbError::Database(format!("{:?}", e)))?;
 
-    /// Opens the database at the current address.
-    async fn open(&mut self) -> Result<(), IndexedDbError> {
-        let session = self.address.clone().open().await?;
-        self.db = session.db;
-        Ok(())
+        let version = db
+            .version()
+            .map_err(|e| IndexedDbError::Database(e.to_string()))?;
+        let stores = db.store_names().into_iter().collect();
+
+        Ok(Self {
+            name: name.to_string(),
+            version,
+            stores,
+            db: Some(db),
+        })
     }
 
     /// Closes the database connection.
@@ -161,22 +102,43 @@ impl Session {
         }
     }
 
-    /// Gets a store handle, opening or upgrading the database as needed.
-    async fn store(&mut self, store_path: &str) -> Result<Store<'_>, IndexedDbError> {
-        if self.db.is_none() {
-            self.open().await?;
+    /// Upgrades the database to add new stores.
+    ///
+    /// Closes the current connection, increments the version, and reopens
+    /// with the new stores added.
+    async fn upgrade(&mut self, stores: HashSet<String>) -> Result<(), IndexedDbError> {
+        self.close();
+
+        let new_version = self.version + 1;
+        let mut builder = RexieBuilder::new(&self.name).version(new_version);
+        for store in &stores {
+            builder = builder.add_object_store(ObjectStore::new(store).auto_increment(false));
         }
 
-        if !self.address.stores.contains(store_path) {
-            self.close();
-            self.address.stores.insert(store_path.to_string());
-            self.address.version += 1;
-            self.open().await?;
+        let db = builder
+            .build()
+            .await
+            .map_err(|e| IndexedDbError::Database(format!("{:?}", e)))?;
+
+        self.version = db
+            .version()
+            .map_err(|e| IndexedDbError::Database(e.to_string()))?;
+        self.stores = db.store_names().into_iter().collect();
+        self.db = Some(db);
+        Ok(())
+    }
+
+    /// Gets a store handle, upgrading the database if needed.
+    async fn store(&mut self, store_path: &str) -> Result<Store<'_>, IndexedDbError> {
+        if !self.stores.contains(store_path) {
+            let mut stores = self.stores.clone();
+            stores.insert(store_path.to_string());
+            self.upgrade(stores).await?;
         }
 
         Ok(Store {
             db: self.db.as_ref().unwrap(),
-            name: self.address.stores.get(store_path).unwrap(),
+            name: self.stores.get(store_path).unwrap(),
         })
     }
 }
@@ -259,19 +221,14 @@ impl IndexedDb {
         }
     }
 
-    /// Gets or creates a session for the given subject, then gets the specified store.
-    async fn store(
-        &mut self,
-        subject: &Did,
-        store_path: &str,
-    ) -> Result<Store<'_>, IndexedDbError> {
+    /// Opens or returns an existing session for the given subject.
+    async fn open(&mut self, subject: &Did) -> Result<&mut Session, IndexedDbError> {
         if !self.sessions.contains_key(subject) {
-            let address = Address::new(subject.as_ref());
-            self.sessions.insert(subject.clone(), Session::new(address));
+            let session = Session::open(subject.as_ref()).await?;
+            self.sessions.insert(subject.clone(), session);
         }
 
-        let session = self.sessions.get_mut(subject).unwrap();
-        session.store(store_path).await
+        Ok(self.sessions.get_mut(subject).unwrap())
     }
 }
 
@@ -299,4 +256,182 @@ pub enum IndexedDbError {
     /// Value conversion failed.
     #[error("Value conversion error: {0}")]
     Conversion(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen::JsValue;
+
+    fn unique_db_name(prefix: &str) -> String {
+        format!("did:test:{}-{}", prefix, js_sys::Date::now() as u64)
+    }
+
+    #[dialog_common::test]
+    async fn it_opens_new_database_with_no_stores() -> anyhow::Result<()> {
+        let db_name = unique_db_name("new-db");
+        let session = Session::open(&db_name).await?;
+
+        assert!(session.stores.is_empty());
+        // New databases start at version 1
+        assert_eq!(session.version, 1);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_reopens_existing_database() -> anyhow::Result<()> {
+        let db_name = unique_db_name("reopen");
+
+        // First session creates database and adds a store
+        {
+            let mut session = Session::open(&db_name).await?;
+            let _store = session.store("my-store").await?;
+            assert!(session.stores.contains("my-store"));
+            session.close();
+        }
+
+        // Second session should see the store
+        let session2 = Session::open(&db_name).await?;
+        assert!(session2.stores.contains("my-store"));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_adds_store_via_upgrade() -> anyhow::Result<()> {
+        let db_name = unique_db_name("add-store");
+
+        let mut session = Session::open(&db_name).await?;
+        let initial_version = session.version;
+        assert!(!session.stores.contains("new-store"));
+
+        // Request a store that doesn't exist - should trigger upgrade
+        let _store = session.store("new-store").await?;
+
+        assert!(session.stores.contains("new-store"));
+        assert_eq!(session.version, initial_version + 1);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_handles_multiple_store_additions() -> anyhow::Result<()> {
+        let db_name = unique_db_name("multi-store");
+
+        let mut session = Session::open(&db_name).await?;
+
+        // Add first store
+        let _store1 = session.store("store-a").await?;
+        assert!(session.stores.contains("store-a"));
+        let version_after_a = session.version;
+
+        // Add second store
+        let _store2 = session.store("store-b").await?;
+        assert!(session.stores.contains("store-b"));
+        assert_eq!(session.version, version_after_a + 1);
+
+        // Request existing store - should not upgrade
+        let _store3 = session.store("store-a").await?;
+        assert_eq!(session.version, version_after_a + 1);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_persists_stores_across_sessions() -> anyhow::Result<()> {
+        let db_name = unique_db_name("persist-stores");
+
+        // Create database and add a custom store
+        let final_version = {
+            let mut session = Session::open(&db_name).await?;
+            let _store = session.store("persistent-store").await?;
+            let version = session.version;
+            session.close();
+            version
+        };
+
+        // Reopen - should see the same version and stores
+        let session = Session::open(&db_name).await?;
+        assert_eq!(session.version, final_version);
+        assert!(session.stores.contains("persistent-store"));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_performs_query_on_store() -> anyhow::Result<()> {
+        let db_name = unique_db_name("query-store");
+
+        let mut session = Session::open(&db_name).await?;
+        let store = session.store("memory").await?;
+
+        let result: Result<Option<JsValue>, IndexedDbError> = store
+            .query(|object_store| async move {
+                object_store
+                    .get(JsValue::from_str("nonexistent"))
+                    .await
+                    .map_err(|e| IndexedDbError::Store(e.to_string()))
+            })
+            .await;
+
+        assert!(result?.is_none());
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_performs_transaction_on_store() -> anyhow::Result<()> {
+        let db_name = unique_db_name("transact-store");
+
+        let mut session = Session::open(&db_name).await?;
+        let store = session.store("memory").await?;
+
+        // Write a value
+        let key = JsValue::from_str("test-key");
+        let value = JsValue::from_str("test-value");
+        store
+            .transact(|object_store| {
+                let key = key.clone();
+                let value = value.clone();
+                async move {
+                    object_store
+                        .put(&value, Some(&key))
+                        .await
+                        .map_err(|e| IndexedDbError::Store(e.to_string()))
+                }
+            })
+            .await?;
+
+        // Read it back
+        let result: Option<JsValue> = store
+            .query(|object_store| async move {
+                object_store
+                    .get(JsValue::from_str("test-key"))
+                    .await
+                    .map_err(|e| IndexedDbError::Store(e.to_string()))
+            })
+            .await?;
+
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().as_string(), Some("test-value".to_string()));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_upgrades_for_new_store() -> anyhow::Result<()> {
+        let db_name = unique_db_name("upgrade");
+
+        let mut session = Session::open(&db_name).await?;
+        let initial_version = session.version;
+
+        // Request new store - should upgrade
+        let _store = session.store("upgraded-store").await?;
+
+        assert_eq!(session.version, initial_version + 1);
+        assert!(session.stores.contains("upgraded-store"));
+
+        Ok(())
+    }
 }

@@ -3,7 +3,7 @@
 //! This is a lower-level API where the store name maps directly to an IndexedDB
 //! object store. You can use any store path, including `archive/index` or `memory`.
 
-use super::IndexedDb;
+use super::{IndexedDb, to_uint8array};
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
@@ -13,13 +13,6 @@ use dialog_effects::storage::{
 };
 use js_sys::Uint8Array;
 use wasm_bindgen::{JsCast, JsValue};
-
-/// Convert bytes to a JS Uint8Array.
-fn bytes_to_typed_array(bytes: &[u8]) -> JsValue {
-    let array = Uint8Array::new_with_length(bytes.len() as u32);
-    array.copy_from(bytes);
-    JsValue::from(array)
-}
 
 fn storage_error(e: impl std::fmt::Display) -> StorageError {
     StorageError::Storage(e.to_string())
@@ -38,10 +31,7 @@ impl Provider<Get> for IndexedDb {
         let store_name = effect.store();
         let js_key = JsValue::from_str(&effect.key().to_base58());
 
-        let store = self
-            .store(&subject, store_name)
-            .await
-            .map_err(storage_error)?;
+        let store = self.open(&subject).await?.store(store_name).await?;
 
         store
             .query(|object_store| async move {
@@ -68,12 +58,9 @@ impl Provider<Set> for IndexedDb {
         let subject = effect.subject().into();
         let store_name = effect.store();
         let js_key = JsValue::from_str(&effect.key().to_base58());
-        let js_value = bytes_to_typed_array(effect.value());
+        let js_value: JsValue = to_uint8array(effect.value()).into();
 
-        let store = self
-            .store(&subject, store_name)
-            .await
-            .map_err(storage_error)?;
+        let store = self.open(&subject).await?.store(store_name).await?;
 
         store
             .transact(|object_store| async move {
@@ -94,10 +81,7 @@ impl Provider<Delete> for IndexedDb {
         let store_name = effect.store();
         let js_key = JsValue::from_str(&effect.key().to_base58());
 
-        let store = self
-            .store(&subject, store_name)
-            .await
-            .map_err(storage_error)?;
+        let store = self.open(&subject).await?.store(store_name).await?;
 
         store
             .transact(|object_store| async move {
@@ -115,10 +99,7 @@ impl Provider<List> for IndexedDb {
         let store_name = effect.store();
         let continuation_token = effect.continuation_token().map(|s| s.to_string());
 
-        let store = self
-            .store(&subject, store_name)
-            .await
-            .map_err(storage_error)?;
+        let store = self.open(&subject).await?.store(store_name).await?;
 
         store
             .query(|object_store| async move {
@@ -370,6 +351,157 @@ mod tests {
             .perform(&mut provider)
             .await?;
         assert_eq!(result2, Some(b"value2".to_vec()));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_handles_binary_keys() -> anyhow::Result<()> {
+        let mut provider = IndexedDb::new();
+        let subject = unique_subject("storage-binary-keys");
+
+        // Binary key with non-UTF8 bytes
+        let key = vec![0x00, 0xff, 0xfe, 0x01];
+        let value = b"binary key value".to_vec();
+
+        subject
+            .clone()
+            .attenuate(Storage)
+            .attenuate(Store::new("index"))
+            .invoke(Set::new(key.clone(), value.clone()))
+            .perform(&mut provider)
+            .await?;
+
+        let result = subject
+            .attenuate(Storage)
+            .attenuate(Store::new("index"))
+            .invoke(Get::new(key))
+            .perform(&mut provider)
+            .await?;
+
+        assert_eq!(result, Some(value));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_handles_empty_value() -> anyhow::Result<()> {
+        let mut provider = IndexedDb::new();
+        let subject = unique_subject("storage-empty-value");
+
+        let key = b"empty-key".to_vec();
+        let value = vec![];
+
+        subject
+            .clone()
+            .attenuate(Storage)
+            .attenuate(Store::new("index"))
+            .invoke(Set::new(key.clone(), value.clone()))
+            .perform(&mut provider)
+            .await?;
+
+        let result = subject
+            .attenuate(Storage)
+            .attenuate(Store::new("index"))
+            .invoke(Get::new(key))
+            .perform(&mut provider)
+            .await?;
+
+        assert_eq!(result, Some(value));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_handles_multiple_keys() -> anyhow::Result<()> {
+        let mut provider = IndexedDb::new();
+        let subject = unique_subject("storage-multiple-keys");
+
+        let key1 = b"key1".to_vec();
+        let key2 = b"key2".to_vec();
+        let key3 = b"key3".to_vec();
+        let value1 = b"value1".to_vec();
+        let value2 = b"value2".to_vec();
+        let value3 = b"value3".to_vec();
+
+        subject
+            .clone()
+            .attenuate(Storage)
+            .attenuate(Store::new("index"))
+            .invoke(Set::new(key1.clone(), value1.clone()))
+            .perform(&mut provider)
+            .await?;
+
+        subject
+            .clone()
+            .attenuate(Storage)
+            .attenuate(Store::new("index"))
+            .invoke(Set::new(key2.clone(), value2.clone()))
+            .perform(&mut provider)
+            .await?;
+
+        subject
+            .clone()
+            .attenuate(Storage)
+            .attenuate(Store::new("index"))
+            .invoke(Set::new(key3.clone(), value3.clone()))
+            .perform(&mut provider)
+            .await?;
+
+        let result1 = subject
+            .clone()
+            .attenuate(Storage)
+            .attenuate(Store::new("index"))
+            .invoke(Get::new(key1))
+            .perform(&mut provider)
+            .await?;
+        assert_eq!(result1, Some(value1));
+
+        let result2 = subject
+            .clone()
+            .attenuate(Storage)
+            .attenuate(Store::new("index"))
+            .invoke(Get::new(key2))
+            .perform(&mut provider)
+            .await?;
+        assert_eq!(result2, Some(value2));
+
+        let result3 = subject
+            .attenuate(Storage)
+            .attenuate(Store::new("index"))
+            .invoke(Get::new(key3))
+            .perform(&mut provider)
+            .await?;
+        assert_eq!(result3, Some(value3));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_handles_large_value() -> anyhow::Result<()> {
+        let mut provider = IndexedDb::new();
+        let subject = unique_subject("storage-large-value");
+
+        let key = b"large-key".to_vec();
+        // 1MB value
+        let value: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
+
+        subject
+            .clone()
+            .attenuate(Storage)
+            .attenuate(Store::new("index"))
+            .invoke(Set::new(key.clone(), value.clone()))
+            .perform(&mut provider)
+            .await?;
+
+        let result = subject
+            .attenuate(Storage)
+            .attenuate(Store::new("index"))
+            .invoke(Get::new(key))
+            .perform(&mut provider)
+            .await?;
+
+        assert_eq!(result, Some(value));
 
         Ok(())
     }

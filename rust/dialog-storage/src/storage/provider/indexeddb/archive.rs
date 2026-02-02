@@ -1,6 +1,6 @@
 //! Archive capability provider for IndexedDB.
 
-use super::IndexedDb;
+use super::{IndexedDb, to_uint8array};
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
@@ -8,13 +8,6 @@ use dialog_common::Blake3Hash;
 use dialog_effects::archive::{ArchiveError, Get, GetCapability, Put, PutCapability};
 use js_sys::Uint8Array;
 use wasm_bindgen::{JsCast, JsValue};
-
-/// Convert bytes to a JS Uint8Array.
-fn bytes_to_typed_array(bytes: &[u8]) -> JsValue {
-    let array = Uint8Array::new_with_length(bytes.len() as u32);
-    array.copy_from(bytes);
-    JsValue::from(array)
-}
 
 fn storage_error(e: impl std::fmt::Display) -> ArchiveError {
     ArchiveError::Storage(e.to_string())
@@ -33,15 +26,13 @@ impl Provider<Get> for IndexedDb {
         let catalog = effect.catalog();
         let digest = effect.digest();
 
-        let store_path = format!("archive/{}", catalog);
+        let store = format!("archive/{}", catalog);
         let key = JsValue::from_str(&digest.as_bytes().to_base58());
 
-        let store = self
-            .store(&subject, &store_path)
-            .await
-            .map_err(storage_error)?;
-
-        store
+        self.open(&subject)
+            .await?
+            .store(&store)
+            .await?
             .query(|object_store| async move {
                 let value = object_store.get(key).await.map_err(storage_error)?;
 
@@ -77,16 +68,14 @@ impl Provider<Put> for IndexedDb {
             });
         }
 
-        let store_path = format!("archive/{}", catalog);
+        let store = format!("archive/{}", catalog);
         let key = JsValue::from_str(&digest.as_bytes().to_base58());
-        let value = bytes_to_typed_array(content);
+        let value: JsValue = to_uint8array(content).into();
 
-        let store = self
-            .store(&subject, &store_path)
-            .await
-            .map_err(storage_error)?;
-
-        store
+        self.open(&subject)
+            .await?
+            .store(&store)
+            .await?
             .transact(|object_store| async move {
                 object_store
                     .put(&value, Some(&key))
