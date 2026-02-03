@@ -7,7 +7,8 @@ use super::{DelegationChain, InvocationChain};
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
 use dialog_capability::{
-    Authority, Authorization, AuthorizationError, Capability, Did, Effect, Parameters, Provider,
+    Authority, Authorization, AuthorizationError, Capability, Did, Effect, Provider,
+    ucan::Parameters,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
 use ed25519_dalek::SigningKey;

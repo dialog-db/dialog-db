@@ -305,6 +305,7 @@ mod tests {
     #[cfg(feature = "ucan")]
     mod parameters_tests {
         use super::*;
+        use dialog_capability::ucan::parameters;
         use ipld_core::ipld::Ipld;
 
         #[test]
@@ -314,7 +315,7 @@ mod tests {
                 .attenuate(Space::new("remote"))
                 .attenuate(Cell::new("config"))
                 .invoke(Resolve);
-            let params = cap.parameters();
+            let params = parameters(&cap);
 
             assert_eq!(params.get("space"), Some(&Ipld::String("remote".into())));
             assert_eq!(params.get("cell"), Some(&Ipld::String("config".into())));
@@ -330,7 +331,7 @@ mod tests {
                     content: b"hello".to_vec().into(),
                     when: Some(b"v1".to_vec().into()),
                 });
-            let params = cap.parameters();
+            let params = parameters(&cap);
 
             assert_eq!(params.get("space"), Some(&Ipld::String("local".into())));
             assert_eq!(params.get("cell"), Some(&Ipld::String("main".into())));
@@ -345,7 +346,7 @@ mod tests {
                 .attenuate(Space::new("local"))
                 .attenuate(Cell::new("main"))
                 .invoke(Retract::new(b"v1"));
-            let params = cap.parameters();
+            let params = parameters(&cap);
 
             assert_eq!(params.get("space"), Some(&Ipld::String("local".into())));
             assert_eq!(params.get("cell"), Some(&Ipld::String("main".into())));

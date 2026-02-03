@@ -1,4 +1,4 @@
-use crate::settings::Settings;
+use crate::settings::Caveat;
 use crate::{Constraint, Effect, Policy};
 
 /// Trait for constraints that narrow the ability path.
@@ -31,7 +31,7 @@ use crate::{Constraint, Effect, Policy};
 /// ```
 ///
 /// Note: [`Effect`] types automatically implement `Attenuation` via blanket impl.
-pub trait Attenuation: Sized + Settings {
+pub trait Attenuation: Sized + Caveat {
     /// The capability this type constrains.
     /// Must implement [`Constraint`] so the blanket [`Policy`] impl works.
     type Of: Constraint;
