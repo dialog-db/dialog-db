@@ -2,22 +2,10 @@ use dialog_storage::s3::{Address, Bucket, Credentials};
 
 /// Adds timestamp to the given string to make it unique
 pub fn unique(base: &str) -> String {
-    #[cfg(not(target_arch = "wasm32"))]
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let millis = dialog_common::time::now()
+        .duration_since(dialog_common::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
-
-    #[cfg(target_arch = "wasm32")]
-    let millis = {
-        use web_time::web::SystemTimeExt;
-        web_time::SystemTime::now()
-            .to_std()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    };
-
     format!("{}-{}", base, millis)
 }
 

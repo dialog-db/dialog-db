@@ -154,8 +154,8 @@ mod tests {
         Subject::from(format!(
             "did:test:{}-{}",
             prefix,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            dialog_common::time::now()
+                .duration_since(dialog_common::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ))

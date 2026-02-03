@@ -14,12 +14,6 @@ use url::Url;
 
 use super::Checksum;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::SystemTime;
-
-#[cfg(target_arch = "wasm32")]
-use web_time::{SystemTime, web::SystemTimeExt};
-
 /// Default URL expiration: 1 hours.
 pub const DEFAULT_EXPIRES: u64 = 3600;
 
@@ -341,14 +335,7 @@ pub enum AuthorizationError {
 ///
 /// Uses platform-appropriate time sources (std on native, web-time on wasm).
 fn current_time() -> DateTime<Utc> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        DateTime::<Utc>::from(SystemTime::now().to_std())
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        DateTime::<Utc>::from(SystemTime::now())
-    }
+    DateTime::<Utc>::from(dialog_common::time::now())
 }
 
 /// Encode bytes as lowercase hexadecimal string.
