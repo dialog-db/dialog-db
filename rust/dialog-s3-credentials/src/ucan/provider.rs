@@ -781,17 +781,15 @@ mod tests {
 
         let authorizer = UcanAuthorizer::new(credentials);
 
-        let mut checksum_map = BTreeMap::new();
-        checksum_map.insert(
-            "algorithm".to_string(),
-            Promised::String("sha256".to_string()),
-        );
-        checksum_map.insert("value".to_string(), Promised::Bytes([0u8; 32].to_vec()));
+        // Multihash format: [code, length, ...digest]
+        // SHA-256 code is 0x12, length is 0x20 (32 bytes)
+        let mut checksum_bytes = vec![0x12, 0x20];
+        checksum_bytes.extend_from_slice(&[0u8; 32]);
 
         let mut args = BTreeMap::new();
         args.insert("store".to_string(), Promised::String("index".to_string()));
         args.insert("key".to_string(), Promised::Bytes(b"test-key".to_vec()));
-        args.insert("checksum".to_string(), Promised::Map(checksum_map));
+        args.insert("checksum".to_string(), Promised::Bytes(checksum_bytes));
 
         // Build self-invocation (issuer == subject, no delegation)
         let container = build_self_invocation_container(
