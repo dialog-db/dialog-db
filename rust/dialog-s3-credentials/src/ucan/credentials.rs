@@ -118,9 +118,6 @@ impl Access for Credentials {
         &self,
         claim: Claim<C>,
     ) -> Result<Self::Authorization, Self::Error> {
-        let mut parameters = Parameters::new();
-        claim.capability().parametrize(&mut parameters);
-
         // Self-authorization: when subject == audience, no delegation needed.
         // The subject is acting on itself, which is inherently authorized.
         if claim.subject() == claim.audience() {
@@ -128,7 +125,7 @@ impl Access for Credentials {
                 self.endpoint.clone(),
                 claim.subject().clone(),
                 claim.capability().ability(),
-                parameters,
+                parameters(claim.capability()),
             ));
         }
 

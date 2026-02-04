@@ -765,6 +765,7 @@ dependencies = [
  "getrandom 0.2.17",
  "ipld-core",
  "serde",
+ "serde_bytes",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -809,6 +810,7 @@ dependencies = [
  "dialog-common",
  "ipld-core",
  "serde",
+ "serde_bytes",
  "thiserror 2.0.18",
  "ucan",
 ]
@@ -914,6 +916,7 @@ dependencies = [
  "rand_core 0.6.4",
  "reqwest",
  "serde",
+ "serde_bytes",
  "serde_ipld_dagcbor",
  "serde_json",
  "sha2 0.10.9",

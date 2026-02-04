@@ -18,10 +18,7 @@ impl<Issuer> Provider<Get> for S3<Issuer>
 where
     Issuer: Authority + ConditionalSend + ConditionalSync,
 {
-    async fn execute(
-        &mut self,
-        input: Capability<Get>,
-    ) -> Result<Option<dialog_common::Bytes>, ArchiveError> {
+    async fn execute(&mut self, input: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         // Build the authorization capability
         let capability = Subject::from(input.subject().to_string())
             .attenuate(Archive)
@@ -53,7 +50,7 @@ where
                 .bytes()
                 .await
                 .map_err(|e| ArchiveError::Io(e.to_string()))?;
-            Ok(Some(bytes.to_vec().into()))
+            Ok(Some(bytes.to_vec()))
         } else if response.status() == reqwest::StatusCode::NOT_FOUND {
             Ok(None)
         } else {

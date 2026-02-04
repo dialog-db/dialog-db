@@ -35,8 +35,7 @@ macro_rules! log {
 mod sync;
 pub use sync::*;
 
-pub mod bytes;
-pub use bytes::Bytes;
+pub mod as_bytes;
 
 mod hash;
 pub use hash::*;
