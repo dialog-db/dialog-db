@@ -358,46 +358,18 @@ fn build_archive_put_capability(
 }
 
 /// Parse checksum from arguments.
+///
+/// Expects multihash bytes: `<code><length><digest>`
 fn parse_checksum(
     args: &BTreeMap<String, ucan::promise::Promised>,
 ) -> Result<crate::Checksum, AccessError> {
     use ucan::promise::Promised;
 
-    // Try to get checksum as a map with algorithm and value
     match args.get("checksum") {
-        Some(Promised::Map(map)) => {
-            let algorithm = match map.get("algorithm") {
-                Some(Promised::String(s)) => s.as_str(),
-                _ => {
-                    return Err(AccessError::Invocation(
-                        "checksum.algorithm must be a string".to_string(),
-                    ));
-                }
-            };
-            let value = match map.get("value") {
-                Some(Promised::Bytes(b)) => b.clone(),
-                _ => {
-                    return Err(AccessError::Invocation(
-                        "checksum.value must be bytes".to_string(),
-                    ));
-                }
-            };
-
-            match algorithm {
-                "sha256" => {
-                    let arr: [u8; 32] = value.try_into().map_err(|_| {
-                        AccessError::Invocation("sha256 checksum must be 32 bytes".to_string())
-                    })?;
-                    Ok(crate::Checksum::Sha256(arr))
-                }
-                _ => Err(AccessError::Invocation(format!(
-                    "Unknown checksum algorithm: {}",
-                    algorithm
-                ))),
-            }
-        }
+        Some(Promised::Bytes(bytes)) => crate::Checksum::try_from(bytes.clone())
+            .map_err(|e| AccessError::Invocation(format!("Invalid multihash checksum: {}", e))),
         Some(_) => Err(AccessError::Invocation(
-            "checksum must be a map with algorithm and value".to_string(),
+            "checksum must be multihash bytes".to_string(),
         )),
         None => Err(AccessError::Invocation(
             "Missing checksum argument".to_string(),
@@ -527,17 +499,15 @@ mod tests {
         let operator_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
         let operator_signer = Ed25519Signer::new(operator_key);
 
-        let mut checksum_map = BTreeMap::new();
-        checksum_map.insert(
-            "algorithm".to_string(),
-            Promised::String("sha256".to_string()),
-        );
-        checksum_map.insert("value".to_string(), Promised::Bytes([0u8; 32].to_vec()));
+        // Multihash format: [code, length, ...digest]
+        // SHA-256 code is 0x12, length is 0x20 (32 bytes)
+        let mut checksum_bytes = vec![0x12, 0x20];
+        checksum_bytes.extend_from_slice(&[0u8; 32]);
 
         let mut args = BTreeMap::new();
         args.insert("store".to_string(), Promised::String("index".to_string()));
         args.insert("key".to_string(), Promised::Bytes(b"test-key".to_vec()));
-        args.insert("checksum".to_string(), Promised::Map(checksum_map));
+        args.insert("checksum".to_string(), Promised::Bytes(checksum_bytes));
 
         let container = build_test_container(
             &subject_signer,
@@ -652,17 +622,15 @@ mod tests {
         let operator_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
         let operator_signer = Ed25519Signer::new(operator_key);
 
-        let mut checksum_map = BTreeMap::new();
-        checksum_map.insert(
-            "algorithm".to_string(),
-            Promised::String("sha256".to_string()),
-        );
-        checksum_map.insert("value".to_string(), Promised::Bytes([0u8; 32].to_vec()));
+        // Multihash format: [code, length, ...digest]
+        // SHA-256 code is 0x12, length is 0x20 (32 bytes)
+        let mut checksum_bytes = vec![0x12, 0x20];
+        checksum_bytes.extend_from_slice(&[0u8; 32]);
 
         let mut args = BTreeMap::new();
         args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
         args.insert("digest".to_string(), Promised::Bytes([0u8; 32].to_vec()));
-        args.insert("checksum".to_string(), Promised::Map(checksum_map));
+        args.insert("checksum".to_string(), Promised::Bytes(checksum_bytes));
 
         let container = build_test_container(
             &subject_signer,
@@ -813,17 +781,15 @@ mod tests {
 
         let authorizer = UcanAuthorizer::new(credentials);
 
-        let mut checksum_map = BTreeMap::new();
-        checksum_map.insert(
-            "algorithm".to_string(),
-            Promised::String("sha256".to_string()),
-        );
-        checksum_map.insert("value".to_string(), Promised::Bytes([0u8; 32].to_vec()));
+        // Multihash format: [code, length, ...digest]
+        // SHA-256 code is 0x12, length is 0x20 (32 bytes)
+        let mut checksum_bytes = vec![0x12, 0x20];
+        checksum_bytes.extend_from_slice(&[0u8; 32]);
 
         let mut args = BTreeMap::new();
         args.insert("store".to_string(), Promised::String("index".to_string()));
         args.insert("key".to_string(), Promised::Bytes(b"test-key".to_vec()));
-        args.insert("checksum".to_string(), Promised::Map(checksum_map));
+        args.insert("checksum".to_string(), Promised::Bytes(checksum_bytes));
 
         // Build self-invocation (issuer == subject, no delegation)
         let container = build_self_invocation_container(
