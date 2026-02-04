@@ -132,7 +132,7 @@ impl<Backend: PlatformBackend + 'static> RemoteSite<Backend> {
             subject.into(),
             self.storage.clone(),
             self.issuer.clone(),
-            self.memory.read(),
+            self.memory.read().map(|s| s.credentials),
         )
     }
 }
