@@ -53,7 +53,8 @@ csv-async = { version = "1", features = ["tokio"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures-core = "0.3"
 ipld-core = { version = "0.4", features = ["serde"] }
-ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "jackddouglas/feat/check" }
+ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "tonk", package = "ucan" }
+varsig = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "tonk", package = "varsig" }
 futures-util = "0.3"
 # getrandom = "0.3"
 getrandom = "0.2"

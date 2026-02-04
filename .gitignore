@@ -8,3 +8,5 @@ typescript/dialog-experimental/src/artifacts
 typescript/*/dist/
 typescript/dialog-artifacts-web-tests/dialog-artifacts
 x-query
+.direnv
+.envrc

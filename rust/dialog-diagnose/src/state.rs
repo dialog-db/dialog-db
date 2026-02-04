@@ -70,21 +70,21 @@ impl TreeState {
                 }
             }
             index => {
-                if let Some((_, TreeNode::Branch { children, .. })) = self.selection_parent(store) {
-                    if let Some(mut child) = children.get(index.saturating_sub(1)) {
-                        while self.expanded.contains(child) {
-                            let Promise::Resolved(TreeNode::Branch { children, .. }) =
-                                store.node(child)
-                            else {
-                                break;
-                            };
-                            let Some(last) = children.last() else {
-                                break;
-                            };
-                            child = last;
-                        }
-                        self.selected_node = *child;
+                if let Some((_, TreeNode::Branch { children, .. })) = self.selection_parent(store)
+                    && let Some(mut child) = children.get(index.saturating_sub(1))
+                {
+                    while self.expanded.contains(child) {
+                        let Promise::Resolved(TreeNode::Branch { children, .. }) =
+                            store.node(child)
+                        else {
+                            break;
+                        };
+                        let Some(last) = children.last() else {
+                            break;
+                        };
+                        child = last;
                     }
+                    self.selected_node = *child;
                 }
             }
         }
@@ -95,15 +95,13 @@ impl TreeState {
     /// This method implements depth-first tree navigation, descending into
     /// expanded nodes and moving to siblings when reaching the end of a branch.
     pub fn select_next(&mut self, store: &DiagnoseStore) {
-        if self.expanded.contains(&self.selected_node) {
-            if let Promise::Resolved(TreeNode::Branch { children, .. }) =
+        if self.expanded.contains(&self.selected_node)
+            && let Promise::Resolved(TreeNode::Branch { children, .. }) =
                 store.node(&self.selected_node)
-            {
-                if let Some(child) = children.first() {
-                    self.selected_node = *child;
-                    return;
-                }
-            }
+            && let Some(child) = children.first()
+        {
+            self.selected_node = *child;
+            return;
         }
 
         let mut cursor = &self.selected_node;

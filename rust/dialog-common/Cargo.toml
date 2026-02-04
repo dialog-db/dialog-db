@@ -37,6 +37,7 @@ tokio = { workspace = true, features = ["rt", "sync"] }
 tokio = { workspace = true, features = ["sync"] }
 wasm-bindgen-futures = { workspace = true }
 getrandom = { workspace = true, features = ["js"] }
+web-sys = { workspace = true, features = ["console"] }
 
 [dev-dependencies]
 dialog-macros = { workspace = true }

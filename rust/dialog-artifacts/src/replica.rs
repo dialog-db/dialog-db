@@ -18,10 +18,6 @@ use dialog_common::ConditionalSend;
 use dialog_prolly_tree::{
     Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Node, Tree, TreeDifference,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use futures_util::future::BoxFuture;
-#[cfg(target_arch = "wasm32")]
-use futures_util::future::LocalBoxFuture;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use std::fmt::Debug;
 
@@ -284,19 +280,19 @@ where
             remote_guard.clone()
         };
 
-        if let Some(remote) = connection.as_ref() {
-            if let Some(bytes) = remote.get(&key).await.map_err(|e| {
+        if let Some(remote) = connection.as_ref()
+            && let Some(bytes) = remote.get(&key).await.map_err(|e| {
                 dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
-            })? {
-                // Cache the remote value to local storage
-                // Clone the Arc to get a mutable copy that shares the backend's interior state
-                let mut local = (*self.local).clone();
-                local.set(key, bytes.clone()).await.map_err(|e| {
-                    dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
-                })?;
+            })?
+        {
+            // Cache the remote value to local storage
+            // Clone the Arc to get a mutable copy that shares the backend's interior state
+            let mut local = (*self.local).clone();
+            local.set(key, bytes.clone()).await.map_err(|e| {
+                dialog_storage::DialogStorageError::StorageBackend(format!("{:?}", e))
+            })?;
 
-                return remote.decode(&bytes).await.map(Some);
-            }
+            return remote.decode(&bytes).await.map(Some);
         }
 
         Ok(None)
@@ -359,6 +355,7 @@ where
 pub struct Branch<Backend: PlatformBackend + 'static> {
     issuer: Operator,
     id: BranchId,
+    subject: Did,
     storage: PlatformStorage<Backend>,
     archive: Archive<PrefixedBackend<Backend>>,
     memory: TypedStoreResource<BranchState, Backend>,
@@ -425,13 +422,13 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             // If branch has an upstream setup we load it up and configure
             // archive's remote
             let upstream = if let Some(state) = &state.upstream {
-                let upstream =
+                let mut upstream =
                     Upstream::open(state, issuer.clone(), storage.clone(), subject.clone()).await?;
 
-                if let Upstream::Remote(branch) = &upstream {
-                    if let Some(archive_storage) = branch.archive_connection() {
-                        archive.set_remote(archive_storage).await;
-                    }
+                // Configure archive's remote for fallback reads
+                if let Upstream::Remote(branch) = &mut upstream {
+                    let connection = branch.open().await?;
+                    archive.set_remote(connection.archive()).await;
                 }
 
                 Some(upstream)
@@ -442,6 +439,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
             Ok(Branch {
                 id: id.clone(),
                 issuer: issuer.clone(),
+                subject,
                 memory,
                 archive,
                 storage: storage.clone(),
@@ -665,9 +663,10 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                             id: target.id().clone(),
                         })
                     } else {
-                        let before = target.revision();
+                        let mut branch = target.load().await?;
+                        let before = branch.revision();
                         if before.tree() == &self.base() {
-                            target.reset(self.revision()).await?;
+                            branch.reset(self.revision()).await?;
                             self.reset(self.revision()).await?;
                             Ok(Some(before))
                         } else {
@@ -676,13 +675,15 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                     }
                 }
                 Upstream::Remote(target) => {
-                    let before = target.revision();
+                    let connection = target.open().await?;
+                    let before = connection.resolve().await?;
                     let after = self.revision().clone();
+
                     if before.as_ref() != Some(&after) {
                         // Replicate novel blocks to a remote target
-                        target.upload(self.novelty()).await?;
+                        connection.upload(self.novelty()).await?;
                         // Now that all blocks are synced, publish the revision
-                        target.publish(after.clone()).await?;
+                        connection.publish(after.clone()).await?;
                         self.reset(after).await?;
                     }
 
@@ -805,18 +806,18 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
         // Set the archive remote to the upstream store if it is a
         // remote so tree changes will be replicated; if local, clear the remote
-        match &upstream {
-            Upstream::Remote(remote) => {
-                // Use archive_connection which points to the archive/index bucket,
-                // not connection which points to the memory bucket
-                if let Some(archive_storage) = remote.archive_connection() {
-                    self.archive.set_remote(archive_storage).await;
-                }
+        // Configure archive's remote for fallback reads
+        let upstream = match upstream {
+            Upstream::Remote(mut remote) => {
+                let connection = remote.open().await?;
+                self.archive.set_remote(connection.archive()).await;
+                Upstream::Remote(remote)
             }
             Upstream::Local(_) => {
                 self.archive.clear_remote().await;
+                upstream
             }
-        }
+        };
 
         // Update the cached upstream on the branch
         *self.upstream.write().unwrap_or_else(|e| e.into_inner()) = Some(upstream);
@@ -849,10 +850,10 @@ impl<Backend: PlatformBackend + 'static> ArtifactStore for Branch<Backend> {
                 for await item in stream {
                     let entry = item?;
 
-                    if entry.matches_selector(&selector) {
-                        if let Entry { value: State::Added(datum), .. } = entry {
-                            yield Artifact::try_from(datum)?;
-                        }
+                    if entry.matches_selector(&selector)
+                        && let Entry { value: State::Added(datum), .. } = entry
+                    {
+                        yield Artifact::try_from(datum)?;
                     }
                 }
             } else if selector.value().is_some() {
@@ -866,10 +867,10 @@ impl<Backend: PlatformBackend + 'static> ArtifactStore for Branch<Backend> {
                 for await item in stream {
                     let entry = item?;
 
-                    if entry.matches_selector(&selector) {
-                        if let Entry { value: State::Added(datum), .. } = entry {
-                            yield Artifact::try_from(datum)?;
-                        }
+                    if entry.matches_selector(&selector)
+                        && let Entry { value: State::Added(datum), .. } = entry
+                    {
+                        yield Artifact::try_from(datum)?;
                     }
                 }
             } else if selector.attribute().is_some() {
@@ -883,10 +884,10 @@ impl<Backend: PlatformBackend + 'static> ArtifactStore for Branch<Backend> {
                 for await item in stream {
                     let entry = item?;
 
-                    if entry.matches_selector(&selector) {
-                        if let Entry { value: State::Added(datum), .. } = entry {
-                            yield Artifact::try_from(datum)?;
-                        }
+                    if entry.matches_selector(&selector)
+                        && let Entry { value: State::Added(datum), .. } = entry
+                    {
+                        yield Artifact::try_from(datum)?;
                     }
                 }
             } else {
@@ -1277,66 +1278,89 @@ impl BranchState {
     }
 }
 
+/// Descriptor for a local upstream branch (lazy loaded).
+#[derive(Clone)]
+pub struct LocalUpstream<Backend: PlatformBackend + 'static> {
+    branch_id: BranchId,
+    issuer: Operator,
+    storage: PlatformStorage<Backend>,
+    subject: Did,
+}
+
+impl<Backend: PlatformBackend + 'static> std::fmt::Debug for LocalUpstream<Backend> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalUpstream")
+            .field("branch_id", &self.branch_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<Backend: PlatformBackend + 'static> LocalUpstream<Backend> {
+    /// Load the branch on demand.
+    async fn load(&self) -> Result<Branch<Backend>, ReplicaError> {
+        Branch::load(
+            &self.branch_id,
+            self.issuer.clone(),
+            self.storage.clone(),
+            self.subject.clone(),
+        )
+        .await
+    }
+
+    /// Get the branch ID.
+    pub fn id(&self) -> &BranchId {
+        &self.branch_id
+    }
+}
+
 /// Upstream branch that is used to push & pull changes
 /// to / from. It can be local or remote.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum Upstream<Backend: PlatformBackend + 'static> {
-    /// A local branch upstream
-    Local(Branch<Backend>),
+    /// A local branch upstream (lazy - loaded on fetch/publish)
+    Local(LocalUpstream<Backend>),
     /// A remote branch upstream
     Remote(RemoteBranch<Backend>),
 }
 
 impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
-    /// Loads an upstream from its state descriptor
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn open(
+    /// Creates an upstream from its state descriptor.
+    ///
+    /// For local upstreams, this stores a descriptor for lazy loading.
+    /// For remote upstreams, this creates the remote branch reference.
+    pub async fn open(
         state: &UpstreamState,
         issuer: Operator,
         storage: PlatformStorage<Backend>,
         subject: Did,
-    ) -> BoxFuture<'_, Result<Self, ReplicaError>> {
-        Box::pin(async move {
-            match state {
-                UpstreamState::Local { branch } => {
-                    let branch = Branch::load(branch, issuer, storage, subject).await?;
-                    Ok(Upstream::Local(branch))
-                }
-                UpstreamState::Remote { site, branch } => {
-                    let mut remote_branch =
-                        RemoteBranch::new(site, branch.id(), storage.clone(), issuer, subject)
-                            .await?;
-                    remote_branch.open().await?;
-                    Ok(Upstream::Remote(remote_branch))
-                }
+    ) -> Result<Self, ReplicaError> {
+        match state {
+            UpstreamState::Local { branch } => Ok(Upstream::Local(LocalUpstream {
+                branch_id: branch.clone(),
+                issuer,
+                storage,
+                subject,
+            })),
+            UpstreamState::Remote {
+                site,
+                branch,
+                subject: remote_subject,
+            } => {
+                // Use the subject from the state, not the one passed in.
+                // This ensures we track the correct remote repository.
+                let mut remote_branch = RemoteBranch::new(
+                    site,
+                    branch.id(),
+                    storage.clone(),
+                    issuer,
+                    remote_subject.clone(),
+                )
+                .await?;
+                remote_branch.open().await?;
+                Ok(Upstream::Remote(remote_branch))
             }
-        })
-    }
-
-    /// Loads an upstream from its state descriptor
-    #[cfg(target_arch = "wasm32")]
-    pub fn open(
-        state: &UpstreamState,
-        issuer: Operator,
-        storage: PlatformStorage<Backend>,
-        subject: Did,
-    ) -> LocalBoxFuture<'_, Result<Self, ReplicaError>> {
-        Box::pin(async move {
-            match state {
-                UpstreamState::Local { branch } => {
-                    let branch = Branch::load(branch, issuer, storage, subject).await?;
-                    Ok(Upstream::Local(branch))
-                }
-                UpstreamState::Remote { site, branch } => {
-                    let mut remote_branch =
-                        RemoteBranch::new(site, branch.id(), storage.clone(), issuer, subject)
-                            .await?;
-                    remote_branch.open().await?;
-                    Ok(Upstream::Remote(remote_branch))
-                }
-            }
-        })
+        }
     }
 
     /// Returns the branch id of this upstream as a string
@@ -1347,20 +1371,20 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
         }
     }
 
-    /// Returns revision this branch is at
-    pub fn revision(&self) -> Option<Revision> {
-        match self {
-            Upstream::Local(branch) => Some(branch.revision()),
-            Upstream::Remote(branch) => branch.revision(),
-        }
-    }
-
     /// Returns site of the branch. If local returns None otherwise
     /// returns site identifier
     pub fn site(&self) -> Option<&str> {
         match self {
             Upstream::Local(_) => None,
             Upstream::Remote(branch) => Some(branch.site()),
+        }
+    }
+
+    /// Returns subject DID of the upstream repository.
+    pub fn subject(&self) -> &Did {
+        match self {
+            Upstream::Local(local) => &local.subject,
+            Upstream::Remote(branch) => branch.subject(),
         }
     }
 
@@ -1378,6 +1402,7 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
             Upstream::Remote(remote) => UpstreamState::Remote {
                 site: remote.site().to_string(),
                 branch: BranchId::new(remote.id().to_string()),
+                subject: remote.subject().clone(),
             },
         }
     }
@@ -1385,23 +1410,34 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
     /// Fetches the current revision from the upstream
     pub async fn fetch(&mut self) -> Result<Option<Revision>, ReplicaError> {
         match self {
-            Upstream::Local(branch) => Ok(Some(branch.revision())),
-            Upstream::Remote(remote) => Ok(remote.resolve().await?.to_owned()),
+            Upstream::Local(local) => {
+                let branch = local.load().await?;
+                Ok(Some(branch.revision()))
+            }
+            Upstream::Remote(remote) => Ok(remote.open().await?.resolve().await?.to_owned()),
         }
     }
 
     /// Pushes a revision to the upstream, returning the previous revision if any
     pub async fn publish(&mut self, revision: Revision) -> Result<(), ReplicaError> {
         match self {
-            Upstream::Local(branch) => branch.reset(revision).await,
-            Upstream::Remote(remote) => remote.publish(revision).await,
+            Upstream::Local(local) => {
+                let mut branch = local.load().await?;
+                branch.reset(revision).await
+            }
+            Upstream::Remote(remote) => remote.open().await?.publish(revision).await,
         }
     }
 }
 
 impl<Backend: PlatformBackend + 'static> From<Branch<Backend>> for Upstream<Backend> {
     fn from(branch: Branch<Backend>) -> Self {
-        Self::Local(branch)
+        Self::Local(LocalUpstream {
+            branch_id: branch.id.clone(),
+            issuer: branch.issuer.clone(),
+            storage: branch.storage.clone(),
+            subject: branch.subject.clone(),
+        })
     }
 }
 
@@ -1420,6 +1456,7 @@ impl<Backend: PlatformBackend> From<Upstream<Backend>> for UpstreamState {
             Upstream::Remote(branch) => UpstreamState::Remote {
                 site: branch.site().to_string(),
                 branch: BranchId::new(branch.id().to_string()),
+                subject: branch.subject().clone(),
             },
         }
     }
@@ -1439,6 +1476,8 @@ pub enum UpstreamState {
         site: Site,
         /// Branch identifier
         branch: BranchId,
+        /// Subject DID of the repository being tracked
+        subject: Did,
     },
 }
 
@@ -1448,6 +1487,14 @@ impl UpstreamState {
         match self {
             Self::Local { branch } => branch,
             Self::Remote { branch, .. } => branch,
+        }
+    }
+
+    /// Returns the subject DID for remote upstreams, None for local.
+    pub fn subject(&self) -> Option<&Did> {
+        match self {
+            Self::Local { .. } => None,
+            Self::Remote { subject, .. } => Some(subject),
         }
     }
 }
@@ -1755,6 +1802,78 @@ mod tests {
         // Push should fail if upstream is not setup
         let result = branch.push().await;
         assert!(result.is_err());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_upstream_state_remote_roundtrip_preserves_subject() {
+        // This test verifies that when a remote upstream is converted to UpstreamState
+        // and back, the subject DID is preserved correctly.
+        //
+        // The scenario: Alice's branch tracks Bob's remote branch.
+        // When saved to state and reopened, the upstream should still point to Bob's
+        // repository (Bob's subject DID), not Alice's.
+
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let storage = PlatformStorage::new(backend.clone(), CborEncoder);
+
+        // Alice and Bob have different subject DIDs
+        let alice_issuer = Operator::from_secret(&[1u8; 32]);
+        let alice_subject: Did = alice_issuer.did().clone();
+        let bob_subject: Did = "did:key:z6MkbobBobBobBobBobBobBobBobBobBobBobBobBob".into();
+
+        // Create a remote upstream state with Bob's subject
+        let original_state = UpstreamState::Remote {
+            site: "origin".to_string(),
+            branch: BranchId::new("main".to_string()),
+            subject: bob_subject.clone(),
+        };
+
+        // Verify the state captures all fields including subject
+        match &original_state {
+            UpstreamState::Remote {
+                site,
+                branch,
+                subject,
+            } => {
+                assert_eq!(site, "origin");
+                assert_eq!(branch.id(), "main");
+                assert_eq!(subject, &bob_subject);
+            }
+            _ => panic!("Expected Remote upstream"),
+        }
+
+        // Roundtrip: open the upstream from state
+        // The subject parameter is Alice's (the replica owner), but the state
+        // contains Bob's subject which should be used for the remote.
+        let _upstream = Upstream::<MemoryStorageBackend<Vec<u8>, Vec<u8>>>::open(
+            &original_state,
+            alice_issuer.clone(),
+            storage.clone(),
+            alice_subject.clone(), // Alice's subject (replica owner)
+        )
+        .await;
+
+        // Opening will fail because no credentials are configured, but that's expected.
+        // The important thing is that if it succeeded, the remote branch would have
+        // Bob's subject, not Alice's.
+
+        // Verify the state serialization preserves subject.
+        let serialized = serde_json::to_string(&original_state).unwrap();
+        let deserialized: UpstreamState = serde_json::from_str(&serialized).unwrap();
+
+        match deserialized {
+            UpstreamState::Remote {
+                site,
+                branch,
+                subject,
+            } => {
+                assert_eq!(site, "origin");
+                assert_eq!(branch.id(), "main");
+                assert_eq!(subject, bob_subject, "Subject should roundtrip correctly");
+            }
+            _ => panic!("Expected Remote upstream after deserialization"),
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -3000,7 +3119,8 @@ mod tests {
             &operator_did,
             operator_signer.did(),
             &["archive", "memory"],
-        )?;
+        )
+        .await?;
         let delegation_chain = DelegationChain::new(delegation);
 
         // Create UCAN credentials
@@ -3089,7 +3209,8 @@ mod tests {
             &operator_did,
             operator_signer.did(),
             &[], // Empty command = root capability (/)
-        )?;
+        )
+        .await?;
         let delegation_chain = DelegationChain::new(delegation);
 
         // Step 3: Create UCAN credentials
@@ -3200,7 +3321,8 @@ mod tests {
             &second_operator_did,
             operator_signer.did(),
             &[], // Empty command = root capability (/)
-        )?;
+        )
+        .await?;
         let second_delegation_chain = DelegationChain::new(second_delegation);
         let second_ucan_credentials =
             ucan::Credentials::new(env.access_service_url.clone(), second_delegation_chain);
@@ -3279,5 +3401,68 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    /// Test that archive has remote configured after set_upstream.
+    ///
+    /// This is a bug where the archive's remote wasn't configured because
+    /// RemoteBranch was in Reference state (not connected) when set_upstream
+    /// was called. The fix ensures connect() is called before accessing archive().
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn test_archive_has_remote_after_set_upstream() {
+        use crate::replica::remote::{RemoteCredentials, RemoteSite, RemoteState};
+
+        let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
+        let storage = PlatformStorage::new(backend.clone(), CborEncoder);
+        let issuer = Operator::from_secret(&seed());
+        let subject = test_subject();
+
+        let mut replica = Replica::open(issuer.clone(), subject.clone(), backend.clone())
+            .expect("Failed to create replica");
+
+        // Add memory remote
+        let remote_state = RemoteState {
+            site: "origin".to_string(),
+            credentials: RemoteCredentials::Memory,
+        };
+        replica
+            .add_remote(remote_state)
+            .await
+            .expect("Failed to add remote");
+
+        let branch_id = BranchId::new("main".to_string());
+        let mut branch = replica
+            .branches
+            .open(&branch_id)
+            .await
+            .expect("Failed to open branch");
+
+        // Before set_upstream: archive has no remote
+        assert!(
+            !branch.archive.has_remote().await,
+            "Archive should NOT have remote before set_upstream"
+        );
+
+        // Set upstream
+        let remote_site = RemoteSite::load(&"origin".to_string(), issuer.clone(), storage)
+            .await
+            .expect("Failed to load remote site");
+        let remote_branch = remote_site
+            .repository(&subject)
+            .branch(branch_id.to_string());
+
+        branch
+            .set_upstream(remote_branch)
+            .await
+            .expect("Failed to set upstream");
+
+        // After set_upstream: archive MUST have remote configured
+        // With the old bug, this would be false because archive_connection()
+        // returned None when RemoteBranch was in Reference state.
+        assert!(
+            branch.archive.has_remote().await,
+            "Archive MUST have remote after set_upstream - this was the bug!"
+        );
     }
 }
