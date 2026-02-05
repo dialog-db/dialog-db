@@ -12,7 +12,7 @@ use dialog_storage::{
 };
 
 #[cfg(feature = "s3")]
-use {super::Operator, crate::ErrorMappingBackend, dialog_storage::s3::Bucket};
+use {super::SigningAuthority, crate::ErrorMappingBackend, dialog_storage::s3::Bucket};
 
 /// A storage backend for remote connections.
 ///
@@ -23,7 +23,7 @@ use {super::Operator, crate::ErrorMappingBackend, dialog_storage::s3::Bucket};
 pub enum RemoteBackend {
     /// S3-compatible storage backend.
     #[cfg(feature = "s3")]
-    S3(ErrorMappingBackend<Bucket<Operator>>),
+    S3(ErrorMappingBackend<Bucket<SigningAuthority>>),
     /// In-memory storage backend (useful for testing).
     Memory(MemoryStorageBackend<Vec<u8>, Vec<u8>>),
 }

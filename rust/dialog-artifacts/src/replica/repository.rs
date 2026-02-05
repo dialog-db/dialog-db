@@ -1,6 +1,7 @@
 pub use super::Replica;
 use super::remote::Site;
-use super::{PlatformBackend, RemoteSite, RemoteState, ReplicaError};
+use super::{OperatingAuthority, PlatformBackend, RemoteSite, RemoteState, ReplicaError};
+use dialog_common::ConditionalSync;
 
 /// Manages remote sites used for synchronization. Repository (a.k.a Replica)
 /// may have zero or more sites configured that can be used to obtain references
@@ -8,7 +9,7 @@ use super::{PlatformBackend, RemoteSite, RemoteState, ReplicaError};
 /// branches.
 ///
 /// Trait is meant to be implemented by `Replica` or other similar abstraction
-/// that needs to manage remotes e.g. `Operator` could potentially implement
+/// that needs to manage remotes e.g. `SigningAuthority` could potentially implement
 /// `Remotes` to have remotes configured level higher.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -21,7 +22,9 @@ pub trait Remotes<Backend: PlatformBackend> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Backend: PlatformBackend + 'static> Remotes<Backend> for Replica<Backend> {
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
+    Remotes<Backend> for Replica<Backend, A>
+{
     async fn add_remote(&mut self, state: RemoteState) -> Result<Site, ReplicaError> {
         let site = state.site.clone();
         RemoteSite::add(state, self.issuer().clone(), self.storage().clone()).await?;

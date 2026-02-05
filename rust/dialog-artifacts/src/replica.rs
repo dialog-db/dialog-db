@@ -13,8 +13,8 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use base58::ToBase58;
 use blake3;
-use dialog_capability::Did;
-use dialog_common::ConditionalSend;
+use dialog_capability::{Authority, Did};
+use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_prolly_tree::{
     Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Node, Tree, TreeDifference,
 };
@@ -24,7 +24,7 @@ use std::fmt::Debug;
 use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
 
 use ed25519_dalek::ed25519::signature::SignerMut;
-use ed25519_dalek::{SECRET_KEY_LENGTH, Signature, SignatureError, SigningKey, VerifyingKey};
+use ed25519_dalek::{SECRET_KEY_LENGTH, SignatureError, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
@@ -35,19 +35,32 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-/// Operator module for signing and identity management.
-pub mod operator;
 /// Principal type definitions.
 pub mod principal;
 /// Remote repository and branch management.
 pub mod remote;
 /// Repository trait for managing remotes.
 pub mod repository;
+/// SigningAuthority for signing and identity management.
+pub mod signing_authority;
 
-pub use operator::Operator;
-pub use principal::Principal;
+pub use signing_authority::{Signer, SigningAuthority};
+
+// Re-export WebCrypto types for WASM key storage
+pub use principal::{Principal, PrincipalError};
 pub use remote::{RemoteBranch, RemoteCredentials, RemoteRepository, RemoteSite, Site};
 pub use repository::Remotes;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
+pub use signing_authority::{CryptoKey, WebCryptoEd25519Signer};
+
+/// An authority that can operate on a replica.
+///
+/// This trait alias bundles the required bounds for authorities used with Replica:
+/// - `Authority`: Provides DID identity and signing capability
+/// - `Clone`: Required for sharing authority across branches and operations
+/// - `Debug`: Required for error messages and debugging output
+pub trait OperatingAuthority: Authority + Clone + Debug {}
+impl<A: Authority + Clone + Debug> OperatingAuthority for A {}
 
 // TryFrom<Principal> for VerifyingKey is implemented in principal.rs
 
@@ -90,18 +103,23 @@ impl From<NodeReference> for Blake3Hash {
 }
 
 /// A replica represents a local instance of a distributed database.
+///
+/// The type parameter `A` represents the authority used for signing operations.
+/// It defaults to `SigningAuthority` for convenience.
 #[derive(Debug, Clone)]
-pub struct Replica<Backend: PlatformBackend> {
-    issuer: Operator,
+pub struct Replica<Backend: PlatformBackend, A: OperatingAuthority = SigningAuthority> {
+    issuer: A,
     subject: Did,
     storage: PlatformStorage<Backend>,
     /// Local branches in this replica
-    pub branches: Branches<Backend>,
+    pub branches: Branches<Backend, A>,
 }
 
-impl<Backend: PlatformBackend + 'static> Replica<Backend> {
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
+    Replica<Backend, A>
+{
     /// Creates a new replica with the given issuer and storage backend.
-    pub fn open(issuer: Operator, subject: Did, backend: Backend) -> Result<Self, ReplicaError> {
+    pub fn open(issuer: A, subject: Did, backend: Backend) -> Result<Self, ReplicaError> {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branches = Branches::new(issuer.clone(), subject.clone(), backend.clone());
@@ -113,9 +131,9 @@ impl<Backend: PlatformBackend + 'static> Replica<Backend> {
         })
     }
 
-    /// Returns the principal (public key) of the issuer for this replica.
-    pub fn principal(&self) -> &Principal {
-        self.issuer.principal()
+    /// Returns the DID of the authority for this replica.
+    pub fn did(&self) -> &Did {
+        self.issuer.did()
     }
 
     /// Returns a reference to the storage.
@@ -128,8 +146,8 @@ impl<Backend: PlatformBackend + 'static> Replica<Backend> {
         &mut self.storage
     }
 
-    /// Returns a reference to the issuer (operator).
-    pub fn issuer(&self) -> &Operator {
+    /// Returns a reference to the issuer (authority).
+    pub fn issuer(&self) -> &A {
         &self.issuer
     }
 
@@ -141,15 +159,17 @@ impl<Backend: PlatformBackend + 'static> Replica<Backend> {
 
 /// Manages multiple branches within a replica.
 #[derive(Debug, Clone)]
-pub struct Branches<Backend: PlatformBackend> {
-    issuer: Operator,
+pub struct Branches<Backend: PlatformBackend, A: OperatingAuthority = SigningAuthority> {
+    issuer: A,
     subject: Did,
     storage: PlatformStorage<Backend>,
 }
 
-impl<Backend: PlatformBackend + 'static> Branches<Backend> {
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
+    Branches<Backend, A>
+{
     /// Creates a new instance for the given backend
-    pub fn new(issuer: Operator, subject: Did, backend: Backend) -> Self {
+    pub fn new(issuer: A, subject: Did, backend: Backend) -> Self {
         let storage = PlatformStorage::new(backend, CborEncoder);
         Self {
             issuer,
@@ -160,7 +180,7 @@ impl<Backend: PlatformBackend + 'static> Branches<Backend> {
 
     /// Loads a branch with given identifier, produces an error if it does not
     /// exists.
-    pub async fn load(&self, id: &BranchId) -> Result<Branch<Backend>, ReplicaError> {
+    pub async fn load(&self, id: &BranchId) -> Result<Branch<Backend, A>, ReplicaError> {
         Branch::load(
             id,
             self.issuer.clone(),
@@ -172,7 +192,7 @@ impl<Backend: PlatformBackend + 'static> Branches<Backend> {
 
     /// Loads a branch with the given identifier or creates a new one if
     /// it does not already exist.
-    pub async fn open(&self, id: impl Into<BranchId>) -> Result<Branch<Backend>, ReplicaError> {
+    pub async fn open(&self, id: impl Into<BranchId>) -> Result<Branch<Backend, A>, ReplicaError> {
         Branch::open(
             id,
             self.issuer.clone(),
@@ -352,27 +372,34 @@ where
 
 /// A branch represents a named line of development within a replica.
 #[derive(Clone)]
-pub struct Branch<Backend: PlatformBackend + 'static> {
-    issuer: Operator,
+pub struct Branch<
+    Backend: PlatformBackend + 'static,
+    A: OperatingAuthority + 'static = SigningAuthority,
+> {
+    issuer: A,
     id: BranchId,
     subject: Did,
     storage: PlatformStorage<Backend>,
     archive: Archive<PrefixedBackend<Backend>>,
     memory: TypedStoreResource<BranchState, Backend>,
     tree: Arc<RwLock<Index<Backend>>>,
-    upstream: Arc<std::sync::RwLock<Option<Upstream<Backend>>>>,
+    upstream: Arc<std::sync::RwLock<Option<Upstream<Backend, A>>>>,
 }
 
-impl<Backend: PlatformBackend + 'static> std::fmt::Debug for Branch<Backend> {
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> std::fmt::Debug
+    for Branch<Backend, A>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Branch")
             .field("id", &self.id)
-            .field("issuer", &self.issuer)
+            .field("issuer", &self.issuer.did())
             .finish_non_exhaustive()
     }
 }
 
-impl<Backend: PlatformBackend + 'static> Branch<Backend> {
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
+    Branch<Backend, A>
+{
     async fn mount(
         id: &BranchId,
         storage: &mut PlatformStorage<Backend>,
@@ -402,11 +429,11 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// Loads a branch from storage, creating it with the provided default state if it doesn't exist.
     pub async fn load_with_default(
         id: &BranchId,
-        issuer: Operator,
+        issuer: A,
         mut storage: PlatformStorage<Backend>,
         subject: Did,
         default_state: Option<BranchState>,
-    ) -> Result<Branch<Backend>, ReplicaError> {
+    ) -> Result<Branch<Backend, A>, ReplicaError> {
         let memory = Self::mount(id, &mut storage, default_state).await?;
         let prefixed_backend = PrefixedBackend::new(b"index/", storage.clone().into_backend());
         let archive = Archive::new(prefixed_backend);
@@ -455,15 +482,14 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// Loads a branch with a given id or creates one if it does not exist.
     pub async fn open(
         id: impl Into<BranchId>,
-        issuer: Operator,
+        issuer: A,
         storage: PlatformStorage<Backend>,
         subject: Did,
-    ) -> Result<Branch<Backend>, ReplicaError> {
+    ) -> Result<Branch<Backend, A>, ReplicaError> {
         let id = id.into();
         let default_state = Some(BranchState::new(
             id.clone(),
-            #[allow(clippy::clone_on_copy)]
-            Revision::new(issuer.principal().clone()),
+            Revision::new(issuer.did().clone()),
             None,
         ));
 
@@ -476,10 +502,10 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     /// given id does not exists it produces an error.
     pub async fn load(
         id: &BranchId,
-        issuer: Operator,
+        issuer: A,
         storage: PlatformStorage<Backend>,
         subject: Did,
-    ) -> Result<Branch<Backend>, ReplicaError> {
+    ) -> Result<Branch<Backend, A>, ReplicaError> {
         let branch = Self::load_with_default(id, issuer, storage, subject, None).await?;
 
         Ok(branch)
@@ -545,7 +571,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
     /// Lazily initializes and returns a mutable reference to the upstream.
     /// Returns None if no upstream is configured.
-    pub fn upstream(&self) -> Option<Upstream<Backend>> {
+    pub fn upstream(&self) -> Option<Upstream<Backend, A>> {
         self.upstream
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -570,7 +596,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         self.memory.read().unwrap_or_else(|| {
             BranchState::new(
                 self.id.clone(),
-                Revision::new(self.issuer.principal().to_owned()),
+                Revision::new(self.issuer.did().clone()),
                 None,
             )
         })
@@ -580,9 +606,9 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
         &self.id
     }
 
-    /// Returns principal issuing changes on this branch
-    pub fn principal(&self) -> &Principal {
-        self.issuer.principal()
+    /// Returns the DID of the authority issuing changes on this branch.
+    pub fn did(&self) -> &Did {
+        self.issuer.did()
     }
 
     /// Returns the current revision of this branch.
@@ -746,9 +772,8 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
                         Ok(Some(revision))
                     } else {
                         // Create new revision with integrated changes
-                        #[allow(clippy::clone_on_copy)]
                         let new_revision = Revision {
-                            issuer: self.issuer.principal().clone(),
+                            issuer: self.issuer.did().clone(),
                             tree: NodeReference(hash),
                             cause: HashSet::from([revision.edition()?]),
                             // period is max between local and remote periods + 1
@@ -777,7 +802,7 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 
     /// Sets the upstream for this branch and persists the change.
     /// Accepts either a Branch or RemoteBranch via Into<Upstream>.
-    pub async fn set_upstream<U: Into<Upstream<Backend>>>(
+    pub async fn set_upstream<U: Into<Upstream<Backend, A>>>(
         &mut self,
         target: U,
     ) -> Result<(), ReplicaError> {
@@ -827,7 +852,9 @@ impl<Backend: PlatformBackend + 'static> Branch<Backend> {
 }
 
 // Implement ArtifactStore for Branch
-impl<Backend: PlatformBackend + 'static> ArtifactStore for Branch<Backend> {
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> ArtifactStore
+    for Branch<Backend, A>
+{
     fn select(
         &self,
         selector: ArtifactSelector<Constrained>,
@@ -900,7 +927,9 @@ impl<Backend: PlatformBackend + 'static> ArtifactStore for Branch<Backend> {
 // Implement ArtifactStoreMut for Branch
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
+    ArtifactStoreMut for Branch<Backend, A>
+{
     async fn commit<Instructions>(
         &mut self,
         instructions: Instructions,
@@ -1000,12 +1029,13 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
             let tree_reference = NodeReference(tree_hash);
 
             // Calculate the new period and moment based on the base revision
+            let issuer_did = self.issuer.did().clone();
             let (period, moment) = {
                 let base_period = *base_revision.period();
                 let base_moment = *base_revision.moment();
                 let base_issuer = base_revision.issuer();
 
-                if base_issuer == self.issuer.principal() {
+                if base_issuer == &issuer_did {
                     // Same issuer - increment moment
                     (base_period, base_moment + 1)
                 } else {
@@ -1014,9 +1044,8 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
                 }
             };
 
-            #[allow(clippy::clone_on_copy)]
             let new_revision = Revision {
-                issuer: self.issuer.principal().clone(),
+                issuer: issuer_did,
                 tree: tree_reference.clone(),
                 cause: HashSet::from([base_revision.edition().expect("Failed to create edition")]),
                 period,
@@ -1070,8 +1099,8 @@ pub use remote::{RemoteBackend, RemoteState};
 /// over those that are not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Occurence {
-    /// Site of this occurence.
-    pub site: Principal,
+    /// DID of the site where this occurence happened.
+    pub site: Did,
 
     /// Logical coordinated time component denoting a last synchronization
     /// cycle.
@@ -1086,10 +1115,11 @@ pub struct Occurence {
 /// kind of like git commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Revision {
-    /// Site where this revision was created.It as expected to be a signing
-    /// principal representing a tool acting on author's behalf. In the future
-    /// I expect we'll have signed delegation chain from user to this site.
-    pub issuer: Principal,
+    /// DID of the site where this revision was created. It is expected to be
+    /// the DID of a signing principal representing a tool acting on the
+    /// author's behalf. In the future we expect to have a signed delegation
+    /// chain from user to this site.
+    pub issuer: Did,
 
     /// Reference the root of the search tree.
     pub tree: NodeReference,
@@ -1119,8 +1149,8 @@ pub struct Revision {
 }
 
 impl Revision {
-    /// Creates new revision for with an empty tree
-    pub fn new(issuer: Principal) -> Self {
+    /// Creates new revision with an empty tree
+    pub fn new(issuer: Did) -> Self {
         Self {
             issuer,
             tree: NodeReference::default(),
@@ -1130,8 +1160,8 @@ impl Revision {
         }
     }
 
-    /// Issuer of this revision.
-    pub fn issuer(&self) -> &Principal {
+    /// DID of the issuer of this revision.
+    pub fn issuer(&self) -> &Did {
         &self.issuer
     }
 
@@ -1280,14 +1310,19 @@ impl BranchState {
 
 /// Descriptor for a local upstream branch (lazy loaded).
 #[derive(Clone)]
-pub struct LocalUpstream<Backend: PlatformBackend + 'static> {
+pub struct LocalUpstream<
+    Backend: PlatformBackend + 'static,
+    A: OperatingAuthority = SigningAuthority,
+> {
     branch_id: BranchId,
-    issuer: Operator,
+    issuer: A,
     storage: PlatformStorage<Backend>,
     subject: Did,
 }
 
-impl<Backend: PlatformBackend + 'static> std::fmt::Debug for LocalUpstream<Backend> {
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority> std::fmt::Debug
+    for LocalUpstream<Backend, A>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LocalUpstream")
             .field("branch_id", &self.branch_id)
@@ -1295,9 +1330,11 @@ impl<Backend: PlatformBackend + 'static> std::fmt::Debug for LocalUpstream<Backe
     }
 }
 
-impl<Backend: PlatformBackend + 'static> LocalUpstream<Backend> {
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
+    LocalUpstream<Backend, A>
+{
     /// Load the branch on demand.
-    async fn load(&self) -> Result<Branch<Backend>, ReplicaError> {
+    async fn load(&self) -> Result<Branch<Backend, A>, ReplicaError> {
         Branch::load(
             &self.branch_id,
             self.issuer.clone(),
@@ -1317,21 +1354,26 @@ impl<Backend: PlatformBackend + 'static> LocalUpstream<Backend> {
 /// to / from. It can be local or remote.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
-pub enum Upstream<Backend: PlatformBackend + 'static> {
+pub enum Upstream<
+    Backend: PlatformBackend + 'static,
+    A: OperatingAuthority + 'static = SigningAuthority,
+> {
     /// A local branch upstream (lazy - loaded on fetch/publish)
-    Local(LocalUpstream<Backend>),
+    Local(LocalUpstream<Backend, A>),
     /// A remote branch upstream
-    Remote(RemoteBranch<Backend>),
+    Remote(RemoteBranch<Backend, A>),
 }
 
-impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
+    Upstream<Backend, A>
+{
     /// Creates an upstream from its state descriptor.
     ///
     /// For local upstreams, this stores a descriptor for lazy loading.
     /// For remote upstreams, this creates the remote branch reference.
     pub async fn open(
         state: &UpstreamState,
-        issuer: Operator,
+        issuer: A,
         storage: PlatformStorage<Backend>,
         subject: Did,
     ) -> Result<Self, ReplicaError> {
@@ -1430,8 +1472,10 @@ impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
     }
 }
 
-impl<Backend: PlatformBackend + 'static> From<Branch<Backend>> for Upstream<Backend> {
-    fn from(branch: Branch<Backend>) -> Self {
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> From<Branch<Backend, A>>
+    for Upstream<Backend, A>
+{
+    fn from(branch: Branch<Backend, A>) -> Self {
         Self::Local(LocalUpstream {
             branch_id: branch.id.clone(),
             issuer: branch.issuer.clone(),
@@ -1441,14 +1485,18 @@ impl<Backend: PlatformBackend + 'static> From<Branch<Backend>> for Upstream<Back
     }
 }
 
-impl<Backend: PlatformBackend + 'static> From<RemoteBranch<Backend>> for Upstream<Backend> {
-    fn from(branch: RemoteBranch<Backend>) -> Self {
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static>
+    From<RemoteBranch<Backend, A>> for Upstream<Backend, A>
+{
+    fn from(branch: RemoteBranch<Backend, A>) -> Self {
         Self::Remote(branch)
     }
 }
 
-impl<Backend: PlatformBackend> From<Upstream<Backend>> for UpstreamState {
-    fn from(upstream: Upstream<Backend>) -> Self {
+impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
+    From<Upstream<Backend, A>> for UpstreamState
+{
+    fn from(upstream: Upstream<Backend, A>) -> Self {
         match upstream {
             Upstream::Local(branch) => UpstreamState::Local {
                 branch: branch.id().clone(),
@@ -1698,7 +1746,7 @@ mod tests {
         let upstream_branch_id = BranchId::new(upstream_id.to_string());
         let subject = test_subject();
 
-        let issuer = Operator::from_secret(&seed());
+        let issuer = SigningAuthority::from_secret(&seed());
         let mut branch =
             Branch::open(&branch_id, issuer.clone(), storage.clone(), subject.clone()).await?;
         let target = Branch::open(&upstream_branch_id, issuer, storage.clone(), subject).await?;
@@ -1718,7 +1766,7 @@ mod tests {
 
         // Create main branch
         let main_id = BranchId::new("main".to_string());
-        let issuer = Operator::from_secret(&seed());
+        let issuer = SigningAuthority::from_secret(&seed());
         let subject = test_subject();
         let mut main_branch =
             Branch::open(&main_id, issuer.clone(), storage.clone(), subject.clone())
@@ -1727,7 +1775,7 @@ mod tests {
 
         // Create a revision for main
         let main_revision = Revision {
-            issuer: issuer.principal().clone(),
+            issuer: issuer.did().clone(),
             tree: NodeReference(EMPT_TREE_HASH),
             cause: HashSet::new(),
             period: 0,
@@ -1745,7 +1793,7 @@ mod tests {
 
         // Create a new revision on feature branch with main_revision as cause
         let feature_revision = Revision {
-            issuer: issuer.principal().clone(),
+            issuer: issuer.did().clone(),
             tree: NodeReference(EMPT_TREE_HASH),
             cause: HashSet::from([main_revision.edition().expect("Failed to create edition")]),
             period: 0,
@@ -1793,7 +1841,7 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branch_id = BranchId::new("no-upstream".to_string());
-        let issuer = Operator::from_secret(&seed());
+        let issuer = SigningAuthority::from_secret(&seed());
         let subject = test_subject();
         let mut branch = Branch::open(&branch_id, issuer, storage, subject)
             .await
@@ -1818,7 +1866,7 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         // Alice and Bob have different subject DIDs
-        let alice_issuer = Operator::from_secret(&[1u8; 32]);
+        let alice_issuer = SigningAuthority::from_secret(&[1u8; 32]);
         let alice_subject: Did = alice_issuer.did().clone();
         let bob_subject: Did = "did:key:z6MkbobBobBobBobBobBobBobBobBobBobBobBobBob".into();
 
@@ -1884,7 +1932,7 @@ mod tests {
 
         // Create main and feature branches
         let main_id = BranchId::new("main".to_string());
-        let issuer = Operator::from_secret(&seed());
+        let issuer = SigningAuthority::from_secret(&seed());
         let subject = test_subject();
         let mut main_branch =
             Branch::open(&main_id, issuer.clone(), storage.clone(), subject.clone())
@@ -1892,7 +1940,7 @@ mod tests {
                 .expect("Failed to create main branch");
 
         let main_revision = Revision {
-            issuer: main_branch.principal().clone(),
+            issuer: main_branch.did().clone(),
             tree: NodeReference(EMPT_TREE_HASH),
             cause: HashSet::new(),
             period: 0,
@@ -1926,7 +1974,7 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branch_id = BranchId::new("no-upstream".to_string());
-        let issuer = Operator::from_secret(&seed());
+        let issuer = SigningAuthority::from_secret(&seed());
         let subject = test_subject();
         let mut branch = Branch::open(&branch_id, issuer, storage, subject)
             .await
@@ -1946,7 +1994,7 @@ mod tests {
         use futures_util::stream;
 
         // Step 1: Generate issuer
-        let issuer = Operator::from_passphrase("test_end_to_end_remote_upstream");
+        let issuer = SigningAuthority::from_passphrase("test_end_to_end_remote_upstream");
         let subject = issuer.did().clone();
 
         // Step 2: Create a replica with that issuer and journaled in-memory backend
@@ -2176,13 +2224,13 @@ mod tests {
         let subject: Did = "did:test:shared_repo".into();
 
         // Create Alice's replica
-        let alice_issuer = Operator::from_passphrase("alice");
+        let alice_issuer = SigningAuthority::from_passphrase("alice");
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let mut alice_replica = Replica::open(alice_issuer.clone(), subject.clone(), alice_backend)
             .expect("Failed to create Alice's replica");
 
         // Create Bob's replica
-        let bob_issuer = Operator::from_passphrase("bob");
+        let bob_issuer = SigningAuthority::from_passphrase("bob");
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let mut bob_replica = Replica::open(bob_issuer.clone(), subject.clone(), bob_backend)
             .expect("Failed to create Bob's replica");
@@ -2321,7 +2369,7 @@ mod tests {
         let subject: Did = "did:test:shared_repo".into();
 
         // Step 1: Create Alice's replica with her own issuer and backend
-        let alice_issuer = Operator::from_passphrase("alice");
+        let alice_issuer = SigningAuthority::from_passphrase("alice");
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
         let mut alice_replica = Replica::open(
@@ -2332,7 +2380,7 @@ mod tests {
         .expect("Failed to create Alice's replica");
 
         // Step 2: Create Bob's replica with his own issuer and backend
-        let bob_issuer = Operator::from_passphrase("bob");
+        let bob_issuer = SigningAuthority::from_passphrase("bob");
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
         let mut bob_replica =
@@ -2590,7 +2638,7 @@ mod tests {
         let subject: Did = "did:test:shared_repo".into();
 
         // Create Alice's replica
-        let alice_issuer = Operator::from_passphrase("alice");
+        let alice_issuer = SigningAuthority::from_passphrase("alice");
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
         let mut alice_replica = Replica::open(
@@ -2601,7 +2649,7 @@ mod tests {
         .expect("Failed to create Alice's replica");
 
         // Create Bob's replica
-        let bob_issuer = Operator::from_passphrase("bob");
+        let bob_issuer = SigningAuthority::from_passphrase("bob");
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
         let mut bob_replica =
@@ -2773,7 +2821,7 @@ mod tests {
         // Test the difference between load (expects existing) and open (creates if missing)
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
-        let issuer = Operator::from_passphrase("test-user");
+        let issuer = SigningAuthority::from_passphrase("test-user");
         let subject = test_subject();
 
         let branch_id = BranchId::new("test-branch".to_string());
@@ -2811,7 +2859,7 @@ mod tests {
         let subject: Did = "did:test:shared_repo".into();
 
         // Create Alice's replica
-        let alice_issuer = Operator::from_passphrase("alice");
+        let alice_issuer = SigningAuthority::from_passphrase("alice");
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
         let mut alice_replica = Replica::open(
@@ -2864,7 +2912,7 @@ mod tests {
         let alice_revision_after_push = alice_main.revision();
 
         // Create Bob's replica
-        let bob_issuer = Operator::from_passphrase("bob");
+        let bob_issuer = SigningAuthority::from_passphrase("bob");
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
         let mut bob_replica =
@@ -2933,7 +2981,7 @@ mod tests {
         use dialog_s3_credentials::Address;
         use dialog_storage::JournaledStorage;
 
-        let issuer = Operator::from_passphrase("multi-remote-user");
+        let issuer = SigningAuthority::from_passphrase("multi-remote-user");
         let subject = issuer.did().clone();
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let journaled = JournaledStorage::new(backend);
@@ -2982,7 +3030,7 @@ mod tests {
         // Test branch description getting and setting
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
-        let issuer = Operator::from_passphrase("test-user");
+        let issuer = SigningAuthority::from_passphrase("test-user");
         let subject = test_subject();
 
         let branch_id = BranchId::new("feature-x".to_string());
@@ -3005,8 +3053,8 @@ mod tests {
     #[tokio::test]
     async fn test_issuer_generate() -> anyhow::Result<()> {
         // Test generating random issuer keys
-        let issuer1 = Operator::generate()?;
-        let issuer2 = Operator::generate()?;
+        let issuer1 = SigningAuthority::generate().await?;
+        let issuer2 = SigningAuthority::generate().await?;
 
         // Each generated issuer should be unique
         assert_ne!(issuer1.did(), issuer2.did());
@@ -3035,7 +3083,7 @@ mod tests {
         }
 
         let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
-        let issuer = Operator::from_passphrase("test-archive-cache");
+        let issuer = SigningAuthority::from_passphrase("test-archive-cache");
         let subject = issuer.did().clone();
         let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
             address,
@@ -3110,7 +3158,7 @@ mod tests {
         // Create operator and subject
         let operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
         let operator_did = operator_signer.did().clone();
-        let operator = Operator::from_secret(&operator_signer.signer().to_bytes());
+        let operator = SigningAuthority::from_secret(&operator_signer.signer().to_bytes());
         let subject = operator.did().clone();
 
         // Create a delegation chain
@@ -3192,11 +3240,11 @@ mod tests {
         let operator_did = operator_signer.did().clone();
         let subject: Did = operator_did.into();
 
-        // Create an Operator wrapper that uses the UCAN signer's key
-        // Note: Operator::did() may produce a different DID format than Ed25519Did,
+        // Create a SigningAuthority that uses the UCAN signer's key
+        // Note: SigningAuthority::did() may produce a different DID format than Ed25519Did,
         // but the UCAN invocation system uses the Authority trait which gets the
         // secret key bytes for signing, not the DID for identity.
-        let operator = Operator::from_secret(&operator_signer.signer().to_bytes());
+        let operator = SigningAuthority::from_secret(&operator_signer.signer().to_bytes());
 
         // Step 2: Create a delegation chain from subject to operator
         // In this test, the subject and operator are the same (self-signed)
@@ -3312,7 +3360,8 @@ mod tests {
         // Generate a second operator for the second replica
         let second_operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
         let second_operator_did = second_operator_signer.did().clone();
-        let second_operator = Operator::from_secret(&second_operator_signer.signer().to_bytes());
+        let second_operator =
+            SigningAuthority::from_secret(&second_operator_signer.signer().to_bytes());
 
         // Create delegation from the original subject to the second operator
         // Grant root capability (/) to allow all operations for the pull test
@@ -3415,7 +3464,7 @@ mod tests {
 
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
-        let issuer = Operator::from_secret(&seed());
+        let issuer = SigningAuthority::from_secret(&seed());
         let subject = test_subject();
 
         let mut replica = Replica::open(issuer.clone(), subject.clone(), backend.clone())
