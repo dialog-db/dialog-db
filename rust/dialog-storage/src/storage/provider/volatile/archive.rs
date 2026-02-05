@@ -1,44 +1,35 @@
-//! Archive capability provider for filesystem.
+//! Archive capability provider for volatile storage.
 
-use super::{FileSystem, FileSystemError};
+use super::{ArchiveKey, Volatile, VolatileError};
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::archive::{ArchiveError, Get, GetCapability, Put, PutCapability};
-use std::io::ErrorKind;
-use std::path::PathBuf;
-use tokio::fs::{read, rename, write};
 
-impl From<FileSystemError> for ArchiveError {
-    fn from(e: FileSystemError) -> Self {
+impl From<VolatileError> for ArchiveError {
+    fn from(e: VolatileError) -> Self {
         ArchiveError::Storage(e.to_string())
     }
 }
 
-#[async_trait]
-impl Provider<Get> for FileSystem {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Get> for Volatile {
     async fn execute(&mut self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         let subject = effect.subject().into();
         let catalog = effect.catalog();
         let digest = effect.digest();
 
-        let path: PathBuf = self
-            .archive(&subject)?
-            .resolve(catalog)?
-            .resolve(&digest.as_bytes().to_base58())?
-            .try_into()?;
+        let key: ArchiveKey = (catalog.to_string(), digest.as_bytes().to_base58());
 
-        match read(&path).await {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(ArchiveError::Storage(e.to_string())),
-        }
+        Ok(self.session(&subject).archive.get(&key).cloned())
     }
 }
 
-#[async_trait]
-impl Provider<Put> for FileSystem {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Put> for Volatile {
     async fn execute(&mut self, effect: Capability<Put>) -> Result<(), ArchiveError> {
         let subject = effect.subject().into();
         let catalog = effect.catalog();
@@ -54,30 +45,13 @@ impl Provider<Put> for FileSystem {
             });
         }
 
-        let destination = self.archive(&subject)?.resolve(catalog)?;
+        let key: ArchiveKey = (catalog.to_string(), digest.as_bytes().to_base58());
 
-        // Ensure destination directory exists
-        destination.ensure_dir().await?;
-
-        let key = digest.as_bytes().to_base58();
-        let path: PathBuf = destination.resolve(&key)?.try_into()?;
-
-        // Content-addressed storage is idempotent - if file exists with same
-        // content hash, no need to rewrite
-        if path.exists() {
-            return Ok(());
-        }
-
-        // Write atomically via temp file + rename
-        let temp_path: PathBuf = destination.resolve(&format!("{}.tmp", key))?.try_into()?;
-
-        write(&temp_path, content)
-            .await
-            .map_err(|e| ArchiveError::Storage(e.to_string()))?;
-
-        rename(&temp_path, &path)
-            .await
-            .map_err(|e| ArchiveError::Storage(e.to_string()))?;
+        // Content-addressed storage is idempotent
+        self.session(&subject)
+            .archive
+            .entry(key)
+            .or_insert_with(|| content.to_vec());
 
         Ok(())
     }
@@ -102,8 +76,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_none_for_missing_content() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("archive-get-none");
         let digest = Blake3Hash::hash(b"nonexistent");
 
@@ -120,8 +93,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_stores_and_retrieves_content() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("archive-put-get");
         let content = b"hello world".to_vec();
         let digest = Blake3Hash::hash(&content);
@@ -149,8 +121,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_rejects_digest_mismatch() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("archive-mismatch");
         let content = b"hello world".to_vec();
         let wrong_digest = Blake3Hash::hash(b"different content");
@@ -168,8 +139,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_different_catalogs() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("archive-catalogs");
         let content1 = b"content for catalog 1".to_vec();
         let content2 = b"content for catalog 2".to_vec();
@@ -227,8 +197,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_is_idempotent_for_same_content() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("archive-idempotent");
         let content = b"idempotent content".to_vec();
         let digest = Blake3Hash::hash(&content);
@@ -264,8 +233,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_empty_content() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("archive-empty");
         let content = vec![];
         let digest = Blake3Hash::hash(&content);
@@ -291,8 +259,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_large_content() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("archive-large");
         // 1MB content
         let content: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();

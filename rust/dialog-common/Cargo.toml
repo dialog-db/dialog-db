@@ -18,6 +18,7 @@ web-integration-tests = ["helpers"]
 [dependencies]
 blake3 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+web-time = { workspace = true }
 serde_bytes = { workspace = true }
 anyhow = { workspace = true, optional = true }
 serde_json = { version = "1.0", optional = true }

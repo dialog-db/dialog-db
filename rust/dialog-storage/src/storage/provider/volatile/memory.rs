@@ -1,91 +1,20 @@
-//! Memory capability provider for filesystem.
+//! Memory capability provider for volatile storage.
 //!
 //! Implements transactional cell storage with CAS (Compare-And-Swap) semantics.
-//! Uses PID-based file locking for cross-process coordination and BLAKE3
-//! content hashing for edition tracking.
+//! Uses BLAKE3 content hashing for edition tracking.
 
-use super::{FileSystem, FileSystemError, Location};
+use super::{MemoryKey, Volatile, VolatileError};
 use async_trait::async_trait;
-use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::memory::{
     MemoryError, Publication, Publish, PublishCapability, Resolve, ResolveCapability, Retract,
     RetractCapability,
 };
-use pidlock::Pidlock;
-use std::path::PathBuf;
 
-/// A 32-byte content hash used as the edition for CAS operations.
-type ContentHash = [u8; 32];
-
-/// Compute BLAKE3 hash of content.
-fn content_hash(content: &[u8]) -> ContentHash {
-    blake3::hash(content).into()
-}
-
-impl From<FileSystemError> for MemoryError {
-    fn from(e: FileSystemError) -> Self {
+impl From<VolatileError> for MemoryError {
+    fn from(e: VolatileError) -> Self {
         MemoryError::Storage(e.to_string())
-    }
-}
-
-/// RAII guard that acquires a PID lock and releases it when dropped.
-///
-/// Handles stale lock detection and recovery automatically.
-struct PidlockGuard(Pidlock);
-
-impl PidlockGuard {
-    /// Acquire a PID lock at the given path.
-    ///
-    /// If a stale lock exists (from a dead process), it will be automatically
-    /// cleaned up and the lock acquired.
-    ///
-    /// If the lock is held by an active process, returns an error immediately
-    /// rather than waiting. This is intentional - the STM layer will retry
-    /// the entire transaction, which is the correct behavior since the locked
-    /// value will likely change anyway.
-    fn new(path: PathBuf) -> Result<Self, FileSystemError> {
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| FileSystemError::Lock("Lock path is not valid UTF-8".to_string()))?;
-
-        let mut lock = Pidlock::new(path_str);
-
-        // Acquire lock, handling stale locks
-        loop {
-            match lock.acquire() {
-                Ok(()) => return Ok(Self(lock)),
-                Err(pidlock::PidlockError::LockExists) => {
-                    // get_owner() checks if the PID is valid and clears stale locks
-                    match lock.get_owner() {
-                        Some(pid) => {
-                            // Fail immediately rather than wait - the value is being
-                            // modified so the edition will change anyway. Let STM
-                            // retry the transaction with the new edition.
-                            return Err(FileSystemError::Lock(format!(
-                                "Concurrent write in progress (lock held by pid {})",
-                                pid
-                            )));
-                        }
-                        None => {
-                            // Lock was stale and cleared by get_owner(), retry
-                        }
-                    }
-                }
-                Err(e) => {
-                    return Err(FileSystemError::Lock(format!(
-                        "Failed to acquire lock: {e:?}"
-                    )));
-                }
-            }
-        }
-    }
-}
-
-impl Drop for PidlockGuard {
-    fn drop(&mut self) {
-        let _ = self.0.release();
     }
 }
 
@@ -94,23 +23,9 @@ fn format_edition(edition: Option<&[u8]>) -> Option<String> {
     edition.map(base58::ToBase58::to_base58)
 }
 
-/// Helper methods for cell-related paths.
-impl Location {
-    fn cell(&self, name: &str) -> Result<Self, FileSystemError> {
-        self.resolve(name)
-    }
-
-    fn lock(&self, cell: &str) -> Result<Self, FileSystemError> {
-        self.resolve(&format!("{}.lock", cell))
-    }
-
-    fn temp(&self, cell: &str, hash: &[u8; 32]) -> Result<Self, FileSystemError> {
-        self.resolve(&format!("{}.{}.tmp", cell, hash.to_base58()))
-    }
-}
-
-#[async_trait]
-impl Provider<Resolve> for FileSystem {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Resolve> for Volatile {
     async fn execute(
         &mut self,
         effect: Capability<Resolve>,
@@ -119,28 +34,21 @@ impl Provider<Resolve> for FileSystem {
         let space = effect.space();
         let cell = effect.cell();
 
-        let path: PathBuf = self
-            .memory(&subject)?
-            .resolve(space)?
-            .cell(cell)?
-            .try_into()?;
+        let key: MemoryKey = (space.to_string(), cell.to_string());
 
-        match tokio::fs::read(&path).await {
-            Ok(bytes) => {
-                let edition = Blake3Hash::hash(&bytes);
-                Ok(Some(Publication {
-                    content: bytes,
-                    edition: edition.as_bytes().to_vec(),
-                }))
+        Ok(self.session(&subject).memory.get(&key).map(|content| {
+            let edition = Blake3Hash::hash(content);
+            Publication {
+                content: content.clone(),
+                edition: edition.as_bytes().to_vec(),
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(MemoryError::Storage(e.to_string())),
-        }
+        }))
     }
 }
 
-#[async_trait]
-impl Provider<Publish> for FileSystem {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Publish> for Volatile {
     async fn execute(&mut self, effect: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
         let subject = effect.subject().into();
         let space = effect.space();
@@ -148,30 +56,21 @@ impl Provider<Publish> for FileSystem {
         let content = effect.content().to_vec();
         let expected_edition = effect.when().map(|e| e.to_vec());
 
-        let space_location = self.memory(&subject)?.resolve(space)?;
+        let key: MemoryKey = (space.to_string(), cell.to_string());
+        let session = self.session(&subject);
 
-        // Ensure space directory exists
-        space_location.ensure_dir().await?;
-
-        let path: PathBuf = space_location.cell(cell)?.try_into()?;
-        let lock_path: PathBuf = space_location.lock(cell)?.try_into()?;
-
-        // Acquire lock for exclusive access
-        let _guard = PidlockGuard::new(lock_path)?;
-
-        // Read current value to check CAS condition
-        let current_edition: Option<[u8; 32]> = match tokio::fs::read(&path).await {
-            Ok(bytes) => Some(content_hash(&bytes)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(MemoryError::Storage(e.to_string())),
-        };
+        // Get current value and edition
+        let current_edition = session
+            .memory
+            .get(&key)
+            .map(|bytes| Blake3Hash::hash(bytes));
 
         // Compute new edition
-        let new_edition = content_hash(&content);
+        let new_edition = Blake3Hash::hash(&content);
 
         // If current value already matches desired value, succeed without writing
-        if current_edition.as_ref() == Some(&new_edition) {
-            return Ok(new_edition.to_vec());
+        if current_edition.as_ref().map(|h| h.as_bytes()) == Some(new_edition.as_bytes()) {
+            return Ok(new_edition.as_bytes().to_vec());
         }
 
         // Check CAS condition
@@ -180,15 +79,15 @@ impl Provider<Publish> for FileSystem {
             (None, Some(current)) => {
                 return Err(MemoryError::EditionMismatch {
                     expected: None,
-                    actual: format_edition(Some(current.as_slice())),
+                    actual: format_edition(Some(current.as_bytes())),
                 });
             }
             // Updating existing: require edition matches
             (Some(expected), Some(current)) => {
-                if expected != current.as_slice() {
+                if expected != current.as_bytes() {
                     return Err(MemoryError::EditionMismatch {
                         expected: format_edition(Some(expected)),
-                        actual: format_edition(Some(current.as_slice())),
+                        actual: format_edition(Some(current.as_bytes())),
                     });
                 }
             }
@@ -203,69 +102,45 @@ impl Provider<Publish> for FileSystem {
             (None, None) => {}
         }
 
-        // Write to temp file (hash in name prevents conflicts if cleanup fails)
-        let tmp_path: PathBuf = space_location.temp(cell, &new_edition)?.try_into()?;
-        tokio::fs::write(&tmp_path, &content)
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        // Write the new value
+        session.memory.insert(key, content);
 
-        // Atomic rename
-        tokio::fs::rename(&tmp_path, &path)
-            .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
-
-        Ok(new_edition.to_vec())
+        Ok(new_edition.as_bytes().to_vec())
     }
 }
 
-#[async_trait]
-impl Provider<Retract> for FileSystem {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Retract> for Volatile {
     async fn execute(&mut self, effect: Capability<Retract>) -> Result<(), MemoryError> {
         let subject = effect.subject().into();
         let space = effect.space();
         let cell = effect.cell();
         let expected_edition = effect.when().to_vec();
 
-        let space_location = self.memory(&subject)?.resolve(space)?;
-        let space_path: PathBuf = space_location.clone().try_into()?;
+        let key: MemoryKey = (space.to_string(), cell.to_string());
+        let session = self.session(&subject);
 
-        // If space directory doesn't exist, the cell doesn't exist either
-        if !space_path.exists() {
+        // Get current value
+        let Some(current_bytes) = session.memory.get(&key) else {
+            // Already deleted, succeed
             return Ok(());
-        }
-
-        let path: PathBuf = space_location.cell(cell)?.try_into()?;
-        let lock_path: PathBuf = space_location.lock(cell)?.try_into()?;
-
-        // Acquire lock for exclusive access
-        let _guard = PidlockGuard::new(lock_path)?;
-
-        // Read current value to check CAS condition
-        let current_bytes = match tokio::fs::read(&path).await {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Already deleted, succeed
-                return Ok(());
-            }
-            Err(e) => return Err(MemoryError::Storage(e.to_string())),
         };
 
-        let current_edition = content_hash(&current_bytes);
+        let current_edition = Blake3Hash::hash(current_bytes);
 
         // Check CAS condition
-        if expected_edition != current_edition.as_slice() {
+        if expected_edition != current_edition.as_bytes() {
             return Err(MemoryError::EditionMismatch {
                 expected: format_edition(Some(&expected_edition)),
-                actual: format_edition(Some(current_edition.as_slice())),
+                actual: format_edition(Some(current_edition.as_bytes())),
             });
         }
 
-        // Delete the file
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(MemoryError::Storage(e.to_string())),
-        }
+        // Delete the value
+        session.memory.remove(&key);
+
+        Ok(())
     }
 }
 
@@ -288,8 +163,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_resolves_non_existent_cell() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("memory-resolve-none");
 
         let effect = subject
@@ -306,8 +180,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_publishes_new_content() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("memory-publish-new");
         let content = b"hello world".to_vec();
 
@@ -341,8 +214,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_updates_existing_content() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("memory-publish-update");
 
         // Create initial content
@@ -384,8 +256,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_on_edition_mismatch() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("memory-mismatch");
 
         // Create initial content
@@ -415,8 +286,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_creating_when_exists() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("memory-create-exists");
 
         // Create initial content
@@ -445,8 +315,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_retracts_content() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("memory-retract");
 
         // Create content
@@ -485,8 +354,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_fails_retract_on_edition_mismatch() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("memory-retract-mismatch");
 
         // Create content
@@ -516,8 +384,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_different_spaces() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("memory-spaces");
 
         // Publish to different spaces
@@ -565,8 +432,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_succeeds_with_stale_edition_when_value_matches() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("memory-stale-ok");
         let content = b"desired value".to_vec();
 
@@ -601,8 +467,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_produces_deterministic_content_hash() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("memory-deterministic-hash");
         let content = b"same content".to_vec();
 
@@ -633,8 +498,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_succeeds_retracting_already_retracted() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("memory-retract-already-retracted");
 
         // Try to retract non-existent cell - should succeed
@@ -654,8 +518,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_nested_spaces() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("memory-nested-spaces");
         let content = b"nested content".to_vec();
 
@@ -688,8 +551,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_empty_content() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("memory-empty");
         let content = vec![];
 
@@ -720,8 +582,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_handles_large_content() -> anyhow::Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let mut provider = Volatile::new();
         let subject = unique_subject("memory-large");
         // 1MB content
         let content: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
