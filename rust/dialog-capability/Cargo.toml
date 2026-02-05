@@ -1,0 +1,21 @@
+[package]
+name = "dialog-capability"
+description = "Capability-based authorization primitives"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# UCAN support (IPLD serialization for capabilities)
+ucan = ["dep:ipld-core", "dep:ucan"]
+
+[dependencies]
+convert_case = { workspace = true }
+dialog-common = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+ipld-core = { workspace = true, optional = true }
+ucan = { workspace = true, optional = true }
