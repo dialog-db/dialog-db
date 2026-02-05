@@ -10,6 +10,8 @@ extern crate self as dialog_common;
 mod sync;
 pub use sync::*;
 
+pub mod as_bytes;
+
 mod hash;
 pub use hash::*;
 

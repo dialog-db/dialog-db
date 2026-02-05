@@ -19,6 +19,7 @@ members = [
     "rust/dialog-artifacts",
     "rust/dialog-capability",
     "rust/dialog-common",
+    "rust/dialog-effects",
     "rust/dialog-macros",
     "rust/dialog-diagnose",
     "rust/dialog-dbsp",
@@ -73,6 +74,7 @@ rexie = "0.6"
 rkyv = "0.8"
 serde = "1"
 serde-big-array = "0.5"
+serde_bytes = "0.11"
 serde_ipld_dagcbor = "0.6"
 serde_json = "1"
 sieve-cache = "1"
@@ -108,6 +110,9 @@ path = "./rust/dialog-prolly-tree"
 
 [workspace.dependencies.dialog-storage]
 path = "./rust/dialog-storage"
+
+[workspace.dependencies.dialog-effects]
+path = "./rust/dialog-effects"
 
 [workspace.dependencies.dialog-macros]
 path = "./rust/dialog-macros"
