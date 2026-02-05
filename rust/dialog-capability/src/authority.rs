@@ -1,4 +1,4 @@
-use crate::Did;
+use crate::{DialogCapabilitySignError, Did};
 use async_trait::async_trait;
 use dialog_common::ConditionalSend;
 
@@ -8,18 +8,6 @@ pub trait Principal {
     fn did(&self) -> &Did;
 }
 
-/// Error that can occur during signing operations.
-#[derive(Debug, thiserror::Error)]
-pub enum SignError {
-    /// The signing key is not available or cannot be used.
-    #[error("Signing key unavailable: {0}")]
-    KeyUnavailable(String),
-
-    /// An error occurred during the signing operation.
-    #[error("Signing failed: {0}")]
-    SigningFailed(String),
-}
-
 /// An authority that can sign data.
 ///
 /// Extends `Principal` with the ability to sign payloads.
@@ -27,7 +15,7 @@ pub enum SignError {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Authority: Principal + ConditionalSend {
     /// Sign the given payload.
-    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, SignError>;
+    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError>;
 
     /// Try to export the raw Ed25519 secret key bytes for delegation purposes.
     ///

@@ -45,6 +45,7 @@ brotli = "8"
 clap = "4"
 clap_derive = "4"
 console_error_panic_hook = "0.1"
+convert_case = "0.6"
 csv-async = { version = "1", features = ["tokio"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures-core = "0.3"
