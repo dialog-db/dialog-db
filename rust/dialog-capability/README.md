@@ -71,6 +71,7 @@ An ability path like `/storage` includes everything beneath it — `/storage/get
 
 Capabilities attenuate (narrow) this space. A capability with ability `/storage` grants access to all storage operations, while `/storage/get` restricts to just reads. Policies further constrain what's permitted within a given ability by adding parameters (e.g., which store, which key) without changing the ability path itself.
 
+
 ### Abilities and Policies
 
 A capability represents a set of invocable operations (effects). This set is defined by:

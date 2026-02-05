@@ -12,6 +12,8 @@ pub use sync::*;
 
 pub mod as_bytes;
 
+pub mod time;
+
 mod hash;
 pub use hash::*;
 

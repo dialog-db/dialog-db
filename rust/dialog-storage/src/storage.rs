@@ -4,6 +4,9 @@ use dialog_common::ConditionalSync;
 mod backend;
 pub use backend::*;
 
+/// Capability-based storage providers.
+pub mod provider;
+
 mod cache;
 pub use cache::*;
 
