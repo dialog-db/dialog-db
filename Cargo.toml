@@ -46,6 +46,7 @@ brotli = "8"
 clap = "4"
 clap_derive = "4"
 console_error_panic_hook = "0.1"
+convert_case = "0.6"
 csv-async = { version = "1", features = ["tokio"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures-core = "0.3"
@@ -85,7 +86,7 @@ tokio = "1"
 ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "tonk" }
 ulid = "1"
 url = "2"
-wasm-bindgen = "=0.2.100"
+wasm-bindgen = "=0.2.108"
 wasm-bindgen-futures = "0.4"
 wasm-bindgen-test = "0.3"
 web-sys = "0.3"

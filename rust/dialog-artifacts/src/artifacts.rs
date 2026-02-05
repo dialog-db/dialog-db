@@ -347,10 +347,10 @@ where
                 for await item in stream {
                     let entry = item?;
 
-                    if entry.matches_selector(&selector) {
-                        if let Entry { value: State::Added(datum), .. } = entry {
-                            yield Artifact::try_from(datum)?;
-                        }
+                    if entry.matches_selector(&selector)
+                        && let Entry { value: State::Added(datum), .. } = entry
+                    {
+                        yield Artifact::try_from(datum)?;
                     }
                 }
             } else if selector.value().is_some() {
@@ -364,10 +364,10 @@ where
                 for await item in stream {
                     let entry = item?;
 
-                    if entry.matches_selector(&selector) {
-                        if let Entry { value: State::Added(datum), .. } = entry {
-                            yield Artifact::try_from(datum)?;
-                        }
+                    if entry.matches_selector(&selector)
+                        && let Entry { value: State::Added(datum), .. } = entry
+                    {
+                        yield Artifact::try_from(datum)?;
                     }
                 }
             } else if selector.attribute().is_some() {
@@ -381,10 +381,10 @@ where
                 for await item in stream {
                     let entry = item?;
 
-                    if entry.matches_selector(&selector) {
-                        if let Entry { value: State::Added(datum), .. } = entry {
-                            yield Artifact::try_from(datum)?;
-                        }
+                    if entry.matches_selector(&selector)
+                        && let Entry { value: State::Added(datum), .. } = entry
+                    {
+                        yield Artifact::try_from(datum)?;
                     }
                 }
             } else {

@@ -159,7 +159,7 @@ mod tests {
         type Of = Subject;
     }
 
-    /// A policy that restricts Archive (no command path contribution)
+    /// A policy that restricts Archive (no ability path contribution)
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     struct Catalog {
         name: String,
@@ -191,7 +191,7 @@ mod tests {
         type Of = Subject;
     }
 
-    /// An attenuation under Storage (contributes to command path)
+    /// An attenuation under Storage (contributes to ability path)
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     struct Store {
         name: String,
@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn it_adds_attenuation_to_command_path() {
+    fn it_adds_attenuation_to_ability_path() {
         let cap = Subject::from("did:key:zSpace").attenuate(Archive);
 
         assert_eq!(cap.subject(), "did:key:zSpace");

@@ -41,21 +41,20 @@
           with pkgs;
           rustPlatform.buildRustPackage rec {
             pname = "wasm-bindgen-cli";
-            version = "0.2.100";
-            buildInputs =
-              [ rust-bin.stable.latest.default ]
-              ++ lib.optionals stdenv.isDarwin [
-                darwin.apple_sdk.frameworks.SystemConfiguration
-                darwin.apple_sdk.frameworks.Security
-              ];
+            version = "0.2.108";
+            buildInputs = [
+              rust-bin.stable.latest.default
+            ]
+            ++ lib.optionals stdenv.isDarwin [
+              apple-sdk
+            ];
 
             src = fetchCrate {
               inherit pname version;
-              sha256 = "sha256-3RJzK7mkYFrs7C/WkhW9Rr4LdP5ofb2FdYGz1P7Uxog=";
+              sha256 = "sha256-UsuxILm1G6PkmVw0I/JF12CRltAfCJQFOaT4hFwvR8E=";
             };
 
-            cargoHash = "sha256-qsO12332HSjWCVKtf1cUePWWb9IdYUmT+8OPj/XP2WE=";
-            useFetchCargoVendor = true;
+            cargoHash = "sha256-iqQiWbsKlLBiJFeqIYiXo3cqxGLSjNM8SOWXGM9u43E=";
           };
 
         common-build-inputs =
@@ -76,8 +75,7 @@
               wasm-pack
             ]
             ++ lib.optionals stdenv.isDarwin [
-              darwin.apple_sdk.frameworks.SystemConfiguration
-              darwin.apple_sdk.frameworks.Security
+              apple-sdk
             ];
 
         common-dev-tools = with pkgs; [

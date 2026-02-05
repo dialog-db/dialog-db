@@ -1,5 +1,6 @@
 use crate::{
-    Authority, Authorization, AuthorizationError, Capability, Constraint, Effect, Provider,
+    Authority, Authorization, Capability, Constraint, DialogCapabilityPerformError, Effect,
+    Provider,
 };
 use std::{
     error::Error,
@@ -78,21 +79,12 @@ impl<C: Constraint, A: Authorization> Authorized<C, A> {
     }
 }
 
-/// Error type for capability execution failures.
-#[derive(Debug)]
-pub enum PerformError<E: Error> {
-    /// Error during effect execution.
-    Excution(E),
-    /// Error during authorization verification.
-    Authorization(AuthorizationError),
-}
-
 impl<Ok, E: Error, Fx: Effect<Output = Result<Ok, E>> + Constraint, A: Authorization>
     Authorized<Fx, A>
 {
     /// Perform the invocation directly without authorization verification.
     /// For operations that require authorization, use `acquire` first.
-    pub async fn perform<Env>(self, env: &mut Env) -> Result<Ok, PerformError<E>>
+    pub async fn perform<Env>(self, env: &mut Env) -> Result<Ok, DialogCapabilityPerformError<E>>
     where
         Env: Provider<Self> + Authority,
     {
@@ -103,8 +95,8 @@ impl<Ok, E: Error, Fx: Effect<Output = Result<Ok, E>> + Constraint, A: Authoriza
                     authorization,
                 })
                 .await
-                .map_err(PerformError::Excution),
-            Err(e) => Err(PerformError::Authorization(e)),
+                .map_err(DialogCapabilityPerformError::Execution),
+            Err(e) => Err(DialogCapabilityPerformError::Authorization(e)),
         }
     }
 }

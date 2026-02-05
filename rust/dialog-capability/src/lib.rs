@@ -154,6 +154,9 @@
 //! | [`Delegation<C, A>`] | Grants capability to another principal |
 //! | [`Access`] | Looks up authorization proofs |
 
+mod error;
+pub use error::*;
+
 mod selector;
 pub use selector::*;
 
