@@ -26,13 +26,13 @@ pub fn extract_doc_comments(attrs: &[Attribute]) -> String {
     for attr in attrs {
         match &attr.meta {
             Meta::NameValue(nv) if nv.path.is_ident("doc") => {
-                if let Expr::Lit(expr_lit) = &nv.value {
-                    if let Lit::Str(lit) = &expr_lit.lit {
-                        // Trim leading space that rustdoc adds
-                        let doc = lit.value();
-                        let trimmed = doc.trim_start_matches(' ');
-                        docs.push(trimmed.to_string());
-                    }
+                if let Expr::Lit(expr_lit) = &nv.value
+                    && let Lit::Str(lit) = &expr_lit.lit
+                {
+                    // Trim leading space that rustdoc adds
+                    let doc = lit.value();
+                    let trimmed = doc.trim_start_matches(' ');
+                    docs.push(trimmed.to_string());
                 }
             }
             _ => {}
@@ -168,12 +168,11 @@ pub fn parse_namespace_attribute(attrs: &[Attribute]) -> Option<String> {
             }
 
             // Support legacy #[namespace = "..."] syntax
-            if let Meta::NameValue(nv) = &attr.meta {
-                if let Expr::Lit(expr_lit) = &nv.value {
-                    if let Lit::Str(lit) = &expr_lit.lit {
-                        return Some(lit.value());
-                    }
-                }
+            if let Meta::NameValue(nv) = &attr.meta
+                && let Expr::Lit(expr_lit) = &nv.value
+                && let Lit::Str(lit) = &expr_lit.lit
+            {
+                return Some(lit.value());
             }
         }
     }

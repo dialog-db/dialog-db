@@ -138,16 +138,15 @@ impl<T: Scalar> AttributeSchema<T> {
             .map_err(|e| e.at("is".to_string()))?;
 
         // Check that if `this` parameter is provided, it has entity type.
-        if let Some(this) = parameters.get("this") {
-            if let Some(actual) = this.content_type() {
-                if actual != Type::Entity {
-                    return Err(SchemaError::TypeError {
-                        binding: "this".to_string(),
-                        expected: Type::Entity,
-                        actual: this.clone(),
-                    });
-                }
-            }
+        if let Some(this) = parameters.get("this")
+            && let Some(actual) = this.content_type()
+            && actual != Type::Entity
+        {
+            return Err(SchemaError::TypeError {
+                binding: "this".to_string(),
+                expected: Type::Entity,
+                actual: this.clone(),
+            });
         }
 
         // Get the attribute term - parse the string name to an Attribute
@@ -1861,6 +1860,7 @@ mod tests {
 
     // Tests from attribute_as_concept_test.rs (only test_attribute_claim)
 
+    #[allow(dead_code)]
     mod note_concept {
         use crate::Attribute;
 

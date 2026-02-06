@@ -74,10 +74,9 @@ impl Environment {
             if let Term::Variable {
                 name: Some(name), ..
             } = variable
+                && !self.variables.contains(&name)
             {
-                if !self.variables.contains(&name) {
-                    intersection.variables.insert(name.clone());
-                }
+                intersection.variables.insert(name.clone());
             }
         }
 

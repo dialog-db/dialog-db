@@ -629,6 +629,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     mod person {
         use crate::artifact::{Type, Value};
         use crate::attribute::AttributeSchema;

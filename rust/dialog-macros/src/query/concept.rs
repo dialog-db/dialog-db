@@ -38,14 +38,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     // Check for required `this: Entity` field
     let has_this_field = fields.iter().any(|field| {
-        if let Some(field_name) = &field.ident {
-            if field_name == "this" {
-                // Check if the type is Entity
-                if let Type::Path(type_path) = &field.ty {
-                    if let Some(last_segment) = type_path.path.segments.last() {
-                        return last_segment.ident == "Entity";
-                    }
-                }
+        if let Some(field_name) = &field.ident
+            && field_name == "this"
+        {
+            // Check if the type is Entity
+            if let Type::Path(type_path) = &field.ty
+                && let Some(last_segment) = type_path.path.segments.last()
+            {
+                return last_segment.ident == "Entity";
             }
         }
         false

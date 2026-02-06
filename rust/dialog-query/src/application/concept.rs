@@ -639,7 +639,7 @@ mod tests {
     fn test_application_variants() {
         use crate::predicate::concept::Attributes;
         use crate::predicate::fact::Fact;
-        use crate::{Application, Premise};
+        use crate::Application;
 
         // Test Select application
         let fact = Fact::select().the("test/attr");

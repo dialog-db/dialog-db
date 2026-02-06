@@ -32,12 +32,12 @@ impl Planner {
 
         // Return the first required bindings error we find
         for analysis in analyses {
-            if let Analysis::Blocked { requires, .. } = analysis {
-                if requires.count() > 0 {
-                    return Err(CompileError::RequiredBindings {
-                        required: requires.clone(),
-                    });
-                }
+            if let Analysis::Blocked { requires, .. } = analysis
+                && requires.count() > 0
+            {
+                return Err(CompileError::RequiredBindings {
+                    required: requires.clone(),
+                });
             }
         }
 
