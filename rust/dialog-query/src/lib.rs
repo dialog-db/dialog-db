@@ -1,0 +1,91 @@
+//! Dialog Query Engine
+//!
+//! A Datalog-inspired query engine for Dialog-DB that provides declarative
+//! pattern matching and rule-based deduction over facts.
+//!
+//! This crate implements the core query planning and execution functionality,
+//! designed to be equivalent to the TypeScript query engine in @query/.
+
+// TODO: Large error types - Many functions return Result<T, E> where E contains large types
+// like QueryError (344 bytes), InconsistencyError (320 bytes), and TypeError (161 bytes).
+// These error types contain large Value/Term types that make the Result enum large.
+// Consider boxing error fields in the future to reduce Result sizes, but this would be
+// a breaking API change. For now, we allow this clippy warning.
+#![allow(clippy::result_large_err)]
+
+// Allow macro-generated code to reference this crate as `dialog_query::`
+extern crate self as dialog_query;
+
+pub mod analyzer;
+pub mod application;
+pub mod artifact;
+pub mod attribute;
+
+pub mod claim;
+pub mod concept;
+pub mod constraint;
+pub mod context;
+pub mod cursor;
+pub mod dsl;
+pub mod environment;
+pub mod error;
+pub mod fact;
+pub mod formula;
+pub mod negation;
+pub mod parameters;
+pub mod planner;
+pub mod predicate;
+pub mod premise;
+pub mod query;
+pub mod relation;
+pub mod rule;
+pub mod schema;
+pub mod selection;
+pub mod session;
+pub mod stream;
+pub mod term;
+pub mod types;
+
+pub use application::Application;
+pub use artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
+pub use attribute::{Attribute, AttributeSchema, Cardinality, With};
+pub use claim::Claim;
+pub use concept::Concept;
+pub use context::{EvaluationContext, EvaluationPlan};
+pub use dialog_macros::{Attribute, Concept, Formula};
+pub use dsl::{Input, Match};
+pub use error::{InconsistencyError, QueryError};
+pub use fact::Fact;
+pub use negation::Negation;
+pub use parameters::Parameters;
+pub use predicate::{DeductiveRule, Formula, Output};
+pub use premise::Premise;
+pub use query::{Source, Store};
+pub use relation::Relation;
+pub use rule::{Premises, When};
+pub use schema::{Field, Requirement, Schema};
+pub use session::transaction::{Edit, Transaction, TransactionError};
+pub use session::{QuerySession, Session};
+
+pub use async_stream::try_stream;
+pub use environment::Environment;
+pub use selection::{Answer, Answers};
+pub use stream::*;
+pub use term::*;
+pub use types::IntoType;
+
+/// Backwards-compatible alias for `formula`
+pub use formula as formulas;
+
+/// Re-export commonly used types
+pub mod prelude {
+    pub use crate::artifact::{Type, Value};
+    pub use crate::context::EvaluationPlan;
+    pub use crate::environment::Environment;
+    pub use crate::error::QueryError;
+    pub use crate::premise::Premise;
+    pub use crate::rule::Premises;
+    pub use crate::term::Term;
+    pub use crate::types::IntoType;
+    // Macros are automatically available due to #[macro_export]
+}
