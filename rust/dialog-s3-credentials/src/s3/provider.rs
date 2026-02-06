@@ -47,12 +47,6 @@ where
     }
 }
 
-// --- Provider implementations for capabilities ---
-//
-// Each effect type needs a Provider implementation that generates the RequestDescriptor.
-// These providers work with Capability<Fx> directly. Since Capability<access::*::Fx>
-// implements the access::Claim trait, we delegate to Credentials::authorize.
-
 #[cfg(test)]
 mod tests {
     use super::*;
