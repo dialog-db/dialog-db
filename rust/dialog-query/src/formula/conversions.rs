@@ -266,4 +266,65 @@ mod tests {
         assert_eq!(results.len(), 0);
         Ok(())
     }
+
+    #[test]
+    fn test_integration_type_conversions() -> anyhow::Result<()> {
+        // Test ToString formula with number
+        let mut to_string_terms = Parameters::new();
+        to_string_terms.insert("value".to_string(), Term::var("input"));
+        to_string_terms.insert("is".to_string(), Term::var("str_result"));
+
+        let to_string_formula = ToString::apply(to_string_terms)?;
+
+        let number_input = Answer::new().set(Term::var("input"), 42u32).unwrap();
+
+        let string_results = to_string_formula.derive(number_input)?;
+        assert_eq!(string_results.len(), 1);
+        assert_eq!(
+            string_results[0]
+                .get::<String>(&Term::var("str_result"))
+                .ok(),
+            Some("42".to_string())
+        );
+
+        // Test ToString formula with boolean
+        let bool_input = Answer::new().set(Term::var("input"), true).unwrap();
+
+        let bool_string_results = to_string_formula.derive(bool_input)?;
+        assert_eq!(bool_string_results.len(), 1);
+        assert_eq!(
+            bool_string_results[0]
+                .get::<String>(&Term::var("str_result"))
+                .ok(),
+            Some("true".to_string())
+        );
+
+        // Test ParseNumber formula with valid input
+        let mut parse_terms = Parameters::new();
+        parse_terms.insert("text".to_string(), Term::var("str_input"));
+        parse_terms.insert("is".to_string(), Term::var("num_result"));
+
+        let parse_formula = ParseNumber::apply(parse_terms)?;
+
+        let parse_input = Answer::new()
+            .set(Term::var("str_input"), "123".to_string())
+            .unwrap();
+
+        let parse_results = parse_formula.derive(parse_input)?;
+        assert_eq!(parse_results.len(), 1);
+        assert_eq!(
+            parse_results[0].get::<u32>(&Term::var("num_result")).ok(),
+            Some(123)
+        );
+
+        // Test ParseNumber formula with invalid input
+        let invalid_input = Answer::new()
+            .set(Term::var("str_input"), "not a number".to_string())
+            .unwrap();
+
+        let invalid_results = parse_formula.derive(invalid_input)?;
+        assert_eq!(invalid_results.len(), 0);
+
+        Ok(())
+    }
 }

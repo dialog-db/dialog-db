@@ -373,3 +373,221 @@ impl FactApplicationPlan {
         &self.provides
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artifact::Artifacts;
+    use crate::query::Output;
+    use crate::selection::{Answer, Answers};
+    use crate::{Cardinality, Relation, Session};
+    use dialog_storage::MemoryStorageBackend;
+    use futures_util::stream::once;
+
+    #[dialog_macros::test]
+    async fn test_fact_application_with_provenance() -> anyhow::Result<()> {
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+        let name_attr = "person/name".parse::<Attribute>()?;
+
+        let claims = vec![Relation {
+            the: name_attr.clone(),
+            of: alice.clone(),
+            is: Value::String("Alice".to_string()),
+        }];
+
+        let mut session = Session::open(artifacts.clone());
+        session.transact(claims).await?;
+
+        let fact_app = FactApplication::new(
+            Term::Constant(name_attr.clone()),
+            Term::var("person"),
+            Term::var("name"),
+            Term::var("cause"),
+            Cardinality::Many,
+        );
+
+        let session = Session::open(artifacts);
+        let initial_answer = once(async move { Ok(Answer::new()) });
+        let answers = fact_app.evaluate_with_provenance(session, initial_answer);
+
+        let results = Answers::try_vec(answers).await?;
+
+        assert_eq!(results.len(), 1);
+
+        let answer = &results[0];
+
+        assert!(answer.contains(&Term::<Entity>::var("person")));
+        assert!(answer.contains(&Term::<Value>::var("name")));
+
+        let person_id: Entity = answer.get(&Term::var("person"))?;
+        let name_value: Value = answer.resolve(&Term::<Value>::var("name"))?;
+
+        assert_eq!(person_id, alice);
+        assert_eq!(name_value, Value::String("Alice".to_string()));
+
+        let factors = answer
+            .resolve_factors(&Term::<Value>::var("name"))
+            .expect("name should have factors");
+
+        let evidence: Vec<_> = factors.evidence().collect();
+        assert!(!evidence.is_empty(), "Should have at least one factor");
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_provenance_tracks_multiple_facts() -> anyhow::Result<()> {
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        let name_attr = "person/name".parse::<Attribute>()?;
+
+        let claims = vec![
+            Relation {
+                the: name_attr.clone(),
+                of: alice.clone(),
+                is: Value::String("Alice".to_string()),
+            },
+            Relation {
+                the: name_attr.clone(),
+                of: bob.clone(),
+                is: Value::String("Bob".to_string()),
+            },
+        ];
+
+        let mut session = Session::open(artifacts.clone());
+        session.transact(claims).await?;
+
+        let fact_app = FactApplication::new(
+            Term::Constant(name_attr.clone()),
+            Term::var("person"),
+            Term::var("name"),
+            Term::var("cause"),
+            Cardinality::Many,
+        );
+
+        let session = Session::open(artifacts);
+        let initial_answer = once(async move { Ok(Answer::new()) });
+        let answers = fact_app.evaluate_with_provenance(session, initial_answer);
+
+        let results = Answers::try_vec(answers).await?;
+
+        assert_eq!(results.len(), 2);
+
+        for answer in &results {
+            let factors = answer
+                .resolve_factors(&Term::<Value>::var("name"))
+                .expect("Each answer should have factors for name");
+
+            let evidence: Vec<_> = factors.evidence().collect();
+            assert!(!evidence.is_empty(), "Each answer should have evidence");
+        }
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_fact_application_query_with_provenance() -> anyhow::Result<()> {
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+        let name_attr = "person/name".parse::<Attribute>()?;
+
+        let claims = vec![Relation {
+            the: name_attr.clone(),
+            of: alice.clone(),
+            is: Value::String("Alice".to_string()),
+        }];
+
+        let mut session = Session::open(artifacts.clone());
+        session.transact(claims).await?;
+
+        // Test 1: Query with variables
+        let fact_app = FactApplication::new(
+            Term::Constant(name_attr.clone()),
+            Term::var("person"),
+            Term::var("name"),
+            Term::var("cause"),
+            Cardinality::Many,
+        );
+
+        let session = Session::open(artifacts.clone());
+        let results = fact_app.query(&session).try_vec().await?;
+
+        assert_eq!(results.len(), 1);
+        let fact = &results[0];
+        assert_eq!(fact.the(), &name_attr);
+        assert_eq!(fact.of(), &alice);
+        assert_eq!(fact.is(), &Value::String("Alice".to_string()));
+
+        // Test 2: Query with all constants
+        let fact_app_constant = FactApplication::new(
+            Term::Constant(name_attr.clone()),
+            Term::Constant(alice.clone()),
+            Term::Constant(Value::String("Alice".to_string())),
+            Term::var("cause"),
+            Cardinality::Many,
+        );
+
+        let session = Session::open(artifacts.clone());
+        let results_constant = fact_app_constant.query(&session).try_vec().await?;
+
+        assert_eq!(results_constant.len(), 1);
+        let fact_constant = &results_constant[0];
+        assert_eq!(fact_constant.the(), &name_attr);
+        assert_eq!(fact_constant.of(), &alice);
+        assert_eq!(fact_constant.is(), &Value::String("Alice".to_string()));
+
+        // Test 3: Verify both approaches return the same fact
+        assert_eq!(fact.cause(), fact_constant.cause());
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_query_with_blank_variables() -> anyhow::Result<()> {
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+        let name_attr = "person/name".parse::<Attribute>()?;
+
+        let facts = vec![Relation {
+            the: name_attr.clone(),
+            of: alice.clone(),
+            is: Value::String("Alice".to_string()),
+        }];
+
+        let mut session = Session::open(artifacts.clone());
+        session.transact(facts).await?;
+
+        let fact_app = FactApplication::new(
+            Term::Constant(name_attr.clone()),
+            Term::Variable {
+                name: None,
+                content_type: Default::default(),
+            },
+            Term::var("name"),
+            Term::var("cause"),
+            Cardinality::Many,
+        );
+
+        let session = Session::open(artifacts);
+        let results = fact_app.query(&session).try_vec().await?;
+
+        assert_eq!(results.len(), 1);
+        let fact = &results[0];
+
+        assert_eq!(fact.the(), &name_attr);
+        assert_eq!(fact.of(), &alice);
+        assert_eq!(fact.is(), &Value::String("Alice".to_string()));
+
+        Ok(())
+    }
+}

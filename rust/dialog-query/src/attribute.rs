@@ -783,4 +783,1275 @@ mod tests {
         assert_eq!(person::Name::NAMESPACE, "person");
         assert_eq!(person::Name::NAME, "name");
     }
+
+    // Tests from attribute_derive_test.rs
+
+    mod employee_derive {
+        use crate::Attribute;
+
+        /// Name of the employee
+        #[derive(Attribute, Clone)]
+        pub struct Name(pub String);
+
+        /// Job title of the employee
+        #[derive(Attribute, Clone)]
+        pub struct Job(pub String);
+
+        /// Salary of the employee
+        #[derive(Attribute, Clone)]
+        pub struct Salary(pub u32);
+    }
+
+    mod person_derive {
+        use crate::Attribute;
+
+        /// Name of the person
+        #[derive(Attribute, Clone)]
+        pub struct Name(pub String);
+
+        /// Employees managed by this person
+        #[derive(Attribute, Clone)]
+        #[cardinality(many)]
+        pub struct Manages(pub crate::Entity);
+    }
+
+    #[test]
+    fn test_employee_name_derives_attribute() {
+        use crate::Cardinality;
+
+        let name = employee_derive::Name("Alice".to_string());
+
+        assert_eq!(employee_derive::Name::namespace(), "employee-derive");
+        assert_eq!(employee_derive::Name::name(), "name");
+        assert_eq!(employee_derive::Name::description(), "Name of the employee");
+        assert_eq!(employee_derive::Name::cardinality(), Cardinality::One);
+        assert_eq!(name.value(), "Alice");
+        assert_eq!(
+            employee_derive::Name::selector().to_string(),
+            "employee-derive/name"
+        );
+    }
+
+    #[test]
+    fn test_employee_job_derives_attribute() {
+        use crate::Cardinality;
+
+        let job = employee_derive::Job("Engineer".to_string());
+
+        assert_eq!(employee_derive::Job::namespace(), "employee-derive");
+        assert_eq!(employee_derive::Job::name(), "job");
+        assert_eq!(
+            employee_derive::Job::description(),
+            "Job title of the employee"
+        );
+        assert_eq!(employee_derive::Job::cardinality(), Cardinality::One);
+        assert_eq!(job.value(), "Engineer");
+        assert_eq!(
+            employee_derive::Job::selector().to_string(),
+            "employee-derive/job"
+        );
+    }
+
+    #[test]
+    fn test_employee_salary_derives_attribute() {
+        use crate::Cardinality;
+
+        let salary = employee_derive::Salary(100000);
+
+        assert_eq!(employee_derive::Salary::namespace(), "employee-derive");
+        assert_eq!(employee_derive::Salary::name(), "salary");
+        assert_eq!(
+            employee_derive::Salary::description(),
+            "Salary of the employee"
+        );
+        assert_eq!(employee_derive::Salary::cardinality(), Cardinality::One);
+        assert_eq!(salary.value(), &100000u32);
+        assert_eq!(
+            employee_derive::Salary::selector().to_string(),
+            "employee-derive/salary"
+        );
+    }
+
+    #[test]
+    fn test_person_derive_namespace() {
+        let name = person_derive::Name("Bob".to_string());
+
+        assert_eq!(person_derive::Name::namespace(), "person-derive");
+        assert_eq!(person_derive::Name::name(), "name");
+        assert_eq!(
+            person_derive::Name::selector().to_string(),
+            "person-derive/name"
+        );
+        assert_eq!(name.value(), "Bob");
+    }
+
+    #[test]
+    fn test_cardinality_many() {
+        use crate::Cardinality;
+
+        assert_eq!(person_derive::Manages::cardinality(), Cardinality::Many);
+        assert_eq!(
+            person_derive::Manages::description(),
+            "Employees managed by this person"
+        );
+        assert_eq!(person_derive::Manages::namespace(), "person-derive");
+    }
+
+    mod custom_ns_derive {
+        use crate::Attribute;
+
+        /// Custom namespace override test
+        #[derive(Attribute, Clone)]
+        #[namespace = "custom"]
+        pub struct Field(pub String);
+    }
+
+    #[test]
+    fn test_custom_namespace_override_derive() {
+        let field = custom_ns_derive::Field("value".to_string());
+
+        assert_eq!(custom_ns_derive::Field::namespace(), "custom");
+        assert_eq!(custom_ns_derive::Field::name(), "field");
+        assert_eq!(
+            custom_ns_derive::Field::selector().to_string(),
+            "custom/field"
+        );
+        assert_eq!(field.value(), "value");
+    }
+
+    // Tests from attribute_identifier_test.rs
+
+    mod employee_ident {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone)]
+        pub struct Name(pub String);
+
+        #[derive(Attribute, Clone)]
+        pub struct Salary(pub u32);
+
+        #[derive(Attribute, Clone)]
+        pub struct Job(pub String);
+    }
+
+    mod person_ident {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone)]
+        pub struct Name(pub String);
+    }
+
+    #[test]
+    fn test_attribute_hash_stability() {
+        let hash1 = employee_ident::Name::hash();
+        let hash2 = employee_ident::Name::hash();
+
+        assert_eq!(
+            hash1, hash2,
+            "Same attribute should produce identical hashes"
+        );
+    }
+
+    #[test]
+    fn test_different_attributes_different_hashes() {
+        let name_hash = employee_ident::Name::hash();
+        let salary_hash = employee_ident::Salary::hash();
+        let job_hash = employee_ident::Job::hash();
+
+        assert_ne!(
+            name_hash, salary_hash,
+            "Name and Salary should have different hashes"
+        );
+        assert_ne!(
+            name_hash, job_hash,
+            "Name and Job should have different hashes"
+        );
+        assert_ne!(
+            salary_hash, job_hash,
+            "Salary and Job should have different hashes"
+        );
+    }
+
+    #[test]
+    fn test_same_name_different_namespace_different_hashes() {
+        let employee_name_hash = employee_ident::Name::hash();
+        let person_name_hash = person_ident::Name::hash();
+
+        assert_ne!(
+            employee_name_hash, person_name_hash,
+            "employee::Name and person::Name should have different hashes"
+        );
+    }
+
+    #[test]
+    fn test_attribute_uri_format() {
+        let uri = employee_ident::Name::to_uri();
+
+        assert!(
+            uri.starts_with("the:"),
+            "URI should start with 'the:' prefix"
+        );
+        assert_eq!(
+            uri.len(),
+            4 + 64,
+            "URI should be 'the:' + 64 hex chars (32 bytes)"
+        );
+    }
+
+    #[test]
+    fn test_attribute_uri_roundtrip() {
+        let uri = employee_ident::Name::to_uri();
+        let parsed_hash =
+            crate::attribute::AttributeSchema::<String>::parse_uri(&uri);
+
+        assert!(parsed_hash.is_some(), "Should be able to parse valid URI");
+        assert_eq!(
+            parsed_hash.unwrap(),
+            employee_ident::Name::hash(),
+            "Parsed hash should match original hash"
+        );
+    }
+
+    #[test]
+    fn test_attribute_uri_parse_invalid() {
+        assert!(
+            crate::attribute::AttributeSchema::<String>::parse_uri("invalid").is_none(),
+            "Should fail to parse URI without 'the:' prefix"
+        );
+
+        assert!(
+            crate::attribute::AttributeSchema::<String>::parse_uri("the:invalid").is_none(),
+            "Should fail to parse URI with invalid hash"
+        );
+
+        assert!(
+            crate::attribute::AttributeSchema::<String>::parse_uri("concept:abcd").is_none(),
+            "Should fail to parse URI with wrong prefix"
+        );
+    }
+
+    #[test]
+    fn test_attribute_schema_hash_stability() {
+        let schema_hash = employee_ident::Name::SCHEMA.hash();
+        let trait_hash = employee_ident::Name::hash();
+
+        assert_eq!(
+            schema_hash, trait_hash,
+            "Schema hash and trait hash should match"
+        );
+    }
+
+    #[test]
+    fn test_attribute_cbor_encoding() {
+        let cbor1 = employee_ident::Name::SCHEMA.to_cbor_bytes();
+        let cbor2 = employee_ident::Name::SCHEMA.to_cbor_bytes();
+
+        assert_eq!(cbor1, cbor2, "CBOR encoding should be deterministic");
+        assert!(!cbor1.is_empty(), "CBOR encoding should not be empty");
+    }
+
+    #[test]
+    fn test_attribute_description_does_not_affect_hash() {
+        use crate::artifact::Type;
+        use crate::attribute::AttributeSchema;
+
+        let attr1 =
+            AttributeSchema::<String>::new("user", "email", "Primary email address", Type::String);
+
+        let attr2 = AttributeSchema::<String>::new(
+            "user",
+            "email",
+            "User's email for notifications",
+            Type::String,
+        );
+
+        assert_eq!(
+            attr1.hash(),
+            attr2.hash(),
+            "Attributes with different descriptions should have the same hash"
+        );
+
+        assert_eq!(
+            attr1.to_uri(),
+            attr2.to_uri(),
+            "Attributes with different descriptions should have the same URI"
+        );
+    }
+
+    // Tests from attribute_into_term_test.rs
+
+    mod employee_term {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone)]
+        pub struct Name(pub String);
+
+        #[derive(Attribute, Clone)]
+        pub struct Job(pub String);
+
+        #[derive(Attribute, Clone)]
+        pub struct Salary(pub u32);
+    }
+
+    #[test]
+    fn test_attribute_into_term() {
+        use crate::Term;
+
+        let name = employee_term::Name("Alice".into());
+        let name_term: Term<String> = name.into();
+        assert!(name_term.is_constant());
+
+        let job = employee_term::Job("Engineer".into());
+        let job_term: Term<String> = job.into();
+        assert!(job_term.is_constant());
+
+        let salary = employee_term::Salary(65000);
+        let salary_term: Term<u32> = salary.into();
+        assert!(salary_term.is_constant());
+    }
+
+    #[test]
+    fn test_attribute_from_method() {
+        use crate::Term;
+
+        let name = employee_term::Name::from("Alice");
+        assert_eq!(name.value(), "Alice");
+
+        let job = employee_term::Job::from("Engineer");
+        assert_eq!(job.value(), "Engineer");
+
+        let salary = employee_term::Salary::from(65000u32);
+        assert_eq!(*salary.value(), 65000);
+
+        let name_term: Term<String> = employee_term::Name::from("Bob").into();
+        assert!(name_term.is_constant());
+    }
+
+    #[test]
+    fn test_attribute_into_in_match_construction() {
+        use crate::{Concept, Entity, Match, Term};
+
+        #[derive(Concept, Debug, Clone)]
+        pub struct Employee {
+            pub this: Entity,
+            pub name: employee_term::Name,
+            pub job: employee_term::Job,
+            pub salary: employee_term::Salary,
+        }
+
+        let pattern = Match::<Employee> {
+            this: Term::var("e"),
+            name: Term::var("name"),
+            salary: Term::var("salary"),
+            job: employee_term::Job("Engineer".into()).into(),
+        };
+
+        assert!(pattern.job.is_constant());
+
+        let pattern2 = Match::<Employee> {
+            this: Term::var("e"),
+            name: Term::var("name"),
+            salary: Term::var("salary"),
+            job: employee_term::Job::from("Engineer").into(),
+        };
+
+        assert!(pattern2.job.is_constant());
+    }
+
+    // Tests from attribute_namespace_test.rs
+
+    mod account_name {
+        use crate::Attribute;
+
+        /// Account holder's name
+        #[derive(Attribute, Clone)]
+        pub struct Name(pub String);
+    }
+
+    mod ns_my {
+        pub mod config {
+            use crate::Attribute;
+
+            /// Configuration key
+            #[derive(Attribute, Clone)]
+            pub struct Key(pub String);
+        }
+    }
+
+    #[derive(crate::Attribute, Clone)]
+    #[namespace("my.custom.namespace")]
+    pub struct NsValue(pub String);
+
+    #[derive(crate::Attribute, Clone)]
+    #[namespace(custom)]
+    pub struct NsCustomValue(pub String);
+
+    #[derive(crate::Attribute, Clone)]
+    #[namespace("io.gozala")]
+    pub struct NsDottedValue(pub String);
+
+    mod ns_my_app {
+        pub mod user_profile {
+            use crate::Attribute;
+
+            /// User email address
+            #[derive(Attribute, Clone)]
+            pub struct Email(pub String);
+        }
+    }
+
+    #[test]
+    fn test_underscore_to_hyphen_conversion() {
+        use crate::Attribute;
+
+        assert_eq!(account_name::Name::NAMESPACE, "account-name");
+        assert_eq!(account_name::Name::NAME, "name");
+        assert_eq!(
+            account_name::Name::selector().to_string(),
+            "account-name/name"
+        );
+    }
+
+    #[test]
+    fn test_nested_module_namespace() {
+        use crate::Attribute;
+
+        assert_eq!(ns_my::config::Key::NAMESPACE, "config");
+        assert_eq!(ns_my::config::Key::NAME, "key");
+        assert_eq!(ns_my::config::Key::selector().to_string(), "config/key");
+    }
+
+    #[test]
+    fn test_explicit_namespace_override() {
+        use crate::Attribute;
+
+        assert_eq!(NsValue::NAMESPACE, "my.custom.namespace");
+        assert_eq!(NsValue::NAME, "ns-value");
+        assert_eq!(
+            NsValue::selector().to_string(),
+            "my.custom.namespace/ns-value"
+        );
+    }
+
+    #[test]
+    fn test_namespace_identifier_syntax() {
+        use crate::Attribute;
+
+        assert_eq!(NsCustomValue::NAMESPACE, "custom");
+        assert_eq!(NsCustomValue::NAME, "ns-custom-value");
+        assert_eq!(
+            NsCustomValue::selector().to_string(),
+            "custom/ns-custom-value"
+        );
+    }
+
+    #[test]
+    fn test_namespace_string_literal_syntax() {
+        use crate::Attribute;
+
+        assert_eq!(NsDottedValue::NAMESPACE, "io.gozala");
+        assert_eq!(NsDottedValue::NAME, "ns-dotted-value");
+        assert_eq!(
+            NsDottedValue::selector().to_string(),
+            "io.gozala/ns-dotted-value"
+        );
+    }
+
+    #[test]
+    fn test_nested_underscore_conversion() {
+        use crate::Attribute;
+
+        assert_eq!(ns_my_app::user_profile::Email::NAMESPACE, "user-profile");
+        assert_eq!(ns_my_app::user_profile::Email::NAME, "email");
+        assert_eq!(
+            ns_my_app::user_profile::Email::selector().to_string(),
+            "user-profile/email"
+        );
+    }
+
+    #[test]
+    fn test_all_metadata_preserved() {
+        use crate::{Attribute, Cardinality};
+
+        let name = account_name::Name("John Doe".to_string());
+
+        assert_eq!(account_name::Name::NAMESPACE, "account-name");
+        assert_eq!(account_name::Name::NAME, "name");
+        assert_eq!(account_name::Name::DESCRIPTION, "Account holder's name");
+        assert_eq!(account_name::Name::CARDINALITY, Cardinality::One);
+        assert_eq!(name.value(), "John Doe");
+    }
+
+    // Tests from attribute_naming_test.rs
+
+    mod test_pascal {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone)]
+        pub struct UserName(pub String);
+
+        #[derive(Attribute, Clone)]
+        pub struct HTTPRequest(pub String);
+
+        #[derive(Attribute, Clone)]
+        pub struct APIKey(pub String);
+    }
+
+    #[test]
+    fn test_pascal_case_to_kebab_case() {
+        assert_eq!(test_pascal::UserName::NAME, "user-name");
+    }
+
+    #[test]
+    fn test_consecutive_capitals() {
+        assert_eq!(test_pascal::HTTPRequest::NAME, "http-request");
+        assert_eq!(test_pascal::APIKey::NAME, "api-key");
+    }
+
+    #[test]
+    fn test_static_values() {
+        let ns = test_pascal::UserName::NAMESPACE;
+        let name = test_pascal::UserName::NAME;
+        let desc = test_pascal::UserName::DESCRIPTION;
+
+        assert!(!ns.is_empty());
+        assert_eq!(name, "user-name");
+        let _ = desc;
+    }
+
+    #[test]
+    fn test_schema_static() {
+        use crate::Cardinality;
+
+        let schema = &test_pascal::UserName::SCHEMA;
+        assert_eq!(schema.name, "user-name");
+        assert_eq!(schema.cardinality, Cardinality::One);
+    }
+
+    #[test]
+    fn test_match_struct_literal() {
+        use crate::{Entity, Match, Term};
+
+        let entity_id = Entity::new().unwrap();
+
+        let query = Match::<crate::attribute::With<test_pascal::UserName>> {
+            this: Term::from(entity_id),
+            has: Term::from("Alice".to_string()),
+        };
+
+        assert!(matches!(query.this, Term::Constant(_)));
+        assert!(matches!(query.has, Term::Constant(_)));
+    }
+
+    #[test]
+    fn test_quarriable_match_pattern() {
+        use crate::{Entity, Match, Term};
+
+        let entity_id = Entity::new().unwrap();
+
+        let query = Match::<crate::attribute::With<test_pascal::UserName>> {
+            this: Term::from(entity_id),
+            has: Term::from("Alice".to_string()),
+        };
+
+        assert!(matches!(query.this, Term::Constant(_)));
+        assert!(matches!(query.has, Term::Constant(_)));
+    }
+
+    #[test]
+    fn test_default_match_constructor() {
+        use crate::{Match, Term};
+
+        let query = Match::<crate::attribute::With<test_pascal::UserName>>::default();
+
+        assert!(matches!(query.this, Term::Variable { .. }));
+        assert!(matches!(query.has, Term::Variable { .. }));
+    }
+
+    // Tests from attribute_transaction_test.rs
+
+    mod employee_txn {
+        use crate::Attribute;
+
+        /// Name of the employee
+        #[derive(Attribute, Clone)]
+        pub struct Name(pub String);
+
+        /// Job title of the employee
+        #[derive(Attribute, Clone)]
+        pub struct Job(pub String);
+
+        /// Salary of the employee
+        #[derive(Attribute, Clone)]
+        pub struct Salary(pub u32);
+
+        /// Employee's manager
+        #[derive(Attribute, Clone)]
+        pub struct Manager(pub crate::Entity);
+    }
+
+    #[dialog_macros::test]
+    async fn test_single_attribute_assert_and_retract() -> anyhow::Result<()> {
+        use crate::artifact::{Artifacts, Value};
+        use crate::{Entity, Fact, Session};
+        use dialog_storage::MemoryStorageBackend;
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+
+        let alice = Entity::new()?;
+        let name = employee_txn::Name("Alice".to_string());
+
+        let mut session = Session::open(store.clone());
+        session
+            .transact(vec![crate::attribute::With {
+                this: alice.clone(),
+                has: name.clone(),
+            }])
+            .await?;
+
+        let query = Fact::<Value>::select()
+            .the("employee-txn/name")
+            .of(alice.clone())
+            .compile()?;
+
+        let facts: Vec<_> = query
+            .query(&Session::open(store.clone()))
+            .try_collect()
+            .await?;
+
+        assert_eq!(facts.len(), 1);
+        match &facts[0] {
+            Fact::Assertion { is, .. } => {
+                assert_eq!(*is, Value::String("Alice".to_string()));
+            }
+            _ => panic!("Expected Assertion"),
+        }
+
+        let mut session = Session::open(store.clone());
+        session
+            .transact(vec![!crate::attribute::With {
+                this: alice.clone(),
+                has: name,
+            }])
+            .await?;
+
+        let query = Fact::<Value>::select()
+            .the("employee-txn/name")
+            .of(alice)
+            .compile()?;
+
+        let facts: Vec<_> = query.query(&Session::open(store)).try_collect().await?;
+
+        assert_eq!(facts.len(), 0);
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_multiple_attributes_assert() -> anyhow::Result<()> {
+        use crate::artifact::{Artifacts, Value};
+        use crate::{Entity, Fact, Session};
+        use dialog_storage::MemoryStorageBackend;
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+
+        let bob = Entity::new()?;
+        let name = employee_txn::Name("Bob".to_string());
+        let job = employee_txn::Job("Engineer".to_string());
+
+        let mut session = Session::open(store.clone());
+        session
+            .transact(vec![crate::attribute::With {
+                this: bob.clone(),
+                has: name,
+            }])
+            .await?;
+        session
+            .transact(vec![crate::attribute::With {
+                this: bob.clone(),
+                has: job,
+            }])
+            .await?;
+
+        let name_query = Fact::<Value>::select()
+            .the("employee-txn/name")
+            .of(bob.clone())
+            .compile()?;
+
+        let job_query = Fact::<Value>::select()
+            .the("employee-txn/job")
+            .of(bob.clone())
+            .compile()?;
+
+        let name_facts: Vec<_> = name_query
+            .query(&Session::open(store.clone()))
+            .try_collect()
+            .await?;
+
+        let job_facts: Vec<_> = job_query.query(&Session::open(store)).try_collect().await?;
+
+        assert_eq!(name_facts.len(), 1);
+        match &name_facts[0] {
+            Fact::Assertion { is, .. } => {
+                assert_eq!(*is, Value::String("Bob".to_string()));
+            }
+            _ => panic!("Expected Assertion"),
+        }
+
+        assert_eq!(job_facts.len(), 1);
+        match &job_facts[0] {
+            Fact::Assertion { is, .. } => {
+                assert_eq!(*is, Value::String("Engineer".to_string()));
+            }
+            _ => panic!("Expected Assertion"),
+        }
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_three_attributes_assert() -> anyhow::Result<()> {
+        use crate::artifact::{Artifacts, Value};
+        use crate::{Entity, Fact, Session};
+        use dialog_storage::MemoryStorageBackend;
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+
+        let charlie = Entity::new()?;
+        let name = employee_txn::Name("Charlie".to_string());
+        let job = employee_txn::Job("Manager".to_string());
+        let salary = employee_txn::Salary(120000);
+
+        let mut session = Session::open(store.clone());
+        session
+            .transact(vec![crate::attribute::With {
+                this: charlie.clone(),
+                has: name,
+            }])
+            .await?;
+        session
+            .transact(vec![crate::attribute::With {
+                this: charlie.clone(),
+                has: job,
+            }])
+            .await?;
+        session
+            .transact(vec![crate::attribute::With {
+                this: charlie.clone(),
+                has: salary,
+            }])
+            .await?;
+
+        let name_query = Fact::<Value>::select()
+            .the("employee-txn/name")
+            .of(charlie.clone())
+            .compile()?;
+
+        let job_query = Fact::<Value>::select()
+            .the("employee-txn/job")
+            .of(charlie.clone())
+            .compile()?;
+
+        let salary_query = Fact::<Value>::select()
+            .the("employee-txn/salary")
+            .of(charlie.clone())
+            .compile()?;
+
+        let name_facts: Vec<_> = name_query
+            .query(&Session::open(store.clone()))
+            .try_collect()
+            .await?;
+
+        let job_facts: Vec<_> = job_query
+            .query(&Session::open(store.clone()))
+            .try_collect()
+            .await?;
+
+        let salary_facts: Vec<_> = salary_query
+            .query(&Session::open(store))
+            .try_collect()
+            .await?;
+
+        assert_eq!(name_facts.len(), 1);
+        match &name_facts[0] {
+            Fact::Assertion { is, .. } => {
+                assert_eq!(*is, Value::String("Charlie".to_string()));
+            }
+            _ => panic!("Expected Assertion"),
+        }
+
+        assert_eq!(job_facts.len(), 1);
+        match &job_facts[0] {
+            Fact::Assertion { is, .. } => {
+                assert_eq!(*is, Value::String("Manager".to_string()));
+            }
+            _ => panic!("Expected Assertion"),
+        }
+
+        assert_eq!(salary_facts.len(), 1);
+        match &salary_facts[0] {
+            Fact::Assertion { is, .. } => {
+                assert_eq!(*is, Value::UnsignedInt(120000));
+            }
+            _ => panic!("Expected Assertion"),
+        }
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_multiple_attributes_retract() -> anyhow::Result<()> {
+        use crate::artifact::{Artifacts, Value};
+        use crate::{Entity, Fact, Session};
+        use dialog_storage::MemoryStorageBackend;
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+
+        let dave = Entity::new()?;
+        let name = employee_txn::Name("Dave".to_string());
+        let job = employee_txn::Job("Developer".to_string());
+
+        let mut session = Session::open(store.clone());
+        session
+            .transact(vec![crate::attribute::With {
+                this: dave.clone(),
+                has: name.clone(),
+            }])
+            .await?;
+        session
+            .transact(vec![crate::attribute::With {
+                this: dave.clone(),
+                has: job.clone(),
+            }])
+            .await?;
+
+        let mut session = Session::open(store.clone());
+        session
+            .transact(vec![!crate::attribute::With {
+                this: dave.clone(),
+                has: name,
+            }])
+            .await?;
+        session
+            .transact(vec![!crate::attribute::With {
+                this: dave.clone(),
+                has: job,
+            }])
+            .await?;
+
+        let name_query = Fact::<Value>::select()
+            .the("employee-txn/name")
+            .of(dave.clone())
+            .compile()?;
+
+        let job_query = Fact::<Value>::select()
+            .the("employee-txn/job")
+            .of(dave.clone())
+            .compile()?;
+
+        let name_facts: Vec<_> = name_query
+            .query(&Session::open(store.clone()))
+            .try_collect()
+            .await?;
+
+        let job_facts: Vec<_> = job_query.query(&Session::open(store)).try_collect().await?;
+
+        assert_eq!(name_facts.len(), 0);
+        assert_eq!(job_facts.len(), 0);
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_update_attribute() -> anyhow::Result<()> {
+        use crate::artifact::{Artifacts, Value};
+        use crate::{Entity, Fact, Session};
+        use dialog_storage::MemoryStorageBackend;
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+
+        let eve = Entity::new()?;
+        let old_job = employee_txn::Job("Junior Developer".to_string());
+
+        let mut session = Session::open(store.clone());
+        session
+            .transact(vec![crate::attribute::With {
+                this: eve.clone(),
+                has: old_job.clone(),
+            }])
+            .await?;
+
+        let mut session = Session::open(store.clone());
+        session
+            .transact(vec![!crate::attribute::With {
+                this: eve.clone(),
+                has: old_job,
+            }])
+            .await?;
+
+        let new_job = employee_txn::Job("Senior Developer".to_string());
+        let mut session = Session::open(store.clone());
+        session
+            .transact(vec![crate::attribute::With {
+                this: eve.clone(),
+                has: new_job,
+            }])
+            .await?;
+
+        let query = Fact::<Value>::select()
+            .the("employee-txn/job")
+            .of(eve)
+            .compile()?;
+
+        let job_facts: Vec<_> = query.query(&Session::open(store)).try_collect().await?;
+
+        assert_eq!(job_facts.len(), 1);
+        match &job_facts[0] {
+            Fact::Assertion { is, .. } => {
+                assert_eq!(*is, Value::String("Senior Developer".to_string()));
+            }
+            _ => panic!("Expected Assertion"),
+        }
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_entity_reference_attribute() -> anyhow::Result<()> {
+        use crate::artifact::{Artifacts, Value};
+        use crate::{Entity, Fact, Session};
+        use dialog_storage::MemoryStorageBackend;
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+
+        let manager = Entity::new()?;
+        let employee_entity = Entity::new()?;
+
+        let manager_name = employee_txn::Name("Manager Alice".to_string());
+        let employee_name = employee_txn::Name("Employee Bob".to_string());
+        let reports_to = employee_txn::Manager(manager.clone());
+
+        let mut session = Session::open(store.clone());
+        session
+            .transact(vec![crate::attribute::With {
+                this: manager.clone(),
+                has: manager_name,
+            }])
+            .await?;
+
+        let mut session = Session::open(store.clone());
+        session
+            .transact(vec![crate::attribute::With {
+                this: employee_entity.clone(),
+                has: employee_name,
+            }])
+            .await?;
+        session
+            .transact(vec![crate::attribute::With {
+                this: employee_entity.clone(),
+                has: reports_to,
+            }])
+            .await?;
+
+        let query = Fact::<Value>::select()
+            .the("employee-txn/manager")
+            .of(employee_entity)
+            .compile()?;
+
+        let manager_facts: Vec<_> = query.query(&Session::open(store)).try_collect().await?;
+
+        assert_eq!(manager_facts.len(), 1);
+        match &manager_facts[0] {
+            Fact::Assertion { is, .. } => {
+                assert_eq!(*is, Value::Entity(manager));
+            }
+            _ => panic!("Expected Assertion"),
+        }
+
+        Ok(())
+    }
+
+    // Tests from with_query_shortcut_test.rs
+
+    mod employee_shortcut {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone)]
+        pub struct Name(pub String);
+
+        #[derive(Attribute, Clone)]
+        pub struct Job(pub String);
+    }
+
+    #[dialog_macros::test]
+    async fn test_with_query_shortcut() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+        use crate::attribute::With;
+        use crate::{Concept, Entity, Session};
+        use dialog_storage::MemoryStorageBackend;
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store);
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        let mut edit = session.edit();
+        edit.assert(With {
+            this: alice.clone(),
+            has: employee_shortcut::Name("Alice".into()),
+        })
+        .assert(With {
+            this: bob.clone(),
+            has: employee_shortcut::Name("Bob".into()),
+        })
+        .assert(With {
+            this: alice.clone(),
+            has: employee_shortcut::Job("Engineer".into()),
+        })
+        .assert(With {
+            this: bob.clone(),
+            has: employee_shortcut::Job("Designer".into()),
+        });
+        session.commit(edit).await?;
+
+        let names: Vec<With<employee_shortcut::Name>> =
+            With::<employee_shortcut::Name>::query(session.clone())
+                .try_collect()
+                .await?;
+
+        assert_eq!(names.len(), 2, "Should find 2 names");
+
+        let mut found_alice = false;
+        let mut found_bob = false;
+
+        for name in &names {
+            if name.has.value() == "Alice" {
+                found_alice = true;
+            } else if name.has.value() == "Bob" {
+                found_bob = true;
+            }
+        }
+
+        assert!(found_alice, "Should find Alice");
+        assert!(found_bob, "Should find Bob");
+
+        let jobs: Vec<With<employee_shortcut::Job>> =
+            With::<employee_shortcut::Job>::query(session.clone())
+                .try_collect()
+                .await?;
+
+        assert_eq!(jobs.len(), 2, "Should find 2 jobs");
+
+        Ok(())
+    }
+
+    // Tests from attribute_as_concept_test.rs (only test_attribute_claim)
+
+    mod note_concept {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone)]
+        pub struct Title(pub String);
+
+        #[derive(Attribute, Clone)]
+        pub struct Body(pub String);
+    }
+
+    #[dialog_macros::test]
+    async fn test_attribute_claim() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+        use crate::claim::Claim;
+        use crate::{Entity, Match, Session, Term, Transaction};
+        use dialog_storage::MemoryStorageBackend;
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store);
+
+        let entity = Entity::new()?;
+        let title = note_concept::Title("Test Note".to_string());
+
+        let instance = crate::attribute::With {
+            this: entity.clone(),
+            has: title.clone(),
+        };
+
+        let mut transaction = Transaction::new();
+        instance.clone().assert(&mut transaction);
+        session.commit(transaction).await?;
+
+        let query = Match::<crate::attribute::With<note_concept::Title>> {
+            this: Term::from(entity.clone()),
+            has: Term::var("has"),
+        };
+
+        let premise: crate::Premise = query.into();
+        let application = match premise {
+            crate::Premise::Apply(app) => app,
+            _ => panic!("Expected Apply premise"),
+        };
+
+        let results = application.query(&session).try_collect::<Vec<_>>().await?;
+
+        assert_eq!(results.len(), 1);
+
+        Ok(())
+    }
+
+    // Tests from attribute_tuple_rule_test.rs (only async tests)
+
+    mod note_rule {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone)]
+        pub struct Title(pub String);
+    }
+
+    #[dialog_macros::test]
+    async fn test_adhoc_concept_query() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+        use crate::{Entity, Match, Relation, Session, Term, Value};
+        use dialog_artifacts::Attribute as ArtifactAttribute;
+        use dialog_storage::MemoryStorageBackend;
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store);
+
+        let note1 = Entity::new()?;
+        let note2 = Entity::new()?;
+        let note3 = Entity::new()?;
+
+        session
+            .transact(vec![
+                Relation {
+                    the: "note-rule/title".parse::<ArtifactAttribute>()?,
+                    of: note1.clone(),
+                    is: Value::String("First Note".to_string()),
+                },
+                Relation {
+                    the: "note-rule/title".parse::<ArtifactAttribute>()?,
+                    of: note2.clone(),
+                    is: Value::String("Second Note".to_string()),
+                },
+                Relation {
+                    the: "note-rule/title".parse::<ArtifactAttribute>()?,
+                    of: note3.clone(),
+                    is: Value::String("Third Note".to_string()),
+                },
+            ])
+            .await?;
+
+        let query = Match::<crate::attribute::With<note_rule::Title>> {
+            this: Term::var("entity"),
+            has: Term::var("has"),
+        };
+
+        let premise: crate::Premise = query.into();
+
+        let application = match premise {
+            crate::Premise::Apply(app) => app,
+            _ => panic!("Expected Apply premise"),
+        };
+
+        let results = application.query(&session).try_collect::<Vec<_>>().await?;
+
+        assert_eq!(results.len(), 3, "Should find 3 notes with titles");
+
+        let title_var: Term<Value> = Term::var("has");
+
+        let mut found_titles = std::collections::HashSet::new();
+        for result in &results {
+            let title = result.resolve(&title_var)?;
+            if let Value::String(s) = title {
+                found_titles.insert(s.clone());
+            }
+        }
+
+        assert!(found_titles.contains("First Note"));
+        assert!(found_titles.contains("Second Note"));
+        assert!(found_titles.contains("Third Note"));
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_adhoc_concept_query_with_filter() -> anyhow::Result<()> {
+        use crate::artifact::Artifacts;
+        use crate::{Entity, Match, Relation, Session, Term, Value};
+        use dialog_artifacts::Attribute as ArtifactAttribute;
+        use dialog_storage::MemoryStorageBackend;
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store);
+
+        let note1 = Entity::new()?;
+        let note2 = Entity::new()?;
+        let note3 = Entity::new()?;
+
+        session
+            .transact(vec![
+                Relation {
+                    the: "note-rule/title".parse::<ArtifactAttribute>()?,
+                    of: note1.clone(),
+                    is: Value::String("Target Note".to_string()),
+                },
+                Relation {
+                    the: "note-rule/title".parse::<ArtifactAttribute>()?,
+                    of: note2.clone(),
+                    is: Value::String("Other Note".to_string()),
+                },
+                Relation {
+                    the: "note-rule/title".parse::<ArtifactAttribute>()?,
+                    of: note3.clone(),
+                    is: Value::String("Another Note".to_string()),
+                },
+            ])
+            .await?;
+
+        let query = Match::<crate::attribute::With<note_rule::Title>> {
+            this: Term::var("entity"),
+            has: Term::from("Target Note".to_string()),
+        };
+
+        let premise: crate::Premise = query.into();
+
+        let application = match premise {
+            crate::Premise::Apply(app) => app,
+            _ => panic!("Expected Apply premise"),
+        };
+
+        let results = application.query(&session).try_collect::<Vec<_>>().await?;
+
+        assert_eq!(
+            results.len(),
+            1,
+            "Should find exactly 1 note with 'Target Note' title"
+        );
+
+        let entity_var: Term<Value> = Term::var("entity");
+        let found_entity = results[0].resolve(&entity_var)?;
+        assert_eq!(found_entity, Value::Entity(note1));
+
+        Ok(())
+    }
 }

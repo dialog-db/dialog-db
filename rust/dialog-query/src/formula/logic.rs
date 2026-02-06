@@ -300,4 +300,67 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn test_integration_boolean_logic() -> anyhow::Result<()> {
+        // Test And formula: true AND true = true
+        let mut and_terms = Parameters::new();
+        and_terms.insert("left".to_string(), Term::var("a"));
+        and_terms.insert("right".to_string(), Term::var("b"));
+        and_terms.insert("is".to_string(), Term::var("and_result"));
+
+        let and_formula = And::apply(and_terms)?;
+
+        let and_input = Answer::new()
+            .set(Term::var("a"), true)
+            .unwrap()
+            .set(Term::var("b"), true)
+            .unwrap();
+
+        let and_results = and_formula.derive(and_input)?;
+        assert_eq!(and_results.len(), 1);
+        assert_eq!(
+            and_results[0].get::<bool>(&Term::var("and_result")).ok(),
+            Some(true)
+        );
+
+        // Test Or formula: false OR true = true
+        let mut or_terms = Parameters::new();
+        or_terms.insert("left".to_string(), Term::var("x"));
+        or_terms.insert("right".to_string(), Term::var("y"));
+        or_terms.insert("is".to_string(), Term::var("or_result"));
+
+        let or_formula = Or::apply(or_terms)?;
+
+        let or_input = Answer::new()
+            .set(Term::var("x"), false)
+            .unwrap()
+            .set(Term::var("y"), true)
+            .unwrap();
+
+        let or_results = or_formula.derive(or_input)?;
+        assert_eq!(or_results.len(), 1);
+        assert_eq!(
+            or_results[0].get::<bool>(&Term::var("or_result")).ok(),
+            Some(true)
+        );
+
+        // Test Not formula: NOT true = false
+        let mut not_terms = Parameters::new();
+        not_terms.insert("value".to_string(), Term::var("input"));
+        not_terms.insert("is".to_string(), Term::var("not_result"));
+
+        let not_formula = Not::apply(not_terms)?;
+
+        let not_input = Answer::new().set(Term::var("input"), true).unwrap();
+
+        let not_results = not_formula.derive(not_input)?;
+        assert_eq!(not_results.len(), 1);
+        assert_eq!(
+            not_results[0].get::<bool>(&Term::var("not_result")).ok(),
+            Some(false)
+        );
+
+        Ok(())
+    }
 }

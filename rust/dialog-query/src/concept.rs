@@ -146,6 +146,7 @@ mod tests {
     use super::*;
     use crate::artifact::Value;
     use crate::artifact::{Artifacts, Attribute as ArtifactAttribute};
+    use crate::attribute::Attribute as _;
     use crate::term::Term;
     use crate::{Answer, Fact};
     use crate::{Claim, Concept, Session, Transaction};
@@ -1050,6 +1051,588 @@ mod tests {
             facts_after.len(),
             0,
             "Should not have name relation after retraction"
+        );
+
+        Ok(())
+    }
+
+    // Tests migrated from tests/attribute_concept_test.rs
+    mod person_attr_concept {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Name(pub String);
+
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Birthday(pub u32);
+
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Email(pub String);
+    }
+
+    #[derive(Concept, Debug, Clone, PartialEq)]
+    pub struct DerivedPerson {
+        pub this: Entity,
+        pub name: person_attr_concept::Name,
+        pub birthday: person_attr_concept::Birthday,
+    }
+
+    #[derive(Concept, Debug, Clone, PartialEq)]
+    pub struct PersonWithEmail {
+        pub this: Entity,
+        pub name: person_attr_concept::Name,
+        pub email: person_attr_concept::Email,
+    }
+
+    #[dialog_macros::test]
+    async fn test_concept_with_attribute_fields() -> Result<()> {
+        use crate::Match;
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+
+        let alice_id = Entity::new()?;
+
+        let alice = DerivedPerson {
+            this: alice_id.clone(),
+            name: person_attr_concept::Name("Alice".to_string()),
+            birthday: person_attr_concept::Birthday(19830703),
+        };
+
+        let mut session = Session::open(store.clone());
+        session.transact(vec![alice.clone()]).await?;
+
+        let name_query = Fact::<Value>::select()
+            .the("person-attr-concept/name")
+            .of(alice_id.clone())
+            .compile()?;
+
+        let birthday_query = Fact::<Value>::select()
+            .the("person-attr-concept/birthday")
+            .of(alice_id.clone())
+            .compile()?;
+
+        let name_facts: Vec<_> = name_query
+            .query(&Session::open(store.clone()))
+            .try_collect()
+            .await?;
+
+        let birthday_facts: Vec<_> = birthday_query
+            .query(&Session::open(store))
+            .try_collect()
+            .await?;
+
+        assert_eq!(name_facts.len(), 1);
+        assert_eq!(birthday_facts.len(), 1);
+
+        match &name_facts[0] {
+            Fact::Assertion { is, .. } => {
+                assert_eq!(*is, Value::String("Alice".to_string()));
+            }
+            _ => panic!("Expected Assertion"),
+        }
+
+        match &birthday_facts[0] {
+            Fact::Assertion { is, .. } => {
+                assert_eq!(*is, Value::UnsignedInt(19830703));
+            }
+            _ => panic!("Expected Assertion"),
+        }
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_query_concept_with_attribute_fields() -> Result<()> {
+        use crate::Match;
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+
+        let alice_id = Entity::new()?;
+        let bob_id = Entity::new()?;
+
+        let alice = DerivedPerson {
+            this: alice_id.clone(),
+            name: person_attr_concept::Name("Alice".to_string()),
+            birthday: person_attr_concept::Birthday(19830703),
+        };
+
+        let bob = DerivedPerson {
+            this: bob_id.clone(),
+            name: person_attr_concept::Name("Bob".to_string()),
+            birthday: person_attr_concept::Birthday(19900515),
+        };
+
+        let mut session = Session::open(store.clone());
+        session.transact(vec![alice, bob]).await?;
+
+        let query = crate::rule::Match::<DerivedPerson> {
+            this: Term::var("person"),
+            name: Term::var("name"),
+            birthday: Term::var("birthday"),
+        };
+
+        let results: Vec<DerivedPerson> =
+            query.query(Session::open(store)).try_collect().await?;
+
+        assert_eq!(results.len(), 2);
+
+        let alice_result = results.iter().find(|p| p.name.value() == "Alice");
+        let bob_result = results.iter().find(|p| p.name.value() == "Bob");
+
+        assert!(alice_result.is_some());
+        assert!(bob_result.is_some());
+
+        assert_eq!(alice_result.unwrap().birthday.value(), &19830703u32);
+        assert_eq!(bob_result.unwrap().birthday.value(), &19900515u32);
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_concept_with_constant_term() -> Result<()> {
+        use crate::Match;
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+
+        let alice_id = Entity::new()?;
+        let bob_id = Entity::new()?;
+
+        let alice = DerivedPerson {
+            this: alice_id.clone(),
+            name: person_attr_concept::Name("Alice".to_string()),
+            birthday: person_attr_concept::Birthday(19830703),
+        };
+
+        let bob = DerivedPerson {
+            this: bob_id.clone(),
+            name: person_attr_concept::Name("Bob".to_string()),
+            birthday: person_attr_concept::Birthday(19900515),
+        };
+
+        let mut session = Session::open(store.clone());
+        session.transact(vec![alice, bob]).await?;
+
+        let query = crate::rule::Match::<DerivedPerson> {
+            this: Term::var("person"),
+            name: Term::from("Alice"),
+            birthday: Term::var("birthday"),
+        };
+
+        let results: Vec<DerivedPerson> =
+            query.query(Session::open(store)).try_collect().await?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name.value(), "Alice");
+        assert_eq!(results[0].birthday.value(), &19830703u32);
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_attribute_reuse_across_concepts() -> Result<()> {
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+
+        let alice_id = Entity::new()?;
+
+        let alice_with_email = PersonWithEmail {
+            this: alice_id.clone(),
+            name: person_attr_concept::Name("Alice".to_string()),
+            email: person_attr_concept::Email("alice@example.com".to_string()),
+        };
+
+        let mut session = Session::open(store.clone());
+        session.transact(vec![alice_with_email]).await?;
+
+        let alice_with_birthday = DerivedPerson {
+            this: alice_id.clone(),
+            name: person_attr_concept::Name("Alice".to_string()),
+            birthday: person_attr_concept::Birthday(19830703),
+        };
+
+        let mut session = Session::open(store.clone());
+        session.transact(vec![alice_with_birthday]).await?;
+
+        let name_query = Fact::<Value>::select()
+            .the("person-attr-concept/name")
+            .of(alice_id.clone())
+            .compile()?;
+
+        let email_query = Fact::<Value>::select()
+            .the("person-attr-concept/email")
+            .of(alice_id.clone())
+            .compile()?;
+
+        let birthday_query = Fact::<Value>::select()
+            .the("person-attr-concept/birthday")
+            .of(alice_id.clone())
+            .compile()?;
+
+        let name_facts: Vec<_> = name_query
+            .query(&Session::open(store.clone()))
+            .try_collect()
+            .await?;
+
+        let email_facts: Vec<_> = email_query
+            .query(&Session::open(store.clone()))
+            .try_collect()
+            .await?;
+
+        let birthday_facts: Vec<_> = birthday_query
+            .query(&Session::open(store))
+            .try_collect()
+            .await?;
+
+        assert_eq!(name_facts.len(), 1);
+        assert_eq!(email_facts.len(), 1);
+        assert_eq!(birthday_facts.len(), 1);
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_retract_concept_with_attributes() -> Result<()> {
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+
+        let alice_id = Entity::new()?;
+
+        let alice = DerivedPerson {
+            this: alice_id.clone(),
+            name: person_attr_concept::Name("Alice".to_string()),
+            birthday: person_attr_concept::Birthday(19830703),
+        };
+
+        let mut session = Session::open(store.clone());
+        session.transact(vec![alice.clone()]).await?;
+
+        let mut session = Session::open(store.clone());
+        session.transact(vec![!alice]).await?;
+
+        let name_query = Fact::<Value>::select()
+            .the("person-attr-concept/name")
+            .of(alice_id.clone())
+            .compile()?;
+
+        let birthday_query = Fact::<Value>::select()
+            .the("person-attr-concept/birthday")
+            .of(alice_id)
+            .compile()?;
+
+        let name_facts: Vec<_> = name_query
+            .query(&Session::open(store.clone()))
+            .try_collect()
+            .await?;
+
+        let birthday_facts: Vec<_> = birthday_query
+            .query(&Session::open(store))
+            .try_collect()
+            .await?;
+
+        assert_eq!(name_facts.len(), 0);
+        assert_eq!(birthday_facts.len(), 0);
+
+        Ok(())
+    }
+
+    // Tests migrated from tests/concept_query_shortcut_test.rs
+    mod shortcut_employee {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone)]
+        pub struct Name(pub String);
+
+        #[derive(Attribute, Clone)]
+        pub struct Job(pub String);
+    }
+
+    #[derive(Concept, Debug, Clone)]
+    pub struct ShortcutEmployee {
+        pub this: Entity,
+        pub name: shortcut_employee::Name,
+        pub job: shortcut_employee::Job,
+    }
+
+    #[dialog_macros::test]
+    async fn test_concept_query_shortcut() -> Result<()> {
+        use crate::Match;
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store);
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        let mut edit = session.edit();
+        edit.assert(ShortcutEmployee {
+            this: alice.clone(),
+            name: shortcut_employee::Name("Alice".into()),
+            job: shortcut_employee::Job("Engineer".into()),
+        })
+        .assert(ShortcutEmployee {
+            this: bob.clone(),
+            name: shortcut_employee::Name("Bob".into()),
+            job: shortcut_employee::Job("Designer".into()),
+        });
+        session.commit(edit).await?;
+
+        let employees_shortcut: Vec<ShortcutEmployee> =
+            ShortcutEmployee::query(session.clone()).try_collect().await?;
+
+        let employees_explicit: Vec<ShortcutEmployee> =
+            crate::rule::Match::<ShortcutEmployee>::default()
+                .query(session.clone())
+                .try_collect()
+                .await?;
+
+        assert_eq!(employees_shortcut.len(), 2);
+        assert_eq!(employees_explicit.len(), 2);
+
+        let mut found_alice = false;
+        let mut found_bob = false;
+
+        for emp in &employees_shortcut {
+            if emp.name.value() == "Alice" {
+                assert_eq!(emp.job.value(), "Engineer");
+                found_alice = true;
+            } else if emp.name.value() == "Bob" {
+                assert_eq!(emp.job.value(), "Designer");
+                found_bob = true;
+            }
+        }
+
+        assert!(found_alice, "Should find Alice");
+        assert!(found_bob, "Should find Bob");
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_concept_query_shortcut_with_filter() -> Result<()> {
+        use crate::Match;
+        use futures_util::TryStreamExt;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store);
+
+        let alice = Entity::new()?;
+
+        let mut edit = session.edit();
+        edit.assert(ShortcutEmployee {
+            this: alice.clone(),
+            name: shortcut_employee::Name("Alice".into()),
+            job: shortcut_employee::Job("Engineer".into()),
+        });
+        session.commit(edit).await?;
+
+        let result1: Vec<ShortcutEmployee> =
+            ShortcutEmployee::query(session.clone()).try_collect().await?;
+
+        let result2: Vec<ShortcutEmployee> = crate::rule::Match::<ShortcutEmployee> {
+            this: Term::var("this"),
+            name: Term::var("name"),
+            job: Term::var("job"),
+        }
+        .query(session.clone())
+        .try_collect()
+        .await?;
+
+        let result3: Vec<ShortcutEmployee> =
+            crate::rule::Match::<ShortcutEmployee>::default()
+                .query(session.clone())
+                .try_collect()
+                .await?;
+
+        assert_eq!(result1.len(), 1);
+        assert_eq!(result2.len(), 1);
+        assert_eq!(result3.len(), 1);
+
+        assert_eq!(result1[0].name.value(), result2[0].name.value());
+        assert_eq!(result2[0].name.value(), result3[0].name.value());
+
+        Ok(())
+    }
+
+    // Tests migrated from tests/query_helper_comprehensive_test.rs
+    mod helper_person {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Name(pub String);
+    }
+
+    mod helper_employee {
+        use crate::Attribute;
+
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Name(pub String);
+
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Department(pub String);
+    }
+
+    #[derive(Concept, Debug, Clone)]
+    pub struct HelperPerson {
+        pub this: Entity,
+        pub name: helper_person::Name,
+    }
+
+    #[derive(Concept, Debug, Clone, PartialEq)]
+    pub struct HelperEmployee {
+        pub this: Entity,
+        pub name: helper_employee::Name,
+        pub department: helper_employee::Department,
+    }
+
+    #[dialog_macros::test]
+    async fn test_single_attribute_query_works() -> Result<()> {
+        use crate::Match;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        let mut session = Session::open(artifacts.clone());
+        let mut transaction = session.edit();
+        transaction.assert(crate::attribute::With {
+            this: alice,
+            has: helper_person::Name("Alice".into()),
+        });
+        transaction.assert(crate::attribute::With {
+            this: bob,
+            has: helper_person::Name("Bob".into()),
+        });
+        session.commit(transaction).await?;
+
+        let alice_query = crate::rule::Match::<HelperPerson> {
+            this: Term::var("person"),
+            name: Term::from("Alice".to_string()),
+        };
+
+        let session = Session::open(artifacts.clone());
+        let results = alice_query.query(session).try_vec().await?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name.value(), "Alice");
+
+        let all_people_query = crate::rule::Match::<HelperPerson> {
+            this: Term::var("person"),
+            name: Term::var("name"),
+        };
+
+        let session = Session::open(artifacts);
+        let all_results = all_people_query.query(session).try_vec().await?;
+        assert_eq!(all_results.len(), 2);
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_multi_attribute_constant_query_works() -> Result<()> {
+        use crate::Match;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        let mut session = Session::open(artifacts.clone());
+        let mut transaction = session.edit();
+        transaction.assert(crate::attribute::With {
+            this: alice.clone(),
+            has: helper_employee::Name("Alice".into()),
+        });
+        transaction.assert(crate::attribute::With {
+            this: alice.clone(),
+            has: helper_employee::Department("Engineering".into()),
+        });
+        transaction.assert(crate::attribute::With {
+            this: bob.clone(),
+            has: helper_employee::Name("Bob".into()),
+        });
+        transaction.assert(crate::attribute::With {
+            this: bob,
+            has: helper_employee::Department("Sales".into()),
+        });
+        session.commit(transaction).await?;
+
+        let alice_engineering_query = crate::rule::Match::<HelperEmployee> {
+            this: Term::var("employee"),
+            name: Term::from("Alice".to_string()),
+            department: Term::from("Engineering".to_string()),
+        };
+
+        let session = Session::open(artifacts);
+
+        let results = alice_engineering_query.query(session).try_vec().await?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name.value(), "Alice");
+        assert_eq!(results[0].department.value(), "Engineering");
+        assert_eq!(results[0].this, alice);
+
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_multi_attribute_variable_query_limitation() -> Result<()> {
+        use crate::Match;
+
+        let storage_backend = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        let mut session = Session::open(artifacts.clone());
+        let mut transaction = session.edit();
+        transaction.assert(crate::attribute::With {
+            this: alice.clone(),
+            has: helper_employee::Name("Alice".into()),
+        });
+        transaction.assert(crate::attribute::With {
+            this: alice.clone(),
+            has: helper_employee::Department("Engineering".into()),
+        });
+        transaction.assert(crate::attribute::With {
+            this: bob.clone(),
+            has: helper_employee::Name("Bob".into()),
+        });
+        transaction.assert(crate::attribute::With {
+            this: bob.clone(),
+            has: helper_employee::Department("Sales".into()),
+        });
+        session.commit(transaction).await?;
+
+        let engineering_query = crate::rule::Match::<HelperEmployee> {
+            this: Term::var("employee"),
+            name: Term::var("name"),
+            department: Term::from("Engineering".to_string()),
+        };
+
+        let session = Session::open(artifacts);
+        let results = engineering_query.query(session).try_vec().await?;
+        assert_eq!(
+            results,
+            vec![HelperEmployee {
+                this: alice.clone(),
+                name: helper_employee::Name("Alice".into()),
+                department: helper_employee::Department("Engineering".into())
+            }]
         );
 
         Ok(())
