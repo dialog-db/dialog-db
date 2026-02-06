@@ -3,7 +3,7 @@ use super::principal::Principal;
 use super::{Formatter, PlatformBackend, ReplicaError, SECRET_KEY_LENGTH, SignerMut, SigningKey};
 use async_trait::async_trait;
 pub use dialog_capability::Did;
-use dialog_capability::{Authority, Principal as PrincipalTrait, SignError};
+use dialog_capability::{Authority, DialogCapabilitySignError, Principal as PrincipalTrait};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -25,7 +25,7 @@ pub trait Signer: Send + Sync {
     fn principal(&self) -> &Principal;
 
     /// Sign a payload.
-    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, SignError>;
+    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError>;
 
     /// Try to export the raw Ed25519 secret key bytes.
     ///
@@ -315,7 +315,7 @@ impl PrincipalTrait for SigningAuthority {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Authority for SigningAuthority {
-    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, SignError> {
+    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> {
         match self {
             Self::Native { key, .. } => Ok(key.sign(payload).to_bytes().to_vec()),
 
@@ -326,7 +326,7 @@ impl Authority for SigningAuthority {
                     .sign(payload)
                     .await
                     .map(|sig| sig.to_bytes().to_vec())
-                    .map_err(|e| SignError::SigningFailed(e.to_string()))
+                    .map_err(|e| DialogCapabilitySignError::SigningFailed(e.to_string()))
             }
 
             Self::Dynamic { signer, .. } => {

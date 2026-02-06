@@ -54,12 +54,30 @@ assert_eq!(Get::of(&capability).key, b"my-key");
 
 A `Subject` is the root of every capability chain - it identifies the resource (via a DID) and represents full authority: ability `/` with no policy constraints.
 
+### Capability Space
+
+Every `Subject` defines a capability space — the full set of operations that can be performed on that resource. The space is organized as a hierarchy of ability paths:
+
+```text
+/                        (root — full authority)
+/storage                 (all storage operations)
+/storage/get             (only storage get)
+/storage/set             (only storage set)
+/memory                  (all memory operations)
+/memory/publish          (only memory publish)
+```
+
+An ability path like `/storage` includes everything beneath it — `/storage/get`, `/storage/set`, etc. The root `/` encompasses the entire capability space.
+
+Capabilities attenuate (narrow) this space. A capability with ability `/storage` grants access to all storage operations, while `/storage/get` restricts to just reads. Policies further constrain what's permitted within a given ability by adding parameters (e.g., which store, which key) without changing the ability path itself.
+
+
 ### Abilities and Policies
 
 A capability represents a set of invocable operations (effects). This set is defined by:
 
-- **Ability**: A path like `/storage` or `/storage/get` that determines which effects are included
-- **Policies**: Parameters that constrain how effects can be invoked
+- **Ability**: A path like `/storage` or `/storage/get` that determines which effects are included. An ability includes all effects whose path starts with it.
+- **Policies**: Parameters that constrain how effects can be invoked, without changing the ability path.
 
 ### Capability Hierarchy
 

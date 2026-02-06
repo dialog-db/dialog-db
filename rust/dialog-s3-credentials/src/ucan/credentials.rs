@@ -237,7 +237,10 @@ pub mod tests {
     )]
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
     impl Authority for Session {
-        async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, dialog_capability::SignError> {
+        async fn sign(
+            &mut self,
+            payload: &[u8],
+        ) -> Result<Vec<u8>, dialog_capability::DialogCapabilitySignError> {
             Ok(self.signer.sign(payload).to_vec())
         }
         fn secret_key_bytes(&self) -> Option<[u8; 32]> {

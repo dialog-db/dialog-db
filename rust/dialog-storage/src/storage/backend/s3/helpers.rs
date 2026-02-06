@@ -9,7 +9,7 @@
 //! - UCAN access service (native-only, requires `ucan` feature)
 //! - Test issuer types for capability-based testing
 use async_trait::async_trait;
-use dialog_capability::{Authority, Did, Principal, SignError};
+use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
 use serde::{Deserialize, Serialize};
 
 /// S3 test server connection info with credentials, passed to inner tests.
@@ -90,7 +90,7 @@ impl Principal for Session {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Authority for Session {
-    async fn sign(&mut self, _payload: &[u8]) -> Result<Vec<u8>, SignError> {
+    async fn sign(&mut self, _payload: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> {
         // S3 direct access uses SigV4 signing, not external signatures
         Ok(Vec::new())
     }
@@ -154,7 +154,7 @@ impl Principal for Operator {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Authority for Operator {
-    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, SignError> {
+    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> {
         use ed25519_dalek::Signer;
         Ok(self.signer.signer().sign(payload).to_vec())
     }

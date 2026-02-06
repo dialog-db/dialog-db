@@ -64,24 +64,24 @@
 
         common-build-inputs =
           toolchain:
-          with pkgs;
-          let
-            rust-toolchain = rustToolchain toolchain;
-          in
-          with pkgs;
-          [
-            binaryen
-            gnused
-            pkg-config
-            protobuf
-            rust-toolchain
-            trunk
-            wasm-bindgen-cli
-            wasm-pack
-          ]
-          ++ lib.optionals stdenv.isDarwin [
-            apple-sdk
-          ];
+            with pkgs;
+            let
+              rust-toolchain = rustToolchain toolchain;
+            in
+            with pkgs;
+            [
+              binaryen
+              gnused
+              pkg-config
+              protobuf
+              rust-toolchain
+              trunk
+              wasm-bindgen-cli
+              wasm-pack
+            ]
+            ++ lib.optionals stdenv.isDarwin [
+              apple-sdk
+            ];
 
         common-dev-tools = with pkgs; [
           cargo-nextest

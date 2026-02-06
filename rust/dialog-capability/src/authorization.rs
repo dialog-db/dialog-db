@@ -2,51 +2,9 @@
 //!
 //! The `Authorization` trait represents proof of authority over a capability.
 
-use crate::{Authority, subject::Did};
+use crate::{Authority, DialogCapabilityAuthorizationError, subject::Did};
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
-
-/// Errors that can occur during authorization.
-#[derive(Debug, thiserror::Error)]
-pub enum AuthorizationError {
-    /// Subject does not match the issuer's DID for self-authorization.
-    #[error("Not authorized: subject '{subject}' does not match issuer '{issuer}'")]
-    NotOwner {
-        /// The subject DID from the capability.
-        subject: Did,
-        /// The issuer's DID.
-        issuer: Did,
-    },
-
-    /// Audience does not match the issuer's DID for delegation/invocation.
-    #[error("Cannot delegate/invoke: audience '{audience}' does not match issuer '{issuer}'")]
-    NotAudience {
-        /// The audience DID from the authorization.
-        audience: Did,
-        /// The issuer's DID.
-        issuer: Did,
-    },
-
-    /// No valid delegation chain found.
-    #[error("No valid delegation chain found from '{subject}' to '{audience}'")]
-    NoDelegationChain {
-        /// The subject DID.
-        subject: Did,
-        /// The audience DID.
-        audience: Did,
-    },
-
-    /// Policy constraint violation.
-    #[error("Policy constraint violation: {message}")]
-    PolicyViolation {
-        /// Description of the violation.
-        message: String,
-    },
-
-    /// Serialization error during signing.
-    #[error("Serialization error: {0}")]
-    Serialization(String),
-}
 
 /// Trait for proof of authority over a capability.
 ///
@@ -71,5 +29,5 @@ pub trait Authorization: Sized + ConditionalSend {
     async fn invoke<A: Authority + ConditionalSend + ConditionalSync>(
         &self,
         authority: &A,
-    ) -> Result<Self, AuthorizationError>;
+    ) -> Result<Self, DialogCapabilityAuthorizationError>;
 }
