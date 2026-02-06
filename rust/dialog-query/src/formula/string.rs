@@ -257,4 +257,70 @@ mod tests {
             Some("World".to_string())
         );
     }
+
+    #[test]
+    fn test_integration_string_operations() -> anyhow::Result<()> {
+        // Test Concatenate formula
+        let mut concat_terms = Parameters::new();
+        concat_terms.insert("first".to_string(), Term::var("fname"));
+        concat_terms.insert("second".to_string(), Term::var("lname"));
+        concat_terms.insert("is".to_string(), Term::var("full_name"));
+
+        let concat_formula = Concatenate::apply(concat_terms)?;
+
+        let concat_input = Answer::new()
+            .set(Term::var("fname"), "John".to_string())
+            .unwrap()
+            .set(Term::var("lname"), " Doe".to_string())
+            .unwrap();
+
+        let concat_results = concat_formula.derive(concat_input)?;
+        assert_eq!(concat_results.len(), 1);
+        assert_eq!(
+            concat_results[0]
+                .get::<String>(&Term::var("full_name"))
+                .ok(),
+            Some("John Doe".to_string())
+        );
+
+        // Test Length formula
+        let mut length_terms = Parameters::new();
+        length_terms.insert("of".to_string(), Term::var("text"));
+        length_terms.insert("is".to_string(), Term::var("length"));
+
+        let length_formula = Length::apply(length_terms)?;
+
+        let length_input = Answer::new()
+            .set(Term::var("text"), "Hello World".to_string())
+            .unwrap();
+
+        let length_results = length_formula.derive(length_input)?;
+        assert_eq!(length_results.len(), 1);
+        assert_eq!(
+            length_results[0].get::<u32>(&Term::var("length")).ok(),
+            Some(11)
+        );
+
+        // Test Uppercase formula
+        let mut upper_terms = Parameters::new();
+        upper_terms.insert("of".to_string(), Term::var("input"));
+        upper_terms.insert("is".to_string(), Term::var("output"));
+
+        let upper_formula = Uppercase::apply(upper_terms)?;
+
+        let upper_input = Answer::new()
+            .set(Term::var("input"), "hello world".to_string())
+            .unwrap();
+
+        let upper_results = upper_formula.derive(upper_input)?;
+        assert_eq!(upper_results.len(), 1);
+        assert_eq!(
+            upper_results[0]
+                .get::<String>(&Term::var("output"))
+                .ok(),
+            Some("HELLO WORLD".to_string())
+        );
+
+        Ok(())
+    }
 }

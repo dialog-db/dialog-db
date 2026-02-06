@@ -670,4 +670,235 @@ mod tests {
         assert_eq!(orig_score.description, deser_score.description);
         assert_eq!(orig_score.content_type, deser_score.content_type);
     }
+
+    #[test]
+    fn test_expected_json_structure() {
+        let concept = Concept::Dynamic {
+            description: String::new(),
+            attributes: Attributes::from(vec![(
+                "id".to_string(),
+                AttributeSchema::new("product", "id", "Product ID", Type::UnsignedInt),
+            )]),
+        };
+
+        let json = serde_json::to_string_pretty(&concept).expect("Should serialize");
+
+        let expected_structure = r#"{
+  "description": "",
+  "attributes": {
+    "id": {
+      "namespace": "product",
+      "name": "id",
+      "description": "Product ID",
+      "type": "UnsignedInt"
+    }
+  }
+}"#;
+
+        let actual: serde_json::Value = serde_json::from_str(&json).expect("Should parse actual");
+        let expected: serde_json::Value =
+            serde_json::from_str(expected_structure).expect("Should parse expected");
+
+        assert_eq!(
+            actual, expected,
+            "JSON structure should match expected format"
+        );
+    }
+
+    #[test]
+    fn test_description_serialization_and_deserialization() {
+        let original_description = "A comprehensive product catalog item";
+
+        let concept = Concept::Dynamic {
+            description: original_description.to_string(),
+            attributes: Attributes::from(vec![(
+                "sku".to_string(),
+                AttributeSchema::new("product", "sku", "Stock Keeping Unit", Type::String),
+            )]),
+        };
+
+        let json = serde_json::to_string_pretty(&concept).expect("Should serialize");
+
+        assert!(
+            json.contains(original_description),
+            "Serialized JSON should contain the description"
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse");
+        assert_eq!(
+            parsed["description"], original_description,
+            "Description field should be serialized correctly"
+        );
+
+        let deserialized: Concept = serde_json::from_str(&json).expect("Should deserialize");
+
+        match deserialized {
+            Concept::Dynamic { description, .. } => {
+                assert_eq!(
+                    description, original_description,
+                    "Description should be preserved through round-trip"
+                );
+            }
+            _ => panic!("Expected Dynamic concept"),
+        }
+    }
+
+    #[test]
+    fn test_concept_field_names_do_not_affect_hash() {
+        let attributes1 = Attributes::from(vec![
+            (
+                "field_a".to_string(),
+                AttributeSchema::new("person", "name", "Person's name", Type::String),
+            ),
+            (
+                "field_b".to_string(),
+                AttributeSchema::new("person", "age", "Person's age", Type::UnsignedInt),
+            ),
+        ]);
+
+        let attributes2 = Attributes::from(vec![
+            (
+                "different_field_1".to_string(),
+                AttributeSchema::new("person", "name", "Person's name", Type::String),
+            ),
+            (
+                "different_field_2".to_string(),
+                AttributeSchema::new("person", "age", "Person's age", Type::UnsignedInt),
+            ),
+        ]);
+
+        let concept1 = Concept::Dynamic {
+            description: String::new(),
+            attributes: attributes1,
+        };
+
+        let concept2 = Concept::Dynamic {
+            description: String::new(),
+            attributes: attributes2,
+        };
+
+        assert_eq!(
+            concept1.hash(),
+            concept2.hash(),
+            "Concepts with same attributes but different field names should have same hash"
+        );
+
+        assert_eq!(
+            concept1.to_uri(),
+            concept2.to_uri(),
+            "Concepts with same attributes but different field names should have same URI"
+        );
+    }
+
+    #[test]
+    fn test_concept_description_does_not_affect_hash() {
+        let attributes = Attributes::from(vec![(
+            "name".to_string(),
+            AttributeSchema::new("user", "name", "User's name", Type::String),
+        )]);
+
+        let concept1 = Concept::Dynamic {
+            description: "A user in the system".to_string(),
+            attributes: attributes.clone(),
+        };
+
+        let concept2 = Concept::Dynamic {
+            description: "System user account".to_string(),
+            attributes,
+        };
+
+        assert_eq!(
+            concept1.hash(),
+            concept2.hash(),
+            "Concepts with different descriptions should have same hash"
+        );
+
+        assert_eq!(
+            concept1.to_uri(),
+            concept2.to_uri(),
+            "Concepts with different descriptions should have same URI"
+        );
+    }
+
+    #[test]
+    fn test_concept_attribute_order_does_not_affect_hash() {
+        let attributes1 = Attributes::from(vec![
+            (
+                "name".to_string(),
+                AttributeSchema::new("person", "name", "Name", Type::String),
+            ),
+            (
+                "age".to_string(),
+                AttributeSchema::new("person", "age", "Age", Type::UnsignedInt),
+            ),
+        ]);
+
+        let attributes2 = Attributes::from(vec![
+            (
+                "age".to_string(),
+                AttributeSchema::new("person", "age", "Age", Type::UnsignedInt),
+            ),
+            (
+                "name".to_string(),
+                AttributeSchema::new("person", "name", "Name", Type::String),
+            ),
+        ]);
+
+        let concept1 = Concept::Dynamic {
+            description: String::new(),
+            attributes: attributes1,
+        };
+
+        let concept2 = Concept::Dynamic {
+            description: String::new(),
+            attributes: attributes2,
+        };
+
+        assert_eq!(
+            concept1.hash(),
+            concept2.hash(),
+            "Concepts with same attributes in different order should have same hash"
+        );
+
+        assert_eq!(
+            concept1.to_uri(),
+            concept2.to_uri(),
+            "Concepts with same attributes in different order should have same URI"
+        );
+    }
+
+    #[test]
+    fn test_concept_different_attributes_different_hash() {
+        let attributes1 = Attributes::from(vec![(
+            "name".to_string(),
+            AttributeSchema::new("person", "name", "Name", Type::String),
+        )]);
+
+        let attributes2 = Attributes::from(vec![(
+            "email".to_string(),
+            AttributeSchema::new("person", "email", "Email", Type::String),
+        )]);
+
+        let concept1 = Concept::Dynamic {
+            description: String::new(),
+            attributes: attributes1,
+        };
+
+        let concept2 = Concept::Dynamic {
+            description: String::new(),
+            attributes: attributes2,
+        };
+
+        assert_ne!(
+            concept1.hash(),
+            concept2.hash(),
+            "Concepts with different attributes should have different hashes"
+        );
+
+        assert_ne!(
+            concept1.to_uri(),
+            concept2.to_uri(),
+            "Concepts with different attributes should have different URIs"
+        );
+    }
 }
