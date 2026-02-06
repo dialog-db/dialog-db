@@ -1,3 +1,4 @@
+use crate::EvaluationContext;
 use crate::analyzer::{Analysis, Plan};
 use crate::artifact::Value;
 use crate::context::new_context;
@@ -6,8 +7,7 @@ use crate::error::{CompileError, QueryResult};
 pub use crate::premise::Premise;
 use crate::stream::{fork_stream, stream_select};
 pub use crate::term::Term;
-use crate::EvaluationContext;
-pub use crate::{try_stream, Environment, Source};
+pub use crate::{Environment, Source, try_stream};
 use core::pin::Pin;
 
 /// Query planner that optimizes the order of premise execution based on cost

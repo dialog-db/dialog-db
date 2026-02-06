@@ -1,8 +1,8 @@
 use crate::error::CompileError;
-use crate::{fact::Scalar, predicate::DeductiveRule};
 use crate::{
     Environment, EvaluationContext, Parameters, Premise, Requirement, Schema, Source, Term, Value,
 };
+use crate::{fact::Scalar, predicate::DeductiveRule};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use thiserror::Error;
@@ -515,8 +515,8 @@ impl TryFrom<Analysis> for Plan {
 
 #[test]
 fn test_analysis_from_premise_all_derived() {
-    use crate::predicate::formula::Formula;
     use crate::formula::string::Length;
+    use crate::predicate::formula::Formula;
     use crate::{Parameters, Term, Value};
 
     // Length formula has: of (required), is (derived)
@@ -535,8 +535,8 @@ fn test_analysis_from_premise_all_derived() {
 
 #[test]
 fn test_analysis_from_premise_with_constant() {
-    use crate::predicate::formula::Formula;
     use crate::formula::string::Length;
+    use crate::predicate::formula::Formula;
     use crate::{Parameters, Term, Value};
 
     // Provide "of" as a constant, "is" as a variable
@@ -557,8 +557,8 @@ fn test_analysis_from_premise_with_constant() {
 
 #[test]
 fn test_analysis_update_transitions_to_viable() {
-    use crate::predicate::formula::Formula;
     use crate::formula::string::Length;
+    use crate::predicate::formula::Formula;
     use crate::{Environment, Parameters, Term, Value};
 
     // Length formula requires "of" parameter
@@ -583,8 +583,8 @@ fn test_analysis_update_transitions_to_viable() {
 
 #[test]
 fn test_analysis_update_reduces_cost_when_derived_bound() {
-    use crate::predicate::formula::Formula;
     use crate::formula::string::Length;
+    use crate::predicate::formula::Formula;
     use crate::{Environment, Parameters, Term, Value};
 
     // Provide "of" as constant so it's viable, "is" is derived
@@ -618,8 +618,8 @@ fn test_analysis_update_reduces_cost_when_derived_bound() {
 
 #[test]
 fn test_analysis_try_into_plan_when_viable() {
-    use crate::predicate::formula::Formula;
     use crate::formula::string::Length;
+    use crate::predicate::formula::Formula;
     use crate::{Parameters, Term, Value};
 
     // Provide "of" as constant so premise is viable
@@ -643,8 +643,8 @@ fn test_analysis_try_into_plan_when_viable() {
 
 #[test]
 fn test_analysis_try_into_plan_when_blocked() {
-    use crate::predicate::formula::Formula;
     use crate::formula::string::Length;
+    use crate::predicate::formula::Formula;
     use crate::{Parameters, Term, Value};
 
     // Leave "of" as unbound variable - premise will be blocked
@@ -665,7 +665,7 @@ fn test_analysis_try_into_plan_when_blocked() {
 #[cfg(test)]
 mod cost_model_tests {
     use crate::analyzer::Analysis;
-    use crate::application::fact::{FactApplication, BASE_COST};
+    use crate::application::fact::{BASE_COST, FactApplication};
     use crate::artifact::{Attribute, Entity};
     use crate::{Environment, Premise, Term, Value};
 
@@ -896,9 +896,9 @@ mod cost_model_tests {
     // Test 4: Formula vs Fact costs
     #[test]
     fn test_formula_cheaper_than_fact_no_io() {
-        use crate::predicate::formula::Formula;
-        use crate::formula::string::Length;
         use crate::Parameters;
+        use crate::formula::string::Length;
+        use crate::predicate::formula::Formula;
 
         // Formula with constant input (no IO needed)
         let mut formula_params = Parameters::new();
@@ -932,9 +932,9 @@ mod cost_model_tests {
 
     #[test]
     fn test_formula_requiring_fact_costs_more() {
-        use crate::predicate::formula::Formula;
-        use crate::formula::string::Length;
         use crate::Parameters;
+        use crate::formula::string::Length;
+        use crate::predicate::formula::Formula;
 
         // Formula that needs variable bound by fact (requires IO transitively)
         let mut formula_params = Parameters::new();

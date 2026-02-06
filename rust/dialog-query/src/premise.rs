@@ -10,11 +10,11 @@ use async_stream::try_stream;
 pub use super::application::Application;
 use super::application::{FactApplication, FormulaApplication};
 pub use super::constraint::Constraint;
-pub use super::context::{new_context, EvaluationPlan};
+pub use super::context::{EvaluationPlan, new_context};
 pub use super::negation::Negation;
 pub use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, PlanError, QueryResult};
-pub use crate::{selection::Answers, EvaluationContext, Source};
+pub use crate::{EvaluationContext, Source, selection::Answers};
 use std::fmt::Display;
 
 /// Represents a premise in a rule - a condition that must be satisfied.

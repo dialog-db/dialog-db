@@ -1,13 +1,13 @@
 use crate::application::ConceptApplication;
 
+#[cfg(test)]
+use crate::Relation;
 pub use crate::dsl::Quarriable;
 pub use crate::predicate::concept::Attributes;
 use crate::query::{Output, Source};
 use crate::selection::Answer;
-#[cfg(test)]
-use crate::Relation;
-use crate::{predicate, QueryError};
 use crate::{Entity, Parameters};
+use crate::{QueryError, predicate};
 use dialog_common::ConditionalSend;
 use futures_util::StreamExt;
 use std::fmt::Debug;
@@ -1175,8 +1175,7 @@ mod tests {
             birthday: Term::var("birthday"),
         };
 
-        let results: Vec<DerivedPerson> =
-            query.query(Session::open(store)).try_collect().await?;
+        let results: Vec<DerivedPerson> = query.query(Session::open(store)).try_collect().await?;
 
         assert_eq!(results.len(), 2);
 
@@ -1224,8 +1223,7 @@ mod tests {
             birthday: Term::var("birthday"),
         };
 
-        let results: Vec<DerivedPerson> =
-            query.query(Session::open(store)).try_collect().await?;
+        let results: Vec<DerivedPerson> = query.query(Session::open(store)).try_collect().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name.value(), "Alice");
@@ -1388,8 +1386,9 @@ mod tests {
         });
         session.commit(edit).await?;
 
-        let employees_shortcut: Vec<ShortcutEmployee> =
-            ShortcutEmployee::query(session.clone()).try_collect().await?;
+        let employees_shortcut: Vec<ShortcutEmployee> = ShortcutEmployee::query(session.clone())
+            .try_collect()
+            .await?;
 
         let employees_explicit: Vec<ShortcutEmployee> =
             crate::rule::Match::<ShortcutEmployee>::default()
@@ -1438,8 +1437,9 @@ mod tests {
         });
         session.commit(edit).await?;
 
-        let result1: Vec<ShortcutEmployee> =
-            ShortcutEmployee::query(session.clone()).try_collect().await?;
+        let result1: Vec<ShortcutEmployee> = ShortcutEmployee::query(session.clone())
+            .try_collect()
+            .await?;
 
         let result2: Vec<ShortcutEmployee> = crate::rule::Match::<ShortcutEmployee> {
             this: Term::var("this"),
@@ -1450,11 +1450,10 @@ mod tests {
         .try_collect()
         .await?;
 
-        let result3: Vec<ShortcutEmployee> =
-            crate::rule::Match::<ShortcutEmployee>::default()
-                .query(session.clone())
-                .try_collect()
-                .await?;
+        let result3: Vec<ShortcutEmployee> = crate::rule::Match::<ShortcutEmployee>::default()
+            .query(session.clone())
+            .try_collect()
+            .await?;
 
         assert_eq!(result1.len(), 1);
         assert_eq!(result2.len(), 1);

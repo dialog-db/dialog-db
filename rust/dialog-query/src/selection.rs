@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 pub use futures_util::stream::{Stream, TryStream};
 
-use crate::{types::Scalar, Fact, InconsistencyError, QueryError, Term};
+use crate::{Fact, InconsistencyError, QueryError, Term, types::Scalar};
 
 /// Trait for streams of Answers (with fact provenance)
 pub trait Answers: Stream<Item = Result<Answer, QueryError>> + 'static + ConditionalSend {
@@ -695,8 +695,8 @@ impl Answer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::{Attribute, Entity};
     use crate::Term;
+    use crate::artifact::{Attribute, Entity};
     use std::str::FromStr;
 
     // ============================================================================

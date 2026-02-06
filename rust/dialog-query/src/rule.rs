@@ -630,8 +630,8 @@ mod tests {
     }
 
     mod person {
-        use crate::attribute::AttributeSchema;
         use crate::artifact::{Type, Value};
+        use crate::attribute::AttributeSchema;
         use crate::attribute::Cardinality;
         use std::marker::PhantomData;
 
