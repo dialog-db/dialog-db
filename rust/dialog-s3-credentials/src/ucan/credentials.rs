@@ -449,18 +449,18 @@ pub mod tests {
     /// Run with: `wasm-pack test --headless --chrome rust/dialog-s3-credentials`
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     mod webcrypto_tests {
-        use signature::Verifier;
-        use ucan::did::Did;
-        use ucan::{AsyncDidSigner, WebCryptoEd25519Signer};
+        use async_signature::AsyncSigner;
+        use ucan::Ed25519Signer;
+        use varsig::verify::AsyncVerifier;
         use wasm_bindgen_test::wasm_bindgen_test_configure;
 
         wasm_bindgen_test_configure!(run_in_service_worker);
 
         #[dialog_common::test]
         async fn it_generates_webcrypto_signer() {
-            let signer = WebCryptoEd25519Signer::generate()
+            let signer = Ed25519Signer::generate()
                 .await
-                .expect("Failed to generate WebCrypto signer");
+                .expect("Failed to generate Ed25519 signer");
 
             let did_str = signer.did().to_string();
             assert!(
@@ -472,32 +472,33 @@ pub mod tests {
 
         #[dialog_common::test]
         async fn it_produces_valid_webcrypto_signature() {
-            let signer = WebCryptoEd25519Signer::generate()
+            let signer = Ed25519Signer::generate()
                 .await
                 .expect("Failed to generate signer");
             let msg = b"test message for WebCrypto signing";
 
-            let signature = signer.sign(msg).await.expect("Failed to sign message");
+            let signature = signer.signer().sign_async(msg).await.expect("Failed to sign message");
 
             let verifier = signer.did().verifier();
             verifier
-                .verify(msg, &signature)
+                .verify_async(msg, &signature)
+                .await
                 .expect("Signature verification failed");
         }
 
         #[dialog_common::test]
         async fn it_rejects_wrong_message() {
-            let signer = WebCryptoEd25519Signer::generate()
+            let signer = Ed25519Signer::generate()
                 .await
                 .expect("Failed to generate signer");
             let msg = b"original message";
             let wrong_msg = b"wrong message";
 
-            let signature = signer.sign(msg).await.expect("Failed to sign message");
+            let signature = signer.signer().sign_async(msg).await.expect("Failed to sign message");
 
             let verifier = signer.did().verifier();
             assert!(
-                verifier.verify(wrong_msg, &signature).is_err(),
+                verifier.verify_async(wrong_msg, &signature).await.is_err(),
                 "Verification should fail for wrong message"
             );
         }

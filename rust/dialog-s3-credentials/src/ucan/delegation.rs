@@ -354,7 +354,7 @@ pub mod helpers {
     /// This is useful for creating space signers in tests.
     pub fn generate_signer() -> Ed25519Signer {
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
-        Ed25519Signer::new(signing_key)
+        Ed25519Signer::from(signing_key)
     }
 
     /// Create a delegation from issuer to audience for a subject with the given command.
@@ -368,15 +368,15 @@ pub mod helpers {
     ) -> Result<Delegation<Ed25519Did>, AccessError> {
         DelegationBuilder::new()
             .issuer(issuer.clone())
-            .audience(*audience)
-            .subject(DelegatedSubject::Specific(*subject))
+            .audience(audience.clone())
+            .subject(DelegatedSubject::Specific(subject.clone()))
             .command(
                 command
                     .iter()
                     .map(|&s| s.to_string()) // or .map(String::from)
                     .collect(),
             )
-            .try_build(issuer)
+            .try_build()
             .await
             .map_err(|e| AccessError::Invocation(format!("Failed to build delegation: {:?}", e)))
     }
@@ -412,7 +412,7 @@ mod tests {
             .audience(operator_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build(&space_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -436,7 +436,7 @@ mod tests {
             .audience(operator1_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build(&space_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -446,7 +446,7 @@ mod tests {
             .audience(operator2_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build(&operator1_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -468,7 +468,7 @@ mod tests {
             .audience(operator1_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build(&space_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -483,7 +483,7 @@ mod tests {
             .audience(operator2_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did))
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build(&operator1_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -509,7 +509,7 @@ mod tests {
             .audience(operator1_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build(&space_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -524,7 +524,7 @@ mod tests {
             .audience(operator3_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did))
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build(&operator2_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -553,7 +553,7 @@ mod tests {
             .audience(operator3_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build(&operator2_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -564,7 +564,7 @@ mod tests {
             .audience(operator1_signer.did().clone()) // Wrong! Should be operator2
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build(&space_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -591,7 +591,7 @@ mod tests {
             .audience(operator_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build(&space_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -620,7 +620,7 @@ mod tests {
             .audience(operator_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build(&space_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -653,7 +653,7 @@ mod tests {
             .audience(operator_signer.did().clone())
             .subject(DelegatedSubject::Specific(subject_did.clone()))
             .command(vec!["archive".to_string()])
-            .try_build(&subject_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -684,7 +684,7 @@ mod tests {
             .audience(operator_signer.did().clone())
             .subject(DelegatedSubject::Specific(subject_did.clone()))
             .command(vec!["archive".to_string(), "put".to_string()])
-            .try_build(&subject_signer)
+            .try_build()
             .await
             .unwrap();
 

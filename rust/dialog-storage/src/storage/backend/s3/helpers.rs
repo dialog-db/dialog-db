@@ -155,12 +155,22 @@ impl Principal for Operator {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Authority for Operator {
     async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, SignError> {
-        use ed25519_dalek::Signer;
-        Ok(self.signer.signer().sign(payload).to_vec())
+        use async_signature::AsyncSigner;
+        self.signer
+            .signer()
+            .sign_async(payload)
+            .await
+            .map(|sig| sig.to_bytes().to_vec())
+            .map_err(|e| SignError::SigningFailed(e.to_string()))
     }
 
     fn secret_key_bytes(&self) -> Option<[u8; 32]> {
-        Some(self.signer.signer().to_bytes())
+        use varsig::signature::eddsa::Ed25519SigningKey;
+        match self.signer.signer() {
+            Ed25519SigningKey::Native(key) => Some(key.to_bytes()),
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            Ed25519SigningKey::WebCrypto(_) => None,
+        }
     }
 }
 

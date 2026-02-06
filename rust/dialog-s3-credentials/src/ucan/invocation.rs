@@ -26,16 +26,24 @@ use std::{
 use ucan::{
     Delegation,
     did::Ed25519Did,
-    future::Sendable,
     invocation::{CheckFailed, Invocation, InvocationCheckError, StoredCheckError},
 };
 
 /// In-memory delegation store for verification.
 type ProofStore = Arc<Mutex<HashMap<Cid, Arc<Delegation<Ed25519Did>>>>>;
 
+/// The future kind used for invocation checks.
+///
+/// On WASM, `Ed25519Did` is `!Send` (it contains a WebCrypto `CryptoKey` handle),
+/// so we use `Local` futures. On native platforms, we use `Sendable`.
+#[cfg(not(target_arch = "wasm32"))]
+type InvocationFutureKind = ucan::future::Sendable;
+#[cfg(target_arch = "wasm32")]
+type InvocationFutureKind = ucan::future::Local;
+
 /// Concrete invocation check error type for our ProofStore.
 type InvocationError =
-    InvocationCheckError<Sendable, Ed25519Did, Arc<Delegation<Ed25519Did>>, ProofStore>;
+    InvocationCheckError<InvocationFutureKind, Ed25519Did, Arc<Delegation<Ed25519Did>>, ProofStore>;
 
 /// An invocation with its delegation chain, parsed from a UCAN container.
 ///
@@ -82,7 +90,7 @@ impl InvocationChain {
 
         // Use rs-ucan's full verification
         self.invocation
-            .check::<Sendable, _, _>(&store)
+            .check::<InvocationFutureKind, _, _>(&store)
             .await
             .map_err(Into::into)
     }
@@ -286,7 +294,7 @@ mod tests {
             .subject(subject_did.clone())
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![delegation_cid])
-            .try_build(&operator_signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 
@@ -376,7 +384,7 @@ mod tests {
             .subject(subject_did)
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![delegation_cid])
-            .try_build(&operator_signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 
@@ -415,7 +423,7 @@ mod tests {
             .subject(subject_did)
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![delegation_cid])
-            .try_build(&wrong_operator_signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 
@@ -474,7 +482,7 @@ mod tests {
             .audience(device1_signer.did().clone())
             .subject(DelegatedSubject::Specific(subject_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build(&subject_signer)
+            .try_build()
             .await
             .expect("Failed to build root delegation");
 
@@ -487,7 +495,7 @@ mod tests {
             .audience(device2_signer.did().clone())
             .subject(DelegatedSubject::Any) // 👈 Powerline: sub: null
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build(&device1_signer)
+            .try_build()
             .await
             .expect("Failed to build powerline delegation");
 
@@ -501,7 +509,7 @@ mod tests {
             .subject(subject_did.clone())
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![root_cid, powerline_cid]) // 👈 root first, then powerline
-            .try_build(&device2_signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 
@@ -542,7 +550,7 @@ mod tests {
             .audience(device2_signer.did().clone())
             .subject(DelegatedSubject::Any) // 👈 Powerline at root
             .command(vec!["storage".to_string()])
-            .try_build(&device1_signer)
+            .try_build()
             .await
             .expect("Failed to build powerline delegation");
 
@@ -556,7 +564,7 @@ mod tests {
             .subject(some_other_subject) // 👈 Wrong! Should be device1
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![powerline_cid])
-            .try_build(&device2_signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 
@@ -589,7 +597,7 @@ mod tests {
             .audience(device2_signer.did().clone())
             .subject(DelegatedSubject::Any) // 👈 Powerline at root
             .command(vec!["storage".to_string()])
-            .try_build(&device1_signer)
+            .try_build()
             .await
             .expect("Failed to build powerline delegation");
 
@@ -602,7 +610,7 @@ mod tests {
             .subject(device1_did.clone()) // 👈 Matches powerline issuer
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![powerline_cid])
-            .try_build(&device2_signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 
@@ -644,7 +652,7 @@ mod tests {
             .audience(device2_signer.did().clone())
             .subject(DelegatedSubject::Any) // 👈 Powerline at root
             .command(vec!["storage".to_string()])
-            .try_build(&device1_signer)
+            .try_build()
             .await
             .expect("Failed to build powerline delegation");
 
@@ -657,7 +665,7 @@ mod tests {
             .audience(device3_signer.did().clone())
             .subject(DelegatedSubject::Specific(some_other_resource.clone())) // 👈 Wrong subject!
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build(&device2_signer)
+            .try_build()
             .await
             .expect("Failed to build redelegation");
 
@@ -670,7 +678,7 @@ mod tests {
             .subject(some_other_resource)
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![powerline_cid, bad_cid]) // root first, then redelegation
-            .try_build(&device3_signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 
@@ -710,7 +718,7 @@ mod tests {
             .audience(device2_signer.did().clone())
             .subject(DelegatedSubject::Any) // 👈 Powerline at root
             .command(vec!["storage".to_string()])
-            .try_build(&device1_signer)
+            .try_build()
             .await
             .expect("Failed to build powerline delegation");
 
@@ -722,7 +730,7 @@ mod tests {
             .audience(device3_signer.did().clone())
             .subject(DelegatedSubject::Specific(device1_did.clone())) // 👈 Correct subject
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build(&device2_signer)
+            .try_build()
             .await
             .expect("Failed to build redelegation");
 
@@ -735,7 +743,7 @@ mod tests {
             .subject(device1_did.clone())
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![powerline_cid, valid_cid]) // root first, then redelegation
-            .try_build(&device3_signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 
@@ -780,7 +788,7 @@ mod tests {
             .subject(subject_did.clone())
             .command(vec!["archive".to_string(), "put".to_string()])
             .proofs(vec![delegation_cid])
-            .try_build(&operator_signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 
@@ -826,7 +834,7 @@ mod tests {
             .subject(subject_did.clone())
             .command(vec!["archive".to_string(), "put".to_string()])
             .proofs(vec![delegation_cid])
-            .try_build(&operator_signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 
@@ -874,7 +882,7 @@ mod tests {
             .subject(subject_did.clone())
             .command(vec!["archive".to_string(), "put".to_string()])
             .proofs(vec![delegation_cid])
-            .try_build(&operator_signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 
@@ -919,7 +927,7 @@ mod tests {
             .subject(subject_did.clone())
             .command(vec!["archive".to_string(), "put".to_string()])
             .proofs(vec![delegation_cid])
-            .try_build(&operator_signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 
@@ -973,7 +981,7 @@ mod tests {
             .subject(did)
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![]) // Empty proofs for self-auth
-            .try_build(&signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 
@@ -1002,7 +1010,7 @@ mod tests {
             .subject(other_subject) // Different from issuer!
             .command(vec!["storage".to_string(), "get".to_string()])
             .proofs(vec![]) // No proofs to establish authority
-            .try_build(&signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 

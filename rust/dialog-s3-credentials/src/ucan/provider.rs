@@ -397,7 +397,7 @@ mod tests {
     /// Helper to create a test signer
     fn test_signer() -> Ed25519Signer {
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        Ed25519Signer::new(signing_key)
+        Ed25519Signer::from(signing_key)
     }
 
     /// Build a valid UCAN container with invocation and delegation for testing
@@ -407,16 +407,16 @@ mod tests {
         command: Vec<String>,
         args: BTreeMap<String, Promised>,
     ) -> Vec<u8> {
-        let subject_did = *subject_signer.did();
-        let operator_did = *operator_signer.did();
+        let subject_did = subject_signer.did().clone();
+        let operator_did = operator_signer.did().clone();
 
         // Create delegation: subject -> operator
         let delegation = DelegationBuilder::new()
             .issuer(subject_signer.clone())
             .audience(operator_did)
-            .subject(DelegatedSubject::Specific(subject_did))
+            .subject(DelegatedSubject::Specific(subject_did.clone()))
             .command(command.clone())
-            .try_build(subject_signer)
+            .try_build()
             .await
             .expect("Failed to build delegation");
 
@@ -425,12 +425,12 @@ mod tests {
         // Create invocation: operator invokes on subject
         let invocation = InvocationBuilder::new()
             .issuer(operator_signer.clone())
-            .audience(subject_did)
+            .audience(subject_did.clone())
             .subject(subject_did)
             .command(command)
             .arguments(args)
             .proofs(vec![delegation_cid])
-            .try_build(operator_signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 
@@ -459,7 +459,7 @@ mod tests {
         let authorizer = UcanAuthorizer::new(credentials);
 
         let operator_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
-        let operator_signer = Ed25519Signer::new(operator_key);
+        let operator_signer = Ed25519Signer::from(operator_key);
 
         let mut args = BTreeMap::new();
         args.insert("store".to_string(), Promised::String("index".to_string()));
@@ -497,7 +497,7 @@ mod tests {
         let authorizer = UcanAuthorizer::new(credentials);
 
         let operator_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
-        let operator_signer = Ed25519Signer::new(operator_key);
+        let operator_signer = Ed25519Signer::from(operator_key);
 
         // Multihash format: [code, length, ...digest]
         // SHA-256 code is 0x12, length is 0x20 (32 bytes)
@@ -540,7 +540,7 @@ mod tests {
         let authorizer = UcanAuthorizer::new(credentials);
 
         let operator_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
-        let operator_signer = Ed25519Signer::new(operator_key);
+        let operator_signer = Ed25519Signer::from(operator_key);
 
         let mut args = BTreeMap::new();
         args.insert(
@@ -583,7 +583,7 @@ mod tests {
         let authorizer = UcanAuthorizer::new(credentials);
 
         let operator_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
-        let operator_signer = Ed25519Signer::new(operator_key);
+        let operator_signer = Ed25519Signer::from(operator_key);
 
         let mut args = BTreeMap::new();
         args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
@@ -620,7 +620,7 @@ mod tests {
         let authorizer = UcanAuthorizer::new(credentials);
 
         let operator_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
-        let operator_signer = Ed25519Signer::new(operator_key);
+        let operator_signer = Ed25519Signer::from(operator_key);
 
         // Multihash format: [code, length, ...digest]
         // SHA-256 code is 0x12, length is 0x20 (32 bytes)
@@ -707,17 +707,17 @@ mod tests {
         command: Vec<String>,
         args: BTreeMap<String, Promised>,
     ) -> Vec<u8> {
-        let did = *signer.did();
+        let did = signer.did().clone();
 
         // Self-invocation: issuer == subject, no proofs needed
         let invocation = InvocationBuilder::new()
             .issuer(signer.clone())
-            .audience(did)
+            .audience(did.clone())
             .subject(did)
             .command(command)
             .arguments(args)
             .proofs(vec![]) // Empty proofs for self-auth
-            .try_build(signer)
+            .try_build()
             .await
             .expect("Failed to build invocation");
 

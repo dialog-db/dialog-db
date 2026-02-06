@@ -9,6 +9,7 @@ license.workspace = true
 [features]
 default = []
 ucan = [
+    "dep:async-signature",
     "dep:ed25519-dalek",
     "dep:ipld-core",
     "dep:rand_core",
@@ -17,6 +18,7 @@ ucan = [
     "dep:serde_json",
     "dep:signature",
     "dep:ucan",
+    "dep:varsig",
     "dialog-capability/ucan",
 ]
 helpers = ["ucan"]
@@ -40,6 +42,7 @@ url = { workspace = true }
 anyhow = { workspace = true }
 
 # UCAN feature dependencies (optional)
+async-signature = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
 ipld-core = { workspace = true, optional = true }
 rand_core = { version = "0.6", features = ["getrandom"], optional = true }
@@ -48,6 +51,7 @@ serde_ipld_dagcbor = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 signature = { version = "2", optional = true }
 ucan = { workspace = true, optional = true }
+varsig = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = { workspace = true }

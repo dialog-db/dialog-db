@@ -15,8 +15,6 @@ helpers = ["dep:anyhow", "dialog-s3-credentials/helpers", "dialog-storage/helper
 csv = ["dep:csv-async"]
 s3 = ["dialog-storage/s3"]
 ucan = ["dialog-s3-credentials/ucan", "dialog-storage/ucan"]
-# Enable WebCrypto Ed25519 signing on WASM (non-extractable keys)
-webcrypto = ["dep:ucan"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["helpers", "dialog-common/integration-tests"]
 # Enable web integration tests
@@ -31,6 +29,7 @@ dialog-s3-credentials = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
 arrayref = { workspace = true }
+async-signature = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
@@ -49,8 +48,9 @@ serde_json = { workspace = true }
 static_assertions = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
-ucan = { workspace = true, optional = true }
+ucan = { workspace = true }
 url = { workspace = true, features = ["serde"] }
+varsig = { workspace = true }
 
 [dev-dependencies]
 dialog-storage = { workspace = true, features = ["helpers"] }
@@ -64,10 +64,6 @@ wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 web-sys = { workspace = true, features = [
     "console",
-    "Crypto",
-    "SubtleCrypto",
-    "CryptoKey",
-    "CryptoKeyPair",
 ] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]

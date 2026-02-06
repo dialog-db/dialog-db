@@ -708,6 +708,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrayref",
+ "async-signature",
  "async-stream",
  "async-trait",
  "base58",
@@ -737,6 +738,7 @@ dependencies = [
  "tokio",
  "ucan",
  "url",
+ "varsig",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
@@ -904,6 +906,7 @@ name = "dialog-s3-credentials"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-signature",
  "async-trait",
  "base58",
  "base64",
@@ -927,6 +930,7 @@ dependencies = [
  "tokio",
  "ucan",
  "url",
+ "varsig",
  "wasm-bindgen-test",
  "web-time",
 ]
@@ -936,6 +940,7 @@ name = "dialog-storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-signature",
  "async-stream",
  "async-trait",
  "base58",
@@ -976,6 +981,7 @@ dependencies = [
  "tower-http",
  "ucan",
  "url",
+ "varsig",
  "wasm-bindgen",
  "wasm-bindgen-test",
  "web-time",
@@ -3147,12 +3153,14 @@ checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 [[package]]
 name = "ucan"
 version = "0.5.0"
-source = "git+https://github.com/tonk-labs/rs-ucan.git?branch=tonk#322861db91bab8d1899492b71cfdbcc695a26c19"
+source = "git+https://github.com/tonk-labs/rs-ucan.git#300a5635544855be4599581bffc8ad231e04eb76"
 dependencies = [
+ "async-signature",
  "base58",
  "ed25519-dalek",
  "futures",
  "getrandom 0.2.17",
+ "getrandom 0.3.4",
  "ipld-core",
  "js-sys",
  "leb128",
@@ -3255,11 +3263,13 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 [[package]]
 name = "varsig"
 version = "0.1.0"
-source = "git+https://github.com/tonk-labs/rs-ucan.git?branch=tonk#322861db91bab8d1899492b71cfdbcc695a26c19"
+source = "git+https://github.com/tonk-labs/rs-ucan.git#300a5635544855be4599581bffc8ad231e04eb76"
 dependencies = [
  "async-signature",
  "ed25519-dalek",
+ "getrandom 0.2.17",
  "ipld-core",
+ "js-sys",
  "k256",
  "leb128",
  "p256",
@@ -3269,6 +3279,9 @@ dependencies = [
  "signature",
  "thiserror 1.0.69",
  "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

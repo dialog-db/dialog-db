@@ -1,48 +1,17 @@
 pub use super::Replica;
 use super::principal::Principal;
-use super::{Formatter, PlatformBackend, ReplicaError, SECRET_KEY_LENGTH, SignerMut, SigningKey};
+use super::{Formatter, PlatformBackend, ReplicaError, SECRET_KEY_LENGTH, SigningKey};
 use async_trait::async_trait;
 pub use dialog_capability::Did;
 use dialog_capability::{Authority, Principal as PrincipalTrait, SignError};
-use std::sync::Arc;
-use tokio::sync::RwLock;
-
-#[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-pub use ucan::WebCryptoEd25519Signer;
-
-/// Re-export CryptoKey for storage purposes.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-pub use web_sys::CryptoKey;
-
-/// Trait for dynamic signers (escape hatch for custom implementations).
-///
-/// This trait is used by the `SigningAuthority::Dynamic` variant to allow custom
-/// signing implementations at the cost of dynamic dispatch.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait Signer: Send + Sync {
-    /// Get the principal (public key) for this signer.
-    fn principal(&self) -> &Principal;
-
-    /// Sign a payload.
-    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, SignError>;
-
-    /// Try to export the raw Ed25519 secret key bytes.
-    ///
-    /// Returns `Some([u8; 32])` if this signer supports key export,
-    /// `None` otherwise (e.g., for non-extractable WebCrypto keys).
-    fn secret_key_bytes(&self) -> Option<[u8; 32]> {
-        None
-    }
-}
+use ucan::Ed25519Signer;
 
 /// A signing authority that can operate replicas.
 ///
-/// SigningAuthority provides signing capabilities with platform-specific implementations:
-///
-/// - **Native**: Uses `ed25519_dalek` directly (all platforms)
-/// - **WebCrypto** (WASM + `webcrypto` feature): Uses WebCrypto API with non-extractable keys
-/// - **Dynamic**: Escape hatch for custom signers (uses dynamic dispatch)
+/// `SigningAuthority` wraps an [`Ed25519Signer`] from the `ucan` crate, which
+/// provides a unified signing API across native (`ed25519_dalek`) and WASM
+/// (`WebCrypto`) platforms. A cached [`Principal`] is kept alongside for
+/// efficient DID lookups.
 ///
 /// # Example
 ///
@@ -58,38 +27,11 @@ pub trait Signer: Send + Sync {
 /// }
 /// ```
 #[derive(Clone)]
-pub enum SigningAuthority {
-    /// Native Ed25519 signing using ed25519_dalek (all platforms).
-    Native {
-        /// The principal (public key).
-        principal: Principal,
-        /// The signing key (boxed to reduce enum size).
-        key: Box<SigningKey>,
-    },
-
-    /// WebCrypto Ed25519 with non-extractable keys (WASM + webcrypto feature).
-    ///
-    /// Wraps the `ucan::WebCryptoEd25519Signer` for UCAN delegation signing.
-    /// Note: We generate non-extractable keys by default for security, but
-    /// WebCrypto does support extractable keys if created with that option.
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-    WebCrypto {
-        /// The principal (public key).
-        principal: Principal,
-        /// The ucan WebCrypto signer (owns the non-extractable CryptoKey).
-        signer: WebCryptoEd25519Signer,
-    },
-
-    /// Dynamic signer for custom implementations (escape hatch).
-    ///
-    /// Uses `Arc<RwLock<dyn Signer>>` to allow cloning and interior mutability.
-    /// The principal is cached at construction time for efficient access.
-    Dynamic {
-        /// The principal (public key), cached at construction.
-        principal: Principal,
-        /// The underlying signer.
-        signer: Arc<RwLock<dyn Signer>>,
-    },
+pub struct SigningAuthority {
+    /// The principal (public key with cached DID).
+    principal: Principal,
+    /// The underlying UCAN signer (handles both native and WebCrypto).
+    signer: Ed25519Signer,
 }
 
 impl std::fmt::Debug for SigningAuthority {
@@ -106,14 +48,6 @@ impl PartialEq for SigningAuthority {
 
 impl Eq for SigningAuthority {}
 
-// SAFETY: In WASM environments, we're single-threaded so Send+Sync are safe.
-// The WebCrypto CryptoKey is a JS handle that doesn't implement Send+Sync,
-// but since WASM is single-threaded, this is not a practical concern.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-unsafe impl Send for SigningAuthority {}
-#[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-unsafe impl Sync for SigningAuthority {}
-
 impl SigningAuthority {
     /// Creates a new signing authority from a passphrase by hashing it to derive a signing key.
     pub fn from_passphrase(passphrase: &str) -> Self {
@@ -126,79 +60,29 @@ impl SigningAuthority {
         Self::from_signing_key(SigningKey::from_bytes(secret))
     }
 
-    /// Creates a new signing authority from a signing key.
-    ///
-    // TODO: Consider supporting import of signing keys into WebCrypto for better
-    // security on WASM. This is awkward as each key type has a different format.
-    // See: https://github.com/storacha/ucanto/blob/main/packages/principal/src/rsa.js#L129-L147
+    /// Creates a new signing authority from an `ed25519_dalek` signing key.
     pub fn from_signing_key(key: SigningKey) -> Self {
         let principal = Principal::new(key.verifying_key().to_bytes());
+        let signer = Ed25519Signer::from(key);
+        Self { principal, signer }
+    }
 
-        Self::Native {
-            principal,
-            key: Box::new(key),
-        }
+    /// Creates a new signing authority from a [`Ed25519Signer`].
+    pub fn from_ucan_signer(signer: Ed25519Signer) -> Self {
+        let public_key_bytes: [u8; 32] = signer.did().0.to_bytes();
+        let principal = Principal::new(public_key_bytes);
+        Self { principal, signer }
     }
 
     /// Generates a new signing authority with a random signing key.
     ///
-    /// On WASM with the `webcrypto` feature enabled, this will:
-    /// 1. Try to generate a WebCrypto Ed25519 key pair with non-extractable keys
-    /// 2. If WebCrypto fails, fall back to the `Native` variant with extractable keys
-    ///
-    /// On non-WASM platforms, this uses the native Ed25519 implementation.
-    /// On WASM platforms without the `webcrypto` feature, this uses the native implementation.
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
+    /// On WASM, the underlying [`Ed25519Signer`] uses the `WebCrypto` API
+    /// with non-extractable keys. On native platforms, it uses `ed25519_dalek`.
     pub async fn generate() -> Result<Self, ReplicaError> {
-        match WebCryptoEd25519Signer::generate().await {
-            Ok(signer) => Ok(SigningAuthority::from(signer)),
-            Err(_) => {
-                // WebCrypto Ed25519 not available, fall back to native
-                Ok(Self::from_signing_key(SigningKey::generate(
-                    &mut rand::thread_rng(),
-                )))
-            }
-        }
-    }
-
-    /// Generates a new signing authority with a random signing key.
-    ///
-    /// On non-WASM platforms, this uses the native Ed25519 implementation.
-    /// On WASM platforms without the `webcrypto` feature, this uses the native implementation.
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto")))]
-    pub async fn generate() -> Result<Self, ReplicaError> {
-        Ok(Self::from_signing_key(SigningKey::generate(
-            &mut rand::thread_rng(),
-        )))
-    }
-
-    /// Creates a signing authority from a custom signer (escape hatch).
-    ///
-    /// This allows using custom signing implementations at the cost of
-    /// dynamic dispatch. The principal is cached at construction time.
-    pub fn from_signer(signer: impl Signer + 'static) -> Self {
-        let principal = signer.principal().clone();
-        Self::Dynamic {
-            principal,
-            signer: Arc::new(RwLock::new(signer)),
-        }
-    }
-
-    /// Returns the WebCrypto signer if this is a WebCrypto signing authority.
-    ///
-    /// This is useful for accessing the underlying `CryptoKey` for storage.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if this is not a WebCrypto signing authority.
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-    pub fn webcrypto_signer(&self) -> Result<&WebCryptoEd25519Signer, ReplicaError> {
-        match self {
-            Self::WebCrypto { signer, .. } => Ok(signer),
-            _ => Err(ReplicaError::InvalidState {
-                message: "Not a WebCrypto signing authority".to_string(),
-            }),
-        }
+        let signer = Ed25519Signer::generate()
+            .await
+            .map_err(|e| ReplicaError::StorageError(format!("Key generation failed: {e}")))?;
+        Ok(Self::from_ucan_signer(signer))
     }
 
     /// Returns the DID (Decentralized Identifier) for this signing authority.
@@ -208,58 +92,25 @@ impl SigningAuthority {
 
     /// Returns the principal (public key) for this signing authority.
     pub fn principal(&self) -> &Principal {
-        match self {
-            Self::Native { principal, .. } => principal,
+        &self.principal
+    }
 
-            #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-            Self::WebCrypto { principal, .. } => principal,
-
-            Self::Dynamic { principal, .. } => principal,
-        }
+    /// Returns the underlying UCAN [`Ed25519Signer`].
+    ///
+    /// This is useful for building UCAN delegations and invocations directly.
+    pub fn ucan_signer(&self) -> &Ed25519Signer {
+        &self.signer
     }
 
     /// Returns the raw secret key bytes, if available.
     ///
-    /// Returns `None` for `WebCrypto` (non-extractable by default) and `Dynamic` variants
-    /// that don't support key extraction.
+    /// Returns `None` for WebCrypto keys (non-extractable by default on WASM).
     pub fn secret_key_bytes(&self) -> Option<[u8; SECRET_KEY_LENGTH]> {
-        match self {
-            Self::Native { key, .. } => Some(key.to_bytes()),
-
-            #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-            Self::WebCrypto { .. } => None, // Non-extractable by default
-
-            Self::Dynamic { signer, .. } => {
-                if let Ok(guard) = signer.try_read() {
-                    guard.secret_key_bytes()
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    /// Returns true if this signing authority uses non-extractable keys.
-    ///
-    /// This is useful for determining whether the signing authority can be serialized
-    /// or if it requires special handling (e.g., storing CryptoKey in IndexedDB).
-    ///
-    /// Note: For WebCrypto, we generate non-extractable keys by default for security,
-    /// but WebCrypto does support extractable keys if created with that option.
-    pub fn is_non_extractable(&self) -> bool {
-        match self {
-            Self::Native { .. } => false,
-
-            #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-            Self::WebCrypto { .. } => true, // We generate non-extractable by default
-
-            Self::Dynamic { signer, .. } => {
-                if let Ok(guard) = signer.try_read() {
-                    guard.secret_key_bytes().is_none()
-                } else {
-                    true // Assume non-extractable if we can't check
-                }
-            }
+        use varsig::signature::eddsa::Ed25519SigningKey;
+        match self.signer.signer() {
+            Ed25519SigningKey::Native(key) => Some(key.to_bytes()),
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            Ed25519SigningKey::WebCrypto(_) => None,
         }
     }
 
@@ -296,13 +147,9 @@ impl SigningAuthority {
     }
 }
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-impl From<WebCryptoEd25519Signer> for SigningAuthority {
-    fn from(signer: WebCryptoEd25519Signer) -> Self {
-        // Get public key bytes from the Ed25519Did
-        let public_key_bytes: [u8; 32] = *signer.did().0.as_bytes();
-        let principal = Principal::new(public_key_bytes);
-        Self::WebCrypto { principal, signer }
+impl From<Ed25519Signer> for SigningAuthority {
+    fn from(signer: Ed25519Signer) -> Self {
+        Self::from_ucan_signer(signer)
     }
 }
 
@@ -316,24 +163,13 @@ impl PrincipalTrait for SigningAuthority {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Authority for SigningAuthority {
     async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, SignError> {
-        match self {
-            Self::Native { key, .. } => Ok(key.sign(payload).to_bytes().to_vec()),
-
-            #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-            Self::WebCrypto { signer, .. } => {
-                use ucan::AsyncDidSigner;
-                signer
-                    .sign(payload)
-                    .await
-                    .map(|sig| sig.to_bytes().to_vec())
-                    .map_err(|e| SignError::SigningFailed(e.to_string()))
-            }
-
-            Self::Dynamic { signer, .. } => {
-                let mut guard = signer.write().await;
-                guard.sign(payload).await
-            }
-        }
+        use async_signature::AsyncSigner;
+        self.signer
+            .signer()
+            .sign_async(payload)
+            .await
+            .map(|sig| sig.to_bytes().to_vec())
+            .map_err(|e| SignError::SigningFailed(e.to_string()))
     }
 
     fn secret_key_bytes(&self) -> Option<[u8; 32]> {

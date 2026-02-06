@@ -40,6 +40,7 @@ license = "MPL-2.0"
 [workspace.dependencies]
 anyhow = "1"
 arrayref = "0.3"
+async-signature = "0.5.1"
 async-stream = "0.3"
 async-trait = "0.1"
 base58 = "0.2"
@@ -53,8 +54,8 @@ csv-async = { version = "1", features = ["tokio"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures-core = "0.3"
 ipld-core = { version = "0.4", features = ["serde"] }
-ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "tonk", package = "ucan" }
-varsig = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "tonk", package = "varsig" }
+ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", package = "ucan" }
+varsig = { git = "https://github.com/tonk-labs/rs-ucan.git", package = "varsig" }
 futures-util = "0.3"
 # getrandom = "0.3"
 getrandom = "0.2"
