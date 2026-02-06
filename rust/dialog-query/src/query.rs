@@ -7,7 +7,7 @@ use crate::artifact::{ArtifactStore, ArtifactStoreMut};
 pub use crate::context::new_context;
 pub use crate::error::{QueryError, QueryResult};
 pub use crate::fact::Fact;
-use crate::{selection, EvaluationContext};
+use crate::{EvaluationContext, selection};
 pub use futures_util::stream::{Stream, StreamExt, TryStream};
 
 use crate::predicate::DeductiveRule;

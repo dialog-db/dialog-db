@@ -721,8 +721,8 @@ mod tests {
     use crate::attribute::Attribute;
 
     mod person {
-        use crate::attribute::Attribute;
         use crate::Cardinality;
+        use crate::attribute::Attribute;
 
         pub struct Name(pub String);
 
@@ -1001,8 +1001,7 @@ mod tests {
     #[test]
     fn test_attribute_uri_roundtrip() {
         let uri = employee_ident::Name::to_uri();
-        let parsed_hash =
-            crate::attribute::AttributeSchema::<String>::parse_uri(&uri);
+        let parsed_hash = crate::attribute::AttributeSchema::<String>::parse_uri(&uri);
 
         assert!(parsed_hash.is_some(), "Should be able to parse valid URI");
         assert_eq!(

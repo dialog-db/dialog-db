@@ -1,12 +1,12 @@
 //! Query execution plans - traits and context for evaluation
 
 pub use crate::query::Source;
-pub use crate::{selection::Answer, selection::Answers, try_stream, Value};
+pub use crate::{Value, selection::Answer, selection::Answers, try_stream};
 pub use dialog_common::ConditionalSend;
 pub use futures_util::stream::once;
 use std::collections::BTreeMap;
 
-pub use futures_util::{stream, TryStreamExt};
+pub use futures_util::{TryStreamExt, stream};
 
 pub use super::environment::Environment;
 pub use super::parameters::Parameters;

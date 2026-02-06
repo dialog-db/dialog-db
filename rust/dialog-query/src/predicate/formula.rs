@@ -108,13 +108,13 @@ use std::fmt::Display;
 use crate::{Term, Type};
 use serde::{Deserialize, Serialize};
 
+use crate::Schema;
 use crate::application::formula::FormulaApplication;
 use crate::cursor::Cursor;
 pub use crate::dsl::{Input, Quarriable};
 use crate::error::{FormulaEvaluationError, SchemaError, TypeError};
 use crate::selection::Answer;
 use crate::types::Scalar;
-use crate::Schema;
 use crate::{Parameters, Requirement};
 
 /// Core trait for implementing formulas in the query system
