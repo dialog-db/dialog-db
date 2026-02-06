@@ -272,12 +272,12 @@ impl Authorization for UcanAuthorization {
 
             let invocation = InvocationBuilder::new()
                 .issuer(issuer.clone())
-                .audience(subject)
+                .audience(subject.clone())
                 .subject(subject)
                 .command(command)
                 .arguments(args)
                 .proofs(proofs)
-                .try_build(&issuer)
+                .try_build()
                 .await
                 .map_err(|e| {
                     DialogCapabilityAuthorizationError::Serialization(format!("{:?}", e))

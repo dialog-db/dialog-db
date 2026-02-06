@@ -3158,12 +3158,14 @@ checksum = "1dccffe3ce07af9386bfd29e80c0ab1a8205a2fc34e4bcd40364df902cfa8f3f"
 [[package]]
 name = "ucan"
 version = "0.5.0"
-source = "git+https://github.com/tonk-labs/rs-ucan.git?branch=tonk#51d0ec8952ccaf3d95a767f0bb3d302064ac7aa1"
+source = "git+https://github.com/tonk-labs/rs-ucan.git?branch=main#300a5635544855be4599581bffc8ad231e04eb76"
 dependencies = [
+ "async-signature",
  "base58",
  "ed25519-dalek",
  "futures",
  "getrandom 0.2.16",
+ "getrandom 0.3.3",
  "ipld-core",
  "js-sys",
  "leb128",
@@ -3265,11 +3267,13 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 [[package]]
 name = "varsig"
 version = "0.1.0"
-source = "git+https://github.com/tonk-labs/rs-ucan.git?branch=tonk#51d0ec8952ccaf3d95a767f0bb3d302064ac7aa1"
+source = "git+https://github.com/tonk-labs/rs-ucan.git?branch=main#300a5635544855be4599581bffc8ad231e04eb76"
 dependencies = [
  "async-signature",
  "ed25519-dalek",
+ "getrandom 0.2.16",
  "ipld-core",
+ "js-sys",
  "k256",
  "leb128",
  "p256",
@@ -3279,6 +3283,9 @@ dependencies = [
  "signature",
  "thiserror 1.0.69",
  "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

@@ -354,7 +354,7 @@ pub mod helpers {
     /// This is useful for creating space signers in tests.
     pub fn generate_signer() -> Ed25519Signer {
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
-        Ed25519Signer::new(signing_key)
+        Ed25519Signer::from(signing_key)
     }
 
     /// Create a delegation from issuer to audience for a subject with the given command.
@@ -368,15 +368,15 @@ pub mod helpers {
     ) -> Result<Delegation<Ed25519Did>, AccessError> {
         DelegationBuilder::new()
             .issuer(issuer.clone())
-            .audience(*audience)
-            .subject(DelegatedSubject::Specific(*subject))
+            .audience(audience.clone())
+            .subject(DelegatedSubject::Specific(subject.clone()))
             .command(
                 command
                     .iter()
                     .map(|&s| s.to_string()) // or .map(String::from)
                     .collect(),
             )
-            .try_build(issuer)
+            .try_build()
             .await
             .map_err(|e| AccessError::Invocation(format!("Failed to build delegation: {:?}", e)))
     }
