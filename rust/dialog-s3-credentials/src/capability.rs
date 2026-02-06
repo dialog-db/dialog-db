@@ -88,13 +88,8 @@ use super::checksum::Checksum;
 use chrono::{DateTime, Utc};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::SystemTime;
 use thiserror::Error;
 use url::Url;
-
-#[cfg(target_arch = "wasm32")]
-use web_time::{SystemTime, web::SystemTimeExt};
 
 /// Default URL expiration: 1 hour.
 pub const DEFAULT_EXPIRES: u64 = 3600;
@@ -231,12 +226,5 @@ impl Acl {
 
 /// Get the current time as a UTC datetime.
 pub fn current_time() -> DateTime<Utc> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        DateTime::<Utc>::from(SystemTime::now().to_std())
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        DateTime::<Utc>::from(SystemTime::now())
-    }
+    DateTime::<Utc>::from(dialog_common::time::now())
 }
