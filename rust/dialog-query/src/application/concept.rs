@@ -637,9 +637,9 @@ mod tests {
 
     #[test]
     fn test_application_variants() {
+        use crate::Application;
         use crate::predicate::concept::Attributes;
         use crate::predicate::fact::Fact;
-        use crate::Application;
 
         // Test Select application
         let fact = Fact::select().the("test/attr");

@@ -935,13 +935,12 @@ impl TreeSpec {
                 let ref_boundary = reference.upper_bound();
                 let ref_key_str = String::from_utf8_lossy(ref_boundary).to_string();
 
-                let ref_rank = if ref_boundary.len() >= 2
-                    && ref_boundary[ref_boundary.len() - 2] == 0x00
-                {
-                    ref_boundary[ref_boundary.len() - 1]
-                } else {
-                    1
-                };
+                let ref_rank =
+                    if ref_boundary.len() >= 2 && ref_boundary[ref_boundary.len() - 2] == 0x00 {
+                        ref_boundary[ref_boundary.len() - 1]
+                    } else {
+                        1
+                    };
 
                 let ref_hash = reference.hash();
                 let ref_hash_str = format!(

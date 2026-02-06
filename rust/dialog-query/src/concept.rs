@@ -1087,7 +1087,6 @@ mod tests {
 
     #[dialog_macros::test]
     async fn test_concept_with_attribute_fields() -> Result<()> {
-
         use futures_util::TryStreamExt;
 
         let backend = MemoryStorageBackend::default();
@@ -1146,7 +1145,6 @@ mod tests {
 
     #[dialog_macros::test]
     async fn test_query_concept_with_attribute_fields() -> Result<()> {
-
         use futures_util::TryStreamExt;
 
         let backend = MemoryStorageBackend::default();
@@ -1194,7 +1192,6 @@ mod tests {
 
     #[dialog_macros::test]
     async fn test_concept_with_constant_term() -> Result<()> {
-
         use futures_util::TryStreamExt;
 
         let backend = MemoryStorageBackend::default();
@@ -1364,7 +1361,6 @@ mod tests {
 
     #[dialog_macros::test]
     async fn test_concept_query_shortcut() -> Result<()> {
-
         use futures_util::TryStreamExt;
 
         let backend = MemoryStorageBackend::default();
@@ -1421,7 +1417,6 @@ mod tests {
 
     #[dialog_macros::test]
     async fn test_concept_query_shortcut_with_filter() -> Result<()> {
-
         use futures_util::TryStreamExt;
 
         let backend = MemoryStorageBackend::default();
@@ -1499,8 +1494,6 @@ mod tests {
 
     #[dialog_macros::test]
     async fn test_single_attribute_query_works() -> Result<()> {
-
-
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
@@ -1543,8 +1536,6 @@ mod tests {
 
     #[dialog_macros::test]
     async fn test_multi_attribute_constant_query_works() -> Result<()> {
-
-
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
@@ -1590,8 +1581,6 @@ mod tests {
 
     #[dialog_macros::test]
     async fn test_multi_attribute_variable_query_limitation() -> Result<()> {
-
-
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
 
