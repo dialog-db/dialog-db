@@ -133,7 +133,8 @@
             cargoLock = {
               lockFile = ./Cargo.lock;
               outputHashes = {
-                "ucan-0.5.0" = "sha256-apwOaUuOLvYfqNGHOTnOeJx3DIOSPvJLFwXpc6p3UkA=";
+                "ucan-0.5.0" = "sha256-hbT5Gb1U1wITExFMDOzwP6gmofSwbUyb6wGLuVipROA=";
+                "varsig-0.1.0" = "sha256-hbT5Gb1U1wITExFMDOzwP6gmofSwbUyb6wGLuVipROA=";
               };
             };
           };

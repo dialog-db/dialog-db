@@ -53,10 +53,12 @@ ucan = { workspace = true, optional = true }
 getrandom = { workspace = true, features = ["js"] }
 
 [dev-dependencies]
+async-signature = "0.5"
 dialog-common = { workspace = true, features = ["helpers"] }
 ipld-core = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
+varsig = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 
 [lints.rust]
