@@ -12,12 +12,6 @@ use crate::{AccessError, Address};
 
 use super::{build_url, extract_host, is_path_style_default};
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::SystemTime;
-
-#[cfg(target_arch = "wasm32")]
-use web_time::{SystemTime, web::SystemTimeExt};
-
 /// Public S3 credentials for unsigned access.
 ///
 /// Use this for publicly accessible buckets that don't require authentication.
@@ -584,14 +578,7 @@ fn percent_encode_path(path: &str) -> String {
 
 /// Get the current time as a UTC datetime.
 fn current_time() -> DateTime<Utc> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        DateTime::<Utc>::from(SystemTime::now().to_std())
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        DateTime::<Utc>::from(SystemTime::now())
-    }
+    DateTime::<Utc>::from(dialog_common::time::now())
 }
 
 #[cfg(test)]
