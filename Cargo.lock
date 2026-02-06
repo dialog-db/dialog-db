@@ -896,7 +896,6 @@ dependencies = [
  "ucan",
  "url",
  "wasm-bindgen-test",
- "web-time",
 ]
 
 [[package]]
