@@ -12,6 +12,7 @@ default = []
 ucan = ["dep:ipld-core", "dep:ucan"]
 
 [dependencies]
+convert_case = { workspace = true }
 dialog-common = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 async-trait = { workspace = true }

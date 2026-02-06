@@ -17,7 +17,7 @@
 //!
 //! ```no_run
 //! # use async_trait::async_trait;
-//! use dialog_capability::{Authority, Did, Principal, SignError};
+//! use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
 //! use dialog_storage::s3::{Address, S3, S3Credentials};
 //! use dialog_storage::capability::{storage, Provider, Subject};
 //!
@@ -30,7 +30,7 @@
 //! # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 //! # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 //! impl Authority for Issuer {
-//!     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, SignError> { Ok(Vec::new()) }
+//!     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> { Ok(Vec::new()) }
 //!     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
 //! }
 //!
@@ -64,7 +64,7 @@
 //!
 //! ```no_run
 //! # use async_trait::async_trait;
-//! use dialog_capability::{Authority, Did, Principal, SignError};
+//! use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //! use dialog_storage::capability::{storage, Provider, Subject};
 //!
@@ -76,7 +76,7 @@
 //! # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 //! # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 //! # impl Authority for Issuer {
-//! #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, SignError> { Ok(Vec::new()) }
+//! #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> { Ok(Vec::new()) }
 //! #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
 //! # }
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -113,7 +113,7 @@
 //!
 //! ```no_run
 //! # use async_trait::async_trait;
-//! use dialog_capability::{Authority, Did, Principal, SignError};
+//! use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //!
 //! # #[derive(Clone)]
@@ -124,7 +124,7 @@
 //! # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 //! # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 //! # impl Authority for Issuer {
-//! #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, SignError> { Ok(Vec::new()) }
+//! #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> { Ok(Vec::new()) }
 //! #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
 //! # }
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -150,7 +150,7 @@
 //!
 //! ```no_run
 //! # use async_trait::async_trait;
-//! use dialog_capability::{Authority, Did, Principal, SignError};
+//! use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //!
 //! # #[derive(Clone)]
@@ -161,7 +161,7 @@
 //! # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 //! # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 //! # impl Authority for Issuer {
-//! #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, SignError> { Ok(Vec::new()) }
+//! #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> { Ok(Vec::new()) }
 //! #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
 //! # }
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -185,8 +185,8 @@
 
 use async_trait::async_trait;
 use dialog_capability::{
-    Ability, Access, Authority, Authorized, Capability, Claim, Did, Effect, Principal, Provider,
-    SignError, Subject,
+    Ability, Access, Authority, Authorized, Capability, Claim, DialogCapabilitySignError, Did,
+    Effect, Principal, Provider, Subject,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
 use thiserror::Error;
@@ -357,7 +357,7 @@ impl<Issuer: Principal> Principal for S3<Issuer> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer: Authority> Authority for S3<Issuer> {
-    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, SignError> {
+    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> {
         self.issuer.sign(payload).await
     }
 
@@ -407,7 +407,7 @@ where
 ///
 /// ```no_run
 /// # use async_trait::async_trait;
-/// use dialog_capability::{Authority, Did, Principal, SignError};
+/// use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
 /// use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
 /// use dialog_storage::StorageBackend;
 ///
@@ -420,7 +420,7 @@ where
 /// # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 /// # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 /// impl Authority for Issuer {
-///     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, SignError> { Ok(Vec::new()) }
+///     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> { Ok(Vec::new()) }
 ///     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
 /// }
 ///
@@ -496,7 +496,7 @@ where
     /// # use async_trait::async_trait;
     /// # use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
     /// # use dialog_storage::StorageBackend;
-    /// # use dialog_capability::{Authority, Did, Principal, SignError};
+    /// # use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
     /// #
     /// # #[derive(Clone)]
     /// # struct Issuer(Did);
@@ -504,7 +504,7 @@ where
     /// # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     /// # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     /// # impl Authority for Issuer {
-    /// #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, SignError> { Ok(Vec::new()) }
+    /// #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> { Ok(Vec::new()) }
     /// #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
     /// # }
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -547,7 +547,7 @@ impl<Issuer: Principal> Principal for Bucket<Issuer> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer: Authority> Authority for Bucket<Issuer> {
-    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, SignError> {
+    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> {
         self.bucket.sign(payload).await
     }
 

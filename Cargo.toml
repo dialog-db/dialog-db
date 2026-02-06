@@ -49,13 +49,14 @@ brotli = "8"
 clap = "4"
 clap_derive = "4"
 console_error_panic_hook = "0.1"
+convert_case = "0.6"
 csv-async = { version = "1", features = ["tokio"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures-core = "0.3"
-ipld-core = { version = "0.4", features = ["serde"] }
-ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "tonk", package = "ucan" }
-varsig = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "tonk", package = "varsig" }
 futures-util = "0.3"
+ipld-core = { version = "0.4", features = ["serde"] }
+ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "main", package = "ucan" }
+varsig = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "main", package = "varsig" }
 # getrandom = "0.3"
 getrandom = "0.2"
 itertools = "0.14"
@@ -99,6 +100,9 @@ zerocopy = "0.8"
 [workspace.dependencies.dialog-artifacts]
 path = "./rust/dialog-artifacts"
 
+[workspace.dependencies.dialog-capability]
+path = "./rust/dialog-capability"
+
 [workspace.dependencies.dialog-common]
 path = "./rust/dialog-common"
 
@@ -122,9 +126,6 @@ path = "./rust/dialog-macros"
 
 [workspace.dependencies.dialog-s3-credentials]
 path = "./rust/dialog-s3-credentials"
-
-[workspace.dependencies.dialog-capability]
-path = "./rust/dialog-capability"
 
 [workspace.dependencies.dialog-effects]
 path = "./rust/dialog-effects"

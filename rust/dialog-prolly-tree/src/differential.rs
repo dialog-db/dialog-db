@@ -308,6 +308,7 @@ where
                     if node.is_branch()
                         && let Ok(refs) = node.references()
                     {
+                        // Track this branch node before splicing out
                         self.expanded.push(node.clone());
 
                         // Convert references to SparseTreeNode::Ref

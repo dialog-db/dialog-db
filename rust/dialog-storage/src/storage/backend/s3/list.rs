@@ -79,7 +79,7 @@ where
     ///
     /// ```no_run
     /// # use async_trait::async_trait;
-    /// use dialog_capability::{Authority, Did, Principal, SignError};
+    /// use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
     /// use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
     ///
     /// #[derive(Clone)]
@@ -90,7 +90,7 @@ where
     /// # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     /// # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     /// impl Authority for Issuer {
-    ///     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, SignError> { Ok(Vec::new()) }
+    ///     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> { Ok(Vec::new()) }
     ///     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
     /// }
     ///

@@ -14,7 +14,9 @@
 
 use std::error::Error;
 
-pub use dialog_capability::{Attenuation, Capability, Effect, PerformError, Policy, Subject};
+pub use dialog_capability::{
+    Attenuation, Capability, DialogCapabilityPerformError, Effect, Policy, Subject,
+};
 pub use dialog_common::Blake3Hash;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -174,19 +176,21 @@ pub enum ArchiveError {
     Io(String),
 }
 
-impl From<dialog_capability::AuthorizationError> for ArchiveError {
-    fn from(value: dialog_capability::AuthorizationError) -> Self {
+impl From<dialog_capability::DialogCapabilityAuthorizationError> for ArchiveError {
+    fn from(value: dialog_capability::DialogCapabilityAuthorizationError) -> Self {
         ArchiveError::AuthorizationError(value.to_string())
     }
 }
 
-impl<E: Error> From<PerformError<E>> for ArchiveError {
-    fn from(value: PerformError<E>) -> Self {
+impl<E: Error> From<DialogCapabilityPerformError<E>> for ArchiveError {
+    fn from(value: DialogCapabilityPerformError<E>) -> Self {
         match value {
-            PerformError::Authorization(error) => {
+            DialogCapabilityPerformError::Authorization(error) => {
                 ArchiveError::AuthorizationError(error.to_string())
             }
-            PerformError::Excution(error) => ArchiveError::ExecutionError(error.to_string()),
+            DialogCapabilityPerformError::Execution(error) => {
+                ArchiveError::ExecutionError(error.to_string())
+            }
         }
     }
 }

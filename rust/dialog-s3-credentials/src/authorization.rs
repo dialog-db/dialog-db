@@ -4,7 +4,7 @@ use super::ucan;
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
 use dialog_capability::{
-    Authority, Authorization as Auth, AuthorizationError, Capability, Did, Effect,
+    Authority, Authorization as Auth, Capability, DialogCapabilityAuthorizationError, Did, Effect,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
 
@@ -59,7 +59,7 @@ impl Auth for Authorization {
     async fn invoke<A: Authority + ConditionalSend + ConditionalSync>(
         &self,
         authority: &A,
-    ) -> Result<Self, AuthorizationError> {
+    ) -> Result<Self, DialogCapabilityAuthorizationError> {
         Ok(match self {
             Self::S3(auth) => Self::S3(auth.invoke(authority).await?),
             #[cfg(feature = "ucan")]

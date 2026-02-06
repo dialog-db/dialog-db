@@ -9,7 +9,7 @@
 //! - UCAN access service (native-only, requires `ucan` feature)
 //! - Test issuer types for capability-based testing
 use async_trait::async_trait;
-use dialog_capability::{Authority, Did, Principal, SignError};
+use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
 use serde::{Deserialize, Serialize};
 
 /// S3 test server connection info with credentials, passed to inner tests.
@@ -90,7 +90,7 @@ impl Principal for Session {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Authority for Session {
-    async fn sign(&mut self, _payload: &[u8]) -> Result<Vec<u8>, SignError> {
+    async fn sign(&mut self, _payload: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> {
         // S3 direct access uses SigV4 signing, not external signatures
         Ok(Vec::new())
     }
@@ -154,13 +154,23 @@ impl Principal for Operator {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Authority for Operator {
-    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, SignError> {
-        use ed25519_dalek::Signer;
-        Ok(self.signer.signer().sign(payload).to_vec())
+    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> {
+        use async_signature::AsyncSigner;
+        self.signer
+            .signer()
+            .sign_async(payload)
+            .await
+            .map(|sig| sig.to_bytes().to_vec())
+            .map_err(|e| DialogCapabilitySignError::SigningFailed(e.to_string()))
     }
 
     fn secret_key_bytes(&self) -> Option<[u8; 32]> {
-        Some(self.signer.signer().to_bytes())
+        use varsig::signature::eddsa::Ed25519SigningKey;
+        match self.signer.signer() {
+            Ed25519SigningKey::Native(key) => Some(key.to_bytes()),
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            Ed25519SigningKey::WebCrypto(_) => None,
+        }
     }
 }
 

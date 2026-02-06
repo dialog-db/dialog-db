@@ -7,8 +7,8 @@ use super::{DelegationChain, InvocationChain};
 use crate::capability::{AccessError, AuthorizedRequest, S3Request};
 use async_trait::async_trait;
 use dialog_capability::{
-    Authority, Authorization, AuthorizationError, Capability, Did, Effect, Provider,
-    ucan::Parameters,
+    Authority, Authorization, Capability, DialogCapabilityAuthorizationError, Did, Effect,
+    Provider, ucan::Parameters,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
 use ed25519_dalek::SigningKey;
@@ -80,7 +80,7 @@ pub enum UcanAuthorization {
     },
     Invocation {
         endpoint: String,
-        chain: InvocationChain,
+        chain: Box<InvocationChain>,
         subject: Did,
         ability: String,
         parameters: Parameters,
@@ -236,15 +236,18 @@ impl Authorization for UcanAuthorization {
     async fn invoke<A: Authority + ConditionalSend + ConditionalSync>(
         &self,
         authority: &A,
-    ) -> Result<Self, AuthorizationError> {
+    ) -> Result<Self, DialogCapabilityAuthorizationError> {
         if self.audience() != authority.did() {
-            Err(AuthorizationError::NotAudience {
+            Err(DialogCapabilityAuthorizationError::NotAudience {
                 audience: self.audience().into(),
                 issuer: authority.did().into(),
             })
         } else {
             let subject: Ed25519Did = self.subject().parse().map_err(|e| {
-                AuthorizationError::Serialization(format!("Invalid subject DID: {:?}", e))
+                DialogCapabilityAuthorizationError::Serialization(format!(
+                    "Invalid subject DID: {:?}",
+                    e
+                ))
             })?;
 
             let command: Vec<String> = self
@@ -257,7 +260,9 @@ impl Authorization for UcanAuthorization {
             let args = parameters_to_args(self.parameters().clone());
 
             let key = SigningKey::from_bytes(&authority.secret_key_bytes().ok_or(
-                AuthorizationError::Serialization("Authority key can not be used".into()),
+                DialogCapabilityAuthorizationError::Serialization(
+                    "Authority key can not be used".into(),
+                ),
             )?);
             let issuer = Ed25519Signer::from(key);
             let proofs = self
@@ -267,14 +272,16 @@ impl Authorization for UcanAuthorization {
 
             let invocation = InvocationBuilder::new()
                 .issuer(issuer.clone())
-                .audience(subject)
+                .audience(subject.clone())
                 .subject(subject)
                 .command(command)
                 .arguments(args)
                 .proofs(proofs)
-                .try_build(&issuer)
+                .try_build()
                 .await
-                .map_err(|e| AuthorizationError::Serialization(format!("{:?}", e)))?;
+                .map_err(|e| {
+                    DialogCapabilityAuthorizationError::Serialization(format!("{:?}", e))
+                })?;
 
             let delegations = self
                 .chain()
@@ -285,7 +292,7 @@ impl Authorization for UcanAuthorization {
 
             let authorization = Self::Invocation {
                 endpoint: self.endpoint().into(),
-                chain: invocation,
+                chain: Box::new(invocation),
                 subject: self.subject().clone(),
                 ability: self.ability().into(),
                 parameters: self.parameters().clone(),

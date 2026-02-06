@@ -1,6 +1,12 @@
-use crate::{Authority, Authorization, AuthorizationError, Capability, Constraint, Provider};
+use crate::{
+    Authority, Authorization, Capability, Constraint, DialogCapabilityPerformError, Effect,
+    Provider,
+};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use std::error::Error;
+use std::{
+    error::Error,
+    fmt::{Debug, Formatter},
+};
 
 /// A capability paired with its authorization proof.
 ///
@@ -27,12 +33,11 @@ where
     }
 }
 
-impl<C: Constraint + std::fmt::Debug, A: Authorization + std::fmt::Debug> std::fmt::Debug
-    for Authorized<C, A>
+impl<C: Constraint + Debug, A: Authorization + Debug> Debug for Authorized<C, A>
 where
-    C::Capability: std::fmt::Debug,
+    C::Capability: Debug,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Authorized")
             .field("capability", &self.capability)
             .field("authorization", &self.authorization)
@@ -75,25 +80,12 @@ impl<C: Constraint, A: Authorization> Authorized<C, A> {
     }
 }
 
-/// Error type for capability execution failures.
-#[derive(Debug)]
-pub enum PerformError<E: Error + std::fmt::Debug> {
-    /// Error during effect execution.
-    Excution(E),
-    /// Error during authorization verification.
-    Authorization(AuthorizationError),
-}
-
-impl<
-    Ok,
-    E: Error + std::fmt::Debug,
-    Fx: super::effect::Effect<Output = Result<Ok, E>> + Constraint,
-    A: Authorization,
-> Authorized<Fx, A>
+impl<Ok, E: Error, Fx: Effect<Output = Result<Ok, E>> + Constraint, A: Authorization>
+    Authorized<Fx, A>
 {
     /// Perform the invocation directly without authorization verification.
     /// For operations that require authorization, use `acquire` first.
-    pub async fn perform<Env>(self, env: &mut Env) -> Result<Ok, PerformError<E>>
+    pub async fn perform<Env>(self, env: &mut Env) -> Result<Ok, DialogCapabilityPerformError<E>>
     where
         Env: Provider<Self> + Authority + ConditionalSend + ConditionalSync,
     {
@@ -104,8 +96,8 @@ impl<
                     authorization,
                 })
                 .await
-                .map_err(PerformError::Excution),
-            Err(e) => Err(PerformError::Authorization(e)),
+                .map_err(DialogCapabilityPerformError::Execution),
+            Err(e) => Err(DialogCapabilityPerformError::Authorization(e)),
         }
     }
 }

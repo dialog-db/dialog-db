@@ -51,7 +51,7 @@ pub use principal::{Principal, PrincipalError};
 pub use remote::{RemoteBranch, RemoteCredentials, RemoteRepository, RemoteSite, Site};
 pub use repository::Remotes;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-pub use signing_authority::{CryptoKey, WebCryptoEd25519Signer};
+pub use signing_authority::{CryptoKey, Ed25519Signer};
 
 /// An authority that can operate on a replica.
 ///
@@ -3158,7 +3158,14 @@ mod tests {
         // Create operator and subject
         let operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
         let operator_did = operator_signer.did().clone();
-        let operator = SigningAuthority::from_secret(&operator_signer.signer().to_bytes());
+        let operator = {
+            use varsig::signature::eddsa::Ed25519SigningKey;
+            match operator_signer.signer() {
+                Ed25519SigningKey::Native(key) => SigningAuthority::from_secret(&key.to_bytes()),
+                #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+                Ed25519SigningKey::WebCrypto(_) => panic!("expected native signer in test"),
+            }
+        };
         let subject = operator.did().clone();
 
         // Create a delegation chain
@@ -3238,13 +3245,20 @@ mod tests {
         // with the delegation chain.
         let operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
         let operator_did = operator_signer.did().clone();
-        let subject: Did = operator_did.into();
+        let subject: Did = operator_did.clone().into();
 
         // Create a SigningAuthority that uses the UCAN signer's key
         // Note: SigningAuthority::did() may produce a different DID format than Ed25519Did,
         // but the UCAN invocation system uses the Authority trait which gets the
         // secret key bytes for signing, not the DID for identity.
-        let operator = SigningAuthority::from_secret(&operator_signer.signer().to_bytes());
+        let operator = {
+            use varsig::signature::eddsa::Ed25519SigningKey;
+            match operator_signer.signer() {
+                Ed25519SigningKey::Native(key) => SigningAuthority::from_secret(&key.to_bytes()),
+                #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+                Ed25519SigningKey::WebCrypto(_) => panic!("expected native signer in test"),
+            }
+        };
 
         // Step 2: Create a delegation chain from subject to operator
         // In this test, the subject and operator are the same (self-signed)
@@ -3360,8 +3374,14 @@ mod tests {
         // Generate a second operator for the second replica
         let second_operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
         let second_operator_did = second_operator_signer.did().clone();
-        let second_operator =
-            SigningAuthority::from_secret(&second_operator_signer.signer().to_bytes());
+        let second_operator = {
+            use varsig::signature::eddsa::Ed25519SigningKey;
+            match second_operator_signer.signer() {
+                Ed25519SigningKey::Native(key) => SigningAuthority::from_secret(&key.to_bytes()),
+                #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+                Ed25519SigningKey::WebCrypto(_) => panic!("expected native signer in test"),
+            }
+        };
 
         // Create delegation from the original subject to the second operator
         // Grant root capability (/) to allow all operations for the pull test
