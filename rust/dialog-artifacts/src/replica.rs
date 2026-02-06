@@ -51,7 +51,7 @@ pub use principal::{Principal, PrincipalError};
 pub use remote::{RemoteBranch, RemoteCredentials, RemoteRepository, RemoteSite, Site};
 pub use repository::Remotes;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-pub use signing_authority::{CryptoKey, WebCryptoEd25519Signer};
+pub use signing_authority::{CryptoKey, Ed25519Signer};
 
 /// An authority that can operate on a replica.
 ///

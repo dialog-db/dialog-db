@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-pub use ucan::WebCryptoEd25519Signer;
+pub use ucan::Ed25519Signer;
 
 /// Re-export CryptoKey for storage purposes.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
@@ -69,15 +69,14 @@ pub enum SigningAuthority {
 
     /// WebCrypto Ed25519 with non-extractable keys (WASM + webcrypto feature).
     ///
-    /// Wraps the `ucan::WebCryptoEd25519Signer` for UCAN delegation signing.
-    /// Note: We generate non-extractable keys by default for security, but
-    /// WebCrypto does support extractable keys if created with that option.
+    /// Wraps the `ucan::Ed25519Signer` which uses WebCrypto on WASM for
+    /// non-extractable key support, and ed25519_dalek on native platforms.
     #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
     WebCrypto {
         /// The principal (public key).
         principal: Principal,
-        /// The ucan WebCrypto signer (owns the non-extractable CryptoKey).
-        signer: WebCryptoEd25519Signer,
+        /// The ucan Ed25519 signer (uses WebCrypto on WASM).
+        signer: Ed25519Signer,
     },
 
     /// Dynamic signer for custom implementations (escape hatch).
@@ -150,7 +149,7 @@ impl SigningAuthority {
     /// On WASM platforms without the `webcrypto` feature, this uses the native implementation.
     #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
     pub async fn generate() -> Result<Self, ReplicaError> {
-        match WebCryptoEd25519Signer::generate().await {
+        match Ed25519Signer::generate().await {
             Ok(signer) => Ok(SigningAuthority::from(signer)),
             Err(_) => {
                 // WebCrypto Ed25519 not available, fall back to native
@@ -192,7 +191,7 @@ impl SigningAuthority {
     ///
     /// Returns an error if this is not a WebCrypto signing authority.
     #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-    pub fn webcrypto_signer(&self) -> Result<&WebCryptoEd25519Signer, ReplicaError> {
+    pub fn webcrypto_signer(&self) -> Result<&Ed25519Signer, ReplicaError> {
         match self {
             Self::WebCrypto { signer, .. } => Ok(signer),
             _ => Err(ReplicaError::InvalidState {
@@ -297,10 +296,10 @@ impl SigningAuthority {
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-impl From<WebCryptoEd25519Signer> for SigningAuthority {
-    fn from(signer: WebCryptoEd25519Signer) -> Self {
+impl From<Ed25519Signer> for SigningAuthority {
+    fn from(signer: Ed25519Signer) -> Self {
         // Get public key bytes from the Ed25519Did
-        let public_key_bytes: [u8; 32] = *signer.did().0.as_bytes();
+        let public_key_bytes: [u8; 32] = signer.did().0.to_bytes();
         let principal = Principal::new(public_key_bytes);
         Self::WebCrypto { principal, signer }
     }
@@ -321,9 +320,10 @@ impl Authority for SigningAuthority {
 
             #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
             Self::WebCrypto { signer, .. } => {
-                use ucan::AsyncDidSigner;
+                use async_signature::AsyncSigner;
                 signer
-                    .sign(payload)
+                    .signer()
+                    .sign_async(payload)
                     .await
                     .map(|sig| sig.to_bytes().to_vec())
                     .map_err(|e| DialogCapabilitySignError::SigningFailed(e.to_string()))
