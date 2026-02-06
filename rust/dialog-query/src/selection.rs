@@ -406,24 +406,24 @@ impl Answer {
         // This gives us the full fact with all its components
 
         // Try 'the' first
-        if let Term::Variable { name: Some(_), .. } = application.the() {
-            if let Some(factors) = self.resolve_factors(&application.the().as_unknown()) {
-                return Ok(Fact::from(factors));
-            }
+        if let Term::Variable { name: Some(_), .. } = application.the()
+            && let Some(factors) = self.resolve_factors(&application.the().as_unknown())
+        {
+            return Ok(Fact::from(factors));
         }
 
         // Try 'of' next
-        if let Term::Variable { name: Some(_), .. } = application.of() {
-            if let Some(factors) = self.resolve_factors(&application.of().as_unknown()) {
-                return Ok(Fact::from(factors));
-            }
+        if let Term::Variable { name: Some(_), .. } = application.of()
+            && let Some(factors) = self.resolve_factors(&application.of().as_unknown())
+        {
+            return Ok(Fact::from(factors));
         }
 
         // Try 'is' last
-        if let Term::Variable { name: Some(_), .. } = application.is() {
-            if let Some(factors) = self.resolve_factors(&application.is().as_unknown()) {
-                return Ok(Fact::from(factors));
-            }
+        if let Term::Variable { name: Some(_), .. } = application.is()
+            && let Some(factors) = self.resolve_factors(&application.is().as_unknown())
+        {
+            return Ok(Fact::from(factors));
         }
 
         // No named variables - look up by application

@@ -258,13 +258,12 @@ impl Analysis {
 
         // First pass: identify groups satisfied by constants
         for (name, constraint) in schema.iter() {
-            if let Some(term) = params.get(name) {
-                if let Requirement::Required(Some(group)) = &constraint.requirement {
-                    // If this parameter is a constant, its group is satisfied
-                    if matches!(term, Term::Constant(_)) {
-                        satisfied_groups.insert(*group);
-                    }
-                }
+            if let Some(term) = params.get(name)
+                && let Requirement::Required(Some(group)) = &constraint.requirement
+                && matches!(term, Term::Constant(_))
+            {
+                // If this parameter is a constant, its group is satisfied
+                satisfied_groups.insert(*group);
             }
         }
 
@@ -377,21 +376,20 @@ impl Analysis {
 
                 // Process only relevant bindings (parameters that got bound)
                 for (name, constraint) in schema.iter() {
-                    if let Some(term) = params.get(name) {
-                        if new_bindings.contains(term) {
-                            // Check if this term is relevant to this plan
-                            let was_required = requires.remove(term);
-                            let was_bound = binds.remove(term);
+                    if let Some(term) = params.get(name)
+                        && new_bindings.contains(term)
+                    {
+                        // Check if this term is relevant to this plan
+                        let was_required = requires.remove(term);
+                        let was_bound = binds.remove(term);
 
-                            if was_required || was_bound {
-                                // This parameter is now bound (add to env)
-                                env.add(term);
+                        if was_required || was_bound {
+                            // This parameter is now bound (add to env)
+                            env.add(term);
 
-                                // If this is part of a choice group, mark that group as satisfied
-                                if let Requirement::Required(Some(group)) = &constraint.requirement
-                                {
-                                    satisfied_groups.insert(*group);
-                                }
+                            // If this is part of a choice group, mark that group as satisfied
+                            if let Requirement::Required(Some(group)) = &constraint.requirement {
+                                satisfied_groups.insert(*group);
                             }
                         }
                     }
@@ -400,15 +398,14 @@ impl Analysis {
                 // Second pass: for satisfied choice groups, convert required params to desired
                 if !satisfied_groups.is_empty() {
                     for (name, constraint) in schema.iter() {
-                        if let Requirement::Required(Some(group)) = &constraint.requirement {
-                            if satisfied_groups.contains(group) {
-                                if let Some(term) = params.get(name) {
-                                    // If this term was required, it's no longer required
-                                    // Move it to binds if it's not already bound
-                                    if requires.remove(term) && !env.contains(term) {
-                                        binds.add(term);
-                                    }
-                                }
+                        if let Requirement::Required(Some(group)) = &constraint.requirement
+                            && satisfied_groups.contains(group)
+                            && let Some(term) = params.get(name)
+                        {
+                            // If this term was required, it's no longer required
+                            // Move it to binds if it's not already bound
+                            if requires.remove(term) && !env.contains(term) {
+                                binds.add(term);
                             }
                         }
                     }
