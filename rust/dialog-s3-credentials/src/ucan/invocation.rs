@@ -182,10 +182,10 @@ impl From<&InvocationChain> for Container {
 
         // Add delegations in the order they appear in the invocation's proofs
         for cid in chain.invocation.proofs() {
-            if let Some(delegation) = chain.delegations.get(cid) {
-                if let Ok(delegation_bytes) = serde_ipld_dagcbor::to_vec(delegation.as_ref()) {
-                    tokens.push(delegation_bytes);
-                }
+            if let Some(delegation) = chain.delegations.get(cid)
+                && let Ok(delegation_bytes) = serde_ipld_dagcbor::to_vec(delegation.as_ref())
+            {
+                tokens.push(delegation_bytes);
             }
         }
 

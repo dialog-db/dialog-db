@@ -25,7 +25,7 @@ s3 = ["dep:dialog-s3-credentials", "dep:reqwest", "dep:url", "dep:chrono"]
 # Enables S3 list operations (ListObjectsV2) with XML parsing
 s3-list = ["s3", "dep:quick-xml"]
 # Enables UCAN-based authorization via external access service
-ucan = ["s3", "dialog-s3-credentials/ucan", "dialog-s3-credentials/helpers", "dep:ed25519-dalek", "dep:ucan"]
+ucan = ["s3", "dialog-s3-credentials/ucan", "dialog-s3-credentials/helpers", "dep:ed25519-dalek", "dep:ucan", "dep:varsig", "dep:async-signature"]
 # Enables real S3/R2 integration tests (requires R2S3_* environment variables)
 s3-integration-tests = ["s3-list", "helpers"]
 # Enable integration tests (tests with service provisioning)
@@ -55,8 +55,10 @@ serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }
 rand = { workspace = true, optional = true }
 thiserror = { workspace = true }
+async-signature = { version = "0.5", optional = true }
 ed25519-dalek = { workspace = true, optional = true }
 ucan = { workspace = true, optional = true }
+varsig = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync"] }
 url = { version = "2.5", optional = true }
 chrono = { version = "0.4", optional = true }

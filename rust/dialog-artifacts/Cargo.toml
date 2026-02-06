@@ -14,7 +14,7 @@ debug = []
 helpers = ["dep:anyhow", "dialog-s3-credentials/helpers", "dialog-storage/helpers"]
 csv = ["dep:csv-async"]
 s3 = ["dialog-storage/s3"]
-ucan = ["dialog-s3-credentials/ucan", "dialog-storage/ucan"]
+ucan = ["dialog-s3-credentials/ucan", "dialog-storage/ucan", "dep:varsig"]
 # Enable WebCrypto Ed25519 signing on WASM (non-extractable keys)
 webcrypto = ["dep:ucan"]
 # Enable integration tests (tests with service provisioning)
@@ -51,6 +51,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
 ucan = { workspace = true, optional = true }
 url = { workspace = true, features = ["serde"] }
+varsig = { workspace = true, optional = true }
 
 [dev-dependencies]
 dialog-storage = { workspace = true, features = ["helpers"] }

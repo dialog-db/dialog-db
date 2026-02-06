@@ -80,7 +80,7 @@ pub enum UcanAuthorization {
     },
     Invocation {
         endpoint: String,
-        chain: InvocationChain,
+        chain: Box<InvocationChain>,
         subject: Did,
         ability: String,
         parameters: Parameters,
@@ -292,7 +292,7 @@ impl Authorization for UcanAuthorization {
 
             let authorization = Self::Invocation {
                 endpoint: self.endpoint().into(),
-                chain: invocation,
+                chain: Box::new(invocation),
                 subject: self.subject().clone(),
                 ability: self.ability().into(),
                 parameters: self.parameters().clone(),
