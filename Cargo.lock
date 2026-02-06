@@ -873,6 +873,7 @@ name = "dialog-s3-credentials"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-signature",
  "async-trait",
  "base58",
  "base64",
@@ -896,6 +897,7 @@ dependencies = [
  "tokio",
  "ucan",
  "url",
+ "varsig",
  "wasm-bindgen-test",
 ]
 
