@@ -412,7 +412,7 @@ mod tests {
             .audience(operator_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build(&space_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -436,7 +436,7 @@ mod tests {
             .audience(operator1_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build(&space_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -446,7 +446,7 @@ mod tests {
             .audience(operator2_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build(&operator1_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -468,7 +468,7 @@ mod tests {
             .audience(operator1_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build(&space_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -483,7 +483,7 @@ mod tests {
             .audience(operator2_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did))
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build(&operator1_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -509,7 +509,7 @@ mod tests {
             .audience(operator1_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build(&space_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -524,7 +524,7 @@ mod tests {
             .audience(operator3_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did))
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build(&operator2_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -553,7 +553,7 @@ mod tests {
             .audience(operator3_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string(), "get".to_string()])
-            .try_build(&operator2_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -564,7 +564,7 @@ mod tests {
             .audience(operator1_signer.did().clone()) // Wrong! Should be operator2
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build(&space_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -591,7 +591,7 @@ mod tests {
             .audience(operator_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build(&space_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -620,7 +620,7 @@ mod tests {
             .audience(operator_signer.did().clone())
             .subject(DelegatedSubject::Specific(space_did.clone()))
             .command(vec!["storage".to_string()])
-            .try_build(&space_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -653,7 +653,7 @@ mod tests {
             .audience(operator_signer.did().clone())
             .subject(DelegatedSubject::Specific(subject_did.clone()))
             .command(vec!["archive".to_string()])
-            .try_build(&subject_signer)
+            .try_build()
             .await
             .unwrap();
 
@@ -684,7 +684,7 @@ mod tests {
             .audience(operator_signer.did().clone())
             .subject(DelegatedSubject::Specific(subject_did.clone()))
             .command(vec!["archive".to_string(), "put".to_string()])
-            .try_build(&subject_signer)
+            .try_build()
             .await
             .unwrap();
 
