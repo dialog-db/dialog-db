@@ -6,8 +6,8 @@
 
 pub use crate::selection::Evidence;
 pub use crate::{
-    try_stream, Answers, Environment, EvaluationContext, Field, Parameters, QueryError,
-    Requirement, Schema, Source, Term, Value,
+    Answers, Environment, EvaluationContext, Field, Parameters, QueryError, Requirement, Schema,
+    Source, Term, Value, try_stream,
 };
 use std::fmt::Display;
 
@@ -168,7 +168,7 @@ impl Display for Equality {
 mod tests {
     use super::*;
     use crate::selection::Answer;
-    use crate::{artifact::Artifacts, Session};
+    use crate::{Session, artifact::Artifacts};
     use dialog_storage::MemoryStorageBackend;
     use futures_util::TryStreamExt;
 

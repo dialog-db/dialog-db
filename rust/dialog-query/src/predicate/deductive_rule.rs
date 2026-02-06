@@ -191,14 +191,16 @@ fn test_rule_fails_with_unconstrained_fact() {
         ]
         .into(),
     };
-    let premises = vec![FactApplication::new(
-        Term::var("key"),
-        Term::<Entity>::var("user"),
-        Term::var("value"),
-        crate::attribute::Term::var("cause"),
-        Cardinality::One,
-    )
-    .into()];
+    let premises = vec![
+        FactApplication::new(
+            Term::var("key"),
+            Term::<Entity>::var("user"),
+            Term::var("value"),
+            crate::attribute::Term::var("cause"),
+            Cardinality::One,
+        )
+        .into(),
+    ];
     assert!(DeductiveRule::new(conclusion, premises).is_err());
 }
 
@@ -220,14 +222,16 @@ fn test_rule_fails_with_unused_parameter() {
         ]
         .into(),
     };
-    let premises = vec![FactApplication::new(
-        Term::Constant("user/name".parse::<ArtifactAttribute>().unwrap()),
-        Term::<Entity>::var("this"),
-        Term::var("name"),
-        crate::attribute::Term::var("cause"),
-        Cardinality::One,
-    )
-    .into()];
+    let premises = vec![
+        FactApplication::new(
+            Term::Constant("user/name".parse::<ArtifactAttribute>().unwrap()),
+            Term::<Entity>::var("this"),
+            Term::var("name"),
+            crate::attribute::Term::var("cause"),
+            Cardinality::One,
+        )
+        .into(),
+    ];
     let result = DeductiveRule::new(conclusion, premises);
     assert!(result.is_err());
     if let Err(CompileError::UnboundVariable { variable, .. }) = result {
@@ -316,14 +320,16 @@ fn test_rule_parameter_name_vs_variable_name() {
 
     // The premise binds variable "key_var" via parameter "is"
     // But conclusion expects parameter "key" to be bound
-    let premises = vec![FactApplication::new(
-        Term::Constant("user/name".parse::<ArtifactAttribute>().unwrap()),
-        Term::<Entity>::var("this"),
-        Term::var("key_var"), // Variable name is "key_var", not "key"
-        crate::attribute::Term::var("cause"),
-        Cardinality::One,
-    )
-    .into()];
+    let premises = vec![
+        FactApplication::new(
+            Term::Constant("user/name".parse::<ArtifactAttribute>().unwrap()),
+            Term::<Entity>::var("this"),
+            Term::var("key_var"), // Variable name is "key_var", not "key"
+            crate::attribute::Term::var("cause"),
+            Cardinality::One,
+        )
+        .into(),
+    ];
 
     let result = DeductiveRule::new(conclusion, premises);
     // Should fail because conclusion needs "key" but premise binds "key_var"

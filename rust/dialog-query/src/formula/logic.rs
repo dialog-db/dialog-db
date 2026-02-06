@@ -3,8 +3,8 @@
 //! This module provides formulas for boolean operations including
 //! AND, OR, and NOT operations.
 
-use crate::dsl::Input;
 use crate::Formula;
+use crate::dsl::Input;
 
 /// And formula that performs logical AND on two boolean values
 #[derive(Debug, Clone, Formula)]
@@ -72,7 +72,7 @@ impl Not {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{selection::Answer, Formula, Parameters, Term};
+    use crate::{Formula, Parameters, Term, selection::Answer};
 
     #[test]
     fn test_and_formula_true_true() -> anyhow::Result<()> {

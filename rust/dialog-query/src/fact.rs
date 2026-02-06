@@ -3,13 +3,13 @@
 use std::hash::Hash;
 
 pub use super::predicate::fact::Fact as PredicateFact;
+pub use crate::Term;
 pub use crate::application::FactApplication;
 pub use crate::artifact::{Artifact, Attribute, Cause, Entity, Instruction, Value};
 pub use crate::dsl::Quarriable;
 pub use crate::error::SchemaError;
 pub use crate::query::Output;
 pub use crate::types::Scalar;
-pub use crate::Term;
 use dialog_artifacts::{Blake3Hash, CborEncoder, DialogArtifactsError, Encoder};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};

@@ -104,7 +104,7 @@ impl Is {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{selection::Answer, Parameters, Term};
+    use crate::{Parameters, Term, selection::Answer};
 
     #[test]
     fn test_concatenate_formula() {
@@ -315,9 +315,7 @@ mod tests {
         let upper_results = upper_formula.derive(upper_input)?;
         assert_eq!(upper_results.len(), 1);
         assert_eq!(
-            upper_results[0]
-                .get::<String>(&Term::var("output"))
-                .ok(),
+            upper_results[0].get::<String>(&Term::var("output")).ok(),
             Some("HELLO WORLD".to_string())
         );
 

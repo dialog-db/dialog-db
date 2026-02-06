@@ -1,11 +1,11 @@
 use super::fact::CONCEPT_OVERHEAD;
+use crate::DeductiveRule;
 use crate::attribute::AttributeSchema;
 use crate::context::new_context;
 use crate::planner::{Fork, Join};
 use crate::predicate::Concept;
 use crate::selection::{Answer, Evidence};
-use crate::DeductiveRule;
-use crate::{try_stream, Environment, EvaluationContext, Parameters, Schema, Source, Term, Value};
+use crate::{Environment, EvaluationContext, Parameters, Schema, Source, Term, Value, try_stream};
 use std::fmt::Display;
 
 /// Extract an Answer with parameter names from an Answer with user variable names

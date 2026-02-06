@@ -316,8 +316,8 @@ impl<S: ArtifactStore> ArtifactStore for QuerySession<S> {
         &self,
         artifact_selector: ArtifactSelector<Constrained>,
     ) -> impl futures_core::Stream<Item = Result<Artifact, DialogArtifactsError>>
-           + ConditionalSend
-           + 'static {
+    + ConditionalSend
+    + 'static {
         self.store.select(artifact_selector)
     }
 }
@@ -338,8 +338,8 @@ impl<S: Store> ArtifactStore for Session<S> {
         &self,
         artifact_selector: ArtifactSelector<Constrained>,
     ) -> impl futures_core::Stream<Item = Result<Artifact, DialogArtifactsError>>
-           + ConditionalSend
-           + 'static {
+    + ConditionalSend
+    + 'static {
         self.store.select(artifact_selector)
     }
 }
@@ -352,16 +352,16 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::{
-        predicate::{self, concept::Attributes, Fact},
         AttributeSchema, Parameters, Relation, Type,
+        predicate::{self, Fact, concept::Attributes},
     };
 
     use super::*;
 
     #[dialog_macros::test]
     async fn test_session() -> anyhow::Result<()> {
-        use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value};
         use crate::Term;
+        use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value};
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -458,8 +458,8 @@ mod tests {
 
     #[dialog_macros::test]
     async fn test_matches_complete_conepts() -> anyhow::Result<()> {
-        use crate::artifact::{Artifacts, Entity};
         use crate::Concept;
+        use crate::artifact::{Artifacts, Entity};
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();
@@ -568,8 +568,8 @@ mod tests {
 
     #[dialog_macros::test]
     async fn test_concept_planning_mixed_parameters() -> anyhow::Result<()> {
-        use crate::artifact::Type;
         use crate::Term;
+        use crate::artifact::Type;
 
         // Set up concept with attributes
         let mut attributes = HashMap::new();
@@ -599,8 +599,8 @@ mod tests {
 
     #[dialog_macros::test]
     async fn test_assert_concept() -> anyhow::Result<()> {
-        use crate::artifact::{Artifacts, Value};
         use crate::Term;
+        use crate::artifact::{Artifacts, Value};
         use dialog_storage::MemoryStorageBackend;
 
         let backend = MemoryStorageBackend::default();

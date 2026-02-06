@@ -1,7 +1,7 @@
-use super::application::Application;
 use super::Environment;
-use crate::{try_stream, EvaluationContext, Parameters, Schema, Source};
-pub use futures_util::{stream, TryStreamExt};
+use super::application::Application;
+use crate::{EvaluationContext, Parameters, Schema, Source, try_stream};
+pub use futures_util::{TryStreamExt, stream};
 use std::fmt::Display;
 
 // FactSelectorPlan's EvaluationPlan implementation is in fact_selector.rs

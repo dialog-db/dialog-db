@@ -1,7 +1,7 @@
 pub use async_stream::try_stream;
 pub use dialog_common::ConditionalSend;
 pub use futures_core::{Future, TryStream};
-pub use futures_util::{stream_select, TryStreamExt};
+pub use futures_util::{TryStreamExt, stream_select};
 use tokio::sync::mpsc::unbounded_channel;
 
 use crate::QueryError;

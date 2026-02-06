@@ -1,4 +1,4 @@
-use crate::{dsl::Input, Formula};
+use crate::{Formula, dsl::Input};
 
 /// Sum formula that adds two numbers
 #[derive(Debug, Clone, Formula)]
@@ -119,9 +119,9 @@ impl Modulo {
 
 #[cfg(test)]
 mod tests {
+    use crate::Term;
     use crate::error::FormulaEvaluationError;
     use crate::formula::math::*;
-    use crate::Term;
     use crate::*;
 
     #[test]

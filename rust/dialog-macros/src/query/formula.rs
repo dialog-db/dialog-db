@@ -2,7 +2,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields};
+use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 use super::helpers::{
     extract_doc_comments, parse_derived_attribute, to_snake_case, type_to_value_data_type,
