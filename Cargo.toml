@@ -26,6 +26,7 @@ members = [
     "rust/dialog-encoding",
     "rust/dialog-prolly-tree",
     "rust/dialog-storage",
+    "rust/dialog-s3-credentials",
 ]
 resolver = "2"
 
@@ -83,9 +84,10 @@ tempfile = "3"
 thiserror = "2"
 throbber-widgets-tui = "0.8"
 tokio = "1"
-ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "tonk" }
+ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "main", package = "ucan" }
+varsig = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "main", package = "varsig" }
 ulid = "1"
-url = "2"
+url = { version = "2", features = ["serde"] }
 wasm-bindgen = "=0.2.108"
 wasm-bindgen-futures = "0.4"
 wasm-bindgen-test = "0.3"
@@ -116,6 +118,9 @@ path = "./rust/dialog-effects"
 
 [workspace.dependencies.dialog-macros]
 path = "./rust/dialog-macros"
+
+[workspace.dependencies.dialog-s3-credentials]
+path = "./rust/dialog-s3-credentials"
 
 # [patch.crates-io]
 # # TODO: https://github.com/gwierzchowski/csv-async/issues/27
