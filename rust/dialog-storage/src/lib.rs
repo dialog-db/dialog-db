@@ -29,6 +29,8 @@
 
 extern crate self as dialog_storage;
 
+pub mod capability;
+
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub mod web;
 
@@ -39,6 +41,8 @@ mod error;
 pub use error::*;
 
 mod storage;
+#[cfg(feature = "s3")]
+pub use storage::s3;
 pub use storage::*;
 
 mod hash;
