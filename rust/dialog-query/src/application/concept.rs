@@ -686,120 +686,40 @@ mod tests {
             _ => panic!("Expected wrapped Select application"),
         }
     }
-}
 
-#[dialog_macros::test]
-async fn test_concept_application_respects_constant_entity_parameter() -> anyhow::Result<()> {
-    use crate::application::concept::ConceptApplication;
-    use crate::predicate::concept::Concept;
-    use crate::{Relation, Session, Term, Value};
-    use dialog_artifacts::{Artifacts, Attribute, Entity};
-    use dialog_storage::MemoryStorageBackend;
+    #[dialog_macros::test]
+    async fn test_concept_application_respects_constant_entity_parameter() -> anyhow::Result<()> {
+        use crate::application::concept::ConceptApplication;
+        use crate::predicate::concept::Concept;
+        use crate::{Relation, Session, Term, Value};
+        use dialog_artifacts::{Artifacts, Attribute, Entity};
+        use dialog_storage::MemoryStorageBackend;
 
-    let backend = MemoryStorageBackend::default();
-    let store = Artifacts::anonymous(backend).await?;
-    let mut session = Session::open(store);
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store);
 
-    let alice = Entity::new()?;
-    let bob = Entity::new()?;
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
 
-    session
-        .transact(vec![
-            Relation {
-                the: "person/name".parse::<Attribute>()?,
-                of: alice.clone(),
-                is: Value::String("Alice".to_string()),
-            },
-            Relation {
-                the: "person/name".parse::<Attribute>()?,
-                of: bob.clone(),
-                is: Value::String("Bob".to_string()),
-            },
-        ])
-        .await?;
+        session
+            .transact(vec![
+                Relation {
+                    the: "person/name".parse::<Attribute>()?,
+                    of: alice.clone(),
+                    is: Value::String("Alice".to_string()),
+                },
+                Relation {
+                    the: "person/name".parse::<Attribute>()?,
+                    of: bob.clone(),
+                    is: Value::String("Bob".to_string()),
+                },
+            ])
+            .await?;
 
-    let concept = Concept::Dynamic {
-        description: String::new(),
-        attributes: vec![(
-            "name",
-            crate::attribute::AttributeSchema::new(
-                "person",
-                "name",
-                "Person name",
-                crate::Type::String,
-            ),
-        )]
-        .into(),
-    };
-
-    // Query with constant entity - should only return Alice
-    let mut terms = Parameters::new();
-    terms.insert(
-        "this".to_string(),
-        Term::Constant(Value::Entity(alice.clone())),
-    );
-    terms.insert("name".to_string(), Term::var("name"));
-
-    let app = ConceptApplication { terms, concept };
-    let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(app.query(session)).await?;
-
-    assert_eq!(
-        selection.len(),
-        1,
-        "Should find only Alice, not both people"
-    );
-    assert_eq!(
-        selection[0].resolve(&Term::<Value>::var("name"))?,
-        Value::String("Alice".to_string())
-    );
-
-    Ok(())
-}
-
-#[dialog_macros::test]
-async fn test_concept_application_respects_constant_attribute_parameter() -> anyhow::Result<()> {
-    use crate::application::concept::ConceptApplication;
-    use crate::predicate::concept::Concept;
-    use crate::{Relation, Session, Term, Value};
-    use dialog_artifacts::{Artifacts, Attribute, Entity};
-    use dialog_storage::MemoryStorageBackend;
-
-    let backend = MemoryStorageBackend::default();
-    let store = Artifacts::anonymous(backend).await?;
-    let mut session = Session::open(store);
-
-    let alice = Entity::new()?;
-    let bob = Entity::new()?;
-
-    session
-        .transact(vec![
-            Relation {
-                the: "person/name".parse::<Attribute>()?,
-                of: alice.clone(),
-                is: Value::String("Alice".to_string()),
-            },
-            Relation {
-                the: "person/age".parse::<Attribute>()?,
-                of: alice.clone(),
-                is: Value::UnsignedInt(25),
-            },
-            Relation {
-                the: "person/name".parse::<Attribute>()?,
-                of: bob.clone(),
-                is: Value::String("Bob".to_string()),
-            },
-            Relation {
-                the: "person/age".parse::<Attribute>()?,
-                of: bob.clone(),
-                is: Value::UnsignedInt(30),
-            },
-        ])
-        .await?;
-
-    let concept = Concept::Dynamic {
-        description: String::new(),
-        attributes: vec![
-            (
+        let concept = Concept::Dynamic {
+            description: String::new(),
+            attributes: vec![(
                 "name",
                 crate::attribute::AttributeSchema::new(
                     "person",
@@ -807,131 +727,216 @@ async fn test_concept_application_respects_constant_attribute_parameter() -> any
                     "Person name",
                     crate::Type::String,
                 ),
-            ),
-            (
-                "age",
-                crate::attribute::AttributeSchema::new(
-                    "person",
-                    "age",
-                    "Person age",
-                    crate::Type::UnsignedInt,
-                ),
-            ),
-        ]
-        .into(),
-    };
+            )]
+            .into(),
+        };
 
-    // Query with constant name value - should only return Bob
-    let mut terms = Parameters::new();
-    terms.insert("this".to_string(), Term::var("entity"));
-    terms.insert(
-        "name".to_string(),
-        Term::Constant(Value::String("Bob".to_string())),
-    );
-    terms.insert("age".to_string(), Term::var("age"));
+        // Query with constant entity - should only return Alice
+        let mut terms = Parameters::new();
+        terms.insert(
+            "this".to_string(),
+            Term::Constant(Value::Entity(alice.clone())),
+        );
+        terms.insert("name".to_string(), Term::var("name"));
 
-    let app = ConceptApplication { terms, concept };
-    let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(app.query(session)).await?;
+        let app = ConceptApplication { terms, concept };
+        let selection =
+            futures_util::TryStreamExt::try_collect::<Vec<_>>(app.query(session)).await?;
 
-    assert_eq!(selection.len(), 1, "Should find only Bob");
-    assert_eq!(
-        selection[0].resolve(&Term::<Value>::var("entity"))?,
-        Value::Entity(bob.clone())
-    );
-    assert_eq!(
-        selection[0].resolve(&Term::<Value>::var("age"))?,
-        Value::UnsignedInt(30)
-    );
+        assert_eq!(
+            selection.len(),
+            1,
+            "Should find only Alice, not both people"
+        );
+        assert_eq!(
+            selection[0].resolve(&Term::<Value>::var("name"))?,
+            Value::String("Alice".to_string())
+        );
 
-    Ok(())
-}
+        Ok(())
+    }
 
-#[dialog_macros::test]
-async fn test_concept_application_respects_multiple_constant_parameters() -> anyhow::Result<()> {
-    use crate::application::concept::ConceptApplication;
-    use crate::predicate::concept::Concept;
-    use crate::{Relation, Session, Term, Value};
-    use dialog_artifacts::{Artifacts, Attribute, Entity};
-    use dialog_storage::MemoryStorageBackend;
+    #[dialog_macros::test]
+    async fn test_concept_application_respects_constant_attribute_parameter() -> anyhow::Result<()>
+    {
+        use crate::application::concept::ConceptApplication;
+        use crate::predicate::concept::Concept;
+        use crate::{Relation, Session, Term, Value};
+        use dialog_artifacts::{Artifacts, Attribute, Entity};
+        use dialog_storage::MemoryStorageBackend;
 
-    let backend = MemoryStorageBackend::default();
-    let store = Artifacts::anonymous(backend).await?;
-    let mut session = Session::open(store);
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store);
 
-    let alice = Entity::new()?;
-    let bob = Entity::new()?;
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
 
-    session
-        .transact(vec![
-            Relation {
-                the: "person/name".parse::<Attribute>()?,
-                of: alice.clone(),
-                is: Value::String("Alice".to_string()),
-            },
-            Relation {
-                the: "person/age".parse::<Attribute>()?,
-                of: alice.clone(),
-                is: Value::UnsignedInt(25),
-            },
-            Relation {
-                the: "person/name".parse::<Attribute>()?,
-                of: bob.clone(),
-                is: Value::String("Bob".to_string()),
-            },
-            Relation {
-                the: "person/age".parse::<Attribute>()?,
-                of: bob.clone(),
-                is: Value::UnsignedInt(30),
-            },
-        ])
-        .await?;
+        session
+            .transact(vec![
+                Relation {
+                    the: "person/name".parse::<Attribute>()?,
+                    of: alice.clone(),
+                    is: Value::String("Alice".to_string()),
+                },
+                Relation {
+                    the: "person/age".parse::<Attribute>()?,
+                    of: alice.clone(),
+                    is: Value::UnsignedInt(25),
+                },
+                Relation {
+                    the: "person/name".parse::<Attribute>()?,
+                    of: bob.clone(),
+                    is: Value::String("Bob".to_string()),
+                },
+                Relation {
+                    the: "person/age".parse::<Attribute>()?,
+                    of: bob.clone(),
+                    is: Value::UnsignedInt(30),
+                },
+            ])
+            .await?;
 
-    let concept = Concept::Dynamic {
-        description: String::new(),
-        attributes: vec![
-            (
-                "name",
-                crate::attribute::AttributeSchema::new(
-                    "person",
+        let concept = Concept::Dynamic {
+            description: String::new(),
+            attributes: vec![
+                (
                     "name",
-                    "Person name",
-                    crate::Type::String,
+                    crate::attribute::AttributeSchema::new(
+                        "person",
+                        "name",
+                        "Person name",
+                        crate::Type::String,
+                    ),
                 ),
-            ),
-            (
-                "age",
-                crate::attribute::AttributeSchema::new(
-                    "person",
+                (
                     "age",
-                    "Person age",
-                    crate::Type::UnsignedInt,
+                    crate::attribute::AttributeSchema::new(
+                        "person",
+                        "age",
+                        "Person age",
+                        crate::Type::UnsignedInt,
+                    ),
                 ),
-            ),
-        ]
-        .into(),
-    };
+            ]
+            .into(),
+        };
 
-    // Query with both name and age constants - should only match Alice
-    let mut terms = Parameters::new();
-    terms.insert("this".to_string(), Term::var("entity"));
-    terms.insert(
-        "name".to_string(),
-        Term::Constant(Value::String("Alice".to_string())),
-    );
-    terms.insert("age".to_string(), Term::Constant(Value::UnsignedInt(25)));
+        // Query with constant name value - should only return Bob
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert(
+            "name".to_string(),
+            Term::Constant(Value::String("Bob".to_string())),
+        );
+        terms.insert("age".to_string(), Term::var("age"));
 
-    let app = ConceptApplication { terms, concept };
-    let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(app.query(session)).await?;
+        let app = ConceptApplication { terms, concept };
+        let selection =
+            futures_util::TryStreamExt::try_collect::<Vec<_>>(app.query(session)).await?;
 
-    assert_eq!(
-        selection.len(),
-        1,
-        "Should find only Alice with exact name and age match"
-    );
-    assert_eq!(
-        selection[0].resolve(&Term::<Value>::var("entity"))?,
-        Value::Entity(alice.clone())
-    );
+        assert_eq!(selection.len(), 1, "Should find only Bob");
+        assert_eq!(
+            selection[0].resolve(&Term::<Value>::var("entity"))?,
+            Value::Entity(bob.clone())
+        );
+        assert_eq!(
+            selection[0].resolve(&Term::<Value>::var("age"))?,
+            Value::UnsignedInt(30)
+        );
 
-    Ok(())
+        Ok(())
+    }
+
+    #[dialog_macros::test]
+    async fn test_concept_application_respects_multiple_constant_parameters() -> anyhow::Result<()>
+    {
+        use crate::application::concept::ConceptApplication;
+        use crate::predicate::concept::Concept;
+        use crate::{Relation, Session, Term, Value};
+        use dialog_artifacts::{Artifacts, Attribute, Entity};
+        use dialog_storage::MemoryStorageBackend;
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store);
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        session
+            .transact(vec![
+                Relation {
+                    the: "person/name".parse::<Attribute>()?,
+                    of: alice.clone(),
+                    is: Value::String("Alice".to_string()),
+                },
+                Relation {
+                    the: "person/age".parse::<Attribute>()?,
+                    of: alice.clone(),
+                    is: Value::UnsignedInt(25),
+                },
+                Relation {
+                    the: "person/name".parse::<Attribute>()?,
+                    of: bob.clone(),
+                    is: Value::String("Bob".to_string()),
+                },
+                Relation {
+                    the: "person/age".parse::<Attribute>()?,
+                    of: bob.clone(),
+                    is: Value::UnsignedInt(30),
+                },
+            ])
+            .await?;
+
+        let concept = Concept::Dynamic {
+            description: String::new(),
+            attributes: vec![
+                (
+                    "name",
+                    crate::attribute::AttributeSchema::new(
+                        "person",
+                        "name",
+                        "Person name",
+                        crate::Type::String,
+                    ),
+                ),
+                (
+                    "age",
+                    crate::attribute::AttributeSchema::new(
+                        "person",
+                        "age",
+                        "Person age",
+                        crate::Type::UnsignedInt,
+                    ),
+                ),
+            ]
+            .into(),
+        };
+
+        // Query with both name and age constants - should only match Alice
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("entity"));
+        terms.insert(
+            "name".to_string(),
+            Term::Constant(Value::String("Alice".to_string())),
+        );
+        terms.insert("age".to_string(), Term::Constant(Value::UnsignedInt(25)));
+
+        let app = ConceptApplication { terms, concept };
+        let selection =
+            futures_util::TryStreamExt::try_collect::<Vec<_>>(app.query(session)).await?;
+
+        assert_eq!(
+            selection.len(),
+            1,
+            "Should find only Alice with exact name and age match"
+        );
+        assert_eq!(
+            selection[0].resolve(&Term::<Value>::var("entity"))?,
+            Value::Entity(alice.clone())
+        );
+
+        Ok(())
+    }
 }
