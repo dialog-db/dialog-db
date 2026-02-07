@@ -81,9 +81,10 @@ pub enum DialogAsyncError {
 /// ```rust,no_run
 /// use dialog_common::r#async::{spawn, DialogAsyncError};
 ///
+/// # async fn expensive_computation() {}
 /// # async fn example() -> Result<(), DialogAsyncError> {
 /// let result = spawn(async {
-///     42 // your async computation here
+///     expensive_computation().await
 /// }).await?;
 /// # Ok(())
 /// # }
