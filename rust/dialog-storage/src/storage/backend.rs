@@ -18,7 +18,7 @@ pub use indexeddb::*;
 #[cfg(feature = "s3")]
 pub mod s3;
 #[cfg(feature = "s3")]
-pub use s3::{Bucket, S3StorageError};
+pub use s3::{Bucket, S3, S3StorageError};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod fs;
@@ -61,7 +61,7 @@ pub trait TransactionalMemoryBackend: Clone {
     /// Loads content and its current edition from storage.
     /// Returns None if the key doesn't exist.
     async fn resolve(
-        &self,
+        &mut self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error>;
 
@@ -73,7 +73,7 @@ pub trait TransactionalMemoryBackend: Clone {
     ///
     /// Returns the new edition on success, or error if CAS check fails.
     async fn replace(
-        &self,
+        &mut self,
         address: &Self::Address,
         edition: Option<&Self::Edition>,
         content: Option<Self::Value>,
@@ -143,14 +143,14 @@ where
     type Edition = T::Edition;
 
     async fn resolve(
-        &self,
+        &mut self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
         (**self).resolve(address).await
     }
 
     async fn replace(
-        &self,
+        &mut self,
         address: &Self::Address,
         edition: Option<&Self::Edition>,
         content: Option<Self::Value>,
@@ -192,20 +192,20 @@ where
     type Edition = T::Edition;
 
     async fn resolve(
-        &self,
+        &mut self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
-        let inner = self.lock().await;
+        let mut inner = self.lock().await;
         inner.resolve(address).await
     }
 
     async fn replace(
-        &self,
+        &mut self,
         address: &Self::Address,
         edition: Option<&Self::Edition>,
         content: Option<Self::Value>,
     ) -> Result<Option<Self::Edition>, Self::Error> {
-        let inner = self.lock().await;
+        let mut inner = self.lock().await;
         inner.replace(address, edition, content).await
     }
 }
