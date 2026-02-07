@@ -32,7 +32,7 @@ use std::{pin::Pin, str::FromStr, sync::Arc};
 
 use base58::{FromBase58, ToBase58};
 use dialog_storage::{
-    Blake3Hash, IndexedDbStorageBackend, StorageCache, web::ObjectSafeStorageBackend,
+    Blake3Hash, HashType, IndexedDbStorageBackend, StorageCache, web::ObjectSafeStorageBackend,
 };
 use futures_util::{Stream, StreamExt};
 use rand::{Rng, distributions::Alphanumeric};
@@ -42,7 +42,7 @@ use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
     Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute, Cause,
-    DialogArtifactsError, Entity, HASH_SIZE, Instruction, Value, ValueDataType,
+    DialogArtifactsError, Entity, Instruction, Value, ValueDataType,
     artifacts::selector::Constrained,
 };
 
@@ -281,7 +281,8 @@ impl ArtifactsBinding {
         let revision = if let Some(revision) = revision {
             Some(Blake3Hash::try_from(revision).map_err(|bytes: Vec<u8>| {
                 DialogArtifactsError::InvalidRevision(format!(
-                    "Incorrect byte length (expected {HASH_SIZE}, received {})",
+                    "Incorrect byte length (expected {}, received {})",
+                    Blake3Hash::SIZE,
                     bytes.len()
                 ))
             })?)
@@ -441,7 +442,7 @@ impl From<Entity> for JsValue {
 
 impl From<Cause> for JsValue {
     fn from(value: Cause) -> Self {
-        let result = Uint8Array::new_with_length(HASH_SIZE as u32);
+        let result = Uint8Array::new_with_length(<Blake3Hash as HashType>::SIZE as u32);
         result.copy_from(value.as_ref());
         JsValue::from(result)
     }

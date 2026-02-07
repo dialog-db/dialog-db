@@ -9,7 +9,7 @@ on:
       # requests)
       - patches/*
 
-name: 'Test'
+name: "Test"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -17,8 +17,8 @@ concurrency:
 
 jobs:
   lint_nix:
-    name: 'Lint Nix'
-    runs-on: 'ubuntu-latest'
+    name: "Lint Nix"
+    runs-on: "ubuntu-latest"
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/flake-checker-action@main
@@ -27,34 +27,34 @@ jobs:
           ignore-missing-flake-lock: false
 
   lint_rust:
-    name: 'Lint Rust'
-    needs: ['lint_nix']
-    runs-on: 'ubuntu-latest'
+    name: "Lint Rust"
+    needs: ["lint_nix"]
+    runs-on: "ubuntu-latest"
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-nix
-      - name: 'Run lints'
+      - name: "Run lints"
         shell: bash
         run: |
           nix develop --command cargo fmt --all -- --check
           nix develop --command cargo clippy --all -- -D warnings
 
   lints:
-    name: 'Lints'
-    needs: ['lint_nix', 'lint_rust']
-    runs-on: 'ubuntu-latest'
+    name: "Lints"
+    needs: ["lint_nix", "lint_rust"]
+    runs-on: "ubuntu-latest"
     steps:
       - run: echo "Lints are good!"
 
   npm_packages:
-    name: 'NPM Packages'
-    needs: ['lints']
-    runs-on: 'macos-latest'
+    name: "NPM Packages"
+    needs: ["lints"]
+    runs-on: "macos-latest"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
       - uses: ./.github/actions/setup-nix
-      - name: 'Run `npm test`'
+      - name: "Run `npm test`"
         shell: bash
         run: |
           nix build .#npm-packages
@@ -86,24 +86,24 @@ jobs:
           path: ./result/@dialog-db/experimental
 
   rust_crates:
-    name: 'Rust Crates'
-    needs: ['lints']
-    runs-on: 'ubuntu-latest'
+    name: "Rust Crates"
+    needs: ["lints"]
+    runs-on: "ubuntu-latest"
     strategy:
       matrix:
         include:
-          - flags: '--features s3,s3-list,integration-tests'
-          - flags: '--features s3,s3-list,integration-tests --release'
-          - flags: '--features s3,s3-list --target wasm32-unknown-unknown'
-          - flags: '--features s3,s3-list --target wasm32-unknown-unknown --release'
+          - flags: "--features s3,s3-list,ucan,integration-tests"
+          - flags: "--features s3,s3-list,ucan,integration-tests --release"
+          - flags: "--features s3,s3-list,ucan --target wasm32-unknown-unknown"
+          - flags: "--features s3,s3-list,ucan --target wasm32-unknown-unknown --release"
           # web (wasm) integration tests
-          - flags: '--features s3,s3-list,web-integration-tests'
-          - flags: '--features s3,s3-list,web-integration-tests'
+          - flags: "--features s3,s3-list,ucan,web-integration-tests"
+          - flags: "--features s3,s3-list,ucan,web-integration-tests"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
       - uses: ./.github/actions/setup-nix
-      - name: 'Run `cargo test`'
+      - name: "Run `cargo test`"
         shell: bash
         run: |
           # Ensure we don't pick up a built-in chrome / chromedriver

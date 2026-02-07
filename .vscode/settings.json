@@ -1,10 +1,11 @@
 {
-    "rust-analyzer.cargo.target": null,
+    "rust-analyzer.cargo.target": "wasm32-unknown-unknown",
     "rust-analyzer.procMacro.ignored": {
         "async-trait": [
             "async_trait"
         ]
     },
+    "rust-analyzer.diagnostics.disabled": ["proc-macro-disabled"],
     "[github-actions-workflow]": {
         "prettier.singleQuote": true
     },

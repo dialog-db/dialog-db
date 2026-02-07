@@ -3,6 +3,8 @@
 //! The `Authorization` trait represents proof of authority over a capability.
 
 use crate::{Authority, DialogCapabilityAuthorizationError, subject::Did};
+use async_trait::async_trait;
+use dialog_common::{ConditionalSend, ConditionalSync};
 
 /// Trait for proof of authority over a capability.
 ///
@@ -11,7 +13,9 @@ use crate::{Authority, DialogCapabilityAuthorizationError, subject::Did};
 ///
 /// - Self-issued (when subject == audience, i.e., owner acting directly)
 /// - Derived from a delegation chain
-pub trait Authorization: Sized {
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
+pub trait Authorization: Sized + ConditionalSend {
     /// The subject (resource owner) this authorization covers.
     fn subject(&self) -> &Did;
 
@@ -21,8 +25,8 @@ pub trait Authorization: Sized {
     /// The ability path this authorization permits.
     fn ability(&self) -> &str;
 
-    /// Creates authorized invocation
-    fn invoke<A: Authority>(
+    /// Creates authorized invocation by signing with the provided authority.
+    async fn invoke<A: Authority + ConditionalSend + ConditionalSync>(
         &self,
         authority: &A,
     ) -> Result<Self, DialogCapabilityAuthorizationError>;
