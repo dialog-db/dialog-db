@@ -132,7 +132,7 @@
 //!
 //! | Type | Role | Example |
 //! |------|------|---------|
-//! | [`Subject`] | Root of chains (a DID) | `Subject::from("did:key:z6Mk...")` |
+//! | [`Subject`] | Root of chains (a DID) | `Subject::from(did!("key:z6Mk..."))` |
 //! | [`Capability<T>`] | Complete capability chain | `Capability<Get>` |
 //! | [`Constrained<P, Of>`] | Internal chain element | (used internally) |
 //!
