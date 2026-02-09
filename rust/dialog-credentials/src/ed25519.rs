@@ -21,7 +21,7 @@ pub use crate::key::KeyExport;
 pub use error::{Ed25519DidFromStrError, Ed25519KeyError, Ed25519ResolveError, Ed25519SignerError};
 pub use resolver::Ed25519KeyResolver;
 pub use signer::Ed25519Signer;
-pub use verifier::Ed25519Principal;
+pub use verifier::Ed25519Verifier;
 
 // Re-export WebCrypto types on WASM
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]

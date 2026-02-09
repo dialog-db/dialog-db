@@ -1,6 +1,6 @@
 //! Ed25519 DID principal and verifier.
 
-use super::{error::Ed25519DidFromStrError, Ed25519Signature, Ed25519VerifyingKey};
+use super::{Ed25519Signature, Ed25519VerifyingKey, error::Ed25519DidFromStrError};
 use base58::ToBase58;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::str::FromStr;
@@ -9,28 +9,28 @@ use varsig::{Did, Principal, Verifier};
 /// An `Ed25519` `did:key`.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(missing_copy_implementations)] // Ed25519VerifyingKey is not Copy on WASM
-pub struct Ed25519Principal(pub Ed25519VerifyingKey);
+pub struct Ed25519Verifier(pub Ed25519VerifyingKey);
 
-impl From<Ed25519VerifyingKey> for Ed25519Principal {
+impl From<Ed25519VerifyingKey> for Ed25519Verifier {
     fn from(key: Ed25519VerifyingKey) -> Self {
-        Ed25519Principal(key)
+        Ed25519Verifier(key)
     }
 }
 
-impl From<ed25519_dalek::VerifyingKey> for Ed25519Principal {
+impl From<ed25519_dalek::VerifyingKey> for Ed25519Verifier {
     fn from(key: ed25519_dalek::VerifyingKey) -> Self {
-        Ed25519Principal(Ed25519VerifyingKey::Native(key))
+        Ed25519Verifier(Ed25519VerifyingKey::Native(key))
     }
 }
 
-impl From<ed25519_dalek::SigningKey> for Ed25519Principal {
+impl From<ed25519_dalek::SigningKey> for Ed25519Verifier {
     fn from(key: ed25519_dalek::SigningKey) -> Self {
         let verifying_key = Ed25519VerifyingKey::Native(key.verifying_key());
-        Ed25519Principal(verifying_key)
+        Ed25519Verifier(verifying_key)
     }
 }
 
-impl std::fmt::Display for Ed25519Principal {
+impl std::fmt::Display for Ed25519Verifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut raw_bytes = Vec::with_capacity(34);
         raw_bytes.push(0xed);
@@ -41,7 +41,7 @@ impl std::fmt::Display for Ed25519Principal {
     }
 }
 
-impl FromStr for Ed25519Principal {
+impl FromStr for Ed25519Verifier {
     type Err = Ed25519DidFromStrError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -73,12 +73,11 @@ impl FromStr for Ed25519Principal {
             .map_err(|_| Ed25519DidFromStrError::InvalidKey)?;
         let key = ed25519_dalek::VerifyingKey::from_bytes(&key_arr)
             .map_err(|_| Ed25519DidFromStrError::InvalidKey)?;
-        Ok(Ed25519Principal(Ed25519VerifyingKey::Native(key)))
+        Ok(Ed25519Verifier(Ed25519VerifyingKey::Native(key)))
     }
 }
 
-// Verifier impl for Ed25519Principal
-impl Verifier<Ed25519Signature> for Ed25519Principal {
+impl Verifier<Ed25519Signature> for Ed25519Verifier {
     async fn verify(
         &self,
         msg: &[u8],
@@ -88,14 +87,13 @@ impl Verifier<Ed25519Signature> for Ed25519Principal {
     }
 }
 
-// Principal impl for Ed25519Principal
-impl Principal for Ed25519Principal {
+impl Principal for Ed25519Verifier {
     fn did(&self) -> Did {
         self.to_string().parse().expect("valid DID string")
     }
 }
 
-impl Serialize for Ed25519Principal {
+impl Serialize for Ed25519Verifier {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -104,7 +102,7 @@ impl Serialize for Ed25519Principal {
     }
 }
 
-impl<'de> Deserialize<'de> for Ed25519Principal {
+impl<'de> Deserialize<'de> for Ed25519Verifier {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -112,7 +110,7 @@ impl<'de> Deserialize<'de> for Ed25519Principal {
         struct DidKeyVisitor;
 
         impl serde::de::Visitor<'_> for DidKeyVisitor {
-            type Value = Ed25519Principal;
+            type Value = Ed25519Verifier;
 
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str("a did:key string containing an ed25519 public key")
@@ -162,7 +160,7 @@ impl<'de> Deserialize<'de> for Ed25519Principal {
                     ))
                 })?;
 
-                Ok(Ed25519Principal(Ed25519VerifyingKey::Native(vk)))
+                Ok(Ed25519Verifier(Ed25519VerifyingKey::Native(vk)))
             }
         }
 
@@ -183,15 +181,15 @@ mod tests {
     #[dialog_common::test]
     fn ed25519_did_display_roundtrip() {
         let vk = test_verifying_key(0);
-        let principal = Ed25519Principal(vk);
+        let principal = Ed25519Verifier(vk);
         let did_string = principal.to_string();
-        let parsed: Ed25519Principal = did_string.parse().unwrap();
+        let parsed: Ed25519Verifier = did_string.parse().unwrap();
         assert_eq!(parsed, principal);
     }
 
     #[dialog_common::test]
     fn ed25519_did_from_str_invalid_header() {
-        let result: Result<Ed25519Principal, _> = "not:a:did".parse();
+        let result: Result<Ed25519Verifier, _> = "not:a:did".parse();
         assert!(matches!(
             result,
             Err(Ed25519DidFromStrError::InvalidDidHeader)
@@ -200,7 +198,7 @@ mod tests {
 
     #[dialog_common::test]
     fn ed25519_did_from_str_missing_prefix() {
-        let result: Result<Ed25519Principal, _> = "did:key:abc".parse();
+        let result: Result<Ed25519Verifier, _> = "did:key:abc".parse();
         assert!(matches!(
             result,
             Err(Ed25519DidFromStrError::MissingBase58Prefix)

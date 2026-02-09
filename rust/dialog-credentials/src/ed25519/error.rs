@@ -92,7 +92,7 @@ impl From<Ed25519KeyError> for Ed25519SignerError {
     }
 }
 
-/// Errors that can occur when parsing an `Ed25519Principal` from a string.
+/// Errors that can occur when parsing an `Ed25519Verifier` from a string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Error)]
 pub enum Ed25519DidFromStrError {
     /// The DID header is invalid.

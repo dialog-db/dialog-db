@@ -84,8 +84,5 @@ async fn issue_wildcard_delegation() {
         .unwrap();
 
     assert_eq!(delegation.subject(), &Subject::Any);
-    delegation
-        .verify_signature(&resolver)
-        .await
-        .unwrap();
+    delegation.verify_signature(&resolver).await.unwrap();
 }

@@ -1,9 +1,9 @@
 //! Ed25519 signer implementation.
 
-use super::{error::Ed25519SignerError, verifier::Ed25519Principal, Ed25519SigningKey};
+use super::{Ed25519SigningKey, error::Ed25519SignerError, verifier::Ed25519Verifier};
 use crate::key::KeyExport;
 use serde::Serialize;
-use varsig::{eddsa::Ed25519Signature, Did, Principal, Signer};
+use varsig::{Did, Principal, Signer, eddsa::Ed25519Signature};
 
 // Re-import WebCrypto types on WASM
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -18,13 +18,13 @@ use crate::key::{ExtractableKey, WebCryptoError};
 /// On WASM, it can also wrap a `WebCrypto` `CryptoKey` for non-extractable key support.
 #[derive(Debug, Clone)]
 pub struct Ed25519Signer {
-    did: Ed25519Principal,
+    did: Ed25519Verifier,
     signer: Ed25519SigningKey,
 }
 
 impl From<Ed25519SigningKey> for Ed25519Signer {
     fn from(signer: Ed25519SigningKey) -> Self {
-        let did = Ed25519Principal::from(signer.verifying_key());
+        let did = Ed25519Verifier::from(signer.verifying_key());
         Self { did, signer }
     }
 }
@@ -66,7 +66,7 @@ impl Ed25519Signer {
 
     /// Get the associated Ed25519 DID (verifier).
     #[must_use]
-    pub const fn ed25519_did(&self) -> &Ed25519Principal {
+    pub const fn ed25519_did(&self) -> &Ed25519Verifier {
         &self.did
     }
 
@@ -161,7 +161,7 @@ mod tests {
     async fn ed25519_did_round_trip() {
         let signer = test_signer(0).await;
         let did_string = signer.ed25519_did().to_string();
-        let parsed: Ed25519Principal = did_string.parse().unwrap();
+        let parsed: Ed25519Verifier = did_string.parse().unwrap();
         assert_eq!(parsed, signer.ed25519_did().clone());
     }
 
@@ -175,7 +175,7 @@ mod tests {
             .unwrap();
 
         let did = signer.ed25519_did();
-        <Ed25519Principal as varsig::Verifier<Ed25519Signature>>::verify(did, msg, &signature)
+        <Ed25519Verifier as varsig::Verifier<Ed25519Signature>>::verify(did, msg, &signature)
             .await
             .unwrap();
     }
@@ -199,10 +199,10 @@ mod tests {
         );
 
         let did = signer.ed25519_did();
-        <Ed25519Principal as varsig::Verifier<Ed25519Signature>>::verify(did, msg1, &sig1)
+        <Ed25519Verifier as varsig::Verifier<Ed25519Signature>>::verify(did, msg1, &sig1)
             .await
             .unwrap();
-        <Ed25519Principal as varsig::Verifier<Ed25519Signature>>::verify(did, msg2, &sig2)
+        <Ed25519Verifier as varsig::Verifier<Ed25519Signature>>::verify(did, msg2, &sig2)
             .await
             .unwrap();
     }
@@ -219,7 +219,7 @@ mod tests {
 
         let did = signer.ed25519_did();
         assert!(
-            <Ed25519Principal as varsig::Verifier<Ed25519Signature>>::verify(
+            <Ed25519Verifier as varsig::Verifier<Ed25519Signature>>::verify(
                 did, wrong_msg, &signature
             )
             .await
@@ -244,7 +244,7 @@ mod tests {
         assert_ne!(sig1, sig2);
 
         assert!(
-            <Ed25519Principal as varsig::Verifier<Ed25519Signature>>::verify(
+            <Ed25519Verifier as varsig::Verifier<Ed25519Signature>>::verify(
                 signer1.ed25519_did(),
                 msg,
                 &sig1
@@ -253,7 +253,7 @@ mod tests {
             .is_ok()
         );
         assert!(
-            <Ed25519Principal as varsig::Verifier<Ed25519Signature>>::verify(
+            <Ed25519Verifier as varsig::Verifier<Ed25519Signature>>::verify(
                 signer2.ed25519_did(),
                 msg,
                 &sig2
@@ -264,7 +264,7 @@ mod tests {
 
         // Cross-verification should fail
         assert!(
-            <Ed25519Principal as varsig::Verifier<Ed25519Signature>>::verify(
+            <Ed25519Verifier as varsig::Verifier<Ed25519Signature>>::verify(
                 signer1.ed25519_did(),
                 msg,
                 &sig2
@@ -273,7 +273,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            <Ed25519Principal as varsig::Verifier<Ed25519Signature>>::verify(
+            <Ed25519Verifier as varsig::Verifier<Ed25519Signature>>::verify(
                 signer2.ed25519_did(),
                 msg,
                 &sig1
@@ -309,7 +309,7 @@ mod tests {
         let signature = <Ed25519Signer as Signer<Ed25519Signature>>::sign(&restored, msg)
             .await
             .unwrap();
-        <Ed25519Principal as varsig::Verifier<Ed25519Signature>>::verify(
+        <Ed25519Verifier as varsig::Verifier<Ed25519Signature>>::verify(
             signer.ed25519_did(),
             msg,
             &signature,
@@ -365,7 +365,7 @@ mod tests {
         let sig = <Ed25519Signer as Signer<Ed25519Signature>>::sign(&restored2, msg)
             .await
             .unwrap();
-        <Ed25519Principal as varsig::Verifier<Ed25519Signature>>::verify(
+        <Ed25519Verifier as varsig::Verifier<Ed25519Signature>>::verify(
             signer.ed25519_did(),
             msg,
             &sig,
@@ -404,7 +404,7 @@ mod wasm_tests {
             did_string
         );
 
-        let parsed: Result<Ed25519Principal, _> = did_string.parse();
+        let parsed: Result<Ed25519Verifier, _> = did_string.parse();
         assert!(parsed.is_ok(), "DID should be parseable");
         assert_eq!(parsed.unwrap(), signer.ed25519_did().clone());
     }
@@ -455,7 +455,7 @@ mod wasm_tests {
             .unwrap();
 
         let result =
-            <Ed25519Principal as varsig::Verifier<Ed25519Signature>>::verify(did, msg, &signature)
+            <Ed25519Verifier as varsig::Verifier<Ed25519Signature>>::verify(did, msg, &signature)
                 .await;
         assert!(
             result.is_ok(),
@@ -508,7 +508,7 @@ mod wasm_tests {
         let sig = <Ed25519Signer as Signer<Ed25519Signature>>::sign(&restored, msg)
             .await
             .unwrap();
-        <Ed25519Principal as varsig::Verifier<Ed25519Signature>>::verify(
+        <Ed25519Verifier as varsig::Verifier<Ed25519Signature>>::verify(
             signer.ed25519_did(),
             msg,
             &sig,
@@ -541,7 +541,7 @@ mod wasm_tests {
         let sig = <Ed25519Signer as Signer<Ed25519Signature>>::sign(&restored, msg)
             .await
             .unwrap();
-        <Ed25519Principal as varsig::Verifier<Ed25519Signature>>::verify(
+        <Ed25519Verifier as varsig::Verifier<Ed25519Signature>>::verify(
             signer.ed25519_did(),
             msg,
             &sig,
@@ -557,7 +557,7 @@ mod wasm_tests {
         let web_signer = Ed25519Signer::import(&seed).await.unwrap();
 
         let native_signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
-        let native_did: Ed25519Principal = native_signing_key.verifying_key().into();
+        let native_did: Ed25519Verifier = native_signing_key.verifying_key().into();
 
         let web_did = web_signer.ed25519_did();
 
@@ -572,7 +572,7 @@ mod wasm_tests {
             .unwrap();
 
         assert!(
-            <Ed25519Principal as varsig::Verifier<Ed25519Signature>>::verify(
+            <Ed25519Verifier as varsig::Verifier<Ed25519Signature>>::verify(
                 &native_did,
                 msg,
                 &signature
