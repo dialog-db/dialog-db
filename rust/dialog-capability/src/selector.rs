@@ -71,14 +71,14 @@ mod tests {
 
     #[test]
     fn it_selects_subject_from_itself() {
-        let subject = Subject::from("did:key:test");
+        let subject = Subject::from(did!("key:test"));
         let selected: &Subject = subject.select();
-        assert_eq!(selected.0, "did:key:test");
+        assert_eq!(selected.0, did!("key:test"));
     }
 
     #[test]
     fn it_selects_head_from_constrained() {
-        let cap = Subject::from("did:key:test").attenuate(Level1);
+        let cap = Subject::from(did!("key:test")).attenuate(Level1);
 
         // Select the head (Level1)
         let level1: &Level1 = cap.policy();
@@ -87,16 +87,16 @@ mod tests {
 
     #[test]
     fn it_selects_subject_from_chain() {
-        let cap = Subject::from("did:key:test").attenuate(Level1);
+        let cap = Subject::from(did!("key:test")).attenuate(Level1);
 
         // Subject is in the tail, accessed via There<Here>
         let subject: &Subject = cap.policy();
-        assert_eq!(subject.0, "did:key:test");
+        assert_eq!(subject.0, did!("key:test"));
     }
 
     #[test]
     fn it_selects_from_deep_chain() {
-        let cap = Subject::from("did:key:test")
+        let cap = Subject::from(did!("key:test"))
             .attenuate(Level1)
             .attenuate(Level2 { value: 42 })
             .invoke(Level3 {
@@ -117,6 +117,6 @@ mod tests {
 
         // Select Subject (at the root)
         let subject: &Subject = cap.policy();
-        assert_eq!(subject.0, "did:key:test");
+        assert_eq!(subject.0, did!("key:test"));
     }
 }

@@ -17,5 +17,7 @@ dialog-common = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
+signature = { workspace = true }
+varsig = { workspace = true }
 ipld-core = { workspace = true, optional = true }
 ucan = { workspace = true, optional = true }

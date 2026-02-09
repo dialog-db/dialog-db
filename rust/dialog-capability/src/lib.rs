@@ -10,7 +10,7 @@
 //!
 //! ```rust
 //! # mod example {
-//! use dialog_capability::{Subject, Ability, Attenuation, Policy, Effect};
+//! use dialog_capability::{did, Subject, Did, Ability, Attenuation, Policy, Effect};
 //! use serde::{Serialize, Deserialize};
 //!
 //! // Attenuation: narrows ability (adds "/storage" to path) and adds parameters
@@ -37,7 +37,7 @@
 //!
 //! pub fn example() {
 //!     // Build a capability chain
-//!     let capability = Subject::from("did:key:z6MkhaXgBZD...")
+//!     let capability = Subject::from(did!("key:z6MkhaXgBZD..."))
 //!         .attenuate(Storage)                        // ability: /storage
 //!         .attenuate(Store { name: "index".into() }) // ability: /storage (unchanged)
 //!         .invoke(Get { key: b"my-key".to_vec() });  // ability: /storage/get
@@ -156,6 +156,9 @@
 
 mod error;
 pub use error::*;
+
+pub mod signature;
+pub use signature::*;
 
 mod selector;
 pub use selector::*;

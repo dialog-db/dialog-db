@@ -23,7 +23,7 @@
 //!
 //! ```no_run
 //! use dialog_storage::provider::FileSystem;
-//! use dialog_capability::Subject;
+//! use dialog_capability::{did, Did, Subject};
 //! use dialog_effects::archive::{Archive, Catalog, Get};
 //! use dialog_common::Blake3Hash;
 //! use std::path::PathBuf;
@@ -32,7 +32,7 @@
 //! let mut provider = FileSystem::mount("file:///tmp/storage")?;
 //! let digest = Blake3Hash::hash(b"hello");
 //!
-//! let effect = Subject::from("did:key:z6Mk...")
+//! let effect = Subject::from(did!("key:z6Mk..."))
 //!     .attenuate(Archive)
 //!     .attenuate(Catalog::new("index"))
 //!     .invoke(Get::new(digest));
@@ -263,11 +263,12 @@ impl Location {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dialog_capability::did;
 
     #[dialog_common::test]
     fn it_generates_correct_paths() {
         let provider: FileSystem = "file:///root/".try_into().unwrap();
-        let subject = Did::from("did:key:z6MkTest");
+        let subject = did!("key:z6MkTest");
 
         // Archive path
         let archive = provider.archive(&subject).unwrap();
@@ -289,7 +290,7 @@ mod tests {
     #[dialog_common::test]
     fn it_allows_nested_paths() {
         let provider: FileSystem = "file:///root/".try_into().unwrap();
-        let subject = Did::from("did:key:z6MkTest");
+        let subject = did!("key:z6MkTest");
 
         // Nested space path should work
         let memory = provider.memory(&subject).unwrap();
@@ -308,7 +309,7 @@ mod tests {
     #[dialog_common::test]
     fn it_prevents_containment_escape_via_dotdot() {
         let provider: FileSystem = "file:///root/".try_into().unwrap();
-        let subject = Did::from("did:key:z6MkTest");
+        let subject = did!("key:z6MkTest");
 
         // Attempt to escape via ..
         let memory = provider.memory(&subject).unwrap();
@@ -320,7 +321,7 @@ mod tests {
     #[dialog_common::test]
     fn it_handles_absolute_looking_path() {
         let provider: FileSystem = "file:///root/".try_into().unwrap();
-        let subject = Did::from("did:key:z6MkTest");
+        let subject = did!("key:z6MkTest");
 
         // With "./" prefix, "/etc/passwd" becomes ".//etc/passwd" which URL normalizes
         let archive = provider.archive(&subject).unwrap();
@@ -348,7 +349,7 @@ mod tests {
     #[dialog_common::test]
     fn it_prevents_escape_via_encoded_dotdot() {
         let provider: FileSystem = "file:///root/".try_into().unwrap();
-        let subject = Did::from("did:key:z6MkTest");
+        let subject = did!("key:z6MkTest");
 
         // URL decodes %2e%2e to .. during join, so this should be caught
         let memory = provider.memory(&subject).unwrap();
@@ -359,7 +360,7 @@ mod tests {
     #[dialog_common::test]
     fn it_prevents_deep_escape() {
         let provider: FileSystem = "file:///root/".try_into().unwrap();
-        let subject = Did::from("did:key:z6MkTest");
+        let subject = did!("key:z6MkTest");
 
         // Try to escape multiple levels
         let memory = provider.memory(&subject).unwrap();

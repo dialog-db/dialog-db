@@ -2,7 +2,7 @@
 //!
 //! The `Authorization` trait represents proof of authority over a capability.
 
-use crate::{Authority, DialogCapabilityAuthorizationError, subject::Did};
+use crate::{Authority, DialogCapabilityAuthorizationError, Did};
 
 /// Trait for proof of authority over a capability.
 ///

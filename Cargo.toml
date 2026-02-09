@@ -83,7 +83,9 @@ tempfile = "3"
 thiserror = "2"
 throbber-widgets-tui = "0.8"
 tokio = "1"
-ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "tonk" }
+signature = "2.2"
+ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "feat/lib-redesign" }
+varsig = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "feat/lib-redesign" }
 ulid = "1"
 url = "2"
 wasm-bindgen = "=0.2.108"

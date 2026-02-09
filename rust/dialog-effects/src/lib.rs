@@ -14,12 +14,10 @@
 //!
 //! ```
 //! use dialog_effects::storage::{Storage, Store, Get};
-//! use dialog_capability::Subject;
-//!
-//! let subject = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+//! use dialog_capability::{did, Subject};
 //!
 //! // Build a capability to get a value from the "index" store
-//! let get_capability = Subject::from(subject)
+//! let get_capability = Subject::from(did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"))
 //!     .attenuate(Storage)              // Domain: storage operations
 //!     .attenuate(Store::new("index"))  // Policy: only the "index" store
 //!     .invoke(Get::new(b"my-key"));    // Effect: get this specific key
