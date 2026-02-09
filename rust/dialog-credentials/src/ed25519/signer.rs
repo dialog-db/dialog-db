@@ -377,13 +377,10 @@ mod tests {
 
 // WebCrypto-only tests (extractable keys, non-extractable public key extraction)
 #[cfg(all(test, target_arch = "wasm32", target_os = "unknown"))]
-mod wasm_tests {
+mod web_tests {
     use super::*;
-    use wasm_bindgen_test::*;
 
-    wasm_bindgen_test_configure!(run_in_browser);
-
-    #[wasm_bindgen_test]
+    #[dialog_common::test]
     async fn generate_signer_succeeds() {
         let signer = Ed25519Signer::generate().await;
         assert!(
@@ -393,7 +390,7 @@ mod wasm_tests {
         );
     }
 
-    #[wasm_bindgen_test]
+    #[dialog_common::test]
     async fn generated_signer_has_valid_did() {
         let signer = Ed25519Signer::generate().await.unwrap();
         let did_string = signer.ed25519_did().to_string();
@@ -409,7 +406,7 @@ mod wasm_tests {
         assert_eq!(parsed.unwrap(), signer.ed25519_did().clone());
     }
 
-    #[wasm_bindgen_test]
+    #[dialog_common::test]
     async fn generate_extractable_key() {
         let signer = <Ed25519Signer as ExtractableKey>::generate().await;
         assert!(signer.is_ok(), "Should be able to generate extractable key");
@@ -420,7 +417,7 @@ mod wasm_tests {
         assert!(sig.is_ok());
     }
 
-    #[wasm_bindgen_test]
+    #[dialog_common::test]
     async fn import_extractable_key() {
         let seed = [42u8; 32];
 
@@ -437,7 +434,7 @@ mod wasm_tests {
         assert!(sig.is_ok());
     }
 
-    #[wasm_bindgen_test]
+    #[dialog_common::test]
     async fn non_extractable_key_can_extract_public_key() {
         let signer = Ed25519Signer::generate().await.unwrap();
         let did = signer.ed25519_did();
@@ -464,7 +461,7 @@ mod wasm_tests {
         );
     }
 
-    #[wasm_bindgen_test]
+    #[dialog_common::test]
     async fn extractable_export_import_roundtrip_preserves_seed() {
         let seed = [42u8; 32];
         let signer = <Ed25519Signer as ExtractableKey>::import(&seed)
@@ -492,7 +489,7 @@ mod wasm_tests {
         );
     }
 
-    #[wasm_bindgen_test]
+    #[dialog_common::test]
     async fn extractable_export_import_roundtrip_signs_correctly() {
         let seed = [99u8; 32];
         let signer = <Ed25519Signer as ExtractableKey>::import(&seed)
@@ -517,7 +514,7 @@ mod wasm_tests {
         .expect("Original verifier should accept signature from restored signer");
     }
 
-    #[wasm_bindgen_test]
+    #[dialog_common::test]
     async fn non_extractable_export_import_roundtrip() {
         let signer = Ed25519Signer::import(&[33u8; 32]).await.unwrap();
         let original_did = signer.ed25519_did().to_string();
@@ -550,7 +547,7 @@ mod wasm_tests {
         .expect("Original verifier should accept non-extractable roundtrip signature");
     }
 
-    #[wasm_bindgen_test]
+    #[dialog_common::test]
     async fn imported_non_extractable_key_matches_native_public_key() {
         let seed = [42u8; 32];
 

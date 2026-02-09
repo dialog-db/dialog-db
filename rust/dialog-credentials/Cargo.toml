@@ -43,6 +43,7 @@ web-sys = { workspace = true, features = ["Crypto", "SubtleCrypto", "CryptoKey",
 dialog-common = { workspace = true, features = ["helpers"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 ed25519-dalek = { workspace = true }
+wasm-bindgen-test = { workspace = true }
 
 [lints.rust]
 # These cfgs are used by the dialog_common::test proc macro
