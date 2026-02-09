@@ -40,7 +40,7 @@ pub mod principal;
 /// Remote repository and branch management.
 pub mod remote;
 /// Repository trait for managing remotes.
-pub mod repository;
+pub mod remotes;
 /// SigningAuthority for signing and identity management.
 pub mod signing_authority;
 
@@ -49,11 +49,11 @@ pub use signing_authority::{Signer, SigningAuthority};
 // Re-export WebCrypto types for WASM key storage
 pub use principal::{Principal, PrincipalError};
 pub use remote::{RemoteBranch, RemoteCredentials, RemoteRepository, RemoteSite, Site};
-pub use repository::Remotes;
+pub use remotes::Remotes;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
 pub use signing_authority::{CryptoKey, Ed25519Signer};
 
-/// An authority that can operate on a replica.
+/// An authority that can operate on a repository.
 ///
 /// This trait alias bundles the required bounds for authorities used with Replica:
 /// - `Authority`: Provides DID identity and signing capability
@@ -102,28 +102,28 @@ impl From<NodeReference> for Blake3Hash {
     }
 }
 
-/// A replica represents a local instance of a distributed database.
+/// A repository represents a local instance of a distributed database.
 ///
 /// The type parameter `A` represents the authority used for signing operations.
 /// It defaults to `SigningAuthority` for convenience.
 #[derive(Debug, Clone)]
-pub struct Replica<Backend: PlatformBackend, A: OperatingAuthority = SigningAuthority> {
+pub struct Repository<Backend: PlatformBackend, A: OperatingAuthority = SigningAuthority> {
     issuer: A,
     subject: Did,
     storage: PlatformStorage<Backend>,
-    /// Local branches in this replica
+    /// Local branches in this repository
     pub branches: Branches<Backend, A>,
 }
 
 impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
-    Replica<Backend, A>
+    Repository<Backend, A>
 {
-    /// Creates a new replica with the given issuer and storage backend.
-    pub fn open(issuer: A, subject: Did, backend: Backend) -> Result<Self, ReplicaError> {
+    /// Creates a new repository with the given issuer and storage backend.
+    pub fn open(issuer: A, subject: Did, backend: Backend) -> Result<Self, RepositoryError> {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branches = Branches::new(issuer.clone(), subject.clone(), backend.clone());
-        Ok(Replica {
+        Ok(Repository {
             issuer,
             subject,
             storage,
@@ -131,7 +131,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
         })
     }
 
-    /// Returns the DID of the authority for this replica.
+    /// Returns the DID of the authority for this repository.
     pub fn did(&self) -> &Did {
         self.issuer.did()
     }
@@ -157,7 +157,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     }
 }
 
-/// Manages multiple branches within a replica.
+/// Manages multiple branches within a repository.
 #[derive(Debug, Clone)]
 pub struct Branches<Backend: PlatformBackend, A: OperatingAuthority = SigningAuthority> {
     issuer: A,
@@ -180,7 +180,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
 
     /// Loads a branch with given identifier, produces an error if it does not
     /// exists.
-    pub async fn load(&self, id: &BranchId) -> Result<Branch<Backend, A>, ReplicaError> {
+    pub async fn load(&self, id: &BranchId) -> Result<Branch<Backend, A>, RepositoryError> {
         Branch::load(
             id,
             self.issuer.clone(),
@@ -192,7 +192,10 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
 
     /// Loads a branch with the given identifier or creates a new one if
     /// it does not already exist.
-    pub async fn open(&self, id: impl Into<BranchId>) -> Result<Branch<Backend, A>, ReplicaError> {
+    pub async fn open(
+        &self,
+        id: impl Into<BranchId>,
+    ) -> Result<Branch<Backend, A>, RepositoryError> {
         Branch::open(
             id,
             self.issuer.clone(),
@@ -370,7 +373,7 @@ where
     }
 }
 
-/// A branch represents a named line of development within a replica.
+/// A branch represents a named line of development within a repository.
 #[derive(Clone)]
 pub struct Branch<
     Backend: PlatformBackend + 'static,
@@ -404,12 +407,12 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
         id: &BranchId,
         storage: &mut PlatformStorage<Backend>,
         default_state: Option<BranchState>,
-    ) -> Result<TypedStoreResource<BranchState, Backend>, ReplicaError> {
+    ) -> Result<TypedStoreResource<BranchState, Backend>, RepositoryError> {
         let key = format!("local/{}", id);
         let memory = storage
             .open::<BranchState>(&key.into())
             .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+            .map_err(|e| RepositoryError::StorageError(format!("{:?}", e)))?;
 
         // if we branch does not exist yet and we have default state we create
         // a branch.
@@ -420,7 +423,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
                     storage,
                 )
                 .await
-                .map_err(|_| ReplicaError::StorageError("Updating branch failed".into()))?;
+                .map_err(|_| RepositoryError::StorageError("Updating branch failed".into()))?;
         }
 
         Ok(memory)
@@ -433,7 +436,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
         mut storage: PlatformStorage<Backend>,
         subject: Did,
         default_state: Option<BranchState>,
-    ) -> Result<Branch<Backend, A>, ReplicaError> {
+    ) -> Result<Branch<Backend, A>, RepositoryError> {
         let memory = Self::mount(id, &mut storage, default_state).await?;
         let prefixed_backend = PrefixedBackend::new(b"index/", storage.clone().into_backend());
         let archive = Archive::new(prefixed_backend);
@@ -444,7 +447,9 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
             // Load the tree from the revision's tree hash
             let tree = Tree::from_hash(state.revision.tree().hash(), archive.clone())
                 .await
-                .map_err(|e| ReplicaError::StorageError(format!("Failed to load tree: {:?}", e)))?;
+                .map_err(|e| {
+                    RepositoryError::StorageError(format!("Failed to load tree: {:?}", e))
+                })?;
 
             // If branch has an upstream setup we load it up and configure
             // archive's remote
@@ -474,7 +479,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
                 tree: Arc::new(RwLock::new(tree)),
             })
         } else {
-            Err(ReplicaError::BranchNotFound { id: id.clone() })
+            Err(RepositoryError::BranchNotFound { id: id.clone() })
         }
     }
 
@@ -485,7 +490,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
         issuer: A,
         storage: PlatformStorage<Backend>,
         subject: Did,
-    ) -> Result<Branch<Backend, A>, ReplicaError> {
+    ) -> Result<Branch<Backend, A>, RepositoryError> {
         let id = id.into();
         let default_state = Some(BranchState::new(
             id.clone(),
@@ -498,14 +503,14 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
         Ok(branch)
     }
 
-    /// Loads a branch from the the the underlaying replica, if branch with a
+    /// Loads a branch from the the the underlaying repository, if branch with a
     /// given id does not exists it produces an error.
     pub async fn load(
         id: &BranchId,
         issuer: A,
         storage: PlatformStorage<Backend>,
         subject: Did,
-    ) -> Result<Branch<Backend, A>, ReplicaError> {
+    ) -> Result<Branch<Backend, A>, RepositoryError> {
         let branch = Self::load_with_default(id, issuer, storage, subject, None).await?;
 
         Ok(branch)
@@ -518,7 +523,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
         &mut self,
         revision: Revision,
         base: NodeReference,
-    ) -> Result<(), ReplicaError> {
+    ) -> Result<(), RepositoryError> {
         // Update local state with explicit base
         self.memory
             .replace_with(
@@ -544,7 +549,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
                 &mut self.storage,
             )
             .await
-            .map_err(|_| ReplicaError::StorageError("Updating branch failed".into()))?;
+            .map_err(|_| RepositoryError::StorageError("Updating branch failed".into()))?;
 
         // Update the tree to match the new revision
         let mut tree = self.tree.write().await;
@@ -552,11 +557,11 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
             #[allow(clippy::clone_on_copy)]
             tree.set_hash(Some(revision.tree().hash().clone()))
                 .await
-                .map_err(|_| ReplicaError::StorageError("Failed to update tree".into()))?;
+                .map_err(|_| RepositoryError::StorageError("Failed to update tree".into()))?;
         } else {
             tree.set_hash(None)
                 .await
-                .map_err(|_| ReplicaError::StorageError("Failed to reset tree".into()))?;
+                .map_err(|_| RepositoryError::StorageError("Failed to reset tree".into()))?;
         }
 
         Ok(())
@@ -565,7 +570,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     /// Advances the branch to a given revision. The base tree is set to the
     /// revision's tree, representing that the branch is now "in sync" at this
     /// revision (no divergence from the synced state).
-    pub async fn reset(&mut self, revision: Revision) -> Result<(), ReplicaError> {
+    pub async fn reset(&mut self, revision: Revision) -> Result<(), RepositoryError> {
         self.advance(revision.clone(), revision.tree.clone()).await
     }
 
@@ -582,11 +587,11 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     /// setup it will produce an error. If upstream branch is a local one this
     /// operation is a no-op. If it has a remote upsteram it tries to fetch
     /// a revision and update corresponding branch record locally
-    pub async fn fetch(&mut self) -> Result<Option<Revision>, ReplicaError> {
+    pub async fn fetch(&mut self) -> Result<Option<Revision>, RepositoryError> {
         if let Some(mut upstream) = self.upstream() {
             upstream.fetch().await
         } else {
-            Err(ReplicaError::BranchNotFound {
+            Err(RepositoryError::BranchNotFound {
                 id: self.id().clone(),
             })
         }
@@ -634,12 +639,12 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     /// These are tree nodes that exist in the current tree but not in the base tree.
     fn novelty(
         &self,
-    ) -> impl Stream<Item = Result<Node<Key, State<Datum>, Blake3Hash>, ReplicaError>> + '_ {
+    ) -> impl Stream<Item = Result<Node<Key, State<Datum>, Blake3Hash>, RepositoryError>> + '_ {
         try_stream! {
             // Load base tree (state at last sync)
             let base: Index<Backend> = Tree::from_hash(self.base().hash(), self.archive.clone())
                 .await
-                .map_err(|e| ReplicaError::StorageError(format!("Failed to load base tree: {:?}", e)))?;
+                .map_err(|e| RepositoryError::StorageError(format!("Failed to load base tree: {:?}", e)))?;
 
             // Get current tree
             let current = self.tree.read().await.clone();
@@ -647,11 +652,11 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
             // Compute diff to find novel nodes
             let difference = TreeDifference::compute(&base, &current)
                 .await
-                .map_err(|e| ReplicaError::StorageError(format!("Failed to compute diff: {:?}", e)))?;
+                .map_err(|e| RepositoryError::StorageError(format!("Failed to compute diff: {:?}", e)))?;
 
             // Yield all novel nodes
             for await node in difference.novel_nodes() {
-                yield node.map_err(|e| ReplicaError::StorageError(format!("Failed to load node: {:?}", e)))?;
+                yield node.map_err(|e| RepositoryError::StorageError(format!("Failed to load node: {:?}", e)))?;
             }
         }
     }
@@ -679,13 +684,13 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     /// If upstream is remote, it publishes to the remote and updates local cache.
     /// Returns Error if  if branch does not have upstream set. Returns
     /// Option<Revision> describing prior state of the upstream.
-    pub async fn push(&mut self) -> Result<Option<Revision>, ReplicaError> {
+    pub async fn push(&mut self) -> Result<Option<Revision>, RepositoryError> {
         if let Some(upstream) = &mut self.upstream() {
             match upstream {
                 Upstream::Local(target) => {
                     // setting upstream to yourself should be invalid
                     if target.id() == self.id() {
-                        Err(ReplicaError::BranchUpstreamIsItself {
+                        Err(RepositoryError::BranchUpstreamIsItself {
                             id: target.id().clone(),
                         })
                     } else {
@@ -717,7 +722,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
                 }
             }
         } else {
-            Err(ReplicaError::BranchHasNoUpstream {
+            Err(RepositoryError::BranchHasNoUpstream {
                 id: self.id.clone(),
             })
         }
@@ -731,7 +736,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     /// 2. Computes local changes since last pull using differentiate()
     /// 3. Integrates local changes into upstream tree
     /// 4. Creates a new revision with proper period/moment
-    pub async fn pull(&mut self) -> Result<Option<Revision>, ReplicaError> {
+    pub async fn pull(&mut self) -> Result<Option<Revision>, RepositoryError> {
         if self.upstream().is_some() {
             if let Some(revision) = self.fetch().await? {
                 // if upstream revision is different from our base
@@ -745,7 +750,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
                         Tree::from_hash(revision.tree.hash(), self.archive.clone())
                             .await
                             .map_err(|e| {
-                                ReplicaError::StorageError(format!(
+                                RepositoryError::StorageError(format!(
                                     "Failed to load upstream tree: {:?}",
                                     e
                                 ))
@@ -757,7 +762,10 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
 
                     // Integrate local changes into upstream tree
                     target.integrate(changes).await.map_err(|e| {
-                        ReplicaError::StorageError(format!("Failed to integrate changes: {:?}", e))
+                        RepositoryError::StorageError(format!(
+                            "Failed to integrate changes: {:?}",
+                            e
+                        ))
                     })?;
 
                     // Get the hash of the integrated tree
@@ -794,7 +802,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
                 Ok(None)
             }
         } else {
-            Err(ReplicaError::BranchHasNoUpstream {
+            Err(RepositoryError::BranchHasNoUpstream {
                 id: self.id.clone(),
             })
         }
@@ -805,7 +813,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     pub async fn set_upstream<U: Into<Upstream<Backend, A>>>(
         &mut self,
         target: U,
-    ) -> Result<(), ReplicaError> {
+    ) -> Result<(), RepositoryError> {
         let upstream = target.into();
 
         // Get the state descriptor from the upstream
@@ -827,7 +835,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
                 &mut self.storage,
             )
             .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+            .map_err(|e| RepositoryError::StorageError(format!("{:?}", e)))?;
 
         // Set the archive remote to the upstream store if it is a
         // remote so tree changes will be replicated; if local, clear the remote
@@ -1190,9 +1198,9 @@ impl Revision {
     /// Creates an [`Edition`] of this revision by hashing it.
     ///
     /// This is used to reference this revision as a causal ancestor in subsequent revisions.
-    pub fn edition(&self) -> Result<Edition<Revision>, ReplicaError> {
+    pub fn edition(&self) -> Result<Edition<Revision>, RepositoryError> {
         let revision_bytes = serde_ipld_dagcbor::to_vec(self).map_err(|e| {
-            ReplicaError::StorageError(format!("Failed to serialize revision: {}", e))
+            RepositoryError::StorageError(format!("Failed to serialize revision: {}", e))
         })?;
         let revision_hash: [u8; 32] = *blake3::hash(&revision_bytes).as_bytes();
         Ok(Edition::new(revision_hash))
@@ -1334,7 +1342,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     LocalUpstream<Backend, A>
 {
     /// Load the branch on demand.
-    async fn load(&self) -> Result<Branch<Backend, A>, ReplicaError> {
+    async fn load(&self) -> Result<Branch<Backend, A>, RepositoryError> {
         Branch::load(
             &self.branch_id,
             self.issuer.clone(),
@@ -1376,7 +1384,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
         issuer: A,
         storage: PlatformStorage<Backend>,
         subject: Did,
-    ) -> Result<Self, ReplicaError> {
+    ) -> Result<Self, RepositoryError> {
         match state {
             UpstreamState::Local { branch } => Ok(Upstream::Local(LocalUpstream {
                 branch_id: branch.clone(),
@@ -1450,7 +1458,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     }
 
     /// Fetches the current revision from the upstream
-    pub async fn fetch(&mut self) -> Result<Option<Revision>, ReplicaError> {
+    pub async fn fetch(&mut self) -> Result<Option<Revision>, RepositoryError> {
         match self {
             Upstream::Local(local) => {
                 let branch = local.load().await?;
@@ -1461,7 +1469,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     }
 
     /// Pushes a revision to the upstream, returning the previous revision if any
-    pub async fn publish(&mut self, revision: Revision) -> Result<(), ReplicaError> {
+    pub async fn publish(&mut self, revision: Revision) -> Result<(), RepositoryError> {
         match self {
             Upstream::Local(local) => {
                 let mut branch = local.load().await?;
@@ -1618,7 +1626,7 @@ impl<T> TryFrom<Vec<u8>> for Edition<T> {
 
 /// The common error type used by this crate
 #[derive(Error, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ReplicaError {
+pub enum RepositoryError {
     /// Branch with the given ID was not found
     #[error("Branch {id} not found")]
     BranchNotFound {
@@ -1678,15 +1686,15 @@ pub enum ReplicaError {
     },
 }
 
-impl ReplicaError {
+impl RepositoryError {
     /// Create a new storage error
     pub fn storage_error(capability: Capability, cause: DialogStorageError) -> Self {
-        ReplicaError::StorageError(format!("{}: {:?}", capability, cause))
+        RepositoryError::StorageError(format!("{}: {:?}", capability, cause))
     }
 }
 
 /// Identifies which operation failed when a storage error occurs.
-/// Used in [`ReplicaError::StorageError`] to provide context about where the failure happened.
+/// Used in [`RepositoryError::StorageError`] to provide context about where the failure happened.
 #[derive(Error, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Capability {
     /// Failed while resolving a branch by ID
@@ -1738,7 +1746,7 @@ mod tests {
         storage: PlatformStorage<Backend>,
         id: &str,
         upstream_id: &str,
-    ) -> Result<Branch<Backend>, ReplicaError>
+    ) -> Result<Branch<Backend>, RepositoryError>
     where
         Backend: PlatformBackend + 'static,
     {
@@ -1830,7 +1838,7 @@ mod tests {
         // Push fails branch tracks itself
         assert!(matches!(
             branch.push().await,
-            Err(ReplicaError::BranchUpstreamIsItself { .. })
+            Err(RepositoryError::BranchUpstreamIsItself { .. })
         ))
     }
 
@@ -1892,13 +1900,13 @@ mod tests {
         }
 
         // Roundtrip: open the upstream from state
-        // The subject parameter is Alice's (the replica owner), but the state
+        // The subject parameter is Alice's (the repository owner), but the state
         // contains Bob's subject which should be used for the remote.
         let _upstream = Upstream::<MemoryStorageBackend<Vec<u8>, Vec<u8>>>::open(
             &original_state,
             alice_issuer.clone(),
             storage.clone(),
-            alice_subject.clone(), // Alice's subject (replica owner)
+            alice_subject.clone(), // Alice's subject (repository owner)
         )
         .await;
 
@@ -1997,16 +2005,16 @@ mod tests {
         let issuer = SigningAuthority::from_passphrase("test_end_to_end_remote_upstream");
         let subject = issuer.did().clone();
 
-        // Step 2: Create a replica with that issuer and journaled in-memory backend
+        // Step 2: Create a repository with that issuer and journaled in-memory backend
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let journaled_backend = JournaledStorage::new(backend);
-        let mut replica = issuer
+        let mut repository = issuer
             .open(issuer.did(), journaled_backend.clone())
-            .expect("Failed to create replica");
+            .expect("Failed to create repository");
 
         // Step 3: Create a branch e.g. main
         let main_id = BranchId::new("main".to_string());
-        let mut main_branch = replica
+        let mut main_branch = repository
             .branches
             .open(&main_id)
             .await
@@ -2033,7 +2041,7 @@ mod tests {
             "Branch state should contain branch name 'main'"
         );
 
-        // Step 4: Add a remote to the replica
+        // Step 4: Add a remote to the repository
         let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
         let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
             address,
@@ -2045,7 +2053,7 @@ mod tests {
             site: "origin".to_string(),
             credentials: RemoteCredentials::S3(s3_credentials),
         };
-        let _site = replica
+        let _site = repository
             .add_remote(remote_state.clone())
             .await
             .expect("Failed to add remote");
@@ -2074,7 +2082,7 @@ mod tests {
         let remote_site = RemoteSite::load(
             &remote_state.site,
             issuer.clone(),
-            replica.storage().clone(),
+            repository.storage().clone(),
         )
         .await
         .expect("Failed to load remote site");
@@ -2202,7 +2210,7 @@ mod tests {
         // Branch state was written to S3 during push (verified by successful reload below)
 
         // Reload the main branch and verify the changes persisted
-        let reloaded_main = replica
+        let reloaded_main = repository
             .branches
             .load(&main_id)
             .await
@@ -2223,26 +2231,27 @@ mod tests {
         // Both Alice and Bob share the same subject for this test
         let subject: Did = "did:test:shared_repo".into();
 
-        // Create Alice's replica
+        // Create Alice's repository
         let alice_issuer = SigningAuthority::from_passphrase("alice");
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
-        let mut alice_replica = Replica::open(alice_issuer.clone(), subject.clone(), alice_backend)
-            .expect("Failed to create Alice's replica");
+        let mut alice_repository =
+            Repository::open(alice_issuer.clone(), subject.clone(), alice_backend)
+                .expect("Failed to create Alice's repository");
 
-        // Create Bob's replica
+        // Create Bob's repository
         let bob_issuer = SigningAuthority::from_passphrase("bob");
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
-        let mut bob_replica = Replica::open(bob_issuer.clone(), subject.clone(), bob_backend)
-            .expect("Failed to create Bob's replica");
+        let mut bob_repository = Repository::open(bob_issuer.clone(), subject.clone(), bob_backend)
+            .expect("Failed to create Bob's repository");
 
         // Both create main branches
         let main_id = BranchId::new("main".to_string());
-        let mut alice_main = alice_replica
+        let mut alice_main = alice_repository
             .branches
             .open(&main_id)
             .await
             .expect("Failed to create Alice's branch");
-        let mut bob_main = bob_replica
+        let mut bob_main = bob_repository
             .branches
             .open(&main_id)
             .await
@@ -2262,14 +2271,14 @@ mod tests {
             site: "origin".to_string(),
             credentials: RemoteCredentials::S3(s3_credentials.clone()),
         };
-        alice_replica
+        alice_repository
             .add_remote(alice_remote_state.clone())
             .await
             .expect("Failed to add remote");
         let alice_remote_site = RemoteSite::load(
             &"origin".to_string(),
             alice_issuer.clone(),
-            alice_replica.storage().clone(),
+            alice_repository.storage().clone(),
         )
         .await
         .expect("Failed to load Alice's remote site");
@@ -2309,14 +2318,14 @@ mod tests {
             site: "origin".to_string(),
             credentials: RemoteCredentials::S3(s3_credentials),
         };
-        bob_replica
+        bob_repository
             .add_remote(bob_remote_state)
             .await
             .expect("Failed to add remote");
         let bob_remote_site = RemoteSite::load(
             &"origin".to_string(),
             bob_issuer.clone(),
-            bob_replica.storage().clone(),
+            bob_repository.storage().clone(),
         )
         .await
         .expect("Failed to load Bob's remote site");
@@ -2368,34 +2377,34 @@ mod tests {
         // Both Alice and Bob share the same subject for this test
         let subject: Did = "did:test:shared_repo".into();
 
-        // Step 1: Create Alice's replica with her own issuer and backend
+        // Step 1: Create Alice's repository with her own issuer and backend
         let alice_issuer = SigningAuthority::from_passphrase("alice");
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
-        let mut alice_replica = Replica::open(
+        let mut alice_repository = Repository::open(
             alice_issuer.clone(),
             subject.clone(),
             alice_journaled.clone(),
         )
-        .expect("Failed to create Alice's replica");
+        .expect("Failed to create Alice's repository");
 
-        // Step 2: Create Bob's replica with his own issuer and backend
+        // Step 2: Create Bob's repository with his own issuer and backend
         let bob_issuer = SigningAuthority::from_passphrase("bob");
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
-        let mut bob_replica =
-            Replica::open(bob_issuer.clone(), subject.clone(), bob_journaled.clone())
-                .expect("Failed to create Bob's replica");
+        let mut bob_repository =
+            Repository::open(bob_issuer.clone(), subject.clone(), bob_journaled.clone())
+                .expect("Failed to create Bob's repository");
 
         // Step 3: Both create a "main" branch
         let main_id = BranchId::new("main".to_string());
-        let mut alice_main = alice_replica
+        let mut alice_main = alice_repository
             .branches
             .open(&main_id)
             .await
             .expect("Failed to create Alice's main branch");
 
-        let mut bob_main = bob_replica
+        let mut bob_main = bob_repository
             .branches
             .open(&main_id)
             .await
@@ -2415,7 +2424,7 @@ mod tests {
             site: "origin".to_string(),
             credentials: RemoteCredentials::S3(s3_credentials.clone()),
         };
-        alice_replica
+        alice_repository
             .add_remote(alice_remote_state)
             .await
             .expect("Failed to add remote for Alice");
@@ -2423,7 +2432,7 @@ mod tests {
         let alice_remote_site = RemoteSite::load(
             &"origin".to_string(),
             alice_issuer.clone(),
-            alice_replica.storage().clone(),
+            alice_repository.storage().clone(),
         )
         .await
         .expect("Failed to load Alice's remote site");
@@ -2468,7 +2477,7 @@ mod tests {
             site: "origin".to_string(),
             credentials: RemoteCredentials::S3(s3_credentials),
         };
-        bob_replica
+        bob_repository
             .add_remote(bob_remote_state)
             .await
             .expect("Failed to add remote for Bob");
@@ -2476,7 +2485,7 @@ mod tests {
         let bob_remote_site = RemoteSite::load(
             &"origin".to_string(),
             bob_issuer.clone(),
-            bob_replica.storage().clone(),
+            bob_repository.storage().clone(),
         )
         .await
         .expect("Failed to load Bob's remote site");
@@ -2607,7 +2616,7 @@ mod tests {
             "Alice should have Bob's artifact after pull"
         );
 
-        // Final verification: Both replicas are in sync
+        // Final verification: Both repositories are in sync
         let alice_final_revision = alice_main.revision();
         let bob_final_revision = bob_main.revision();
         assert_eq!(
@@ -2637,11 +2646,11 @@ mod tests {
         // Both Alice and Bob share the same subject for this test
         let subject: Did = "did:test:shared_repo".into();
 
-        // Create Alice's replica
+        // Create Alice's repository
         let alice_issuer = SigningAuthority::from_passphrase("alice");
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
-        let mut alice_replica = Replica::open(
+        let mut alice_replica = Repository::open(
             alice_issuer.clone(),
             subject.clone(),
             alice_journaled.clone(),
@@ -2653,7 +2662,7 @@ mod tests {
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
         let mut bob_replica =
-            Replica::open(bob_issuer.clone(), subject.clone(), bob_journaled.clone())
+            Repository::open(bob_issuer.clone(), subject.clone(), bob_journaled.clone())
                 .expect("Failed to create Bob's replica");
 
         // Both create a "main" branch
@@ -2862,7 +2871,7 @@ mod tests {
         let alice_issuer = SigningAuthority::from_passphrase("alice");
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
-        let mut alice_replica = Replica::open(
+        let mut alice_replica = Repository::open(
             alice_issuer.clone(),
             subject.clone(),
             alice_journaled.clone(),
@@ -2916,7 +2925,7 @@ mod tests {
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
         let mut bob_replica =
-            Replica::open(bob_issuer.clone(), subject.clone(), bob_journaled.clone())?;
+            Repository::open(bob_issuer.clone(), subject.clone(), bob_journaled.clone())?;
 
         let mut bob_main = bob_replica.branches.open(&main_id).await?;
 
@@ -2985,7 +2994,7 @@ mod tests {
         let subject = issuer.did().clone();
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let journaled = JournaledStorage::new(backend);
-        let mut replica = Replica::open(issuer.clone(), subject.clone(), journaled.clone())?;
+        let mut replica = Repository::open(issuer.clone(), subject.clone(), journaled.clone())?;
 
         // Create S3 credentials
         let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
@@ -3197,7 +3206,7 @@ mod tests {
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let journaled_backend = dialog_storage::JournaledStorage::new(backend);
         let mut replica =
-            Replica::open(operator.clone(), subject.clone(), journaled_backend.clone())
+            Repository::open(operator.clone(), subject.clone(), journaled_backend.clone())
                 .expect("Failed to create replica");
 
         // Store the remote
@@ -3279,16 +3288,16 @@ mod tests {
         let ucan_credentials =
             ucan::Credentials::new(env.access_service_url.clone(), delegation_chain);
 
-        // Step 4: Create local replica with journaled backend
+        // Step 4: Create local repository with journaled backend
         let local_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let journaled_backend = JournaledStorage::new(local_backend);
-        let mut local_replica =
-            Replica::open(operator.clone(), subject.clone(), journaled_backend.clone())
-                .expect("Failed to create local replica");
+        let mut local_repository =
+            Repository::open(operator.clone(), subject.clone(), journaled_backend.clone())
+                .expect("Failed to create local repository");
 
         // Step 5: Create local "main" branch
         let main_id = BranchId::new("main".to_string());
-        let mut local_main = local_replica
+        let mut local_main = local_repository
             .branches
             .open(&main_id)
             .await
@@ -3299,7 +3308,7 @@ mod tests {
             site: "origin".to_string(),
             credentials: RemoteCredentials::Ucan(ucan_credentials),
         };
-        local_replica
+        local_repository
             .add_remote(remote_state.clone())
             .await
             .expect("Failed to add remote 'origin'");
@@ -3308,7 +3317,7 @@ mod tests {
         let remote_site = RemoteSite::load(
             &"origin".to_string(),
             operator.clone(),
-            local_replica.storage().clone(),
+            local_repository.storage().clone(),
         )
         .await
         .expect("Failed to load remote site");
@@ -3367,11 +3376,11 @@ mod tests {
             "First push should return None (no previous revision)"
         );
 
-        // Step 11: Verify changes propagate - create a second replica and pull
+        // Step 11: Verify changes propagate - create a second repository and pull
         let second_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let second_journaled = JournaledStorage::new(second_backend);
 
-        // Generate a second operator for the second replica
+        // Generate a second operator for the second repository
         let second_operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
         let second_operator_did = second_operator_signer.did().clone();
         let second_operator = {
@@ -3396,33 +3405,33 @@ mod tests {
         let second_ucan_credentials =
             ucan::Credentials::new(env.access_service_url.clone(), second_delegation_chain);
 
-        let mut second_replica = Replica::open(
+        let mut second_repository = Repository::open(
             second_operator.clone(),
             subject.clone(),
             second_journaled.clone(),
         )
-        .expect("Failed to create second replica");
+        .expect("Failed to create second repository");
 
-        let mut second_main = second_replica
+        let mut second_main = second_repository
             .branches
             .open(&main_id)
             .await
             .expect("Failed to create second main branch");
 
-        // Add remote to second replica
+        // Add remote to second repository
         let second_remote_state = RemoteState {
             site: "origin".to_string(),
             credentials: RemoteCredentials::Ucan(second_ucan_credentials),
         };
-        second_replica
+        second_repository
             .add_remote(second_remote_state)
             .await
-            .expect("Failed to add remote to second replica");
+            .expect("Failed to add remote to second repository");
 
         let second_remote_site = RemoteSite::load(
             &"origin".to_string(),
             second_operator.clone(),
-            second_replica.storage().clone(),
+            second_repository.storage().clone(),
         )
         .await
         .expect("Failed to load second remote site");
@@ -3480,28 +3489,28 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn test_archive_has_remote_after_set_upstream() {
-        use crate::replica::remote::{RemoteCredentials, RemoteSite, RemoteState};
+        use crate::repository::remote::{RemoteCredentials, RemoteSite, RemoteState};
 
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
         let issuer = SigningAuthority::from_secret(&seed());
         let subject = test_subject();
 
-        let mut replica = Replica::open(issuer.clone(), subject.clone(), backend.clone())
-            .expect("Failed to create replica");
+        let mut repository = Repository::open(issuer.clone(), subject.clone(), backend.clone())
+            .expect("Failed to create repository");
 
         // Add memory remote
         let remote_state = RemoteState {
             site: "origin".to_string(),
             credentials: RemoteCredentials::Memory,
         };
-        replica
+        repository
             .add_remote(remote_state)
             .await
             .expect("Failed to add remote");
 
         let branch_id = BranchId::new("main".to_string());
-        let mut branch = replica
+        let mut branch = repository
             .branches
             .open(&branch_id)
             .await

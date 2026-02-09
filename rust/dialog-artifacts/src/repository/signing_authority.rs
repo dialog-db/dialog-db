@@ -1,6 +1,8 @@
-pub use super::Replica;
+pub use super::Repository;
 use super::principal::Principal;
-use super::{Formatter, PlatformBackend, ReplicaError, SECRET_KEY_LENGTH, SignerMut, SigningKey};
+use super::{
+    Formatter, PlatformBackend, RepositoryError, SECRET_KEY_LENGTH, SignerMut, SigningKey,
+};
 use async_trait::async_trait;
 pub use dialog_capability::Did;
 use dialog_capability::{Authority, DialogCapabilitySignError, Principal as PrincipalTrait};
@@ -36,7 +38,7 @@ pub trait Signer: Send + Sync {
     }
 }
 
-/// A signing authority that can operate replicas.
+/// A signing authority that can operate repository.
 ///
 /// SigningAuthority provides signing capabilities with platform-specific implementations:
 ///
@@ -47,7 +49,7 @@ pub trait Signer: Send + Sync {
 /// # Example
 ///
 /// ```rust,no_run
-/// use dialog_artifacts::replica::SigningAuthority;
+/// use dialog_artifacts::repository::SigningAuthority;
 ///
 /// async fn example() {
 ///     // Generate a new signing authority
@@ -148,7 +150,7 @@ impl SigningAuthority {
     /// On non-WASM platforms, this uses the native Ed25519 implementation.
     /// On WASM platforms without the `webcrypto` feature, this uses the native implementation.
     #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-    pub async fn generate() -> Result<Self, ReplicaError> {
+    pub async fn generate() -> Result<Self, RepositoryError> {
         match Ed25519Signer::generate().await {
             Ok(signer) => Ok(SigningAuthority::from(signer)),
             Err(_) => {
@@ -165,7 +167,7 @@ impl SigningAuthority {
     /// On non-WASM platforms, this uses the native Ed25519 implementation.
     /// On WASM platforms without the `webcrypto` feature, this uses the native implementation.
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto")))]
-    pub async fn generate() -> Result<Self, ReplicaError> {
+    pub async fn generate() -> Result<Self, RepositoryError> {
         Ok(Self::from_signing_key(SigningKey::generate(
             &mut rand::thread_rng(),
         )))
@@ -191,10 +193,10 @@ impl SigningAuthority {
     ///
     /// Returns an error if this is not a WebCrypto signing authority.
     #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-    pub fn webcrypto_signer(&self) -> Result<&Ed25519Signer, ReplicaError> {
+    pub fn webcrypto_signer(&self) -> Result<&Ed25519Signer, RepositoryError> {
         match self {
             Self::WebCrypto { signer, .. } => Ok(signer),
-            _ => Err(ReplicaError::InvalidState {
+            _ => Err(RepositoryError::InvalidState {
                 message: "Not a WebCrypto signing authority".to_string(),
             }),
         }
@@ -262,16 +264,16 @@ impl SigningAuthority {
         }
     }
 
-    /// Opens a replica with this signing authority acting as an issuer.
+    /// Opens a repository with this signing authority acting as an issuer.
     ///
-    /// If a replica with the given `subject` is already persisted in the given
+    /// If a repository with the given `subject` is already persisted in the given
     /// `backend`, loads it; otherwise creates one and persists it.
     pub fn open<Backend: PlatformBackend + 'static>(
         &self,
         subject: impl Into<Did>,
         backend: Backend,
-    ) -> Result<Replica<Backend>, ReplicaError> {
-        Replica::open(self.clone(), subject.into(), backend)
+    ) -> Result<Repository<Backend>, RepositoryError> {
+        Repository::open(self.clone(), subject.into(), backend)
     }
 }
 
@@ -285,10 +287,10 @@ impl SigningAuthority {
     /// # Errors
     ///
     /// Returns an error if the authority does not have extractable key material.
-    pub fn try_from_authority<T: Authority>(authority: &T) -> Result<Self, ReplicaError> {
+    pub fn try_from_authority<T: Authority>(authority: &T) -> Result<Self, RepositoryError> {
         match authority.secret_key_bytes() {
             Some(bytes) => Ok(SigningAuthority::from_secret(&bytes)),
-            None => Err(ReplicaError::StorageError(
+            None => Err(RepositoryError::StorageError(
                 "Remote operations require an authority with extractable key material".to_string(),
             )),
         }

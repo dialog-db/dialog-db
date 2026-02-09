@@ -45,8 +45,8 @@ pub mod artifacts;
 pub use artifacts::*;
 
 mod platform;
-/// Replica abstraction for dialog
-pub mod replica;
+/// Repository abstraction for dialog
+pub mod repository;
 pub use platform::*;
 mod reference;
 pub use reference::*;

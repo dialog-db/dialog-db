@@ -2,7 +2,7 @@
 
 use std::fmt::Debug;
 
-use crate::replica::{BranchId, Site};
+use crate::repository::{BranchId, Site};
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_storage::{
