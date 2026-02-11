@@ -59,6 +59,7 @@ futures-util = "0.3"
 ipld-core = { version = "0.4", features = ["serde"] }
 # getrandom = "0.3"
 getrandom = "0.2"
+getrandom_04 = { package = "getrandom", version = "0.4" }
 itertools = "0.14"
 js-sys = "0.3"
 k256 = "0.13"

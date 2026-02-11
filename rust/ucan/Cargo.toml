@@ -51,6 +51,7 @@ testresult = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+getrandom_04 = { workspace = true, features = ["wasm_js"] }
 wasm-bindgen-test = { workspace = true }
 
 [features]
