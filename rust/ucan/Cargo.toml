@@ -1,0 +1,60 @@
+[package]
+name = "ucan"
+description = "UCAN authorization tokens"
+edition = "2024"
+license = "Apache-2.0"
+version.workspace = true
+
+[dependencies]
+futures = { workspace = true }
+getrandom = { workspace = true }
+ipld-core = { workspace = true }
+leb128 = { workspace = true }
+nom = { workspace = true }
+nom-unicode = { workspace = true }
+nonempty = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_bytes = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
+serde-value = { workspace = true }
+sha2 = { workspace = true }
+signature = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+varsig = { workspace = true }
+web-time = { workspace = true }
+
+# Optional deps
+arbitrary = { workspace = true, optional = true }
+
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+proptest = { workspace = true, optional = true }
+proptest-arbitrary-interop = { workspace = true, optional = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+js-sys = { workspace = true }
+wasm-bindgen = { workspace = true }
+
+[dev-dependencies]
+arbitrary = { workspace = true }
+base64 = { workspace = true }
+dialog-credentials = { workspace = true }
+ipld-core = { workspace = true, features = ["arb"] }
+pretty_assertions = { workspace = true }
+serde_json = { workspace = true }
+serde_ipld_dagjson = { workspace = true }
+test-log = { workspace = true }
+testresult = { workspace = true }
+
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = { workspace = true }
+
+[features]
+default = []
+test_utils = ["arb", "property_test"]
+arb = ["dep:arbitrary", "ipld-core/arb"]
+property_test = ["dep:proptest", "dep:proptest-arbitrary-interop"]
