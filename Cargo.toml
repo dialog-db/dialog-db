@@ -27,6 +27,7 @@ members = [
     "rust/dialog-encoding",
     "rust/dialog-prolly-tree",
     "rust/dialog-storage",
+    "rust/varsig",
 ]
 resolver = "2"
 
@@ -57,11 +58,15 @@ ipld-core = { version = "0.4", features = ["serde"] }
 getrandom = "0.2"
 itertools = "0.14"
 js-sys = "0.3"
+k256 = "0.13"
 leb128 = "0.2"
 leptos = "0.8"
 leptos_meta = "0.8"
 leptos_router = "0.8"
 nonempty = "0.11"
+p256 = "0.13"
+p384 = "0.13"
+p521 = "0.13"
 ptree = "0.5"
 rand = "0.8"
 rand_core = "0.6"
@@ -73,6 +78,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 rexie = "0.6"
 rkyv = "0.8"
+rsa = "0.9"
 serde = "1"
 serde-big-array = "0.5"
 serde_bytes = "0.11"
@@ -81,12 +87,13 @@ serde_json = "1"
 sieve-cache = "1"
 static_assertions = "1"
 tempfile = "3"
+testresult = "0.4"
 thiserror = "2"
 throbber-widgets-tui = "0.8"
 tokio = "1"
 signature = "2.2"
 ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "main" }
-varsig = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "main" }
+varsig = { path = "./rust/varsig" }
 ulid = "1"
 url = "2"
 wasm-bindgen = "=0.2.108"

@@ -1,0 +1,64 @@
+[package]
+name = "varsig"
+description = "Varsig signature metadata"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+ed25519-dalek = { workspace = true, optional = true }
+k256 = { workspace = true, optional = true }
+leb128 = { workspace = true }
+p256 = { workspace = true, optional = true }
+p384 = { workspace = true, optional = true }
+p521 = { workspace = true, optional = true }
+rsa = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"] }
+serde_bytes = { workspace = true }
+signature = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+testresult = { workspace = true }
+
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = { workspace = true }
+
+[features]
+default = ["es256", "es256k", "ed25519"]
+common = ["es256", "es256k", "ed25519"]
+
+sha2_256 = []
+sha2_384 = []
+sha2_512 = []
+shake_256 = []
+sha3_256 = []
+sha3_384 = []
+sha3_512 = []
+blake2b = []
+blake3 = []
+keccak256 = []
+keccak384 = []
+keccak512 = []
+
+rsa = ["dep:rsa"]
+secp256k1 = ["dep:k256"]
+secp256r1 = ["dep:p256"]
+secp384r1 = ["dep:p384"]
+secp521r1 = ["dep:p521"]
+
+edwards448 = []
+edwards25519 = ["dep:ed25519-dalek"]
+
+es256 = ["secp256r1", "sha2_256"]
+es384 = ["secp384r1", "sha2_384"]
+es512 = ["secp521r1", "sha2_512"]
+es256k = ["secp256k1", "sha2_256"]
+ed25519 = ["edwards25519", "sha2_512"]
+
+rs256_2048 = ["rsa", "sha2_256"]
+rs256_4096 = ["rsa", "sha2_256"]
