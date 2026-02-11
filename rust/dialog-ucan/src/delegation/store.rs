@@ -11,13 +11,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use dialog_varsig::signature::Signature;
 use futures::{
     FutureExt,
     future::{BoxFuture, LocalBoxFuture},
 };
 use ipld_core::cid::Cid;
 use thiserror::Error;
-use varsig::signature::Signature;
 
 use crate::future::{FutureKind, Local, Sendable};
 

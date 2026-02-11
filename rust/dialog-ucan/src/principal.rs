@@ -1,6 +1,6 @@
 //! UCAN principal — re-exported from varsig.
 
-pub use varsig::{
+pub use dialog_varsig::{
     did::{Did, DidParseError},
     principal::Principal,
 };

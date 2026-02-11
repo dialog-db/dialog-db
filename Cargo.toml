@@ -27,8 +27,8 @@ members = [
     "rust/dialog-encoding",
     "rust/dialog-prolly-tree",
     "rust/dialog-storage",
-    "rust/ucan",
-    "rust/varsig",
+    "rust/dialog-ucan",
+    "rust/dialog-varsig",
 ]
 resolver = "2"
 
@@ -106,8 +106,8 @@ throbber-widgets-tui = "0.8"
 tokio = "1"
 tracing = "0.1"
 signature = "2.2"
-ucan = { path = "./rust/ucan" }
-varsig = { path = "./rust/varsig" }
+dialog-ucan = { path = "./rust/dialog-ucan" }
+dialog-varsig = { path = "./rust/dialog-varsig" }
 ulid = "1"
 url = "2"
 wasm-bindgen = "=0.2.108"

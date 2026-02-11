@@ -1,8 +1,8 @@
 //! UCAN Subject type.
 
+use dialog_varsig::did::Did;
 use serde::{Serialize, de::Deserialize, ser::Serializer};
 use std::fmt::Display;
-use varsig::did::Did;
 
 /// The Subject of a delegation.
 ///
@@ -86,8 +86,8 @@ impl<'de> Deserialize<'de> for Subject {
 mod tests {
     use super::*;
     use dialog_credentials::ed25519::Ed25519Signer;
+    use dialog_varsig::{did::Did, principal::Principal};
     use serde_ipld_dagcbor::{from_slice, to_vec};
-    use varsig::{did::Did, principal::Principal};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     use wasm_bindgen_test::wasm_bindgen_test;

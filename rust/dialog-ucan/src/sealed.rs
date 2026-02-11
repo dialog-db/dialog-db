@@ -1,6 +1,6 @@
 use crate::{command::Command, issuer::Issuer, subject::Subject, unset::Unset};
+use dialog_varsig::{Did, Signature};
 use ipld_core::cid::Cid;
-use varsig::{Did, Signature};
 
 #[doc(hidden)]
 pub trait IssuerOrUnset<S: Signature> {}

@@ -773,12 +773,12 @@ dependencies = [
  "async-trait",
  "convert_case",
  "dialog-common",
+ "dialog-ucan",
+ "dialog-varsig",
  "ipld-core",
  "serde",
  "signature",
  "thiserror 2.0.17",
- "ucan",
- "varsig",
 ]
 
 [[package]]
@@ -808,6 +808,8 @@ dependencies = [
  "base58",
  "dialog-capability",
  "dialog-common",
+ "dialog-ucan",
+ "dialog-varsig",
  "ed25519-dalek",
  "getrandom 0.2.16",
  "js-sys",
@@ -815,8 +817,6 @@ dependencies = [
  "signature",
  "thiserror 2.0.17",
  "tokio",
- "ucan",
- "varsig",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
@@ -855,11 +855,11 @@ dependencies = [
  "async-trait",
  "dialog-capability",
  "dialog-common",
+ "dialog-ucan",
  "ipld-core",
  "serde",
  "serde_bytes",
  "thiserror 2.0.17",
- "ucan",
 ]
 
 [[package]]
@@ -956,6 +956,64 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-test",
  "web-time",
+]
+
+[[package]]
+name = "dialog-ucan"
+version = "0.1.0"
+dependencies = [
+ "arbitrary",
+ "base64",
+ "dialog-credentials",
+ "dialog-varsig",
+ "futures",
+ "getrandom 0.2.16",
+ "getrandom 0.4.1",
+ "ipld-core",
+ "js-sys",
+ "leb128",
+ "nom 7.1.3",
+ "nom-unicode",
+ "nonempty",
+ "pretty_assertions",
+ "proptest",
+ "proptest-arbitrary-interop",
+ "serde",
+ "serde-value",
+ "serde_bytes",
+ "serde_ipld_dagcbor",
+ "serde_ipld_dagjson",
+ "serde_json",
+ "sha2 0.10.9",
+ "signature",
+ "test-log",
+ "testresult",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+ "web-time",
+]
+
+[[package]]
+name = "dialog-varsig"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "k256",
+ "leb128",
+ "p256",
+ "p384",
+ "p521",
+ "rsa",
+ "serde",
+ "serde_bytes",
+ "signature",
+ "testresult",
+ "thiserror 2.0.17",
+ "tokio",
+ "wasm-bindgen-test",
 ]
 
 [[package]]
@@ -3482,44 +3540,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1dccffe3ce07af9386bfd29e80c0ab1a8205a2fc34e4bcd40364df902cfa8f3f"
 
 [[package]]
-name = "ucan"
-version = "0.1.0"
-dependencies = [
- "arbitrary",
- "base64",
- "dialog-credentials",
- "futures",
- "getrandom 0.2.16",
- "getrandom 0.4.1",
- "ipld-core",
- "js-sys",
- "leb128",
- "nom 7.1.3",
- "nom-unicode",
- "nonempty",
- "pretty_assertions",
- "proptest",
- "proptest-arbitrary-interop",
- "serde",
- "serde-value",
- "serde_bytes",
- "serde_ipld_dagcbor",
- "serde_ipld_dagjson",
- "serde_json",
- "sha2 0.10.9",
- "signature",
- "test-log",
- "testresult",
- "thiserror 2.0.17",
- "tokio",
- "tracing",
- "varsig",
- "wasm-bindgen",
- "wasm-bindgen-test",
- "web-time",
-]
-
-[[package]]
 name = "unarray"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3613,26 +3633,6 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
-
-[[package]]
-name = "varsig"
-version = "0.1.0"
-dependencies = [
- "ed25519-dalek",
- "k256",
- "leb128",
- "p256",
- "p384",
- "p521",
- "rsa",
- "serde",
- "serde_bytes",
- "signature",
- "testresult",
- "thiserror 2.0.17",
- "tokio",
- "wasm-bindgen-test",
-]
 
 [[package]]
 name = "version_check"

@@ -111,7 +111,7 @@ impl<'de> Deserialize<'de> for Did {
 /// The `"did:"` prefix is added automatically — pass `"method:identifier"`.
 ///
 /// ```
-/// use varsig::did;
+/// use dialog_varsig::did;
 ///
 /// let d = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
 /// assert_eq!(d.method(), "key");
@@ -122,7 +122,7 @@ impl<'de> Deserialize<'de> for Did {
 ///
 /// Invalid literals fail at compile time:
 /// ```compile_fail
-/// use varsig::did;
+/// use dialog_varsig::did;
 /// let _bad = did!("nocolon");
 /// ```
 #[macro_export]

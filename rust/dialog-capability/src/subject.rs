@@ -1,5 +1,5 @@
-pub use varsig::Did;
-pub use varsig::did;
+pub use dialog_varsig::Did;
+pub use dialog_varsig::did;
 
 use crate::{Capability, Constrained, Policy};
 

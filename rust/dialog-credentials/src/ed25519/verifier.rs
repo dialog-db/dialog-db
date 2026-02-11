@@ -2,9 +2,9 @@
 
 use super::{Ed25519Signature, Ed25519VerifyingKey, error::Ed25519DidFromStrError};
 use base58::ToBase58;
+use dialog_varsig::{Did, Principal, Verifier};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::str::FromStr;
-use varsig::{Did, Principal, Verifier};
 
 /// An `Ed25519` `did:key`.
 #[derive(Debug, Clone, PartialEq)]

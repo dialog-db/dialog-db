@@ -15,6 +15,7 @@ use crate::{
     subject::Subject,
     time::{TimeRange, Timestamp},
 };
+use dialog_varsig::{Signature, Verifier, did::Did};
 use ipld_core::{cid::Cid, ipld::Ipld};
 use policy::predicate::Predicate;
 use serde::{
@@ -23,7 +24,6 @@ use serde::{
 };
 use serde_ipld_dagcbor::error::CodecError;
 use std::{borrow::Cow, collections::BTreeMap, fmt::Debug};
-use varsig::{Signature, Verifier, did::Did};
 
 /// Grant or delegate a UCAN capability to another.
 ///
@@ -124,7 +124,7 @@ impl<S: Signature> Delegation<S> {
         resolver: &R,
     ) -> Result<(), SignatureVerificationError<R::Error>>
     where
-        R: varsig::resolver::Resolver<S>,
+        R: dialog_varsig::resolver::Resolver<S>,
     {
         let payload = self
             .envelope()
@@ -472,8 +472,8 @@ mod tests {
     };
     use base64::prelude::*;
     use dialog_credentials::ed25519::{Ed25519KeyResolver, Ed25519Signer};
+    use dialog_varsig::{did::Did, eddsa::Ed25519Signature, principal::Principal};
     use testresult::TestResult;
-    use varsig::{did::Did, eddsa::Ed25519Signature, principal::Principal};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     use wasm_bindgen_test::wasm_bindgen_test;

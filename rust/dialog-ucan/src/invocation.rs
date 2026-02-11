@@ -21,6 +21,7 @@ use crate::{
     time::{range::TimeRange, timestamp::Timestamp},
 };
 use builder::InvocationBuilder;
+use dialog_varsig::{Did, Resolver, Signature, Verifier};
 use ipld_core::{cid::Cid, ipld::Ipld};
 use serde::{
     Deserialize, Deserializer, Serialize,
@@ -32,7 +33,6 @@ use std::{
     fmt::Debug,
 };
 use thiserror::Error;
-use varsig::{Did, Resolver, Signature, Verifier};
 
 /// Request to perform a UCAN-authorized action.
 ///
@@ -783,6 +783,7 @@ mod tests {
     };
     use builder::InvocationBuilder;
     use dialog_credentials::ed25519::{Ed25519KeyResolver, Ed25519Signer};
+    use dialog_varsig::{did::Did, eddsa::Ed25519Signature, principal::Principal};
     use std::{
         cell::RefCell,
         collections::HashMap,
@@ -791,7 +792,6 @@ mod tests {
         str::FromStr,
     };
     use testresult::TestResult;
-    use varsig::{did::Did, eddsa::Ed25519Signature, principal::Principal};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     use wasm_bindgen_test::wasm_bindgen_test;

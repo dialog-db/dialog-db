@@ -1,9 +1,10 @@
 [package]
-name = "varsig"
+name = "dialog-varsig"
 description = "Varsig signature metadata"
 edition = "2024"
 license = "Apache-2.0"
 version.workspace = true
+authors.workspace = true
 
 [dependencies]
 ed25519-dalek = { workspace = true, optional = true }

@@ -1,10 +1,10 @@
 //! Concrete codec types for UCAN.
 
+use dialog_varsig::codec::{Codec, Format};
 use ipld_core::codec::Codec as IpldCodec;
 use serde::{Deserialize, Serialize};
 use serde_ipld_dagcbor::{codec::DagCborCodec, error::CodecError};
 use std::io::{BufRead, Write};
-use varsig::codec::{Codec, Format};
 
 /// DAG-CBOR codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -2,14 +2,14 @@
 //! Integration tests demonstrating direct UCAN interop.
 //!
 //! Because `Ed25519Signer` implements `Principal + Signer<Ed25519Signature>`,
-//! it automatically satisfies `ucan::Issuer<Ed25519Signature>` via blanket impl.
+//! it automatically satisfies `dialog_ucan::Issuer<Ed25519Signature>` via blanket impl.
 //! No adapter types are needed.
 
 use dialog_capability::Principal;
 use dialog_credentials::ed25519::{Ed25519KeyResolver, Ed25519Signer};
-use ucan::delegation::builder::DelegationBuilder;
-use ucan::invocation::builder::InvocationBuilder;
-use ucan::subject::Subject;
+use dialog_ucan::delegation::builder::DelegationBuilder;
+use dialog_ucan::invocation::builder::InvocationBuilder;
+use dialog_ucan::subject::Subject;
 
 async fn test_signer(seed: u8) -> Ed25519Signer {
     Ed25519Signer::import(&[seed; 32]).await.unwrap()

@@ -1,6 +1,6 @@
 //! UCAN issuer trait.
 
-use varsig::{
+use dialog_varsig::{
     principal::Principal,
     signature::{Signature, Signer},
 };

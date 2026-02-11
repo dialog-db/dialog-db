@@ -10,9 +10,9 @@ use crate::{
     time::timestamp::Timestamp,
     unset::Unset,
 };
+use dialog_varsig::{Did, Principal, Signature, Signer};
 use ipld_core::{cid::Cid, ipld::Ipld};
 use std::{collections::BTreeMap, marker::PhantomData};
-use varsig::{Did, Principal, Signature, Signer};
 
 /// Typesafe builder for [`Invocation`][super::Invocation].
 ///
@@ -347,7 +347,7 @@ impl<S: Signature, I: Issuer<S>> InvocationBuilder<S, I, Did, Did, Command, Vec<
     /// Builds the complete, signed [`Invocation`].
     ///
     /// Uses the issuer (set via `.issuer()`) to sign the invocation.
-    /// The signing is performed asynchronously via [`Signer::sign()`][varsig::signature::Signer::sign].
+    /// The signing is performed asynchronously via [`Signer::sign()`][dialog_varsig::signature::Signer::sign].
     ///
     /// # Errors
     ///

@@ -9,7 +9,7 @@ license.workspace = true
 [features]
 default = []
 # UCAN support (IPLD serialization for capabilities)
-ucan = ["dep:ipld-core", "dep:ucan"]
+ucan = ["dep:ipld-core", "dep:dialog-ucan"]
 
 [dependencies]
 convert_case = { workspace = true }
@@ -18,6 +18,6 @@ serde = { workspace = true, features = ["derive"] }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 signature = { workspace = true }
-varsig = { workspace = true }
+dialog-varsig = { workspace = true }
 ipld-core = { workspace = true, optional = true }
-ucan = { workspace = true, optional = true }
+dialog-ucan = { workspace = true, optional = true }

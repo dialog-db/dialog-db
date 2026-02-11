@@ -12,8 +12,8 @@
 //! service worker, they cannot exfiltrate the private key material.
 
 use crate::key::KeyExport;
+use dialog_varsig::eddsa::Ed25519Signature;
 use js_sys::{Object, Reflect, Uint8Array};
-use varsig::eddsa::Ed25519Signature;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{CryptoKey, SubtleCrypto};

@@ -3,6 +3,7 @@
 pub mod payload_tag;
 
 use crate::codec::CborCodec;
+use dialog_varsig::{Signature, Varsig};
 use ipld_core::ipld::Ipld;
 use payload_tag::PayloadTag;
 use serde::{
@@ -11,7 +12,6 @@ use serde::{
     ser::{SerializeMap, SerializeTuple},
 };
 use std::{fmt, marker::PhantomData};
-use varsig::{Signature, Varsig};
 
 /// Top-level Varsig envelope type.
 ///
@@ -119,9 +119,11 @@ impl<S: Signature, T: PayloadTag + Serialize + for<'de> Deserialize<'de>> Envelo
     /// # Errors
     ///
     /// Returns the codec's encoding error if encoding fails.
-    pub fn encode(&self) -> Result<Vec<u8>, <CborCodec as varsig::Codec<Self>>::EncodingError>
+    pub fn encode(
+        &self,
+    ) -> Result<Vec<u8>, <CborCodec as dialog_varsig::Codec<Self>>::EncodingError>
     where
-        CborCodec: varsig::Codec<Self>,
+        CborCodec: dialog_varsig::Codec<Self>,
     {
         self.header.encode(self)
     }

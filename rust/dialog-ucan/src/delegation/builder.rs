@@ -11,9 +11,9 @@ use crate::{
     time::timestamp::Timestamp,
     unset::Unset,
 };
+use dialog_varsig::{Did, Principal, Signature};
 use ipld_core::ipld::Ipld;
 use std::{collections::BTreeMap, marker::PhantomData};
-use varsig::{Did, Principal, Signature};
 
 /// Typesafe builder for [`Delegation`][super::Delegation].
 ///
@@ -269,7 +269,7 @@ impl<S: Signature, I: Issuer<S>> DelegationBuilder<S, I, Did, Subject, Command> 
     /// Builds the complete, signed [`Delegation`].
     ///
     /// Uses the issuer (set via `.issuer()`) to sign the delegation.
-    /// The signing is performed asynchronously via [`Signer::sign()`][varsig::signature::Signer::sign].
+    /// The signing is performed asynchronously via [`Signer::sign()`][dialog_varsig::signature::Signer::sign].
     ///
     /// # Errors
     ///
@@ -319,7 +319,7 @@ impl<S: Signature, I: Issuer<S>> DelegationBuilder<S, I, Did, Subject, Command> 
             .encode()
             .map_err(|e| BuildError::EncodingError(e.to_string()))?;
 
-        let signature = varsig::signature::Signer::sign(&self.issuer, &encoded)
+        let signature = dialog_varsig::signature::Signer::sign(&self.issuer, &encoded)
             .await
             .map_err(BuildError::SigningError)?;
 
