@@ -7,7 +7,7 @@ use dialog_storage::CborEncoder;
 use dialog_storage::s3::Bucket;
 
 use crate::ErrorMappingBackend;
-use crate::replica::remote::{PlatformStorage, RemoteBackend, SigningAuthority};
+use crate::repository::remote::{PlatformStorage, RemoteBackend, SigningAuthority};
 
 /// An active connection to an S3-compatible storage backend.
 #[derive(Clone)]

@@ -12,7 +12,7 @@ use super::{
     RemoteCredentials, RemoteSite, Revision, SigningAuthority, Site,
 };
 use crate::TypedStoreResource;
-use crate::replica::ReplicaError;
+use crate::repository::RepositoryError;
 
 /// Descriptor for a remote branch that hasn't been connected yet.
 ///
@@ -132,26 +132,26 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static>
     /// Resolves remote revision for this branch. If remote revision is different
     /// from local revision, updates local one to match the remote. Returns
     /// revision of this branch.
-    pub async fn resolve(&mut self) -> Result<Option<Revision>, ReplicaError> {
+    pub async fn resolve(&mut self) -> Result<Option<Revision>, RepositoryError> {
         // Reload from upstream to get latest revision before we read.
         let mut memory = self.connection.memory();
         self.up
             .reload(&mut memory)
             .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+            .map_err(|e| RepositoryError::StorageError(format!("{:?}", e)))?;
         let revision = self.up.read();
 
         // Update local record for the upstream revision
         self.down
             .replace_with(|_| revision.clone(), &mut self.descriptor.storage.clone())
             .await
-            .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+            .map_err(|e| RepositoryError::StorageError(format!("{:?}", e)))?;
 
         Ok(self.down.read())
     }
 
     /// Publishes new canonical revision. Returns error if publishing fails.
-    pub async fn publish(&mut self, revision: Revision) -> Result<(), ReplicaError> {
+    pub async fn publish(&mut self, revision: Revision) -> Result<(), RepositoryError> {
         let prior = self.down.read();
 
         // We only need to publish to upstream if desired revision is different
@@ -161,7 +161,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static>
             self.up
                 .replace(Some(revision.clone()), &mut memory)
                 .await
-                .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+                .map_err(|e| RepositoryError::StorageError(format!("{:?}", e)))?;
         }
 
         // If revision for the remote branch is different from one published,
@@ -173,7 +173,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static>
                     &mut self.descriptor.storage.clone(),
                 )
                 .await
-                .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+                .map_err(|e| RepositoryError::StorageError(format!("{:?}", e)))?;
         }
 
         Ok(())
@@ -184,7 +184,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static>
     /// This method takes a stream of tree nodes (typically from `TreeDifference::novel_nodes()`)
     /// and uploads them to the remote storage. Use this before publishing a new
     /// revision to ensure all tree blocks are available on the remote.
-    pub async fn upload<Key, Value, E, S>(&mut self, nodes: S) -> Result<(), ReplicaError>
+    pub async fn upload<Key, Value, E, S>(&mut self, nodes: S) -> Result<(), RepositoryError>
     where
         Key: KeyType + 'static,
         Value: dialog_prolly_tree::ValueType,
@@ -197,20 +197,20 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static>
         let mut archive = self.connection.archive();
 
         while let Some(result) = nodes.next().await {
-            let node = result.map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+            let node = result.map_err(|e| RepositoryError::StorageError(format!("{:?}", e)))?;
 
             // Use hash directly as key
             let key = node.hash().to_vec();
 
             // Encode the block using the standard encoder
             let (_hash, bytes) = CborEncoder.encode(node.block()).await.map_err(|e| {
-                ReplicaError::StorageError(format!("Failed to encode block: {:?}", e))
+                RepositoryError::StorageError(format!("Failed to encode block: {:?}", e))
             })?;
 
             // Upload the block using StorageBackend trait
             StorageBackend::set(&mut archive, key, bytes)
                 .await
-                .map_err(|e| ReplicaError::StorageError(format!("Upload failed: {:?}", e)))?;
+                .map_err(|e| RepositoryError::StorageError(format!("Upload failed: {:?}", e)))?;
         }
 
         Ok(())
@@ -302,12 +302,14 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> Remote
     ///
     /// This establishes the connection if needed (transitioning from Reference to Open)
     /// and returns a reference to the connection.
-    pub async fn open(&mut self) -> Result<&mut RemoteBranchConnection<Backend, A>, ReplicaError> {
+    pub async fn open(
+        &mut self,
+    ) -> Result<&mut RemoteBranchConnection<Backend, A>, RepositoryError> {
         if let Self::Reference(desc) = self {
             let credentials =
                 desc.credentials
                     .as_ref()
-                    .ok_or_else(|| ReplicaError::RemoteNotFound {
+                    .ok_or_else(|| RepositoryError::RemoteNotFound {
                         remote: desc.site_name.clone(),
                     })?;
 
@@ -318,7 +320,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> Remote
                 .clone()
                 .open::<Revision>(&address.into_bytes())
                 .await
-                .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+                .map_err(|e| RepositoryError::StorageError(format!("{:?}", e)))?;
 
             // Connect to remote using credentials.
             // TODO: Remove this requirement once ucan-rs is more flexible with WebCrypto support,
@@ -331,7 +333,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> Remote
             let up = memory
                 .open::<Revision>(&format!("local/{}", &desc.name).into_bytes())
                 .await
-                .map_err(|e| ReplicaError::StorageError(format!("{:?}", e)))?;
+                .map_err(|e| RepositoryError::StorageError(format!("{:?}", e)))?;
 
             // Transition to Open state
             *self = Self::Open(RemoteBranchConnection {
@@ -355,7 +357,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> Remote
         storage: PlatformStorage<Backend>,
         issuer: A,
         subject: Did,
-    ) -> Result<Self, ReplicaError> {
+    ) -> Result<Self, RepositoryError> {
         // Load the remote site to get credentials
         let credentials = RemoteSite::load(site_name, issuer.clone(), storage.clone())
             .await?

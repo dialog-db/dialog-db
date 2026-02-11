@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use super::{Connection, MemoryConnection, SigningAuthority};
 #[cfg(feature = "s3")]
 use super::{RemoteBackend, S3Connection};
-use crate::replica::ReplicaError;
+use crate::repository::RepositoryError;
 #[cfg(feature = "s3")]
 use crate::{ErrorMappingBackend, PlatformStorage};
 #[cfg(feature = "s3")]
@@ -98,7 +98,7 @@ impl RemoteCredentials {
         &self,
         issuer: SigningAuthority,
         subject: &Did,
-    ) -> Result<Connection, ReplicaError> {
+    ) -> Result<Connection, RepositoryError> {
         match self {
             #[cfg(feature = "s3")]
             Self::S3(creds) => {
