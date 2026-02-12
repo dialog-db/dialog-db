@@ -12,7 +12,7 @@ use crate::{DialogArtifactsError, ENTITY_LENGTH, Uri};
 
 /// An [`Entity`] is the subject part of a semantic triple. An [`Entity`] can
 /// be embodied by any valid [`Uri`].
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(into = "String", try_from = "String")]
 pub struct Entity(Uri, [u8; ENTITY_LENGTH]);
 
@@ -106,5 +106,11 @@ impl Entity {
     /// formatted for use in an index key.
     pub fn key_bytes(&self) -> &[u8; ENTITY_LENGTH] {
         &self.1
+    }
+}
+
+impl std::fmt::Debug for Entity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.to_string())
     }
 }
