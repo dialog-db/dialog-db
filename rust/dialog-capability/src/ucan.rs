@@ -4,9 +4,9 @@
 //! collection utilities for UCAN invocations.
 //!
 //! The core bridging is automatic: any type implementing [`Authority`](crate::Authority)
-//! automatically satisfies `ucan::Issuer<A::Signature>` because `Authority`
-//! extends `varsig::Principal + varsig::Signer<Self::Signature>`, and
-//! `ucan::Issuer<S>` has a blanket impl for `Signer<S> + Principal`.
+//! automatically satisfies `dialog_ucan::Issuer<A::Signature>` because `Authority`
+//! extends `dialog_varsig::Principal + dialog_varsig::Signer<Self::Signature>`, and
+//! `dialog_ucan::Issuer<S>` has a blanket impl for `Signer<S> + Principal`.
 
 use crate::{Ability, PolicyBuilder};
 use ipld_core::ipld::Ipld;

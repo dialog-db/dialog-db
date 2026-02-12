@@ -12,15 +12,15 @@ ed25519 = [
     "dep:ed25519-dalek",
     "dep:getrandom",
     "dep:base58",
-    "varsig/edwards25519",
-    "varsig/sha2_512",
+    "dialog-varsig/edwards25519",
+    "dialog-varsig/sha2_512",
 ]
-ucan = ["dep:ucan", "dialog-capability/ucan"]
+ucan = ["dep:dialog-ucan", "dialog-capability/ucan"]
 
 [dependencies]
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
-varsig = { workspace = true }
+dialog-varsig = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 signature = { workspace = true }
@@ -31,7 +31,7 @@ getrandom = { workspace = true, optional = true }
 base58 = { workspace = true, optional = true }
 
 # ucan feature deps
-ucan = { workspace = true, optional = true }
+dialog-ucan = { workspace = true, optional = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 js-sys = { workspace = true }

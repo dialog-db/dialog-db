@@ -1,6 +1,6 @@
 //! Ed25519 key types, DID, and signer implementations.
 
-use varsig::eddsa::Ed25519Signature;
+use dialog_varsig::eddsa::Ed25519Signature;
 
 // Platform-specific implementations
 pub mod native;

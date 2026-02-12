@@ -3,7 +3,7 @@ use crate::{
     PolicyBuilder, Provider, Selector,
 };
 use dialog_common::ConditionalSend;
-use varsig::Principal;
+use dialog_varsig::Principal;
 
 /// Newtype wrapper for describing a capability chain from the constraint type.
 /// It enables defining convenience methods for working with that capability.
