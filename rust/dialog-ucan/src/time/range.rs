@@ -1,6 +1,6 @@
 //! Time range for UCAN validity windows.
 
-use super::timestamp::Timestamp;
+use super::{error::TimeBoundError, timestamp::Timestamp};
 use std::{
     fmt,
     ops::{Bound, RangeBounds},
@@ -54,6 +54,26 @@ impl TimeRange {
             (Bound::Included(nbf), Bound::Included(exp)) => nbf <= exp,
             _ => true,
         }
+    }
+
+    /// Check whether a timestamp falls within this range.
+    ///
+    /// # Errors
+    ///
+    /// * [`TimeBoundError::Expired`] — if `time` is past the expiration bound
+    /// * [`TimeBoundError::NotYetValid`] — if `time` is before the not-before bound
+    pub fn check(&self, time: &Timestamp) -> Result<(), TimeBoundError> {
+        match self.expiration {
+            Bound::Included(exp) if *time > exp => return Err(TimeBoundError::Expired),
+            Bound::Excluded(exp) if *time >= exp => return Err(TimeBoundError::Expired),
+            _ => {}
+        }
+        match self.not_before {
+            Bound::Included(nbf) if *time < nbf => return Err(TimeBoundError::NotYetValid),
+            Bound::Excluded(nbf) if *time <= nbf => return Err(TimeBoundError::NotYetValid),
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Compute the intersection of two time ranges.
