@@ -109,7 +109,7 @@ impl Address {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn it_creates_s3_address() {
         let addr = Address::new(
             "https://s3.us-east-1.amazonaws.com",
@@ -122,7 +122,7 @@ mod tests {
         assert_eq!(addr.bucket(), "my-bucket");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_creates_r2_address() {
         let addr = Address::new(
             "https://account-id.r2.cloudflarestorage.com",
@@ -138,7 +138,7 @@ mod tests {
         assert_eq!(addr.bucket(), "my-bucket");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_creates_localhost_address() {
         let addr = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
 
@@ -147,7 +147,7 @@ mod tests {
         assert_eq!(addr.bucket(), "my-bucket");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_roundtrips_through_serde() {
         let addr = Address::new(
             "https://s3.us-east-1.amazonaws.com",

@@ -23,7 +23,10 @@ pub struct Get {
 
 impl Get {
     /// Create a new Get effect.
-    pub fn new(digest: impl Into<Blake3Hash>) -> Self {
+    pub fn new<T>(digest: T) -> Self
+    where
+        Blake3Hash: From<T>,
+    {
         Self {
             digest: digest.into(),
         }
@@ -61,7 +64,10 @@ pub struct Put {
 
 impl Put {
     /// Create a new Put effect.
-    pub fn new(digest: impl Into<Blake3Hash>, checksum: Checksum) -> Self {
+    pub fn new<T>(digest: T, checksum: Checksum) -> Self
+    where
+        Blake3Hash: From<T>,
+    {
         Self {
             digest: digest.into(),
             checksum,

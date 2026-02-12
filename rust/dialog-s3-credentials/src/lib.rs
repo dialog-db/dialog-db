@@ -52,19 +52,19 @@
 //! # }
 //! ```
 
-pub mod address;
-pub mod authorization;
+mod address;
+mod authorization;
 pub mod capability;
-pub mod checksum;
-pub mod credentials;
+mod checksum;
+mod credentials;
 pub mod s3;
 
 #[cfg(feature = "ucan")]
 pub mod ucan;
 
-// Primary exports
-pub use address::Address;
-pub use authorization::Authorization;
-pub use capability::{AccessError, AuthorizedRequest, S3Request, archive, memory, storage};
-pub use checksum::{Checksum, Hasher};
-pub use credentials::Credentials;
+pub use address::*;
+pub use authorization::*;
+pub use capability::{AccessError, Acl, AuthorizedRequest, Precondition, S3Request};
+pub use capability::{archive, memory, storage};
+pub use checksum::*;
+pub use credentials::*;

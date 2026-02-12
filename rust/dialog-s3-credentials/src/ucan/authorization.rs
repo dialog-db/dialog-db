@@ -89,12 +89,11 @@ pub enum UcanAuthorization {
 
 impl UcanAuthorization {
     /// Create a self-issued authorization for an owner.
-    pub fn owned(
-        endpoint: String,
-        subject: impl Into<Did>,
-        ability: impl Into<String>,
-        parameters: Parameters,
-    ) -> Self {
+    pub fn owned<S, A>(endpoint: String, subject: S, ability: A, parameters: Parameters) -> Self
+    where
+        Did: From<S>,
+        String: From<A>,
+    {
         Self::Owned {
             endpoint,
             subject: subject.into(),
@@ -104,19 +103,22 @@ impl UcanAuthorization {
     }
 
     /// Create an authorization from a delegation chain.
-    pub fn delegated(
+    pub fn delegated<A>(
         endpoint: String,
         chain: DelegationChain,
-        ability: impl Into<String>,
+        ability: A,
         parameters: Parameters,
-    ) -> Self {
+    ) -> Self
+    where
+        String: From<A>,
+    {
         // Pre-compute and cache the DID representations
         let subject: Did = chain.subject().map(|did| did.into()).unwrap_or_default();
         let audience: Did = chain.audience().into();
 
         Self::Delegated {
             endpoint,
-            ability: ability.into(),
+            ability: String::from(ability),
             chain,
             subject,
             audience,

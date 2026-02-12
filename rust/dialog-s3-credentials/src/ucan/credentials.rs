@@ -105,11 +105,8 @@ impl Credentials {
 ///
 /// This allows Credentials to find authorization proofs for capability claims
 /// by looking up delegation chains for the subject.
-#[cfg_attr(
-    not(all(target_arch = "wasm32", target_os = "unknown")),
-    async_trait::async_trait
-)]
-#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
 impl Access for Credentials {
     type Authorization = UcanAuthorization;
     type Error = AccessError;
@@ -210,11 +207,8 @@ pub mod tests {
         }
     }
 
-    #[cfg_attr(
-        not(all(target_arch = "wasm32", target_os = "unknown")),
-        async_trait::async_trait
-    )]
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
     impl Access for Session {
         type Authorization = UcanAuthorization;
         type Error = AccessError;
@@ -231,11 +225,8 @@ pub mod tests {
             &self.did
         }
     }
-    #[cfg_attr(
-        not(all(target_arch = "wasm32", target_os = "unknown")),
-        async_trait::async_trait
-    )]
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
     impl Authority for Session {
         async fn sign(
             &mut self,
