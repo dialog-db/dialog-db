@@ -15,17 +15,20 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```rust,no_run
 //! use dialog_common::r#async::{spawn, TaskQueue, DialogAsyncError};
 //!
+//! # async fn example() -> Result<(), DialogAsyncError> {
 //! // Spawn a single task
 //! let result = spawn(async { 42 }).await?;
 //!
 //! // Aggregate multiple tasks
 //! let mut queue = TaskQueue::default();
-//! queue.spawn(async { Ok(()) });
-//! queue.spawn(async { Ok(()) });
+//! queue.spawn(async { Ok::<(), DialogAsyncError>(()) });
+//! queue.spawn(async { Ok::<(), DialogAsyncError>(()) });
 //! queue.join().await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::future::Future;
@@ -75,10 +78,16 @@ pub enum DialogAsyncError {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rust,no_run
+/// use dialog_common::r#async::{spawn, DialogAsyncError};
+///
+/// # async fn expensive_computation() {}
+/// # async fn example() -> Result<(), DialogAsyncError> {
 /// let result = spawn(async {
 ///     expensive_computation().await
 /// }).await?;
+/// # Ok(())
+/// # }
 /// ```
 pub async fn spawn<F>(future: F) -> Result<F::Output, DialogAsyncError>
 where
@@ -243,26 +252,26 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[dialog_macros::test]
-    async fn spawn_returns_future_output() {
+    async fn it_returns_future_output_from_spawn() {
         let result = spawn(async { 42 }).await.unwrap();
         assert_eq!(result, 42);
     }
 
     #[dialog_macros::test]
-    async fn spawn_propagates_async_result() {
+    async fn it_propagates_async_result_from_spawn() {
         let result: Result<i32, &str> = spawn(async { Ok(123) }).await.unwrap();
         assert_eq!(result, Ok(123));
     }
 
     #[dialog_macros::test]
-    async fn task_queue_empty_join_succeeds() {
+    async fn it_joins_empty_queue() {
         let mut queue = TaskQueue::default();
         assert_eq!(queue.count(), 0);
         queue.join().await.unwrap();
     }
 
     #[dialog_macros::test]
-    async fn task_queue_executes_single_task() {
+    async fn it_executes_single_task() {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
 
@@ -278,7 +287,7 @@ mod tests {
     }
 
     #[dialog_macros::test]
-    async fn task_queue_executes_multiple_tasks() {
+    async fn it_executes_multiple_tasks() {
         let counter = Arc::new(AtomicUsize::new(0));
 
         let mut queue = TaskQueue::default();
@@ -296,7 +305,7 @@ mod tests {
     }
 
     #[dialog_macros::test]
-    async fn task_queue_propagates_error() {
+    async fn it_propagates_task_error() {
         let mut queue = TaskQueue::default();
         queue.spawn(async { Err(DialogAsyncError::JoinError) });
 
@@ -305,7 +314,7 @@ mod tests {
     }
 
     #[dialog_macros::test]
-    async fn task_queue_is_empty_after_join() {
+    async fn it_is_empty_after_join() {
         let mut queue = TaskQueue::default();
         queue.spawn(async { Ok(()) });
         queue.spawn(async { Ok(()) });
@@ -315,7 +324,7 @@ mod tests {
     }
 
     #[dialog_macros::test]
-    async fn task_queue_can_be_reused() {
+    async fn it_can_be_reused() {
         let counter = Arc::new(AtomicUsize::new(0));
 
         let mut queue = TaskQueue::default();
@@ -344,7 +353,7 @@ mod tests {
     }
 
     #[dialog_macros::test]
-    fn task_queue_debug_shows_count() {
+    fn it_shows_count_in_debug() {
         let queue = TaskQueue::default();
         assert!(format!("{:?}", queue).contains("tasks: 0"));
     }

@@ -477,14 +477,13 @@ impl<'a> IntegrationTest<'a> {
                 #(#feature_checks)*
                 let features_str = features.join(",");
 
-                // Build RUSTFLAGS with dialog_test_wasm_integration cfg so that only wasm
-                // integration tests will run.
-                let existing_rustflags = ::std::env::var("RUSTFLAGS").unwrap_or_default();
-                let rustflags = format!("{} --cfg dialog_test_wasm_integration", existing_rustflags);
-
-                // Build cargo command args
+                // Build cargo command args.
+                // Use --config to add dialog_test_wasm_integration cfg. This merges
+                // with .cargo/config.toml rustflags (unlike RUSTFLAGS env which overrides).
                 let mut args = vec![
                     "test".to_string(),
+                    "--config".to_string(),
+                    r#"target.wasm32-unknown-unknown.rustflags = ["--cfg", "dialog_test_wasm_integration"]"#.to_string(),
                     "-p".to_string(), pkg_name.to_string(),
                     "--target".to_string(), "wasm32-unknown-unknown".to_string(),
                     "--lib".to_string(),
@@ -503,7 +502,6 @@ impl<'a> IntegrationTest<'a> {
                 // Spawn cargo test directly with env vars
                 let mut cmd = ::std::process::Command::new("cargo");
                 cmd.args(&args)
-                    .env("RUSTFLAGS", &rustflags)
                     .env(PROVISIONED_SERVICE_ADDRESS, &address)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
