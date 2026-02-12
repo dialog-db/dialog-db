@@ -435,7 +435,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_fails_on_empty_container() {
         let container = Container::new(vec![]);
         let result = InvocationChain::try_from(container);
@@ -448,7 +448,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_fails_on_invalid_bytes() {
         let container = Container::new(vec![vec![1, 2, 3, 4]]); // Invalid CBOR
         let result = InvocationChain::try_from(container);

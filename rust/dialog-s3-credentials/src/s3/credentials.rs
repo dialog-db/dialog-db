@@ -178,7 +178,8 @@ impl<'de> Deserialize<'de> for PrivateCredentials {
 }
 
 impl PrivateCredentials {
-    /// Create new private credentials with AWS SigV4 signing.
+    /// Create new private credentials allowing [AWS SigV4] signing.
+    /// [AWS SigV4]:https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-authenticating-requests.html
     ///
     /// # Arguments
     ///
