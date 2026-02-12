@@ -73,46 +73,6 @@ mod invocation_conformance {
         Ok(())
     }
 
-    mod valid {
-        use super::*;
-        use dialog_credentials::ed25519::Ed25519KeyResolver;
-
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        use wasm_bindgen_test::wasm_bindgen_test;
-
-        #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), tokio::test)]
-        #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
-        async fn test_all_valid_invocations_check() -> TestResult {
-            let valid = invocation_fixture()["valid"]
-                .as_array()
-                .expect("valid is an array");
-
-            for (idx, entry) in valid.iter().enumerate() {
-                let name = entry["name"].as_str().unwrap();
-                let invocation = parse_invocation(entry);
-                let proofs = parse_proofs(entry);
-                let delegation_store = build_store(proofs).await;
-
-                let result = invocation
-                    .check(&delegation_store, &Ed25519KeyResolver)
-                    .await;
-
-                assert!(
-                    result.is_ok(),
-                    "valid[{idx}] '{name}' should pass check but got: {:?}",
-                    result.err()
-                );
-
-                eprintln!(
-                    "valid[{idx}] '{name}': check passed, time_range = {:?}",
-                    result.unwrap()
-                );
-            }
-
-            Ok(())
-        }
-    }
-
     mod roundtrip {
         use super::*;
 
@@ -199,11 +159,63 @@ mod invocation_conformance {
         }
     }
 
+    /// Parse the `time` field from a fixture entry as a `Timestamp`.
+    fn parse_time(entry: &serde_json::Value) -> dialog_ucan::time::Timestamp {
+        let secs = entry["time"]
+            .as_u64()
+            .expect("fixture entry has a 'time' field (Unix seconds)");
+        use dialog_ucan::time::timestamp::{Duration, UNIX_EPOCH};
+        dialog_ucan::time::Timestamp::new(UNIX_EPOCH + Duration::from_secs(secs))
+            .expect("fixture time is in range")
+    }
+
+    mod valid {
+        use super::*;
+        use dialog_credentials::ed25519::Ed25519KeyResolver;
+
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        use wasm_bindgen_test::wasm_bindgen_test;
+
+        #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), tokio::test)]
+        #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
+        async fn test_all_valid_invocations_check() -> TestResult {
+            let valid = invocation_fixture()["valid"]
+                .as_array()
+                .expect("valid is an array");
+
+            for (idx, entry) in valid.iter().enumerate() {
+                let name = entry["name"].as_str().unwrap();
+                let time = parse_time(entry);
+                let invocation = parse_invocation(entry);
+                let proofs = parse_proofs(entry);
+                let delegation_store = build_store(proofs).await;
+
+                let result = invocation
+                    .check(&delegation_store, &Ed25519KeyResolver)
+                    .await;
+
+                let range = result.unwrap_or_else(|e| {
+                    panic!("valid[{idx}] '{name}' should pass check but got: {e:?}")
+                });
+
+                range.check(&time).unwrap_or_else(|e| {
+                    panic!(
+                        "valid[{idx}] '{name}': fixture time not in range: {e}, \
+                         range={range:?}, time={time:?}"
+                    )
+                });
+
+                eprintln!("valid[{idx}] '{name}': check passed, time_range = {range:?}");
+            }
+
+            Ok(())
+        }
+    }
+
     mod invalid {
         use super::*;
         use dialog_credentials::ed25519::Ed25519KeyResolver;
         use dialog_ucan::invocation::{CheckFailed, InvocationCheckError, StoredCheckError};
-        use std::ops::RangeBounds;
 
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         use wasm_bindgen_test::wasm_bindgen_test;
@@ -264,7 +276,6 @@ mod invocation_conformance {
         #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), tokio::test)]
         #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
         async fn test_all_invalid_invocations_fail_check() -> TestResult {
-            let now = dialog_ucan::time::Timestamp::now();
             let invalid = invocation_fixture()["invalid"]
                 .as_array()
                 .expect("invalid is an array");
@@ -272,6 +283,7 @@ mod invocation_conformance {
             for (idx, entry) in invalid.iter().enumerate() {
                 let name = entry["name"].as_str().unwrap();
                 let error_name = entry["error"]["name"].as_str().unwrap();
+                let time = parse_time(entry);
 
                 // Try to parse invocation — InvalidSignature cases may fail here.
                 let inv_result = try_parse_invocation(entry);
@@ -305,16 +317,8 @@ mod invocation_conformance {
                     .check(&delegation_store, &Ed25519KeyResolver)
                     .await;
 
-                // The fixture declares an expected error class, but our validator
-                // may catch a *different* (equally valid) error first due to check
-                // ordering. For example, a fixture designed to test "Expired" may
-                // also have a subject mismatch that fires before we reach time
-                // checks. We verify:
-                // 1. The specific expected error if we can identify it, OR
-                // 2. That the invocation is at least rejected (not accepted).
                 match error_name {
                     "InvalidClaim" => {
-                        // "no proof" or "invalid powerline"
                         let err = result
                             .expect_err(&format!("invalid[{idx}] '{name}' should fail check"));
                         match &err {
@@ -329,7 +333,6 @@ mod invocation_conformance {
                         }
                     }
                     "UnavailableProof" => {
-                        // "missing proof" — store doesn't have a referenced CID
                         let err = result
                             .expect_err(&format!("invalid[{idx}] '{name}' should fail check"));
                         match &err {
@@ -340,19 +343,13 @@ mod invocation_conformance {
                         }
                     }
                     "Expired" | "TooEarly" => {
-                        // These may return Ok(range) where the range doesn't
-                        // contain "now", or Err(InvalidTimeWindow) if the chain
-                        // has contradictory bounds.
-                        //
-                        // Some fixtures also have structural issues (e.g. subject
-                        // mismatch) that our validator catches first, which is an
-                        // equally valid rejection.
                         match &result {
                             Ok(range) => {
                                 assert!(
-                                    !range.contains(&now),
+                                    range.check(&time).is_err(),
                                     "invalid[{idx}] '{name}' ({error_name}): \
-                                     expected time range not to contain now, but range={range:?}"
+                                     expected fixture time to be outside range, \
+                                     but range={range:?}, time={time:?}"
                                 );
                             }
                             Err(_) => {
@@ -388,11 +385,6 @@ mod invocation_conformance {
                         }
                     }
                     "InvalidSignature" => {
-                        // If we got here, the invocation parsed OK but should
-                        // fail signature verification. However, if the *proof*
-                        // has the bad signature (not the invocation), it may
-                        // have been filtered out during parsing, causing the
-                        // store to report it as missing.
                         let err = result
                             .expect_err(&format!("invalid[{idx}] '{name}' should fail check"));
                         match &err {

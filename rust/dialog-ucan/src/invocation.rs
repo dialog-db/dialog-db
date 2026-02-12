@@ -18,7 +18,7 @@ use crate::{
     future::FutureKind,
     promise::{Promised, WaitingOn},
     subject::Subject,
-    time::{range::TimeRange, timestamp::Timestamp},
+    time::{TimeBoundError, range::TimeRange, timestamp::Timestamp},
 };
 use builder::InvocationBuilder;
 use dialog_varsig::{Did, Resolver, Signature, Verifier};
@@ -366,14 +366,8 @@ impl InvocationPayload {
             .collect::<Result<BTreeMap<String, Ipld>, _>>()?
             .into();
 
-        // Collect proofs and normalize to root-to-leaf order.
-        // The spec is ambiguous about proof ordering in `prf`:
-        // https://github.com/ucan-wg/invocation/issues/41
-        // TODO: settle on a single order once the spec clarifies this.
-        let mut proofs: Vec<&'a Delegation<S>> = proofs.into_iter().collect();
-        if proofs.len() > 1 && proofs.last().is_some_and(|p| p.issuer() == self.subject()) {
-            proofs.reverse();
-        }
+        // Proofs are expected in subject-to-invocation-issuer (root-to-leaf) order.
+        let proofs: Vec<&'a Delegation<S>> = proofs.into_iter().collect();
 
         // Start with the invocation's own time bounds.
         let mut time_range = TimeRange::from(self);
@@ -712,6 +706,10 @@ pub enum CheckFailed {
         /// The empty time range that was computed.
         range: TimeRange,
     },
+
+    /// The invocation is outside the valid time window (expired or not yet valid).
+    #[error(transparent)]
+    TimeBound(#[from] TimeBoundError),
 }
 
 /// Errors that can occur when checking an invocation with proofs stored in a delegation store
