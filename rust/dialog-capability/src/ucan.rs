@@ -1,4 +1,12 @@
-//! UCAN-specific parameter collection using IPLD.
+//! UCAN bridge types.
+//!
+//! When the `ucan` feature is enabled this module provides IPLD parameter
+//! collection utilities for UCAN invocations.
+//!
+//! The core bridging is automatic: any type implementing [`Authority`](crate::Authority)
+//! automatically satisfies `ucan::Issuer<A::Signature>` because `Authority`
+//! extends `varsig::Principal + varsig::Signer<Self::Signature>`, and
+//! `ucan::Issuer<S>` has a blanket impl for `Signer<S> + Principal`.
 
 use crate::{Ability, PolicyBuilder};
 use ipld_core::ipld::Ipld;

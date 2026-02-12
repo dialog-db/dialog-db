@@ -241,41 +241,42 @@ pub enum MemoryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dialog_capability::did;
 
     #[test]
     fn it_builds_memory_claim_path() {
-        let claim = Subject::from("did:key:zSpace").attenuate(Memory);
+        let claim = Subject::from(did!("key:zSpace")).attenuate(Memory);
 
-        assert_eq!(claim.subject(), "did:key:zSpace");
+        assert_eq!(claim.subject(), &did!("key:zSpace"));
         assert_eq!(claim.ability(), "/memory");
     }
 
     #[test]
     fn it_builds_space_claim_path() {
-        let claim = Subject::from("did:key:zSpace")
+        let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Memory)
             .attenuate(Space::new("local"));
 
-        assert_eq!(claim.subject(), "did:key:zSpace");
+        assert_eq!(claim.subject(), &did!("key:zSpace"));
         // Space is Policy, not Ability, so it doesn't add to path
         assert_eq!(claim.ability(), "/memory");
     }
 
     #[test]
     fn it_builds_cell_claim_path() {
-        let claim = Subject::from("did:key:zSpace")
+        let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("main"));
 
-        assert_eq!(claim.subject(), "did:key:zSpace");
+        assert_eq!(claim.subject(), &did!("key:zSpace"));
         // Cell is Policy, not Ability, so it doesn't add to path
         assert_eq!(claim.ability(), "/memory");
     }
 
     #[test]
     fn it_builds_resolve_claim_path() {
-        let claim = Subject::from("did:key:zSpace")
+        let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("main"))
@@ -286,7 +287,7 @@ mod tests {
 
     #[test]
     fn it_builds_publish_claim_path() {
-        let claim = Subject::from("did:key:zSpace")
+        let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("main"))
@@ -297,7 +298,7 @@ mod tests {
 
     #[test]
     fn it_builds_retract_claim_path() {
-        let claim = Subject::from("did:key:zSpace")
+        let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Memory)
             .attenuate(Space::new("local"))
             .attenuate(Cell::new("main"))
@@ -314,7 +315,7 @@ mod tests {
 
         #[test]
         fn it_collects_resolve_capability_parameters() {
-            let cap = Subject::from("did:key:zSpace")
+            let cap = Subject::from(did!("key:zSpace"))
                 .attenuate(Memory)
                 .attenuate(Space::new("remote"))
                 .attenuate(Cell::new("config"))
@@ -327,7 +328,7 @@ mod tests {
 
         #[test]
         fn it_collects_publish_capability_parameters() {
-            let cap = Subject::from("did:key:zSpace")
+            let cap = Subject::from(did!("key:zSpace"))
                 .attenuate(Memory)
                 .attenuate(Space::new("local"))
                 .attenuate(Cell::new("main"))
@@ -345,7 +346,7 @@ mod tests {
 
         #[test]
         fn it_collects_retract_capability_parameters() {
-            let cap = Subject::from("did:key:zSpace")
+            let cap = Subject::from(did!("key:zSpace"))
                 .attenuate(Memory)
                 .attenuate(Space::new("local"))
                 .attenuate(Cell::new("main"))

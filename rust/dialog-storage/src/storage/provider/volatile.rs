@@ -15,7 +15,7 @@
 //!
 //! ```no_run
 //! use dialog_storage::provider::Volatile;
-//! use dialog_capability::Subject;
+//! use dialog_capability::{did, Did, Subject};
 //! use dialog_effects::archive::{Archive, Catalog, Get};
 //! use dialog_common::Blake3Hash;
 //!
@@ -23,7 +23,7 @@
 //! let mut provider = Volatile::new();
 //! let digest = Blake3Hash::hash(b"hello");
 //!
-//! let effect = Subject::from("did:key:z6Mk...")
+//! let effect = Subject::from(did!("key:z6Mk..."))
 //!     .attenuate(Archive)
 //!     .attenuate(Catalog::new("index"))
 //!     .invoke(Get::new(digest));
@@ -87,6 +87,7 @@ pub enum VolatileError {
 mod tests {
     use super::*;
     use base58::ToBase58;
+    use dialog_capability::did;
     use dialog_common::Blake3Hash;
 
     #[dialog_common::test]
@@ -98,7 +99,7 @@ mod tests {
     #[dialog_common::test]
     fn it_creates_session_on_demand() {
         let mut provider = Volatile::new();
-        let subject = Did::from("did:test:subject1");
+        let subject = did!("test:subject1");
 
         let _session = provider.session(&subject);
         assert!(provider.sessions.contains_key(&subject));
@@ -107,7 +108,7 @@ mod tests {
     #[dialog_common::test]
     fn it_reuses_existing_session() {
         let mut provider = Volatile::new();
-        let subject = Did::from("did:test:subject2");
+        let subject = did!("test:subject2");
 
         // First access creates session
         let digest = Blake3Hash::hash(b"test").as_bytes().to_base58();
@@ -124,8 +125,8 @@ mod tests {
     #[dialog_common::test]
     fn it_isolates_sessions_by_subject() {
         let mut provider = Volatile::new();
-        let subject1 = Did::from("did:test:subject-a");
-        let subject2 = Did::from("did:test:subject-b");
+        let subject1 = did!("test:subject-a");
+        let subject2 = did!("test:subject-b");
 
         let digest = Blake3Hash::hash(b"test").as_bytes().to_base58();
         provider

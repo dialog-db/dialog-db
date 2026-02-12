@@ -64,20 +64,20 @@ mod tests {
 
     #[test]
     fn it_creates_claim_with_accessors() {
-        let cap = Subject::from("did:key:zSubject").attenuate(TestAbility);
-        let claim = Claim::new(cap.clone(), "did:key:zAudience".into());
+        let cap = Subject::from(did!("key:zSubject")).attenuate(TestAbility);
+        let claim = Claim::new(cap.clone(), did!("key:zAudience"));
 
-        assert_eq!(claim.audience(), "did:key:zAudience");
-        assert_eq!(claim.subject(), "did:key:zSubject");
+        assert_eq!(claim.audience(), &did!("key:zAudience"));
+        assert_eq!(claim.subject(), &did!("key:zSubject"));
         assert_eq!(claim.ability(), "/test-ability");
     }
 
     #[test]
     fn it_provides_capability_reference() {
-        let cap = Subject::from("did:key:zSubject").attenuate(TestAbility);
-        let claim = Claim::new(cap, "did:key:zAudience".into());
+        let cap = Subject::from(did!("key:zSubject")).attenuate(TestAbility);
+        let claim = Claim::new(cap, did!("key:zAudience"));
 
         let retrieved = claim.capability();
-        assert_eq!(retrieved.subject(), "did:key:zSubject");
+        assert_eq!(retrieved.subject(), &did!("key:zSubject"));
     }
 }

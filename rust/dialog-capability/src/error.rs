@@ -4,7 +4,7 @@ use std::fmt::{Debug, Display, Formatter};
 
 /// Error that can occur during signing operations.
 #[derive(Debug, thiserror::Error)]
-pub enum DialogCapabilitySignError {
+pub enum SignError {
     /// The signing key is not available or cannot be used.
     #[error("Signing key unavailable: {0}")]
     KeyUnavailable(String),
