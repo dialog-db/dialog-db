@@ -773,6 +773,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-credentials"
+version = "0.1.0"
+dependencies = [
+ "base58",
+ "dialog-capability",
+ "dialog-common",
+ "ed25519-dalek",
+ "getrandom 0.2.16",
+ "js-sys",
+ "serde",
+ "signature",
+ "thiserror 2.0.17",
+ "tokio",
+ "ucan",
+ "varsig",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
+]
+
+[[package]]
 name = "dialog-dbsp"
 version = "0.1.0"
 dependencies = [

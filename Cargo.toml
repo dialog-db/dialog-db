@@ -18,6 +18,7 @@ strip = "debuginfo"
 members = [
     "rust/dialog-artifacts",
     "rust/dialog-capability",
+    "rust/dialog-credentials",
     "rust/dialog-common",
     "rust/dialog-effects",
     "rust/dialog-macros",
@@ -103,6 +104,9 @@ path = "./rust/dialog-capability"
 
 [workspace.dependencies.dialog-common]
 path = "./rust/dialog-common"
+
+[workspace.dependencies.dialog-credentials]
+path = "./rust/dialog-credentials"
 
 [workspace.dependencies.dialog-encoding]
 path = "./rust/dialog-encoding"
