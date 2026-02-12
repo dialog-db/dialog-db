@@ -53,7 +53,11 @@ mod tests {
     use crate::Address;
     use crate::capability::{archive, memory, storage};
     use base58::ToBase58;
-    use dialog_capability::Subject;
+    use dialog_capability::{Did, Subject, did};
+
+    fn test_subject() -> Did {
+        did!("key:zTestSubject")
+    }
 
     const TEST_SUBJECT: &str = "did:key:zTestSubject";
 
@@ -90,7 +94,7 @@ mod tests {
         let mut creds = public_creds();
         let key = b"test-key";
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("index"))
             .invoke(storage::Get::new(key));
@@ -114,7 +118,7 @@ mod tests {
             0x09, 0x0a, 0x0b, 0x0c,
         ];
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("blob"))
             .invoke(storage::Get::new(binary_key));
@@ -133,7 +137,7 @@ mod tests {
         let checksum_bytes = [0x12u8; 32];
         let checksum = crate::Checksum::Sha256(checksum_bytes);
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("blob"))
             .invoke(storage::Set::new(key, checksum));
@@ -163,7 +167,7 @@ mod tests {
         let mut creds = public_creds();
         let key = b"key-to-delete";
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("index"))
             .invoke(storage::Delete::new(key));
@@ -181,7 +185,7 @@ mod tests {
     async fn it_generates_correct_query_params_for_storage_list() {
         let mut creds = public_creds();
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("index"))
             .invoke(storage::List::new(None));
@@ -211,7 +215,7 @@ mod tests {
         let mut creds = public_creds();
         let token = "next-page-token-abc123";
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("data"))
             .invoke(storage::List::new(Some(token.to_string())));
@@ -232,7 +236,7 @@ mod tests {
     async fn it_generates_correct_url_for_memory_resolve() {
         let mut creds = public_creds();
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(memory::Memory)
             .attenuate(memory::Space::new("did:key:zUser123"))
             .attenuate(memory::Cell::new("main"))
@@ -252,7 +256,7 @@ mod tests {
         let mut creds = public_creds();
         let checksum = crate::Checksum::Sha256([0xab; 32]);
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(memory::Memory)
             .attenuate(memory::Space::new("did:key:zSpace"))
             .attenuate(memory::Cell::new("head"))
@@ -283,7 +287,7 @@ mod tests {
         let checksum = crate::Checksum::Sha256([0xcd; 32]);
         let prior_etag = "abc123etag".to_string();
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(memory::Memory)
             .attenuate(memory::Space::new("did:key:zSpace"))
             .attenuate(memory::Cell::new("main"))
@@ -306,7 +310,7 @@ mod tests {
     async fn it_generates_correct_url_for_memory_retract() {
         let mut creds = public_creds();
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(memory::Memory)
             .attenuate(memory::Space::new("did:key:zOwner"))
             .attenuate(memory::Cell::new("temp"))
@@ -326,7 +330,7 @@ mod tests {
         let mut creds = public_creds();
         let digest: [u8; 32] = [0x42; 32];
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("blobs"))
             .invoke(archive::Get::new(digest));
@@ -346,7 +350,7 @@ mod tests {
         let digest: [u8; 32] = [0x99; 32];
         let checksum = crate::Checksum::Sha256([0x11; 32]);
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog::new("index"))
             .invoke(archive::Put::new(digest, checksum));
@@ -370,7 +374,7 @@ mod tests {
         let mut creds = private_creds();
         let key = b"signed-key";
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("data"))
             .invoke(storage::Get::new(key));
@@ -399,7 +403,7 @@ mod tests {
         let key = b"upload-key";
         let checksum = crate::Checksum::Sha256([0xff; 32]);
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("uploads"))
             .invoke(storage::Set::new(key, checksum));
@@ -428,7 +432,7 @@ mod tests {
     async fn it_generates_signed_url_for_list_with_private_creds() {
         let mut creds = private_creds();
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("files"))
             .invoke(storage::List::new(None));
@@ -455,7 +459,7 @@ mod tests {
     async fn it_uses_virtual_hosted_style_for_aws() {
         let mut creds = public_creds();
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("test"))
             .invoke(storage::Get::new(b"key"));
@@ -470,7 +474,7 @@ mod tests {
     async fn it_uses_path_style_for_localhost() {
         let mut creds = localhost_creds();
 
-        let capability = Subject::from(TEST_SUBJECT)
+        let capability = Subject::from(test_subject())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new("test"))
             .invoke(storage::Get::new(b"key"));
@@ -488,7 +492,7 @@ mod tests {
         let stores = ["index", "blob", "metadata", "cache", ""];
 
         for store_name in stores {
-            let capability = Subject::from(TEST_SUBJECT)
+            let capability = Subject::from(test_subject())
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new(store_name))
                 .invoke(storage::Get::new(b"key"));
@@ -514,7 +518,7 @@ mod tests {
         let digest: [u8; 32] = [0x55; 32];
 
         for catalog_name in catalogs {
-            let capability = Subject::from(TEST_SUBJECT)
+            let capability = Subject::from(test_subject())
                 .attenuate(archive::Archive)
                 .attenuate(archive::Catalog::new(catalog_name))
                 .invoke(archive::Get::new(digest));

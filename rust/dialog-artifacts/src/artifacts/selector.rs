@@ -18,7 +18,7 @@ impl ArtifactSelectorState for Unconstrained {}
 
 /// A marker type that represents an [`ArtifactSelector`] that is constrained
 /// by at least the attribute, entity or value part of a triple.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Constrained;
 impl ArtifactSelectorState for Constrained {}
 
@@ -37,7 +37,7 @@ trait ArtifactSelectorState {}
 /// be very slow and is often not what you want). To avoid this, always be sure
 /// to specify at least one field of the [`ArtifactSelector`] before submitting
 /// a query!
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ArtifactSelector<State>
 where
     State: ArtifactSelectorState,

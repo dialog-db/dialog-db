@@ -16,7 +16,7 @@
 //! ```no_run
 //! use dialog_s3_credentials::{Address, s3, capability};
 //! use dialog_s3_credentials::capability::storage::{Storage, Store, Get, Set};
-//! use dialog_capability::{Capability, Subject};
+//! use dialog_capability::{Capability, Subject, did};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create address for S3 bucket
@@ -27,7 +27,7 @@
 //! );
 //!
 //! // Subject DID identifies whose data we're accessing (used as path prefix)
-//! let subject = "did:key:zSubject";
+//! let subject = did!("key:zSubject");
 //!
 //! // Create credentials (public or private)
 //! let mut credentials = s3::Credentials::private(

@@ -98,6 +98,8 @@ jobs:
           - flags: '--features s3,s3-list,integration-tests --release'
           - flags: '--features s3,s3-list --target wasm32-unknown-unknown'
           - flags: '--features s3,s3-list --target wasm32-unknown-unknown --release'
+          # dialog-credentials with ucan bridge
+          - flags: '-p dialog-credentials --features ucan'
           # web (wasm) integration tests
           - flags: '--features s3,s3-list,web-integration-tests'
           - flags: '--features s3,s3-list,web-integration-tests'

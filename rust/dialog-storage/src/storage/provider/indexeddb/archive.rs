@@ -90,15 +90,14 @@ impl Provider<Put> for IndexedDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::Subject;
+    use dialog_capability::{Did, Subject};
     use dialog_effects::archive::{Archive, Catalog};
 
     fn unique_subject(prefix: &str) -> Subject {
-        Subject::from(format!(
-            "did:test:{}-{}",
-            prefix,
-            js_sys::Date::now() as u64
-        ))
+        let did: Did = format!("did:test:{}-{}", prefix, js_sys::Date::now() as u64)
+            .parse()
+            .unwrap();
+        Subject::from(did)
     }
 
     #[dialog_common::test]

@@ -2,6 +2,8 @@ use dialog_prolly_tree::DialogProllyTreeError;
 use dialog_storage::DialogStorageError;
 use thiserror::Error;
 
+use crate::ValueDataType;
+
 /// The common error type used by this crate
 #[derive(Error, Debug, PartialEq)]
 pub enum DialogArtifactsError {
@@ -68,4 +70,12 @@ impl From<DialogProllyTreeError> for DialogArtifactsError {
     fn from(value: DialogProllyTreeError) -> Self {
         DialogArtifactsError::Tree(format!("{value}"))
     }
+}
+
+/// Errors created when types are used inconsistently with value.
+#[derive(Error, Debug, PartialEq)]
+pub enum TypeError {
+    /// Expected type and actual type mismatch.
+    #[error("Type mismatch: expected {0}, got {1}")]
+    TypeMismatch(ValueDataType, ValueDataType),
 }

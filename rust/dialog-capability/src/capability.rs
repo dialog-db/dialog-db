@@ -1,8 +1,9 @@
 use crate::{
     Ability, Access, Authorized, Claim, Constrained, Constraint, Did, Effect, Policy,
-    PolicyBuilder, Principal, Provider, Selector,
+    PolicyBuilder, Provider, Selector,
 };
 use dialog_common::ConditionalSend;
+use dialog_varsig::Principal;
 
 /// Newtype wrapper for describing a capability chain from the constraint type.
 /// It enables defining convenience methods for working with that capability.
@@ -79,7 +80,7 @@ impl<T: Constraint> Capability<T> {
         let authorization = access
             .claim(Claim {
                 capability,
-                audience: access.did().into(),
+                audience: access.did(),
             })
             .await?;
 
@@ -214,28 +215,28 @@ mod tests {
 
     #[test]
     fn it_returns_root_ability_for_subject() {
-        let subject = Subject::from("did:key:zSpace");
-        assert_eq!(subject.subject(), "did:key:zSpace");
+        let subject = Subject::from(did!("key:zSpace"));
+        assert_eq!(subject.subject(), &did!("key:zSpace"));
         assert_eq!(subject.ability(), "/");
     }
 
     #[test]
     fn it_adds_attenuation_to_ability_path() {
-        let cap = Subject::from("did:key:zSpace").attenuate(Archive);
+        let cap = Subject::from(did!("key:zSpace")).attenuate(Archive);
 
-        assert_eq!(cap.subject(), "did:key:zSpace");
+        assert_eq!(cap.subject(), &did!("key:zSpace"));
         assert_eq!(cap.ability(), "/archive");
     }
 
     #[test]
     fn it_does_not_add_policy_to_ability_path() {
-        let cap = Subject::from("did:key:zSpace")
+        let cap = Subject::from(did!("key:zSpace"))
             .attenuate(Archive)
             .attenuate(Catalog {
                 name: "blobs".into(),
             });
 
-        assert_eq!(cap.subject(), "did:key:zSpace");
+        assert_eq!(cap.subject(), &did!("key:zSpace"));
         // Catalog is a Policy, not Attenuation, so ability stays /archive
         assert_eq!(cap.ability(), "/archive");
         assert_eq!(Catalog::of(&cap).name, "blobs");
@@ -243,7 +244,7 @@ mod tests {
 
     #[test]
     fn it_adds_effect_to_ability_path() {
-        let cap: Capability<Get> = Subject::from("did:key:zSpace")
+        let cap: Capability<Get> = Subject::from(did!("key:zSpace"))
             .attenuate(Archive)
             .attenuate(Catalog {
                 name: "blobs".into(),
@@ -252,7 +253,7 @@ mod tests {
                 digest: vec![1, 2, 3],
             });
 
-        assert_eq!(cap.subject(), "did:key:zSpace");
+        assert_eq!(cap.subject(), &did!("key:zSpace"));
         assert_eq!(Catalog::of(&cap).name, "blobs");
         // Effect adds /get to the path
         assert_eq!(cap.ability(), "/archive/get");
@@ -261,7 +262,7 @@ mod tests {
 
     #[test]
     fn it_chains_multiple_attenuations() {
-        let cap: Capability<Lookup> = Subject::from("did:key:zSpace")
+        let cap: Capability<Lookup> = Subject::from(did!("key:zSpace"))
             .attenuate(Storage)
             .attenuate(Store {
                 name: "index".into(),
@@ -270,7 +271,7 @@ mod tests {
                 key: b"hello".to_vec(),
             });
 
-        assert_eq!(cap.subject(), "did:key:zSpace");
+        assert_eq!(cap.subject(), &did!("key:zSpace"));
         // Storage -> Store -> Lookup all contribute
         assert_eq!(cap.ability(), "/storage/store/lookup");
         assert_eq!(Store::of(&cap).name, "index");
@@ -279,7 +280,7 @@ mod tests {
 
     #[test]
     fn it_extracts_policies_from_chain() {
-        let cap: Capability<Get> = Subject::from("did:key:zSpace")
+        let cap: Capability<Get> = Subject::from(did!("key:zSpace"))
             .attenuate(Archive)
             .attenuate(Catalog {
                 name: "blobs".into(),
@@ -307,7 +308,7 @@ mod tests {
 
         #[test]
         fn it_collects_parameters_from_chain() {
-            let cap: Capability<Get> = Subject::from("did:key:zSpace")
+            let cap: Capability<Get> = Subject::from(did!("key:zSpace"))
                 .attenuate(Archive)
                 .attenuate(Catalog {
                     name: "blobs".into(),
@@ -333,7 +334,7 @@ mod tests {
 
         #[test]
         fn it_collects_parameters_from_attenuations() {
-            let cap: Capability<Lookup> = Subject::from("did:key:zSpace")
+            let cap: Capability<Lookup> = Subject::from(did!("key:zSpace"))
                 .attenuate(Storage)
                 .attenuate(Store {
                     name: "index".into(),

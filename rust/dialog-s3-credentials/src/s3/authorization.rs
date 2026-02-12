@@ -57,7 +57,7 @@ impl Authorization for S3Authorization {
         &self,
         authority: &A,
     ) -> Result<Self, DialogCapabilityAuthorizationError> {
-        if &self.audience != authority.did() {
+        if self.audience != authority.did() {
             Err(DialogCapabilityAuthorizationError::NotAudience {
                 audience: self.audience.clone(),
                 issuer: authority.did().into(),

@@ -238,29 +238,30 @@ pub enum StorageError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dialog_capability::did;
 
     #[test]
     fn it_builds_storage_claim_path() {
-        let claim = Subject::from("did:key:zSpace").attenuate(Storage);
+        let claim = Subject::from(did!("key:zSpace")).attenuate(Storage);
 
-        assert_eq!(claim.subject(), "did:key:zSpace");
+        assert_eq!(claim.subject(), &did!("key:zSpace"));
         assert_eq!(claim.ability(), "/storage");
     }
 
     #[test]
     fn it_builds_store_claim_path() {
-        let claim = Subject::from("did:key:zSpace")
+        let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Storage)
             .attenuate(Store::new("index"));
 
-        assert_eq!(claim.subject(), "did:key:zSpace");
+        assert_eq!(claim.subject(), &did!("key:zSpace"));
         // Store is Policy, not Ability, so it doesn't add to path
         assert_eq!(claim.ability(), "/storage");
     }
 
     #[test]
     fn it_builds_get_claim_path() {
-        let claim = Subject::from("did:key:zSpace")
+        let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Storage)
             .attenuate(Store::new("index"))
             .invoke(Get::new(vec![1, 2, 3]));
@@ -270,7 +271,7 @@ mod tests {
 
     #[test]
     fn it_builds_set_claim_path() {
-        let claim = Subject::from("did:key:zSpace")
+        let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Storage)
             .attenuate(Store::new("index"))
             .invoke(Set::new(vec![1, 2, 3], vec![4, 5, 6]));
@@ -290,7 +291,7 @@ mod tests {
 
         #[test]
         fn it_collects_storage_parameters() {
-            let cap = Subject::from("did:key:zSpace").attenuate(Storage);
+            let cap = Subject::from(did!("key:zSpace")).attenuate(Storage);
             let params = parameters(&cap);
 
             // Storage is a unit struct, should produce empty map
@@ -299,7 +300,7 @@ mod tests {
 
         #[test]
         fn it_collects_store_parameters() {
-            let cap = Subject::from("did:key:zSpace")
+            let cap = Subject::from(did!("key:zSpace"))
                 .attenuate(Storage)
                 .attenuate(Store::new("index"));
             let params = parameters(&cap);
@@ -309,7 +310,7 @@ mod tests {
 
         #[test]
         fn it_collects_get_parameters() {
-            let cap = Subject::from("did:key:zSpace")
+            let cap = Subject::from(did!("key:zSpace"))
                 .attenuate(Storage)
                 .attenuate(Store::new("index"))
                 .invoke(Get::new(vec![1, 2, 3]));
@@ -321,7 +322,7 @@ mod tests {
 
         #[test]
         fn it_collects_set_parameters() {
-            let cap = Subject::from("did:key:zSpace")
+            let cap = Subject::from(did!("key:zSpace"))
                 .attenuate(Storage)
                 .attenuate(Store::new("mystore"))
                 .invoke(Set::new(vec![10, 20], vec![30, 40, 50]));
@@ -334,7 +335,7 @@ mod tests {
 
         #[test]
         fn it_collects_delete_parameters() {
-            let cap = Subject::from("did:key:zSpace")
+            let cap = Subject::from(did!("key:zSpace"))
                 .attenuate(Storage)
                 .attenuate(Store::new("trash"))
                 .invoke(Delete::new(vec![99]));

@@ -7,7 +7,7 @@ use crate::{
 /// Build capability chains by constraining from a Subject:
 ///
 /// ```
-/// use dialog_capability::{Subject, Policy, Capability, Attenuation};
+/// use dialog_capability::{Subject, Policy, Capability, Attenuation, did};
 /// use serde::{Serialize, Deserialize};
 ///
 /// // Define an attenuation type
@@ -19,7 +19,7 @@ use crate::{
 /// }
 ///
 /// // Build a capability chain
-/// let cap: Capability<Storage> = Subject::from("did:key:zSpace")
+/// let cap: Capability<Storage> = Subject::from(did!("key:zSpace"))
 ///     .attenuate(Storage);
 /// ```
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

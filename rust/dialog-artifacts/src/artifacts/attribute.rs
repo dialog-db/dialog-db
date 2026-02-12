@@ -13,7 +13,7 @@ use crate::{ATTRIBUTE_LENGTH, DialogArtifactsError};
 /// An [`Attribute`] is the predicate part of a semantic triple. [`Attribute`]s
 /// in this crate may be a maximum of 64 bytes, and must be formated as
 /// "namespace/predicate". The namespace part of an attribute is required.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
 #[serde(into = "String", try_from = "String")]
 pub struct Attribute(String, [u8; ATTRIBUTE_LENGTH]);
 

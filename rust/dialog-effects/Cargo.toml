@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [features]
-ucan = ["dep:ipld-core", "dep:ucan", "dialog-capability/ucan"]
+ucan = ["dep:ipld-core", "dep:dialog-ucan", "dialog-capability/ucan"]
 
 [dependencies]
 dialog-capability = { workspace = true }
@@ -19,7 +19,7 @@ thiserror = { workspace = true }
 
 # Optional UCAN support
 ipld-core = { workspace = true, optional = true }
-ucan = { workspace = true, optional = true }
+dialog-ucan = { workspace = true, optional = true }
 
 [dev-dependencies]
 ipld-core = { workspace = true }
