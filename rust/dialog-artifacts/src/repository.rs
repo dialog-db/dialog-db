@@ -94,11 +94,7 @@ pub struct Repository<Backend: PlatformBackend> {
 
 impl<Backend: PlatformBackend + 'static> Repository<Backend> {
     /// Creates a new repository with the given issuer and storage backend.
-    pub fn open<T>(
-        issuer: T,
-        subject: Did,
-        backend: Backend,
-    ) -> Result<Self, RepositoryError>
+    pub fn open<T>(issuer: T, subject: Did, backend: Backend) -> Result<Self, RepositoryError>
     where
         Credentials: From<T>,
     {
@@ -2180,7 +2176,7 @@ mod tests {
         use futures_util::stream;
 
         // Both Alice and Bob share the same subject for this test
-        let subject: Did = "did:test:shared_repo".into();
+        let subject: Did = "did:test:shared_repo".parse()?;
 
         // Create Alice's repository
         let alice_issuer = Credentials::from_passphrase("alice").await?;
@@ -2326,7 +2322,7 @@ mod tests {
         use futures_util::stream;
 
         // Both Alice and Bob share the same subject for this test
-        let subject: Did = "did:test:shared_repo".into();
+        let subject: Did = "did:test:shared_repo".parse()?;
 
         // Step 1: Create Alice's repository with her own issuer and backend
         let alice_issuer = Credentials::from_passphrase("alice").await?;
@@ -2595,7 +2591,7 @@ mod tests {
         use futures_util::stream;
 
         // Both Alice and Bob share the same subject for this test
-        let subject: Did = "did:test:shared_repo".into();
+        let subject: Did = "did:test:shared_repo".parse()?;
 
         // Create Alice's repository
         let alice_issuer = Credentials::from_passphrase("alice").await?;
@@ -2816,7 +2812,7 @@ mod tests {
         use futures_util::stream;
 
         // Both Alice and Bob share the same subject for this test
-        let subject: Did = "did:test:shared_repo".into();
+        let subject: Did = "did:test:shared_repo".parse()?;
 
         // Create Alice's replica
         let alice_issuer = Credentials::from_passphrase("alice").await?;
@@ -3031,6 +3027,7 @@ mod tests {
     async fn test_archive_caches_remote_reads_to_local(
         s3_address: dialog_storage::s3::helpers::S3Address,
     ) -> anyhow::Result<()> {
+        use crate::ErrorMappingBackend;
         use dialog_s3_credentials::Address;
         use dialog_storage::s3::{Bucket, S3};
         use dialog_storage::{ContentAddressedStorage, MemoryStorageBackend};
