@@ -86,18 +86,21 @@ impl Provider<Put> for FileSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::Subject;
+    use dialog_capability::{Did, Subject};
     use dialog_effects::archive::{Archive, Catalog};
 
     fn unique_subject(prefix: &str) -> Subject {
-        Subject::from(format!(
+        let did: Did = format!(
             "did:test:{}-{}",
             prefix,
             dialog_common::time::now()
                 .duration_since(dialog_common::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ))
+        )
+        .parse()
+        .unwrap();
+        Subject::from(did)
     }
 
     #[dialog_common::test]

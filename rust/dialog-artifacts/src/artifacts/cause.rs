@@ -7,11 +7,14 @@
 use std::fmt::Display;
 
 use base58::ToBase58;
+use dialog_storage::HashType;
 use serde::{Deserialize, Serialize};
 
 use crate::{make_reference, reference_type};
 
-use super::{Artifact, Blake3Hash, HashType, TypeError, Value, ValueDataType};
+use crate::{TypeError, ValueDataType};
+
+use super::{Artifact, Blake3Hash, Value};
 
 /// A [`Cause`] is a reference to an [`Artifact`] that preceded a more recent
 /// version of the same [`Artifact`] (where same implies same [`Entity`] and
@@ -48,7 +51,6 @@ impl TryFrom<Value> for Cause {
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
             Value::Bytes(b) => {
-                // Convert Vec<u8> to [u8; 32] for Blake3Hash
                 let mut hash_bytes = [0u8; 32];
                 let len = b.len().min(32);
                 hash_bytes[..len].copy_from_slice(&b[..len]);

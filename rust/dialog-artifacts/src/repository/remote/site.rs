@@ -102,13 +102,11 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> Remote
     }
 
     /// Connect to the remote storage.
-    ///
-    /// Remote S3 operations require a SigningAuthority with secret key access.
-    /// Construct one from the Authority's secret key bytes if available.
     pub fn connect(&self, subject: &Did) -> Result<Connection, RepositoryError> {
         if let Some(state) = self.memory.read() {
-            let authority = SigningAuthority::try_from_authority(&self.issuer)?;
-            state.credentials.connect(authority, subject)
+            state
+                .credentials
+                .connect(self.issuer.clone().into(), subject)
         } else {
             Err(RepositoryError::RemoteNotFound {
                 remote: self.name.clone(),

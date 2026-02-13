@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use dialog_capability::{Authority, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_s3_credentials::capability::archive::{Get as AuthorizeGet, Put as AuthorizePut};
+use dialog_varsig::eddsa::Ed25519Signature;
 
 use super::{Hasher, RequestDescriptorExt, S3};
 
@@ -16,11 +17,11 @@ use super::{Hasher, RequestDescriptorExt, S3};
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer> Provider<Get> for S3<Issuer>
 where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
+    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(&mut self, input: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         // Build the authorization capability
-        let capability = Subject::from(input.subject().to_string())
+        let capability = Subject::from(input.subject().clone())
             .attenuate(Archive)
             .attenuate(Catalog::of(&input).clone())
             .invoke(AuthorizeGet {
@@ -66,14 +67,14 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer> Provider<Put> for S3<Issuer>
 where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
+    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(&mut self, input: Capability<Put>) -> Result<(), ArchiveError> {
         let Put { content, digest } = Put::of(&input);
         let checksum = Hasher::Sha256.checksum(content);
 
         // Build the authorization capability
-        let capability = Subject::from(input.subject().to_string())
+        let capability = Subject::from(input.subject().clone())
             .attenuate(Archive)
             .attenuate(Catalog::of(&input).clone())
             .invoke(AuthorizePut {

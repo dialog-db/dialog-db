@@ -28,6 +28,8 @@ dialog-common = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-prolly-tree = { workspace = true }
 dialog-s3-credentials = { workspace = true }
+dialog-varsig = { workspace = true }
+signature = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
 arrayref = { workspace = true }

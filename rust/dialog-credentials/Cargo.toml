@@ -1,0 +1,53 @@
+[package]
+name = "dialog-credentials"
+description = "Concrete key and signing types for dialog-capability"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = ["ed25519"]
+ed25519 = [
+    "dep:ed25519-dalek",
+    "dep:getrandom",
+    "dep:base58",
+    "dialog-varsig/edwards25519",
+    "dialog-varsig/sha2_512",
+]
+ucan = ["dep:dialog-ucan", "dialog-capability/ucan"]
+
+[dependencies]
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-varsig = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+signature = { workspace = true }
+
+# ed25519 feature deps
+ed25519-dalek = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+base58 = { workspace = true, optional = true }
+
+# ucan feature deps
+dialog-ucan = { workspace = true, optional = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+js-sys = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+web-sys = { workspace = true, features = ["Crypto", "SubtleCrypto", "CryptoKey", "CryptoKeyPair"] }
+
+[dev-dependencies]
+dialog-common = { workspace = true, features = ["helpers"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
+ed25519-dalek = { workspace = true }
+wasm-bindgen-test = { workspace = true }
+
+[lints.rust]
+# These cfgs are used by the dialog_common::test proc macro
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(dialog_test_wasm_integration)",
+    "cfg(feature, values(\"web-integration-tests\"))",
+] }

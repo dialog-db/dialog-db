@@ -83,7 +83,9 @@ impl Principal {
             // Base58btc encode (which starts with 'z' indicator in did:key format)
             let encoded = multicodec_key.to_base58();
 
-            format!("did:key:z{}", encoded).into()
+            format!("did:key:z{}", encoded)
+                .parse()
+                .expect("generated DID is always valid")
         })
     }
 }
@@ -138,7 +140,7 @@ impl<'de> Deserialize<'de> for Principal {
 
 impl Debug for Principal {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.did())
+        f.write_str(self.did().as_str())
     }
 }
 

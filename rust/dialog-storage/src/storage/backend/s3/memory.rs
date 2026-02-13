@@ -11,6 +11,7 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_s3_credentials::capability::memory::{
     Publish as AuthorizePublish, Resolve as AuthorizeResolve, Retract as AuthorizeRetract,
 };
+use dialog_varsig::eddsa::Ed25519Signature;
 
 use super::{Hasher, RequestDescriptorExt, S3};
 
@@ -18,14 +19,14 @@ use super::{Hasher, RequestDescriptorExt, S3};
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer> Provider<Resolve> for S3<Issuer>
 where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
+    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(
         &mut self,
         input: Capability<Resolve>,
     ) -> Result<Option<Publication>, MemoryError> {
         // Build the authorization capability
-        let capability = Subject::from(input.subject().to_string())
+        let capability = Subject::from(input.subject().clone())
             .attenuate(Memory)
             .attenuate(Space::of(&input).clone())
             .attenuate(Cell::of(&input).clone())
@@ -82,7 +83,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer> Provider<Publish> for S3<Issuer>
 where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
+    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(&mut self, input: Capability<Publish>) -> Result<Vec<u8>, MemoryError> {
         let Publish { content, when } = Publish::of(&input);
@@ -92,7 +93,7 @@ where
         let checksum = Hasher::Sha256.checksum(content);
 
         // Build the authorization capability
-        let capability = Subject::from(input.subject().to_string())
+        let capability = Subject::from(input.subject().clone())
             .attenuate(Memory)
             .attenuate(Space::of(&input).clone())
             .attenuate(Cell::of(&input).clone())
@@ -148,14 +149,14 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer> Provider<Retract> for S3<Issuer>
 where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
+    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(&mut self, input: Capability<Retract>) -> Result<(), MemoryError> {
         let Retract { when } = Retract::of(&input);
         let when = String::from_utf8_lossy(when).to_string();
 
         // Build the authorization capability
-        let capability = Subject::from(input.subject().to_string())
+        let capability = Subject::from(input.subject().clone())
             .attenuate(Memory)
             .attenuate(Space::of(&input).clone())
             .attenuate(Cell::of(&input).clone())

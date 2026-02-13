@@ -11,12 +11,11 @@ use dialog_capability::{
     Provider, ucan::Parameters,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
-use ed25519_dalek::SigningKey;
+use dialog_ucan::InvocationBuilder;
+use dialog_ucan::promise::Promised;
+use dialog_varsig::eddsa::Ed25519Signature;
 use ipld_core::ipld::Ipld;
 use std::collections::BTreeMap;
-use ucan::did::{Ed25519Did, Ed25519Signer};
-use ucan::invocation::builder::InvocationBuilder;
-use ucan::promise::Promised;
 
 pub type Args = BTreeMap<String, Promised>;
 
@@ -80,7 +79,7 @@ pub enum UcanAuthorization {
     },
     Invocation {
         endpoint: String,
-        chain: Box<InvocationChain>,
+        chain: Box<InvocationChain<Ed25519Signature>>,
         subject: Did,
         ability: String,
         parameters: Parameters,
@@ -89,12 +88,11 @@ pub enum UcanAuthorization {
 
 impl UcanAuthorization {
     /// Create a self-issued authorization for an owner.
-    pub fn owned(
-        endpoint: String,
-        subject: impl Into<Did>,
-        ability: impl Into<String>,
-        parameters: Parameters,
-    ) -> Self {
+    pub fn owned<S, A>(endpoint: String, subject: S, ability: A, parameters: Parameters) -> Self
+    where
+        Did: From<S>,
+        String: From<A>,
+    {
         Self::Owned {
             endpoint,
             subject: subject.into(),
@@ -104,19 +102,27 @@ impl UcanAuthorization {
     }
 
     /// Create an authorization from a delegation chain.
-    pub fn delegated(
+    pub fn delegated<A>(
         endpoint: String,
         chain: DelegationChain,
-        ability: impl Into<String>,
+        ability: A,
         parameters: Parameters,
-    ) -> Self {
-        // Pre-compute and cache the DID representations
-        let subject: Did = chain.subject().map(|did| did.into()).unwrap_or_default();
-        let audience: Did = chain.audience().into();
+    ) -> Self
+    where
+        String: From<A>,
+    {
+        // Pre-compute and cache the DID representations.
+        // For powerline delegations (Subject::Any), use the root delegation's
+        // issuer as the effective subject, since that's the original authority.
+        let subject: Did = chain
+            .subject()
+            .cloned()
+            .unwrap_or_else(|| chain.issuer().clone());
+        let audience: Did = chain.audience().clone();
 
         Self::Delegated {
             endpoint,
-            ability: ability.into(),
+            ability: String::from(ability),
             chain,
             subject,
             audience,
@@ -209,6 +215,8 @@ impl UcanAuthorization {
 #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
 impl Authorization for UcanAuthorization {
+    type Signature = Ed25519Signature;
+
     fn subject(&self) -> &Did {
         match self {
             Self::Owned { subject, .. } => subject,
@@ -233,22 +241,20 @@ impl Authorization for UcanAuthorization {
         }
     }
 
-    async fn invoke<A: Authority + ConditionalSend + ConditionalSync>(
+    async fn invoke<
+        A: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
+    >(
         &self,
         authority: &A,
     ) -> Result<Self, DialogCapabilityAuthorizationError> {
-        if self.audience() != authority.did() {
+        let authority_did = dialog_capability::Principal::did(authority);
+        if self.audience() != &authority_did {
             Err(DialogCapabilityAuthorizationError::NotAudience {
-                audience: self.audience().into(),
-                issuer: authority.did().into(),
+                audience: self.audience().clone(),
+                issuer: authority_did,
             })
         } else {
-            let subject: Ed25519Did = self.subject().parse().map_err(|e| {
-                DialogCapabilityAuthorizationError::Serialization(format!(
-                    "Invalid subject DID: {:?}",
-                    e
-                ))
-            })?;
+            let subject_did = self.subject().clone();
 
             let command: Vec<String> = self
                 .ability()
@@ -259,21 +265,15 @@ impl Authorization for UcanAuthorization {
 
             let args = parameters_to_args(self.parameters().clone());
 
-            let key = SigningKey::from_bytes(&authority.secret_key_bytes().ok_or(
-                DialogCapabilityAuthorizationError::Serialization(
-                    "Authority key can not be used".into(),
-                ),
-            )?);
-            let issuer = Ed25519Signer::from(key);
             let proofs = self
                 .chain()
                 .map(|c| c.proof_cids().into())
                 .unwrap_or_default();
 
             let invocation = InvocationBuilder::new()
-                .issuer(issuer.clone())
-                .audience(subject.clone())
-                .subject(subject)
+                .issuer(authority.clone())
+                .audience(&subject_did)
+                .subject(&subject_did)
                 .command(command)
                 .arguments(args)
                 .proofs(proofs)
@@ -288,11 +288,11 @@ impl Authorization for UcanAuthorization {
                 .map(|c| c.delegations().clone())
                 .unwrap_or_default();
 
-            let invocation = InvocationChain::new(invocation, delegations);
+            let chain = InvocationChain::new(invocation, delegations);
 
             let authorization = Self::Invocation {
                 endpoint: self.endpoint().into(),
-                chain: Box::new(invocation),
+                chain: Box::new(chain),
                 subject: self.subject().clone(),
                 ability: self.ability().into(),
                 parameters: self.parameters().clone(),
@@ -325,19 +325,21 @@ mod tests {
 
     use super::*;
     use crate::ucan::delegation::helpers::{create_delegation, generate_signer};
+    use dialog_capability::did;
+    use dialog_varsig::Principal;
     use ipld_core::ipld::Ipld;
 
     #[test]
     fn it_creates_owned_authorization() {
         let auth = UcanAuthorization::owned(
             "https://ucan.tonk.workers.dev".into(),
-            "did:key:zTest",
+            did!("key:zTest"),
             "/storage/get",
             BTreeMap::default(),
         );
 
-        assert_eq!(auth.subject(), "did:key:zTest");
-        assert_eq!(auth.audience(), "did:key:zTest");
+        assert_eq!(auth.subject(), &did!("key:zTest"));
+        assert_eq!(auth.audience(), &did!("key:zTest"));
         assert_eq!(auth.ability(), "/storage/get");
         assert!(auth.chain().is_none());
         assert_eq!(auth.parameters(), &BTreeMap::default());
@@ -345,14 +347,14 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_creates_delegated_authorization() {
-        let subject_signer = generate_signer();
+        let subject_signer = generate_signer().await;
         let subject_did = subject_signer.did();
-        let operator_signer = generate_signer();
+        let operator_signer = generate_signer().await;
 
         let delegation = create_delegation(
             &subject_signer,
-            operator_signer.did(),
-            subject_did,
+            &operator_signer,
+            &subject_signer,
             &["storage", "get"],
         )
         .await
@@ -366,13 +368,61 @@ mod tests {
             BTreeMap::from([("key".to_string(), Ipld::Bytes(b"hello".into()))]),
         );
 
-        assert_eq!(auth.subject(), &subject_did.to_string());
-        assert_eq!(auth.audience(), &operator_signer.did().to_string());
+        assert_eq!(auth.subject(), &subject_did);
+        assert_eq!(auth.audience(), &operator_signer.did());
         assert_eq!(auth.ability(), "/storage/get");
         assert_eq!(
             auth.parameters(),
             &BTreeMap::from([("key".to_string(), Ipld::Bytes(b"hello".into()))])
         );
         assert!(auth.chain().is_some());
+    }
+
+    #[dialog_common::test]
+    async fn it_uses_root_issuer_as_subject_for_powerline_delegation() {
+        use dialog_ucan::DelegationBuilder;
+        use dialog_ucan::subject::Subject;
+
+        let issuer_signer = generate_signer().await;
+        let issuer_did = issuer_signer.did();
+        let operator_signer = generate_signer().await;
+        let operator_did = operator_signer.did();
+
+        // Create a powerline delegation (Subject::Any) from issuer to operator
+        let delegation = DelegationBuilder::new()
+            .issuer(issuer_signer.clone())
+            .audience(&operator_signer)
+            .subject(Subject::Any)
+            .command(vec!["storage".to_string()])
+            .try_build()
+            .await
+            .unwrap();
+
+        let chain = DelegationChain::new(delegation);
+        // Verify the chain has no specific subject
+        assert!(
+            chain.subject().is_none(),
+            "powerline delegation has no specific subject"
+        );
+
+        let auth = UcanAuthorization::delegated(
+            "https://ucan.tonk.workers.dev".into(),
+            chain,
+            "/storage/get",
+            BTreeMap::default(),
+        );
+
+        // The effective subject must be the root issuer, NOT the audience (operator).
+        assert_eq!(
+            auth.subject(),
+            &issuer_did,
+            "powerline delegation subject should be the root issuer"
+        );
+        assert_ne!(
+            auth.subject(),
+            &operator_did,
+            "powerline delegation subject must not be the operator"
+        );
+        assert_eq!(auth.audience(), &operator_did);
     }
 }

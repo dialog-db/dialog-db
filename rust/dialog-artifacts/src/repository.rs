@@ -23,7 +23,6 @@ use std::fmt::Debug;
 
 use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
 
-use ed25519_dalek::ed25519::signature::SignerMut;
 use ed25519_dalek::{SECRET_KEY_LENGTH, SignatureError, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -55,12 +54,13 @@ pub use signing_authority::{CryptoKey, Ed25519Signer};
 
 /// An authority that can operate on a repository.
 ///
-/// This trait alias bundles the required bounds for authorities used with Replica:
+/// This trait alias bundles the required bounds for authorities used with Repository:
 /// - `Authority`: Provides DID identity and signing capability
 /// - `Clone`: Required for sharing authority across branches and operations
 /// - `Debug`: Required for error messages and debugging output
-pub trait OperatingAuthority: Authority + Clone + Debug {}
-impl<A: Authority + Clone + Debug> OperatingAuthority for A {}
+/// - `Into<SigningAuthority>`: Required for remote operations that need concrete signing
+pub trait OperatingAuthority: Authority + Clone + Debug + Into<SigningAuthority> {}
+impl<A: Authority + Clone + Debug + Into<SigningAuthority>> OperatingAuthority for A {}
 
 // TryFrom<Principal> for VerifyingKey is implemented in principal.rs
 
@@ -132,7 +132,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     }
 
     /// Returns the DID of the authority for this repository.
-    pub fn did(&self) -> &Did {
+    pub fn did(&self) -> Did {
         self.issuer.did()
     }
 
@@ -612,7 +612,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     }
 
     /// Returns the DID of the authority issuing changes on this branch.
-    pub fn did(&self) -> &Did {
+    pub fn did(&self) -> Did {
         self.issuer.did()
     }
 
@@ -1738,7 +1738,7 @@ mod tests {
 
     /// Helper to get a test subject DID
     fn test_subject() -> Did {
-        "did:test:subject".into()
+        "did:test:subject".parse().expect("valid DID")
     }
 
     /// Helper to create a test branch with upstream
@@ -1876,7 +1876,9 @@ mod tests {
         // Alice and Bob have different subject DIDs
         let alice_issuer = SigningAuthority::from_secret(&[1u8; 32]);
         let alice_subject: Did = alice_issuer.did().clone();
-        let bob_subject: Did = "did:key:z6MkbobBobBobBobBobBobBobBobBobBobBobBobBob".into();
+        let bob_subject: Did = "did:key:z6MkbobBobBobBobBobBobBobBobBobBobBobBobBob"
+            .parse()
+            .expect("valid DID");
 
         // Create a remote upstream state with Bob's subject
         let original_state = UpstreamState::Remote {
@@ -3070,8 +3072,8 @@ mod tests {
         assert_ne!(issuer1.principal(), issuer2.principal());
 
         // DIDs should be valid format
-        assert!(issuer1.did().starts_with("did:key:"));
-        assert!(issuer2.did().starts_with("did:key:"));
+        assert!(issuer1.did().as_str().starts_with("did:key:"));
+        assert!(issuer2.did().as_str().starts_with("did:key:"));
 
         Ok(())
     }

@@ -8,8 +8,8 @@
 //! - Server implementation (native-only, in the `server` submodule)
 //! - UCAN access service (native-only, requires `ucan` feature)
 //! - Test issuer types for capability-based testing
-use async_trait::async_trait;
-use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
+use dialog_capability::{Authority, Did, Principal, Signer};
+use dialog_varsig::eddsa::Ed25519Signature;
 use serde::{Deserialize, Serialize};
 
 /// S3 test server connection info with credentials, passed to inner tests.
@@ -60,13 +60,13 @@ pub struct UcanS3Address {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use dialog_storage::s3::helpers::Session;
 /// use dialog_storage::s3::{S3, S3Credentials, Address};
 ///
 /// let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
 /// let credentials = S3Credentials::public(address).unwrap();
-/// let issuer = Session::new("did:key:zTestIssuer");
+/// let issuer = Session::new("did:key:zTestIssuer".parse::<dialog_capability::Did>().unwrap());
 /// let bucket = S3::from_s3(credentials, issuer);
 /// ```
 #[derive(Debug, Clone)]
@@ -82,97 +82,29 @@ impl Session {
 }
 
 impl Principal for Session {
-    fn did(&self) -> &Did {
-        &self.did
+    fn did(&self) -> Did {
+        self.did.clone()
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Signer<Ed25519Signature> for Session {
+    async fn sign(&self, _payload: &[u8]) -> Result<Ed25519Signature, signature::Error> {
+        // S3 direct access uses SigV4 signing, not external signatures.
+        // The signature is never verified — S3 uses its own SigV4 auth.
+        Ok(Ed25519Signature::from_bytes([0u8; 64]))
+    }
+}
+
 impl Authority for Session {
-    async fn sign(&mut self, _payload: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> {
-        // S3 direct access uses SigV4 signing, not external signatures
-        Ok(Vec::new())
-    }
-
-    fn secret_key_bytes(&self) -> Option<[u8; 32]> {
-        None
-    }
+    type Signature = Ed25519Signature;
 }
 
-/// An operator that wraps a signing key and provides [`Principal`] + [`Authority`].
+/// Re-export [`dialog_credentials::Ed25519Signer`] for UCAN-based S3 operations.
 ///
-/// This is useful for testing UCAN-based S3 operations where actual cryptographic
-/// signing is required. The operator can sign payloads using its Ed25519 key.
-///
-/// # Example
-///
-/// ```ignore
-/// use dialog_storage::s3::helpers::Operator;
-/// use dialog_storage::s3::{S3, Credentials};
-/// use dialog_s3_credentials::ucan::Credentials as UcanCredentials;
-///
-/// let operator = Operator::generate();
-/// let ucan_credentials = UcanCredentials::new(access_service_url, delegation);
-/// let bucket = S3::new(Credentials::Ucan(ucan_credentials), operator);
-/// ```
+/// This signer implements [`Authority`], [`Principal`], and [`Signer`] and can be
+/// used directly as the `Issuer` type parameter for [`super::S3`] and [`super::Bucket`].
 #[cfg(feature = "ucan")]
-#[derive(Clone)]
-pub struct Operator {
-    signer: ucan::did::Ed25519Signer,
-    did: Did,
-}
-
-#[cfg(feature = "ucan")]
-impl Operator {
-    /// Create a new operator from an existing signer.
-    pub fn new(signer: ucan::did::Ed25519Signer) -> Self {
-        let did: Did = signer.did().into();
-        Self { signer, did }
-    }
-
-    /// Generate a new operator with a random signing key.
-    pub fn generate() -> Self {
-        use dialog_s3_credentials::ucan::test_helpers::generate_signer;
-        Self::new(generate_signer())
-    }
-
-    /// Get the underlying signer.
-    pub fn signer(&self) -> &ucan::did::Ed25519Signer {
-        &self.signer
-    }
-}
-
-#[cfg(feature = "ucan")]
-impl Principal for Operator {
-    fn did(&self) -> &Did {
-        &self.did
-    }
-}
-
-#[cfg(feature = "ucan")]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Authority for Operator {
-    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> {
-        use async_signature::AsyncSigner;
-        self.signer
-            .signer()
-            .sign_async(payload)
-            .await
-            .map(|sig| sig.to_bytes().to_vec())
-            .map_err(|e| DialogCapabilitySignError::SigningFailed(e.to_string()))
-    }
-
-    fn secret_key_bytes(&self) -> Option<[u8; 32]> {
-        use varsig::signature::eddsa::Ed25519SigningKey;
-        match self.signer.signer() {
-            Ed25519SigningKey::Native(key) => Some(key.to_bytes()),
-            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-            Ed25519SigningKey::WebCrypto(_) => None,
-        }
-    }
-}
+pub use dialog_credentials::Ed25519Signer;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;

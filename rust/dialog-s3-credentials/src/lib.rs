@@ -16,7 +16,7 @@
 //! ```no_run
 //! use dialog_s3_credentials::{Address, s3, capability};
 //! use dialog_s3_credentials::capability::storage::{Storage, Store, Get, Set};
-//! use dialog_capability::{Capability, Subject};
+//! use dialog_capability::{Capability, Subject, did};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create address for S3 bucket
@@ -27,7 +27,7 @@
 //! );
 //!
 //! // Subject DID identifies whose data we're accessing (used as path prefix)
-//! let subject = "did:key:zSubject";
+//! let subject = did!("key:zSubject");
 //!
 //! // Create credentials (public or private)
 //! let mut credentials = s3::Credentials::private(
@@ -52,19 +52,19 @@
 //! # }
 //! ```
 
-pub mod address;
-pub mod authorization;
+mod address;
+mod authorization;
 pub mod capability;
-pub mod checksum;
-pub mod credentials;
+mod checksum;
+mod credentials;
 pub mod s3;
 
 #[cfg(feature = "ucan")]
 pub mod ucan;
 
-// Primary exports
-pub use address::Address;
-pub use authorization::Authorization;
-pub use capability::{AccessError, AuthorizedRequest, S3Request, archive, memory, storage};
-pub use checksum::{Checksum, Hasher};
-pub use credentials::Credentials;
+pub use address::*;
+pub use authorization::*;
+pub use capability::{AccessError, Acl, AuthorizedRequest, Precondition, S3Request};
+pub use capability::{archive, memory, storage};
+pub use checksum::*;
+pub use credentials::*;

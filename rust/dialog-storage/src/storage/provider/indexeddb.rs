@@ -21,7 +21,7 @@
 //!
 //! ```no_run
 //! use dialog_storage::provider::IndexedDb;
-//! use dialog_capability::Subject;
+//! use dialog_capability::{did, Subject};
 //! use dialog_effects::archive::{Archive, Catalog, Get};
 //! use dialog_common::Blake3Hash;
 //!
@@ -29,7 +29,7 @@
 //! let mut provider = IndexedDb::new();
 //! let digest = Blake3Hash::hash(b"hello");
 //!
-//! let effect = Subject::from("did:key:z6Mk...")
+//! let effect = Subject::from(did!("key:z6Mk..."))
 //!     .attenuate(Archive)
 //!     .attenuate(Catalog::new("index"))
 //!     .invoke(Get::new(digest));
@@ -46,7 +46,6 @@ use dialog_capability::Did;
 use js_sys::Uint8Array;
 use rexie::{ObjectStore, Rexie, RexieBuilder, TransactionMode};
 use std::collections::{HashMap, HashSet};
-use wasm_bindgen::JsValue;
 
 /// Convert bytes to a JS Uint8Array.
 fn to_uint8array(bytes: &[u8]) -> Uint8Array {

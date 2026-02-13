@@ -37,7 +37,7 @@ use rand::{Rng, distributions::Alphanumeric};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_prolly_tree::{EMPT_TREE_HASH, Entry, GeometricDistribution, Tree};
+use dialog_prolly_tree::{Entry, GeometricDistribution, Tree};
 pub use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, HashType,
     MemoryStorageBackend, Storage, StorageBackend,

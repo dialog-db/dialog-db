@@ -178,7 +178,8 @@ impl<'de> Deserialize<'de> for PrivateCredentials {
 }
 
 impl PrivateCredentials {
-    /// Create new private credentials with AWS SigV4 signing.
+    /// Create new private credentials allowing [AWS SigV4] signing.
+    /// [AWS SigV4]:https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-authenticating-requests.html
     ///
     /// # Arguments
     ///
@@ -587,13 +588,15 @@ mod tests {
     use crate::Checksum;
     // Use capability module for Storage/Store hierarchy, access module for effects
     use crate::capability::storage::{Get, Set, Storage, Store};
-    use dialog_capability::{Capability, Subject};
+    use dialog_capability::{Capability, Subject, did};
 
-    const TEST_SUBJECT: &str = "did:key:zTestSubject";
+    fn test_subject() -> dialog_capability::Did {
+        did!("key:zTestSubject")
+    }
 
     /// Helper to build a storage Get capability.
     fn get_capability(store: &str, key: &[u8]) -> Capability<Get> {
-        Subject::from(TEST_SUBJECT)
+        Subject::from(test_subject())
             .attenuate(Storage)
             .attenuate(Store::new(store))
             .invoke(Get::new(key))
@@ -601,7 +604,7 @@ mod tests {
 
     /// Helper to build a storage Set capability.
     fn set_capability(store: &str, key: &[u8], checksum: Checksum) -> Capability<Set> {
-        Subject::from(TEST_SUBJECT)
+        Subject::from(test_subject())
             .attenuate(Storage)
             .attenuate(Store::new(store))
             .invoke(Set::new(key, checksum))

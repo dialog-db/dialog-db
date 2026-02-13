@@ -16,37 +16,19 @@
 //! For publicly accessible buckets that don't require authentication:
 //!
 //! ```no_run
-//! # use async_trait::async_trait;
-//! use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
 //! use dialog_storage::s3::{Address, S3, S3Credentials};
-//! use dialog_storage::capability::{storage, Provider, Subject};
+//! use dialog_storage::capability::{storage, Subject};
 //!
-//! // Define an issuer type for capability-based access
-//! #[derive(Clone)]
-//! struct Issuer(Did);
-//! impl Principal for Issuer {
-//!     fn did(&self) -> &Did { &self.0 }
-//! }
-//! # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-//! # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-//! impl Authority for Issuer {
-//!     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> { Ok(Vec::new()) }
-//!     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
-//! }
-//!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! // Create address with endpoint, region, and bucket
+//! # async fn example(issuer: impl dialog_capability::Authority<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync) -> Result<(), Box<dyn std::error::Error>> {
 //! let address = Address::new(
 //!     "https://s3.us-east-1.amazonaws.com",
 //!     "us-east-1",
 //!     "my-bucket",
 //! );
 //! let credentials = S3Credentials::public(address)?;
-//! let issuer = Issuer(Did::from("did:key:zMyIssuer"));
 //! let mut bucket = S3::from_s3(credentials, issuer);
 //!
-//! // Use capability-based access with subject DID as the root
-//! let subject = "did:key:zMySubject";
+//! let subject: dialog_capability::Did = "did:key:zMySubject".parse().unwrap();
 //! Subject::from(subject)
 //!     .attenuate(storage::Storage)
 //!     .attenuate(storage::Store::new("data"))
@@ -63,23 +45,10 @@
 //! ## Authorized Access (Credentials based Authentication)
 //!
 //! ```no_run
-//! # use async_trait::async_trait;
-//! use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
-//! use dialog_storage::capability::{storage, Provider, Subject};
+//! use dialog_storage::capability::{storage, Subject};
 //!
-//! # #[derive(Clone)]
-//! # struct Issuer(Did);
-//! # impl Principal for Issuer {
-//! #     fn did(&self) -> &Did { &self.0 }
-//! # }
-//! # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-//! # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-//! # impl Authority for Issuer {
-//! #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> { Ok(Vec::new()) }
-//! #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
-//! # }
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn example(issuer: impl dialog_capability::Authority<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync) -> Result<(), Box<dyn std::error::Error>> {
 //! let address = Address::new(
 //!     "https://s3.us-east-1.amazonaws.com",
 //!     "us-east-1",
@@ -91,11 +60,9 @@
 //!     std::env::var("AWS_SECRET_ACCESS_KEY")?,
 //! )?;
 //!
-//! let issuer = Issuer(Did::from("did:key:zMyIssuer"));
 //! let mut bucket = S3::from_s3(credentials, issuer);
 //!
-//! // Subject DID identifies whose data we're accessing
-//! let subject = "did:key:zMySubject";
+//! let subject: dialog_capability::Did = "did:key:zMySubject".parse().unwrap();
 //! Subject::from(subject)
 //!     .attenuate(storage::Storage)
 //!     .attenuate(storage::Store::new("data"))
@@ -112,23 +79,9 @@
 //! ## Cloudflare R2
 //!
 //! ```no_run
-//! # use async_trait::async_trait;
-//! use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //!
-//! # #[derive(Clone)]
-//! # struct Issuer(Did);
-//! # impl Principal for Issuer {
-//! #     fn did(&self) -> &Did { &self.0 }
-//! # }
-//! # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-//! # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-//! # impl Authority for Issuer {
-//! #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> { Ok(Vec::new()) }
-//! #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
-//! # }
-//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! // R2 uses "auto" region for signing
+//! # fn example(issuer: impl dialog_capability::Authority<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync) -> Result<(), Box<dyn std::error::Error>> {
 //! let address = Address::new(
 //!     "https://account-id.r2.cloudflarestorage.com",
 //!     "auto",
@@ -140,7 +93,6 @@
 //!     std::env::var("R2_SECRET_ACCESS_KEY")?,
 //! )?;
 //!
-//! let issuer = Issuer(Did::from("did:key:zMyIssuer"));
 //! let bucket = S3::from_s3(credentials, issuer);
 //! # Ok(())
 //! # }
@@ -149,28 +101,12 @@
 //! ## Local Development (MinIO)
 //!
 //! ```no_run
-//! # use async_trait::async_trait;
-//! use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
 //! use dialog_storage::s3::{Address, S3Credentials, S3};
 //!
-//! # #[derive(Clone)]
-//! # struct Issuer(Did);
-//! # impl Principal for Issuer {
-//! #     fn did(&self) -> &Did { &self.0 }
-//! # }
-//! # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-//! # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-//! # impl Authority for Issuer {
-//! #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> { Ok(Vec::new()) }
-//! #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
-//! # }
-//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! // IP addresses and localhost automatically use path-style URLs
+//! # fn example(issuer: impl dialog_capability::Authority<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync) -> Result<(), Box<dyn std::error::Error>> {
 //! let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
 //! let credentials = S3Credentials::private(address, "minioadmin", "minioadmin")?;
-//! let issuer = Issuer(Did::from("did:key:zMyIssuer"));
 //! let bucket = S3::from_s3(credentials, issuer);
-//! // path_style is true by default for IP addresses and localhost
 //! # Ok(())
 //! # }
 //! ```
@@ -185,10 +121,11 @@
 
 use async_trait::async_trait;
 use dialog_capability::{
-    Ability, Access, Authority, Authorized, Capability, Claim, DialogCapabilitySignError, Did,
-    Effect, Principal, Provider, Subject,
+    Ability, Access, Authority, Authorized, Capability, Claim, Did, Effect, Principal, Provider,
+    Subject,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_varsig::eddsa::Ed25519Signature;
 use thiserror::Error;
 
 // Re-export core types from dialog-s3-credentials crate
@@ -319,7 +256,7 @@ pub trait Authorizer: Clone + std::fmt::Debug + Send + Sync {
 ///
 /// The `Issuer` type parameter represents the authority that signs requests.
 /// For simple S3 usage, this can be any type implementing `Authority`.
-/// For UCAN-based access, this would typically be an `Operator` from dialog-artifacts.
+/// For UCAN-based access, this would typically be an `Ed25519Signer` from dialog-credentials.
 #[derive(Debug, Clone)]
 pub struct S3<Issuer> {
     credentials: Credentials,
@@ -348,22 +285,23 @@ impl<Issuer: Clone> S3<Issuer> {
 
 // Implement Principal for S3 by delegating to the issuer
 impl<Issuer: Principal> Principal for S3<Issuer> {
-    fn did(&self) -> &Did {
+    fn did(&self) -> Did {
         self.issuer.did()
     }
 }
 
-// Implement Authority for S3 by delegating to the issuer
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer: Authority> Authority for S3<Issuer> {
-    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> {
+// Implement Signer for S3 by delegating to the issuer
+impl<Issuer: Authority + ConditionalSync> dialog_capability::Signer<Issuer::Signature>
+    for S3<Issuer>
+{
+    async fn sign(&self, payload: &[u8]) -> Result<Issuer::Signature, signature::Error> {
         self.issuer.sign(payload).await
     }
+}
 
-    fn secret_key_bytes(&self) -> Option<[u8; 32]> {
-        self.issuer.secret_key_bytes()
-    }
+// Implement Authority for S3 by delegating to the issuer
+impl<Issuer: Authority + ConditionalSync> Authority for S3<Issuer> {
+    type Signature = Issuer::Signature;
 }
 
 // Implement Access for S3 by delegating to credentials
@@ -406,34 +344,12 @@ where
 /// # Example
 ///
 /// ```no_run
-/// # use async_trait::async_trait;
-/// use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
 /// use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
 /// use dialog_storage::StorageBackend;
 ///
-/// // Define an issuer type for capability-based access
-/// #[derive(Clone)]
-/// struct Issuer(Did);
-/// impl Principal for Issuer {
-///     fn did(&self) -> &Did { &self.0 }
-/// }
-/// # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-/// # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-/// impl Authority for Issuer {
-///     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> { Ok(Vec::new()) }
-///     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
-/// }
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
-/// let credentials = S3Credentials::public(address)?;
-/// let issuer = Issuer(Did::from("did:key:zMyIssuer"));
-/// let bucket = S3::from_s3(credentials, issuer);
-///
-/// // Create a scoped bucket for StorageBackend operations
-/// let mut storage = Bucket::new(bucket, "did:key:zMySubject", "my-store");
-///
-/// // Now you can use StorageBackend methods
+/// # async fn example(s3: S3<impl dialog_capability::Authority<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync>) -> Result<(), Box<dyn std::error::Error>> {
+/// let subject: dialog_capability::Did = "did:key:zMySubject".parse().unwrap();
+/// let mut storage = Bucket::new(s3, subject, "my-store");
 /// storage.set(b"key".to_vec(), b"value".to_vec()).await?;
 /// let value = storage.get(&b"key".to_vec()).await?;
 /// # Ok(())
@@ -486,34 +402,16 @@ impl<Issuer: Clone> Bucket<Issuer> {
 
 impl<Issuer> Bucket<Issuer>
 where
-    Issuer: Authority + Clone + ConditionalSend + ConditionalSync,
+    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     /// Delete a value by key.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use async_trait::async_trait;
     /// # use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
     /// # use dialog_storage::StorageBackend;
-    /// # use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
-    /// #
-    /// # #[derive(Clone)]
-    /// # struct Issuer(Did);
-    /// # impl Principal for Issuer { fn did(&self) -> &Did { &self.0 } }
-    /// # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    /// # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    /// # impl Authority for Issuer {
-    /// #     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> { Ok(Vec::new()) }
-    /// #     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
-    /// # }
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let address = Address::new("http://localhost:9000", "us-east-1", "bucket");
-    /// # let credentials = S3Credentials::public(address)?;
-    /// # let issuer = Issuer(Did::from("did:key:zMyIssuer"));
-    /// # let s3 = S3::from_s3(credentials, issuer);
-    /// # let mut bucket = Bucket::new(s3, "did:key:zSubject", "store");
-    /// // First set a value
+    /// # async fn example(mut bucket: Bucket<impl dialog_capability::Authority<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync>) -> Result<(), Box<dyn std::error::Error>> {
     /// bucket.set(b"key".to_vec(), b"value".to_vec()).await?;
     ///
     /// // Then delete it
@@ -538,22 +436,23 @@ where
 
 // Forward Principal trait to the underlying bucket
 impl<Issuer: Principal> Principal for Bucket<Issuer> {
-    fn did(&self) -> &Did {
+    fn did(&self) -> Did {
         self.bucket.did()
     }
 }
 
-// Forward Authority trait to the underlying bucket
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Issuer: Authority> Authority for Bucket<Issuer> {
-    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> {
+// Forward Signer trait to the underlying bucket
+impl<Issuer: Authority + ConditionalSync> dialog_capability::Signer<Issuer::Signature>
+    for Bucket<Issuer>
+{
+    async fn sign(&self, payload: &[u8]) -> Result<Issuer::Signature, signature::Error> {
         self.bucket.sign(payload).await
     }
+}
 
-    fn secret_key_bytes(&self) -> Option<[u8; 32]> {
-        self.bucket.secret_key_bytes()
-    }
+// Forward Authority trait to the underlying bucket
+impl<Issuer: Authority + ConditionalSync> Authority for Bucket<Issuer> {
+    type Signature = Issuer::Signature;
 }
 
 // Forward Access trait to the underlying bucket
@@ -593,7 +492,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer> StorageBackend for Bucket<Issuer>
 where
-    Issuer: Authority + Clone + ConditionalSend + ConditionalSync,
+    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     type Key = Vec<u8>;
     type Value = Vec<u8>;
@@ -636,7 +535,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer> TransactionalMemoryBackend for Bucket<Issuer>
 where
-    Issuer: Authority + Clone + ConditionalSend + ConditionalSync,
+    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     type Address = Vec<u8>;
     type Value = Vec<u8>;
@@ -748,6 +647,11 @@ mod tests {
     const TEST_SUBJECT: &str = "did:key:zTestSubject";
 
     #[allow(dead_code)]
+    fn test_subject() -> Did {
+        TEST_SUBJECT.parse().unwrap()
+    }
+
+    #[allow(dead_code)]
     fn test_address() -> Address {
         Address::new("https://s3.amazonaws.com", "us-east-1", "bucket")
     }
@@ -766,7 +670,7 @@ mod tests {
             let s3_creds = S3Credentials::public(address)
                 .unwrap()
                 .with_path_style(true);
-            S3::from_s3(s3_creds, helpers::Session::new(TEST_SUBJECT))
+            S3::from_s3(s3_creds, helpers::Session::new(test_subject()))
         }
 
         #[dialog_common::test]
@@ -780,7 +684,7 @@ mod tests {
             let value = b"test-provider-value".to_vec();
 
             // Execute the set operation using perform()
-            Subject::from(TEST_SUBJECT)
+            Subject::from(test_subject())
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new("test"))
                 .invoke(storage::Set {
@@ -791,7 +695,7 @@ mod tests {
                 .await?;
 
             // Execute the get operation using perform()
-            let result = Subject::from(TEST_SUBJECT)
+            let result = Subject::from(test_subject())
                 .attenuate(storage::Storage)
                 .attenuate(storage::Store::new("test"))
                 .invoke(storage::Get {
@@ -816,7 +720,7 @@ mod tests {
             let digest = dialog_common::Blake3Hash::hash(&content);
 
             // Execute the put operation using perform()
-            Subject::from(TEST_SUBJECT)
+            Subject::from(test_subject())
                 .attenuate(archive::Archive)
                 .attenuate(archive::Catalog::new("test"))
                 .invoke(archive::Put {
@@ -827,7 +731,7 @@ mod tests {
                 .await?;
 
             // Execute the get operation using perform()
-            let result = Subject::from(TEST_SUBJECT)
+            let result = Subject::from(test_subject())
                 .attenuate(archive::Archive)
                 .attenuate(archive::Catalog::new("test"))
                 .invoke(archive::Get {
@@ -848,19 +752,15 @@ mod tests {
         #[allow(unused_imports)]
         use dialog_capability::Subject;
         use dialog_s3_credentials::ucan::{
-            Credentials as UcanCredentials, DelegationChain, test_helpers::create_delegation,
+            Credentials as UcanCredentials, DelegationChain,
+            test_helpers::{create_delegation, generate_signer},
         };
-        use helpers::Operator;
+        use helpers::Ed25519Signer;
 
-        /// Helper to create a test delegation chain from subject to operator.
+        /// Helper to create a test delegation chain where subject and audience are the same signer.
         #[allow(dead_code)]
-        async fn create_test_delegation_chain(
-            subject_signer: &ucan::did::Ed25519Signer,
-            operator_did: &ucan::did::Ed25519Did,
-            can: &[&str],
-        ) -> DelegationChain {
-            let subject_did = subject_signer.did().clone();
-            let delegation = create_delegation(subject_signer, operator_did, &subject_did, can)
+        async fn create_self_delegation(signer: &Ed25519Signer, can: &[&str]) -> DelegationChain {
+            let delegation = create_delegation(signer, signer, signer, can)
                 .await
                 .expect("Failed to create test delegation");
             DelegationChain::new(delegation)
@@ -869,11 +769,11 @@ mod tests {
         #[allow(dead_code)]
         fn create_ucan_bucket(
             env: &helpers::UcanS3Address,
-            operator: Operator,
+            signer: Ed25519Signer,
             delegation: DelegationChain,
-        ) -> S3<Operator> {
+        ) -> S3<Ed25519Signer> {
             let ucan_credentials = UcanCredentials::new(env.access_service_url.clone(), delegation);
-            S3::new(Credentials::Ucan(ucan_credentials), operator)
+            S3::new(Credentials::Ucan(ucan_credentials), signer)
         }
 
         #[dialog_common::test]
@@ -881,22 +781,12 @@ mod tests {
             env: helpers::UcanS3Address,
         ) -> anyhow::Result<()> {
             use dialog_capability::Principal;
-            // Create operator
-            let operator = Operator::generate();
+            let signer = generate_signer().await;
+            let delegation = create_self_delegation(&signer, &["archive"]).await;
+            let subject_did = signer.did();
 
-            // Create delegation chain: subject delegates to operator
-            // For this test, subject and operator are the same
-            let delegation = create_test_delegation_chain(
-                operator.signer(),
-                &operator.signer().did(),
-                &["archive"],
-            )
-            .await;
-
-            let subject_did = operator.did().to_string();
-
-            // Create bucket with UCAN credentials and operator
-            let mut bucket = create_ucan_bucket(&env, operator, delegation);
+            // Create bucket with UCAN credentials
+            let mut bucket = create_ucan_bucket(&env, signer, delegation);
 
             // Create content and compute its digest
             let content = b"test ucan archive content".to_vec();
@@ -968,8 +858,8 @@ mod tests {
             let s3_creds = S3Credentials::public(address)
                 .unwrap()
                 .with_path_style(true);
-            let s3 = S3::from_s3(s3_creds, helpers::Session::new(TEST_SUBJECT));
-            Bucket::new(s3, TEST_SUBJECT, "test-store")
+            let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
+            Bucket::new(s3, test_subject(), "test-store")
         }
 
         #[dialog_common::test]
@@ -1113,12 +1003,12 @@ mod tests {
             let s3_creds = S3Credentials::public(address)
                 .unwrap()
                 .with_path_style(true);
-            let s3 = S3::from_s3(s3_creds, helpers::Session::new(TEST_SUBJECT));
+            let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
 
             // Create two backends with different paths
-            let bucket = Bucket::new(s3.clone(), TEST_SUBJECT, "prefix-a");
+            let bucket = Bucket::new(s3.clone(), test_subject(), "prefix-a");
             let mut backend1 = bucket;
-            let mut backend2 = Bucket::new(s3, TEST_SUBJECT, "prefix-b");
+            let mut backend2 = Bucket::new(s3, test_subject(), "prefix-b");
 
             // Set the same key in both backends
             let key = b"shared-key".to_vec();
@@ -1311,8 +1201,8 @@ mod tests {
                 S3Credentials::private(address, &env.access_key_id, &env.secret_access_key)
                     .unwrap()
                     .with_path_style(true);
-            let s3 = S3::from_s3(s3_creds, helpers::Session::new(TEST_SUBJECT));
-            Bucket::new(s3, TEST_SUBJECT, "signed-test")
+            let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
+            Bucket::new(s3, test_subject(), "signed-test")
         }
 
         #[dialog_common::test]
@@ -1338,8 +1228,8 @@ mod tests {
             let s3_creds = S3Credentials::private(address, &env.access_key_id, "wrong-secret")
                 .unwrap()
                 .with_path_style(true);
-            let s3 = S3::from_s3(s3_creds, helpers::Session::new(TEST_SUBJECT));
-            let mut bucket = Bucket::new(s3, TEST_SUBJECT, "test");
+            let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
+            let mut bucket = Bucket::new(s3, test_subject(), "test");
 
             // Attempt to set a value - should fail due to signature mismatch
             let result = bucket.set(b"key".to_vec(), b"value".to_vec()).await;
@@ -1359,8 +1249,8 @@ mod tests {
                 S3Credentials::private(address, "wrong-access-key", &env.secret_access_key)
                     .unwrap()
                     .with_path_style(true);
-            let s3 = S3::from_s3(s3_creds, helpers::Session::new(TEST_SUBJECT));
-            let mut bucket = Bucket::new(s3, TEST_SUBJECT, "test");
+            let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
+            let mut bucket = Bucket::new(s3, test_subject(), "test");
 
             // Attempt to set a value - should fail due to unknown access key
             let result = bucket.set(b"key".to_vec(), b"value".to_vec()).await;
@@ -1382,8 +1272,8 @@ mod tests {
             let s3_creds = S3Credentials::public(address)
                 .unwrap()
                 .with_path_style(true);
-            let s3 = S3::from_s3(s3_creds, helpers::Session::new(TEST_SUBJECT));
-            let mut bucket = Bucket::new(s3, TEST_SUBJECT, "test");
+            let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
+            let mut bucket = Bucket::new(s3, test_subject(), "test");
 
             // Attempt to set a value - should fail because server expects signed requests
             let result = bucket.set(b"key".to_vec(), b"value".to_vec()).await;
@@ -1411,8 +1301,8 @@ mod tests {
             let wrong_creds = S3Credentials::private(address, &env.access_key_id, "wrong-secret")
                 .unwrap()
                 .with_path_style(true);
-            let s3 = S3::from_s3(wrong_creds, helpers::Session::new(TEST_SUBJECT));
-            let wrong_bucket = Bucket::new(s3, TEST_SUBJECT, "signed-test");
+            let s3 = S3::from_s3(wrong_creds, helpers::Session::new(test_subject()));
+            let wrong_bucket = Bucket::new(s3, test_subject(), "signed-test");
 
             // Attempt to get the value - should fail
             let result = wrong_bucket.get(&b"protected-key".to_vec()).await;
@@ -1433,39 +1323,34 @@ mod tests {
         #[allow(unused_imports)]
         use dialog_capability::{Principal, Subject};
         use dialog_s3_credentials::ucan::{
-            Credentials as UcanCredentials, DelegationChain, test_helpers::create_delegation,
+            Credentials as UcanCredentials, DelegationChain,
+            test_helpers::{create_delegation, generate_signer},
         };
-        use helpers::Operator;
+        use helpers::Ed25519Signer;
 
         #[allow(dead_code)]
         async fn create_ucan_bucket(
             env: &helpers::UcanS3Address,
-            operator: &Operator,
+            signer: &Ed25519Signer,
             can: &[&str],
-        ) -> Bucket<Operator> {
+        ) -> Bucket<Ed25519Signer> {
             let delegation = {
-                let subject_did = operator.signer().did().clone();
-                let delegation = create_delegation(
-                    operator.signer(),
-                    &operator.signer().did(),
-                    &subject_did,
-                    can,
-                )
-                .await
-                .expect("Failed to create test delegation");
+                let delegation = create_delegation(signer, signer, signer, can)
+                    .await
+                    .expect("Failed to create test delegation");
                 DelegationChain::new(delegation)
             };
             let ucan_credentials = UcanCredentials::new(env.access_service_url.clone(), delegation);
-            let s3 = S3::new(Credentials::Ucan(ucan_credentials), operator.clone());
-            Bucket::new(s3, operator.did().to_string(), "test-store")
+            let s3 = S3::new(Credentials::Ucan(ucan_credentials), signer.clone());
+            Bucket::new(s3, signer.did(), "test-store")
         }
 
         #[dialog_common::test]
         async fn it_performs_storage_get_and_set_via_ucan(
             env: helpers::UcanS3Address,
         ) -> anyhow::Result<()> {
-            let operator = Operator::generate();
-            let mut bucket = create_ucan_bucket(&env, &operator, &["storage"]).await;
+            let signer = generate_signer().await;
+            let mut bucket = create_ucan_bucket(&env, &signer, &["storage"]).await;
 
             let key = b"ucan-test-key".to_vec();
             let value = b"ucan-test-value".to_vec();
@@ -1484,24 +1369,18 @@ mod tests {
         async fn it_performs_storage_delete_via_ucan(
             env: helpers::UcanS3Address,
         ) -> anyhow::Result<()> {
-            let operator = Operator::generate();
-            let subject_did = operator.did().to_string();
+            let signer = generate_signer().await;
+            let subject_did = signer.did();
 
             // Create bucket with storage delegation
             let delegation = {
-                let subject_did_clone = operator.signer().did().clone();
-                let delegation = create_delegation(
-                    operator.signer(),
-                    &operator.signer().did(),
-                    &subject_did_clone,
-                    &["storage"],
-                )
-                .await
-                .expect("Failed to create test delegation");
+                let delegation = create_delegation(&signer, &signer, &signer, &["storage"])
+                    .await
+                    .expect("Failed to create test delegation");
                 DelegationChain::new(delegation)
             };
             let ucan_credentials = UcanCredentials::new(env.access_service_url.clone(), delegation);
-            let mut bucket = S3::new(Credentials::Ucan(ucan_credentials), operator);
+            let mut bucket = S3::new(Credentials::Ucan(ucan_credentials), signer);
 
             let store_name = "test-store";
             let key = b"ucan-delete-key".to_vec();
@@ -1557,8 +1436,8 @@ mod tests {
         async fn it_returns_none_for_nonexistent_key_via_ucan(
             env: helpers::UcanS3Address,
         ) -> anyhow::Result<()> {
-            let operator = Operator::generate();
-            let bucket = create_ucan_bucket(&env, &operator, &["storage"]).await;
+            let signer = generate_signer().await;
+            let bucket = create_ucan_bucket(&env, &signer, &["storage"]).await;
 
             // Try to get a key that doesn't exist
             let result = bucket.get(&b"nonexistent-ucan-key".to_vec()).await?;
@@ -1582,8 +1461,8 @@ mod tests {
             let s3_creds = S3Credentials::public(address)
                 .unwrap()
                 .with_path_style(true);
-            let s3 = S3::from_s3(s3_creds, helpers::Session::new(TEST_SUBJECT));
-            Bucket::new(s3, TEST_SUBJECT, store)
+            let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
+            Bucket::new(s3, test_subject(), store)
         }
 
         #[allow(dead_code)]
@@ -1593,8 +1472,8 @@ mod tests {
                 S3Credentials::private(address, &env.access_key_id, &env.secret_access_key)
                     .unwrap()
                     .with_path_style(true);
-            let s3 = S3::from_s3(s3_creds, helpers::Session::new(TEST_SUBJECT));
-            Bucket::new(s3, TEST_SUBJECT, store)
+            let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
+            Bucket::new(s3, test_subject(), store)
         }
 
         #[dialog_common::test]
@@ -1646,11 +1525,11 @@ mod tests {
             let s3_creds = S3Credentials::public(address)
                 .unwrap()
                 .with_path_style(true);
-            let s3 = S3::from_s3(s3_creds, helpers::Session::new(TEST_SUBJECT));
+            let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
 
             // Create two buckets with different prefixes
-            let mut bucket_a = Bucket::new(s3.clone(), TEST_SUBJECT, "list-prefix-a");
-            let mut bucket_b = Bucket::new(s3, TEST_SUBJECT, "list-prefix-b");
+            let mut bucket_a = Bucket::new(s3.clone(), test_subject(), "list-prefix-a");
+            let mut bucket_b = Bucket::new(s3, test_subject(), "list-prefix-b");
 
             // Add objects to each bucket
             bucket_a.set(b"key1".to_vec(), b"value-a1".to_vec()).await?;
@@ -1702,8 +1581,8 @@ mod tests {
             let s3_creds = S3Credentials::public(address)
                 .unwrap()
                 .with_path_style(true);
-            let s3 = S3::from_s3(s3_creds, helpers::Session::new(TEST_SUBJECT));
-            let bucket = Bucket::new(s3, TEST_SUBJECT, "test");
+            let s3 = S3::from_s3(s3_creds, helpers::Session::new(test_subject()));
+            let bucket = Bucket::new(s3, test_subject(), "test");
 
             // S3 returns 404 NoSuchBucket error when listing a non-existent bucket.
             let result = bucket.list(None).await;
@@ -1726,39 +1605,34 @@ mod tests {
         use super::*;
         use dialog_capability::Principal;
         use dialog_s3_credentials::ucan::{
-            Credentials as UcanCredentials, DelegationChain, test_helpers::create_delegation,
+            Credentials as UcanCredentials, DelegationChain,
+            test_helpers::{create_delegation, generate_signer},
         };
-        use helpers::Operator;
+        use helpers::Ed25519Signer;
 
         #[allow(dead_code)]
         async fn create_ucan_bucket(
             env: &helpers::UcanS3Address,
-            operator: &Operator,
+            signer: &Ed25519Signer,
             store: &str,
             can: &[&str],
-        ) -> Bucket<Operator> {
+        ) -> Bucket<Ed25519Signer> {
             let delegation = {
-                let subject_did = operator.signer().did().clone();
-                let delegation = create_delegation(
-                    operator.signer(),
-                    &operator.signer().did(),
-                    &subject_did,
-                    can,
-                )
-                .await
-                .expect("Failed to create test delegation");
+                let delegation = create_delegation(signer, signer, signer, can)
+                    .await
+                    .expect("Failed to create test delegation");
                 DelegationChain::new(delegation)
             };
             let ucan_credentials = UcanCredentials::new(env.access_service_url.clone(), delegation);
-            let s3 = S3::new(Credentials::Ucan(ucan_credentials), operator.clone());
-            Bucket::new(s3, operator.did().to_string(), store)
+            let s3 = S3::new(Credentials::Ucan(ucan_credentials), signer.clone());
+            Bucket::new(s3, signer.did(), store)
         }
 
         #[dialog_common::test]
         async fn it_lists_objects_via_ucan(env: helpers::UcanS3Address) -> anyhow::Result<()> {
-            let operator = Operator::generate();
+            let signer = generate_signer().await;
             let mut bucket =
-                create_ucan_bucket(&env, &operator, "ucan-list-test", &["storage"]).await;
+                create_ucan_bucket(&env, &signer, "ucan-list-test", &["storage"]).await;
 
             // Set multiple values
             bucket.set(b"key1".to_vec(), b"value1".to_vec()).await?;
@@ -1778,9 +1652,9 @@ mod tests {
         async fn it_lists_empty_for_nonexistent_prefix_via_ucan(
             env: helpers::UcanS3Address,
         ) -> anyhow::Result<()> {
-            let operator = Operator::generate();
+            let signer = generate_signer().await;
             let bucket =
-                create_ucan_bucket(&env, &operator, "nonexistent-ucan-prefix", &["storage"]).await;
+                create_ucan_bucket(&env, &signer, "nonexistent-ucan-prefix", &["storage"]).await;
 
             // List objects with a prefix that has no objects - should return empty list
             let result = bucket.list(None).await?;
@@ -1795,13 +1669,13 @@ mod tests {
         async fn it_uses_prefix_for_listing_via_ucan(
             env: helpers::UcanS3Address,
         ) -> anyhow::Result<()> {
-            let operator = Operator::generate();
+            let signer = generate_signer().await;
 
-            // Create two buckets with different prefixes but same operator
+            // Create two buckets with different prefixes but same signer
             let mut bucket_a =
-                create_ucan_bucket(&env, &operator, "ucan-list-prefix-a", &["storage"]).await;
+                create_ucan_bucket(&env, &signer, "ucan-list-prefix-a", &["storage"]).await;
             let mut bucket_b =
-                create_ucan_bucket(&env, &operator, "ucan-list-prefix-b", &["storage"]).await;
+                create_ucan_bucket(&env, &signer, "ucan-list-prefix-b", &["storage"]).await;
 
             // Add objects to each bucket
             bucket_a.set(b"key1".to_vec(), b"value-a1".to_vec()).await?;

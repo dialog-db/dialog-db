@@ -16,14 +16,14 @@
 //! # Example: Storage Operations
 //!
 //! ```
-//! use dialog_capability::Subject;
+//! use dialog_capability::{Subject, did};
 //! use dialog_s3_credentials::capability::storage::{Storage, Store, Get, Set};
 //! use dialog_s3_credentials::Checksum;
 //!
-//! let subject = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+//! let subject = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
 //!
 //! // Build a capability to get a value from the "index" store
-//! let get_capability = Subject::from(subject)
+//! let get_capability = Subject::from(subject.clone())
 //!     .attenuate(Storage)              // Domain: storage operations
 //!     .attenuate(Store::new("index"))  // Policy: only the "index" store
 //!     .invoke(Get::new(b"my-key"));    // Effect: get this specific key
@@ -39,15 +39,15 @@
 //! # Example: Memory Operations (CAS cells)
 //!
 //! ```
-//! use dialog_capability::Subject;
+//! use dialog_capability::{Subject, did};
 //! use dialog_s3_credentials::capability::memory::{Memory, Space, Cell, Resolve, Publish};
 //! use dialog_s3_credentials::Checksum;
 //!
-//! let subject = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+//! let subject = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
 //! let user = "did:key:z6Mkuser...";
 //!
 //! // Resolve (read) a memory cell
-//! let resolve = Subject::from(subject)
+//! let resolve = Subject::from(subject.clone())
 //!     .attenuate(Memory)              // Domain: memory operations
 //!     .attenuate(Space::new(user))    // Policy: user's namespace
 //!     .attenuate(Cell::new("main"))   // Policy: specific cell name

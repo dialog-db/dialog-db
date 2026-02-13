@@ -261,18 +261,6 @@ where
         content: Option<Self::Value>,
     ) -> Result<Option<Self::Edition>, Self::Error> {
         let path = self.make_path(address)?;
-
-        // Ensure parent directory exists. Addresses may contain path separators
-        // (e.g. "local/main") and the parent directory won't exist on first write.
-        // Without this, PidlockGuard and file writes fail because the parent
-        // directory is missing, and pidlock misinterprets the error as LockExists,
-        // causing an infinite retry loop.
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| DialogStorageError::StorageBackend(format!("{e}")))?;
-        }
-
         let _lock = PidlockGuard::new(self.make_lock_path(address)?)?;
 
         // Read current content and compute hash

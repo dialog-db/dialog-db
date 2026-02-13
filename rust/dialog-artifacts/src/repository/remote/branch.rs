@@ -323,10 +323,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> Remote
                 .map_err(|e| RepositoryError::StorageError(format!("{:?}", e)))?;
 
             // Connect to remote using credentials.
-            // TODO: Remove this requirement once ucan-rs is more flexible with WebCrypto support,
-            // allowing us to use non-extractable keys for remote operations.
-            let authority = SigningAuthority::try_from_authority(&desc.issuer)?;
-            let connection = credentials.connect(authority, &desc.subject)?;
+            let connection = credentials.connect(desc.issuer.clone().into(), &desc.subject)?;
 
             // Open remote revision storage
             let mut memory = connection.memory();

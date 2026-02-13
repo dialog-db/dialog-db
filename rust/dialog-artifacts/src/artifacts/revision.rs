@@ -1,6 +1,7 @@
-use super::{Blake3Hash, EMPT_TREE_HASH};
+use super::Blake3Hash;
 use crate::DialogArtifactsError;
 use base58::ToBase58;
+use dialog_prolly_tree::EMPT_TREE_HASH;
 use dialog_storage::{CborEncoder, Encoder};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};

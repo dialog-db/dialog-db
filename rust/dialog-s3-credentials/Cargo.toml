@@ -9,14 +9,13 @@ license.workspace = true
 [features]
 default = []
 ucan = [
-    "dep:ed25519-dalek",
+    "dep:dialog-credentials",
+    "dep:dialog-ucan",
     "dep:ipld-core",
-    "dep:rand_core",
     "dep:reqwest",
     "dep:serde_ipld_dagcbor",
     "dep:serde_json",
     "dep:signature",
-    "dep:ucan",
     "dialog-capability/ucan",
 ]
 helpers = ["ucan"]
@@ -31,6 +30,7 @@ chrono = "0.4"
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-effects = { workspace = true }
+dialog-varsig = { workspace = true }
 hmac = "0.12"
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }
@@ -40,14 +40,13 @@ url = { workspace = true }
 anyhow = { workspace = true }
 
 # UCAN feature dependencies (optional)
-ed25519-dalek = { workspace = true, optional = true }
+dialog-credentials = { workspace = true, optional = true }
+dialog-ucan = { workspace = true, optional = true }
 ipld-core = { workspace = true, optional = true }
-rand_core = { version = "0.6", features = ["getrandom"], optional = true }
 reqwest = { workspace = true, optional = true }
 serde_ipld_dagcbor = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 signature = { version = "2", optional = true }
-ucan = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true, features = ["js"] }
@@ -55,10 +54,11 @@ getrandom = { workspace = true, features = ["js"] }
 [dev-dependencies]
 async-signature = "0.5"
 dialog-common = { workspace = true, features = ["helpers"] }
+dialog-credentials = { workspace = true }
+dialog-ucan = { workspace = true }
 ipld-core = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
-varsig = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 
 [lints.rust]

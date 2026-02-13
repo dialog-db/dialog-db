@@ -150,14 +150,14 @@ impl From<&Checksum> for String {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn it_computes_sha256_checksum() {
         let checksum = Hasher::Sha256.checksum(b"hello world");
         // SHA-256 of "hello world" should be 32 bytes
         assert_eq!(checksum.as_bytes().len(), 32);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_formats_checksum_as_base64() {
         let checksum = Hasher::Sha256.checksum(b"hello world");
         // SHA-256 of "hello world" base64 encoded
@@ -167,13 +167,13 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_returns_checksum_algorithm_name() {
         let checksum = Hasher::Sha256.checksum(b"test");
         assert_eq!(checksum.name(), "sha256");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_serializes_as_multihash_bytes() {
         let checksum = Hasher::Sha256.checksum(b"hello world");
         let multihash: Multihash = checksum.clone().into();
@@ -188,7 +188,7 @@ mod tests {
         assert_eq!(multihash.0.len(), 34);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_deserializes_from_multihash_bytes() {
         let original = Hasher::Sha256.checksum(b"hello world");
         let multihash: Multihash = original.clone().into();
@@ -196,7 +196,7 @@ mod tests {
         assert_eq!(original, decoded);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_roundtrips_through_ipld() {
         use ipld_core::ipld::Ipld;
 
@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(checksum, decoded);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_invalid_multihash_code() {
         let mut bytes = vec![0x99, 0x20]; // Unknown code 0x99
         bytes.extend_from_slice(&[0u8; 32]);
@@ -220,7 +220,7 @@ mod tests {
         assert!(result.unwrap_err().contains("unsupported multihash code"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_rejects_wrong_length() {
         let mut bytes = vec![SHA256_CODE, 0x10]; // Claims 16 bytes
         bytes.extend_from_slice(&[0u8; 16]);

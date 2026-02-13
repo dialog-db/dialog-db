@@ -198,29 +198,30 @@ impl<E: Error> From<DialogCapabilityPerformError<E>> for ArchiveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dialog_capability::did;
 
     #[test]
     fn it_builds_archive_claim_path() {
-        let claim = Subject::from("did:key:zSpace").attenuate(Archive);
+        let claim = Subject::from(did!("key:zSpace")).attenuate(Archive);
 
-        assert_eq!(claim.subject(), "did:key:zSpace");
+        assert_eq!(claim.subject(), &did!("key:zSpace"));
         assert_eq!(claim.ability(), "/archive");
     }
 
     #[test]
     fn it_builds_catalog_claim_path() {
-        let claim = Subject::from("did:key:zSpace")
+        let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Archive)
             .attenuate(Catalog::new("index"));
 
-        assert_eq!(claim.subject(), "did:key:zSpace");
+        assert_eq!(claim.subject(), &did!("key:zSpace"));
         // Catalog is Policy, not Ability, so it doesn't add to path
         assert_eq!(claim.ability(), "/archive");
     }
 
     #[test]
     fn it_builds_get_claim_path() {
-        let claim = Subject::from("did:key:zSpace")
+        let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Get::new([0u8; 32]));
@@ -230,7 +231,7 @@ mod tests {
 
     #[test]
     fn it_builds_put_claim_path() {
-        let claim = Subject::from("did:key:zSpace")
+        let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
             .invoke(Put::new([0u8; 32], Vec::new()));
@@ -246,7 +247,7 @@ mod tests {
 
         #[test]
         fn it_collects_archive_parameters() {
-            let cap = Subject::from("did:key:zSpace").attenuate(Archive);
+            let cap = Subject::from(did!("key:zSpace")).attenuate(Archive);
             let params = parameters(&cap);
 
             // Archive is a unit struct, should produce empty map
@@ -255,7 +256,7 @@ mod tests {
 
         #[test]
         fn it_collects_catalog_parameters() {
-            let cap = Subject::from("did:key:zSpace")
+            let cap = Subject::from(did!("key:zSpace"))
                 .attenuate(Archive)
                 .attenuate(Catalog::new("blobs"));
             let params = parameters(&cap);
@@ -266,7 +267,7 @@ mod tests {
         #[test]
         fn it_collects_get_parameters() {
             let digest = Blake3Hash::from([1u8; 32]);
-            let cap = Subject::from("did:key:zSpace")
+            let cap = Subject::from(did!("key:zSpace"))
                 .attenuate(Archive)
                 .attenuate(Catalog::new("index"))
                 .invoke(Get::new(digest));
@@ -280,7 +281,7 @@ mod tests {
         fn it_collects_put_parameters() {
             let digest = Blake3Hash::from([2u8; 32]);
             let content = b"hello world".to_vec();
-            let cap = Subject::from("did:key:zSpace")
+            let cap = Subject::from(did!("key:zSpace"))
                 .attenuate(Archive)
                 .attenuate(Catalog::new("data"))
                 .invoke(Put::new(digest, content.clone()));

@@ -12,11 +12,10 @@ use std::{
     str::FromStr,
 };
 
-use crate::{Attribute, Cause, DialogArtifactsError, Entity, make_reference};
+use crate::{Attribute, Cause, DialogArtifactsError, Entity, TypeError, make_reference};
 use base58::{FromBase58, ToBase58};
 use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use thiserror::Error;
 
 /// All value type representations that may be stored by [`Artifacts`]
 #[derive(Debug, Clone, PartialOrd, Serialize, Deserialize)]
@@ -96,7 +95,6 @@ impl Value {
     }
 }
 
-// We need to implement Hash because f64 does not implement it.
 impl Hash for Value {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
@@ -113,8 +111,6 @@ impl Hash for Value {
     }
 }
 
-// We need to implement PartialEq / Eq because we can't derive Eq for f64
-// because of NaN equality
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -124,7 +120,6 @@ impl PartialEq for Value {
             (Value::String(a), Value::String(b)) => a == b,
             (Value::UnsignedInt(a), Value::UnsignedInt(b)) => a == b,
             (Value::SignedInt(a), Value::SignedInt(b)) => a == b,
-            // NaN bitwise equal
             (Value::Float(a), Value::Float(b)) => a.to_le_bytes() == b.to_le_bytes(),
             (Value::Record(a), Value::Record(b)) => a == b,
             (Value::Symbol(a), Value::Symbol(b)) => a == b,
@@ -543,9 +538,6 @@ impl TryFrom<Value> for Vec<u8> {
     }
 }
 
-// Note: TryFrom<Value> for Value is automatically provided by the blanket implementation
-// impl<T, U> TryFrom<U> for T where U: Into<T>
-
 impl From<Vec<u8>> for Value {
     fn from(value: Vec<u8>) -> Self {
         Value::Bytes(value)
@@ -654,7 +646,6 @@ impl From<Cause> for Value {
     }
 }
 
-// PartialEq implementations for comparing types with Value
 impl PartialEq<Value> for Entity {
     fn eq(&self, other: &Value) -> bool {
         match other {
@@ -818,14 +809,6 @@ impl From<Value> for ValueDataType {
     fn from(value: Value) -> Self {
         Self::from(&value)
     }
-}
-
-/// Errors created when types are used inconsistently with value.
-#[derive(Error, Debug, PartialEq)]
-pub enum TypeError {
-    /// Expected type and actual type mismatch.
-    #[error("Type mismatch: expected {0}, got {1}")]
-    TypeMismatch(ValueDataType, ValueDataType),
 }
 
 /// [`ValueDataType`] embodies all types that are able to be represented

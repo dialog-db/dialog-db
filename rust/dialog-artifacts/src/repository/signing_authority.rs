@@ -1,11 +1,10 @@
 pub use super::Repository;
 use super::principal::Principal;
-use super::{
-    Formatter, PlatformBackend, RepositoryError, SECRET_KEY_LENGTH, SignerMut, SigningKey,
-};
-use async_trait::async_trait;
+use super::{Formatter, PlatformBackend, RepositoryError, SECRET_KEY_LENGTH, SigningKey};
 pub use dialog_capability::Did;
-use dialog_capability::{Authority, DialogCapabilitySignError, Principal as PrincipalTrait};
+use dialog_capability::{Authority, Principal as PrincipalTrait};
+use dialog_varsig::Signer as VarsigSigner;
+use dialog_varsig::eddsa::Ed25519Signature;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -20,14 +19,14 @@ pub use web_sys::CryptoKey;
 ///
 /// This trait is used by the `SigningAuthority::Dynamic` variant to allow custom
 /// signing implementations at the cost of dynamic dispatch.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Signer: Send + Sync {
     /// Get the principal (public key) for this signer.
     fn principal(&self) -> &Principal;
 
     /// Sign a payload.
-    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError>;
+    async fn sign(&self, payload: &[u8]) -> Result<Ed25519Signature, signature::Error>;
 
     /// Try to export the raw Ed25519 secret key bytes.
     ///
@@ -203,8 +202,8 @@ impl SigningAuthority {
     }
 
     /// Returns the DID (Decentralized Identifier) for this signing authority.
-    pub fn did(&self) -> &Did {
-        self.principal().did()
+    pub fn did(&self) -> Did {
+        self.principal().did().clone()
     }
 
     /// Returns the principal (public key) for this signing authority.
@@ -278,7 +277,7 @@ impl SigningAuthority {
 }
 
 impl SigningAuthority {
-    /// Creates a SigningAuthority from any Authority with extractable keys.
+    /// Creates a SigningAuthority from another SigningAuthority with extractable keys.
     ///
     /// This encapsulates the pattern of extracting secret key bytes and creating
     /// a SigningAuthority from them. Useful for remote operations that require
@@ -287,7 +286,9 @@ impl SigningAuthority {
     /// # Errors
     ///
     /// Returns an error if the authority does not have extractable key material.
-    pub fn try_from_authority<T: Authority>(authority: &T) -> Result<Self, RepositoryError> {
+    pub fn try_from_signing_authority(
+        authority: &SigningAuthority,
+    ) -> Result<Self, RepositoryError> {
         match authority.secret_key_bytes() {
             Some(bytes) => Ok(SigningAuthority::from_secret(&bytes)),
             None => Err(RepositoryError::StorageError(
@@ -308,37 +309,35 @@ impl From<Ed25519Signer> for SigningAuthority {
 }
 
 impl PrincipalTrait for SigningAuthority {
-    fn did(&self) -> &Did {
+    fn did(&self) -> Did {
         SigningAuthority::did(self)
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Authority for SigningAuthority {
-    async fn sign(&mut self, payload: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> {
+impl VarsigSigner<Ed25519Signature> for SigningAuthority {
+    async fn sign(&self, payload: &[u8]) -> Result<Ed25519Signature, signature::Error> {
         match self {
-            Self::Native { key, .. } => Ok(key.sign(payload).to_bytes().to_vec()),
+            Self::Native { key, .. } => {
+                use ed25519_dalek::Signer as _;
+                let sig = key.try_sign(payload)?;
+                Ok(Ed25519Signature::from(sig))
+            }
 
             #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
             Self::WebCrypto { signer, .. } => {
                 use async_signature::AsyncSigner;
-                signer
-                    .signer()
-                    .sign_async(payload)
-                    .await
-                    .map(|sig| sig.to_bytes().to_vec())
-                    .map_err(|e| DialogCapabilitySignError::SigningFailed(e.to_string()))
+                let sig = signer.signer().sign_async(payload).await?;
+                Ok(Ed25519Signature::from(sig))
             }
 
             Self::Dynamic { signer, .. } => {
-                let mut guard = signer.write().await;
+                let guard = signer.read().await;
                 guard.sign(payload).await
             }
         }
     }
+}
 
-    fn secret_key_bytes(&self) -> Option<[u8; 32]> {
-        SigningAuthority::secret_key_bytes(self)
-    }
+impl Authority for SigningAuthority {
+    type Signature = Ed25519Signature;
 }

@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use dialog_capability::{Authority, Capability, Provider, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_s3_credentials::capability::storage::List as AuthorizeList;
+use dialog_varsig::eddsa::Ed25519Signature;
 use serde::Deserialize;
 
 use super::{Bucket, RequestDescriptorExt, S3, S3StorageError};
@@ -61,7 +62,7 @@ struct S3Error {
 
 impl<Issuer> Bucket<Issuer>
 where
-    Issuer: Authority + ConditionalSend + ConditionalSync + Clone,
+    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
     super::S3<Issuer>: Provider<storage::List>,
 {
     /// List objects in the bucket with the configured path prefix.
@@ -78,28 +79,12 @@ where
     /// # Example
     ///
     /// ```no_run
-    /// # use async_trait::async_trait;
-    /// use dialog_capability::{Authority, DialogCapabilitySignError, Did, Principal};
-    /// use dialog_storage::s3::{S3, S3Credentials, Address, Bucket};
-    ///
-    /// #[derive(Clone)]
-    /// struct Issuer(Did);
-    /// impl Principal for Issuer {
-    ///     fn did(&self) -> &Did { &self.0 }
-    /// }
-    /// # #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    /// # #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    /// impl Authority for Issuer {
-    ///     async fn sign(&mut self, _: &[u8]) -> Result<Vec<u8>, DialogCapabilitySignError> { Ok(Vec::new()) }
-    ///     fn secret_key_bytes(&self) -> Option<[u8; 32]> { None }
-    /// }
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let address = Address::new("http://localhost:9000", "us-east-1", "my-bucket");
-    /// let credentials = S3Credentials::public(address)?;
-    /// let issuer = Issuer(Did::from("did:key:zMyIssuer"));
-    /// let s3 = S3::from_s3(credentials, issuer);
-    /// let bucket = Bucket::new(s3, "did:key:zMySubject", "my-store");
+    /// # use dialog_storage::s3::{S3, Bucket};
+    /// # async fn example(
+    /// #     s3: S3<impl dialog_capability::Authority<Signature = dialog_varsig::eddsa::Ed25519Signature> + Clone + Send + Sync>,
+    /// # ) -> Result<(), Box<dyn std::error::Error>> {
+    /// let subject: dialog_capability::Did = "did:key:zMySubject".parse().unwrap();
+    /// let bucket = Bucket::new(s3, subject, "my-store");
     ///
     /// // List all objects in the store
     /// let result = bucket.list(None).await?;
@@ -120,7 +105,7 @@ where
         continuation_token: Option<&str>,
     ) -> Result<ListResult, S3StorageError> {
         // Build the list capability
-        let capability = Subject::from(self.subject().to_string())
+        let capability = Subject::from(self.subject().clone())
             .attenuate(storage::Storage)
             .attenuate(storage::Store::new(self.path()))
             .invoke(storage::List::new(continuation_token.map(String::from)));
@@ -144,7 +129,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer> Provider<storage::List> for S3<Issuer>
 where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
+    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(
         &mut self,
@@ -153,7 +138,7 @@ where
         // Build the authorization capability
         let store: &storage::Store = input.policy();
         let list: &storage::List = input.policy();
-        let capability = Subject::from(input.subject().to_string())
+        let capability = Subject::from(input.subject().clone())
             .attenuate(storage::Storage)
             .attenuate(store.clone())
             .invoke(AuthorizeList::new(list.continuation_token.clone()));

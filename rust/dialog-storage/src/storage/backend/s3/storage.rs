@@ -11,6 +11,7 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_s3_credentials::capability::storage::{
     Delete as AuthorizeDelete, Get as AuthorizeGet, Set as AuthorizeSet,
 };
+use dialog_varsig::eddsa::Ed25519Signature;
 
 use super::{Hasher, RequestDescriptorExt, S3};
 
@@ -18,11 +19,11 @@ use super::{Hasher, RequestDescriptorExt, S3};
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer> Provider<Get> for S3<Issuer>
 where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
+    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(&mut self, input: Capability<Get>) -> Result<Option<Vec<u8>>, StorageError> {
         // Build the authorization capability
-        let capability = Subject::from(input.subject().to_string())
+        let capability = Subject::from(input.subject().clone())
             .attenuate(Storage)
             .attenuate(Store::of(&input).clone())
             .invoke(AuthorizeGet {
@@ -68,14 +69,14 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer> Provider<Set> for S3<Issuer>
 where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
+    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(&mut self, input: Capability<Set>) -> Result<(), StorageError> {
         let Set { key, value } = Set::of(&input);
         let checksum = Hasher::Sha256.checksum(value);
 
         // Build the authorization capability
-        let capability = Subject::from(input.subject().to_string())
+        let capability = Subject::from(input.subject().clone())
             .attenuate(Storage)
             .attenuate(Store::of(&input).clone())
             .invoke(AuthorizeSet {
@@ -116,11 +117,11 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Issuer> Provider<Delete> for S3<Issuer>
 where
-    Issuer: Authority + ConditionalSend + ConditionalSync,
+    Issuer: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
 {
     async fn execute(&mut self, input: Capability<Delete>) -> Result<(), StorageError> {
         // Build the authorization capability
-        let capability = Subject::from(input.subject().to_string())
+        let capability = Subject::from(input.subject().clone())
             .attenuate(Storage)
             .attenuate(Store::of(&input).clone())
             .invoke(AuthorizeDelete {
