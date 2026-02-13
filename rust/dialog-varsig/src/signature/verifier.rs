@@ -3,6 +3,7 @@
 use std::future::Future;
 
 use super::Signature;
+use dialog_common::ConditionalSend;
 
 /// Verifies that a cryptographic signature is valid for a given payload.
 ///
@@ -14,5 +15,5 @@ pub trait Verifier<S: Signature> {
         &self,
         payload: &[u8],
         signature: &S,
-    ) -> impl Future<Output = Result<(), signature::Error>>;
+    ) -> impl Future<Output = Result<(), signature::Error>> + ConditionalSend;
 }

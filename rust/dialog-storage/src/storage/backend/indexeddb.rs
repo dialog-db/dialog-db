@@ -167,7 +167,7 @@ where
     type Edition = Blake3Hash;
 
     async fn resolve(
-        &self,
+        &mut self,
         address: &Self::Address,
     ) -> Result<Option<(Self::Value, Self::Edition)>, Self::Error> {
         let tx = self
@@ -199,7 +199,7 @@ where
     }
 
     async fn replace(
-        &self,
+        &mut self,
         address: &Self::Address,
         edition: Option<&Self::Edition>,
         content: Option<Self::Value>,
@@ -495,7 +495,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_resolves_non_existent_address() -> Result<()> {
         let db_name = unique_db_name("test-stm-resolve-none");
-        let backend: IndexedDbStorageBackend<String, Vec<u8>> =
+        let mut backend: IndexedDbStorageBackend<String, Vec<u8>> =
             IndexedDbStorageBackend::new(&db_name).await?;
 
         let result = backend.resolve(&"missing".to_string()).await?;
@@ -506,7 +506,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_creates_new_value() -> Result<()> {
         let db_name = unique_db_name("test-stm-create");
-        let backend: IndexedDbStorageBackend<String, Vec<u8>> =
+        let mut backend: IndexedDbStorageBackend<String, Vec<u8>> =
             IndexedDbStorageBackend::new(&db_name).await?;
 
         let content = b"hello world".to_vec();
@@ -528,7 +528,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_updates_existing_value() -> Result<()> {
         let db_name = unique_db_name("test-stm-update");
-        let backend: IndexedDbStorageBackend<String, Vec<u8>> =
+        let mut backend: IndexedDbStorageBackend<String, Vec<u8>> =
             IndexedDbStorageBackend::new(&db_name).await?;
 
         // Create initial value
@@ -560,7 +560,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_fails_on_edition_mismatch() -> Result<()> {
         let db_name = unique_db_name("test-stm-mismatch");
-        let backend: IndexedDbStorageBackend<String, Vec<u8>> =
+        let mut backend: IndexedDbStorageBackend<String, Vec<u8>> =
             IndexedDbStorageBackend::new(&db_name).await?;
 
         // Create initial value
@@ -587,7 +587,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_fails_creating_when_exists() -> Result<()> {
         let db_name = unique_db_name("test-stm-create-exists");
-        let backend: IndexedDbStorageBackend<String, Vec<u8>> =
+        let mut backend: IndexedDbStorageBackend<String, Vec<u8>> =
             IndexedDbStorageBackend::new(&db_name).await?;
 
         // Create initial value
@@ -609,7 +609,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_deletes_value() -> Result<()> {
         let db_name = unique_db_name("test-stm-delete");
-        let backend: IndexedDbStorageBackend<String, Vec<u8>> =
+        let mut backend: IndexedDbStorageBackend<String, Vec<u8>> =
             IndexedDbStorageBackend::new(&db_name).await?;
 
         // Create value
@@ -635,7 +635,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_rejects_invalid_utf8_address() -> Result<()> {
         let db_name = unique_db_name("test-stm-invalid-utf8");
-        let backend: IndexedDbStorageBackend<Vec<u8>, Vec<u8>> =
+        let mut backend: IndexedDbStorageBackend<Vec<u8>, Vec<u8>> =
             IndexedDbStorageBackend::new(&db_name).await?;
 
         // Invalid UTF-8 sequence
@@ -650,7 +650,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_produces_deterministic_content_hash() -> Result<()> {
         let db_name = unique_db_name("test-stm-hash-deterministic");
-        let backend: IndexedDbStorageBackend<String, Vec<u8>> =
+        let mut backend: IndexedDbStorageBackend<String, Vec<u8>> =
             IndexedDbStorageBackend::new(&db_name).await?;
 
         let content = b"same content".to_vec();
@@ -675,7 +675,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_subdirectory_addresses() -> Result<()> {
         let db_name = unique_db_name("test-stm-subdir");
-        let backend: IndexedDbStorageBackend<String, Vec<u8>> =
+        let mut backend: IndexedDbStorageBackend<String, Vec<u8>> =
             IndexedDbStorageBackend::new(&db_name).await?;
 
         let address = "path/to/nested/key".to_string();
@@ -695,7 +695,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_succeeds_with_stale_edition_when_value_matches() -> Result<()> {
         let db_name = unique_db_name("test-stm-stale-edition");
-        let backend: IndexedDbStorageBackend<String, Vec<u8>> =
+        let mut backend: IndexedDbStorageBackend<String, Vec<u8>> =
             IndexedDbStorageBackend::new(&db_name).await?;
 
         // Create initial value
@@ -723,7 +723,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_succeeds_deleting_already_deleted() -> Result<()> {
         let db_name = unique_db_name("test-stm-delete-already-deleted");
-        let backend: IndexedDbStorageBackend<String, Vec<u8>> =
+        let mut backend: IndexedDbStorageBackend<String, Vec<u8>> =
             IndexedDbStorageBackend::new(&db_name).await?;
 
         // Try to delete non-existent key with wrong edition - should succeed

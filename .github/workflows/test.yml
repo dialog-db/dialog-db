@@ -38,6 +38,8 @@ jobs:
         run: |
           nix develop --command cargo fmt --all -- --check
           nix develop --command cargo clippy --all -- -D warnings
+          nix develop --command cargo clippy -p dialog-s3-credentials --features ucan -- -D warnings
+          nix develop --command cargo clippy -p dialog-storage --features ucan -- -D warnings
 
   lints:
     name: 'Lints'
@@ -101,6 +103,9 @@ jobs:
           # web (wasm) integration tests
           - flags: '--features s3,s3-list,web-integration-tests'
           - flags: '--features s3,s3-list,web-integration-tests'
+          # ucan features not activated by workspace flags
+          - flags: '-p dialog-s3-credentials --features ucan'
+          - flags: '-p dialog-storage --features ucan'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

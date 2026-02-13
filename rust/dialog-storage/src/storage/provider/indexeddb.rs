@@ -46,7 +46,6 @@ use dialog_capability::Did;
 use js_sys::Uint8Array;
 use rexie::{ObjectStore, Rexie, RexieBuilder, TransactionMode};
 use std::collections::{HashMap, HashSet};
-use wasm_bindgen::JsValue;
 
 /// Convert bytes to a JS Uint8Array.
 fn to_uint8array(bytes: &[u8]) -> Uint8Array {

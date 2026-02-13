@@ -132,8 +132,6 @@
             nativeBuildInputs = common-build-inputs "stable";
             cargoLock = {
               lockFile = ./Cargo.lock;
-              outputHashes = {
-              };
             };
           };
 

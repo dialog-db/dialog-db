@@ -21,9 +21,11 @@ helpers = [
   "dep:tower-http",
 ]
 # Enables the S3/R2-compatible storage backend
-s3 = ["dep:chrono", "dep:hmac", "dep:reqwest", "dep:sha2", "dep:url"]
+s3 = ["dep:dialog-s3-credentials", "dep:reqwest", "dep:url", "dep:chrono"]
 # Enables S3 list operations (ListObjectsV2) with XML parsing
 s3-list = ["s3", "dep:quick-xml"]
+# Enables UCAN-based authorization via external access service
+ucan = ["s3", "dialog-s3-credentials/ucan", "dialog-s3-credentials/helpers", "dep:dialog-credentials"]
 # Enables real S3/R2 integration tests (requires R2S3_* environment variables)
 s3-integration-tests = ["s3-list", "helpers"]
 # Enable integration tests (tests with service provisioning)
@@ -32,9 +34,11 @@ integration-tests = ["dialog-common/integration-tests"]
 web-integration-tests = ["dialog-common/web-integration-tests"]
 
 [dependencies]
-dialog-common = { workspace = true }
 dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
 dialog-effects = { workspace = true }
+dialog-varsig = { workspace = true }
+signature = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
 async-stream = { workspace = true }
@@ -43,12 +47,11 @@ base58 = { workspace = true }
 base64 = { workspace = true }
 blake3 = { workspace = true }
 brotli = { workspace = true }
-chrono = { version = "0.4", optional = true }
 futures-util = { workspace = true }
-hmac = { version = "0.12", optional = true }
 md5 = "0.8.0"
 reqwest = { workspace = true, features = ["json"], optional = true }
-sha2 = { version = "0.10", optional = true }
+dialog-credentials = { workspace = true, optional = true }
+dialog-s3-credentials = { workspace = true, optional = true }
 quick-xml = { version = "0.37", features = ["serde", "serialize"], optional = true }
 sieve-cache = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -57,13 +60,14 @@ rand = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 url = { version = "2.5", optional = true }
+chrono = { version = "0.4", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+url = { workspace = true }
 pidlock = "0.1"
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net"] }
-url = { workspace = true }
-s3s = { version = "0.12.0-rc.3", optional = true }
+s3s = { version = "0.12.0", optional = true }
 hyper = { version = "1.0", optional = true }
 hyper-util = { version = "0.1", features = [
   "server",
@@ -86,6 +90,7 @@ web-time = { workspace = true }
 anyhow = { workspace = true }
 blake3 = { workspace = true }
 dialog-common = { workspace = true, features = ["helpers"] }
+ipld-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0"
 rand = { workspace = true }
@@ -93,11 +98,13 @@ rand = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 bytes = "1.0"
 chrono = "0.4"
+clap = { version = "4.5", features = ["derive"] }
 tokio-test = "0.4"
-s3s = "0.12.0-rc.3"
+s3s = "0.12.0"
 hyper = "1.0"
 hyper-util = { version = "0.1", features = ["server", "tokio", "service"] }
 http-body-util = "0.1"
+serde_ipld_dagcbor = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = [
   "sync",

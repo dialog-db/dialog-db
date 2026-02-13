@@ -1,0 +1,69 @@
+[package]
+name = "dialog-s3-credentials"
+description = "AWS SigV4 presigned URL generation for S3-compatible storage"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+ucan = [
+    "dep:dialog-credentials",
+    "dep:dialog-ucan",
+    "dep:ipld-core",
+    "dep:reqwest",
+    "dep:serde_ipld_dagcbor",
+    "dep:serde_json",
+    "dep:signature",
+    "dialog-capability/ucan",
+]
+helpers = ["ucan"]
+integration-tests = ["dialog-common/integration-tests"]
+web-integration-tests = ["dialog-common/web-integration-tests"]
+
+[dependencies]
+base58 = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+chrono = "0.4"
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-varsig = { workspace = true }
+hmac = "0.12"
+serde = { workspace = true, features = ["derive"] }
+serde_bytes = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }
+url = { workspace = true }
+anyhow = { workspace = true }
+
+# UCAN feature dependencies (optional)
+dialog-credentials = { workspace = true, optional = true }
+dialog-ucan = { workspace = true, optional = true }
+ipld-core = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+serde_ipld_dagcbor = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+signature = { version = "2", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+
+[dev-dependencies]
+async-signature = "0.5"
+dialog-common = { workspace = true, features = ["helpers"] }
+dialog-credentials = { workspace = true }
+dialog-ucan = { workspace = true }
+ipld-core = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+wasm-bindgen-test = { workspace = true }
+
+[lints.rust]
+# This cfg is used by the dialog_common::test proc macro for wasm inner tests
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(feature, values(\"web-integration-tests\", \"helpers\"))",
+  "cfg(dialog_test_wasm_integration)"
+] }

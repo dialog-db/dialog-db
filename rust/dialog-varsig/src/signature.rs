@@ -5,15 +5,16 @@ pub mod verifier;
 
 use super::{Codec, Format, SignatureAlgorithm};
 use ::signature::SignatureEncoding;
+use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
 pub use signer::Signer;
 use std::{fmt::Debug, marker::PhantomData};
 pub use verifier::Verifier;
 
 /// Cryptographic signature produced by `Signer` and verified by `Verifier`.
-pub trait Signature: SignatureEncoding + Debug {
+pub trait Signature: SignatureEncoding + Debug + ConditionalSend + ConditionalSync {
     /// The signature algorithm that produces this signature type.
-    type Algorithm: SignatureAlgorithm;
+    type Algorithm: SignatureAlgorithm + ConditionalSend + ConditionalSync;
 }
 
 /// Variable signature configuration that ties signature algorithm
