@@ -12,8 +12,10 @@
 mod error;
 pub mod native;
 mod resolver;
+mod signer;
 mod verifier;
 
 pub use error::{WebAuthnDidFromStrError, WebAuthnResolveError, WebAuthnVerifyError};
 pub use resolver::WebAuthnKeyResolver;
+pub use signer::{RegistrationOptions, WebAuthnSigner, WebAuthnSignerError};
 pub use verifier::WebAuthnVerifier;
