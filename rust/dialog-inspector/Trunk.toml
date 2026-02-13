@@ -1,0 +1,10 @@
+[build]
+public_url = "/"
+# Build output goes to dist/
+dist = "dist"
+
+[serve]
+port = 8090
+
+[watch]
+watch = ["src", "../dialog-artifacts", "../dialog-storage", "../dialog-prolly-tree"]
