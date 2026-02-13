@@ -276,11 +276,9 @@ impl WebAuthnSigner {
         }
 
         let get_pk_fn: js_sys::Function =
-            js_get(&response, "getPublicKey")?
-                .dyn_into()
-                .map_err(|_| {
-                    WebAuthnSignerError::RegistrationFailed("getPublicKey not supported".into())
-                })?;
+            js_get(&response, "getPublicKey")?.dyn_into().map_err(|_| {
+                WebAuthnSignerError::RegistrationFailed("getPublicKey not supported".into())
+            })?;
         let spki_buffer = get_pk_fn
             .call0(&response)
             .map_err(|e| WebAuthnSignerError::RegistrationFailed(format!("{e:?}")))?;
@@ -323,11 +321,7 @@ impl WebAuthnSigner {
 
         let challenge_array = Uint8Array::from(challenge.as_slice());
         js_set(&public_key_opts, "challenge", &challenge_array)?;
-        js_set(
-            &public_key_opts,
-            "rpId",
-            &JsValue::from_str(&self.rp_id),
-        )?;
+        js_set(&public_key_opts, "rpId", &JsValue::from_str(&self.rp_id))?;
         js_set(
             &public_key_opts,
             "userVerification",
@@ -459,10 +453,9 @@ fn random_challenge(len: usize) -> Result<Vec<u8>, WebAuthnSignerError> {
     let crypto = Reflect::get(&global, &"crypto".into())
         .map_err(|_| WebAuthnSignerError::NotAvailable("crypto not found".into()))?;
     let array = Uint8Array::new_with_length(len as u32);
-    let get_random_values: js_sys::Function =
-        Reflect::get(&crypto, &"getRandomValues".into())
-            .map_err(|e| WebAuthnSignerError::JsError(format!("{e:?}")))?
-            .unchecked_into();
+    let get_random_values: js_sys::Function = Reflect::get(&crypto, &"getRandomValues".into())
+        .map_err(|e| WebAuthnSignerError::JsError(format!("{e:?}")))?
+        .unchecked_into();
     get_random_values
         .call1(&crypto, &array)
         .map_err(|e| WebAuthnSignerError::JsError(format!("{e:?}")))?;
@@ -516,12 +509,7 @@ mod tests {
     fn test_signer(seed: u8) -> WebAuthnSigner {
         let sk = SigningKey::from_bytes(&[seed; 32].into()).unwrap();
         let sec1 = sk.verifying_key().to_encoded_point(true);
-        WebAuthnSigner::from_raw_parts(
-            vec![seed; 16],
-            "example.com",
-            sec1.as_bytes(),
-        )
-        .unwrap()
+        WebAuthnSigner::from_raw_parts(vec![seed; 16], "example.com", sec1.as_bytes()).unwrap()
     }
 
     #[dialog_common::test]

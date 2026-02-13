@@ -62,12 +62,12 @@ fn build_authenticator_data() -> Vec<u8> {
 }
 
 /// Create a complete signed WebAuthn test fixture.
-fn sign_webauthn(
-    sk: &SigningKey,
-    payload: &[u8],
-) -> (WebAuthnVerifier, WebAuthnSignature) {
+fn sign_webauthn(sk: &SigningKey, payload: &[u8]) -> (WebAuthnVerifier, WebAuthnSignature) {
     let vk = WebAuthnVerifier::from_sec1_bytes(
-        &sk.verifying_key().to_encoded_point(true).as_bytes().to_vec(),
+        &sk.verifying_key()
+            .to_encoded_point(true)
+            .as_bytes()
+            .to_vec(),
     )
     .unwrap();
 

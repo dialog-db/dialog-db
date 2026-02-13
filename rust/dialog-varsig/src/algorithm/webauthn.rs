@@ -89,11 +89,7 @@ pub struct WebAuthnSignature {
 impl WebAuthnSignature {
     /// Create a new `WebAuthnSignature`.
     #[must_use]
-    pub fn new(
-        client_data_json: Vec<u8>,
-        authenticator_data: Vec<u8>,
-        signature: Vec<u8>,
-    ) -> Self {
+    pub fn new(client_data_json: Vec<u8>, authenticator_data: Vec<u8>, signature: Vec<u8>) -> Self {
         Self {
             client_data_json,
             authenticator_data,

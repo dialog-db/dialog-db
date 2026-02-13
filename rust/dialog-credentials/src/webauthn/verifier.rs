@@ -163,8 +163,8 @@ impl FromStr for WebAuthnVerifier {
             .strip_prefix('z')
             .ok_or(WebAuthnDidFromStrError::MissingBase58Prefix)?;
 
-        let key_bytes =
-            base58::FromBase58::from_base58(b58).map_err(|_| WebAuthnDidFromStrError::InvalidKey)?;
+        let key_bytes = base58::FromBase58::from_base58(b58)
+            .map_err(|_| WebAuthnDidFromStrError::InvalidKey)?;
 
         // Expect: 2-byte varint multicodec prefix + 33-byte compressed point
         if key_bytes.len() != 35 {
@@ -321,7 +321,10 @@ mod tests {
 
         let result = verifier.verify_webauthn(b"tampered payload", &sig);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), WebAuthnVerifyError::ChallengeMismatch));
+        assert!(matches!(
+            result.unwrap_err(),
+            WebAuthnVerifyError::ChallengeMismatch
+        ));
     }
 
     #[dialog_common::test]
@@ -445,6 +448,9 @@ mod tests {
 
         // sig1 is NOT valid for payload2 (challenge mismatch)
         let result = verifier.verify_webauthn(payload2, &sig1);
-        assert!(matches!(result.unwrap_err(), WebAuthnVerifyError::ChallengeMismatch));
+        assert!(matches!(
+            result.unwrap_err(),
+            WebAuthnVerifyError::ChallengeMismatch
+        ));
     }
 }

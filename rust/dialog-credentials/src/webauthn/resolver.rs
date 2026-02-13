@@ -10,10 +10,7 @@ pub struct WebAuthnKeyResolver;
 impl dialog_varsig::resolver::Resolver<WebAuthnSignature> for WebAuthnKeyResolver {
     type Error = WebAuthnResolveError;
 
-    async fn resolve(
-        &self,
-        did: &Did,
-    ) -> Result<impl Verifier<WebAuthnSignature>, Self::Error> {
+    async fn resolve(&self, did: &Did) -> Result<impl Verifier<WebAuthnSignature>, Self::Error> {
         let verifier: WebAuthnVerifier = did.as_str().parse()?;
         Ok(verifier)
     }
