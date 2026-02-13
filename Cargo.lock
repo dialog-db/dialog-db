@@ -816,6 +816,7 @@ name = "dialog-credentials"
 version = "0.1.0"
 dependencies = [
  "base58",
+ "base64",
  "dialog-capability",
  "dialog-common",
  "dialog-ucan",
@@ -823,7 +824,11 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.16",
  "js-sys",
+ "p256",
+ "rand 0.8.5",
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "signature",
  "thiserror 2.0.17",
  "tokio",

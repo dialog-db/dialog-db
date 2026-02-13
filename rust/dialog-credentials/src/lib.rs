@@ -3,8 +3,9 @@
 //! This crate provides credential implementations that satisfy the
 //! [`Principal`] and [`Authority`] traits from `dialog-capability`.
 //!
-//! Currently the only implementation is Ed25519 (enabled by the `ed25519`
-//! feature, which is on by default).
+//! Implementations:
+//! - **Ed25519** (enabled by the `ed25519` feature, on by default)
+//! - **WebAuthn P-256** (enabled by the `webauthn` feature)
 //!
 //! [`Principal`]: dialog_capability::Principal
 //! [`Authority`]: dialog_capability::Authority
@@ -15,3 +16,6 @@ pub mod key;
 pub mod ed25519;
 #[cfg(feature = "ed25519")]
 pub use ed25519::*;
+
+#[cfg(feature = "webauthn")]
+pub mod webauthn;

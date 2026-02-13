@@ -16,6 +16,15 @@ ed25519 = [
     "dialog-varsig/sha2_512",
 ]
 ucan = ["dep:dialog-ucan", "dialog-capability/ucan"]
+webauthn = [
+    "dep:p256",
+    "dep:sha2",
+    "dep:serde_json",
+    "dep:base64",
+    "dep:base58",
+    "dialog-varsig/webauthn_p256",
+]
+web-integration-tests = ["webauthn"]
 
 [dependencies]
 dialog-capability = { workspace = true }
@@ -29,6 +38,12 @@ signature = { workspace = true }
 ed25519-dalek = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
 base58 = { workspace = true, optional = true }
+
+# webauthn feature deps
+p256 = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
 
 # ucan feature deps
 dialog-ucan = { workspace = true, optional = true }
@@ -44,6 +59,11 @@ dialog-common = { workspace = true, features = ["helpers"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 ed25519-dalek = { workspace = true }
 wasm-bindgen-test = { workspace = true }
+p256 = { workspace = true }
+sha2 = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
 
 [lints.rust]
 # These cfgs are used by the dialog_common::test proc macro
