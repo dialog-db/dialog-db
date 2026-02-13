@@ -47,6 +47,18 @@ jobs:
               -- --bin content
           "
 
+      - name: 'Build worker (wasm-pack)'
+        shell: bash
+        run: |
+          nix develop --command bash -c "
+            export HOME=\$(mktemp -d)
+            wasm-pack build --release --target web \
+              --out-dir dist/worker \
+              --out-name dialog_inspector_worker \
+              ./rust/dialog-inspector \
+              -- --bin worker
+          "
+
       - name: 'Assemble extension'
         shell: bash
         run: |
@@ -68,6 +80,13 @@ jobs:
           if [ -d rust/dialog-inspector/dist/content ]; then
             cp rust/dialog-inspector/dist/content/content.js extension-dist/ 2>/dev/null || true
             cp rust/dialog-inspector/dist/content/content_bg.wasm extension-dist/ 2>/dev/null || true
+          fi
+
+          # Service worker WASM (if wasm-pack produced output)
+          if [ -d rust/dialog-inspector/dist/worker ]; then
+            cp rust/dialog-inspector/assets/service_worker.js extension-dist/ 2>/dev/null || true
+            cp rust/dialog-inspector/dist/worker/dialog_inspector_worker.js extension-dist/ 2>/dev/null || true
+            cp rust/dialog-inspector/dist/worker/dialog_inspector_worker_bg.wasm extension-dist/ 2>/dev/null || true
           fi
 
           echo "Extension contents:"

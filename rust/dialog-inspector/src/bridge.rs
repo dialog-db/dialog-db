@@ -1,38 +1,38 @@
 //! Transport bridge between the UI panel and the inspection backend.
 //!
 //! The UI always calls [`send`] with a [`Request`]. Depending on the
-//! runtime context, `send` either:
+//! runtime context, `send` picks one of three transport modes:
 //!
-//! - **Direct dispatch** (standalone / same-origin): calls
-//!   [`dispatch::dispatch`] in-process.  No serialization overhead.
-//! - **Message dispatch** (extension devtools panel): serializes the
-//!   request as JSON and sends it to the content script via
-//!   `chrome.runtime.sendMessage` / `chrome.tabs.sendMessage`.
-//!   The content script deserializes, calls `dispatch`, and replies.
+//! 1. **Direct dispatch** (standalone / same-origin): calls
+//!    [`dispatch::dispatch`] in-process.  No serialization overhead.
+//! 2. **Fetch dispatch** (service-worker backed): the host app has
+//!    registered a dialog-inspector service worker that serves an API
+//!    at `/dialog-inspector/api/*`.  The bridge sends a `fetch()` to
+//!    that endpoint.
+//! 3. **Message dispatch** (extension devtools panel): serializes the
+//!    request as JSON and sends it to the content script via
+//!    `chrome.tabs.sendMessage`.  The content script deserializes,
+//!    calls `dispatch`, and replies.
 //!
-//! The mode is detected at runtime by checking for the presence of
-//! `chrome.devtools` — if it exists we're in a devtools panel running
-//! in the extension's origin and must use message passing.
+//! Mode detection order: extension panel → service worker → direct.
 
 use crate::handler::{Request, Response};
 use wasm_bindgen::prelude::*;
 
 /// Send a [`Request`] and await the [`Response`].
 ///
-/// Automatically picks direct dispatch or message-based dispatch depending
-/// on the runtime context.
+/// Automatically picks the appropriate transport based on the runtime context.
 pub async fn send(request: Request) -> Response {
     if is_extension_panel() {
         send_via_message(request).await
+    } else if has_inspector_sw().await {
+        send_via_fetch(request).await
     } else {
         crate::dispatch::dispatch(request).await
     }
 }
 
 /// Detect whether we're running inside a devtools panel (extension origin).
-///
-/// If `chrome.devtools` exists, we're in the extension context and cannot
-/// access the host page's IndexedDB directly.
 fn is_extension_panel() -> bool {
     let Ok(chrome) = js_sys::Reflect::get(&js_sys::global(), &"chrome".into()) else {
         return false;
@@ -46,15 +46,96 @@ fn is_extension_panel() -> bool {
     !devtools.is_undefined() && !devtools.is_null()
 }
 
+/// Check whether a dialog-inspector service worker is available by probing
+/// the API endpoint.  We send a lightweight `list_databases` request and
+/// check for a valid JSON response.
+async fn has_inspector_sw() -> bool {
+    let result = probe_sw().await;
+    result.unwrap_or(false)
+}
+
+async fn probe_sw() -> Result<bool, JsValue> {
+    let window: web_sys::Window = js_sys::global().unchecked_into();
+    let promise = window.fetch_with_str("/dialog-inspector/api/list_databases");
+    let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(promise)
+        .await?
+        .unchecked_into();
+    // If the SW is active, we get a 200 with JSON.  If not registered the
+    // request will 404 from the server (or fail).
+    Ok(resp.ok())
+}
+
+// ── Fetch-based transport (service worker) ──────────────────────────
+
+/// Send a request to the dialog-inspector service worker via `fetch()`.
+async fn send_via_fetch(request: Request) -> Response {
+    match fetch_from_sw(request).await {
+        Ok(response) => response,
+        Err(e) => Response::Error {
+            message: format!("SW fetch error: {e:?}"),
+        },
+    }
+}
+
+/// Build a URL from the request, `fetch()` it, and parse the JSON response.
+fn request_to_url(request: &Request) -> String {
+    match request {
+        Request::ListDatabases => "/dialog-inspector/api/list_databases".to_string(),
+        Request::DatabaseSummary { name } => {
+            format!(
+                "/dialog-inspector/api/database_summary?name={}",
+                js_sys::encode_uri_component(name)
+            )
+        }
+        Request::QueryFacts {
+            name,
+            attribute,
+            entity,
+            limit,
+        } => {
+            let mut url = format!(
+                "/dialog-inspector/api/query_facts?name={}&limit={limit}",
+                js_sys::encode_uri_component(name),
+            );
+            if let Some(attr) = attribute {
+                url.push_str(&format!(
+                    "&attribute={}",
+                    js_sys::encode_uri_component(attr)
+                ));
+            }
+            if let Some(ent) = entity {
+                url.push_str(&format!(
+                    "&entity={}",
+                    js_sys::encode_uri_component(ent)
+                ));
+            }
+            url
+        }
+    }
+}
+
+async fn fetch_from_sw(request: Request) -> Result<Response, JsValue> {
+    let url = request_to_url(&request);
+    let window: web_sys::Window = js_sys::global().unchecked_into();
+    let promise = window.fetch_with_str(&url);
+    let resp: web_sys::Response =
+        wasm_bindgen_futures::JsFuture::from(promise).await?.unchecked_into();
+
+    let json_promise = resp.text()?;
+    let body_val = wasm_bindgen_futures::JsFuture::from(json_promise).await?;
+    let body_str = body_val
+        .as_string()
+        .ok_or_else(|| JsValue::from_str("response body is not a string"))?;
+
+    serde_json::from_str::<Response>(&body_str)
+        .map_err(|e| JsValue::from_str(&format!("failed to parse SW response: {e}")))
+}
+
+// ── Message-based transport (extension) ─────────────────────────────
+
 /// Send a request to the content script via `chrome.tabs.sendMessage`.
-///
-/// The devtools panel gets the inspected tab ID from
-/// `chrome.devtools.inspectedWindow.tabId`, then sends the request to that
-/// tab.  The content script listening in that tab runs `dispatch` and
-/// responds.
 async fn send_via_message(request: Request) -> Response {
-    let result = send_to_tab(request).await;
-    match result {
+    match send_to_tab(request).await {
         Ok(response) => response,
         Err(e) => Response::Error {
             message: format!("Message bridge error: {e:?}"),
