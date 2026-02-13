@@ -1,0 +1,80 @@
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'rust/dialog-inspector/**'
+      - 'rust/dialog-artifacts/**'
+      - 'rust/dialog-storage/**'
+      - 'rust/dialog-prolly-tree/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/dialog-inspector.yml'
+  push:
+    branches:
+      - main
+
+name: 'Dialog Inspector'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_extension:
+    name: 'Build Web Extension'
+    runs-on: 'ubuntu-latest'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-nix
+
+      - name: 'Build panel (Trunk)'
+        shell: bash
+        run: |
+          nix develop --command bash -c "
+            cd rust/dialog-inspector
+            trunk build --release
+          "
+
+      - name: 'Build content script (wasm-pack)'
+        shell: bash
+        run: |
+          nix develop --command bash -c "
+            export HOME=\$(mktemp -d)
+            wasm-pack build --release --target web \
+              --out-dir dist/content \
+              --out-name content \
+              ./rust/dialog-inspector \
+              -- --bin content
+          "
+
+      - name: 'Assemble extension'
+        shell: bash
+        run: |
+          mkdir -p extension-dist
+
+          # Panel UI (Trunk output)
+          cp rust/dialog-inspector/dist/*.html extension-dist/panel.html 2>/dev/null || true
+          cp rust/dialog-inspector/dist/*.js extension-dist/ 2>/dev/null || true
+          cp rust/dialog-inspector/dist/*.wasm extension-dist/ 2>/dev/null || true
+          cp rust/dialog-inspector/dist/*.css extension-dist/ 2>/dev/null || true
+
+          # Extension glue
+          cp rust/dialog-inspector/extension/manifest.json extension-dist/
+          cp rust/dialog-inspector/extension/devtools.html extension-dist/
+          cp rust/dialog-inspector/extension/devtools.js extension-dist/
+          cp rust/dialog-inspector/extension/content_loader.js extension-dist/
+
+          # Content script WASM (if wasm-pack produced output)
+          if [ -d rust/dialog-inspector/dist/content ]; then
+            cp rust/dialog-inspector/dist/content/content.js extension-dist/ 2>/dev/null || true
+            cp rust/dialog-inspector/dist/content/content_bg.wasm extension-dist/ 2>/dev/null || true
+          fi
+
+          echo "Extension contents:"
+          ls -la extension-dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dialog-inspector-extension
+          path: extension-dist/
+          retention-days: 30

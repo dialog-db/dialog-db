@@ -1,8 +1,13 @@
 //! Database list component.
 //!
-//! Discovers and displays all dialog-db instances in the current origin.
+//! Discovers and displays all dialog-db instances via the bridge
+//! (which dispatches directly or through the content script depending
+//! on whether we're in standalone or extension mode).
 
 use leptos::prelude::*;
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+use crate::handler::{Request, Response};
 
 /// A discovered database entry for the list.
 #[derive(Debug, Clone, PartialEq)]
@@ -15,8 +20,7 @@ pub struct DbListEntry {
 
 /// Sidebar component that lists all discovered dialog-db instances.
 ///
-/// On mount, this calls the discovery module to enumerate IndexedDB databases,
-/// probes each one for the dialog-db schema, and displays the results.
+/// On mount, sends a [`Request::ListDatabases`] through the bridge.
 /// Clicking an entry calls `on_select` with the database name.
 #[component]
 pub fn DatabaseList(
@@ -27,26 +31,26 @@ pub fn DatabaseList(
     let loading = RwSignal::new(true);
     let error_msg = RwSignal::new(Option::<String>::None);
 
-    // Discover databases on mount.
-    // On non-wasm targets this is a no-op stub; the real discovery
-    // only runs in the browser.
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
-        use wasm_bindgen_futures::spawn_local;
-        spawn_local(async move {
-            match crate::discovery::discover_instances().await {
-                Ok(instances) => {
-                    let entries: Vec<DbListEntry> = instances
+        wasm_bindgen_futures::spawn_local(async move {
+            let response = crate::bridge::send(Request::ListDatabases).await;
+            match response {
+                Response::Databases { entries } => {
+                    let items: Vec<DbListEntry> = entries
                         .into_iter()
-                        .map(|info| DbListEntry {
-                            name: info.name,
-                            version: info.version,
+                        .map(|e| DbListEntry {
+                            name: e.name,
+                            version: e.version,
                         })
                         .collect();
-                    databases.set(entries);
+                    databases.set(items);
                 }
-                Err(e) => {
-                    error_msg.set(Some(format!("Discovery failed: {:?}", e)));
+                Response::Error { message } => {
+                    error_msg.set(Some(message));
+                }
+                _ => {
+                    error_msg.set(Some("Unexpected response".into()));
                 }
             }
             loading.set(false);

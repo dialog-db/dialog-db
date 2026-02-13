@@ -1,9 +1,14 @@
 //! Database detail view component.
 //!
 //! Displays summary information about a selected database and provides
-//! an interface for querying its facts.
+//! an interface for querying its facts.  All data access goes through
+//! the [`bridge`](crate::bridge) which handles both standalone and
+//! extension modes transparently.
 
 use leptos::prelude::*;
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+use crate::handler::{Request, Response};
 
 /// Detail view for a selected database.
 ///
@@ -26,22 +31,17 @@ pub fn DatabaseDetail(
     {
         let name = name.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let db_info = crate::discovery::DatabaseInfo {
-                name: name.clone(),
-                version: 0, // version doesn't matter for opening
-            };
-            match crate::inspect::InspectedDatabase::open(&db_info).await {
-                Ok(db) => match db.summary().await {
-                    Ok(summary) => {
-                        revision.set(summary.revision);
-                        is_empty.set(summary.is_empty);
-                    }
-                    Err(e) => {
-                        revision.set(format!("error: {:?}", e));
-                    }
-                },
-                Err(e) => {
-                    revision.set(format!("failed to open: {:?}", e));
+            let response = crate::bridge::send(Request::DatabaseSummary { name }).await;
+            match response {
+                Response::Summary(s) => {
+                    revision.set(s.revision);
+                    is_empty.set(s.is_empty);
+                }
+                Response::Error { message } => {
+                    revision.set(format!("error: {message}"));
+                }
+                _ => {
+                    revision.set("unexpected response".into());
                 }
             }
         });
@@ -63,33 +63,32 @@ pub fn DatabaseDetail(
         {
             let name = _name;
             wasm_bindgen_futures::spawn_local(async move {
-                let db_info = crate::discovery::DatabaseInfo {
-                    name: name.clone(),
-                    version: 0,
-                };
-                match crate::inspect::InspectedDatabase::open(&db_info).await {
-                    Ok(db) => {
-                        match db.query_facts(Some(&attr), None, 100).await {
-                            Ok(results) => {
-                                let rows: Vec<FactRow> = results
-                                    .into_iter()
-                                    .map(|f| FactRow {
-                                        the: f.the,
-                                        of: f.of,
-                                        is: f.is,
-                                        value_type: f.value_type,
-                                        cause: f.cause,
-                                    })
-                                    .collect();
-                                facts.set(rows);
-                            }
-                            Err(e) => {
-                                facts_error.set(Some(format!("{:?}", e)));
-                            }
-                        }
+                let response = crate::bridge::send(Request::QueryFacts {
+                    name,
+                    attribute: Some(attr),
+                    entity: None,
+                    limit: 100,
+                })
+                .await;
+                match response {
+                    Response::Facts { rows } => {
+                        let items: Vec<FactRow> = rows
+                            .into_iter()
+                            .map(|f| FactRow {
+                                the: f.the,
+                                of: f.of,
+                                is: f.is,
+                                value_type: f.value_type,
+                                cause: f.cause,
+                            })
+                            .collect();
+                        facts.set(items);
                     }
-                    Err(e) => {
-                        facts_error.set(Some(format!("Failed to open: {:?}", e)));
+                    Response::Error { message } => {
+                        facts_error.set(Some(message));
+                    }
+                    _ => {
+                        facts_error.set(Some("Unexpected response".into()));
                     }
                 }
                 facts_loading.set(false);
