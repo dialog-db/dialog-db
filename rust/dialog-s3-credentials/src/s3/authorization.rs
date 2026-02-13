@@ -5,6 +5,7 @@ use crate::capability::{AccessError, S3Request};
 use async_trait::async_trait;
 use dialog_capability::{Authority, Authorization, DialogCapabilityAuthorizationError, Did};
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_varsig::eddsa::Ed25519Signature;
 
 /// Self-issued authorization for direct S3 access.
 ///
@@ -41,6 +42,8 @@ impl S3Authorization {
 #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
 impl Authorization for S3Authorization {
+    type Signature = Ed25519Signature;
+
     fn subject(&self) -> &Did {
         &self.subject
     }
@@ -53,14 +56,16 @@ impl Authorization for S3Authorization {
         &self.ability
     }
 
-    async fn invoke<A: Authority + ConditionalSend + ConditionalSync>(
+    async fn invoke<
+        A: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
+    >(
         &self,
         authority: &A,
     ) -> Result<Self, DialogCapabilityAuthorizationError> {
         if self.audience != authority.did() {
             Err(DialogCapabilityAuthorizationError::NotAudience {
                 audience: self.audience.clone(),
-                issuer: authority.did().into(),
+                issuer: authority.did(),
             })
         } else {
             Ok(self.clone())

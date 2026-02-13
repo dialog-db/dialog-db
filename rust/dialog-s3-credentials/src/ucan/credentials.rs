@@ -80,7 +80,7 @@ impl Credentials {
     pub fn new(endpoint: String, delegation: DelegationChain) -> Self {
         Self {
             endpoint,
-            audience: delegation.audience().into(),
+            audience: delegation.audience().clone(),
             delegation,
         }
     }
@@ -128,8 +128,8 @@ impl Access for Credentials {
 
         // Delegated authorization: verify the claim's audience matches the delegation chain.
         // Per UCAN spec: first delegation's `aud` should match the invoker.
-        let audience = self.delegation.audience().to_string();
-        if claim.audience() != &audience {
+        let audience = self.delegation.audience();
+        if claim.audience() != audience {
             return Err(AccessError::Configuration(format!(
                 "Claim audience '{}' does not match delegation chain audience '{}'",
                 claim.audience(),
@@ -173,34 +173,35 @@ pub mod tests {
     use anyhow;
     use dialog_capability::{Authority, Authorization, Did, Principal, Subject};
     use dialog_common::Blake3Hash;
-    use ed25519_dalek::ed25519::signature::SignerMut;
-    use ucan::did::{Ed25519Did, Ed25519Signer};
-    use ucan::promise::Promised;
+    use dialog_credentials::{Ed25519KeyResolver, Ed25519Signer};
+    use dialog_ucan::promise::Promised;
+    use dialog_varsig::Signer;
+    use dialog_varsig::eddsa::Ed25519Signature;
 
     /// Helper to create a test delegation chain from subject to operator.
     pub async fn test_delegation_chain(
-        subject_signer: &ucan::did::Ed25519Signer,
-        operator_did: &Ed25519Did,
+        subject_signer: &Ed25519Signer,
+        operator: &impl Principal,
         ability: &[&str],
     ) -> DelegationChain {
-        let subject_did = subject_signer.did();
-        let delegation = create_delegation(subject_signer, operator_did, subject_did, ability)
+        let delegation = create_delegation(subject_signer, operator, subject_signer, ability)
             .await
             .expect("Failed to create test delegation");
         DelegationChain::new(delegation)
     }
 
+    #[derive(Clone)]
     pub struct Session {
         credentials: Credentials,
-        signer: ed25519_dalek::SigningKey,
-        did: Did,
+        signer: Ed25519Signer,
     }
     impl Session {
-        pub fn new(credentials: Credentials, secret: &[u8; 32]) -> Self {
-            let signer = ed25519_dalek::SigningKey::from_bytes(secret);
+        pub async fn open(credentials: Credentials, secret: &[u8; 32]) -> Self {
+            let signer = Ed25519Signer::import(secret)
+                .await
+                .expect("Failed to import signer");
 
             Session {
-                did: Ed25519Signer::from(signer.clone()).did().into(),
                 signer,
                 credentials,
             }
@@ -221,37 +222,31 @@ pub mod tests {
         }
     }
     impl Principal for Session {
-        fn did(&self) -> &Did {
-            &self.did
+        fn did(&self) -> Did {
+            self.signer.did()
         }
     }
-    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
-    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
+    impl Signer<Ed25519Signature> for Session {
+        async fn sign(&self, payload: &[u8]) -> Result<Ed25519Signature, signature::Error> {
+            self.signer.sign(payload).await
+        }
+    }
     impl Authority for Session {
-        async fn sign(
-            &mut self,
-            payload: &[u8],
-        ) -> Result<Vec<u8>, dialog_capability::DialogCapabilitySignError> {
-            Ok(self.signer.sign(payload).to_vec())
-        }
-        fn secret_key_bytes(&self) -> Option<[u8; 32]> {
-            self.signer.to_bytes().into()
-        }
+        type Signature = Ed25519Signature;
     }
 
     #[dialog_common::test]
     async fn it_acquires_access() -> anyhow::Result<()> {
-        let signer = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
-        let operator = Ed25519Signer::from(signer);
+        let operator = Ed25519Signer::import(&[0u8; 32]).await.unwrap();
 
         let credentials = Credentials::new(
             "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, operator.did(), &["archive"]).await,
+            test_delegation_chain(&operator, &operator, &["archive"]).await,
         );
 
-        let mut session = Session::new(credentials, &[0u8; 32]);
+        let session = Session::open(credentials, &[0u8; 32]).await;
 
-        let read = Subject::from(session.did().to_string())
+        let read = Subject::from(session.did())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog {
                 catalog: "blobs".into(),
@@ -259,7 +254,7 @@ pub mod tests {
             .invoke(archive::Get {
                 digest: Blake3Hash::hash(b"hello"),
             })
-            .acquire(&mut session)
+            .acquire(&mut session.clone())
             .await?;
 
         let authorization = read.authorization().invoke(&session).await?;
@@ -274,7 +269,7 @@ pub mod tests {
             ucan.invocation.subject().to_string(),
             session.did().to_string()
         );
-        assert_eq!(ucan.verify().await?, ());
+        assert_eq!(ucan.verify(&Ed25519KeyResolver).await?, ());
 
         assert_eq!(
             ucan.arguments().get("catalog"),
@@ -293,19 +288,18 @@ pub mod tests {
     #[dialog_common::test]
     async fn it_returns_owned_authorization_for_self_claim() -> anyhow::Result<()> {
         // Create a signer where subject == operator (self-authorization)
-        let signer = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
-        let operator = Ed25519Signer::from(signer);
+        let operator = Ed25519Signer::import(&[0u8; 32]).await.unwrap();
 
         // Create credentials with a delegation (won't be used for self-auth)
         let credentials = Credentials::new(
             "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, operator.did(), &["archive"]).await,
+            test_delegation_chain(&operator, &operator, &["archive"]).await,
         );
 
-        let mut session = Session::new(credentials, &[0u8; 32]);
+        let session = Session::open(credentials, &[0u8; 32]).await;
 
         // Create a capability where subject == session.did() (self-authorization)
-        let capability = Subject::from(session.did().to_string())
+        let capability = Subject::from(session.did())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog {
                 catalog: "blobs".into(),
@@ -315,12 +309,12 @@ pub mod tests {
             });
 
         // Acquire authorization - should return Owned since subject == audience
-        let authorized = capability.acquire(&mut session).await?;
+        let authorized = capability.acquire(&mut session.clone()).await?;
 
         // Verify it's an Owned authorization
         match authorized.authorization() {
             UcanAuthorization::Owned { subject, .. } => {
-                assert_eq!(subject, session.did());
+                assert_eq!(subject, &session.did());
             }
             _ => panic!("Expected Owned authorization for self-claim"),
         }
@@ -332,17 +326,16 @@ pub mod tests {
     async fn it_allows_self_authorization_with_different_delegation_audience() -> anyhow::Result<()>
     {
         // Create an operator signer for the delegation chain
-        let operator_signer = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
-        let operator = Ed25519Signer::from(operator_signer);
+        let operator = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
         // Create credentials with delegation chain audience = operator_did
         let credentials = Credentials::new(
             "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, operator.did(), &["archive"]).await,
+            test_delegation_chain(&operator, &operator, &["archive"]).await,
         );
 
         // Create a session with a DIFFERENT key (session.did() != operator_did)
-        let mut session = Session::new(credentials, &[2u8; 32]);
+        let session = Session::open(credentials, &[2u8; 32]).await;
 
         // Verify the DIDs are different
         let session_did = session.did().to_string();
@@ -353,8 +346,7 @@ pub mod tests {
         );
 
         // Create a capability where subject == session.did() (self-authorization case)
-        // This means: subject == claim.audience (since acquire sets audience = session.did())
-        let capability = Subject::from(session.did().to_string())
+        let capability = Subject::from(session.did())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog {
                 catalog: "blobs".into(),
@@ -363,12 +355,8 @@ pub mod tests {
                 digest: Blake3Hash::hash(b"hello"),
             });
 
-        // This should succeed because subject == audience (self-authorization),
-        // but currently fails because claim.audience != delegation.audience
-        let result = capability.acquire(&mut session).await;
+        let result = capability.acquire(&mut session.clone()).await;
 
-        // Assert this is an error due to the current implementation order
-        // The error message shows it's checking delegation audience before self-auth
         assert!(
             result.is_ok(),
             "Self-authorization should work regardless of delegation chain audience. Error: {:?}",
@@ -381,18 +369,17 @@ pub mod tests {
     #[dialog_common::test]
     async fn it_invokes_and_verifies_self_authorization() -> anyhow::Result<()> {
         // Create a signer where subject == operator (self-authorization)
-        let signer = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
-        let operator = Ed25519Signer::from(signer);
+        let operator = Ed25519Signer::import(&[0u8; 32]).await.unwrap();
 
         let credentials = Credentials::new(
             "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, operator.did(), &["archive"]).await,
+            test_delegation_chain(&operator, &operator, &["archive"]).await,
         );
 
-        let mut session = Session::new(credentials, &[0u8; 32]);
+        let session = Session::open(credentials, &[0u8; 32]).await;
 
         // Create a capability where subject == session.did() (self-authorization)
-        let authorized = Subject::from(session.did().to_string())
+        let authorized = Subject::from(session.did())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog {
                 catalog: "blobs".into(),
@@ -400,7 +387,7 @@ pub mod tests {
             .invoke(archive::Get {
                 digest: Blake3Hash::hash(b"hello"),
             })
-            .acquire(&mut session)
+            .acquire(&mut session.clone())
             .await?;
 
         // Invoke the authorization - should create an Invocation with empty proofs
@@ -428,7 +415,7 @@ pub mod tests {
         );
 
         // Verify the chain - self-invocation (issuer == subject) should pass
-        assert_eq!(ucan.verify().await?, ());
+        assert_eq!(ucan.verify(&Ed25519KeyResolver).await?, ());
 
         Ok(())
     }
@@ -436,17 +423,14 @@ pub mod tests {
     /// WebCrypto-specific tests for browser WASM.
     ///
     /// These tests verify that the UCAN authorization flow works correctly
-    /// with WebCrypto-backed signers in browser environments. They exercise
-    /// key generation, async signing, and signature verification using the
-    /// unified `Ed25519Signer` (which uses WebCrypto on WASM).
-    ///
-    /// Run with: `wasm-pack test --headless --chrome rust/dialog-s3-credentials`
+    /// with WebCrypto-backed signers in browser environments.
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     mod webcrypto_tests {
-        use async_signature::AsyncSigner;
-        use ucan::did::{Did, ed25519::Ed25519Signer};
-        use varsig::signature::eddsa::{Ed25519SigningKey, Ed25519VerifyingKey};
-        use varsig::verify::AsyncVerifier;
+        use dialog_credentials::Ed25519Signer;
+        use dialog_varsig::Principal;
+        use dialog_varsig::eddsa::{Ed25519SigningKey, Ed25519VerifyingKey};
+        use dialog_varsig::signature::Signer as _;
+        use dialog_varsig::signature::Verifier;
         use wasm_bindgen_test::wasm_bindgen_test_configure;
 
         wasm_bindgen_test_configure!(run_in_service_worker);
@@ -457,21 +441,11 @@ pub mod tests {
                 .await
                 .expect("Failed to generate signer");
 
-            assert!(
-                matches!(signer.signer(), Ed25519SigningKey::WebCrypto(_)),
-                "Generated signer should use WebCrypto backend"
-            );
-
             let did_str = signer.did().to_string();
             assert!(
                 did_str.starts_with("did:key:z"),
                 "DID should start with 'did:key:z', got: {}",
                 did_str
-            );
-
-            assert!(
-                matches!(signer.did().verifier(), Ed25519VerifyingKey::WebCrypto(_)),
-                "Verifier should use WebCrypto backend"
             );
         }
 
@@ -482,20 +456,15 @@ pub mod tests {
                 .expect("Failed to generate signer");
             let msg = b"test message for WebCrypto signing";
 
-            assert!(
-                matches!(signer.signer(), Ed25519SigningKey::WebCrypto(_)),
-                "Signer should use WebCrypto backend"
-            );
-
             let signature = signer
-                .signer()
-                .sign_async(msg)
+                .signing_key()
+                .sign(msg)
                 .await
                 .expect("Failed to sign message");
 
-            let verifier = signer.did().verifier();
+            let verifier = signer.ed25519_did();
             verifier
-                .verify_async(msg, &signature)
+                .verify(msg, &signature)
                 .await
                 .expect("Signature verification failed");
         }
@@ -509,14 +478,14 @@ pub mod tests {
             let wrong_msg = b"wrong message";
 
             let signature = signer
-                .signer()
-                .sign_async(msg)
+                .signing_key()
+                .sign(msg)
                 .await
                 .expect("Failed to sign message");
 
-            let verifier = signer.did().verifier();
+            let verifier = signer.ed25519_did();
             assert!(
-                verifier.verify_async(wrong_msg, &signature).await.is_err(),
+                verifier.verify(wrong_msg, &signature).await.is_err(),
                 "Verification should fail for wrong message"
             );
         }

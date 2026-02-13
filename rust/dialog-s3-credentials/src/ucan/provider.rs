@@ -67,7 +67,9 @@ use super::InvocationChain;
 use crate::capability::{AccessError, AuthorizedRequest};
 use crate::capability::{archive, memory, storage};
 use crate::s3::Credentials;
-use dialog_capability::{Capability, Subject};
+use dialog_capability::{Capability, Did, Subject};
+use dialog_credentials::Ed25519KeyResolver;
+use dialog_ucan::promise::Promised;
 
 /// UCAN authorizer that wraps credentials and handles UCAN invocations.
 ///
@@ -108,14 +110,14 @@ impl UcanAuthorizer {
     pub async fn authorize(&self, container: &[u8]) -> Result<AuthorizedRequest, AccessError> {
         // Parse and verify the invocation chain
         let chain = InvocationChain::try_from(container)?;
-        chain.verify().await?;
+        chain.verify(&Ed25519KeyResolver).await?;
 
         // Extract command path and arguments
         let command = chain.command();
         let args = chain.arguments();
 
         // Get subject DID from the invocation
-        let subject_did = chain.subject().to_string();
+        let subject_did = chain.subject();
 
         // 5. Dispatch based on command path
         // Command format: ["storage", "get"] or ["memory", "resolve"] etc.
@@ -125,46 +127,46 @@ impl UcanAuthorizer {
             // Storage commands
             ["storage", "get"] => {
                 let effect = parse_storage_get(args)?;
-                let capability = build_storage_capability(&subject_did, args, effect)?;
+                let capability = build_storage_capability(subject_did, args, effect)?;
                 self.credentials.grant(&capability).await
             }
             ["storage", "set"] => {
                 let effect = parse_storage_set(args)?;
-                let capability = build_storage_capability(&subject_did, args, effect)?;
+                let capability = build_storage_capability(subject_did, args, effect)?;
                 self.credentials.grant(&capability).await
             }
             ["storage", "delete"] => {
                 let effect = parse_storage_delete(args)?;
-                let capability = build_storage_capability(&subject_did, args, effect)?;
+                let capability = build_storage_capability(subject_did, args, effect)?;
                 self.credentials.grant(&capability).await
             }
             ["storage", "list"] => {
                 let effect = parse_storage_list(args)?;
-                let capability = build_storage_capability(&subject_did, args, effect)?;
+                let capability = build_storage_capability(subject_did, args, effect)?;
                 self.credentials.grant(&capability).await
             }
 
             // Memory commands
             ["memory", "resolve"] => {
-                let capability = build_memory_resolve_capability(&subject_did, args)?;
+                let capability = build_memory_resolve_capability(subject_did, args)?;
                 self.credentials.grant(&capability).await
             }
             ["memory", "publish"] => {
-                let capability = build_memory_publish_capability(&subject_did, args)?;
+                let capability = build_memory_publish_capability(subject_did, args)?;
                 self.credentials.grant(&capability).await
             }
             ["memory", "retract"] => {
-                let capability = build_memory_retract_capability(&subject_did, args)?;
+                let capability = build_memory_retract_capability(subject_did, args)?;
                 self.credentials.grant(&capability).await
             }
 
             // Archive commands
             ["archive", "get"] => {
-                let capability = build_archive_get_capability(&subject_did, args)?;
+                let capability = build_archive_get_capability(subject_did, args)?;
                 self.credentials.grant(&capability).await
             }
             ["archive", "put"] => {
-                let capability = build_archive_put_capability(&subject_did, args)?;
+                let capability = build_archive_put_capability(subject_did, args)?;
                 self.credentials.grant(&capability).await
             }
 
@@ -177,11 +179,7 @@ impl UcanAuthorizer {
 }
 
 /// Get a string field from arguments.
-fn get_string_arg(
-    args: &BTreeMap<String, ucan::promise::Promised>,
-    key: &str,
-) -> Result<String, AccessError> {
-    use ucan::promise::Promised;
+fn get_string_arg(args: &BTreeMap<String, Promised>, key: &str) -> Result<String, AccessError> {
     match args.get(key) {
         Some(Promised::String(s)) => Ok(s.clone()),
         Some(_) => Err(AccessError::Invocation(format!(
@@ -197,10 +195,9 @@ fn get_string_arg(
 
 /// Get an optional string field from arguments.
 fn get_optional_string_arg(
-    args: &BTreeMap<String, ucan::promise::Promised>,
+    args: &BTreeMap<String, Promised>,
     key: &str,
 ) -> Result<Option<String>, AccessError> {
-    use ucan::promise::Promised;
     match args.get(key) {
         Some(Promised::String(s)) => Ok(Some(s.clone())),
         Some(Promised::Null) => Ok(None),
@@ -213,11 +210,7 @@ fn get_optional_string_arg(
 }
 
 /// Get a bytes field from arguments.
-fn get_bytes_arg(
-    args: &BTreeMap<String, ucan::promise::Promised>,
-    key: &str,
-) -> Result<Vec<u8>, AccessError> {
-    use ucan::promise::Promised;
+fn get_bytes_arg(args: &BTreeMap<String, Promised>, key: &str) -> Result<Vec<u8>, AccessError> {
     match args.get(key) {
         Some(Promised::Bytes(b)) => Ok(b.clone()),
         Some(_) => Err(AccessError::Invocation(format!(
@@ -234,14 +227,14 @@ fn get_bytes_arg(
 // Storage command parsers
 
 fn parse_storage_get(
-    args: &BTreeMap<String, ucan::promise::Promised>,
+    args: &BTreeMap<String, Promised>,
 ) -> Result<crate::capability::storage::Get, AccessError> {
     let key = get_bytes_arg(args, "key")?;
     Ok(crate::capability::storage::Get::new(key))
 }
 
 fn parse_storage_set(
-    args: &BTreeMap<String, ucan::promise::Promised>,
+    args: &BTreeMap<String, Promised>,
 ) -> Result<crate::capability::storage::Set, AccessError> {
     let key = get_bytes_arg(args, "key")?;
     let checksum = parse_checksum(args)?;
@@ -249,14 +242,14 @@ fn parse_storage_set(
 }
 
 fn parse_storage_delete(
-    args: &BTreeMap<String, ucan::promise::Promised>,
+    args: &BTreeMap<String, Promised>,
 ) -> Result<crate::capability::storage::Delete, AccessError> {
     let key = get_bytes_arg(args, "key")?;
     Ok(crate::capability::storage::Delete::new(key))
 }
 
 fn parse_storage_list(
-    args: &BTreeMap<String, ucan::promise::Promised>,
+    args: &BTreeMap<String, Promised>,
 ) -> Result<crate::capability::storage::List, AccessError> {
     let continuation_token = get_optional_string_arg(args, "continuation_token")?;
     Ok(crate::capability::storage::List::new(continuation_token))
@@ -264,15 +257,15 @@ fn parse_storage_list(
 
 /// Build a storage capability from subject, args, and effect.
 fn build_storage_capability<E>(
-    subject_did: &str,
-    args: &BTreeMap<String, ucan::promise::Promised>,
+    subject_did: &Did,
+    args: &BTreeMap<String, Promised>,
     effect: E,
 ) -> Result<Capability<E>, AccessError>
 where
     E: dialog_capability::Effect<Of = storage::Store>,
 {
     let store_name = get_string_arg(args, "store")?;
-    Ok(Subject::from(subject_did)
+    Ok(Subject::from(subject_did.clone())
         .attenuate(storage::Storage)
         .attenuate(storage::Store::new(store_name))
         .invoke(effect))
@@ -281,12 +274,12 @@ where
 // Memory command builders
 
 fn build_memory_resolve_capability(
-    subject_did: &str,
-    args: &BTreeMap<String, ucan::promise::Promised>,
+    subject_did: &Did,
+    args: &BTreeMap<String, Promised>,
 ) -> Result<Capability<crate::capability::memory::Resolve>, AccessError> {
     let space = get_string_arg(args, "space")?;
     let cell = get_string_arg(args, "cell")?;
-    Ok(Subject::from(subject_did)
+    Ok(Subject::from(subject_did.clone())
         .attenuate(memory::Memory)
         .attenuate(memory::Space::new(space))
         .attenuate(memory::Cell::new(cell))
@@ -294,14 +287,14 @@ fn build_memory_resolve_capability(
 }
 
 fn build_memory_publish_capability(
-    subject_did: &str,
-    args: &BTreeMap<String, ucan::promise::Promised>,
+    subject_did: &Did,
+    args: &BTreeMap<String, Promised>,
 ) -> Result<Capability<crate::capability::memory::Publish>, AccessError> {
     let space = get_string_arg(args, "space")?;
     let cell = get_string_arg(args, "cell")?;
     let when = get_optional_string_arg(args, "when")?;
     let checksum = parse_checksum(args)?;
-    Ok(Subject::from(subject_did)
+    Ok(Subject::from(subject_did.clone())
         .attenuate(memory::Memory)
         .attenuate(memory::Space::new(space))
         .attenuate(memory::Cell::new(cell))
@@ -309,13 +302,13 @@ fn build_memory_publish_capability(
 }
 
 fn build_memory_retract_capability(
-    subject_did: &str,
-    args: &BTreeMap<String, ucan::promise::Promised>,
+    subject_did: &Did,
+    args: &BTreeMap<String, Promised>,
 ) -> Result<Capability<crate::capability::memory::Retract>, AccessError> {
     let space = get_string_arg(args, "space")?;
     let cell = get_string_arg(args, "cell")?;
     let when = get_string_arg(args, "when")?;
-    Ok(Subject::from(subject_did)
+    Ok(Subject::from(subject_did.clone())
         .attenuate(memory::Memory)
         .attenuate(memory::Space::new(space))
         .attenuate(memory::Cell::new(cell))
@@ -325,8 +318,8 @@ fn build_memory_retract_capability(
 // Archive command builders
 
 fn build_archive_get_capability(
-    subject_did: &str,
-    args: &BTreeMap<String, ucan::promise::Promised>,
+    subject_did: &Did,
+    args: &BTreeMap<String, Promised>,
 ) -> Result<Capability<crate::capability::archive::Get>, AccessError> {
     let catalog = get_string_arg(args, "catalog")?;
     let digest = get_bytes_arg(args, "digest")?;
@@ -334,15 +327,15 @@ fn build_archive_get_capability(
         .try_into()
         .map_err(|_| AccessError::Invocation("digest must be 32 bytes".to_string()))?;
     let digest_hash = dialog_common::Blake3Hash::from(digest_arr);
-    Ok(Subject::from(subject_did)
+    Ok(Subject::from(subject_did.clone())
         .attenuate(archive::Archive)
         .attenuate(archive::Catalog::new(catalog))
         .invoke(crate::capability::archive::Get::new(digest_hash)))
 }
 
 fn build_archive_put_capability(
-    subject_did: &str,
-    args: &BTreeMap<String, ucan::promise::Promised>,
+    subject_did: &Did,
+    args: &BTreeMap<String, Promised>,
 ) -> Result<Capability<crate::capability::archive::Put>, AccessError> {
     let catalog = get_string_arg(args, "catalog")?;
     let digest = get_bytes_arg(args, "digest")?;
@@ -351,7 +344,7 @@ fn build_archive_put_capability(
         .map_err(|_| AccessError::Invocation("digest must be 32 bytes".to_string()))?;
     let digest_hash = dialog_common::Blake3Hash::from(digest_arr);
     let checksum = parse_checksum(args)?;
-    Ok(Subject::from(subject_did)
+    Ok(Subject::from(subject_did.clone())
         .attenuate(archive::Archive)
         .attenuate(archive::Catalog::new(catalog))
         .invoke(crate::capability::archive::Put::new(digest_hash, checksum)))
@@ -360,11 +353,7 @@ fn build_archive_put_capability(
 /// Parse checksum from arguments.
 ///
 /// Expects multihash bytes: `<code><length><digest>`
-fn parse_checksum(
-    args: &BTreeMap<String, ucan::promise::Promised>,
-) -> Result<crate::Checksum, AccessError> {
-    use ucan::promise::Promised;
-
+fn parse_checksum(args: &BTreeMap<String, Promised>) -> Result<crate::Checksum, AccessError> {
     match args.get("checksum") {
         Some(Promised::Bytes(bytes)) => crate::Checksum::try_from(bytes.clone())
             .map_err(|e| AccessError::Invocation(format!("Invalid multihash checksum: {}", e))),
@@ -387,17 +376,15 @@ mod tests {
     use base58::ToBase58;
     use dialog_capability::{Authorization, Principal};
     use dialog_common::Blake3Hash;
+    use dialog_credentials::Ed25519Signer;
+    use dialog_ucan::DelegationBuilder;
+    use dialog_ucan::InvocationBuilder;
+    use dialog_ucan::subject::Subject as DelegatedSubject;
     use std::collections::BTreeMap;
-    use ucan::delegation::builder::DelegationBuilder;
-    use ucan::delegation::subject::DelegatedSubject;
-    use ucan::did::Ed25519Signer;
-    use ucan::invocation::builder::InvocationBuilder;
-    use ucan::promise::Promised;
 
     /// Helper to create a test signer
-    fn test_signer() -> Ed25519Signer {
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        Ed25519Signer::from(signing_key)
+    async fn test_signer() -> Ed25519Signer {
+        Ed25519Signer::import(&[42u8; 32]).await.unwrap()
     }
 
     /// Build a valid UCAN container with invocation and delegation for testing
@@ -407,13 +394,12 @@ mod tests {
         command: Vec<String>,
         args: BTreeMap<String, Promised>,
     ) -> Vec<u8> {
-        let subject_did = subject_signer.did().clone();
-        let operator_did = operator_signer.did().clone();
+        let subject_did = subject_signer.did();
 
         // Create delegation: subject -> operator
         let delegation = DelegationBuilder::new()
             .issuer(subject_signer.clone())
-            .audience(operator_did)
+            .audience(operator_signer)
             .subject(DelegatedSubject::Specific(subject_did.clone()))
             .command(command.clone())
             .try_build()
@@ -425,8 +411,8 @@ mod tests {
         // Create invocation: operator invokes on subject
         let invocation = InvocationBuilder::new()
             .issuer(operator_signer.clone())
-            .audience(subject_did.clone())
-            .subject(subject_did.clone())
+            .audience(&subject_did)
+            .subject(&subject_did)
             .command(command)
             .arguments(args)
             .proofs(vec![delegation_cid])
@@ -446,7 +432,7 @@ mod tests {
     async fn it_acquires_and_performs_storage_get() {
         use crate::{Address, s3::Credentials};
 
-        let subject_signer = test_signer();
+        let subject_signer = test_signer().await;
 
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
@@ -458,8 +444,7 @@ mod tests {
 
         let authorizer = UcanAuthorizer::new(credentials);
 
-        let operator_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
-        let operator_signer = Ed25519Signer::from(operator_key);
+        let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
         let mut args = BTreeMap::new();
         args.insert("store".to_string(), Promised::String("index".to_string()));
@@ -484,7 +469,7 @@ mod tests {
     async fn it_acquires_and_performs_storage_set() {
         use crate::{Address, s3::Credentials};
 
-        let subject_signer = test_signer();
+        let subject_signer = test_signer().await;
 
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
@@ -496,8 +481,7 @@ mod tests {
 
         let authorizer = UcanAuthorizer::new(credentials);
 
-        let operator_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
-        let operator_signer = Ed25519Signer::from(operator_key);
+        let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
         // Multihash format: [code, length, ...digest]
         // SHA-256 code is 0x12, length is 0x20 (32 bytes)
@@ -527,7 +511,7 @@ mod tests {
     async fn it_acquires_and_performs_memory_resolve() {
         use crate::{Address, s3::Credentials};
 
-        let subject_signer = test_signer();
+        let subject_signer = test_signer().await;
 
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
@@ -539,8 +523,7 @@ mod tests {
 
         let authorizer = UcanAuthorizer::new(credentials);
 
-        let operator_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
-        let operator_signer = Ed25519Signer::from(operator_key);
+        let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
         let mut args = BTreeMap::new();
         args.insert(
@@ -570,7 +553,7 @@ mod tests {
     async fn it_acquires_and_performs_archive_get() {
         use crate::{Address, s3::Credentials};
 
-        let subject_signer = test_signer();
+        let subject_signer = test_signer().await;
 
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
@@ -582,8 +565,7 @@ mod tests {
 
         let authorizer = UcanAuthorizer::new(credentials);
 
-        let operator_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
-        let operator_signer = Ed25519Signer::from(operator_key);
+        let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
         let mut args = BTreeMap::new();
         args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
@@ -607,7 +589,7 @@ mod tests {
     async fn it_acquires_and_performs_archive_put() {
         use crate::{Address, s3::Credentials};
 
-        let subject_signer = test_signer();
+        let subject_signer = test_signer().await;
 
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
@@ -619,8 +601,7 @@ mod tests {
 
         let authorizer = UcanAuthorizer::new(credentials);
 
-        let operator_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
-        let operator_signer = Ed25519Signer::from(operator_key);
+        let operator_signer = Ed25519Signer::import(&[1u8; 32]).await.unwrap();
 
         // Multihash format: [code, length, ...digest]
         // SHA-256 code is 0x12, length is 0x20 (32 bytes)
@@ -648,8 +629,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_provides_authorized_requests() -> anyhow::Result<()> {
-        let signer = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
-        let operator = Ed25519Signer::from(signer);
+        let operator = Ed25519Signer::import(&[0u8; 32]).await.unwrap();
 
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
@@ -663,12 +643,12 @@ mod tests {
 
         let credentials = Credentials::new(
             "https://access.ucan.com".into(),
-            test_delegation_chain(&operator, operator.did(), &["archive"]).await,
+            test_delegation_chain(&operator, &operator, &["archive"]).await,
         );
 
-        let mut session = Session::new(credentials, &[0u8; 32]);
+        let mut session = Session::open(credentials, &[0u8; 32]).await;
 
-        let read = Subject::from(session.did().to_string())
+        let read = Subject::from(session.did())
             .attenuate(archive::Archive)
             .attenuate(archive::Catalog {
                 catalog: "blobs".into(),
@@ -707,13 +687,13 @@ mod tests {
         command: Vec<String>,
         args: BTreeMap<String, Promised>,
     ) -> Vec<u8> {
-        let did = signer.did().clone();
+        let did = signer.did();
 
         // Self-invocation: issuer == subject, no proofs needed
         let invocation = InvocationBuilder::new()
             .issuer(signer.clone())
-            .audience(did.clone())
-            .subject(did.clone())
+            .audience(&did)
+            .subject(&did)
             .command(command)
             .arguments(args)
             .proofs(vec![]) // Empty proofs for self-auth
@@ -729,7 +709,7 @@ mod tests {
     async fn it_authorizes_self_invocation_for_storage_get() {
         use crate::{Address, s3::Credentials};
 
-        let signer = test_signer();
+        let signer = test_signer().await;
 
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
@@ -769,7 +749,7 @@ mod tests {
     async fn it_authorizes_self_invocation_for_storage_set() {
         use crate::{Address, s3::Credentials};
 
-        let signer = test_signer();
+        let signer = test_signer().await;
 
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",
@@ -814,7 +794,7 @@ mod tests {
     async fn it_authorizes_self_invocation_for_archive_get() {
         use crate::{Address, s3::Credentials};
 
-        let signer = test_signer();
+        let signer = test_signer().await;
 
         let address = Address::new(
             "https://s3.us-east-1.amazonaws.com",

@@ -7,6 +7,7 @@ use dialog_capability::{
     Authority, Authorization as Auth, Capability, DialogCapabilityAuthorizationError, Did, Effect,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_varsig::eddsa::Ed25519Signature;
 
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -35,6 +36,8 @@ impl Authorization {
 #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait)]
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait(?Send))]
 impl Auth for Authorization {
+    type Signature = Ed25519Signature;
+
     fn subject(&self) -> &Did {
         match self {
             Self::S3(auth) => auth.subject(),
@@ -56,7 +59,9 @@ impl Auth for Authorization {
             Self::Ucan(auth) => auth.ability(),
         }
     }
-    async fn invoke<A: Authority + ConditionalSend + ConditionalSync>(
+    async fn invoke<
+        A: Authority<Signature = Ed25519Signature> + Clone + ConditionalSend + ConditionalSync,
+    >(
         &self,
         authority: &A,
     ) -> Result<Self, DialogCapabilityAuthorizationError> {

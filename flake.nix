@@ -132,10 +132,6 @@
             nativeBuildInputs = common-build-inputs "stable";
             cargoLock = {
               lockFile = ./Cargo.lock;
-              outputHashes = {
-                "ucan-0.5.0" = "sha256-mkZ6M7jOrRvlcVyBZ+mUPagD7/hJZ/HvoptDOIm90bs=";
-                "varsig-0.1.0" = "sha256-mkZ6M7jOrRvlcVyBZ+mUPagD7/hJZ/HvoptDOIm90bs=";
-              };
             };
           };
 

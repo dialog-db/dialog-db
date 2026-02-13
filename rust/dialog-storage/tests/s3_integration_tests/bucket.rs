@@ -25,7 +25,10 @@ pub fn open() -> Bucket<Session> {
     );
 
     // Use the bucket name as subject by default for integration tests
-    let subject = option_env!("R2S3_SUBJECT").unwrap_or("did:key:zTestSubject");
+    let subject: dialog_capability::Did = option_env!("R2S3_SUBJECT")
+        .unwrap_or("did:key:zTestSubject")
+        .parse()
+        .expect("Invalid DID in R2S3_SUBJECT");
 
     let credentials = S3Credentials::private(
         address,
@@ -34,7 +37,7 @@ pub fn open() -> Bucket<Session> {
     )
     .expect("Failed to create credentials");
 
-    let s3 = S3::from_s3(credentials, Session::new(subject));
+    let s3 = S3::from_s3(credentials, Session::new(subject.clone()));
     Bucket::new(s3, subject, "integration-tests")
 }
 

@@ -87,7 +87,11 @@ impl<Ok, E: Error, Fx: Effect<Output = Result<Ok, E>> + Constraint, A: Authoriza
     /// For operations that require authorization, use `acquire` first.
     pub async fn perform<Env>(self, env: &mut Env) -> Result<Ok, DialogCapabilityPerformError<E>>
     where
-        Env: Provider<Self> + Authority + ConditionalSend + ConditionalSync,
+        Env: Provider<Self>
+            + Authority<Signature = A::Signature>
+            + Clone
+            + ConditionalSend
+            + ConditionalSync,
     {
         match self.authorization.invoke(env).await {
             Ok(authorization) => env
