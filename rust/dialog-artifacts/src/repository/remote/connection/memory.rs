@@ -3,7 +3,7 @@
 //! This module provides [`MemoryConnection`] for testing and local development
 //! without requiring actual remote infrastructure.
 
-use super::super::{Connect, Connection, PlatformStorage, RemoteBackend, SigningAuthority};
+use super::super::{Connect, Connection, Credentials, PlatformStorage, RemoteBackend};
 use dialog_capability::Did;
 use dialog_storage::{CborEncoder, MemoryStorageBackend};
 
@@ -58,7 +58,7 @@ impl MemoryConnection {
 }
 
 impl Connect for MemoryConnection {
-    fn connect(self, _: SigningAuthority, _: &Did) -> Connection {
+    fn connect(self, _: Credentials, _: &Did) -> Connection {
         self.into()
     }
 }

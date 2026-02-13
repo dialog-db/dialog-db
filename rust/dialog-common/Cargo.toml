@@ -15,7 +15,7 @@ integration-tests = ["helpers"]
 # Enable web integration tests (implies integration-tests behavior)
 web-integration-tests = ["helpers"]
 # UCAN support (IPLD serialization for capabilities)
-ucan = ["dep:ipld-core", "dep:ucan"]
+ucan = ["dep:ipld-core"]
 
 [dependencies]
 blake3 = { workspace = true }
@@ -29,7 +29,6 @@ async-trait = { workspace = true, optional = true }
 futures-util = { workspace = true }
 thiserror = { workspace = true }
 ipld-core = { workspace = true, optional = true }
-ucan = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["rt", "sync"] }

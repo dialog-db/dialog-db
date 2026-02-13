@@ -2,16 +2,13 @@
 
 use dialog_capability::Did;
 
-use super::{
-    OperatingAuthority, PlatformBackend, PlatformStorage, RemoteBranch, RemoteCredentials,
-    SigningAuthority, Site,
-};
+use super::{Credentials, PlatformBackend, PlatformStorage, RemoteBranch, RemoteCredentials, Site};
 
 /// A reference to a repository on a remote site.
 ///
 /// This is a builder step for accessing remote branches.
 #[derive(Clone)]
-pub struct RemoteRepository<Backend: PlatformBackend, A: OperatingAuthority = SigningAuthority> {
+pub struct RemoteRepository<Backend: PlatformBackend> {
     /// The subject DID identifying the repository owner.
     subject: Did,
     /// The remote site name.
@@ -19,18 +16,18 @@ pub struct RemoteRepository<Backend: PlatformBackend, A: OperatingAuthority = Si
     /// Storage for persistence (cloned, cheap).
     storage: PlatformStorage<Backend>,
     /// Issuer for signing requests.
-    issuer: A,
+    issuer: Credentials,
     /// Credentials for connecting to the remote.
     credentials: Option<RemoteCredentials>,
 }
 
-impl<Backend: PlatformBackend, A: OperatingAuthority + 'static> RemoteRepository<Backend, A> {
+impl<Backend: PlatformBackend + 'static> RemoteRepository<Backend> {
     /// Create a new remote repository reference.
     pub(super) fn new(
         site_name: Site,
         subject: Did,
         storage: PlatformStorage<Backend>,
-        issuer: A,
+        issuer: Credentials,
         credentials: Option<RemoteCredentials>,
     ) -> Self {
         Self {
@@ -51,13 +48,9 @@ impl<Backend: PlatformBackend, A: OperatingAuthority + 'static> RemoteRepository
     pub fn site_name(&self) -> &Site {
         &self.site_name
     }
-}
 
-impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static>
-    RemoteRepository<Backend, A>
-{
     /// Reference a branch within this remote repository.
-    pub fn branch(&self, name: impl Into<String>) -> RemoteBranch<Backend, A> {
+    pub fn branch(&self, name: impl Into<String>) -> RemoteBranch<Backend> {
         RemoteBranch::reference(
             name.into(),
             self.site_name.clone(),

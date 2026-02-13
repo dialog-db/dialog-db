@@ -753,6 +753,7 @@ dependencies = [
  "csv-async",
  "dialog-capability",
  "dialog-common",
+ "dialog-credentials",
  "dialog-prolly-tree",
  "dialog-s3-credentials",
  "dialog-storage",
@@ -775,9 +776,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
- "ucan",
  "url",
- "varsig",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
@@ -815,7 +814,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.17",
  "tokio",
- "ucan",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
@@ -925,7 +923,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "getrandom 0.2.16",
- "nonempty 0.11.0",
+ "nonempty",
  "rand 0.8.5",
  "serde",
  "thiserror 2.0.17",
@@ -1064,8 +1062,8 @@ dependencies = [
  "js-sys",
  "leb128",
  "nom 7.1.3",
- "nom-unicode 0.3.0",
- "nonempty 0.11.0",
+ "nom-unicode",
+ "nonempty",
  "pretty_assertions",
  "proptest",
  "proptest-arbitrary-interop",
@@ -1170,7 +1168,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
  "pkcs8",
- "serde",
  "signature",
 ]
 
@@ -2096,24 +2093,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5c03a4d71ab9740c752c165329e9df13a808093b146dfbef6170ac260771ffe"
 dependencies = [
  "nom 7.1.3",
-]
-
-[[package]]
-name = "nom-unicode"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00dea06b6b61609274f105c468f1ea996d2f7226bfa528b4de79c05eabf5f759"
-dependencies = [
- "nom 8.0.0",
-]
-
-[[package]]
-name = "nonempty"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "303e8749c804ccd6ca3b428de7fe0d86cb86bc7606bc15291f100fd487960bb8"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -3650,33 +3629,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1dccffe3ce07af9386bfd29e80c0ab1a8205a2fc34e4bcd40364df902cfa8f3f"
 
 [[package]]
-name = "ucan"
-version = "0.5.0"
-source = "git+https://github.com/tonk-labs/rs-ucan.git?branch=main#d058960bb8720975166d1cde4163c44086bb2996"
-dependencies = [
- "futures",
- "getrandom 0.2.16",
- "getrandom 0.4.1",
- "ipld-core",
- "js-sys",
- "leb128",
- "nom 8.0.0",
- "nom-unicode 0.4.0",
- "nonempty 0.10.0",
- "serde",
- "serde-value",
- "serde_bytes",
- "serde_ipld_dagcbor",
- "sha2 0.10.9",
- "signature",
- "thiserror 1.0.69",
- "tracing",
- "varsig",
- "wasm-bindgen",
- "web-time",
-]
-
-[[package]]
 name = "unarray"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3770,22 +3722,6 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
-
-[[package]]
-name = "varsig"
-version = "0.1.0"
-source = "git+https://github.com/tonk-labs/rs-ucan.git?branch=main#d058960bb8720975166d1cde4163c44086bb2996"
-dependencies = [
- "ed25519-dalek",
- "k256",
- "leb128",
- "p256",
- "serde",
- "serde_bytes",
- "signature",
- "thiserror 1.0.69",
- "tracing",
-]
 
 [[package]]
 name = "version_check"

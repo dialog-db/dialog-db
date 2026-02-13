@@ -16,7 +16,7 @@ pub use dialog_s3_credentials::{ucan, ucan::DelegationChain};
 use dialog_storage::s3::{Bucket, S3};
 use serde::{Deserialize, Serialize};
 
-use super::{Connection, MemoryConnection, SigningAuthority};
+use super::{Connection, Credentials, MemoryConnection};
 #[cfg(feature = "s3")]
 use super::{RemoteBackend, S3Connection};
 use crate::repository::RepositoryError;
@@ -28,12 +28,12 @@ use dialog_storage::CborEncoder;
 /// Trait for credentials that can establish a connection.
 pub trait Connect {
     /// Open a connection using these credentials.
-    fn connect(self, issuer: SigningAuthority, subject: &Did) -> Connection;
+    fn connect(self, issuer: Credentials, subject: &Did) -> Connection;
 }
 
 #[cfg(feature = "s3")]
 impl Connect for dialog_s3_credentials::Credentials {
-    fn connect(self, issuer: SigningAuthority, subject: &Did) -> Connection {
+    fn connect(self, issuer: Credentials, subject: &Did) -> Connection {
         let s3 = S3::new(self, issuer);
         let bucket = Bucket::new(s3.clone(), subject, "memory");
         let backend = RemoteBackend::S3(ErrorMappingBackend::new(bucket));
@@ -96,7 +96,7 @@ impl RemoteCredentials {
     /// Open a connection to the remote storage using these credentials.
     pub fn connect(
         &self,
-        issuer: SigningAuthority,
+        issuer: Credentials,
         subject: &Did,
     ) -> Result<Connection, RepositoryError> {
         match self {

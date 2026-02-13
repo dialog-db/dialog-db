@@ -27,8 +27,7 @@ pub use repository::*;
 pub use site::*;
 pub use state::*;
 
-pub use super::OperatingAuthority;
-use super::{PlatformBackend, Revision, SigningAuthority};
+use super::{Credentials, PlatformBackend, Revision};
 use crate::PlatformStorage;
 
 /// A named remote site identifier.

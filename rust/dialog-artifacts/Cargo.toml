@@ -14,9 +14,7 @@ debug = []
 helpers = ["dep:anyhow", "dialog-s3-credentials/helpers", "dialog-storage/helpers"]
 csv = ["dep:csv-async"]
 s3 = ["dialog-storage/s3"]
-ucan = ["dialog-s3-credentials/ucan", "dialog-storage/ucan", "dep:varsig"]
-# Enable WebCrypto Ed25519 signing on WASM (non-extractable keys)
-webcrypto = ["dep:ucan"]
+ucan = ["dialog-s3-credentials/ucan", "dialog-storage/ucan"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["helpers", "dialog-common/integration-tests"]
 # Enable web integration tests
@@ -25,6 +23,7 @@ web-integration-tests = ["dialog-common/web-integration-tests", "dialog-storage/
 [dependencies]
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
+dialog-credentials = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-prolly-tree = { workspace = true }
 dialog-s3-credentials = { workspace = true }
@@ -51,9 +50,7 @@ serde_json = { workspace = true }
 static_assertions = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
-ucan = { workspace = true, optional = true }
 url = { workspace = true, features = ["serde"] }
-varsig = { workspace = true, optional = true }
 
 [dev-dependencies]
 dialog-storage = { workspace = true, features = ["helpers"] }

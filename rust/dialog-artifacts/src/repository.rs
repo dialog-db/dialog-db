@@ -13,8 +13,8 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use base58::ToBase58;
 use blake3;
-use dialog_capability::{Authority, Did};
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_capability::Did;
+use dialog_common::ConditionalSend;
 use dialog_prolly_tree::{
     Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Node, Tree, TreeDifference,
 };
@@ -23,7 +23,6 @@ use std::fmt::Debug;
 
 use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
 
-use ed25519_dalek::{SECRET_KEY_LENGTH, SignatureError, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
@@ -34,35 +33,16 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-/// Principal type definitions.
-pub mod principal;
+/// Credentials for signing and identity management.
+pub mod credentials;
 /// Remote repository and branch management.
 pub mod remote;
 /// Repository trait for managing remotes.
 pub mod remotes;
-/// SigningAuthority for signing and identity management.
-pub mod signing_authority;
 
-pub use signing_authority::{Signer, SigningAuthority};
-
-// Re-export WebCrypto types for WASM key storage
-pub use principal::{Principal, PrincipalError};
+pub use credentials::Credentials;
 pub use remote::{RemoteBranch, RemoteCredentials, RemoteRepository, RemoteSite, Site};
 pub use remotes::Remotes;
-#[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "webcrypto"))]
-pub use signing_authority::{CryptoKey, Ed25519Signer};
-
-/// An authority that can operate on a repository.
-///
-/// This trait alias bundles the required bounds for authorities used with Repository:
-/// - `Authority`: Provides DID identity and signing capability
-/// - `Clone`: Required for sharing authority across branches and operations
-/// - `Debug`: Required for error messages and debugging output
-/// - `Into<SigningAuthority>`: Required for remote operations that need concrete signing
-pub trait OperatingAuthority: Authority + Clone + Debug + Into<SigningAuthority> {}
-impl<A: Authority + Clone + Debug + Into<SigningAuthority>> OperatingAuthority for A {}
-
-// TryFrom<Principal> for VerifyingKey is implemented in principal.rs
 
 /// Type alias for the prolly tree index used to store artifacts.
 /// The Archive wraps the backend with PrefixedBackend to namespace index storage.
@@ -103,23 +83,26 @@ impl From<NodeReference> for Blake3Hash {
 }
 
 /// A repository represents a local instance of a distributed database.
-///
-/// The type parameter `A` represents the authority used for signing operations.
-/// It defaults to `SigningAuthority` for convenience.
 #[derive(Debug, Clone)]
-pub struct Repository<Backend: PlatformBackend, A: OperatingAuthority = SigningAuthority> {
-    issuer: A,
+pub struct Repository<Backend: PlatformBackend> {
+    issuer: Credentials,
     subject: Did,
     storage: PlatformStorage<Backend>,
     /// Local branches in this repository
-    pub branches: Branches<Backend, A>,
+    pub branches: Branches<Backend>,
 }
 
-impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
-    Repository<Backend, A>
-{
+impl<Backend: PlatformBackend + 'static> Repository<Backend> {
     /// Creates a new repository with the given issuer and storage backend.
-    pub fn open(issuer: A, subject: Did, backend: Backend) -> Result<Self, RepositoryError> {
+    pub fn open<T>(
+        issuer: T,
+        subject: Did,
+        backend: Backend,
+    ) -> Result<Self, RepositoryError>
+    where
+        Credentials: From<T>,
+    {
+        let issuer = Credentials::from(issuer);
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branches = Branches::new(issuer.clone(), subject.clone(), backend.clone());
@@ -146,8 +129,8 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
         &mut self.storage
     }
 
-    /// Returns a reference to the issuer (authority).
-    pub fn issuer(&self) -> &A {
+    /// Returns a reference to the issuer
+    pub fn issuer(&self) -> &Credentials {
         &self.issuer
     }
 
@@ -159,17 +142,15 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
 
 /// Manages multiple branches within a repository.
 #[derive(Debug, Clone)]
-pub struct Branches<Backend: PlatformBackend, A: OperatingAuthority = SigningAuthority> {
-    issuer: A,
+pub struct Branches<Backend: PlatformBackend> {
+    issuer: Credentials,
     subject: Did,
     storage: PlatformStorage<Backend>,
 }
 
-impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
-    Branches<Backend, A>
-{
+impl<Backend: PlatformBackend + 'static> Branches<Backend> {
     /// Creates a new instance for the given backend
-    pub fn new(issuer: A, subject: Did, backend: Backend) -> Self {
+    pub fn new(issuer: Credentials, subject: Did, backend: Backend) -> Self {
         let storage = PlatformStorage::new(backend, CborEncoder);
         Self {
             issuer,
@@ -180,7 +161,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
 
     /// Loads a branch with given identifier, produces an error if it does not
     /// exists.
-    pub async fn load(&self, id: &BranchId) -> Result<Branch<Backend, A>, RepositoryError> {
+    pub async fn load(&self, id: &BranchId) -> Result<Branch<Backend>, RepositoryError> {
         Branch::load(
             id,
             self.issuer.clone(),
@@ -192,10 +173,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
 
     /// Loads a branch with the given identifier or creates a new one if
     /// it does not already exist.
-    pub async fn open(
-        &self,
-        id: impl Into<BranchId>,
-    ) -> Result<Branch<Backend, A>, RepositoryError> {
+    pub async fn open(&self, id: impl Into<BranchId>) -> Result<Branch<Backend>, RepositoryError> {
         Branch::open(
             id,
             self.issuer.clone(),
@@ -375,23 +353,18 @@ where
 
 /// A branch represents a named line of development within a repository.
 #[derive(Clone)]
-pub struct Branch<
-    Backend: PlatformBackend + 'static,
-    A: OperatingAuthority + 'static = SigningAuthority,
-> {
-    issuer: A,
+pub struct Branch<Backend: PlatformBackend + 'static> {
+    issuer: Credentials,
     id: BranchId,
     subject: Did,
     storage: PlatformStorage<Backend>,
     archive: Archive<PrefixedBackend<Backend>>,
     memory: TypedStoreResource<BranchState, Backend>,
     tree: Arc<RwLock<Index<Backend>>>,
-    upstream: Arc<std::sync::RwLock<Option<Upstream<Backend, A>>>>,
+    upstream: Arc<std::sync::RwLock<Option<Upstream<Backend>>>>,
 }
 
-impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> std::fmt::Debug
-    for Branch<Backend, A>
-{
+impl<Backend: PlatformBackend + 'static> std::fmt::Debug for Branch<Backend> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Branch")
             .field("id", &self.id)
@@ -400,9 +373,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> std::f
     }
 }
 
-impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
-    Branch<Backend, A>
-{
+impl<Backend: PlatformBackend + 'static> Branch<Backend> {
     async fn mount(
         id: &BranchId,
         storage: &mut PlatformStorage<Backend>,
@@ -432,11 +403,11 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     /// Loads a branch from storage, creating it with the provided default state if it doesn't exist.
     pub async fn load_with_default(
         id: &BranchId,
-        issuer: A,
+        issuer: Credentials,
         mut storage: PlatformStorage<Backend>,
         subject: Did,
         default_state: Option<BranchState>,
-    ) -> Result<Branch<Backend, A>, RepositoryError> {
+    ) -> Result<Branch<Backend>, RepositoryError> {
         let memory = Self::mount(id, &mut storage, default_state).await?;
         let prefixed_backend = PrefixedBackend::new(b"index/", storage.clone().into_backend());
         let archive = Archive::new(prefixed_backend);
@@ -487,10 +458,10 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     /// Loads a branch with a given id or creates one if it does not exist.
     pub async fn open(
         id: impl Into<BranchId>,
-        issuer: A,
+        issuer: Credentials,
         storage: PlatformStorage<Backend>,
         subject: Did,
-    ) -> Result<Branch<Backend, A>, RepositoryError> {
+    ) -> Result<Branch<Backend>, RepositoryError> {
         let id = id.into();
         let default_state = Some(BranchState::new(
             id.clone(),
@@ -507,10 +478,10 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     /// given id does not exists it produces an error.
     pub async fn load(
         id: &BranchId,
-        issuer: A,
+        issuer: Credentials,
         storage: PlatformStorage<Backend>,
         subject: Did,
-    ) -> Result<Branch<Backend, A>, RepositoryError> {
+    ) -> Result<Branch<Backend>, RepositoryError> {
         let branch = Self::load_with_default(id, issuer, storage, subject, None).await?;
 
         Ok(branch)
@@ -576,7 +547,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
 
     /// Lazily initializes and returns a mutable reference to the upstream.
     /// Returns None if no upstream is configured.
-    pub fn upstream(&self) -> Option<Upstream<Backend, A>> {
+    pub fn upstream(&self) -> Option<Upstream<Backend>> {
         self.upstream
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -810,7 +781,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
 
     /// Sets the upstream for this branch and persists the change.
     /// Accepts either a Branch or RemoteBranch via Into<Upstream>.
-    pub async fn set_upstream<U: Into<Upstream<Backend, A>>>(
+    pub async fn set_upstream<U: Into<Upstream<Backend>>>(
         &mut self,
         target: U,
     ) -> Result<(), RepositoryError> {
@@ -860,9 +831,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
 }
 
 // Implement ArtifactStore for Branch
-impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> ArtifactStore
-    for Branch<Backend, A>
-{
+impl<Backend: PlatformBackend + 'static> ArtifactStore for Branch<Backend> {
     fn select(
         &self,
         selector: ArtifactSelector<Constrained>,
@@ -935,9 +904,7 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> Artifa
 // Implement ArtifactStoreMut for Branch
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
-    ArtifactStoreMut for Branch<Backend, A>
-{
+impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
     async fn commit<Instructions>(
         &mut self,
         instructions: Instructions,
@@ -1318,19 +1285,14 @@ impl BranchState {
 
 /// Descriptor for a local upstream branch (lazy loaded).
 #[derive(Clone)]
-pub struct LocalUpstream<
-    Backend: PlatformBackend + 'static,
-    A: OperatingAuthority = SigningAuthority,
-> {
+pub struct LocalUpstream<Backend: PlatformBackend + 'static> {
     branch_id: BranchId,
-    issuer: A,
+    issuer: Credentials,
     storage: PlatformStorage<Backend>,
     subject: Did,
 }
 
-impl<Backend: PlatformBackend + 'static, A: OperatingAuthority> std::fmt::Debug
-    for LocalUpstream<Backend, A>
-{
+impl<Backend: PlatformBackend + 'static> std::fmt::Debug for LocalUpstream<Backend> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LocalUpstream")
             .field("branch_id", &self.branch_id)
@@ -1338,11 +1300,9 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority> std::fmt::Debug
     }
 }
 
-impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
-    LocalUpstream<Backend, A>
-{
+impl<Backend: PlatformBackend + 'static> LocalUpstream<Backend> {
     /// Load the branch on demand.
-    async fn load(&self) -> Result<Branch<Backend, A>, RepositoryError> {
+    async fn load(&self) -> Result<Branch<Backend>, RepositoryError> {
         Branch::load(
             &self.branch_id,
             self.issuer.clone(),
@@ -1362,26 +1322,21 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
 /// to / from. It can be local or remote.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
-pub enum Upstream<
-    Backend: PlatformBackend + 'static,
-    A: OperatingAuthority + 'static = SigningAuthority,
-> {
+pub enum Upstream<Backend: PlatformBackend + 'static> {
     /// A local branch upstream (lazy - loaded on fetch/publish)
-    Local(LocalUpstream<Backend, A>),
+    Local(LocalUpstream<Backend>),
     /// A remote branch upstream
-    Remote(RemoteBranch<Backend, A>),
+    Remote(RemoteBranch<Backend>),
 }
 
-impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
-    Upstream<Backend, A>
-{
+impl<Backend: PlatformBackend + 'static> Upstream<Backend> {
     /// Creates an upstream from its state descriptor.
     ///
     /// For local upstreams, this stores a descriptor for lazy loading.
     /// For remote upstreams, this creates the remote branch reference.
     pub async fn open(
         state: &UpstreamState,
-        issuer: A,
+        issuer: Credentials,
         storage: PlatformStorage<Backend>,
         subject: Did,
     ) -> Result<Self, RepositoryError> {
@@ -1480,10 +1435,8 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync
     }
 }
 
-impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> From<Branch<Backend, A>>
-    for Upstream<Backend, A>
-{
-    fn from(branch: Branch<Backend, A>) -> Self {
+impl<Backend: PlatformBackend + 'static> From<Branch<Backend>> for Upstream<Backend> {
+    fn from(branch: Branch<Backend>) -> Self {
         Self::Local(LocalUpstream {
             branch_id: branch.id.clone(),
             issuer: branch.issuer.clone(),
@@ -1493,18 +1446,14 @@ impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static> From<B
     }
 }
 
-impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + 'static>
-    From<RemoteBranch<Backend, A>> for Upstream<Backend, A>
-{
-    fn from(branch: RemoteBranch<Backend, A>) -> Self {
+impl<Backend: PlatformBackend + 'static> From<RemoteBranch<Backend>> for Upstream<Backend> {
+    fn from(branch: RemoteBranch<Backend>) -> Self {
         Self::Remote(branch)
     }
 }
 
-impl<Backend: PlatformBackend + 'static, A: OperatingAuthority + ConditionalSync + 'static>
-    From<Upstream<Backend, A>> for UpstreamState
-{
-    fn from(upstream: Upstream<Backend, A>) -> Self {
+impl<Backend: PlatformBackend + 'static> From<Upstream<Backend>> for UpstreamState {
+    fn from(upstream: Upstream<Backend>) -> Self {
         match upstream {
             Upstream::Local(branch) => UpstreamState::Local {
                 branch: branch.id().clone(),
@@ -1725,7 +1674,7 @@ impl Display for Capability {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ErrorMappingBackend;
+    use dialog_credentials::Ed25519Signer;
     use dialog_storage::MemoryStorageBackend;
 
     #[cfg(target_arch = "wasm32")]
@@ -1754,7 +1703,7 @@ mod tests {
         let upstream_branch_id = BranchId::new(upstream_id.to_string());
         let subject = test_subject();
 
-        let issuer = SigningAuthority::from_secret(&seed());
+        let issuer: Credentials = Ed25519Signer::import(&seed()).await.unwrap().into();
         let mut branch =
             Branch::open(&branch_id, issuer.clone(), storage.clone(), subject.clone()).await?;
         let target = Branch::open(&upstream_branch_id, issuer, storage.clone(), subject).await?;
@@ -1774,7 +1723,7 @@ mod tests {
 
         // Create main branch
         let main_id = BranchId::new("main".to_string());
-        let issuer = SigningAuthority::from_secret(&seed());
+        let issuer: Credentials = Ed25519Signer::import(&seed()).await.unwrap().into();
         let subject = test_subject();
         let mut main_branch =
             Branch::open(&main_id, issuer.clone(), storage.clone(), subject.clone())
@@ -1849,7 +1798,7 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branch_id = BranchId::new("no-upstream".to_string());
-        let issuer = SigningAuthority::from_secret(&seed());
+        let issuer: Credentials = Ed25519Signer::import(&seed()).await.unwrap().into();
         let subject = test_subject();
         let mut branch = Branch::open(&branch_id, issuer, storage, subject)
             .await
@@ -1874,7 +1823,7 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         // Alice and Bob have different subject DIDs
-        let alice_issuer = SigningAuthority::from_secret(&[1u8; 32]);
+        let alice_issuer: Credentials = Ed25519Signer::import(&[1u8; 32]).await.unwrap().into();
         let alice_subject: Did = alice_issuer.did().clone();
         let bob_subject: Did = "did:key:z6MkbobBobBobBobBobBobBobBobBobBobBobBobBob"
             .parse()
@@ -1942,7 +1891,7 @@ mod tests {
 
         // Create main and feature branches
         let main_id = BranchId::new("main".to_string());
-        let issuer = SigningAuthority::from_secret(&seed());
+        let issuer: Credentials = Ed25519Signer::import(&seed()).await.unwrap().into();
         let subject = test_subject();
         let mut main_branch =
             Branch::open(&main_id, issuer.clone(), storage.clone(), subject.clone())
@@ -1984,7 +1933,7 @@ mod tests {
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
 
         let branch_id = BranchId::new("no-upstream".to_string());
-        let issuer = SigningAuthority::from_secret(&seed());
+        let issuer: Credentials = Ed25519Signer::import(&seed()).await.unwrap().into();
         let subject = test_subject();
         let mut branch = Branch::open(&branch_id, issuer, storage, subject)
             .await
@@ -2004,7 +1953,7 @@ mod tests {
         use futures_util::stream;
 
         // Step 1: Generate issuer
-        let issuer = SigningAuthority::from_passphrase("test_end_to_end_remote_upstream");
+        let issuer = Credentials::from_passphrase("test_end_to_end_remote_upstream").await?;
         let subject = issuer.did().clone();
 
         // Step 2: Create a repository with that issuer and journaled in-memory backend
@@ -2234,14 +2183,14 @@ mod tests {
         let subject: Did = "did:test:shared_repo".into();
 
         // Create Alice's repository
-        let alice_issuer = SigningAuthority::from_passphrase("alice");
+        let alice_issuer = Credentials::from_passphrase("alice").await?;
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let mut alice_repository =
             Repository::open(alice_issuer.clone(), subject.clone(), alice_backend)
                 .expect("Failed to create Alice's repository");
 
         // Create Bob's repository
-        let bob_issuer = SigningAuthority::from_passphrase("bob");
+        let bob_issuer = Credentials::from_passphrase("bob").await?;
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let mut bob_repository = Repository::open(bob_issuer.clone(), subject.clone(), bob_backend)
             .expect("Failed to create Bob's repository");
@@ -2380,7 +2329,7 @@ mod tests {
         let subject: Did = "did:test:shared_repo".into();
 
         // Step 1: Create Alice's repository with her own issuer and backend
-        let alice_issuer = SigningAuthority::from_passphrase("alice");
+        let alice_issuer = Credentials::from_passphrase("alice").await?;
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
         let mut alice_repository = Repository::open(
@@ -2391,7 +2340,7 @@ mod tests {
         .expect("Failed to create Alice's repository");
 
         // Step 2: Create Bob's repository with his own issuer and backend
-        let bob_issuer = SigningAuthority::from_passphrase("bob");
+        let bob_issuer = Credentials::from_passphrase("bob").await?;
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
         let mut bob_repository =
@@ -2649,7 +2598,7 @@ mod tests {
         let subject: Did = "did:test:shared_repo".into();
 
         // Create Alice's repository
-        let alice_issuer = SigningAuthority::from_passphrase("alice");
+        let alice_issuer = Credentials::from_passphrase("alice").await?;
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
         let mut alice_replica = Repository::open(
@@ -2660,7 +2609,7 @@ mod tests {
         .expect("Failed to create Alice's replica");
 
         // Create Bob's replica
-        let bob_issuer = SigningAuthority::from_passphrase("bob");
+        let bob_issuer = Credentials::from_passphrase("bob").await?;
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
         let mut bob_replica =
@@ -2832,7 +2781,7 @@ mod tests {
         // Test the difference between load (expects existing) and open (creates if missing)
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
-        let issuer = SigningAuthority::from_passphrase("test-user");
+        let issuer = Credentials::from_passphrase("test-user").await?;
         let subject = test_subject();
 
         let branch_id = BranchId::new("test-branch".to_string());
@@ -2870,7 +2819,7 @@ mod tests {
         let subject: Did = "did:test:shared_repo".into();
 
         // Create Alice's replica
-        let alice_issuer = SigningAuthority::from_passphrase("alice");
+        let alice_issuer = Credentials::from_passphrase("alice").await?;
         let alice_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let alice_journaled = JournaledStorage::new(alice_backend);
         let mut alice_replica = Repository::open(
@@ -2923,7 +2872,7 @@ mod tests {
         let alice_revision_after_push = alice_main.revision();
 
         // Create Bob's replica
-        let bob_issuer = SigningAuthority::from_passphrase("bob");
+        let bob_issuer = Credentials::from_passphrase("bob").await?;
         let bob_backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let bob_journaled = JournaledStorage::new(bob_backend);
         let mut bob_replica =
@@ -2992,7 +2941,7 @@ mod tests {
         use dialog_s3_credentials::Address;
         use dialog_storage::JournaledStorage;
 
-        let issuer = SigningAuthority::from_passphrase("multi-remote-user");
+        let issuer = Credentials::from_passphrase("multi-remote-user").await?;
         let subject = issuer.did().clone();
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let journaled = JournaledStorage::new(backend);
@@ -3041,7 +2990,7 @@ mod tests {
         // Test branch description getting and setting
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
-        let issuer = SigningAuthority::from_passphrase("test-user");
+        let issuer = Credentials::from_passphrase("test-user").await?;
         let subject = test_subject();
 
         let branch_id = BranchId::new("feature-x".to_string());
@@ -3064,12 +3013,12 @@ mod tests {
     #[tokio::test]
     async fn test_issuer_generate() -> anyhow::Result<()> {
         // Test generating random issuer keys
-        let issuer1 = SigningAuthority::generate().await?;
-        let issuer2 = SigningAuthority::generate().await?;
+        let issuer1: Credentials = Ed25519Signer::generate().await.unwrap().into();
+        let issuer2: Credentials = Ed25519Signer::generate().await.unwrap().into();
 
         // Each generated issuer should be unique
         assert_ne!(issuer1.did(), issuer2.did());
-        assert_ne!(issuer1.principal(), issuer2.principal());
+        assert_ne!(issuer1.verifier(), issuer2.verifier());
 
         // DIDs should be valid format
         assert!(issuer1.did().as_str().starts_with("did:key:"));
@@ -3094,7 +3043,7 @@ mod tests {
         }
 
         let address = Address::new(&s3_address.endpoint, "auto", &s3_address.bucket);
-        let issuer = SigningAuthority::from_passphrase("test-archive-cache");
+        let issuer = Credentials::from_passphrase("test-archive-cache").await?;
         let subject = issuer.did().clone();
         let s3_credentials = dialog_s3_credentials::s3::Credentials::private(
             address,
@@ -3169,14 +3118,7 @@ mod tests {
         // Create operator and subject
         let operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
         let operator_did = operator_signer.did().clone();
-        let operator = {
-            use varsig::signature::eddsa::Ed25519SigningKey;
-            match operator_signer.signer() {
-                Ed25519SigningKey::Native(key) => SigningAuthority::from_secret(&key.to_bytes()),
-                #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-                Ed25519SigningKey::WebCrypto(_) => panic!("expected native signer in test"),
-            }
-        };
+        let operator = Credentials::from(operator_signer.clone());
         let subject = operator.did().clone();
 
         // Create a delegation chain
@@ -3258,18 +3200,11 @@ mod tests {
         let operator_did = operator_signer.did().clone();
         let subject: Did = operator_did.clone().into();
 
-        // Create a SigningAuthority that uses the UCAN signer's key
-        // Note: SigningAuthority::did() may produce a different DID format than Ed25519Did,
+        // Create Credentials that use the UCAN signer's key
+        // Note: Credentials::did() may produce a different DID format than Ed25519Did,
         // but the UCAN invocation system uses the Authority trait which gets the
         // secret key bytes for signing, not the DID for identity.
-        let operator = {
-            use varsig::signature::eddsa::Ed25519SigningKey;
-            match operator_signer.signer() {
-                Ed25519SigningKey::Native(key) => SigningAuthority::from_secret(&key.to_bytes()),
-                #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-                Ed25519SigningKey::WebCrypto(_) => panic!("expected native signer in test"),
-            }
-        };
+        let operator = Credentials::from(operator_signer.clone());
 
         // Step 2: Create a delegation chain from subject to operator
         // In this test, the subject and operator are the same (self-signed)
@@ -3385,14 +3320,7 @@ mod tests {
         // Generate a second operator for the second repository
         let second_operator_signer = dialog_s3_credentials::ucan::test_helpers::generate_signer();
         let second_operator_did = second_operator_signer.did().clone();
-        let second_operator = {
-            use varsig::signature::eddsa::Ed25519SigningKey;
-            match second_operator_signer.signer() {
-                Ed25519SigningKey::Native(key) => SigningAuthority::from_secret(&key.to_bytes()),
-                #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-                Ed25519SigningKey::WebCrypto(_) => panic!("expected native signer in test"),
-            }
-        };
+        let second_operator = Credentials::from(second_operator_signer.clone());
 
         // Create delegation from the original subject to the second operator
         // Grant root capability (/) to allow all operations for the pull test
@@ -3495,7 +3423,7 @@ mod tests {
 
         let backend = MemoryStorageBackend::<Vec<u8>, Vec<u8>>::default();
         let storage = PlatformStorage::new(backend.clone(), CborEncoder);
-        let issuer = SigningAuthority::from_secret(&seed());
+        let issuer: Credentials = Ed25519Signer::import(&seed()).await.unwrap().into();
         let subject = test_subject();
 
         let mut repository = Repository::open(issuer.clone(), subject.clone(), backend.clone())
