@@ -25,6 +25,7 @@ members = [
     "rust/dialog-diagnose",
     "rust/dialog-dbsp",
     "rust/dialog-encoding",
+    "rust/dialog-inspector",
     "rust/dialog-prolly-tree",
     "rust/dialog-storage",
     "rust/dialog-s3-credentials",

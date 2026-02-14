@@ -1,0 +1,43 @@
+[package]
+name = "dialog-inspector"
+description = "Browser devtools extension for inspecting Dialog databases"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+debug = ["dialog-artifacts/debug"]
+
+[dependencies]
+dialog-artifacts = { workspace = true }
+dialog-prolly-tree = { workspace = true }
+dialog-storage = { workspace = true }
+dialog-common = { workspace = true }
+
+base58 = { workspace = true }
+futures-util = { workspace = true }
+leptos = { workspace = true, features = ["csr"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+console_error_panic_hook = { workspace = true }
+getrandom = { workspace = true, features = ["js"] }
+js-sys = { workspace = true }
+rexie = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+web-sys = { workspace = true, features = [
+    "Window",
+    "IdbFactory",
+] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)"] }
