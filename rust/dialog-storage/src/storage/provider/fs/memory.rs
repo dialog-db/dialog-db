@@ -156,6 +156,15 @@ impl Provider<Publish> for FileSystem {
         let path: PathBuf = space_location.cell(cell)?.try_into()?;
         let lock_path: PathBuf = space_location.lock(cell)?.try_into()?;
 
+        // Ensure parent directory exists for nested cell paths (e.g. "subdir/cell").
+        // space_location.ensure_dir() only creates the space directory, not
+        // subdirectories within it that the cell path may require.
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        }
+
         // Acquire lock for exclusive access
         let _guard = PidlockGuard::new(lock_path)?;
 
@@ -679,6 +688,40 @@ mod tests {
             .attenuate(Memory)
             .attenuate(Space::new("parent/child/grandchild"))
             .attenuate(Cell::new("cell"))
+            .invoke(Resolve)
+            .perform(&mut provider)
+            .await?;
+
+        let publication = resolved.expect("should have content");
+        assert_eq!(publication.content, content);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_publishes_to_nested_cell() -> anyhow::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let mut provider = FileSystem::mount(tempdir.path().to_path_buf())?;
+        let subject = unique_subject("memory-nested-cell");
+        let content = b"nested cell content".to_vec();
+
+        // Publish to a cell with a path separator, without pre-creating dirs.
+        // This mirrors how Branch::mount uses "local/main" as an address.
+        let edition = subject
+            .clone()
+            .attenuate(Memory)
+            .attenuate(Space::new("local"))
+            .attenuate(Cell::new("subdir/cell"))
+            .invoke(Publish::new(content.clone(), None))
+            .perform(&mut provider)
+            .await?;
+
+        assert!(!edition.is_empty());
+
+        let resolved = subject
+            .attenuate(Memory)
+            .attenuate(Space::new("local"))
+            .attenuate(Cell::new("subdir/cell"))
             .invoke(Resolve)
             .perform(&mut provider)
             .await?;
