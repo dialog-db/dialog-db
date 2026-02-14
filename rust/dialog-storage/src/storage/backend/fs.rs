@@ -261,6 +261,17 @@ where
         content: Option<Self::Value>,
     ) -> Result<Option<Self::Edition>, Self::Error> {
         let path = self.make_path(address)?;
+
+        // Ensure parent directory exists. Addresses may contain path separators
+        // (e.g. "local/main") and the parent directory won't exist on first write.
+        // Without this, PidlockGuard enters an infinite retry loop because pidlock
+        // misinterprets "directory not found" as LockExists.
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| DialogStorageError::StorageBackend(format!("{e}")))?;
+        }
+
         let _lock = PidlockGuard::new(self.make_lock_path(address)?)?;
 
         // Read current content and compute hash
@@ -637,6 +648,31 @@ mod tests {
 
         let (value, _) = backend
             .resolve(&"subdir/nested-key".to_string())
+            .await?
+            .unwrap();
+        assert_eq!(value, content);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_creates_parent_dirs_on_replace() -> Result<()> {
+        let (mut backend, _tempdir) = make_backend().await?;
+
+        // Write to a nested address without pre-creating the parent directory.
+        // This mirrors how Branch::mount uses "local/main" as an address.
+        let content = b"nested content".to_vec();
+        let edition = backend
+            .replace(
+                &"nonexistent-subdir/key".to_string(),
+                None,
+                Some(content.clone()),
+            )
+            .await?;
+
+        assert!(edition.is_some());
+
+        let (value, _) = backend
+            .resolve(&"nonexistent-subdir/key".to_string())
             .await?
             .unwrap();
         assert_eq!(value, content);
