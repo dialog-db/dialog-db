@@ -37,7 +37,6 @@ wasm-bindgen-futures = { workspace = true }
 web-sys = { workspace = true, features = [
     "Window",
     "IdbFactory",
-    "Response",
 ] }
 
 [lints.rust]

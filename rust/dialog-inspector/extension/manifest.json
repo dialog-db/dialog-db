@@ -16,16 +16,13 @@
     }
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
-    "sandbox": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
   "web_accessible_resources": [
     {
       "resources": [
         "content_bg.wasm",
-        "content.js",
-        "dialog_inspector_worker.js",
-        "dialog_inspector_worker_bg.wasm"
+        "content.js"
       ],
       "matches": ["<all_urls>"]
     }

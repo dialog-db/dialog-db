@@ -2,18 +2,11 @@
 //!
 //! This module defines the request/response types that form the communication
 //! protocol between the UI panel and the inspection backend. The types are
-//! [`serde`]-serializable so they can travel over:
+//! [`serde`]-serializable so they can travel over `chrome.tabs.sendMessage`
+//! as JSON, from the devtools panel to the content script (which runs in
+//! the host page's origin and has IndexedDB access).
 //!
-//! - **Direct call** (same-origin / standalone mode): the UI invokes
-//!   [`dispatch`] in-process — no serialization needed, but the same types
-//!   are used as the interface contract.
-//! - **`postMessage`** (extension mode): serialized as JSON, sent from the
-//!   devtools panel → content script (which runs in the host page's origin
-//!   and has IndexedDB access).
-//! - **Service worker `fetch`** (future): serialized into URL paths / JSON
-//!   bodies, handled by a WASM service worker.
-//!
-//! # Message flow (extension mode)
+//! # Message flow
 //!
 //! ```text
 //! Panel (extension origin)          Content script (host page origin)
