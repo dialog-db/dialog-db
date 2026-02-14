@@ -22,25 +22,32 @@
 //! The simplest mode: the panel page is served from the same origin as the
 //! application.  [`bridge::send`] calls [`dispatch::dispatch`] directly.
 //!
-//! ## 2. Service worker (app-provided)
+//! ## 2. Service worker plugin (extension-assisted)
 //!
 //! ```text
-//! ┌──────────────────────────────────────────────┐
-//! │ Host application                              │
-//! │  registers service_worker.js at own origin    │
-//! │                                               │
-//! │  SW (WASM) ── dispatch ──▸ IDB                │
-//! │    ▲                                          │
-//! │    │ fetch("/dialog-inspector/api/…")         │
-//! │    │                                          │
-//! │  Panel / Extension ── bridge (fetch) ─────┘   │
-//! └──────────────────────────────────────────────┘
+//! ┌───────────────────────────────────────────────────────┐
+//! │ Host application's existing service worker            │
+//! │  includes: import { initDialogInspector }             │
+//! │            from './sw-plugin.js';                      │
+//! │                                                       │
+//! │  content script ──msg──▸ SW: "here's my extension id" │
+//! │                          │                             │
+//! │                          ▼                             │
+//! │                   import('chrome-extension://<id>/     │
+//! │                     dialog_inspector_worker.js')       │
+//! │                          │                             │
+//! │                   SW (WASM) ── dispatch ──▸ IDB        │
+//! │                     ▲                                  │
+//! │  Panel ─ fetch ─────┘                                  │
+//! └───────────────────────────────────────────────────────┘
 //! ```
 //!
-//! The host app registers the inspector as a service worker route.  The SW
-//! loads the WASM worker binary (`bin/worker.rs`) and delegates API requests
-//! to [`dispatch`].  The panel (or extension) uses [`bridge::send`] in
-//! fetch mode.
+//! The host app's service worker includes `sw-plugin.js` (one-line opt-in).
+//! When the extension's content script is injected, it sends the extension
+//! ID to the SW via `postMessage`.  The SW dynamically imports the inspector
+//! WASM module from the extension's `web_accessible_resources`.  The panel
+//! uses [`bridge::send`] in fetch mode, or the host app can also deploy the
+//! WASM locally (no extension needed) by passing `{ wasmUrl }` to the plugin.
 //!
 //! ## 3. Extension (content script bridge)
 //!

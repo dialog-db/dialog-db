@@ -21,7 +21,12 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["content_bg.wasm", "content.js"],
+      "resources": [
+        "content_bg.wasm",
+        "content.js",
+        "dialog_inspector_worker.js",
+        "dialog_inspector_worker_bg.wasm"
+      ],
       "matches": ["<all_urls>"]
     }
   ]

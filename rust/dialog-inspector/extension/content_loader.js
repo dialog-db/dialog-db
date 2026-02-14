@@ -1,17 +1,35 @@
 // Content script loader for dialog-inspector.
 //
-// This runs in every page and initialises the WASM content script module
-// which provides the IndexedDB inspection backend.  The WASM module
-// registers a chrome.runtime.onMessage listener so the devtools panel
-// can send Request messages and receive Response messages.
+// Runs in every page and performs two tasks:
 //
-// The WASM + JS glue files (content.js, content_bg.wasm) are produced
-// by wasm-bindgen during the build.  They are declared as
-// web_accessible_resources in manifest.json so the content script
-// (which shares the page's origin for IDB, but the extension's origin
-// for asset loading) can import them.
+// 1. Signals the extension ID to the host page's service worker (if one
+//    exists and includes the dialog-inspector sw-plugin).  This lets the
+//    SW dynamically import the inspector WASM from this extension's
+//    web_accessible_resources.
+//
+// 2. Loads the WASM content script module which provides the IndexedDB
+//    inspection backend via chrome.runtime.onMessage.  This is the
+//    fallback path when the host has no SW plugin.
 
 (async () => {
+  // ── Signal extension ID to host SW ──────────────────────────────────
+  //
+  // If the host page has a service worker that includes
+  // dialog-inspector's sw-plugin.js, it listens for this message and
+  // dynamically imports the WASM module from our web_accessible_resources.
+  try {
+    const reg = await navigator.serviceWorker?.ready;
+    if (reg?.active) {
+      reg.active.postMessage({
+        type: "dialog-inspector-init",
+        extensionId: chrome.runtime.id,
+      });
+    }
+  } catch (_) {
+    // No service worker — that's fine, content script handles dispatch.
+  }
+
+  // ── Load content script WASM (fallback / direct dispatch) ──────────
   try {
     const src = chrome.runtime.getURL("content.js");
     const mod = await import(src);

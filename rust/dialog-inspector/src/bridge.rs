@@ -46,22 +46,23 @@ fn is_extension_panel() -> bool {
     !devtools.is_undefined() && !devtools.is_null()
 }
 
-/// Check whether a dialog-inspector service worker is available by probing
-/// the API endpoint.  We send a lightweight `list_databases` request and
-/// check for a valid JSON response.
+/// Check whether a dialog-inspector service worker plugin is available.
+///
+/// Probes the `/dialog-inspector/api/ping` endpoint which the sw-plugin
+/// always handles (even before WASM loads).  Returns `true` if the SW
+/// responds with 200.
 async fn has_inspector_sw() -> bool {
-    let result = probe_sw().await;
-    result.unwrap_or(false)
+    probe_sw().await.unwrap_or(false)
 }
 
 async fn probe_sw() -> Result<bool, JsValue> {
     let window: web_sys::Window = js_sys::global().unchecked_into();
-    let promise = window.fetch_with_str("/dialog-inspector/api/list_databases");
+    let promise = window.fetch_with_str("/dialog-inspector/api/ping");
     let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(promise)
         .await?
         .unchecked_into();
-    // If the SW is active, we get a 200 with JSON.  If not registered the
-    // request will 404 from the server (or fail).
+    // The sw-plugin always responds 200 to /ping (with { ready: bool }).
+    // A 404 means no SW plugin is installed.
     Ok(resp.ok())
 }
 
