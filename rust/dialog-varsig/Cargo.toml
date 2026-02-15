@@ -22,6 +22,9 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 testresult = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
 
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

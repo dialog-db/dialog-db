@@ -333,4 +333,152 @@ mod tests {
 
         Ok(())
     }
+
+    #[cfg(feature = "rs256_2048")]
+    #[test]
+    fn test_rs256_2048_varsig_header_construction() {
+        use crate::algorithm::rsa::Rs256;
+
+        let fixture: Varsig<Rs256<256>, TestCodec, String> = Varsig::new(TestCodec);
+        assert_eq!(fixture.algorithm(), &Rs256::<256>::default());
+        assert_eq!(fixture.codec(), &TestCodec);
+    }
+
+    #[cfg(feature = "rs256_4096")]
+    #[test]
+    fn test_rs256_4096_varsig_header_construction() {
+        use crate::algorithm::rsa::Rs256;
+
+        let fixture: Varsig<Rs256<512>, TestCodec, String> = Varsig::new(TestCodec);
+        assert_eq!(fixture.algorithm(), &Rs256::<512>::default());
+        assert_eq!(fixture.codec(), &TestCodec);
+    }
+
+    #[cfg(feature = "rs256_2048")]
+    #[test]
+    fn test_rs256_2048_algorithm_reader() {
+        use crate::algorithm::rsa::Rs256;
+
+        let varsig: Varsig<Rs256<256>, TestCodec, String> = Varsig::new(TestCodec);
+        assert_eq!(varsig.algorithm(), &Rs256::<256>::default());
+    }
+
+    #[cfg(feature = "rs256_4096")]
+    #[test]
+    fn test_rs256_4096_algorithm_reader() {
+        use crate::algorithm::rsa::Rs256;
+
+        let varsig: Varsig<Rs256<512>, TestCodec, String> = Varsig::new(TestCodec);
+        assert_eq!(varsig.algorithm(), &Rs256::<512>::default());
+    }
+
+    #[cfg(feature = "rs256_2048")]
+    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), tokio::test)]
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
+    async fn test_rsa_2048_sign_and_verify() -> TestResult {
+        use super::{signer::Signer, verifier::Verifier};
+        use crate::algorithm::rsa::{Rs256, RsaSignature};
+        use rand::SeedableRng;
+
+        struct TestRsaSigner(rsa::pkcs1v15::SigningKey<sha2::Sha256>);
+        struct TestRsaVerifier(rsa::pkcs1v15::VerifyingKey<sha2::Sha256>);
+
+        impl Signer<RsaSignature<256>> for TestRsaSigner {
+            async fn sign(&self, msg: &[u8]) -> Result<RsaSignature<256>, signature::Error> {
+                use signature::Signer as _;
+                let sig = self.0.try_sign(msg)?;
+                Ok(RsaSignature::from(sig))
+            }
+        }
+
+        impl Verifier<RsaSignature<256>> for TestRsaVerifier {
+            async fn verify(
+                &self,
+                msg: &[u8],
+                sig: &RsaSignature<256>,
+            ) -> Result<(), signature::Error> {
+                use signature::Verifier as _;
+                let rsa_sig = rsa::pkcs1v15::Signature::try_from(sig.to_bytes())?;
+                self.0.verify(msg, &rsa_sig)
+            }
+        }
+
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(42);
+        let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048)?;
+        let public_key = rsa::RsaPublicKey::from(&private_key);
+
+        let sk = TestRsaSigner(rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new_unprefixed(
+            private_key,
+        ));
+        let vk = TestRsaVerifier(rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new_unprefixed(
+            public_key,
+        ));
+
+        let payload = TestPayload {
+            message: "Hello, RSA Varsig!".to_string(),
+            count: 42,
+        };
+
+        let varsig: Varsig<Rs256<256>, TestCodec, TestPayload> = Varsig::new(TestCodec);
+        let encoded = varsig.encode(&payload)?;
+        let sig = sk.sign(&encoded).await?;
+        vk.verify(&encoded, &sig).await?;
+
+        Ok(())
+    }
+
+    #[cfg(feature = "rs256_4096")]
+    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), tokio::test)]
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
+    async fn test_rsa_4096_sign_and_verify() -> TestResult {
+        use super::{signer::Signer, verifier::Verifier};
+        use crate::algorithm::rsa::{Rs256, RsaSignature};
+        use rand::SeedableRng;
+
+        struct TestRsaSigner(rsa::pkcs1v15::SigningKey<sha2::Sha256>);
+        struct TestRsaVerifier(rsa::pkcs1v15::VerifyingKey<sha2::Sha256>);
+
+        impl Signer<RsaSignature<512>> for TestRsaSigner {
+            async fn sign(&self, msg: &[u8]) -> Result<RsaSignature<512>, signature::Error> {
+                use signature::Signer as _;
+                let sig = self.0.try_sign(msg)?;
+                Ok(RsaSignature::from(sig))
+            }
+        }
+
+        impl Verifier<RsaSignature<512>> for TestRsaVerifier {
+            async fn verify(
+                &self,
+                msg: &[u8],
+                sig: &RsaSignature<512>,
+            ) -> Result<(), signature::Error> {
+                use signature::Verifier as _;
+                let rsa_sig = rsa::pkcs1v15::Signature::try_from(sig.to_bytes())?;
+                self.0.verify(msg, &rsa_sig)
+            }
+        }
+
+        let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(99);
+        let private_key = rsa::RsaPrivateKey::new(&mut rng, 4096)?;
+        let public_key = rsa::RsaPublicKey::from(&private_key);
+
+        let sk = TestRsaSigner(rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new_unprefixed(
+            private_key,
+        ));
+        let vk = TestRsaVerifier(rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new_unprefixed(
+            public_key,
+        ));
+
+        let payload = TestPayload {
+            message: "Hello, RSA-4096 Varsig!".to_string(),
+            count: 99,
+        };
+
+        let varsig: Varsig<Rs256<512>, TestCodec, TestPayload> = Varsig::new(TestCodec);
+        let encoded = varsig.encode(&payload)?;
+        let sig = sk.sign(&encoded).await?;
+        vk.verify(&encoded, &sig).await?;
+
+        Ok(())
+    }
 }
