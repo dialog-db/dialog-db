@@ -1,4 +1,5 @@
 use crate::Invocation;
+use dialog_common::Impossible;
 
 /// Trait for environments that can execute invocations.
 ///
@@ -36,4 +37,19 @@ use crate::Invocation;
 pub trait Provider<I: Invocation> {
     /// Execute an invocation and return the output.
     async fn execute(&mut self, input: I::Input) -> I::Output;
+}
+
+/// Blanket [`Provider`] for [`Impossible`]: since it can never be constructed,
+/// the body is unreachable.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<T, I> Provider<I> for Impossible<T>
+where
+    T: dialog_common::ConditionalSend,
+    I: Invocation + 'static,
+    I::Input: dialog_common::ConditionalSend + 'static,
+{
+    async fn execute(&mut self, _input: I::Input) -> I::Output {
+        match self.0 {}
+    }
 }
