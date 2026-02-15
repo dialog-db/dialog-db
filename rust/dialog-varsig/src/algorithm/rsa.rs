@@ -9,6 +9,22 @@ use {
 #[cfg(all(feature = "rsa", feature = "sha2_256"))]
 use super::{SignatureAlgorithm, hash::Sha2_256};
 
+/// Multicodec code for RSA signature algorithm.
+#[cfg(all(feature = "rsa", feature = "sha2_256"))]
+const RSA_SIG_PREFIX: u64 = 0x1205;
+
+/// Multicodec code for SHA2-256 hash algorithm.
+#[cfg(all(feature = "rsa", feature = "sha2_256"))]
+const SHA2_256_TAG: u64 = Sha2_256::MULTIHASH_TAG;
+
+/// Key size tag for RSA-2048 (256 bytes).
+#[cfg(all(feature = "rsa", feature = "sha2_256"))]
+const RSA_2048_KEY_SIZE_TAG: u64 = 0x0100;
+
+/// Key size tag for RSA-4096 (512 bytes).
+#[cfg(all(feature = "rsa", feature = "sha2_256"))]
+const RSA_4096_KEY_SIZE_TAG: u64 = 0x0200;
+
 /// The RSA signature algorithm.
 ///
 /// The `const L` type parameter represents the key length in bytes.
@@ -117,15 +133,15 @@ impl Signature for RsaSignature<512> {
 #[cfg(all(feature = "rsa", feature = "sha2_256"))]
 impl SignatureAlgorithm for Rs256<256> {
     fn prefix(&self) -> u64 {
-        0x1205
+        RSA_SIG_PREFIX
     }
 
     fn config_tags(&self) -> Vec<u64> {
-        vec![0x12, 0x0100]
+        vec![SHA2_256_TAG, RSA_2048_KEY_SIZE_TAG]
     }
 
     fn try_from_tags(bytes: &[u64]) -> Option<(Self, &[u64])> {
-        if bytes.get(0..=2)? == [0x1205, 0x12, 0x0100] {
+        if bytes.get(0..=2)? == [RSA_SIG_PREFIX, SHA2_256_TAG, RSA_2048_KEY_SIZE_TAG] {
             Some((Rsa(PhantomData), bytes.get(3..)?))
         } else {
             None
@@ -136,15 +152,15 @@ impl SignatureAlgorithm for Rs256<256> {
 #[cfg(all(feature = "rsa", feature = "sha2_256"))]
 impl SignatureAlgorithm for Rs256<512> {
     fn prefix(&self) -> u64 {
-        0x1205
+        RSA_SIG_PREFIX
     }
 
     fn config_tags(&self) -> Vec<u64> {
-        vec![0x12, 0x0200]
+        vec![SHA2_256_TAG, RSA_4096_KEY_SIZE_TAG]
     }
 
     fn try_from_tags(bytes: &[u64]) -> Option<(Self, &[u64])> {
-        if bytes.get(0..=2)? == [0x1205, 0x12, 0x0200] {
+        if bytes.get(0..=2)? == [RSA_SIG_PREFIX, SHA2_256_TAG, RSA_4096_KEY_SIZE_TAG] {
             Some((Rsa(PhantomData), bytes.get(3..)?))
         } else {
             None
