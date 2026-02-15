@@ -2,9 +2,7 @@
 
 #[cfg(feature = "rsa")]
 use {
-    super::hash::Multihasher,
-    crate::signature::Signature,
-    signature::SignatureEncoding,
+    super::hash::Multihasher, crate::signature::Signature, signature::SignatureEncoding,
     std::marker::PhantomData,
 };
 

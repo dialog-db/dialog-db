@@ -384,10 +384,7 @@ mod tests {
         struct TestRsaVerifier(rsa::pkcs1v15::VerifyingKey<sha2::Sha256>);
 
         impl Signer<RsaSignature<256>> for TestRsaSigner {
-            async fn sign(
-                &self,
-                msg: &[u8],
-            ) -> Result<RsaSignature<256>, signature::Error> {
+            async fn sign(&self, msg: &[u8]) -> Result<RsaSignature<256>, signature::Error> {
                 use signature::Signer as _;
                 let sig = self.0.try_sign(msg)?;
                 Ok(RsaSignature::from(sig))
@@ -410,8 +407,12 @@ mod tests {
         let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048)?;
         let public_key = rsa::RsaPublicKey::from(&private_key);
 
-        let sk = TestRsaSigner(rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new_unprefixed(private_key));
-        let vk = TestRsaVerifier(rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new_unprefixed(public_key));
+        let sk = TestRsaSigner(rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new_unprefixed(
+            private_key,
+        ));
+        let vk = TestRsaVerifier(rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new_unprefixed(
+            public_key,
+        ));
 
         let payload = TestPayload {
             message: "Hello, RSA Varsig!".to_string(),
@@ -438,10 +439,7 @@ mod tests {
         struct TestRsaVerifier(rsa::pkcs1v15::VerifyingKey<sha2::Sha256>);
 
         impl Signer<RsaSignature<512>> for TestRsaSigner {
-            async fn sign(
-                &self,
-                msg: &[u8],
-            ) -> Result<RsaSignature<512>, signature::Error> {
+            async fn sign(&self, msg: &[u8]) -> Result<RsaSignature<512>, signature::Error> {
                 use signature::Signer as _;
                 let sig = self.0.try_sign(msg)?;
                 Ok(RsaSignature::from(sig))
@@ -464,8 +462,12 @@ mod tests {
         let private_key = rsa::RsaPrivateKey::new(&mut rng, 4096)?;
         let public_key = rsa::RsaPublicKey::from(&private_key);
 
-        let sk = TestRsaSigner(rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new_unprefixed(private_key));
-        let vk = TestRsaVerifier(rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new_unprefixed(public_key));
+        let sk = TestRsaSigner(rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new_unprefixed(
+            private_key,
+        ));
+        let vk = TestRsaVerifier(rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new_unprefixed(
+            public_key,
+        ));
 
         let payload = TestPayload {
             message: "Hello, RSA-4096 Varsig!".to_string(),
