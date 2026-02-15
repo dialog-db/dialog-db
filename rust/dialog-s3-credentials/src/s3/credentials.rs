@@ -5,6 +5,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
+use std::hash::{Hash, Hasher};
 use url::Url;
 
 use crate::capability::{AuthorizedRequest, Precondition, S3Request};
@@ -42,6 +43,13 @@ impl<'de> Deserialize<'de> for PublicCredentials {
     {
         let address = Address::deserialize(deserializer)?;
         PublicCredentials::new(address).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Hash for PublicCredentials {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.address.hash(state);
+        self.path_style.hash(state);
     }
 }
 
@@ -114,6 +122,15 @@ impl PublicCredentials {
             let header_name = format!("x-amz-checksum-{}", checksum.name());
             headers.push((header_name, checksum.to_string()));
         }
+        match request.precondition() {
+            Precondition::IfMatch(etag) => {
+                headers.push(("if-match".to_string(), format!("\"{}\"", etag)));
+            }
+            Precondition::IfNoneMatch => {
+                headers.push(("if-none-match".to_string(), "*".to_string()));
+            }
+            Precondition::None => {}
+        }
 
         Ok(AuthorizedRequest {
             url,
@@ -174,6 +191,15 @@ impl<'de> Deserialize<'de> for PrivateCredentials {
             helper.secret_access_key,
         )
         .map_err(serde::de::Error::custom)
+    }
+}
+
+impl Hash for PrivateCredentials {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.access_key_id.hash(state);
+        self.secret_access_key.hash(state);
+        self.address.hash(state);
+        self.path_style.hash(state);
     }
 }
 
@@ -418,7 +444,7 @@ impl PrivateCredentials {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Credentials {
     /// Public access without signing.
     Public(PublicCredentials),

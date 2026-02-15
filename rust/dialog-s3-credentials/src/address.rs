@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 ///     "my-bucket",
 /// );
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Address {
     /// The S3-compatible endpoint URL (e.g., "https://s3.us-east-1.amazonaws.com")
     endpoint: String,
