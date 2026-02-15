@@ -5,6 +5,7 @@ pub mod ecdsa;
 pub mod eddsa;
 pub mod hash;
 pub mod rsa;
+pub mod webauthn;
 
 use std::fmt::Debug;
 
