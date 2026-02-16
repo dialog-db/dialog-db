@@ -1,0 +1,20 @@
+[package]
+name = "dialog-nlp"
+version.workspace = true
+edition = "2024"
+authors.workspace = true
+description = "Natural language command parser for Dialog-DB, inspired by Mozilla Ubiquity"
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
+async-stream = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+anyhow = { workspace = true }
+
+[features]
+default = []

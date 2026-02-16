@@ -30,6 +30,7 @@ members = [
     "rust/dialog-s3-credentials",
     "rust/dialog-ucan",
     "rust/dialog-varsig",
+    "rust/dialog-nlp",
 ]
 resolver = "2"
 
