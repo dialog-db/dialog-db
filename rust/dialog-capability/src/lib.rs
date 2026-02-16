@@ -196,6 +196,9 @@ pub use capability::*;
 mod provider;
 pub use provider::*;
 
+mod router;
+pub use router::*;
+
 mod authority;
 pub use authority::*;
 
