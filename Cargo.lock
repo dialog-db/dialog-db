@@ -900,6 +900,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-nlp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "futures-core",
+ "futures-util",
+ "thiserror 2.0.17",
+ "tokio",
+]
+
+[[package]]
 name = "dialog-prolly-tree"
 version = "0.1.0"
 dependencies = [
