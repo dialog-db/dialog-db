@@ -11,6 +11,7 @@
 
 use proc_macro::TokenStream;
 mod provider;
+mod router;
 mod test;
 
 /// A cross-platform test macro with automatic service provisioning.
@@ -60,4 +61,32 @@ pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
     provider::generate(attr, item)
+}
+
+/// Derive macro that generates `Provider<RemoteInvocation<Fx, Address>>` impls
+/// for composite structs whose fields each route to a different address type.
+///
+/// For each field with generic type arguments, the macro extracts the first
+/// type argument as the `Address` and generates a forwarding `Provider` impl
+/// that delegates to that field.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Router)]
+/// pub struct Network<Issuer> {
+///     #[cfg(feature = "s3")]
+///     s3: Router<s3::Address, s3::Connection<Issuer>>,
+///     #[cfg(feature = "ucan")]
+///     ucan: Router<ucan::Address, ucan::Connection<Issuer>>,
+/// }
+/// ```
+///
+/// This generates `Provider<RemoteInvocation<Fx, s3::Address>>` and
+/// `Provider<RemoteInvocation<Fx, ucan::Address>>` implementations that
+/// forward to the respective fields. Each field's `#[cfg]` attributes
+/// are preserved on the generated impls.
+#[proc_macro_derive(Router, attributes(route))]
+pub fn router(input: TokenStream) -> TokenStream {
+    router::generate(input)
 }

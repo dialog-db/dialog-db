@@ -27,6 +27,7 @@
 
 pub mod archive;
 pub mod memory;
+pub mod remote;
 pub mod storage;
 
 // Re-export capability primitives for convenience

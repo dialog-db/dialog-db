@@ -46,6 +46,9 @@ pub use hash::*;
 pub mod r#async;
 pub use r#async::*;
 
+mod impossible;
+pub use impossible::*;
+
 #[cfg(feature = "helpers")]
 pub mod helpers;
 

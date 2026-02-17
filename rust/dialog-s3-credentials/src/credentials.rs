@@ -17,6 +17,17 @@ pub enum Credentials {
     Ucan(ucan::Credentials),
 }
 
+impl std::hash::Hash for Credentials {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::S3(c) => c.hash(state),
+            #[cfg(feature = "ucan")]
+            Self::Ucan(c) => c.hash(state),
+        }
+    }
+}
+
 impl From<s3::Credentials> for Credentials {
     fn from(credentials: s3::Credentials) -> Self {
         Self::S3(credentials)
