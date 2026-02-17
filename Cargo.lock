@@ -922,6 +922,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-prose"
+version = "0.1.0"
+dependencies = [
+ "pretty_assertions",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "dialog-s3-credentials"
 version = "0.1.0"
 dependencies = [

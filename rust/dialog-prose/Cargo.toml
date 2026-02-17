@@ -1,0 +1,13 @@
+[package]
+name = "dialog-prose"
+version.workspace = true
+edition = "2024"
+authors.workspace = true
+description = "Natural language prose parser for Dialog-DB's Datalog query engine"
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
