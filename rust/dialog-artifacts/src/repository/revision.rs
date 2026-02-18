@@ -8,8 +8,8 @@ use std::marker::PhantomData;
 
 use base58::ToBase58;
 
-use super::node_reference::NodeReference;
 use super::RepositoryError;
+use super::node_reference::NodeReference;
 
 /// A [`Revision`] represents a concrete state of the dialog instance. It is
 /// kind of like git commit.

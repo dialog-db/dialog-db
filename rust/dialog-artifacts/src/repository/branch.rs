@@ -29,13 +29,8 @@ use super::node_reference::NodeReference;
 use super::revision::Revision;
 
 /// Type alias for the prolly tree index backed by capability-based archive.
-pub type Index<Env> = Tree<
-    GeometricDistribution,
-    Key,
-    State<Datum>,
-    Blake3Hash,
-    ContentAddressedStore<Env>,
->;
+pub type Index<Env> =
+    Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash, ContentAddressedStore<Env>>;
 
 /// A branch represents a named line of development within a repository.
 ///
@@ -201,11 +196,7 @@ impl Open {
     {
         let space = self.subject.to_string();
         let cell_name = format!("local/{}", self.id);
-        let cell = Cell::new(
-            Subject::from(self.subject.clone()),
-            &space,
-            &cell_name,
-        );
+        let cell = Cell::new(Subject::from(self.subject.clone()), &space, &cell_name);
 
         // Try to resolve existing branch state
         let resolved: Option<(BranchState, Vec<u8>)> = cell.resolve().perform(env).await?;
@@ -214,11 +205,8 @@ impl Open {
             Some((state, edition)) => (state, Some(edition)),
             None if self.create_if_missing => {
                 // Create default state
-                let state = BranchState::new(
-                    self.id.clone(),
-                    Revision::new(self.issuer.did()),
-                    None,
-                );
+                let state =
+                    BranchState::new(self.id.clone(), Revision::new(self.issuer.did()), None);
                 let edition = cell.publish(&state, None).perform(env).await?;
                 (state, Some(edition))
             }
@@ -280,12 +268,9 @@ where
         );
 
         // Load tree from current revision hash
-        let mut tree: Index<Env> = Tree::from_hash(
-            base_revision.tree().hash(),
-            archive,
-        )
-        .await
-        .map_err(|e| DialogArtifactsError::Storage(format!("Failed to load tree: {:?}", e)))?;
+        let mut tree: Index<Env> = Tree::from_hash(base_revision.tree().hash(), archive)
+            .await
+            .map_err(|e| DialogArtifactsError::Storage(format!("Failed to load tree: {:?}", e)))?;
 
         // Apply instructions
         tokio::pin!(instructions);
@@ -363,9 +348,9 @@ where
         }
 
         // Get the tree hash
-        let tree_hash = *tree.hash().ok_or_else(|| {
-            DialogArtifactsError::Storage("Failed to get tree hash".to_string())
-        })?;
+        let tree_hash = *tree
+            .hash()
+            .ok_or_else(|| DialogArtifactsError::Storage("Failed to get tree hash".to_string()))?;
 
         let tree_reference = NodeReference(tree_hash);
 
@@ -431,28 +416,16 @@ impl Select {
     pub async fn perform<Env>(
         self,
         env: Arc<Mutex<Env>>,
-    ) -> Result<
-        impl Stream<Item = Result<Artifact, DialogArtifactsError>>,
-        DialogArtifactsError,
-    >
+    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, DialogArtifactsError>
     where
-        Env: Provider<archive::Get>
-            + Provider<archive::Put>
-            + ConditionalSync
-            + 'static,
+        Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
     {
-        let archive = ContentAddressedStore::new(
-            env,
-            Subject::from(self.subject.clone()),
-            &self.catalog,
-        );
+        let archive =
+            ContentAddressedStore::new(env, Subject::from(self.subject.clone()), &self.catalog);
 
-        let tree: Index<Env> = Tree::from_hash(
-            self.state.revision.tree.hash(),
-            archive,
-        )
-        .await
-        .map_err(|e| DialogArtifactsError::Storage(format!("Failed to load tree: {:?}", e)))?;
+        let tree: Index<Env> = Tree::from_hash(self.state.revision.tree.hash(), archive)
+            .await
+            .map_err(|e| DialogArtifactsError::Storage(format!("Failed to load tree: {:?}", e)))?;
 
         let selector = self.selector;
 
@@ -620,43 +593,29 @@ impl PullLocal {
             Tree::from_hash(upstream_revision.tree.hash(), archive.clone())
                 .await
                 .map_err(|e| {
-                    DialogArtifactsError::Storage(format!(
-                        "Failed to load upstream tree: {:?}",
-                        e
-                    ))
+                    DialogArtifactsError::Storage(format!("Failed to load upstream tree: {:?}", e))
                 })?;
 
         // Load base tree (state at last sync)
-        let base: Index<Env> =
-            Tree::from_hash(branch.state.base.hash(), archive.clone())
-                .await
-                .map_err(|e| {
-                    DialogArtifactsError::Storage(format!(
-                        "Failed to load base tree: {:?}",
-                        e
-                    ))
-                })?;
+        let base: Index<Env> = Tree::from_hash(branch.state.base.hash(), archive.clone())
+            .await
+            .map_err(|e| {
+                DialogArtifactsError::Storage(format!("Failed to load base tree: {:?}", e))
+            })?;
 
         // Load current tree
-        let current: Index<Env> =
-            Tree::from_hash(branch.state.revision.tree.hash(), archive)
-                .await
-                .map_err(|e| {
-                    DialogArtifactsError::Storage(format!(
-                        "Failed to load current tree: {:?}",
-                        e
-                    ))
-                })?;
+        let current: Index<Env> = Tree::from_hash(branch.state.revision.tree.hash(), archive)
+            .await
+            .map_err(|e| {
+                DialogArtifactsError::Storage(format!("Failed to load current tree: {:?}", e))
+            })?;
 
         // Compute local changes: what operations transform base into current
         let changes = base.differentiate(&current);
 
         // Integrate local changes into upstream tree
         target.integrate(changes).await.map_err(|e| {
-            DialogArtifactsError::Storage(format!(
-                "Failed to integrate changes: {:?}",
-                e
-            ))
+            DialogArtifactsError::Storage(format!("Failed to integrate changes: {:?}", e))
         })?;
 
         // Get the hash of the integrated tree
@@ -682,10 +641,7 @@ impl PullLocal {
                 cause: HashSet::from([upstream_revision.edition().map_err(|e| {
                     DialogArtifactsError::Storage(format!("Failed to create edition: {:?}", e))
                 })?]),
-                period: upstream_revision
-                    .period
-                    .max(branch.state.revision.period)
-                    + 1,
+                period: upstream_revision.period.max(branch.state.revision.period) + 1,
                 moment: 0,
             };
 
@@ -714,10 +670,7 @@ pub fn novelty<Env>(
     catalog: String,
 ) -> impl Stream<Item = Result<Node<Key, State<Datum>, Blake3Hash>, DialogArtifactsError>>
 where
-    Env: Provider<archive::Get>
-        + Provider<archive::Put>
-        + ConditionalSync
-        + 'static,
+    Env: Provider<archive::Get> + Provider<archive::Put> + ConditionalSync + 'static,
 {
     async_stream::try_stream! {
         let archive = ContentAddressedStore::new(
@@ -806,7 +759,10 @@ mod tests {
             .perform(&mut env)
             .await;
 
-        assert!(matches!(result, Err(RepositoryError::BranchNotFound { .. })));
+        assert!(matches!(
+            result,
+            Err(RepositoryError::BranchNotFound { .. })
+        ));
         Ok(())
     }
 
@@ -835,10 +791,7 @@ mod tests {
         let stream = branch.select(selector).perform(env.clone()).await?;
         tokio::pin!(stream);
 
-        let results: Vec<_> = stream
-            .filter_map(|r| async { r.ok() })
-            .collect()
-            .await;
+        let results: Vec<_> = stream.filter_map(|r| async { r.ok() }).collect().await;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].the, artifact.the);
@@ -896,10 +849,7 @@ mod tests {
         // Pull with upstream at same base — should be a no-op
         let upstream_revision = Revision::new(issuer.did());
 
-        let (branch, pulled) = branch
-            .pull(upstream_revision)
-            .perform(env.clone())
-            .await?;
+        let (branch, pulled) = branch.pull(upstream_revision).perform(env.clone()).await?;
 
         assert!(pulled.is_none(), "No changes expected when base matches");
         assert_eq!(branch.revision().tree(), &NodeReference::default());

@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use dialog_capability::{Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Archive, Catalog, Get, Put};
-use dialog_storage::{Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder};
+use dialog_storage::{
+    Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 use tokio::sync::Mutex;
