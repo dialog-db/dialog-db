@@ -19,7 +19,10 @@ integration-tests = ["dialog-common/integration-tests"]
 web-integration-tests = ["dialog-common/web-integration-tests"]
 
 [dependencies]
+dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
+dialog-credentials = { workspace = true }
+dialog-effects = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-prolly-tree = { workspace = true }
 
@@ -38,6 +41,7 @@ rand_core = { workspace = true }
 rand_chacha = { workspace = true }
 serde = { workspace = true }
 serde-big-array = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
 serde_json = { workspace = true }
 static_assertions = { workspace = true }
 thiserror = { workspace = true }

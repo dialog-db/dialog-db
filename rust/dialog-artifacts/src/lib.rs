@@ -62,6 +62,9 @@ pub use key::*;
 mod uri;
 pub use uri::*;
 
+/// Capability-based repository system.
+pub mod repository;
+
 #[cfg(any(test, feature = "helpers"))]
 mod helpers;
 #[cfg(any(test, feature = "helpers"))]
