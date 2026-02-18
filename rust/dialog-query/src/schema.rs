@@ -10,7 +10,7 @@ use std::collections::HashMap;
 /// Schema defines set of named fields
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Schema {
-    pub(crate) fields: HashMap<String, Field>,
+    fields: HashMap<String, Field>,
 }
 
 impl Schema {

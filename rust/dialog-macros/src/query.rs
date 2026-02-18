@@ -2,6 +2,6 @@
 
 mod helpers;
 
-pub(crate) mod attribute;
-pub(crate) mod concept;
-pub(crate) mod formula;
+pub mod attribute;
+pub mod concept;
+pub mod formula;

@@ -1,4 +1,82 @@
 //! Concept derive macro implementation
+//!
+//! Generates a full ECS-style "concept" from a struct whose fields are `Attribute`
+//! types. A concept groups related attributes that together describe an entity.
+//!
+//! # Example input
+//!
+//! ```rust,ignore
+//! /// A person in the system
+//! #[derive(Concept)]
+//! pub struct Person {
+//!     pub this: Entity,
+//!     pub name: FullName,    // FullName: Attribute<Type = String>
+//!     pub age: Age,          // Age: Attribute<Type = i64>
+//! }
+//! ```
+//!
+//! # Generated output (simplified)
+//!
+//! ```rust,ignore
+//! // -- Compile-time validation --
+//! // Asserts that FullName and Age implement Attribute (excludes `this: Entity`)
+//!
+//! // -- Match struct (query pattern) --
+//! // Each attribute field becomes a Term<T> for pattern matching.
+//! pub struct PersonMatch {
+//!     pub this: Term<Entity>,
+//!     pub name: Term<String>,   // Term<FullName::Type>
+//!     pub age: Term<i64>,       // Term<Age::Type>
+//! }
+//! // Default fills every field with a named variable:
+//! //   PersonMatch { this: Term::var("this"), name: Term::var("name"), age: Term::var("age") }
+//!
+//! // -- Terms struct (convenience constructors) --
+//! pub struct PersonTerms {}
+//! impl PersonTerms {
+//!     pub fn this() -> Term<Entity> { Term::var("this") }
+//!     pub fn name() -> Term<String> { Term::var("name") }
+//!     pub fn age() -> Term<i64> { Term::var("age") }
+//! }
+//!
+//! // -- Attributes struct --
+//! // Match<T> wrappers bound to a specific entity term.
+//! pub struct PersonAttributes {
+//!     pub this: Term<Entity>,
+//!     pub name: Match<String>,
+//!     pub age: Match<i64>,
+//! }
+//!
+//! // -- Static attribute schemas --
+//! // LazyLock statics like PERSON_NAME, PERSON_AGE holding AttributeSchema<T>.
+//!
+//! // -- Concept trait impl --
+//! impl Concept for Person {
+//!     type Instance = Person;
+//!     type Match = PersonMatch;
+//!     type Term = PersonTerms;
+//!     const CONCEPT: predicate::concept::Concept = /* static descriptor */;
+//! }
+//!
+//! // -- Match trait impl --
+//! // PersonMatch::realize(answer) reconstructs a Person from query results.
+//! // PersonMatch::query(source) runs the query and streams Person instances.
+//!
+//! // -- Instance trait impl --
+//! // Person::this() returns the entity.
+//!
+//! // -- IntoIterator impl --
+//! // Iterates over Relation values (one per attribute) for asserting facts.
+//!
+//! // -- Claim impl --
+//! // Person::assert(tx) / Person::retract(tx) for transactional writes.
+//!
+//! // -- Not impl --
+//! // !person syntax for retraction.
+//!
+//! // -- From impls --
+//! // PersonMatch → Parameters, Premise, Application, ConceptApplication
+//! ```
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -63,7 +141,19 @@ pub fn derive(input: TokenStream) -> TokenStream {
         .into();
     }
 
-    // Extract field information
+    // Collect code fragments for each field. We iterate over fields once and build
+    // up parallel vectors of token streams that get spliced into the final output.
+    // Each vector holds one fragment per non-`this` field:
+    //   match_fields         → Term<T> fields for the Match struct
+    //   attributes_fields    → Match<T> fields for the Attributes struct
+    //   rule_when_fields     → Fact selectors for the when() rule builder
+    //   attribute_init_fields→ field initializers for Attributes::new(entity)
+    //   typed_attributes     → LazyLock<AttributeSchema<T>> statics
+    //   value_attributes     → AttributeSchema<Value> for the attributes() vec
+    //   instance_relations   → Relation constructors for IntoIterator/Claim
+    //   terms_methods        → PersonTerms::name() convenience methods
+    //   attributes_tuples    → (name, schema) pairs for attribute lookup
+    //   match_term_conversions → (unused placeholder for future use)
     let mut match_fields = Vec::new();
     let mut attributes_fields = Vec::new();
     let mut rule_when_fields = Vec::new();
