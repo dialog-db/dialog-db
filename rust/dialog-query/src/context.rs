@@ -53,16 +53,6 @@ where
         }
     }
 
-    pub fn new(store: S) -> EvaluationContext<S, impl Answers> {
-        let answers = once(async move { Ok(Answer::new()) });
-
-        EvaluationContext {
-            source: store,
-            selection: answers,
-            scope: Environment::new(),
-        }
-    }
-
     /// Create a new context with updated scope
     pub fn with_scope(&self, scope: Environment) -> EvaluationContext<S, M>
     where

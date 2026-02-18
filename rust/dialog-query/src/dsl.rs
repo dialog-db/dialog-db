@@ -61,11 +61,3 @@ pub type Input<T: Formula> = T::Input;
 #[allow(type_alias_bounds)]
 pub type Instance<T: Concept> = T::Instance;
 
-#[allow(type_alias_bounds)]
-pub type Terms<T: Concept> = T::Term;
-
-#[allow(type_alias_bounds)]
-pub type Query<T: Quarriable> = T::Query;
-
-#[allow(type_alias_bounds)]
-pub type Not<T: Concept> = T::Match;

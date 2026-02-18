@@ -74,9 +74,6 @@ pub use stream::*;
 pub use term::*;
 pub use types::IntoType;
 
-/// Backwards-compatible alias for `formula`
-pub use formula as formulas;
-
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::artifact::{Type, Value};
