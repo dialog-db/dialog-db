@@ -3,8 +3,8 @@ use dialog_prolly_tree::KeyType;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
-use super::node_reference::NodeReference;
-use super::revision::Revision;
+use crate::repository::node_reference::NodeReference;
+use crate::repository::revision::Revision;
 
 /// Branch is similar to a git branch and represents a named state of
 /// the work that is either diverged or converged from other workstream.
@@ -131,7 +131,7 @@ pub enum UpstreamState {
     /// A remote branch upstream
     Remote {
         /// Remote site identifier
-        site: super::Site,
+        site: crate::repository::Site,
         /// Branch identifier
         branch: BranchId,
         /// Subject DID of the repository being tracked
