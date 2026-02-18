@@ -227,20 +227,6 @@ pub trait Formula: Quarriable + Output + Sized + Clone {
     }
 }
 
-pub trait Interface {
-    /// The input type for this formula
-    ///
-    /// This type must be constructible from a Cursor and should contain
-    /// all the fields that the formula needs to read from the input.
-    type Input: In;
-    type Output: Output;
-}
-
-impl<T: Formula> Interface for T {
-    type Input = T::Input;
-    type Output = T;
-}
-
 pub trait In: for<'a> TryFrom<&'a mut Cursor, Error = FormulaEvaluationError> {}
 impl<T: for<'a> TryFrom<&'a mut Cursor, Error = FormulaEvaluationError>> In for T {}
 

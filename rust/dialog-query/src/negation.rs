@@ -4,8 +4,6 @@ use crate::{EvaluationContext, Parameters, Schema, Source, try_stream};
 pub use futures_util::{TryStreamExt, stream};
 use std::fmt::Display;
 
-// FactSelectorPlan's EvaluationPlan implementation is in fact_selector.rs
-
 /// Cost overhead added for negation operations (checking non-existence)
 pub const NEGATION_OVERHEAD: usize = 100;
 

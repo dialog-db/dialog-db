@@ -84,23 +84,6 @@ impl Lowercase {
     }
 }
 
-#[derive(Debug, Clone, dialog_macros::Formula)]
-pub struct Is {
-    /// String to convert
-    pub of: String,
-    /// Lowercase string
-    #[derived]
-    pub is: String,
-}
-impl Is {
-    pub fn derive(input: dialog_query::dsl::Input<Self>) -> Vec<Self> {
-        vec![Self {
-            of: input.of.clone(),
-            is: input.of.clone(),
-        }]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

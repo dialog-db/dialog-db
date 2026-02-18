@@ -13,4 +13,4 @@ pub mod string;
 pub use conversions::{ParseNumber, ToString};
 pub use logic::{And, Not, Or};
 pub use math::{Difference, Modulo, Product, Quotient, Sum};
-pub use string::{Concatenate, Is, Length, Lowercase, Uppercase};
+pub use string::{Concatenate, Length, Lowercase, Uppercase};
