@@ -11,36 +11,50 @@ use crate::{
 };
 use async_stream::try_stream;
 use async_trait::async_trait;
-use base58::ToBase58;
-use blake3;
 use dialog_capability::Did;
 use dialog_common::ConditionalSend;
 use dialog_prolly_tree::{
-    Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, KeyType, Node, Tree, TreeDifference,
+    Differential, EMPT_TREE_HASH, Entry, GeometricDistribution, Node, Tree, TreeDifference,
 };
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use std::fmt::Debug;
 
-use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
+use dialog_storage::{Blake3Hash, CborEncoder, Encoder, StorageBackend};
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fmt::{Display, Formatter};
-use std::hash::Hash;
-use std::marker::PhantomData;
 use std::ops::Range;
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::sync::RwLock;
 
+/// CAS adapter bridging capabilities with prolly tree's ContentAddressedStorage.
+pub mod archive;
+/// Capability-based branch operations (command pattern).
+pub mod branch;
+/// Branch state, identifiers, and upstream descriptors.
+pub mod branch_state;
+/// Cell descriptor for typed memory cell operations.
+pub mod cell;
 /// Credentials for signing and identity management.
 pub mod credentials;
+/// Repository error types.
+pub mod error;
+/// Node reference type for tree root hashes.
+pub mod node_reference;
+/// Occurence logical timestamp type.
+pub mod occurence;
 /// Remote repository and branch management.
 pub mod remote;
 /// Repository trait for managing remotes.
 pub mod remotes;
+/// Revision type and edition tracking.
+pub mod revision;
 
+pub use branch_state::{BranchId, BranchState, UpstreamState};
 pub use credentials::Credentials;
+pub use error::{OperationKind, RepositoryError};
+pub use node_reference::NodeReference;
+pub use occurence::Occurence;
+pub use revision::{Edition, Revision};
 pub use remote::{RemoteBranch, RemoteCredentials, RemoteRepository, RemoteSite, Site};
 pub use remotes::Remotes;
 
@@ -49,38 +63,6 @@ pub use remotes::Remotes;
 pub type Index<Backend> =
     Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash, Archive<PrefixedBackend<Backend>>>;
 
-/// We reference a tree by the root hash.
-#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct NodeReference(Blake3Hash);
-impl NodeReference {
-    fn hash(&self) -> &Blake3Hash {
-        &self.0
-    }
-}
-impl Default for NodeReference {
-    /// By default, a [`NodeReference`] is created to empty search tree.
-    fn default() -> Self {
-        Self(EMPT_TREE_HASH)
-    }
-}
-impl Display for NodeReference {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let bytes: &[u8] = self.hash();
-        write!(f, "#{}", ToBase58::to_base58(bytes))
-    }
-}
-impl Debug for NodeReference {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self, f)
-    }
-}
-
-impl From<NodeReference> for Blake3Hash {
-    fn from(value: NodeReference) -> Self {
-        let NodeReference(hash) = value;
-        hash
-    }
-}
 
 /// A repository represents a local instance of a distributed database.
 #[derive(Debug, Clone)]
@@ -1060,225 +1042,6 @@ impl<Backend: PlatformBackend + 'static> ArtifactStoreMut for Branch<Backend> {
 
 pub use remote::{RemoteBackend, RemoteState};
 
-/// Logical timestamp used to denote dialog transactions. It takes inspiration
-/// from automerge which tags lamport timestamps with origin information. It
-/// takes inspiration from [Hybrid Logical Clocks (HLC)](https://sergeiturukin.com/2017/06/26/hybrid-logical-clocks.html)
-/// and splits timestamp into two components `period` representing coordinated
-/// component of the time and `moment` representing an uncoordinated local
-/// time component. This construction allows us to capture synchronization
-/// points allowing us to prioritize replicas that are actively collaborating
-/// over those that are not.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Occurence {
-    /// DID of the site where this occurence happened.
-    pub site: Did,
-
-    /// Logical coordinated time component denoting a last synchronization
-    /// cycle.
-    pub period: usize,
-
-    /// Local uncoordinated time component denoting a moment within a
-    /// period at which occurrence happened.
-    pub moment: usize,
-}
-
-/// A [`Revision`] represents a concrete state of the dialog instance. It is
-/// kind of like git commit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Revision {
-    /// DID of the site where this revision was created. It is expected to be
-    /// the DID of a signing principal representing a tool acting on the
-    /// author's behalf. In the future we expect to have a signed delegation
-    /// chain from user to this site.
-    pub issuer: Did,
-
-    /// Reference the root of the search tree.
-    pub tree: NodeReference,
-
-    /// Set of revisions this is based of. It can be an empty set if this is
-    /// a first revision, but more commonly it will point to a previous revision
-    /// it is based on. If branch tracks multiple concurrent upstreams it will
-    /// contain a set of revisions.
-    ///
-    /// It is effectively equivalent of of `parents` in git commit objects.
-    pub cause: HashSet<Edition<Revision>>,
-
-    /// Period indicating when this revision was created. This MUST be derived
-    /// from the `cause`al revisions and it must be greater by one than the
-    /// maximum period of the `cause`al revisions that have different `by` from
-    /// this revision. More simply we create a new period whenever we
-    /// synchronize.
-    pub period: usize,
-
-    /// Moment at which this revision was created. It represents a number of
-    /// transactions that have being made in this period. If `cause`al revisions
-    /// have a revision from same `by` this MUST be value greater by one,
-    /// otherwise it should be `0`. This implies that when we sync we increment
-    /// `period` and reset `moment` to `0`. And when we create a transaction we
-    /// increment `moment` by one and keep the same `period`.
-    pub moment: usize,
-}
-
-impl Revision {
-    /// Creates new revision with an empty tree
-    pub fn new(issuer: Did) -> Self {
-        Self {
-            issuer,
-            tree: NodeReference::default(),
-            period: 0,
-            moment: 0,
-            cause: HashSet::new(),
-        }
-    }
-
-    /// DID of the issuer of this revision.
-    pub fn issuer(&self) -> &Did {
-        &self.issuer
-    }
-
-    /// The component of the [`Revision`] that corresponds to the root of the
-    /// search index.
-    pub fn tree(&self) -> &NodeReference {
-        &self.tree
-    }
-
-    /// Period when changes have being made
-    pub fn period(&self) -> &usize {
-        &self.period
-    }
-
-    /// Number of transactions made by this issuer since the beginning of
-    /// this epoch
-    pub fn moment(&self) -> &usize {
-        &self.moment
-    }
-
-    /// Previous revision this replaced.
-    pub fn cause(&self) -> &HashSet<Edition<Revision>> {
-        &self.cause
-    }
-
-    /// Creates an [`Edition`] of this revision by hashing it.
-    ///
-    /// This is used to reference this revision as a causal ancestor in subsequent revisions.
-    pub fn edition(&self) -> Result<Edition<Revision>, RepositoryError> {
-        let revision_bytes = serde_ipld_dagcbor::to_vec(self).map_err(|e| {
-            RepositoryError::StorageError(format!("Failed to serialize revision: {}", e))
-        })?;
-        let revision_hash: [u8; 32] = *blake3::hash(&revision_bytes).as_bytes();
-        Ok(Edition::new(revision_hash))
-    }
-}
-
-impl From<Revision> for Occurence {
-    fn from(revision: Revision) -> Self {
-        Occurence {
-            site: revision.issuer,
-            period: revision.period,
-            moment: revision.moment,
-        }
-    }
-}
-
-/// Branch is similar to a git branch and represents a named state of
-/// the work that is either diverged or converged from other workstream.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BranchState {
-    /// Unique identifier of this fork.
-    pub id: BranchId,
-
-    /// Free-form human-readable description of this fork.
-    pub description: String,
-
-    /// Current revision associated with this branch.
-    pub revision: Revision,
-
-    /// Root of the search tree our this revision is based off.
-    pub base: NodeReference,
-
-    /// An upstream through which updates get propagated. Branch may
-    /// not have an upstream.
-    pub upstream: Option<UpstreamState>,
-}
-
-/// Unique name for the branch
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct BranchId(String);
-
-impl BranchId {
-    /// Creates a new branch identifier from a string.
-    pub fn new(id: String) -> Self {
-        BranchId(id)
-    }
-
-    /// Returns a reference to the branch identifier string.
-    pub fn id(&self) -> &String {
-        &self.0
-    }
-}
-
-impl KeyType for BranchId {
-    fn bytes(&self) -> &[u8] {
-        self.0.as_bytes()
-    }
-}
-impl TryFrom<Vec<u8>> for BranchId {
-    type Error = std::string::FromUtf8Error;
-
-    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
-        Ok(BranchId(String::from_utf8(bytes)?))
-    }
-}
-impl Display for BranchId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl From<&BranchId> for BranchId {
-    fn from(value: &BranchId) -> Self {
-        value.clone()
-    }
-}
-
-impl BranchState {
-    /// Create a new fork from the given revision.
-    pub fn new(id: BranchId, revision: Revision, description: Option<String>) -> Self {
-        Self {
-            description: description.unwrap_or_else(|| id.0.clone()),
-            base: revision.tree.clone(),
-            revision,
-            upstream: None,
-            id,
-        }
-    }
-    /// Unique identifier of this fork.
-    pub fn id(&self) -> &BranchId {
-        &self.id
-    }
-
-    /// Current revision of this branch.
-    pub fn revision(&self) -> &Revision {
-        &self.revision
-    }
-
-    /// Description of this branch.
-    pub fn description(&self) -> &str {
-        &self.description
-    }
-
-    /// Upstream branch of this branch.
-    pub fn upstream(&self) -> Option<&UpstreamState> {
-        self.upstream.as_ref()
-    }
-
-    /// Resets the branch to a new revision.
-    pub fn reset(&mut self, revision: Revision) -> &mut Self {
-        self.revision = revision;
-        self
-    }
-}
-
 /// Descriptor for a local upstream branch (lazy loaded).
 #[derive(Clone)]
 pub struct LocalUpstream<Backend: PlatformBackend + 'static> {
@@ -1459,210 +1222,6 @@ impl<Backend: PlatformBackend + 'static> From<Upstream<Backend>> for UpstreamSta
                 branch: BranchId::new(branch.id().to_string()),
                 subject: branch.subject().clone(),
             },
-        }
-    }
-}
-
-/// Upstream represents some branch being tracked
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum UpstreamState {
-    /// A local branch upstream
-    Local {
-        /// Branch identifier
-        branch: BranchId,
-    },
-    /// A remote branch upstream
-    Remote {
-        /// Remote site identifier
-        site: Site,
-        /// Branch identifier
-        branch: BranchId,
-        /// Subject DID of the repository being tracked
-        subject: Did,
-    },
-}
-
-impl UpstreamState {
-    /// Returns the branch identifier of this upstream.
-    pub fn id(&self) -> &BranchId {
-        match self {
-            Self::Local { branch } => branch,
-            Self::Remote { branch, .. } => branch,
-        }
-    }
-
-    /// Returns the subject DID for remote upstreams, None for local.
-    pub fn subject(&self) -> Option<&Did> {
-        match self {
-            Self::Local { .. } => None,
-            Self::Remote { subject, .. } => Some(subject),
-        }
-    }
-}
-
-/// Blake3 hash of the branch state.
-#[derive(Serialize, Deserialize)]
-pub struct Edition<T>([u8; 32], PhantomData<fn() -> T>);
-impl<T> Edition<T> {
-    /// Creates a new edition from a hash.
-    pub fn new(hash: [u8; 32]) -> Self {
-        Self(hash, PhantomData)
-    }
-}
-impl<T> Clone for Edition<T> {
-    fn clone(&self) -> Self {
-        Self(self.0, PhantomData)
-    }
-}
-
-impl<T> Debug for Edition<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&format!(
-            "#<{}>{}",
-            std::any::type_name::<T>(),
-            self.0.to_base58().as_str()
-        ))
-    }
-}
-
-impl<T> Hash for Edition<T> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
-    }
-}
-
-impl<T> PartialEq for Edition<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl<T> Eq for Edition<T> {}
-impl<T> PartialOrd for Edition<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl<T> Ord for Edition<T> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.cmp(&other.0)
-    }
-}
-impl<T> KeyType for Edition<T> {
-    fn bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-impl<T> TryFrom<Vec<u8>> for Edition<T> {
-    type Error = crate::DialogArtifactsError;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Ok(Self(
-            value.try_into().map_err(|value: Vec<u8>| {
-                crate::DialogArtifactsError::InvalidReference(format!(
-                    "Incorrect length (expected {}, got {})",
-                    32,
-                    value.len()
-                ))
-            })?,
-            PhantomData,
-        ))
-    }
-}
-
-/// The common error type used by this crate
-#[derive(Error, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RepositoryError {
-    /// Branch with the given ID was not found
-    #[error("Branch {id} not found")]
-    BranchNotFound {
-        /// The ID of the branch that was not found
-        id: BranchId,
-    },
-
-    /// A storage operation failed
-    #[error("Storage error {0}")]
-    StorageError(String),
-
-    /// Branch has no configured upstream
-    #[error("Branch {id} has no upstream")]
-    BranchHasNoUpstream {
-        /// The ID of the branch that has no upstream
-        id: BranchId,
-    },
-
-    /// Pushing a revision failed
-    #[error("Pushing revision failed: {cause}")]
-    PushFailed {
-        /// The underlying error message
-        cause: String,
-    },
-
-    /// Remote repository not found
-    #[error("Remote {remote} not found")]
-    RemoteNotFound {
-        /// Remote site identifier
-        remote: Site,
-    },
-    /// Remote repository already exists
-    #[error("Remote {remote} already exist")]
-    RemoteAlreadyExists {
-        /// Remote site identifier
-        remote: Site,
-    },
-    /// Connection to remote repository failed
-    #[error("Connection to remote {remote} failed")]
-    RemoteConnectionError {
-        /// Remote site identifier
-        remote: Site,
-    },
-
-    /// Branch upstream is set to itself
-    #[error("Upsteam of local {id} is set to itself")]
-    BranchUpstreamIsItself {
-        /// Branch identifier
-        id: BranchId,
-    },
-
-    /// Invalid internal state (should never happen in normal operation)
-    #[error("Invalid state: {message}")]
-    InvalidState {
-        /// Description of the invalid state
-        message: String,
-    },
-}
-
-impl RepositoryError {
-    /// Create a new storage error
-    pub fn storage_error(capability: Capability, cause: DialogStorageError) -> Self {
-        RepositoryError::StorageError(format!("{}: {:?}", capability, cause))
-    }
-}
-
-/// Identifies which operation failed when a storage error occurs.
-/// Used in [`RepositoryError::StorageError`] to provide context about where the failure happened.
-#[derive(Error, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Capability {
-    /// Failed while resolving a branch by ID
-    ResolveBranch,
-    /// Failed while resolving a revision
-    ResolveRevision,
-    /// Failed while updating a revision
-    UpdateRevision,
-
-    /// Failed during archive operation
-    ArchiveError,
-
-    /// Failed during encoding operation
-    EncodeError,
-}
-impl Display for Capability {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Capability::ResolveBranch => write!(f, "ResolveBranch"),
-            Capability::ResolveRevision => write!(f, "ResolveRevision"),
-            Capability::UpdateRevision => write!(f, "UpdateRevision"),
-            Capability::ArchiveError => write!(f, "ArchiveError"),
-            Capability::EncodeError => write!(f, "EncodeError"),
         }
     }
 }

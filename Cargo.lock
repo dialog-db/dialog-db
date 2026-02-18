@@ -754,6 +754,7 @@ dependencies = [
  "dialog-capability",
  "dialog-common",
  "dialog-credentials",
+ "dialog-effects",
  "dialog-prolly-tree",
  "dialog-s3-credentials",
  "dialog-storage",
