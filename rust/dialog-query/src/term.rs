@@ -587,7 +587,6 @@ mod tests {
                 panic!("Deserialization failed: {}", e);
             }
         }
-
     }
 
     #[dialog_common::test]

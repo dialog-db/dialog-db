@@ -122,7 +122,21 @@ macro_rules! impl_scalar {
 }
 
 impl_scalar!(
-    bool, String, u16, u32, u64, u128, i16, i32, i64, i128, f32, f64, Entity, Attribute, Vec<u8>,
+    bool,
+    String,
+    u16,
+    u32,
+    u64,
+    u128,
+    i16,
+    i32,
+    i64,
+    i128,
+    f32,
+    f64,
+    Entity,
+    Attribute,
+    Vec<u8>,
     Cause
 );
 
