@@ -260,8 +260,6 @@ pub enum FormulaEvaluationError {
 
 impl From<InconsistencyError> for FormulaEvaluationError {
     fn from(e: InconsistencyError) -> Self {
-        // Convert InconsistencyError by matching on its variants
-        // This is a compatibility bridge for Match-based formula operations
         match e {
             InconsistencyError::UnboundVariableError(var) => {
                 FormulaEvaluationError::UnboundVariable {
@@ -270,48 +268,34 @@ impl From<InconsistencyError> for FormulaEvaluationError {
                 }
             }
             InconsistencyError::AssignmentError(msg) => {
-                // This occurs when trying to set a variable that's already bound to a different value
-                // We don't have enough context to create proper VariableInconsistency,
-                // so wrap in TypeMismatch for now
-                eprintln!(
-                    "Warning: InconsistencyError::AssignmentError in formula: {}",
-                    msg
-                );
-                FormulaEvaluationError::TypeMismatch {
-                    expected: crate::artifact::Type::UnsignedInt,
-                    actual: crate::artifact::Type::UnsignedInt,
+                FormulaEvaluationError::VariableInconsistency {
+                    parameter: msg,
+                    actual: crate::Term::var("_"),
+                    expected: crate::Term::var("_"),
                 }
             }
             InconsistencyError::UnexpectedType { expected, actual } => {
                 FormulaEvaluationError::TypeMismatch { expected, actual }
             }
-            InconsistencyError::UnconstrainedSelector => {
-                // This shouldn't happen in formula evaluation
-                FormulaEvaluationError::TypeMismatch {
-                    expected: crate::artifact::Type::String,
-                    actual: crate::artifact::Type::String,
-                }
-            }
             InconsistencyError::TypeConversion(type_error) => {
                 let crate::artifact::TypeError::TypeMismatch(expected, actual) = type_error;
                 FormulaEvaluationError::TypeMismatch { expected, actual }
             }
-            InconsistencyError::TypeError(msg) => {
-                eprintln!("Warning: InconsistencyError::TypeError in formula: {}", msg);
-                FormulaEvaluationError::TypeMismatch {
-                    expected: crate::artifact::Type::String,
-                    actual: crate::artifact::Type::String,
+            InconsistencyError::TypeError(msg) => FormulaEvaluationError::VariableInconsistency {
+                parameter: msg,
+                actual: crate::Term::var("_"),
+                expected: crate::Term::var("_"),
+            },
+            InconsistencyError::TypeMismatch { expected, actual } => {
+                FormulaEvaluationError::VariableInconsistency {
+                    parameter: "value".to_string(),
+                    actual: crate::Term::Constant(actual),
+                    expected: crate::Term::Constant(expected),
                 }
             }
-            InconsistencyError::TypeMismatch {
-                expected: _,
-                actual: _,
-            } => {
-                // TypeMismatch from Value comparison - we don't have type info directly
-                eprintln!("Warning: InconsistencyError::TypeMismatch in formula");
-                FormulaEvaluationError::TypeMismatch {
-                    expected: crate::artifact::Type::String,
-                    actual: crate::artifact::Type::UnsignedInt,
+            InconsistencyError::UnconstrainedSelector => {
+                FormulaEvaluationError::RequiredParameter {
+                    parameter: "unconstrained selector".to_string(),
                 }
             }
         }

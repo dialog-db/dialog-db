@@ -357,23 +357,6 @@ impl std::ops::Not for FactApplication {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct FactApplicationPlan {
-    pub selector: FactApplication,
-    pub provides: Environment,
-    pub cost: usize,
-}
-
-impl FactApplicationPlan {
-    pub fn cost(&self) -> usize {
-        self.cost
-    }
-
-    pub fn provides(&self) -> &Environment {
-        &self.provides
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
