@@ -60,4 +60,3 @@ pub type Input<T: Formula> = T::Input;
 
 #[allow(type_alias_bounds)]
 pub type Instance<T: Concept> = T::Instance;
-
