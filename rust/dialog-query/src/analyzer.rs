@@ -510,155 +510,124 @@ impl TryFrom<Analysis> for Plan {
     }
 }
 
-#[dialog_common::test]
-fn test_analysis_from_premise_all_derived() {
-    use crate::formula::string::Length;
-    use crate::predicate::formula::Formula;
-    use crate::{Parameters, Term, Value};
-
-    // Length formula has: of (required), is (derived)
-    // We'll test with both as variables to see derived-only behavior
-    let mut params = Parameters::new();
-    params.insert("of".to_string(), Term::<Value>::var("text".to_string()));
-    params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
-
-    let application = Length::apply(params).unwrap();
-    let premise = Premise::from(application);
-
-    // Analysis should be Blocked because "of" is required
-    let analysis = Analysis::from(premise);
-    assert!(!analysis.is_viable());
-}
-
-#[dialog_common::test]
-fn test_analysis_from_premise_with_constant() {
-    use crate::formula::string::Length;
-    use crate::predicate::formula::Formula;
-    use crate::{Parameters, Term, Value};
-
-    // Provide "of" as a constant, "is" as a variable
-    let mut params = Parameters::new();
-    params.insert(
-        "of".to_string(),
-        Term::<Value>::Constant(Value::String("hello".to_string())),
-    );
-    params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
-
-    let application = Length::apply(params).unwrap();
-    let premise = Premise::from(application);
-
-    // Analysis should be Viable because "of" is provided as constant
-    let analysis = Analysis::from(premise);
-    assert!(analysis.is_viable());
-}
-
-#[dialog_common::test]
-fn test_analysis_update_transitions_to_viable() {
+#[cfg(test)]
+mod tests {
+    use super::*;
     use crate::formula::string::Length;
     use crate::predicate::formula::Formula;
     use crate::{Environment, Parameters, Term, Value};
 
-    // Length formula requires "of" parameter
-    let mut params = Parameters::new();
-    params.insert("of".to_string(), Term::<Value>::var("text"));
-    params.insert("is".to_string(), Term::<Value>::var("len"));
+    #[dialog_common::test]
+    fn test_analysis_from_premise_all_derived() {
+        let mut params = Parameters::new();
+        params.insert("of".to_string(), Term::<Value>::var("text".to_string()));
+        params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
 
-    let application = Length::apply(params).unwrap();
-    let premise = Premise::from(application);
+        let application = Length::apply(params).unwrap();
+        let premise = Premise::from(application);
 
-    let mut analysis = Analysis::from(premise);
-    assert!(!analysis.is_viable());
+        let analysis = Analysis::from(premise);
+        assert!(!analysis.is_viable());
+    }
 
-    // Update with "text" bound
-    let mut env = Environment::new();
-    env.add(&Term::<Value>::var("text"));
-    analysis.update(&env);
+    #[dialog_common::test]
+    fn test_analysis_from_premise_with_constant() {
+        let mut params = Parameters::new();
+        params.insert(
+            "of".to_string(),
+            Term::<Value>::Constant(Value::String("hello".to_string())),
+        );
+        params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
 
-    // Should now be viable
-    assert!(analysis.is_viable());
+        let application = Length::apply(params).unwrap();
+        let premise = Premise::from(application);
+
+        let analysis = Analysis::from(premise);
+        assert!(analysis.is_viable());
+    }
+
+    #[dialog_common::test]
+    fn test_analysis_update_transitions_to_viable() {
+        let mut params = Parameters::new();
+        params.insert("of".to_string(), Term::<Value>::var("text"));
+        params.insert("is".to_string(), Term::<Value>::var("len"));
+
+        let application = Length::apply(params).unwrap();
+        let premise = Premise::from(application);
+
+        let mut analysis = Analysis::from(premise);
+        assert!(!analysis.is_viable());
+
+        let mut env = Environment::new();
+        env.add(&Term::<Value>::var("text"));
+        analysis.update(&env);
+
+        assert!(analysis.is_viable());
+    }
+
+    #[dialog_common::test]
+    fn test_analysis_update_reduces_cost_when_derived_bound() {
+        let mut params = Parameters::new();
+        params.insert(
+            "of".to_string(),
+            Term::<Value>::Constant(Value::String("hello".to_string())),
+        );
+        params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
+
+        let application = Length::apply(params).unwrap();
+        let premise = Premise::from(application);
+
+        let mut analysis = Analysis::from(premise);
+        let initial_cost = analysis.cost();
+        assert!(analysis.is_viable());
+
+        let mut env = Environment::new();
+        env.add(&Term::<Value>::var("len".to_string()));
+        analysis.update(&env);
+
+        assert_eq!(
+            analysis.cost(),
+            initial_cost,
+            "Formula cost should remain constant regardless of bound variables"
+        );
+    }
+
+    #[dialog_common::test]
+    fn test_analysis_try_into_plan_when_viable() {
+        let mut params = Parameters::new();
+        params.insert(
+            "of".to_string(),
+            Term::<Value>::Constant(Value::String("hello".to_string())),
+        );
+        params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
+
+        let application = Length::apply(params).unwrap();
+        let premise = Premise::from(application);
+
+        let analysis = Analysis::from(premise);
+        assert!(analysis.is_viable());
+
+        let plan = Plan::try_from(analysis);
+        assert!(plan.is_ok());
+    }
+
+    #[dialog_common::test]
+    fn test_analysis_try_into_plan_when_blocked() {
+        let mut params = Parameters::new();
+        params.insert("of".to_string(), Term::<Value>::var("text".to_string()));
+        params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
+
+        let application = Length::apply(params).unwrap();
+        let premise = Premise::from(application);
+
+        let analysis = Analysis::from(premise);
+        assert!(!analysis.is_viable());
+
+        let plan = Plan::try_from(analysis);
+        assert!(plan.is_err());
+    }
 }
 
-#[dialog_common::test]
-fn test_analysis_update_reduces_cost_when_derived_bound() {
-    use crate::formula::string::Length;
-    use crate::predicate::formula::Formula;
-    use crate::{Environment, Parameters, Term, Value};
-
-    // Provide "of" as constant so it's viable, "is" is derived
-    let mut params = Parameters::new();
-    params.insert(
-        "of".to_string(),
-        Term::<Value>::Constant(Value::String("hello".to_string())),
-    );
-    params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
-
-    let application = Length::apply(params).unwrap();
-    let premise = Premise::from(application);
-
-    let mut analysis = Analysis::from(premise);
-    let initial_cost = analysis.cost();
-    assert!(analysis.is_viable());
-
-    // Update with "len" already bound
-    let mut env = Environment::new();
-    env.add(&Term::<Value>::var("len".to_string()));
-    analysis.update(&env);
-
-    // For formulas, cost doesn't change based on what's bound (it's computational, not I/O)
-    // The cost is constant regardless of which variables are bound
-    assert_eq!(
-        analysis.cost(),
-        initial_cost,
-        "Formula cost should remain constant regardless of bound variables"
-    );
-}
-
-#[dialog_common::test]
-fn test_analysis_try_into_plan_when_viable() {
-    use crate::formula::string::Length;
-    use crate::predicate::formula::Formula;
-    use crate::{Parameters, Term, Value};
-
-    // Provide "of" as constant so premise is viable
-    let mut params = Parameters::new();
-    params.insert(
-        "of".to_string(),
-        Term::<Value>::Constant(Value::String("hello".to_string())),
-    );
-    params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
-
-    let application = Length::apply(params).unwrap();
-    let premise = Premise::from(application);
-
-    let analysis = Analysis::from(premise);
-    assert!(analysis.is_viable());
-
-    // Should successfully convert to Plan
-    let plan = Plan::try_from(analysis);
-    assert!(plan.is_ok());
-}
-
-#[dialog_common::test]
-fn test_analysis_try_into_plan_when_blocked() {
-    use crate::formula::string::Length;
-    use crate::predicate::formula::Formula;
-    use crate::{Parameters, Term, Value};
-
-    // Leave "of" as unbound variable - premise will be blocked
-    let mut params = Parameters::new();
-    params.insert("of".to_string(), Term::<Value>::var("text".to_string()));
-    params.insert("is".to_string(), Term::<Value>::var("len".to_string()));
-
-    let application = Length::apply(params).unwrap();
-    let premise = Premise::from(application);
-
-    let analysis = Analysis::from(premise);
-    assert!(!analysis.is_viable());
-
-    // Should fail to convert to Plan
-    let plan = Plan::try_from(analysis);
-    assert!(plan.is_err());
-}
 #[cfg(test)]
 mod cost_model_tests {
     use crate::analyzer::Analysis;
@@ -1246,50 +1215,50 @@ mod cost_model_tests {
             expected_total, total
         );
     }
-}
-#[dialog_common::test]
-fn debug_update_cost() {
-    use crate::analyzer::Analysis;
-    use crate::application::fact::FactApplication;
-    use crate::artifact::Attribute;
-    use crate::artifact::Entity;
-    use crate::{Environment, Premise, Term, Value};
 
-    let the_attr: Attribute = "user/name".parse().unwrap();
-    let app = FactApplication::new(
-        Term::Constant(the_attr),
-        Term::<Entity>::var("entity"),
-        Term::<Value>::var("value"),
-        Term::var("cause"),
-        crate::attribute::Cardinality::One,
-    );
+    #[dialog_common::test]
+    fn debug_update_cost() {
+        use crate::analyzer::Analysis;
+        use crate::application::fact::FactApplication;
+        use crate::artifact::Attribute;
+        use crate::artifact::Entity;
+        use crate::{Environment, Premise, Term, Value};
 
-    let schema = app.schema();
-    eprintln!("\nSchema:");
-    for (name, constraint) in schema.iter() {
-        eprintln!("  {}: {:?}", name, constraint.requirement);
-    }
+        let the_attr: Attribute = "user/name".parse().unwrap();
+        let app = FactApplication::new(
+            Term::Constant(the_attr),
+            Term::<Entity>::var("entity"),
+            Term::<Value>::var("value"),
+            Term::var("cause"),
+            crate::attribute::Cardinality::One,
+        );
 
-    let premise = Premise::from(app);
-    let mut analysis = Analysis::from(premise);
+        let schema = app.schema();
+        eprintln!("\nSchema:");
+        for (name, constraint) in schema.iter() {
+            eprintln!("  {}: {:?}", name, constraint.requirement);
+        }
 
-    eprintln!("\nInitial state:");
-    eprintln!("  Cost: {}", analysis.cost());
-    if let Analysis::Viable { binds, .. } = &analysis {
-        eprintln!("  Binds: {:?}", binds.variables);
-    }
+        let premise = Premise::from(app);
+        let mut analysis = Analysis::from(premise);
 
-    // Bind entity
-    let mut env = Environment::new();
-    env.add(&Term::<Value>::var("entity"));
+        eprintln!("\nInitial state:");
+        eprintln!("  Cost: {}", analysis.cost());
+        if let Analysis::Viable { binds, .. } = &analysis {
+            eprintln!("  Binds: {:?}", binds.variables);
+        }
 
-    eprintln!("\nUpdating with entity bound...");
-    analysis.update(&env);
+        let mut env = Environment::new();
+        env.add(&Term::<Value>::var("entity"));
 
-    eprintln!("\nAfter update:");
-    eprintln!("  Cost: {}", analysis.cost());
-    if let Analysis::Viable { binds, env, .. } = &analysis {
-        eprintln!("  Binds: {:?}", binds.variables);
-        eprintln!("  Env: {:?}", env.variables);
+        eprintln!("\nUpdating with entity bound...");
+        analysis.update(&env);
+
+        eprintln!("\nAfter update:");
+        eprintln!("  Cost: {}", analysis.cost());
+        if let Analysis::Viable { binds, env, .. } = &analysis {
+            eprintln!("  Binds: {:?}", binds.variables);
+            eprintln!("  Env: {:?}", env.variables);
+        }
     }
 }

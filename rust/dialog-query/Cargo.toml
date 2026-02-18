@@ -50,8 +50,6 @@ dialog-storage = { workspace = true, features = ["helpers"] }
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 futures-util = { workspace = true }
-
-[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 wasm-bindgen-test = { workspace = true }
 
 [features]
