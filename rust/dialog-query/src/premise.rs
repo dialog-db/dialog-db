@@ -10,7 +10,7 @@ use async_stream::try_stream;
 pub use super::application::Application;
 use super::application::{FactApplication, FormulaApplication};
 pub use super::constraint::Constraint;
-pub use super::context::{EvaluationPlan, new_context};
+pub use super::context::new_context;
 pub use super::negation::Negation;
 pub use crate::environment::Environment;
 pub use crate::error::{AnalyzerError, PlanError, QueryResult};

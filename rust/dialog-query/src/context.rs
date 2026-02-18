@@ -1,10 +1,8 @@
-//! Query execution plans - traits and context for evaluation
+//! Query execution context for evaluation
 
 pub use crate::query::Source;
-pub use crate::{Value, selection::Answer, selection::Answers, try_stream};
-pub use dialog_common::ConditionalSend;
+pub use crate::{selection::Answer, selection::Answers, try_stream};
 pub use futures_util::stream::once;
-use std::collections::BTreeMap;
 
 pub use futures_util::{TryStreamExt, stream};
 
@@ -19,10 +17,6 @@ pub fn new_context<S: Source>(store: S) -> EvaluationContext<S, impl Answers> {
         scope: Environment::new(),
     }
 }
-
-/// A single result frame with variable bindings
-/// Equivalent to MatchFrame in TypeScript: Map<Variable, Scalar>
-pub type MatchFrame = BTreeMap<String, Value>;
 
 /// Evaluation context passed to plans during execution
 /// Based on TypeScript EvaluationContext in @query/src/api.ts
@@ -64,18 +58,6 @@ where
             scope,
         }
     }
-}
-
-/// Trait implemented by execution plans
-/// Following the familiar-query pattern: process selection of answers and return new answers
-pub trait EvaluationPlan: Clone + std::fmt::Debug + ConditionalSend {
-    /// Get the estimated cost of executing this plan
-    fn cost(&self) -> usize;
-    /// Set of variables that this plan will bind
-    fn provides(&self) -> &Environment;
-    /// Execute this plan with the given context and return result answers with provenance
-    /// This follows the familiar-query pattern where answers flow through the evaluation
-    fn evaluate<S: Source, M: Answers>(&self, context: EvaluationContext<S, M>) -> impl Answers;
 }
 
 #[cfg(test)]

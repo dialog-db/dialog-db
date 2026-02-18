@@ -51,7 +51,7 @@ pub use artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
 pub use attribute::{Attribute, AttributeSchema, Cardinality, With};
 pub use claim::Claim;
 pub use concept::Concept;
-pub use context::{EvaluationContext, EvaluationPlan};
+pub use context::EvaluationContext;
 pub use dialog_macros::{Attribute, Concept, Formula};
 pub use dsl::{Input, Match};
 pub use error::{InconsistencyError, QueryError};
@@ -77,7 +77,6 @@ pub use types::IntoType;
 /// Re-export commonly used types
 pub mod prelude {
     pub use crate::artifact::{Type, Value};
-    pub use crate::context::EvaluationPlan;
     pub use crate::environment::Environment;
     pub use crate::error::QueryError;
     pub use crate::premise::Premise;
