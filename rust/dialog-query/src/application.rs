@@ -14,16 +14,12 @@ pub use fact::FactApplication;
 pub use formula::FormulaApplication;
 pub use std::fmt::Display;
 
-/// Represents different types of applications that can query the knowledge base.
-/// Each variant corresponds to a different kind of query operation.
-///
-/// Note: Constraints are no longer part of Application - they are now separate
-/// Premise variants since they don't query the knowledge base but rather express
-/// relationships between variables.
+/// Different types of applications that can query the knowledge base.
+/// Constraints are separate `Premise` variants since they express relationships
+/// between variables rather than querying the knowledge base.
 ///
 /// TODO: Large enum variant - FactApplication (448 bytes) is much larger than other variants.
-/// Consider boxing in future to reduce memory footprint. This would require boxing FactApplication
-/// to avoid wasting 350+ bytes when storing Concept/Formula variants.
+/// Consider boxing to reduce memory footprint.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Application {

@@ -10,7 +10,7 @@
 //!
 //! - **[`Formula`] trait** - The core trait that all formulas must implement
 //! - **[`Compute`] trait** - Optional trait for formulas that compute outputs from inputs
-//! - **[`FormulaApplication`]** - Non-generic formula bound to term mappings, integrable with rules
+//! - **[`FormulaApplication`]** - Formula bound to term mappings, integrable with rules
 //! - **[`Cursor`](crate::cursor::Cursor)** - Provides read/write access during evaluation
 //! - **[`Dependencies`](crate::deductive_rule::Dependencies)** - Declares parameter requirements
 //! - **Standard `TryFrom<Value>`** - Type conversion between Value and Rust types
@@ -64,7 +64,7 @@
 //! # Design Principles
 //!
 //! 1. **Type Safety** - Formulas work with strongly typed inputs and outputs
-//! 2. **Integration** - Non-generic applications integrate seamlessly with rule system
+//! 2. **Integration** - Applications integrate seamlessly with the rule system
 //! 3. **Composability** - Formulas can be chained and combined in queries and rules
 //! 4. **Separation of Concerns** - Logic (Compute) is separate from I/O (Cursor)
 //! 5. **Dependency Declaration** - Clear parameter requirements for planning
