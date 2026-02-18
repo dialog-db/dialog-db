@@ -1,4 +1,4 @@
-//! Fact, Assertion, Retraction, and Claim types for the dialog-query system
+//! Fact and Claim types for the dialog-query system
 
 use std::hash::Hash;
 
@@ -13,28 +13,6 @@ pub use crate::types::Scalar;
 use dialog_artifacts::{Blake3Hash, CborEncoder, DialogArtifactsError, Encoder};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
-
-/// An assertion represents a fact to be asserted in the database
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Assertion {
-    /// The attribute (predicate)
-    pub the: Attribute,
-    /// The entity (subject)
-    pub of: Entity,
-    /// The value (object)
-    pub is: Value,
-}
-
-/// A retraction represents a fact to be retracted from the database
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Retraction {
-    /// The attribute (predicate)
-    pub the: Attribute,
-    /// The entity (subject)
-    pub of: Entity,
-    /// The value (object)
-    pub is: Value,
-}
 
 /// A fact represents persisted data with a cause - can be an assertion or retraction
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Serialize, Deserialize)]
@@ -107,32 +85,6 @@ impl<T: Scalar + ConditionalSend + ConditionalSync + Serialize> Fact<T> {
     pub async fn hash(&self) -> Result<Blake3Hash, DialogArtifactsError> {
         let (hash, _) = CborEncoder.encode(self).await?;
         Ok(hash)
-    }
-}
-
-/// Convert Assertion to Instruction for committing
-impl From<Assertion> for Instruction {
-    fn from(assertion: Assertion) -> Self {
-        let artifact = Artifact {
-            the: assertion.the,
-            of: assertion.of,
-            is: assertion.is,
-            cause: None, // Assertions start without a cause
-        };
-        Instruction::Assert(artifact)
-    }
-}
-
-/// Convert Retraction to Instruction for committing
-impl From<Retraction> for Instruction {
-    fn from(retraction: Retraction) -> Self {
-        let artifact = Artifact {
-            the: retraction.the,
-            of: retraction.of,
-            is: retraction.is,
-            cause: None, // Retractions specify what to retract, cause is not relevant
-        };
-        Instruction::Retract(artifact)
     }
 }
 
