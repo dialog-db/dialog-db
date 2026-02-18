@@ -54,15 +54,14 @@ pub use credentials::Credentials;
 pub use error::{OperationKind, RepositoryError};
 pub use node_reference::NodeReference;
 pub use occurence::Occurence;
-pub use revision::{Edition, Revision};
 pub use remote::{RemoteBranch, RemoteCredentials, RemoteRepository, RemoteSite, Site};
 pub use remotes::Remotes;
+pub use revision::{Edition, Revision};
 
 /// Type alias for the prolly tree index used to store artifacts.
 /// The Archive wraps the backend with PrefixedBackend to namespace index storage.
 pub type Index<Backend> =
     Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash, Archive<PrefixedBackend<Backend>>>;
-
 
 /// A repository represents a local instance of a distributed database.
 #[derive(Debug, Clone)]

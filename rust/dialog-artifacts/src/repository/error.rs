@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use thiserror::Error;
 
-use super::branch_state::BranchId;
 use super::Site;
+use super::branch_state::BranchId;
 
 /// The common error type used by repository operations.
 #[derive(Error, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
