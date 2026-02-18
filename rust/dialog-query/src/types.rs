@@ -111,17 +111,20 @@ pub trait Scalar:
     fn as_value(&self) -> Value;
 }
 
-impl Scalar for bool {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
+macro_rules! impl_scalar {
+    ($($ty:ty),*) => {
+        $(impl Scalar for $ty {
+            fn as_value(&self) -> Value {
+                Value::from(self.to_owned())
+            }
+        })*
     }
 }
 
-impl Scalar for String {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
-    }
-}
+impl_scalar!(
+    bool, String, u16, u32, u64, u128, i16, i32, i64, i128, f32, f64, Entity, Attribute, Vec<u8>,
+    Cause
+);
 
 impl Scalar for usize {
     fn as_value(&self) -> Value {
@@ -129,85 +132,8 @@ impl Scalar for usize {
     }
 }
 
-impl Scalar for u16 {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
-    }
-}
-impl Scalar for u32 {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
-    }
-}
-
-impl Scalar for u64 {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
-    }
-}
-
-impl Scalar for u128 {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
-    }
-}
-
-impl Scalar for i16 {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
-    }
-}
-
-impl Scalar for i32 {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
-    }
-}
-
-impl Scalar for i64 {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
-    }
-}
-impl Scalar for i128 {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
-    }
-}
-
-impl Scalar for f32 {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
-    }
-}
-impl Scalar for f64 {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
-    }
-}
-impl Scalar for Entity {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
-    }
-}
-impl Scalar for Attribute {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
-    }
-}
-impl Scalar for Vec<u8> {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
-    }
-}
 impl Scalar for Value {
     fn as_value(&self) -> Value {
         self.to_owned()
-    }
-}
-
-impl Scalar for Cause {
-    fn as_value(&self) -> Value {
-        Value::from(self.to_owned())
     }
 }

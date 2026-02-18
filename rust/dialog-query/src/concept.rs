@@ -107,10 +107,6 @@ pub trait Match: Sized + Clone + ConditionalSend + Default + 'static {
         Self::Concept::CONCEPT
     }
 
-    fn conpect() -> predicate::Concept {
-        Self::Concept::CONCEPT
-    }
-
     fn query<S: Source>(&self, source: S) -> impl Output<Self::Instance>
     where
         ConceptApplication: From<Self>,
