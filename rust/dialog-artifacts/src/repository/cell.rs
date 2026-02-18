@@ -71,19 +71,16 @@ impl<Codec: Encoder> Cell<Codec> {
     /// creating a new cell for the first time.
     pub fn publish<T: Serialize>(
         &self,
-        value: &T,
+        value: T,
         edition: Option<Vec<u8>>,
-    ) -> Result<Publish, RepositoryError> {
-        let content = serde_ipld_dagcbor::to_vec(value)
-            .map_err(|e| RepositoryError::StorageError(format!("Failed to encode value: {}", e)))?;
-
-        Ok(Publish {
+    ) -> Publish<T> {
+        Publish {
             subject: self.subject.clone(),
             space: self.space.clone(),
             cell: self.cell.clone(),
-            content,
+            value,
             edition,
-        })
+        }
     }
 }
 
@@ -147,26 +144,29 @@ where
 /// Command struct for publishing (writing) a value to a cell.
 ///
 /// Created by [`Cell::publish`]. Call `.perform(env)` to execute.
-pub struct Publish {
+pub struct Publish<T> {
     subject: Subject,
     space: String,
     cell: String,
-    content: Vec<u8>,
+    value: T,
     edition: Option<Vec<u8>>,
 }
 
-impl Publish {
+impl<T: Serialize> Publish<T> {
     /// Execute the publish operation, returning the new edition.
     pub async fn perform<Env>(self, env: &mut Env) -> Result<Vec<u8>, RepositoryError>
     where
         Env: Provider<memory::Publish>,
     {
+        let content = serde_ipld_dagcbor::to_vec(&self.value)
+            .map_err(|e| RepositoryError::StorageError(format!("Failed to encode value: {}", e)))?;
+
         let effect = self
             .subject
             .attenuate(Memory)
             .attenuate(Space::new(&self.space))
             .attenuate(memory::Cell::new(&self.cell))
-            .invoke(memory::Publish::new(self.content, self.edition));
+            .invoke(memory::Publish::new(content, self.edition));
 
         let new_edition: Vec<u8> = effect
             .perform(env)
@@ -216,7 +216,7 @@ mod tests {
         };
 
         // Publish with no prior edition (new cell)
-        let edition = cell.publish(&value, None)?.perform(&mut provider).await?;
+        let edition = cell.publish(&value, None).perform(&mut provider).await?;
         assert!(!edition.is_empty());
 
         // Resolve and check
@@ -238,14 +238,14 @@ mod tests {
             count: 1,
             name: "first".into(),
         };
-        let edition1 = cell.publish(&v1, None)?.perform(&mut provider).await?;
+        let edition1 = cell.publish(&v1, None).perform(&mut provider).await?;
 
         let v2 = TestValue {
             count: 2,
             name: "second".into(),
         };
         let edition2 = cell
-            .publish(&v2, Some(edition1.clone()))?
+            .publish(&v2, Some(edition1.clone()))
             .perform(&mut provider)
             .await?;
 

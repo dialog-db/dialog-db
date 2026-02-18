@@ -20,7 +20,7 @@ use crate::{
     KeyViewMut, State, ValueKey,
 };
 
-use super::archive::CapabilityArchive;
+use super::archive::ContentAddressedStore;
 use super::branch_state::{BranchId, BranchState};
 use super::cell::Cell;
 use super::credentials::Credentials;
@@ -34,7 +34,7 @@ pub type Index<Env> = Tree<
     Key,
     State<Datum>,
     Blake3Hash,
-    CapabilityArchive<Env>,
+    ContentAddressedStore<Env>,
 >;
 
 /// A branch represents a named line of development within a repository.
@@ -42,7 +42,7 @@ pub type Index<Env> = Tree<
 /// This is the capability-based version of Branch — it has no `Backend` parameter.
 /// All effectful operations return command structs whose `.perform(env)` method
 /// executes the effects. The `Env` is never captured in persistent structs
-/// (except via the `CapabilityArchive` CAS adapter for the prolly tree).
+/// (except via the `ContentAddressedStore` CAS adapter for the prolly tree).
 pub struct Branch {
     issuer: Credentials,
     id: BranchId,
@@ -219,7 +219,7 @@ impl Open {
                     Revision::new(self.issuer.did()),
                     None,
                 );
-                let edition = cell.publish(&state, None)?.perform(env).await?;
+                let edition = cell.publish(&state, None).perform(env).await?;
                 (state, Some(edition))
             }
             None => {
@@ -256,7 +256,7 @@ where
     /// Execute the commit operation, returning the updated branch and tree hash.
     ///
     /// Takes `Arc<Mutex<Env>>` because the prolly tree requires an owned
-    /// `ContentAddressedStorage` implementation via `CapabilityArchive`.
+    /// `ContentAddressedStorage` implementation via `ContentAddressedStore`.
     pub async fn perform<Env>(
         self,
         env: Arc<Mutex<Env>>,
@@ -273,7 +273,7 @@ where
         let instructions = self.instructions;
         let base_revision = branch.state.revision.clone();
 
-        let archive = CapabilityArchive::new(
+        let archive = ContentAddressedStore::new(
             env.clone(),
             Subject::from(branch.subject.clone()),
             &branch.catalog,
@@ -404,7 +404,6 @@ where
         let new_edition = branch
             .cell
             .publish(&new_state, branch.edition.clone())
-            .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?
             .perform(&mut *env)
             .await
             .map_err(|e| DialogArtifactsError::Storage(format!("{:?}", e)))?;
@@ -428,7 +427,7 @@ impl Select {
     /// Execute the select operation, returning a stream of matching artifacts.
     ///
     /// Takes `Arc<Mutex<Env>>` because the prolly tree requires an owned
-    /// `ContentAddressedStorage` implementation via `CapabilityArchive`.
+    /// `ContentAddressedStorage` implementation via `ContentAddressedStore`.
     pub async fn perform<Env>(
         self,
         env: Arc<Mutex<Env>>,
@@ -442,7 +441,7 @@ impl Select {
             + ConditionalSync
             + 'static,
     {
-        let archive = CapabilityArchive::new(
+        let archive = ContentAddressedStore::new(
             env,
             Subject::from(self.subject.clone()),
             &self.catalog,
@@ -533,7 +532,7 @@ impl Reset {
 
         let new_edition = branch
             .cell
-            .publish(&new_state, branch.edition.clone())?
+            .publish(&new_state, branch.edition.clone())
             .perform(env)
             .await?;
 
@@ -567,7 +566,7 @@ impl Advance {
 
         let new_edition = branch
             .cell
-            .publish(&new_state, branch.edition.clone())?
+            .publish(&new_state, branch.edition.clone())
             .perform(env)
             .await?;
 
@@ -610,7 +609,7 @@ impl PullLocal {
             return Ok((branch, None));
         }
 
-        let archive = CapabilityArchive::new(
+        let archive = ContentAddressedStore::new(
             env.clone(),
             Subject::from(branch.subject.clone()),
             &branch.catalog,
@@ -721,7 +720,7 @@ where
         + 'static,
 {
     async_stream::try_stream! {
-        let archive = CapabilityArchive::new(
+        let archive = ContentAddressedStore::new(
             env,
             Subject::from(subject),
             catalog,
