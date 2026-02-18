@@ -560,7 +560,7 @@ impl TryFrom<Term<Value>> for Term<crate::artifact::Cause> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn test_serde_integration() {
         // Test serialization
         let any = Term::<Value>::default();
@@ -652,7 +652,7 @@ mod tests {
         // }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_term_from_value() {
         let value = Value::String("test".to_string());
         let term = Term::from(value.clone());
@@ -667,7 +667,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_new_variable_system_integration() {
         // Test that the new Variable<T> system works with Terms
         let string_var = Term::<String>::var("name");
@@ -688,7 +688,7 @@ mod tests {
         assert_eq!(untyped_term.content_type(), None);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_turbofish_syntax_with_terms() {
         // Test the new turbofish syntax works with Term conversion
         let name_var = Term::<String>::var("name");
@@ -716,7 +716,7 @@ mod tests {
         assert_eq!(any_term.content_type(), None);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_term_from_implementations() {
         // Test String conversions
         let term1: Term<String> = "hello".into();
@@ -757,7 +757,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_term_from_variable_reference() {
         // Test that we can convert variable references to terms
         let entity_var = Term::<Entity>::var("entity");
@@ -779,7 +779,7 @@ mod tests {
         assert_eq!(string_term.content_type(), Some(Type::String));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_inference() {
         let thing = Term::var("hello");
 
@@ -798,7 +798,7 @@ mod tests {
         assert_eq!(unknown.content_type(), None);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_term_eq_creates_constraint() {
         use crate::Premise;
 
@@ -820,7 +820,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_term_eq_with_constant() {
         use crate::Premise;
 

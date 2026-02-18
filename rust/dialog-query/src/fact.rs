@@ -147,7 +147,7 @@ mod integration_tests {
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_fact_assert_retract_and_query_with_variables() -> Result<()> {
         // Setup: Create in-memory storage and artifacts store
         let storage_backend = MemoryStorageBackend::default();
@@ -248,7 +248,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_retraction_workflow() -> Result<()> {
         // Setup
         let storage_backend = MemoryStorageBackend::default();
@@ -309,7 +309,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_constants_vs_variables_binding() -> Result<()> {
         // Setup
         let storage_backend = MemoryStorageBackend::default();
@@ -396,7 +396,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_complex_queries_with_constants() -> Result<()> {
         // Setup
         let storage_backend = MemoryStorageBackend::default();
@@ -503,7 +503,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_variable_queries_succeed_with_constants() -> Result<()> {
         // Setup store with test data
         let storage_backend = MemoryStorageBackend::default();
@@ -553,7 +553,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_typed_fact_selector_patterns() -> Result<()> {
         // Setup test data
         let storage_backend = MemoryStorageBackend::default();
@@ -629,7 +629,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_type_inference_with_string_literals() -> Result<()> {
         // Setup test data
         let storage_backend = MemoryStorageBackend::default();
@@ -717,7 +717,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_mixed_constants_and_variables_succeed() -> Result<()> {
         let alice = Entity::new()?;
 
@@ -760,7 +760,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_only_variables_query_fails() -> Result<()> {
         // Test that queries with ONLY variables and NO constants fail during building
         // This test verifies error handling for completely unconstrained queries
@@ -786,7 +786,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_fluent_query_building_and_execution() -> Result<()> {
         // Setup
         let storage_backend = MemoryStorageBackend::default();
@@ -875,7 +875,7 @@ mod integration_tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn match_fact() -> Result<()> {
         use dialog_query::Match;
         let storage_backend = MemoryStorageBackend::default();

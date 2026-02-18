@@ -36,7 +36,7 @@ mod tests {
     use super::*;
     use crate::term::Term;
 
-    #[test]
+    #[dialog_common::test]
     fn test_terms_basic_operations() {
         let mut terms = Parameters::new();
 

@@ -358,7 +358,7 @@ mod tests {
 
     use super::*;
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_session() -> anyhow::Result<()> {
         use crate::Term;
         use crate::artifact::{Artifacts, Attribute as ArtifactAttribute, Entity, Value};
@@ -456,7 +456,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_matches_complete_conepts() -> anyhow::Result<()> {
         use crate::Concept;
         use crate::artifact::{Artifacts, Entity};
@@ -566,7 +566,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_concept_planning_mixed_parameters() -> anyhow::Result<()> {
         use crate::Term;
         use crate::artifact::Type;
@@ -597,7 +597,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_assert_concept() -> anyhow::Result<()> {
         use crate::Term;
         use crate::artifact::{Artifacts, Value};
@@ -676,7 +676,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_rule() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Entity};
         use crate::query::Output;
@@ -792,7 +792,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_install_rule_api() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Entity};
         use crate::query::Output;
@@ -936,7 +936,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_session_source_rule_resolution() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::predicate::concept::Attributes;
@@ -986,7 +986,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_source_trait_compatibility() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::predicate::concept::Attributes;
@@ -1026,7 +1026,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_multiple_rules_same_operator() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::predicate::concept::Attributes;
@@ -1083,7 +1083,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_explicit_conversion_pattern() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::query::Source;
@@ -1137,7 +1137,7 @@ mod tests {
         pub struct Role(pub String);
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_implicit_attribute() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Entity};
         use crate::query::Output;

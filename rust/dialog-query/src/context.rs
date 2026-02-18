@@ -95,7 +95,7 @@ mod tests {
     use crate::{Session, Term, Value};
     use dialog_storage::MemoryStorageBackend;
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_fresh_context_has_empty_scope() {
         let storage = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage).await.unwrap();
@@ -107,7 +107,7 @@ mod tests {
         assert_eq!(context.scope.size(), 0);
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_context_single_with_scope() {
         let storage = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage).await.unwrap();

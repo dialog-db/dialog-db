@@ -203,7 +203,7 @@ impl Group {
     }
 }
 
-#[test]
+#[dialog_common::test]
 fn test_requirement_properties() {
     let required = Requirement::Required(None);
     let derived = Requirement::Optional;

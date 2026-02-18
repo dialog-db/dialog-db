@@ -124,7 +124,7 @@ mod tests {
     use crate::formula::math::*;
     use crate::*;
 
-    #[test]
+    #[dialog_common::test]
     fn test_sum_formula_basic() -> anyhow::Result<()> {
         // Create Terms mapping
         let mut terms = Parameters::new();
@@ -183,7 +183,7 @@ mod tests {
     // instead of mutating cursors. The write() method is deprecated and will
     // be removed in query-2 when formulas are updated to work with Answer.
 
-    #[test]
+    #[dialog_common::test]
     fn test_sum_formula_missing_input() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
@@ -205,7 +205,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_sum_formula_multiple_expand() -> anyhow::Result<()> {
         // Test multiple expansions without the stream complexity
         let mut terms = Parameters::new();
@@ -281,7 +281,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_multiple_try_from_types() -> anyhow::Result<()> {
         // Test various data types with standard TryFrom<Value>
         let bool_val = Value::Boolean(true);
@@ -301,7 +301,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_difference_formula() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
@@ -329,7 +329,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_difference_formula_underflow() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
@@ -360,7 +360,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_product_formula() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
@@ -388,7 +388,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_quotient_formula() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
@@ -416,7 +416,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_quotient_formula_division_by_zero() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
@@ -440,7 +440,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_modulo_formula() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
@@ -468,7 +468,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_modulo_formula_by_zero() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
@@ -489,7 +489,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_integration_math_operations() -> anyhow::Result<()> {
         // Test Sum formula: 10 + 5 = 15
         let mut sum_terms = Parameters::new();
@@ -557,7 +557,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_formula_chaining() -> anyhow::Result<()> {
         use crate::formula::conversions::{ParseNumber, ToString};
 
@@ -633,14 +633,14 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_input_struct_generated() {
         let input = crate::dsl::Input::<TestSum> { of: 5, with: 3 };
         assert_eq!(input.of, 5);
         assert_eq!(input.with, 3);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_match_struct_generated() {
         let match_pattern = crate::Match::<TestSum> {
             of: Term::var("x"),
@@ -651,7 +651,7 @@ mod tests {
         assert!(matches!(match_pattern.of, Term::Variable { .. }));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_error_handling() -> anyhow::Result<()> {
         // Test division by zero in Quotient formula
         let mut quotient_terms = Parameters::new();

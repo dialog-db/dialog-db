@@ -497,7 +497,7 @@ impl From<&Cells> for Schema {
     }
 }
 
-#[test]
+#[dialog_common::test]
 fn test_cells() -> anyhow::Result<()> {
     let cells = Cells::define(|builder| {
         builder

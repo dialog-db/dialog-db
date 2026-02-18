@@ -291,7 +291,7 @@ mod tests {
     // with deeply nested async streams. The functionality is tested indirectly through integration
     // tests and the planning tests above verify the core logic.
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_concept_application_query_execution() -> anyhow::Result<()> {
         use crate::{Relation, Session};
         use dialog_artifacts::{Artifacts, Attribute as ArtifactAttribute, Entity};
@@ -389,7 +389,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_concept_application_with_bound_entity_query() -> anyhow::Result<()> {
         use crate::context::new_context;
         use crate::{Relation, Session};
@@ -461,7 +461,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_as_conclusion_operations() {
         use crate::predicate::concept::Attributes;
 
@@ -487,7 +487,7 @@ mod tests {
         // "this" parameter is implied but not in attributes
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_creation() {
         use crate::predicate::concept::Attributes;
 
@@ -508,7 +508,7 @@ mod tests {
         assert!(concept.attributes().keys().any(|k| k == "name"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_application_analysis() {
         use crate::predicate::concept::Attributes;
 
@@ -543,7 +543,7 @@ mod tests {
         assert!(schema.get("age").is_some());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_deductive_rule_parameters() {
         use std::collections::HashSet;
 
@@ -572,7 +572,7 @@ mod tests {
         assert_eq!(params.len(), 3);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_premise_construction() {
         use crate::predicate::fact::Fact;
         use crate::{Application, Premise};
@@ -592,7 +592,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_error_types() {
         use crate::error::{AnalyzerError, PlanError, QueryError};
         use crate::predicate::concept::Attributes;
@@ -635,7 +635,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_application_variants() {
         use crate::Application;
         use crate::predicate::concept::Attributes;
@@ -669,7 +669,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_negation_construction() {
         use crate::predicate::fact::Fact;
         use crate::{Application, Negation};
@@ -687,7 +687,7 @@ mod tests {
         }
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_concept_application_respects_constant_entity_parameter() -> anyhow::Result<()> {
         use crate::application::concept::ConceptApplication;
         use crate::predicate::concept::Concept;
@@ -756,7 +756,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_concept_application_respects_constant_attribute_parameter() -> anyhow::Result<()>
     {
         use crate::application::concept::ConceptApplication;
@@ -848,7 +848,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_concept_application_respects_multiple_constant_parameters() -> anyhow::Result<()>
     {
         use crate::application::concept::ConceptApplication;

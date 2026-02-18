@@ -775,7 +775,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_person_name() {
         let _name = person::Name("hello".into());
         // Basic test that Attribute trait is implemented
@@ -814,7 +814,7 @@ mod tests {
         pub struct Manages(pub crate::Entity);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_employee_name_derives_attribute() {
         use crate::Cardinality;
 
@@ -831,7 +831,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_employee_job_derives_attribute() {
         use crate::Cardinality;
 
@@ -851,7 +851,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_employee_salary_derives_attribute() {
         use crate::Cardinality;
 
@@ -871,7 +871,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_person_derive_namespace() {
         let name = person_derive::Name("Bob".to_string());
 
@@ -884,7 +884,7 @@ mod tests {
         assert_eq!(name.value(), "Bob");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_cardinality_many() {
         use crate::Cardinality;
 
@@ -905,7 +905,7 @@ mod tests {
         pub struct Field(pub String);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_custom_namespace_override_derive() {
         let field = custom_ns_derive::Field("value".to_string());
 
@@ -940,7 +940,7 @@ mod tests {
         pub struct Name(pub String);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_attribute_hash_stability() {
         let hash1 = employee_ident::Name::hash();
         let hash2 = employee_ident::Name::hash();
@@ -951,7 +951,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_different_attributes_different_hashes() {
         let name_hash = employee_ident::Name::hash();
         let salary_hash = employee_ident::Salary::hash();
@@ -971,7 +971,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_same_name_different_namespace_different_hashes() {
         let employee_name_hash = employee_ident::Name::hash();
         let person_name_hash = person_ident::Name::hash();
@@ -982,7 +982,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_attribute_uri_format() {
         let uri = employee_ident::Name::to_uri();
 
@@ -997,7 +997,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_attribute_uri_roundtrip() {
         let uri = employee_ident::Name::to_uri();
         let parsed_hash = crate::attribute::AttributeSchema::<String>::parse_uri(&uri);
@@ -1010,7 +1010,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_attribute_uri_parse_invalid() {
         assert!(
             crate::attribute::AttributeSchema::<String>::parse_uri("invalid").is_none(),
@@ -1028,7 +1028,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_attribute_schema_hash_stability() {
         let schema_hash = employee_ident::Name::SCHEMA.hash();
         let trait_hash = employee_ident::Name::hash();
@@ -1039,7 +1039,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_attribute_cbor_encoding() {
         let cbor1 = employee_ident::Name::SCHEMA.to_cbor_bytes();
         let cbor2 = employee_ident::Name::SCHEMA.to_cbor_bytes();
@@ -1048,7 +1048,7 @@ mod tests {
         assert!(!cbor1.is_empty(), "CBOR encoding should not be empty");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_attribute_description_does_not_affect_hash() {
         use crate::artifact::Type;
         use crate::attribute::AttributeSchema;
@@ -1091,7 +1091,7 @@ mod tests {
         pub struct Salary(pub u32);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_attribute_into_term() {
         use crate::Term;
 
@@ -1108,7 +1108,7 @@ mod tests {
         assert!(salary_term.is_constant());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_attribute_from_method() {
         use crate::Term;
 
@@ -1125,7 +1125,7 @@ mod tests {
         assert!(name_term.is_constant());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_attribute_into_in_match_construction() {
         use crate::{Concept, Entity, Match, Term};
 
@@ -1198,7 +1198,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_underscore_to_hyphen_conversion() {
         use crate::Attribute;
 
@@ -1210,7 +1210,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_nested_module_namespace() {
         use crate::Attribute;
 
@@ -1219,7 +1219,7 @@ mod tests {
         assert_eq!(ns_my::config::Key::selector().to_string(), "config/key");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_explicit_namespace_override() {
         use crate::Attribute;
 
@@ -1231,7 +1231,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_namespace_identifier_syntax() {
         use crate::Attribute;
 
@@ -1243,7 +1243,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_namespace_string_literal_syntax() {
         use crate::Attribute;
 
@@ -1255,7 +1255,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_nested_underscore_conversion() {
         use crate::Attribute;
 
@@ -1267,7 +1267,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_all_metadata_preserved() {
         use crate::{Attribute, Cardinality};
 
@@ -1295,18 +1295,18 @@ mod tests {
         pub struct APIKey(pub String);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_pascal_case_to_kebab_case() {
         assert_eq!(test_pascal::UserName::NAME, "user-name");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_consecutive_capitals() {
         assert_eq!(test_pascal::HTTPRequest::NAME, "http-request");
         assert_eq!(test_pascal::APIKey::NAME, "api-key");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_static_values() {
         let ns = test_pascal::UserName::NAMESPACE;
         let name = test_pascal::UserName::NAME;
@@ -1317,7 +1317,7 @@ mod tests {
         let _ = desc;
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_schema_static() {
         use crate::Cardinality;
 
@@ -1326,7 +1326,7 @@ mod tests {
         assert_eq!(schema.cardinality, Cardinality::One);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_match_struct_literal() {
         use crate::{Entity, Match, Term};
 
@@ -1341,7 +1341,7 @@ mod tests {
         assert!(matches!(query.has, Term::Constant(_)));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_quarriable_match_pattern() {
         use crate::{Entity, Match, Term};
 
@@ -1356,7 +1356,7 @@ mod tests {
         assert!(matches!(query.has, Term::Constant(_)));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_default_match_constructor() {
         use crate::{Match, Term};
 
@@ -1388,7 +1388,7 @@ mod tests {
         pub struct Manager(pub crate::Entity);
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_single_attribute_assert_and_retract() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::{Entity, Fact, Session};
@@ -1447,7 +1447,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_multiple_attributes_assert() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::{Entity, Fact, Session};
@@ -1511,7 +1511,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_three_attributes_assert() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::{Entity, Fact, Session};
@@ -1603,7 +1603,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_multiple_attributes_retract() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::{Entity, Fact, Session};
@@ -1668,7 +1668,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_update_attribute() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::{Entity, Fact, Session};
@@ -1724,7 +1724,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_entity_reference_attribute() -> anyhow::Result<()> {
         use crate::artifact::{Artifacts, Value};
         use crate::{Entity, Fact, Session};
@@ -1793,7 +1793,7 @@ mod tests {
         pub struct Job(pub String);
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_with_query_shortcut() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::attribute::With;
@@ -1871,7 +1871,7 @@ mod tests {
         pub struct Body(pub String);
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_attribute_claim() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::claim::Claim;
@@ -1922,7 +1922,7 @@ mod tests {
         pub struct Title(pub String);
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_adhoc_concept_query() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::{Entity, Match, Relation, Session, Term, Value};
@@ -1991,7 +1991,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_adhoc_concept_query_with_filter() -> anyhow::Result<()> {
         use crate::artifact::Artifacts;
         use crate::{Entity, Match, Relation, Session, Term, Value};

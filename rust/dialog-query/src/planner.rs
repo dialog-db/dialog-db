@@ -432,7 +432,7 @@ impl Fork {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn test_join_plan_with_two_fact_applications() {
         use crate::application::FactApplication;
         use crate::{Cardinality, Term, Value};
@@ -480,7 +480,7 @@ mod tests {
         assert!(plan.binds.contains(&age_var), "Should bind age variable");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_join_plan_execution_order() {
         use crate::application::FactApplication;
         use crate::{Cardinality, Term};
@@ -518,7 +518,7 @@ mod tests {
         assert_eq!(plan.binds.variables.len(), 2, "Should bind 2 variables");
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_join_plan_query_execution() -> anyhow::Result<()> {
         use crate::application::FactApplication;
         use crate::session::Session;

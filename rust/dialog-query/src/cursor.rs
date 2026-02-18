@@ -241,7 +241,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_cursor_read() {
         use crate::selection::Answer;
 
@@ -265,7 +265,7 @@ mod tests {
         assert!(cursor.reads().contains_key("value"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_cursor_missing_parameter() {
         use crate::selection::Answer;
 
@@ -281,7 +281,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_cursor_unbound_variable() {
         use crate::selection::Answer;
 
@@ -299,7 +299,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_cursor_read_tracks_provenance() {
         use crate::selection::Answer;
 
@@ -331,7 +331,7 @@ mod tests {
         assert!(cursor.reads().contains_key("y"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_rejects_conflicting_assignment() {
         use crate::selection::{Answer, Factor};
         use std::collections::HashMap;
@@ -369,7 +369,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     #[allow(deprecated)]
     fn test_cursor_write_rejects_conflicting_value() {
         use crate::selection::Answer;
@@ -411,7 +411,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_cursor_into_parts() {
         use crate::selection::Answer;
 

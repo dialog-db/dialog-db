@@ -510,7 +510,7 @@ impl TryFrom<Analysis> for Plan {
     }
 }
 
-#[test]
+#[dialog_common::test]
 fn test_analysis_from_premise_all_derived() {
     use crate::formula::string::Length;
     use crate::predicate::formula::Formula;
@@ -530,7 +530,7 @@ fn test_analysis_from_premise_all_derived() {
     assert!(!analysis.is_viable());
 }
 
-#[test]
+#[dialog_common::test]
 fn test_analysis_from_premise_with_constant() {
     use crate::formula::string::Length;
     use crate::predicate::formula::Formula;
@@ -552,7 +552,7 @@ fn test_analysis_from_premise_with_constant() {
     assert!(analysis.is_viable());
 }
 
-#[test]
+#[dialog_common::test]
 fn test_analysis_update_transitions_to_viable() {
     use crate::formula::string::Length;
     use crate::predicate::formula::Formula;
@@ -578,7 +578,7 @@ fn test_analysis_update_transitions_to_viable() {
     assert!(analysis.is_viable());
 }
 
-#[test]
+#[dialog_common::test]
 fn test_analysis_update_reduces_cost_when_derived_bound() {
     use crate::formula::string::Length;
     use crate::predicate::formula::Formula;
@@ -613,7 +613,7 @@ fn test_analysis_update_reduces_cost_when_derived_bound() {
     );
 }
 
-#[test]
+#[dialog_common::test]
 fn test_analysis_try_into_plan_when_viable() {
     use crate::formula::string::Length;
     use crate::predicate::formula::Formula;
@@ -638,7 +638,7 @@ fn test_analysis_try_into_plan_when_viable() {
     assert!(plan.is_ok());
 }
 
-#[test]
+#[dialog_common::test]
 fn test_analysis_try_into_plan_when_blocked() {
     use crate::formula::string::Length;
     use crate::predicate::formula::Formula;
@@ -667,7 +667,7 @@ mod cost_model_tests {
     use crate::{Environment, Premise, Term, Value};
 
     // Test 1: Constants don't add to cost
-    #[test]
+    #[dialog_common::test]
     fn test_constants_do_not_add_cost() {
         // All constants - should only have BASE_COST
         let the_attr: Attribute = "user/name".parse().unwrap();
@@ -692,7 +692,7 @@ mod cost_model_tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_one_constant_two_variables() {
         use crate::application::fact::RANGE_SCAN_COST;
 
@@ -721,7 +721,7 @@ mod cost_model_tests {
     }
 
     // Test 2: Parameters in env are removed from costs
-    #[test]
+    #[dialog_common::test]
     fn test_env_variables_reduce_cost() {
         use crate::application::fact::{RANGE_SCAN_COST, SEGMENT_READ_COST};
 
@@ -769,7 +769,7 @@ mod cost_model_tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_variables_already_in_initial_env_dont_add_cost() {
         use crate::application::fact::SEGMENT_READ_COST;
 
@@ -799,7 +799,7 @@ mod cost_model_tests {
     }
 
     // Test 3: Cardinality affects cost
-    #[test]
+    #[dialog_common::test]
     fn test_cardinality_many_costs_more_than_one() {
         use crate::application::fact::{INDEX_SCAN, RANGE_SCAN_COST};
 
@@ -847,7 +847,7 @@ mod cost_model_tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_fully_bound_cardinality_should_not_differ() {
         use crate::application::fact::{RANGE_READ_COST, SEGMENT_READ_COST};
 
@@ -891,7 +891,7 @@ mod cost_model_tests {
     }
 
     // Test 4: Formula vs Fact costs
-    #[test]
+    #[dialog_common::test]
     fn test_formula_cheaper_than_fact_no_io() {
         use crate::Parameters;
         use crate::formula::string::Length;
@@ -927,7 +927,7 @@ mod cost_model_tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_formula_requiring_fact_costs_more() {
         use crate::Parameters;
         use crate::formula::string::Length;
@@ -953,7 +953,7 @@ mod cost_model_tests {
         // which is more than just the formula with a constant
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_equals_fact_cost_nothing_bound() {
         use crate::application::concept::ConceptApplication;
         use crate::application::fact::{CONCEPT_OVERHEAD, RANGE_SCAN_COST};
@@ -1006,7 +1006,7 @@ mod cost_model_tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_equals_fact_cost_value_bound() {
         use crate::application::concept::ConceptApplication;
         use crate::application::fact::{CONCEPT_OVERHEAD, SEGMENT_READ_COST};
@@ -1052,7 +1052,7 @@ mod cost_model_tests {
         assert_eq!(concept_cost, SEGMENT_READ_COST + CONCEPT_OVERHEAD);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_equals_fact_cost_entity_bound() {
         use crate::application::concept::ConceptApplication;
         use crate::application::fact::{CONCEPT_OVERHEAD, SEGMENT_READ_COST};
@@ -1098,7 +1098,7 @@ mod cost_model_tests {
         assert_eq!(concept_cost, SEGMENT_READ_COST + CONCEPT_OVERHEAD);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_equals_fact_cost_cardinality_many_nothing_bound() {
         use crate::application::concept::ConceptApplication;
         use crate::application::fact::{CONCEPT_OVERHEAD, INDEX_SCAN};
@@ -1143,7 +1143,7 @@ mod cost_model_tests {
         assert_eq!(concept_cost, INDEX_SCAN + CONCEPT_OVERHEAD);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_equals_fact_cost_cardinality_many_value_bound() {
         use crate::application::concept::ConceptApplication;
         use crate::application::fact::{CONCEPT_OVERHEAD, RANGE_SCAN_COST};
@@ -1189,7 +1189,7 @@ mod cost_model_tests {
         assert_eq!(concept_cost, RANGE_SCAN_COST + CONCEPT_OVERHEAD);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_cost_accumulation_through_planning() {
         use crate::application::fact::{RANGE_SCAN_COST, SEGMENT_READ_COST};
 
@@ -1247,7 +1247,7 @@ mod cost_model_tests {
         );
     }
 }
-#[test]
+#[dialog_common::test]
 fn debug_update_cost() {
     use crate::analyzer::Analysis;
     use crate::application::fact::FactApplication;

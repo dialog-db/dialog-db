@@ -384,7 +384,7 @@ mod tests {
     use dialog_storage::MemoryStorageBackend;
     use futures_util::stream::once;
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_fact_application_with_provenance() -> anyhow::Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -438,7 +438,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_provenance_tracks_multiple_facts() -> anyhow::Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -491,7 +491,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_fact_application_query_with_provenance() -> anyhow::Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -550,7 +550,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_query_with_blank_variables() -> anyhow::Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;

@@ -106,7 +106,7 @@ mod tests {
     use super::*;
     use crate::{Parameters, Term, selection::Answer};
 
-    #[test]
+    #[dialog_common::test]
     fn test_concatenate_formula() {
         let mut terms = Parameters::new();
         terms.insert("first".to_string(), Term::var("x"));
@@ -133,7 +133,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_length_formula() {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("text"));
@@ -157,7 +157,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_uppercase_formula() {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("text"));
@@ -181,7 +181,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_lowercase_formula() {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("text"));
@@ -205,7 +205,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_empty_string_length() {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("text"));
@@ -229,7 +229,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concatenate_empty_strings() {
         let mut terms = Parameters::new();
         terms.insert("first".to_string(), Term::var("x"));
@@ -258,7 +258,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_integration_string_operations() -> anyhow::Result<()> {
         // Test Concatenate formula
         let mut concat_terms = Parameters::new();
