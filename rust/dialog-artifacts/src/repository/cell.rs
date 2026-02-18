@@ -52,15 +52,9 @@ impl<Codec: Encoder> Cell<Codec> {
     }
 
     /// Create a command to resolve (read) the current value from this cell.
-    pub fn resolve<T>(&self) -> Resolve<T, Codec>
-    where
-        Codec: Clone,
-    {
+    pub fn resolve<T>(&self) -> Resolve<'_, T, Codec> {
         Resolve {
-            subject: self.subject.clone(),
-            space: self.space.clone(),
-            cell: self.cell.clone(),
-            codec: self.codec.clone(),
+            cell: self,
             _phantom: PhantomData,
         }
     }
@@ -69,11 +63,13 @@ impl<Codec: Encoder> Cell<Codec> {
     ///
     /// `edition` is the CAS edition from the last resolve. Pass `None` when
     /// creating a new cell for the first time.
-    pub fn publish<T: Serialize>(&self, value: T, edition: Option<Vec<u8>>) -> Publish<T> {
+    pub fn publish<T: Serialize>(
+        &self,
+        value: T,
+        edition: Option<Vec<u8>>,
+    ) -> Publish<'_, T, Codec> {
         Publish {
-            subject: self.subject.clone(),
-            space: self.space.clone(),
-            cell: self.cell.clone(),
+            cell: self,
             value,
             edition,
         }
@@ -83,15 +79,12 @@ impl<Codec: Encoder> Cell<Codec> {
 /// Command struct for resolving (reading) a cell's value.
 ///
 /// Created by [`Cell::resolve`]. Call `.perform(env)` to execute.
-pub struct Resolve<T, Codec = CborEncoder> {
-    subject: Subject,
-    space: String,
-    cell: String,
-    codec: Codec,
+pub struct Resolve<'a, T, Codec = CborEncoder> {
+    cell: &'a Cell<Codec>,
     _phantom: PhantomData<T>,
 }
 
-impl<T, Codec> Resolve<T, Codec>
+impl<T, Codec> Resolve<'_, T, Codec>
 where
     T: DeserializeOwned + dialog_common::ConditionalSync,
     Codec: Encoder,
@@ -103,10 +96,12 @@ where
         Env: Provider<memory::Resolve>,
     {
         let effect = self
+            .cell
             .subject
+            .clone()
             .attenuate(Memory)
-            .attenuate(Space::new(&self.space))
-            .attenuate(memory::Cell::new(&self.cell))
+            .attenuate(Space::new(&self.cell.space))
+            .attenuate(memory::Cell::new(&self.cell.cell))
             .invoke(memory::Resolve);
 
         let publication: Option<dialog_effects::memory::Publication> = effect
@@ -117,12 +112,17 @@ where
         match publication {
             None => Ok(None),
             Some(pub_data) => {
-                let value: T = self.codec.decode(&pub_data.content).await.map_err(|e| {
-                    RepositoryError::StorageError(format!(
-                        "Failed to decode cell value: {}",
-                        Into::<DialogStorageError>::into(e)
-                    ))
-                })?;
+                let value: T = self
+                    .cell
+                    .codec
+                    .decode(&pub_data.content)
+                    .await
+                    .map_err(|e| {
+                        RepositoryError::StorageError(format!(
+                            "Failed to decode cell value: {}",
+                            Into::<DialogStorageError>::into(e)
+                        ))
+                    })?;
 
                 Ok(Some((value, pub_data.edition)))
             }
@@ -133,15 +133,13 @@ where
 /// Command struct for publishing (writing) a value to a cell.
 ///
 /// Created by [`Cell::publish`]. Call `.perform(env)` to execute.
-pub struct Publish<T> {
-    subject: Subject,
-    space: String,
-    cell: String,
+pub struct Publish<'a, T, Codec = CborEncoder> {
+    cell: &'a Cell<Codec>,
     value: T,
     edition: Option<Vec<u8>>,
 }
 
-impl<T: Serialize> Publish<T> {
+impl<T: Serialize, Codec> Publish<'_, T, Codec> {
     /// Execute the publish operation, returning the new edition.
     pub async fn perform<Env>(self, env: &mut Env) -> Result<Vec<u8>, RepositoryError>
     where
@@ -151,10 +149,12 @@ impl<T: Serialize> Publish<T> {
             .map_err(|e| RepositoryError::StorageError(format!("Failed to encode value: {}", e)))?;
 
         let effect = self
+            .cell
             .subject
+            .clone()
             .attenuate(Memory)
-            .attenuate(Space::new(&self.space))
-            .attenuate(memory::Cell::new(&self.cell))
+            .attenuate(Space::new(&self.cell.space))
+            .attenuate(memory::Cell::new(&self.cell.cell))
             .invoke(memory::Publish::new(content, self.edition));
 
         let new_edition: Vec<u8> = effect
