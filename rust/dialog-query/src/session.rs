@@ -16,6 +16,42 @@ use crate::{DeductiveRule, Store};
 use std::collections::HashMap;
 use transaction::Edit;
 
+/// Registry for deductive rules, indexed by conclusion operator
+///
+/// Provides deduplicating rule registration and operator-based lookup.
+/// Used internally by both `Session` and `QuerySession`.
+#[derive(Debug, Clone, Default)]
+pub struct RuleRegistry {
+    rules: HashMap<String, Vec<DeductiveRule>>,
+}
+
+impl RuleRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a deductive rule, deduplicating by equality
+    pub fn register(&mut self, rule: DeductiveRule) {
+        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator()) {
+            if !rules.contains(&rule) {
+                rules.push(rule);
+            }
+        } else {
+            self.rules.insert(rule.conclusion.operator(), vec![rule]);
+        }
+    }
+
+    /// Resolve rules for the given operator
+    pub fn resolve_rules(&self, operator: &str) -> Vec<DeductiveRule> {
+        self.rules.get(operator).cloned().unwrap_or_default()
+    }
+
+    /// Get a reference to all rules
+    pub fn rules(&self) -> &HashMap<String, Vec<DeductiveRule>> {
+        &self.rules
+    }
+}
+
 /// A database session for committing changes
 ///
 /// Sessions provide a high-level interface for committing claims to the database.
@@ -45,7 +81,7 @@ pub struct Session<S: Store> {
     /// The underlying store for database operations
     store: S,
     /// Registry of the rules
-    rules: HashMap<String, Vec<DeductiveRule>>,
+    rules: RuleRegistry,
 }
 
 impl<S: Store> Session<S> {
@@ -62,21 +98,13 @@ impl<S: Store> Session<S> {
     pub fn open(store: S) -> Self {
         Session {
             store,
-            rules: HashMap::new(),
+            rules: RuleRegistry::new(),
         }
     }
 
     /// Register a new rule into the session
     pub fn register(mut self, rule: DeductiveRule) -> Self {
-        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator()) {
-            if !rules.contains(&rule) {
-                rules.push(rule);
-            }
-        } else {
-            self.rules
-                .insert(rule.conclusion.operator(), vec![rule.clone()]);
-        }
-
+        self.rules.register(rule);
         self
     }
 
@@ -234,7 +262,7 @@ pub struct QuerySession<S: ArtifactStore> {
     /// The underlying store for read operations
     store: S,
     /// Registry of the rules for inference
-    rules: HashMap<String, Vec<DeductiveRule>>,
+    rules: RuleRegistry,
 }
 
 impl<S: ArtifactStore> QuerySession<S> {
@@ -254,7 +282,7 @@ impl<S: ArtifactStore> QuerySession<S> {
     pub fn new(store: S) -> Self {
         Self {
             store,
-            rules: HashMap::new(),
+            rules: RuleRegistry::new(),
         }
     }
 
@@ -275,13 +303,7 @@ impl<S: ArtifactStore> QuerySession<S> {
     /// # }
     /// ```
     pub fn install(mut self, rule: DeductiveRule) -> Self {
-        if let Some(rules) = self.rules.get_mut(&rule.conclusion.operator()) {
-            if !rules.contains(&rule) {
-                rules.push(rule);
-            }
-        } else {
-            self.rules.insert(rule.conclusion.operator(), vec![rule]);
-        }
+        self.rules.register(rule);
         self
     }
 
@@ -292,7 +314,7 @@ impl<S: ArtifactStore> QuerySession<S> {
 
     /// Get a reference to the rules registry
     pub fn rules(&self) -> &HashMap<String, Vec<DeductiveRule>> {
-        &self.rules
+        self.rules.rules()
     }
 }
 
@@ -306,7 +328,7 @@ impl<S: ArtifactStore + Clone + Send + Sync + 'static> From<S> for QuerySession<
 /// Implement Source trait for QuerySession to provide rule resolution capabilities
 impl<S: ArtifactStore + Clone + Send + Sync + 'static> Source for QuerySession<S> {
     fn resolve_rules(&self, operator: &str) -> Vec<DeductiveRule> {
-        self.rules.get(operator).cloned().unwrap_or_default()
+        self.rules.resolve_rules(operator)
     }
 }
 
@@ -328,7 +350,7 @@ impl<S: ArtifactStore> ArtifactStore for QuerySession<S> {
 /// while providing access to both stored artifacts and registered rules.
 impl<S: Store + ConditionalSend + ConditionalSync + 'static> Source for Session<S> {
     fn resolve_rules(&self, operator: &str) -> Vec<DeductiveRule> {
-        self.rules.get(operator).cloned().unwrap_or_default()
+        self.rules.resolve_rules(operator)
     }
 }
 
