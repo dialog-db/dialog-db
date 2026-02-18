@@ -20,14 +20,14 @@ use tokio::sync::Mutex;
 ///
 /// Created on-the-fly inside `perform()` methods when tree operations are
 /// needed, and dropped when those operations complete.
-pub struct CapabilityArchive<Env> {
+pub struct ContentAddressedStore<Env> {
     env: Arc<Mutex<Env>>,
     encoder: CborEncoder,
     subject: Subject,
     catalog: String,
 }
 
-impl<Env> Clone for CapabilityArchive<Env> {
+impl<Env> Clone for ContentAddressedStore<Env> {
     fn clone(&self) -> Self {
         Self {
             env: self.env.clone(),
@@ -38,8 +38,8 @@ impl<Env> Clone for CapabilityArchive<Env> {
     }
 }
 
-impl<Env> CapabilityArchive<Env> {
-    /// Create a new CapabilityArchive that delegates storage operations to
+impl<Env> ContentAddressedStore<Env> {
+    /// Create a new ContentAddressedStore that delegates storage operations to
     /// capability effects on the given environment.
     pub fn new(env: Arc<Mutex<Env>>, subject: Subject, catalog: impl Into<String>) -> Self {
         Self {
@@ -55,7 +55,7 @@ impl<Env> CapabilityArchive<Env> {
     pub fn into_inner(self) -> Env {
         Arc::try_unwrap(self.env)
             .ok()
-            .expect("CapabilityArchive: other references still exist")
+            .expect("ContentAddressedStore: other references still exist")
             .into_inner()
     }
 
@@ -67,7 +67,7 @@ impl<Env> CapabilityArchive<Env> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> ContentAddressedStorage for CapabilityArchive<Env>
+impl<Env> ContentAddressedStorage for ContentAddressedStore<Env>
 where
     Env: Provider<Get> + Provider<Put> + ConditionalSync + 'static,
 {
@@ -125,7 +125,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> Encoder for CapabilityArchive<Env>
+impl<Env> Encoder for ContentAddressedStore<Env>
 where
     Env: ConditionalSync + 'static,
 {
@@ -168,7 +168,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_writes_and_reads_block() -> anyhow::Result<()> {
         let env = Arc::new(Mutex::new(Volatile::new()));
-        let mut archive = CapabilityArchive::new(env, test_subject(), "index");
+        let mut archive = ContentAddressedStore::new(env, test_subject(), "index");
 
         let block = TestBlock {
             value: 42,
@@ -185,7 +185,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_none_for_missing_hash() -> anyhow::Result<()> {
         let env = Arc::new(Mutex::new(Volatile::new()));
-        let archive = CapabilityArchive::new(env, test_subject(), "index");
+        let archive = ContentAddressedStore::new(env, test_subject(), "index");
 
         let missing_hash = [0u8; 32];
         let result: Option<TestBlock> = archive.read(&missing_hash).await?;
@@ -205,20 +205,20 @@ mod tests {
 
         // Write to catalog "a"
         let hash = {
-            let mut archive = CapabilityArchive::new(env.clone(), test_subject(), "a");
+            let mut archive = ContentAddressedStore::new(env.clone(), test_subject(), "a");
             archive.write(&block).await?
         };
 
         // Read from catalog "b" — should not find it
         {
-            let archive = CapabilityArchive::new(env.clone(), test_subject(), "b");
+            let archive = ContentAddressedStore::new(env.clone(), test_subject(), "b");
             let result: Option<TestBlock> = archive.read(&hash).await?;
             assert!(result.is_none());
         }
 
         // Read from catalog "a" — should find it
         {
-            let archive = CapabilityArchive::new(env.clone(), test_subject(), "a");
+            let archive = ContentAddressedStore::new(env.clone(), test_subject(), "a");
             let result: Option<TestBlock> = archive.read(&hash).await?;
             assert_eq!(result, Some(block));
         }
