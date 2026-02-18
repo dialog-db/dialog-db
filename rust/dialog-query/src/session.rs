@@ -1050,4 +1050,179 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_like_formula_in_rule() -> anyhow::Result<()> {
+        use crate::artifact::{Artifacts, Entity};
+        use crate::query::Output;
+        use crate::rule::When;
+        use crate::strings::Like;
+        use crate::{Attribute, Concept, Match, Term};
+        use dialog_storage::MemoryStorageBackend;
+
+        mod note_like_test {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Title(pub String);
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct MatchedTitle(pub String);
+        }
+
+        #[derive(Clone, Debug, PartialEq, Concept)]
+        pub struct Note {
+            pub this: Entity,
+            pub title: note_like_test::Title,
+        }
+
+        #[derive(Clone, Debug, PartialEq, Concept)]
+        pub struct MatchingNote {
+            pub this: Entity,
+            pub title: note_like_test::MatchedTitle,
+        }
+
+        // Rule: a MatchingNote is a Note whose title matches "Hello*"
+        fn matching_notes(result: Match<MatchingNote>) -> impl When {
+            let title = Term::<String>::var("_title");
+            (
+                Match::<Note> {
+                    this: result.this,
+                    title: title.clone(),
+                },
+                Match::<Like> {
+                    text: title,
+                    pattern: Term::from("Hello*".to_string()),
+                    is: result.title,
+                },
+            )
+        }
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store).install(matching_notes)?;
+
+        let mut transaction = session.edit();
+        transaction.assert(Note {
+            this: Entity::new()?,
+            title: note_like_test::Title("Hello World".into()),
+        });
+        transaction.assert(Note {
+            this: Entity::new()?,
+            title: note_like_test::Title("Hello Rust".into()),
+        });
+        transaction.assert(Note {
+            this: Entity::new()?,
+            title: note_like_test::Title("Goodbye World".into()),
+        });
+        session.commit(transaction).await?;
+
+        let results = Match::<MatchingNote> {
+            this: Term::var("note"),
+            title: Term::var("title"),
+        }
+        .query(session)
+        .try_vec()
+        .await?;
+
+        assert_eq!(results.len(), 2, "Should match only the two Hello* notes");
+
+        let mut titles: Vec<String> = results.iter().map(|n| n.title.value().clone()).collect();
+        titles.sort();
+        assert_eq!(titles, vec!["Hello Rust", "Hello World"]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_like_negation_in_rule() -> anyhow::Result<()> {
+        use crate::artifact::{Artifacts, Entity};
+        use crate::query::Output;
+        use crate::rule::When;
+        use crate::strings::Like;
+        use crate::{Attribute, Concept, Match, Term};
+        use dialog_storage::MemoryStorageBackend;
+
+        mod note_not_like_test {
+            use crate::Attribute;
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Title(pub String);
+
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct FilteredTitle(pub String);
+        }
+
+        #[derive(Clone, Debug, PartialEq, Concept)]
+        pub struct Note {
+            pub this: Entity,
+            pub title: note_not_like_test::Title,
+        }
+
+        #[derive(Clone, Debug, PartialEq, Concept)]
+        pub struct NonDraftNote {
+            pub this: Entity,
+            pub title: note_not_like_test::FilteredTitle,
+        }
+
+        // Rule: a NonDraftNote is a Note whose title does NOT match "Draft:*"
+        fn non_draft_notes(result: Match<NonDraftNote>) -> impl When {
+            let title = Term::<String>::var("_title");
+            (
+                Match::<Note> {
+                    this: result.this,
+                    title: title.clone(),
+                },
+                Match::<Like> {
+                    text: title.clone(),
+                    pattern: Term::from("*".to_string()),
+                    is: result.title,
+                },
+                !Match::<Like> {
+                    text: title,
+                    pattern: Term::from("Draft:*".to_string()),
+                    is: Term::blank(),
+                },
+            )
+        }
+
+        let backend = MemoryStorageBackend::default();
+        let store = Artifacts::anonymous(backend).await?;
+        let mut session = Session::open(store).install(non_draft_notes)?;
+
+        let mut transaction = session.edit();
+        transaction.assert(Note {
+            this: Entity::new()?,
+            title: note_not_like_test::Title("Draft: My Ideas".into()),
+        });
+        transaction.assert(Note {
+            this: Entity::new()?,
+            title: note_not_like_test::Title("Published Article".into()),
+        });
+        transaction.assert(Note {
+            this: Entity::new()?,
+            title: note_not_like_test::Title("Draft: TODO".into()),
+        });
+        transaction.assert(Note {
+            this: Entity::new()?,
+            title: note_not_like_test::Title("Final Report".into()),
+        });
+        session.commit(transaction).await?;
+
+        let results = Match::<NonDraftNote> {
+            this: Term::var("note"),
+            title: Term::var("title"),
+        }
+        .query(session)
+        .try_vec()
+        .await?;
+
+        assert_eq!(results.len(), 2, "Should exclude the two Draft:* notes");
+
+        let mut titles: Vec<String> = results.iter().map(|n| n.title.value().clone()).collect();
+        titles.sort();
+        assert_eq!(titles, vec!["Final Report", "Published Article"]);
+
+        Ok(())
+    }
 }
