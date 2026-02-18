@@ -530,7 +530,7 @@ mod tests {
     use super::*;
     use crate::artifact::Type;
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_serialization_to_specific_json() {
         let attributes = <Attributes as From<_>>::from([
             (
@@ -580,7 +580,7 @@ mod tests {
         assert_eq!(age_attr["type"], "UnsignedInt");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_deserialization_from_specific_json() {
         let json = r#"{
             "operator": "person",
@@ -631,7 +631,7 @@ mod tests {
         assert_eq!(active_attr.content_type, Some(Type::Boolean));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_round_trip_serialization() {
         let original = Concept::Dynamic {
             description: String::new(),
@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(orig_score.content_type, deser_score.content_type);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_expected_json_structure() {
         let concept = Concept::Dynamic {
             description: String::new(),
@@ -705,7 +705,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_description_serialization_and_deserialization() {
         let original_description = "A comprehensive product catalog item";
 
@@ -743,7 +743,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_field_names_do_not_affect_hash() {
         let attributes1 = Attributes::from(vec![
             (
@@ -790,7 +790,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_description_does_not_affect_hash() {
         let attributes = Attributes::from(vec![(
             "name".to_string(),
@@ -820,7 +820,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_attribute_order_does_not_affect_hash() {
         let attributes1 = Attributes::from(vec![
             (
@@ -867,7 +867,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_different_attributes_different_hash() {
         let attributes1 = Attributes::from(vec![(
             "name".to_string(),

@@ -137,7 +137,7 @@ impl IntoIterator for &Environment {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn test_scope_add_ignores_constants() {
         let mut scope = Environment::new();
 
@@ -155,7 +155,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_scope_add_ignores_blank_variables() {
         let mut scope = Environment::new();
 
@@ -169,7 +169,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_scope_add_only_adds_named_variables() {
         let mut scope = Environment::new();
 
@@ -186,7 +186,7 @@ mod tests {
         assert_eq!(scope.size(), 2, "Should still have 2 variables");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_scope_tracks_variable_names_not_values() {
         let mut scope = Environment::new();
 

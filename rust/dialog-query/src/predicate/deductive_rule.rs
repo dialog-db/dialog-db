@@ -132,7 +132,7 @@ impl From<&Concept> for DeductiveRule {
     }
 }
 
-#[test]
+#[dialog_common::test]
 fn test_rule_compiles_with_valid_premises() {
     use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
     // Rule: person(name, age) :- fact(user/name, ?user, name), fact(user/age, ?user, age)
@@ -173,7 +173,7 @@ fn test_rule_compiles_with_valid_premises() {
     assert!(result.is_ok());
 }
 
-#[test]
+#[dialog_common::test]
 fn test_rule_fails_with_unconstrained_fact() {
     use crate::artifact::{Entity, Type};
     // Rule: person(key, value) :- fact(key, ?user, value) - all params unconstrained
@@ -204,7 +204,7 @@ fn test_rule_fails_with_unconstrained_fact() {
     assert!(DeductiveRule::new(conclusion, premises).is_err());
 }
 
-#[test]
+#[dialog_common::test]
 fn test_rule_fails_with_unused_parameter() {
     use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
     // Rule: person(name, age) :- fact(user/name, ?this, name) - 'age' unused
@@ -239,7 +239,7 @@ fn test_rule_fails_with_unused_parameter() {
     }
 }
 
-#[test]
+#[dialog_common::test]
 fn test_rule_fails_with_no_premises() {
     use crate::artifact::Type;
     // Rule: person(name, age) :- (empty)
@@ -260,7 +260,7 @@ fn test_rule_fails_with_no_premises() {
     assert!(DeductiveRule::new(conclusion, vec![]).is_err());
 }
 
-#[test]
+#[dialog_common::test]
 fn test_rule_compiles_with_chained_dependencies() {
     use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
     // Rule: result(key, value) :- fact(user/name, ?user, "jack"), fact(key, ?user, value)
@@ -303,7 +303,7 @@ fn test_rule_compiles_with_chained_dependencies() {
     assert_eq!(result.unwrap().premises.len(), 2);
 }
 
-#[test]
+#[dialog_common::test]
 fn test_rule_parameter_name_vs_variable_name() {
     use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
     // This test ensures we correctly track variable names, not parameter names

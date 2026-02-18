@@ -454,7 +454,7 @@ mod tests {
     //     }
     // }
 
-    #[test]
+    #[dialog_common::test]
     fn test_person_concept_creation() {
         // Test that the Person concept has the expected properties
         let concept = Person::CONCEPT;
@@ -474,7 +474,7 @@ mod tests {
         assert!(attr_names.contains(&"age"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_person_match_creation() {
         // Test creating a PersonMatch for querying
         let entity_var = Term::var("person_entity");
@@ -493,7 +493,7 @@ mod tests {
         assert_eq!(person_match.age, age_var);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_person_match_with_constants() {
         // Test querying for a specific person with constant values
         let entity_var = Term::var("alice_entity");
@@ -515,7 +515,7 @@ mod tests {
         assert!(person_match.age.is_constant());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_person_match_mixed_terms() {
         // Test mixing variables and constants in a match pattern
         let entity_var = Term::var("person_entity");
@@ -534,7 +534,7 @@ mod tests {
         assert_eq!(person_match.age.name(), Some("any_age"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_person_instance_creation() {
         // Test creating a Person instance
         let entity = Entity::new().unwrap();
@@ -548,7 +548,7 @@ mod tests {
         assert_eq!(person.this(), entity);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_name_consistency() {
         // Test that concept identifier is consistent across different access patterns
         let concept = Person::CONCEPT;
@@ -574,7 +574,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     #[ignore] // TODO: Fix after Premises trait is properly implemented - test body commented out to allow compilation
     fn test_match_premise_planning() {
         // Test body commented out due to Premises trait not being implemented
@@ -605,7 +605,7 @@ mod tests {
         */
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_person_match_fields() {
         // Test that PersonMatch has the expected fields
         let entity_var = Term::var("entity");
@@ -624,7 +624,7 @@ mod tests {
         assert_eq!(person_match.age, age_var);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_debug_output() {
         // Test that our derived Debug implementations work
         let person = Person {
@@ -639,7 +639,7 @@ mod tests {
         assert!(debug_output.contains("42"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_concept_clone() {
         // Test that our derived Clone implementations work
         let entity = Entity::new().unwrap();
@@ -668,7 +668,7 @@ mod tests {
         assert_eq!(match1.age, match2.age);
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     #[ignore] // Legacy manual concept implementation - needs migration to new API
     async fn test_person_match_query() -> Result<()> {
         // Test that actually uses PersonMatch to query - this should work with the concept system
@@ -735,7 +735,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_concept_match_structure() -> Result<()> {
         // Test that PersonMatch correctly implements the Match trait
         // This doesn't require actual querying, just tests the structure
@@ -767,7 +767,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_concept_query_no_matches() -> Result<()> {
         // Test that individual fact selectors work for non-matching queries
 
@@ -800,7 +800,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_concept_dsl() -> Result<()> {
         use crate::Match;
 
@@ -888,7 +888,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_concept_negation_with_not_operator() -> Result<()> {
         use crate::artifact::Artifacts;
         use crate::artifact::Attribute as ArtifactAttribute;
@@ -997,7 +997,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_relation_negation_with_not_operator() -> Result<()> {
         use crate::artifact::Artifacts;
         use crate::artifact::Attribute as ArtifactAttribute;
@@ -1085,7 +1085,7 @@ mod tests {
         pub email: person_attr_concept::Email,
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_concept_with_attribute_fields() -> Result<()> {
         use futures_util::TryStreamExt;
 
@@ -1143,7 +1143,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_query_concept_with_attribute_fields() -> Result<()> {
         use futures_util::TryStreamExt;
 
@@ -1190,7 +1190,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_concept_with_constant_term() -> Result<()> {
         use futures_util::TryStreamExt;
 
@@ -1230,7 +1230,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_attribute_reuse_across_concepts() -> Result<()> {
         use futures_util::TryStreamExt;
 
@@ -1294,7 +1294,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_retract_concept_with_attributes() -> Result<()> {
         use futures_util::TryStreamExt;
 
@@ -1359,7 +1359,7 @@ mod tests {
         pub job: shortcut_employee::Job,
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_concept_query_shortcut() -> Result<()> {
         use futures_util::TryStreamExt;
 
@@ -1415,7 +1415,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_concept_query_shortcut_with_filter() -> Result<()> {
         use futures_util::TryStreamExt;
 
@@ -1492,7 +1492,7 @@ mod tests {
         pub department: helper_employee::Department,
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_single_attribute_query_works() -> Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -1534,7 +1534,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_multi_attribute_constant_query_works() -> Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;
@@ -1579,7 +1579,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_multi_attribute_variable_query_limitation() -> Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let artifacts = Artifacts::anonymous(storage_backend).await?;

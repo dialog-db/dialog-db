@@ -172,7 +172,7 @@ mod tests {
     use dialog_storage::MemoryStorageBackend;
     use futures_util::TryStreamExt;
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_equality_both_terms_bound_and_equal() -> Result<(), QueryError> {
         let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
@@ -208,7 +208,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_equality_both_terms_bound_but_not_equal() -> Result<(), QueryError> {
         let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
@@ -243,7 +243,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_equality_infers_this_from_is() -> Result<(), QueryError> {
         let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
@@ -275,7 +275,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_equality_estimate_when_bound() {
         let constraint = Equality::new(Term::var("x"), Term::var("y"));
 
@@ -289,7 +289,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_equality_estimate_when_unbound() {
         let constraint = Equality::new(Term::var("x"), Term::var("y"));
         let env = Environment::new();

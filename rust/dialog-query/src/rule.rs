@@ -436,7 +436,7 @@ mod tests {
     use super::*;
     use crate::concept::Concept as _;
 
-    #[test]
+    #[dialog_common::test]
     #[ignore] // TODO: Fix FactSelector vs FactApplication mismatch - test body commented out to allow compilation
     fn test_when_array_literal_api() {
         // Test body commented out due to FactSelector vs FactApplication API mismatch
@@ -483,7 +483,7 @@ mod tests {
         */
     }
 
-    #[test]
+    #[dialog_common::test]
     #[ignore] // TODO: Fix FactSelector vs FactApplication mismatch - test body commented out to allow compilation
     fn test_clean_rule_function_api() {
         // Test body commented out due to FactSelector vs FactApplication API mismatch
@@ -534,7 +534,7 @@ mod tests {
         */
     }
 
-    #[test]
+    #[dialog_common::test]
     #[ignore] // TODO: Fix FactSelector vs FactApplication mismatch - test body commented out to allow compilation
     fn test_new_when_api_comprehensive() {
         // Test body commented out due to FactSelector vs FactApplication API mismatch
@@ -861,7 +861,7 @@ mod tests {
         }
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_install_rule_api() {
         use crate::{Session, When};
         use dialog_storage::MemoryStorageBackend;
@@ -909,7 +909,7 @@ mod tests {
         pub birthday: macro_person::Birthday,
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_derive_rule_generates_types() {
         use crate::artifact::Type;
         use crate::term::Term;
@@ -958,7 +958,7 @@ mod tests {
         assert_eq!(when_result.len(), 2); // Should have 2 field statements
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_static_attributes_generation() {
         // Test that static attributes are generated correctly with prefixed names
         // The prefixed attributes should exist and be accessible

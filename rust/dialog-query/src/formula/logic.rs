@@ -74,7 +74,7 @@ mod tests {
     use super::*;
     use crate::{Formula, Parameters, Term, selection::Answer};
 
-    #[test]
+    #[dialog_common::test]
     fn test_and_formula_true_true() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("left".to_string(), Term::var("a"));
@@ -102,7 +102,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_and_formula_true_false() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("left".to_string(), Term::var("a"));
@@ -130,7 +130,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_and_formula_false_false() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("left".to_string(), Term::var("a"));
@@ -158,7 +158,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_or_formula_true_false() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("left".to_string(), Term::var("a"));
@@ -186,7 +186,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_or_formula_false_false() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("left".to_string(), Term::var("a"));
@@ -214,7 +214,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_not_formula_true() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("bool"));
@@ -237,7 +237,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_not_formula_false() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("bool"));
@@ -261,7 +261,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_chained_logic_operations() -> anyhow::Result<()> {
         // Test AND then NOT: !(true && false) = !false = true
         let mut and_terms = Parameters::new();
@@ -301,7 +301,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_integration_boolean_logic() -> anyhow::Result<()> {
         // Test And formula: true AND true = true
         let mut and_terms = Parameters::new();

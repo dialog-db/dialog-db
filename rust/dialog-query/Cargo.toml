@@ -23,7 +23,7 @@ thiserror = { workspace = true }
 
 # Dialog-DB dependencies
 dialog-artifacts = { workspace = true }
-dialog-common = { workspace = true }
+dialog-common = { workspace = true, features = ["helpers"] }
 
 # Async utilities
 futures-util = { workspace = true }

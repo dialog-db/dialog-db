@@ -65,7 +65,7 @@ mod tests {
     use super::*;
     use crate::{Entity, Parameters, Term, selection::Answer};
 
-    #[test]
+    #[dialog_common::test]
     fn test_to_string_number() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("num"));
@@ -88,7 +88,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_to_string_boolean() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("bool"));
@@ -111,7 +111,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_to_string_string() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("text"));
@@ -136,7 +136,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_to_string_entity() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("entity"));
@@ -159,7 +159,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_parse_number_valid() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("text".to_string(), Term::var("str"));
@@ -184,7 +184,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_parse_number_with_whitespace() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("text".to_string(), Term::var("str"));
@@ -209,7 +209,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_parse_number_invalid() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("text".to_string(), Term::var("str"));
@@ -229,7 +229,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_parse_number_empty_string() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("text".to_string(), Term::var("str"));
@@ -247,7 +247,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_parse_number_negative() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("text".to_string(), Term::var("str"));
@@ -267,7 +267,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_integration_type_conversions() -> anyhow::Result<()> {
         // Test ToString formula with number
         let mut to_string_terms = Parameters::new();

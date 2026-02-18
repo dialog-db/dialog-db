@@ -739,7 +739,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_contains_bound_variable() {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
@@ -762,7 +762,7 @@ mod tests {
         assert!(answer.contains(&name_term));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_contains_unbound_variable() {
         let answer = Answer::new();
         let name_term = Term::<Value>::var("name");
@@ -771,7 +771,7 @@ mod tests {
         assert!(!answer.contains(&name_term));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_contains_constant() {
         let answer = Answer::new();
         let constant_term = Term::Constant(Value::String("constant_value".to_string()));
@@ -780,7 +780,7 @@ mod tests {
         assert!(answer.contains(&constant_term));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_contains_blank_variable() {
         let answer = Answer::new();
         let blank_term = Term::<Value>::blank();
@@ -789,7 +789,7 @@ mod tests {
         assert!(!answer.contains(&blank_term));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_resolve_string() {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
@@ -816,7 +816,7 @@ mod tests {
         assert_eq!(result.unwrap(), "Alice");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_resolve_u32() {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/age").unwrap();
@@ -843,7 +843,7 @@ mod tests {
         assert_eq!(result.unwrap(), 25);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_resolve_i32() {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/score").unwrap();
@@ -870,7 +870,7 @@ mod tests {
         assert_eq!(result.unwrap(), -10);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_resolve_bool() {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/active").unwrap();
@@ -897,7 +897,7 @@ mod tests {
         assert!(result.unwrap());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_resolve_entity() {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/id").unwrap();
@@ -925,7 +925,7 @@ mod tests {
         assert_eq!(result.unwrap(), entity_value);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_resolve_constant() {
         let answer = Answer::new();
         let constant_term = Term::Constant("constant_value".to_string());
@@ -938,7 +938,7 @@ mod tests {
         assert_eq!(result.unwrap(), "constant_value");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_resolve_unbound_variable() {
         let answer = Answer::new();
         let name_term = Term::<String>::var("name");
@@ -956,7 +956,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_resolve_blank_variable() {
         let answer = Answer::new();
         let blank_term = Term::<String>::blank();
@@ -972,7 +972,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_resolve_type_mismatch() {
         let entity = Entity::new().unwrap();
         let attr = Attribute::from_str("user/name").unwrap();
@@ -1002,7 +1002,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_factors_evidence() {
         let entity1 = Entity::new().unwrap();
         let entity2 = Entity::new().unwrap();
@@ -1051,7 +1051,7 @@ mod tests {
         assert!(evidence.contains(&&factor2));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_resolve_multiple_types() {
         let entity = Entity::new().unwrap();
 
@@ -1108,7 +1108,7 @@ mod tests {
         assert!(active_result);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_answer_extend() {
         let entity = Entity::new().unwrap();
 

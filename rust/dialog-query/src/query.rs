@@ -98,7 +98,7 @@ mod tests {
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_fact_selector_query_trait() -> Result<()> {
         // Setup: Create in-memory storage and artifacts store
         let storage_backend = MemoryStorageBackend::default();
@@ -163,7 +163,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_query_trait_with_variables_succeeds_if_constants_present() -> Result<()> {
         // Setup
         let storage_backend = MemoryStorageBackend::default();
@@ -184,7 +184,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_polymorphic_querying() -> Result<()> {
         // This test demonstrates polymorphic querying - same function can work with any Query impl
 
@@ -218,7 +218,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_chaining_query_operations() -> Result<()> {
         // This test shows how the Query trait enables fluent query building and execution
 

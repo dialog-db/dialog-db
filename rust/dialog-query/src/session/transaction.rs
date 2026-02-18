@@ -199,7 +199,7 @@ mod tests {
     use crate::Relation;
     use crate::artifact::{Attribute, Entity, Value};
 
-    #[test]
+    #[dialog_common::test]
     fn test_transaction_basic_operations() -> anyhow::Result<()> {
         let mut transaction = Transaction::new();
         let alice = Entity::new()?;
@@ -222,7 +222,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_transaction_mutation_replacement() -> anyhow::Result<()> {
         let mut transaction = Transaction::new();
         let alice = Entity::new()?;
@@ -257,7 +257,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn test_into_iterator() -> anyhow::Result<()> {
         let mut transaction = Transaction::new();
         let alice = Entity::new()?;
@@ -283,7 +283,7 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_macros::test]
+    #[dialog_common::test]
     async fn test_transaction_stream() -> anyhow::Result<()> {
         use futures_util::StreamExt;
 
