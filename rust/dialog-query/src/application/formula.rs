@@ -10,11 +10,8 @@ use std::sync::Arc;
 
 pub const PARAM_COST: usize = 10;
 
-/// Non-generic formula application that can be evaluated over a stream of matches
-///
-/// This struct represents a formula that has been bound to specific term mappings.
-/// Unlike the previous generic version, this can be stored alongside other applications
-/// in the deductive rule system, allowing formulas to be used as premises in rules.
+/// A formula bound to specific term mappings, usable as a premise in the
+/// deductive rule system alongside fact and concept applications.
 #[derive(Debug, Clone)]
 pub struct FormulaApplication {
     /// Formula identifier being applied
