@@ -1,4 +1,63 @@
 //! Attribute derive macro implementation
+//!
+//! Generates an `Attribute` trait impl for a newtype struct, turning it into
+//! a typed, self-describing ECS-style attribute that can be used in queries.
+//!
+//! # Example input
+//!
+//! ```rust,ignore
+//! /// A person's full name
+//! #[derive(Attribute)]
+//! #[cardinality(one)]
+//! struct FullName(String);
+//! ```
+//!
+//! # Generated output (simplified)
+//!
+//! ```rust,ignore
+//! // -- Namespace derivation (when no explicit #[namespace("...")] is given) --
+//! // Extracts the last segment of module_path!() at compile time.
+//! // e.g. module_path!() = "my_crate::model" → namespace = "model"
+//! const __FULLNAME_MODULE_PATH: &str = module_path!();
+//! const __FULLNAME_NAMESPACE_LEN: usize = __compute_fullname_namespace_len(__FULLNAME_MODULE_PATH);
+//! const FULLNAME_NAMESPACE_BYTES: [u8; __FULLNAME_NAMESPACE_LEN] = __compute_fullname_namespace_bytes(__FULLNAME_MODULE_PATH);
+//! // FULLNAME_NAMESPACE(...) converts the byte array back to &str
+//!
+//! // -- Concept constant --
+//! const FULLNAME_CONCEPT: Concept = Concept::Static {
+//!     description: "A person's full name",
+//!     attributes: &Attributes::Static(&[("has", AttributeSchema {
+//!         namespace: /* derived or explicit */,
+//!         name: "full-name",         // PascalCase → kebab-case
+//!         description: "A person's full name",
+//!         cardinality: Cardinality::One,
+//!         content_type: <String as IntoType>::TYPE,
+//!         ..
+//!     })]),
+//! };
+//!
+//! // -- Attribute trait impl --
+//! impl Attribute for FullName {
+//!     type Type = String;
+//!     type Match = WithMatch<Self>;
+//!     type Instance = With<Self>;
+//!     type Term = WithTerms<Self>;
+//!
+//!     const NAMESPACE: &'static str = /* "model" */;
+//!     const NAME: &'static str = "full-name";
+//!     const CARDINALITY: Cardinality = Cardinality::One;
+//!     const SCHEMA: AttributeSchema<String> = /* ... */;
+//!     const CONCEPT: Concept = FULLNAME_CONCEPT;
+//!
+//!     fn value(&self) -> &String { &self.0 }
+//!     fn new(value: String) -> Self { Self(value) }
+//! }
+//!
+//! // -- Debug, Display, and From impls --
+//! // Debug:   FullName { namespace: "model", name: "full-name", value: "Alice" }
+//! // Display: model/full-name: "Alice"
+//! // From<U>: any U: Into<String> can be converted into FullName
+//! ```
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -46,10 +105,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
     };
 
-    // Check if namespace is explicitly specified
+    // If the user wrote #[namespace("my-ns")], use that; otherwise we'll derive it
+    // from module_path!() at compile time (see namespace_static_decl below).
     let explicit_namespace = parse_namespace_attribute(&input.attrs);
 
-    // Extract attribute name (convert PascalCase/snake_case to kebab-case)
+    // Convert struct name to kebab-case for the attribute name.
+    // e.g. FullName → "full-name", created_at → "created-at"
     let attr_name = to_kebab_case(&struct_name.to_string());
     let attr_name_lit = syn::LitStr::new(&attr_name, proc_macro2::Span::call_site());
 
@@ -60,7 +121,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
     // Parse cardinality
     let cardinality = parse_cardinality_attribute(&input.attrs);
 
-    // Generate namespace static names (unique per struct)
+    // Generate unique identifiers for the const-fn namespace machinery.
+    // Each struct gets its own set to avoid name collisions when multiple
+    // Attribute derives exist in the same module.
+    // e.g. for FullName: __compute_fullname_namespace_len, FULLNAME_NAMESPACE_BYTES, etc.
     let compute_len_name = syn::Ident::new(
         &format!(
             "__compute_{}_namespace_len",
@@ -94,7 +158,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
         struct_name.span(),
     );
 
-    // Generate namespace - explicit or derived
+    // Build the namespace value. Two cases:
+    // 1. Explicit: #[namespace("my-ns")] → just use the string literal directly.
+    // 2. Derived: extract last segment of module_path!() at compile time using
+    //    const fns (because module_path!() is only available as a macro, not in
+    //    const contexts, we capture it in a const and process it with const fns).
+    //    e.g. "my_crate::models::person" → "person"
     let (namespace_static_decl, namespace_expr) = if let Some(ref ns) = explicit_namespace {
         let ns_lit = syn::LitStr::new(ns, proc_macro2::Span::call_site());
         (quote! {}, quote! { #ns_lit })
@@ -173,10 +242,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
         struct_name.span(),
     );
 
+    // Assemble the final generated code: namespace consts, Concept, Attribute impl,
+    // and the Debug/Display/From trait impls.
     let expanded = quote! {
         #namespace_static_decl
 
-        // Generate the CONCEPT constant
+        // A Concept wraps the attribute schema so it can participate in queries
         const #concept_const_name: dialog_query::predicate::concept::Concept = {
             const ATTRS: dialog_query::predicate::concept::Attributes =
                 dialog_query::predicate::concept::Attributes::Static(&[(

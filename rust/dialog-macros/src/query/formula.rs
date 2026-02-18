@@ -1,4 +1,74 @@
 //! Formula derive macro implementation
+//!
+//! Generates a computed/derived attribute system from a struct. A formula has
+//! "input" fields (provided by the caller) and "derived" fields (computed by
+//! the formula's `derive()` function).
+//!
+//! # Example input
+//!
+//! ```rust,ignore
+//! /// Computes a person's full name from parts
+//! #[derive(Formula)]
+//! pub struct FullNameFormula {
+//!     /// The first name
+//!     pub first: String,
+//!     /// The last name
+//!     pub last: String,
+//!     /// The computed full name
+//!     #[derived]            // marks this as an output field (cost defaults to 0)
+//!     pub full: String,
+//! }
+//!
+//! // User must implement the derive function:
+//! impl FullNameFormula {
+//!     fn derive(input: FullNameFormulaInput) -> Vec<Self> {
+//!         vec![FullNameFormula {
+//!             first: input.first.clone(),
+//!             last: input.last.clone(),
+//!             full: format!("{} {}", input.first, input.last),
+//!         }]
+//!     }
+//! }
+//! ```
+//!
+//! # Generated output (simplified)
+//!
+//! ```rust,ignore
+//! // -- Input struct (non-derived fields only) --
+//! pub struct FullNameFormulaInput {
+//!     pub first: String,
+//!     pub last: String,
+//! }
+//!
+//! // -- Match struct (all fields as Term<T> for query patterns) --
+//! pub struct FullNameFormulaMatch {
+//!     pub first: Term<String>,
+//!     pub last: Term<String>,
+//!     pub full: Term<String>,
+//! }
+//!
+//! // -- Cells definition (schema for the formula's inputs/outputs) --
+//! // Static OnceLock holding cell definitions built via a builder:
+//! //   builder.cell("first", DataType::String).the("The first name").required();
+//! //   builder.cell("last",  DataType::String).the("The last name").required();
+//! //   builder.cell("full",  DataType::String).the("The computed full name").derived(0);
+//!
+//! // -- Formula trait impl --
+//! impl Formula for FullNameFormula {
+//!     type Input = FullNameFormulaInput;
+//!     type Match = FullNameFormulaMatch;
+//!
+//!     fn operator() -> &'static str { "full-name-formula" }
+//!     fn cells() -> &'static Cells { /* lazily built from above */ }
+//!     fn cost() -> usize { 0 }  // sum of all #[derived(cost)] values
+//!     fn derive(input: Self::Input) -> Vec<Self> { /* delegates to user impl */ }
+//! }
+//!
+//! // -- Conversions --
+//! // FullNameFormulaMatch → Parameters
+//! // TryFrom<&mut Cursor> for FullNameFormulaInput (reads input cells from cursor)
+//! // Output::write() for FullNameFormula (writes derived cells to cursor)
+//! ```
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -33,7 +103,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
     };
 
-    // Parse fields and identify which are derived (with optional cost)
+    // Partition fields into "input" (required by caller) and "derived" (computed).
+    // Fields marked with #[derived] or #[derived(cost = N)] become outputs.
     let mut input_fields = Vec::new();
     let mut derived_fields = Vec::new(); // (name, type, doc, cost)
     let mut all_fields = Vec::new();
@@ -67,7 +138,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
         .into();
     }
 
-    // Calculate total formula cost by summing derived field costs
+    // Total cost is the sum of per-field costs. This lets the query planner
+    // estimate how expensive it is to evaluate this formula.
     let total_cost: usize = derived_fields.iter().map(|(_, _, _, cost)| cost).sum();
 
     // Generate type names
@@ -106,7 +178,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    // Generate cells definition
+    // Generate cell definitions that describe the formula's schema.
+    // Input fields are marked `.required()`, derived fields are marked `.derived(cost)`.
     let cell_definitions: Vec<_> = all_fields
         .iter()
         .map(|(name, ty, doc, is_derived, cost)| {
@@ -153,7 +226,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    // Generate Output::write() - writes all derived fields
+    // Generate Output::write() statements — only derived fields are written
+    // back to the cursor after computation.
     let write_statements: Vec<_> = derived_fields
         .iter()
         .map(|(name, _ty, _, _cost)| {
