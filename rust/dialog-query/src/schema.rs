@@ -203,11 +203,16 @@ impl Group {
     }
 }
 
-#[dialog_common::test]
-fn test_requirement_properties() {
-    let required = Requirement::Required(None);
-    let derived = Requirement::Optional;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    assert!(required.is_required());
-    assert!(!derived.is_required());
+    #[dialog_common::test]
+    fn test_requirement_properties() {
+        let required = Requirement::Required(None);
+        let derived = Requirement::Optional;
+
+        assert!(required.is_required());
+        assert!(!derived.is_required());
+    }
 }

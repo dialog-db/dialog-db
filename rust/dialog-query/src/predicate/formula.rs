@@ -497,41 +497,46 @@ impl From<&Cells> for Schema {
     }
 }
 
-#[dialog_common::test]
-fn test_cells() -> anyhow::Result<()> {
-    let cells = Cells::define(|builder| {
-        builder
-            .cell("name", Some(Type::String))
-            .the("name field")
-            .required();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        builder
-            .cell("age", Some(Type::UnsignedInt))
-            .the("age field")
-            .derived(15);
-    });
+    #[dialog_common::test]
+    fn test_cells() -> anyhow::Result<()> {
+        let cells = Cells::define(|builder| {
+            builder
+                .cell("name", Some(Type::String))
+                .the("name field")
+                .required();
 
-    assert_eq!(cells.count(), 2);
-    assert_eq!(cells.get("name").unwrap().name(), "name");
-    assert_eq!(
-        *cells.get("name").unwrap().content_type(),
-        Some(Type::String)
-    );
-    assert_eq!(cells.get("name").unwrap().description(), "name field");
-    assert_eq!(
-        cells.get("name").unwrap().requirement(),
-        &Requirement::Required(None)
-    );
+            builder
+                .cell("age", Some(Type::UnsignedInt))
+                .the("age field")
+                .derived(15);
+        });
 
-    assert_eq!(cells.get("age").unwrap().name(), "age");
-    assert_eq!(
-        *cells.get("age").unwrap().content_type(),
-        Some(Type::UnsignedInt)
-    );
-    assert_eq!(cells.get("age").unwrap().description(), "age field");
-    assert_eq!(
-        cells.get("age").unwrap().requirement(),
-        &Requirement::Optional
-    );
-    Ok(())
+        assert_eq!(cells.count(), 2);
+        assert_eq!(cells.get("name").unwrap().name(), "name");
+        assert_eq!(
+            *cells.get("name").unwrap().content_type(),
+            Some(Type::String)
+        );
+        assert_eq!(cells.get("name").unwrap().description(), "name field");
+        assert_eq!(
+            cells.get("name").unwrap().requirement(),
+            &Requirement::Required(None)
+        );
+
+        assert_eq!(cells.get("age").unwrap().name(), "age");
+        assert_eq!(
+            *cells.get("age").unwrap().content_type(),
+            Some(Type::UnsignedInt)
+        );
+        assert_eq!(cells.get("age").unwrap().description(), "age field");
+        assert_eq!(
+            cells.get("age").unwrap().requirement(),
+            &Requirement::Optional
+        );
+        Ok(())
+    }
 }
