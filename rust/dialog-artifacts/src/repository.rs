@@ -30,8 +30,6 @@ use tokio::sync::RwLock;
 pub mod archive;
 /// Capability-based branch operations (command pattern).
 pub mod branch;
-/// Branch state, identifiers, and upstream descriptors.
-pub mod branch_state;
 /// Cell descriptor for typed memory cell operations.
 pub mod cell;
 /// Credentials for signing and identity management.
@@ -49,7 +47,7 @@ pub mod remotes;
 /// Revision type and edition tracking.
 pub mod revision;
 
-pub use branch_state::{BranchId, BranchState, UpstreamState};
+pub use branch::{BranchId, BranchState, UpstreamState};
 pub use credentials::Credentials;
 pub use error::{OperationKind, RepositoryError};
 pub use node_reference::NodeReference;

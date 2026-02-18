@@ -1,7 +1,7 @@
 use async_trait::async_trait;
-use dialog_capability::{Provider, Subject};
+use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::{Archive, Catalog, Get, Put};
+use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder,
 };
@@ -25,8 +25,7 @@ use tokio::sync::Mutex;
 pub struct ContentAddressedStore<Env> {
     env: Arc<Mutex<Env>>,
     encoder: CborEncoder,
-    subject: Subject,
-    catalog: String,
+    catalog: Capability<Catalog>,
 }
 
 impl<Env> Clone for ContentAddressedStore<Env> {
@@ -34,7 +33,6 @@ impl<Env> Clone for ContentAddressedStore<Env> {
         Self {
             env: self.env.clone(),
             encoder: self.encoder.clone(),
-            subject: self.subject.clone(),
             catalog: self.catalog.clone(),
         }
     }
@@ -43,12 +41,11 @@ impl<Env> Clone for ContentAddressedStore<Env> {
 impl<Env> ContentAddressedStore<Env> {
     /// Create a new ContentAddressedStore that delegates storage operations to
     /// capability effects on the given environment.
-    pub fn new(env: Arc<Mutex<Env>>, subject: Subject, catalog: impl Into<String>) -> Self {
+    pub fn new(env: Arc<Mutex<Env>>, catalog: Capability<Catalog>) -> Self {
         Self {
             env,
             encoder: CborEncoder,
-            subject,
-            catalog: catalog.into(),
+            catalog,
         }
     }
 
@@ -80,12 +77,7 @@ where
     where
         T: DeserializeOwned + ConditionalSync,
     {
-        let effect = self
-            .subject
-            .clone()
-            .attenuate(Archive)
-            .attenuate(Catalog::new(&self.catalog))
-            .invoke(Get::new(*hash));
+        let effect = self.catalog.clone().invoke(Get::new(*hash));
 
         let mut env = self.env.lock().await;
         let result: Result<Option<Vec<u8>>, _> = effect.perform(&mut *env).await;
@@ -110,12 +102,7 @@ where
     {
         let (hash, bytes) = self.encoder.encode(block).await?;
 
-        let effect = self
-            .subject
-            .clone()
-            .attenuate(Archive)
-            .attenuate(Catalog::new(&self.catalog))
-            .invoke(Put::new(hash, bytes.clone()));
+        let effect = self.catalog.clone().invoke(Put::new(hash, bytes.clone()));
 
         let mut env = self.env.lock().await;
         let result: Result<(), _> = effect.perform(&mut *env).await;
@@ -153,12 +140,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_capability::Did;
+    use dialog_capability::{Did, Subject};
+    use dialog_effects::archive::Archive;
     use dialog_storage::provider::Volatile;
 
-    fn test_subject() -> Subject {
+    fn test_catalog(name: &str) -> Capability<Catalog> {
         let did: Did = "did:test:archive-cas".parse().unwrap();
         Subject::from(did)
+            .attenuate(Archive)
+            .attenuate(Catalog::new(name))
     }
 
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -170,7 +160,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_writes_and_reads_block() -> anyhow::Result<()> {
         let env = Arc::new(Mutex::new(Volatile::new()));
-        let mut archive = ContentAddressedStore::new(env, test_subject(), "index");
+        let mut archive = ContentAddressedStore::new(env, test_catalog("index"));
 
         let block = TestBlock {
             value: 42,
@@ -187,7 +177,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_returns_none_for_missing_hash() -> anyhow::Result<()> {
         let env = Arc::new(Mutex::new(Volatile::new()));
-        let archive = ContentAddressedStore::new(env, test_subject(), "index");
+        let archive = ContentAddressedStore::new(env, test_catalog("index"));
 
         let missing_hash = [0u8; 32];
         let result: Option<TestBlock> = archive.read(&missing_hash).await?;
@@ -207,20 +197,20 @@ mod tests {
 
         // Write to catalog "a"
         let hash = {
-            let mut archive = ContentAddressedStore::new(env.clone(), test_subject(), "a");
+            let mut archive = ContentAddressedStore::new(env.clone(), test_catalog("a"));
             archive.write(&block).await?
         };
 
         // Read from catalog "b" — should not find it
         {
-            let archive = ContentAddressedStore::new(env.clone(), test_subject(), "b");
+            let archive = ContentAddressedStore::new(env.clone(), test_catalog("b"));
             let result: Option<TestBlock> = archive.read(&hash).await?;
             assert!(result.is_none());
         }
 
         // Read from catalog "a" — should find it
         {
-            let archive = ContentAddressedStore::new(env.clone(), test_subject(), "a");
+            let archive = ContentAddressedStore::new(env.clone(), test_catalog("a"));
             let result: Option<TestBlock> = archive.read(&hash).await?;
             assert_eq!(result, Some(block));
         }
