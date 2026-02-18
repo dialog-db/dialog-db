@@ -196,18 +196,6 @@ where
         }
     }
 
-    /// Get the variable name if this term is a variable
-    ///
-    /// Alias for name() method - kept for backward compatibility
-    pub fn as_variable_name(&self) -> Option<&str> {
-        match self {
-            Term::Variable {
-                name: Some(name), ..
-            } => Some(name),
-            _ => None,
-        }
-    }
-
     /// Get the constant value if this term is a constant
     ///
     /// Returns None for variables
@@ -600,56 +588,6 @@ mod tests {
             }
         }
 
-        // // Test 2: Deserialize typed unnamed variable
-        // let json2 = r#"{"?":{"type":"String"}}"#;
-        // match serde_json::from_str::<Term<String>>(json2) {
-        //     Ok(term) => {
-        //         println!("✓ Deserialized typed Any: {:?}", term);
-        //         assert!(term.is_any());
-        //     }
-        //     Err(e) => panic!("Failed to deserialize typed Any: {}", e),
-        // }
-
-        // // Test 3: Deserialize named variable with type
-        // let json3 = r#"{"?":{"name":"title","type":"String"}}"#;
-        // match serde_json::from_str::<Term<String>>(json3) {
-        //     Ok(term) => {
-        //         println!("✓ Deserialized named variable: {:?}", term);
-        //         assert_eq!(term.name(), Some("title"));
-        //     }
-        //     Err(e) => panic!("Failed to deserialize named variable: {}", e),
-        // }
-
-        // // Test 4: Deserialize untyped named variable
-        // let json4 = r#"{"?":{"name":"title"}}"#;
-        // match serde_json::from_str::<Term<Value>>(json4) {
-        //     Ok(term) => {
-        //         println!("✓ Deserialized untyped variable: {:?}", term);
-        //         assert_eq!(term.name(), Some("title"));
-        //     }
-        //     Err(e) => panic!("Failed to deserialize untyped variable: {}", e),
-        // }
-
-        // // Test 5: Deserialize constant
-        // let json5 = r#""Alice""#;
-        // match serde_json::from_str::<Term<String>>(json5) {
-        //     Ok(term) => {
-        //         println!("✓ Deserialized constant: {:?}", term);
-        //         assert!(term.is_constant());
-        //         assert_eq!(term.as_constant(), Some(&"Alice".to_string()));
-        //     }
-        //     Err(e) => panic!("Failed to deserialize constant: {}", e),
-        // }
-
-        // // Test 6: Deserialize Entity variable (the failing case?)
-        // let json6 = r#"{"?":{"name":"user","type":"Entity"}}"#;
-        // match serde_json::from_str::<Term<Entity>>(json6) {
-        //     Ok(term) => {
-        //         println!("✓ Deserialized Entity variable: {:?}", term);
-        //         assert_eq!(term.name(), Some("user"));
-        //     }
-        //     Err(e) => panic!("Failed to deserialize Entity variable: {}", e),
-        // }
     }
 
     #[dialog_common::test]

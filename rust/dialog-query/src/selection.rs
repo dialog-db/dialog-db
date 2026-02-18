@@ -699,10 +699,6 @@ mod tests {
     use crate::artifact::{Attribute, Entity};
     use std::str::FromStr;
 
-    // ============================================================================
-    // Answer Tests
-    // ============================================================================
-
     // Helper function to create a test fact for Answer tests
     // Since Fact requires a Cause (Blake3Hash), we create a simple helper
     fn create_test_fact(entity: Entity, attr: Attribute, value: Value) -> Fact {

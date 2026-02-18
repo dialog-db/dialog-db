@@ -166,7 +166,7 @@ impl Cursor {
         (self.source, self.reads)
     }
 
-    // ===== Compatibility methods for Match-based formulas =====
+    // Compatibility methods for Match-based formulas
     // These will be removed once formulas are updated to work with Answer
 
     /// Write a value to the cursor
