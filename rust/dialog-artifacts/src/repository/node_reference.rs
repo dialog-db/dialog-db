@@ -1,6 +1,6 @@
 use base58::ToBase58;
-use dialog_storage::Blake3Hash;
 use dialog_prolly_tree::EMPT_TREE_HASH;
+use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Display, Formatter};
 

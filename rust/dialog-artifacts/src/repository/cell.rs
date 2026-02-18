@@ -69,11 +69,7 @@ impl<Codec: Encoder> Cell<Codec> {
     ///
     /// `edition` is the CAS edition from the last resolve. Pass `None` when
     /// creating a new cell for the first time.
-    pub fn publish<T: Serialize>(
-        &self,
-        value: T,
-        edition: Option<Vec<u8>>,
-    ) -> Publish<T> {
+    pub fn publish<T: Serialize>(&self, value: T, edition: Option<Vec<u8>>) -> Publish<T> {
         Publish {
             subject: self.subject.clone(),
             space: self.space.clone(),
@@ -102,10 +98,7 @@ where
 {
     /// Execute the resolve operation, returning the current value and its
     /// edition (for CAS), or `None` if the cell is empty.
-    pub async fn perform<Env>(
-        self,
-        env: &mut Env,
-    ) -> Result<Option<(T, Vec<u8>)>, RepositoryError>
+    pub async fn perform<Env>(self, env: &mut Env) -> Result<Option<(T, Vec<u8>)>, RepositoryError>
     where
         Env: Provider<memory::Resolve>,
     {
@@ -124,16 +117,12 @@ where
         match publication {
             None => Ok(None),
             Some(pub_data) => {
-                let value: T = self
-                    .codec
-                    .decode(&pub_data.content)
-                    .await
-                    .map_err(|e| {
-                        RepositoryError::StorageError(format!(
-                            "Failed to decode cell value: {}",
-                            Into::<DialogStorageError>::into(e)
-                        ))
-                    })?;
+                let value: T = self.codec.decode(&pub_data.content).await.map_err(|e| {
+                    RepositoryError::StorageError(format!(
+                        "Failed to decode cell value: {}",
+                        Into::<DialogStorageError>::into(e)
+                    ))
+                })?;
 
                 Ok(Some((value, pub_data.edition)))
             }
