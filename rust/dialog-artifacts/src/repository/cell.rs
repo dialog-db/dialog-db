@@ -95,16 +95,14 @@ where
     where
         Env: Provider<memory::Resolve>,
     {
-        let effect = self
+        let publication = self
             .cell
             .subject
             .clone()
             .attenuate(Memory)
             .attenuate(Space::new(&self.cell.space))
             .attenuate(memory::Cell::new(&self.cell.cell))
-            .invoke(memory::Resolve);
-
-        let publication: Option<dialog_effects::memory::Publication> = effect
+            .invoke(memory::Resolve)
             .perform(env)
             .await
             .map_err(|e| RepositoryError::StorageError(format!("Memory resolve failed: {}", e)))?;
@@ -148,16 +146,14 @@ impl<T: Serialize, Codec> Publish<'_, T, Codec> {
         let content = serde_ipld_dagcbor::to_vec(&self.value)
             .map_err(|e| RepositoryError::StorageError(format!("Failed to encode value: {}", e)))?;
 
-        let effect = self
+        let new_edition = self
             .cell
             .subject
             .clone()
             .attenuate(Memory)
             .attenuate(Space::new(&self.cell.space))
             .attenuate(memory::Cell::new(&self.cell.cell))
-            .invoke(memory::Publish::new(content, self.edition));
-
-        let new_edition: Vec<u8> = effect
+            .invoke(memory::Publish::new(content, self.edition))
             .perform(env)
             .await
             .map_err(|e| RepositoryError::StorageError(format!("Memory publish failed: {}", e)))?;
