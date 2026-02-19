@@ -1,3 +1,6 @@
+pub mod with;
+pub use with::{With, WithMatch, WithTerms};
+
 use crate::application::ConceptApplication;
 
 #[cfg(test)]
@@ -1429,11 +1432,11 @@ mod tests {
 
         let mut session = Session::open(artifacts.clone());
         let mut transaction = session.edit();
-        transaction.assert(crate::attribute::With {
+        transaction.assert(crate::concept::With {
             this: alice,
             has: helper_person::Name("Alice".into()),
         });
-        transaction.assert(crate::attribute::With {
+        transaction.assert(crate::concept::With {
             this: bob,
             has: helper_person::Name("Bob".into()),
         });
@@ -1471,19 +1474,19 @@ mod tests {
 
         let mut session = Session::open(artifacts.clone());
         let mut transaction = session.edit();
-        transaction.assert(crate::attribute::With {
+        transaction.assert(crate::concept::With {
             this: alice.clone(),
             has: helper_employee::Name("Alice".into()),
         });
-        transaction.assert(crate::attribute::With {
+        transaction.assert(crate::concept::With {
             this: alice.clone(),
             has: helper_employee::Department("Engineering".into()),
         });
-        transaction.assert(crate::attribute::With {
+        transaction.assert(crate::concept::With {
             this: bob.clone(),
             has: helper_employee::Name("Bob".into()),
         });
-        transaction.assert(crate::attribute::With {
+        transaction.assert(crate::concept::With {
             this: bob,
             has: helper_employee::Department("Sales".into()),
         });
@@ -1516,19 +1519,19 @@ mod tests {
 
         let mut session = Session::open(artifacts.clone());
         let mut transaction = session.edit();
-        transaction.assert(crate::attribute::With {
+        transaction.assert(crate::concept::With {
             this: alice.clone(),
             has: helper_employee::Name("Alice".into()),
         });
-        transaction.assert(crate::attribute::With {
+        transaction.assert(crate::concept::With {
             this: alice.clone(),
             has: helper_employee::Department("Engineering".into()),
         });
-        transaction.assert(crate::attribute::With {
+        transaction.assert(crate::concept::With {
             this: bob.clone(),
             has: helper_employee::Name("Bob".into()),
         });
-        transaction.assert(crate::attribute::With {
+        transaction.assert(crate::concept::With {
             this: bob.clone(),
             has: helper_employee::Department("Sales".into()),
         });
