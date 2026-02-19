@@ -48,9 +48,9 @@ pub mod types;
 
 pub use application::Application;
 pub use artifact::{Attribute as ArtifactAttribute, Entity, Type, Value};
-pub use attribute::{Attribute, AttributeSchema, Cardinality, With};
+pub use attribute::{Attribute, AttributeSchema, Cardinality};
 pub use claim::Claim;
-pub use concept::Concept;
+pub use concept::{Concept, With, WithMatch, WithTerms};
 pub use context::EvaluationContext;
 pub use dialog_macros::{Attribute, Concept, Formula};
 pub use dsl::{Input, Match};

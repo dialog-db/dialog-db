@@ -271,9 +271,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl dialog_query::attribute::Attribute for #struct_name {
             type Type = #wrapped_type;
 
-            type Match = dialog_query::attribute::WithMatch<Self>;
-            type Instance = dialog_query::attribute::With<Self>;
-            type Term = dialog_query::attribute::WithTerms<Self>;
+            type Match = dialog_query::concept::WithMatch<Self>;
+            type Instance = dialog_query::concept::With<Self>;
+            type Term = dialog_query::concept::WithTerms<Self>;
 
             const NAMESPACE: &'static str = #namespace_expr;
             const NAME: &'static str = #attr_name_lit;
