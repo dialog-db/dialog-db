@@ -1104,6 +1104,4 @@ mod tests {
         assert_eq!(schema.name, "user-name");
         assert_eq!(schema.cardinality, Cardinality::One);
     }
-
 }
-
