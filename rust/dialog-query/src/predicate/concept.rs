@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Not;
 
+/// Collection of named attribute schemas, supporting both static and dynamic construction.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attributes {
     /// Static attributes from compile-time generated code (const-compatible)
@@ -22,7 +23,9 @@ pub enum Attributes {
 
 /// Iterator over attribute (name, value) pairs
 pub enum AttributesIter<'a> {
+    /// Iterator over a static slice of attributes.
     Static(std::slice::Iter<'a, (&'static str, AttributeSchema<Value>)>),
+    /// Iterator over a dynamic vector of attributes.
     Dynamic(std::slice::Iter<'a, (String, AttributeSchema<Value>)>),
 }
 
@@ -68,6 +71,7 @@ impl Attributes {
         }
     }
 
+    /// Returns the number of attributes in this collection.
     pub fn count(&self) -> usize {
         match self {
             Attributes::Static(slice) => slice.len(),
@@ -75,10 +79,12 @@ impl Attributes {
         }
     }
 
+    /// Creates an empty dynamic attribute collection.
     pub fn new() -> Self {
         Attributes::Dynamic(Vec::new())
     }
 
+    /// Returns an iterator over attribute names.
     pub fn keys(&self) -> impl Iterator<Item = &str> + '_ {
         self.iter().map(|(k, _)| k)
     }
@@ -204,12 +210,18 @@ impl From<&Attributes> for Schema {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Concept {
+    /// A concept constructed at runtime with owned data.
     Dynamic {
+        /// Human-readable description of this concept.
         description: String,
+        /// The set of attributes that define this concept.
         attributes: Attributes,
     },
+    /// A concept defined at compile time with static references.
     Static {
+        /// Human-readable description of this concept.
         description: &'static str,
+        /// The set of attributes that define this concept.
         attributes: &'static Attributes,
     },
 }
@@ -309,6 +321,7 @@ impl Concept {
         }
     }
 
+    /// Returns a reference to this concept's attribute collection.
     pub fn attributes(&self) -> &Attributes {
         match self {
             Self::Dynamic { attributes, .. } => attributes,
@@ -327,10 +340,12 @@ impl Concept {
         self.to_uri()
     }
 
+    /// Returns an iterator over operand names, starting with "this" followed by attribute keys.
     pub fn operands(&self) -> impl Iterator<Item = &str> {
         std::iter::once("this").chain(self.attributes().keys())
     }
 
+    /// Derives a `Schema` from this concept's attributes.
     pub fn schema(&self) -> Schema {
         self.attributes().into()
     }
@@ -504,7 +519,7 @@ impl<'a> Builder<'a> {
     /// Self for method chaining
     ///
     /// # Example
-    /// ```ignore
+    /// ```rs
     /// let instance = concept.new()?
     ///     .with("name", "Alice")
     ///     .with("age", 30)

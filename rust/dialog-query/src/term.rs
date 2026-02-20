@@ -47,8 +47,10 @@ where
     /// predicate will fail to unify will fail to match anything.
     #[serde(rename = "?")]
     Variable {
+        /// Optional variable name for join across conjuncts
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        /// Type constraint carried via PhantomData
         #[serde(
             rename = "type",
             skip_serializing_if = "ContentType::<T>::is_any",
@@ -132,6 +134,7 @@ where
         matches!(self, Term::Variable { .. })
     }
 
+    /// Check if this term is a named variable
     pub fn is_named_variable(&self) -> bool {
         matches!(self, Term::Variable { name: Some(_), .. })
     }
@@ -223,6 +226,7 @@ where
         Constraint::Equality(Equality::new(self.as_unknown(), other.into().as_unknown())).into()
     }
 
+    /// Convert this typed term to an untyped Term<Value>
     pub fn as_unknown(&self) -> Term<Value> {
         match self {
             Term::Constant(value) => Term::Constant(value.as_value()),
@@ -444,7 +448,7 @@ impl From<Vec<u8>> for Term<Vec<u8>> {
 /// Convert an Attribute to a Term of its inner type
 ///
 /// This allows ergonomic conversion from attribute values to terms:
-/// ```ignore
+/// ```rs
 /// let name_term: Term<String> = employee::Name("Alice".into()).into();
 /// ```
 impl<A: Attribute> From<A> for Term<A::Type> {

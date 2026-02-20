@@ -13,6 +13,7 @@ pub const NEGATION_OVERHEAD: usize = 100;
 pub struct Negation(pub Application);
 
 impl Negation {
+    /// Create a negation wrapping the given application
     pub fn not(application: Application) -> Self {
         Negation(application)
     }
@@ -27,6 +28,7 @@ impl Negation {
             .map(|cost| cost + NEGATION_OVERHEAD)
     }
 
+    /// Returns the parameters of the underlying application
     pub fn parameters(&self) -> Parameters {
         let Negation(application) = self;
         application.parameters()
@@ -56,6 +58,7 @@ impl Negation {
         schema
     }
 
+    /// Evaluate this negation, yielding answers that do NOT match the inner application
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
         &self,
         context: EvaluationContext<S, M>,

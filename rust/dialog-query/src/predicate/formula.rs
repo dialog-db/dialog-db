@@ -82,7 +82,7 @@
 //! The formula system is designed to support future macro generation that will
 //! automatically derive the boilerplate code, making formula definition as simple as:
 //!
-//! ```rust,ignore
+//! ```rs
 //! #[derive(Formula)]
 //! struct Sum {
 //!     of: u32,
@@ -160,14 +160,19 @@ pub trait Formula: Quarriable + Output + Sized + Clone {
 
     // fn dependencies() -> Dependencies;
 
+    /// Returns the estimated cost of evaluating this formula.
     fn cost() -> usize;
+    /// Returns the static cell definitions for this formula's parameters.
     fn cells() -> &'static Cells;
+    /// Returns the operator name identifying this formula.
     fn operator() -> &'static str;
 
+    /// Returns the schema derived from this formula's cell definitions.
     fn schema() -> Schema {
         Self::cells().into()
     }
 
+    /// Returns an iterator over the operand names of this formula.
     fn operands(&self) -> impl Iterator<Item = &str> {
         Self::cells().keys()
     }
@@ -206,13 +211,16 @@ pub trait Formula: Quarriable + Output + Sized + Clone {
     /// * `terms` - Mapping from formula parameter names to query terms
     ///
     /// # Example
-    /// ```ignore
-    /// let mut terms = Terms::new();
+    /// ```no_run
+    /// # use dialog_query::{Parameters, Term, Formula};
+    /// # use dialog_query::formula::math::Sum;
+    /// let mut terms = Parameters::new();
     /// terms.insert("of".to_string(), Term::var("input1"));
     /// terms.insert("with".to_string(), Term::var("input2"));
     /// terms.insert("is".to_string(), Term::var("output"));
     ///
     /// let app = Sum::apply(terms)?;
+    /// # Ok::<(), dialog_query::error::SchemaError>(())
     /// ```
     fn apply(terms: Parameters) -> Result<FormulaApplication, SchemaError> {
         let cells = Self::cells();
@@ -227,9 +235,11 @@ pub trait Formula: Quarriable + Output + Sized + Clone {
     }
 }
 
+/// Trait alias for types that can be constructed from a [`Cursor`] as formula input.
 pub trait In: for<'a> TryFrom<&'a mut Cursor, Error = FormulaEvaluationError> {}
 impl<T: for<'a> TryFrom<&'a mut Cursor, Error = FormulaEvaluationError>> In for T {}
 
+/// Trait for formula types that can write their computed output to a [`Cursor`].
 pub trait Output {
     /// Write this formula instance's output values to the cursor
     ///
@@ -245,7 +255,9 @@ pub trait Output {
     fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError>;
 }
 
+/// Trait for formula match patterns that can be converted into [`Parameters`].
 pub trait Match: Sized + Clone + Into<Parameters> {
+    /// The formula type this match pattern corresponds to.
     type Formula: Formula<Match = Self>;
 }
 
@@ -261,6 +273,7 @@ impl<T: Match + Clone> From<T> for FormulaApplication {
     }
 }
 
+/// A named, typed parameter slot in a formula definition.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
     /// Name of this cell
@@ -275,6 +288,7 @@ pub struct Cell {
 }
 
 impl Cell {
+    /// Creates a new optional cell with the given name and optional content type.
     pub fn new(name: &'static str, content_type: Option<Type>) -> Self {
         Cell {
             name: name.to_string(),
@@ -284,42 +298,51 @@ impl Cell {
         }
     }
 
+    /// Sets the content type for this cell, returning `self` for chaining.
     pub fn typed(&mut self, content_type: Type) -> &mut Self {
         self.content_type = Some(content_type);
         self
     }
 
+    /// Sets a human-readable description for this cell, returning `self` for chaining.
     pub fn the(&mut self, description: &'static str) -> &mut Self {
         self.description = description.to_string();
         self
     }
 
+    /// Marks this cell as required, returning `self` for chaining.
     pub fn required(&mut self) -> &mut Self {
         self.requirement = Requirement::Required(None);
         self
     }
 
+    /// Marks this cell as derived (optional), returning `self` for chaining.
     pub fn derived(&mut self, _derivation: usize) -> &mut Self {
         self.requirement = Requirement::Optional;
         self
     }
 
+    /// Consumes and returns the cell, finalizing the builder chain.
     pub fn done(self) -> Self {
         self
     }
 
+    /// Returns the name of this cell.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Returns the description of this cell.
     pub fn description(&self) -> &str {
         &self.description
     }
 
+    /// Returns the content type of this cell, if specified.
     pub fn content_type(&self) -> &Option<Type> {
         &self.content_type
     }
 
+    /// Returns the requirement level of this cell.
     pub fn requirement(&self) -> &Requirement {
         &self.requirement
     }
@@ -348,6 +371,7 @@ impl Cell {
         }
     }
 
+    /// Validates that a term conforms to this cell's type and requirement constraints.
     pub fn conform<'a, T: Scalar>(
         &self,
         term: Option<&'a Term<T>>,
@@ -387,11 +411,13 @@ impl Display for Cell {
     }
 }
 
+/// Builder for constructing a [`Cells`] collection via a callback.
 pub struct CellsBuilder {
     cells: HashMap<String, Cell>,
 }
 
 impl CellsBuilder {
+    /// Adds a new cell with the given name and optional type, returning it for further configuration.
     pub fn cell(&mut self, name: &'static str, content_type: Option<Type>) -> &mut Cell {
         let cell = Cell::new(name, content_type);
         self.cells.insert(name.to_string(), cell);
@@ -399,10 +425,12 @@ impl CellsBuilder {
     }
 }
 
+/// A named collection of [`Cell`] definitions describing a formula's parameter slots.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(transparent)]
 pub struct Cells(HashMap<String, Cell>);
 impl Cells {
+    /// Creates a new `Cells` collection using a builder callback.
     pub fn define<F>(define: F) -> Self
     where
         F: FnOnce(&mut CellsBuilder),
@@ -414,14 +442,17 @@ impl Cells {
         Self(builder.cells)
     }
 
+    /// Inserts a cell into this collection, keyed by its name.
     pub fn insert(&mut self, cell: Cell) {
         self.0.insert(cell.name.clone(), cell);
     }
 
+    /// Creates an empty `Cells` collection.
     pub fn new() -> Self {
         Cells(HashMap::new())
     }
 
+    /// Creates a `Cells` collection from an iterator of [`Cell`] values.
     pub fn from<T: Iterator<Item = Cell>>(source: T) -> Cells {
         let mut cells = Self::default();
         for cell in source {
@@ -435,14 +466,17 @@ impl Cells {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
     }
 
+    /// Returns a reference to the cell with the given name, if it exists.
     pub fn get(&self, name: &str) -> Option<&Cell> {
         self.0.get(name)
     }
 
+    /// Returns the number of cells in this collection.
     pub fn count(&self) -> usize {
         self.0.len()
     }
 
+    /// Returns an iterator over the cell names in this collection.
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.0.keys().map(|k| k.as_str())
     }

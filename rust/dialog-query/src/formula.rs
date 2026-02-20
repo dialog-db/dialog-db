@@ -5,9 +5,13 @@
 //! - Type conversions (to_string, parse_number)
 //! - Boolean logic (and, or, not)
 
+/// Type conversion formulas (to_string, parse_number)
 pub mod conversions;
+/// Boolean logic formulas (and, or, not)
 pub mod logic;
+/// Mathematical operation formulas (sum, difference, product, quotient, modulo)
 pub mod math;
+/// String manipulation formulas (concatenate, length, uppercase, lowercase, like)
 pub mod string;
 
 pub use conversions::{ParseNumber, ToString};

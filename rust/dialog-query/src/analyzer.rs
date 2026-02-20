@@ -15,46 +15,65 @@ pub enum AnalyzerError {
     /// This indicates a likely error in the rule definition.
     #[error("Rule {rule} does not makes use of the \"{parameter}\" parameter")]
     UnusedParameter {
+        /// The rule with the unused parameter.
         rule: DeductiveRule,
+        /// The name of the unused parameter.
         parameter: String,
     },
     /// A rule application is missing a required parameter that the rule needs.
     #[error("Rule {rule} application omits required parameter \"{parameter}\"")]
     RequiredParameter {
+        /// The rule missing the parameter.
         rule: DeductiveRule,
+        /// The name of the missing required parameter.
         parameter: String,
     },
     /// A formula application is missing a required cell value.
     #[error("Formula {formula} application omits required cell \"{cell}\"")]
-    OmitsRequiredCell { formula: &'static str, cell: String },
+    OmitsRequiredCell {
+        /// The formula missing the cell.
+        formula: &'static str,
+        /// The name of the missing required cell.
+        cell: String,
+    },
     /// A rule uses a local variable that cannot be satisfied by any premise.
     /// This makes the rule impossible to execute.
     #[error("Rule {rule} makes use of local {variable} that no premise can provide")]
     RequiredLocalVariable {
+        /// The rule with the unsatisfiable local variable.
         rule: DeductiveRule,
+        /// The name of the local variable no premise can provide.
         variable: String,
     },
 
+    /// A rule references a variable that is never bound by any premise or parameter.
     #[error("Rule {rule} does not bind a variable \"{variable}\"")]
     UnboundVariable {
+        /// The rule containing the unbound variable.
         rule: DeductiveRule,
+        /// The name of the variable that is never bound.
         variable: String,
     },
 }
 
+/// A set of variable names that must be bound before a premise can execute.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Required(HashSet<String>);
 
 impl Required {
+    /// Creates an empty set of required bindings.
     pub fn new() -> Self {
         Self::default()
     }
+    /// Removes all entries from the required set.
     pub fn clear(&mut self) {
         self.0.clear();
     }
+    /// Returns the number of required bindings.
     pub fn count(&self) -> usize {
         self.0.len()
     }
+    /// Adds the variable name from `term` to the required set. Panics if the term is unnamed.
     pub fn add<T: Scalar>(&mut self, term: &Term<T>) {
         match term {
             Term::Constant(_) => {}
@@ -67,6 +86,7 @@ impl Required {
         }
     }
 
+    /// Removes the variable name from the required set. Returns `true` if it was present.
     pub fn remove<T: Scalar>(&mut self, term: &Term<T>) -> bool {
         match term {
             Term::Variable {
@@ -91,17 +111,22 @@ impl Display for Required {
     }
 }
 
+/// A map of variable names to their estimated binding costs.
+/// Represents variables that a premise would like bound but does not strictly require.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Desired(HashMap<String, usize>);
 
 impl Desired {
+    /// Creates an empty desired-bindings map.
     pub fn new() -> Self {
         Self::default()
     }
+    /// Returns the number of desired bindings.
     pub fn count(&self) -> usize {
         self.0.len()
     }
 
+    /// Returns `true` if the variable in `term` is in the desired set.
     pub fn contains<T: Scalar>(&self, term: &Term<T>) -> bool {
         match term {
             Term::Variable {
@@ -111,6 +136,7 @@ impl Desired {
         }
     }
 
+    /// Removes the variable from the desired set. Returns `true` if it was present.
     pub fn remove<T: Scalar>(&mut self, term: &Term<T>) -> bool {
         match term {
             Term::Variable {
@@ -119,6 +145,7 @@ impl Desired {
             _ => false,
         }
     }
+    /// Inserts the variable from `term` with the given cost. Panics if the term is unnamed.
     pub fn insert<T: Scalar>(&mut self, term: &Term<T>, cost: usize) {
         match term {
             Term::Constant(_) => {}
@@ -131,14 +158,17 @@ impl Desired {
         }
     }
 
+    /// Returns the sum of all desired binding costs.
     pub fn total(&self) -> usize {
         self.0.values().sum()
     }
 
+    /// Iterates over the desired variables as `Term::Variable` values.
     pub fn iter(&self) -> impl Iterator<Item = Term<Value>> + '_ {
         self.0.keys().map(|name| Term::var(name.clone()))
     }
 
+    /// Iterates over `(term, cost)` pairs for each desired binding.
     pub fn entries(&self) -> impl Iterator<Item = (Term<Value>, usize)> + '_ {
         self.0
             .iter()
@@ -156,10 +186,15 @@ impl From<Desired> for Environment {
     }
 }
 
+/// Errors that can occur when estimating the cost of a premise.
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum EstimateError<'a> {
+    /// One or more required parameters are not yet bound in the environment.
     #[error("Required parameters {required} are not bound in the environment ")]
-    RequiredParameters { required: &'a Required },
+    RequiredParameters {
+        /// The set of required bindings that are missing.
+        required: &'a Required,
+    },
 }
 
 impl<'a> From<EstimateError<'a>> for CompileError {
@@ -175,21 +210,28 @@ impl<'a> From<EstimateError<'a>> for CompileError {
 /// A plan for executing a premise - ready to execute (lightweight, no cached schema/params)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
+    /// The premise this plan will execute.
     pub premise: Premise,
+    /// Estimated execution cost.
     pub cost: usize,
+    /// Variables that this plan will bind upon execution.
     pub binds: Environment,
+    /// Variables already bound in the environment when this plan runs.
     pub env: Environment,
 }
 
 impl Plan {
+    /// Returns the estimated execution cost.
     pub fn cost(&self) -> usize {
         self.cost
     }
 
+    /// Returns the set of variables this plan will bind.
     pub fn binds(&self) -> &Environment {
         &self.binds
     }
 
+    /// Returns the environment of already-bound variables for this plan.
     pub fn env(&self) -> &Environment {
         &self.env
     }
@@ -215,30 +257,43 @@ impl Plan {
 /// Both variants cache schema/params for efficient updates
 #[derive(Debug, Clone, PartialEq)]
 pub enum Analysis {
-    /// Plan is ready to execute
+    /// Plan is ready to execute.
     Viable {
+        /// The premise to execute.
         premise: Premise,
+        /// Estimated execution cost.
         cost: usize,
+        /// Variables this premise will bind.
         binds: Environment,
+        /// Variables already bound in the environment.
         env: Environment,
-        // Cached for efficient updates
+        /// Cached schema for efficient incremental updates.
         schema: Schema,
+        /// Cached parameters for efficient incremental updates.
         params: Parameters,
     },
-    /// Plan is blocked on missing requirements
+    /// Plan is blocked on missing requirements.
     Blocked {
+        /// The premise that cannot yet execute.
         premise: Premise,
+        /// Estimated execution cost once unblocked.
         cost: usize,
+        /// Variables this premise will bind once it can execute.
         binds: Environment,
+        /// Variables already bound in the environment.
         env: Environment,
+        /// Variables that must be bound before this premise can execute.
         requires: Required,
-        // Cached for efficient updates
+        /// Cached schema for efficient incremental updates.
         schema: Schema,
+        /// Cached parameters for efficient incremental updates.
         params: Parameters,
     },
 }
 
 impl Analysis {
+    /// Analyzes a premise to determine whether it is viable or blocked,
+    /// and computes its estimated cost in an empty environment.
     pub fn from(premise: Premise) -> Self {
         let schema = premise.schema();
         let params = premise.parameters();

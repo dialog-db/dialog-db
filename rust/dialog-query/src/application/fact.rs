@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::sync::OnceLock;
 
+/// Base cost unit for query cost estimation
 pub const BASE_COST: usize = 100;
 
 /// Cost of a segment read for Cardinality::One with 3/3 or 2/3 constraints.
@@ -39,6 +40,7 @@ pub const INDEX_SCAN: usize = 5_000;
 /// Concepts may have associated deductive rules that need to be checked and evaluated.
 pub const CONCEPT_OVERHEAD: usize = 1_000;
 
+/// Compiled fact query with typed terms for attribute, entity, value, and cause
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FactApplication {
     cardinality: Cardinality,
@@ -96,6 +98,7 @@ impl FactApplication {
         })
     }
 
+    /// Create a copy with `Cardinality::Many`
     pub fn many(&self) -> Self {
         Self {
             cardinality: Cardinality::Many,
@@ -106,6 +109,7 @@ impl FactApplication {
         }
     }
 
+    /// Create a new fact application with the given terms and cardinality
     pub fn new(
         the: Term<Attribute>,
         of: Term<Entity>,
@@ -137,6 +141,7 @@ impl FactApplication {
         &self.is
     }
 
+    /// Get the 'cause' term
     pub fn cause(&self) -> &Term<Cause> {
         &self.cause
     }
@@ -222,6 +227,7 @@ impl FactApplication {
         }
     }
 
+    /// Construct a Fact from the given answer by resolving all terms
     pub fn realize(&self, source: Answer) -> Result<Fact<Value>, QueryError> {
         // Convert blank variables to internal names for retrieval
         let the_term = match &self.the {
@@ -255,6 +261,7 @@ impl FactApplication {
         })
     }
 
+    /// Execute this fact application as a query, returning a stream of facts
     pub fn query<S: Source>(&self, source: &S) -> impl Output<Fact>
     where
         Self: Sized,

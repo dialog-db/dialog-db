@@ -14,9 +14,10 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```rs
 //! use dialog_query::cursor::Cursor;
-//! use dialog_query::{Term, Answer, Value, Parameters};
+//! use dialog_query::{Term, Parameters};
+//! use dialog_query::selection::Answer;
 //!
 //! let mut parameters = Parameters::new();
 //! parameters.insert("x".to_string(), Term::var("input_x"));
@@ -110,6 +111,7 @@ impl Cursor {
         Ok(T::try_from(self.resolve(key)?)?)
     }
 
+    /// Resolve a parameter to its Value, tracking the read for provenance
     pub fn resolve(&mut self, key: &str) -> Result<Value, FormulaEvaluationError> {
         let term =
             self.terms

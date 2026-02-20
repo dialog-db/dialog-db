@@ -22,8 +22,7 @@ impl<C: Claim> Edit for C {
     }
 }
 
-/// Describes an claim that retracts the original and asserts original
-/// when retracted.
+/// A reversed claim that retracts the original when asserted
 pub struct Revert<C: Claim>(C);
 impl<C: Claim> Edit for Revert<C> {
     fn merge(self, transaction: &mut Transaction) {

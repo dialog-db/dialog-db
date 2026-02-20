@@ -217,10 +217,12 @@ impl ConceptApplication {
         self.terms.clone()
     }
 
+    /// Returns the schema describing this concept's attributes and their types.
     pub fn schema(&self) -> Schema {
         self.concept.schema()
     }
 
+    /// Evaluates this concept application within the given context, producing a stream of answers.
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
         self,
         context: EvaluationContext<S, M>,
@@ -263,6 +265,7 @@ impl ConceptApplication {
         }
     }
 
+    /// Queries a source for entities matching this concept application.
     pub fn query<S: Source>(self, source: S) -> impl crate::selection::Answers {
         let store = source.clone();
         let context = new_context(store);

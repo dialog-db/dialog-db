@@ -1,3 +1,4 @@
+/// Single-attribute concept wrapper ([`With<A>`]) and its query types.
 pub mod with;
 pub use with::{With, WithMatch, WithTerms};
 
@@ -29,12 +30,14 @@ use std::fmt::Debug;
 /// implement Concept by delegating to their instance types (e.g., Title
 /// delegates to WithTitle). Instance types still implement IntoIterator.
 pub trait Concept: Quarriable + Clone + Debug {
+    /// The materialized form of this concept, produced by resolving a query.
     type Instance: Instance;
     /// Type representing a query of this concept. It is a set of terms
     /// corresponding to the set of attributes defined by this concept.
     /// It is used as premise of the rule.
     type Match: Match<Concept = Self, Instance = Self::Instance>;
 
+    /// Typed term accessors for building queries (e.g. `PersonTerms::name()`).
     type Term;
 
     /// The static concept definition for this type.
@@ -48,7 +51,7 @@ pub trait Concept: Quarriable + Clone + Debug {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rs
     /// // These are equivalent:
     /// let employees = Employee::query(session).try_collect::<Vec<_>>().await?;
     ///
@@ -100,16 +103,21 @@ pub trait Concept: Quarriable + Clone + Debug {
 /// concept. Each match should be translatable into a set of statements making
 /// it possible to spread it into a query.
 pub trait Match: Sized + Clone + ConditionalSend + Default + 'static {
+    /// The concept type this match pattern corresponds to.
     type Concept: Concept;
     /// Instance of the concept that this match can produce.
     type Instance: Instance + ConditionalSend + Clone;
 
+    /// Reconstructs a concept instance from a query [`Answer`].
     fn realize(&self, source: Answer) -> Result<Self::Instance, QueryError>;
 
+    /// Returns the static concept descriptor for this match pattern.
     fn to_concept(&self) -> predicate::Concept {
         Self::Concept::CONCEPT
     }
 
+    /// Executes this match pattern against the given source and streams
+    /// materialized instances.
     fn query<S: Source>(&self, source: S) -> impl Output<Self::Instance>
     where
         ConceptApplication: From<Self>,
@@ -549,37 +557,6 @@ mod tests {
     }
 
     #[dialog_common::test]
-    #[ignore] // TODO: Fix after Premises trait is properly implemented - test body commented out to allow compilation
-    fn test_match_premise_planning() {
-        // Test body commented out due to Premises trait not being implemented
-        /*
-        // Test that PersonMatch can be used through Premises trait
-        use crate::rule::Premises;
-
-        // Create a PersonMatch with all constants to avoid dependency resolution issues
-        let entity_const = Term::from(Entity::new().unwrap());
-        let name_const = Term::from(Value::String("Alice".to_string()));
-        let age_const = Term::from(Value::UnsignedInt(30));
-
-        let person_match = PersonMatch {
-            this: entity_const,
-            name: name_const,
-            age: age_const,
-        };
-
-        // PersonMatch should implement Premises trait and generate individual premises
-        let premises: Vec<_> = person_match.clone().premises().collect();
-
-        // Should have premises for each attribute (name and age)
-        assert_eq!(premises.len(), 2);
-
-        // Test that PersonMatch correctly implements Match trait methods
-        assert_eq!(person_match.term_for("name").unwrap().is_constant(), true);
-        assert_eq!(person_match.term_for("age").unwrap().is_constant(), true);
-        */
-    }
-
-    #[dialog_common::test]
     fn test_person_match_fields() {
         // Test that PersonMatch has the expected fields
         let entity_var = Term::var("entity");
@@ -640,73 +617,6 @@ mod tests {
         assert_eq!(match1.this, match2.this);
         assert_eq!(match1.name, match2.name);
         assert_eq!(match1.age, match2.age);
-    }
-
-    #[dialog_common::test]
-    #[ignore] // Legacy manual concept implementation - needs migration to new API
-    async fn test_person_match_query() -> Result<()> {
-        // Test that actually uses PersonMatch to query - this should work with the concept system
-
-        let storage_backend = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage_backend).await?;
-
-        let alice = Entity::new()?;
-        let bob = Entity::new()?;
-        let mallory = Entity::new()?;
-
-        // Create test data
-        let claims = vec![
-            Relation {
-                the: "person/name".parse::<ArtifactAttribute>()?,
-                of: alice.clone(),
-                is: Value::String("Alice".to_string()),
-            },
-            Relation {
-                the: "person/age".parse::<ArtifactAttribute>()?,
-                of: alice.clone(),
-                is: Value::UnsignedInt(25),
-            },
-            Relation {
-                the: "person/name".parse::<ArtifactAttribute>()?,
-                of: bob.clone(),
-                is: Value::String("Bob".to_string()),
-            },
-            Relation {
-                the: "person/age".parse::<ArtifactAttribute>()?,
-                of: bob.clone(),
-                is: Value::UnsignedInt(30),
-            },
-            Relation {
-                the: "person/name".parse::<ArtifactAttribute>()?,
-                of: mallory.clone(),
-                is: Value::String("Mallory".to_string()),
-            },
-        ];
-
-        let mut session = Session::open(artifacts.clone());
-        session.transact(claims).await?;
-
-        // This is the real test - using PersonMatch to query for people
-        let person_query = PersonMatch {
-            this: Term::var("person"),
-            name: Term::var("name"),
-            age: Term::var("age"),
-        };
-
-        // This should work with the planner fix
-        let session = Session::open(artifacts);
-        let results = person_query.query(session).try_vec().await?;
-
-        // Should find both Alice and Bob (not Mallory who has no age)
-        assert_eq!(results.len(), 2, "Should find both people");
-
-        // Verify we got the right people
-        // assert!(results.contains_binding("name", &Value::String("Alice".to_string())));
-        // assert!(results.contains_binding("name", &Value::String("Bob".to_string())));
-        // assert!(results.contains_binding("age", &Value::UnsignedInt(25)));
-        // assert!(results.contains_binding("age", &Value::UnsignedInt(30)));
-
-        Ok(())
     }
 
     #[dialog_common::test]

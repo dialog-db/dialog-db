@@ -14,6 +14,7 @@ pub use crate::predicate::formula::Formula;
 /// }
 /// ```
 pub trait Quarriable {
+    /// The query/match pattern type associated with this predicate
     type Query;
 }
 
@@ -58,5 +59,6 @@ pub type Match<T: Quarriable> = T::Query;
 #[allow(type_alias_bounds)]
 pub type Input<T: Formula> = T::Input;
 
+/// Type alias for the concrete instance type of a concept
 #[allow(type_alias_bounds)]
 pub type Instance<T: Concept> = T::Instance;

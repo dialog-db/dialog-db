@@ -14,8 +14,13 @@ use std::task::{Context, Poll};
 /// Error types that can occur during transaction operations
 #[derive(Debug, thiserror::Error)]
 pub enum TransactionError {
+    /// The requested operation is not valid
     #[error("Invalid operation: {reason}")]
-    InvalidOperation { reason: String },
+    InvalidOperation {
+        /// Reason why the operation is invalid
+        reason: String,
+    },
+    /// An error from the underlying storage layer
     #[error("Storage error: {0}")]
     Storage(#[from] DialogArtifactsError),
 }
@@ -26,7 +31,9 @@ pub type Changes = HashMap<Entity, HashMap<Attribute, Change>>;
 /// Type of change
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change {
+    /// Assert a value for an entity-attribute pair
     Assert(Value),
+    /// Retract a value from an entity-attribute pair
     Retract(Value),
 }
 
@@ -48,20 +55,24 @@ impl Transaction {
         }
     }
 
+    /// Assert a claim into this transaction
     pub fn assert<C: Claim>(&mut self, claim: C) -> &mut Self {
         claim.assert(self);
         self
     }
 
+    /// Retract a claim from this transaction
     pub fn retract<C: Claim>(&mut self, claim: C) -> &mut Self {
         claim.retract(self);
         self
     }
 
+    /// Assert a relation (entity-attribute-value triple)
     pub fn associate(&mut self, relation: Relation) -> &mut Self {
         self.insert(relation.the, relation.of, Change::Assert(relation.is))
     }
 
+    /// Retract a relation (entity-attribute-value triple)
     pub fn dissociate(&mut self, relation: Relation) -> &mut Self {
         self.insert(relation.the, relation.of, Change::Retract(relation.is))
     }
@@ -138,7 +149,7 @@ impl IntoIterator for Transaction {
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rs
 /// use dialog_query::Transaction;
 /// use futures_util::StreamExt;
 ///
@@ -152,8 +163,9 @@ impl IntoIterator for Transaction {
 ///     println!("Processing: {:?}", instruction);
 /// }
 /// ```
-/// Internal state for Transaction streaming
+/// Stream adapter that yields instructions from a consumed transaction
 pub struct TransactionStream {
+    /// Iterator over the transaction's instructions
     iter: std::vec::IntoIter<Instruction>,
 }
 

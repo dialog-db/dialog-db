@@ -14,36 +14,44 @@ pub struct Schema {
 }
 
 impl Schema {
+    /// Creates a new empty schema.
     pub fn new() -> Self {
         Self {
             fields: HashMap::new(),
         }
     }
 
+    /// Inserts a named field into the schema.
     pub fn insert(&mut self, name: String, constraint: Field) {
         self.fields.insert(name, constraint);
     }
 
+    /// Returns `true` if the schema contains a field with the given name.
     pub fn contains(&self, name: &str) -> bool {
         self.fields.contains_key(name)
     }
 
+    /// Returns a reference to the field with the given name, if present.
     pub fn get(&self, name: &str) -> Option<&Field> {
         self.fields.get(name)
     }
 
+    /// Returns an iterator over all `(name, field)` pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Field)> {
         self.fields.iter()
     }
 
+    /// Returns a mutable iterator over all `(name, field)` pairs.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut Field)> {
         self.fields.iter_mut()
     }
 
+    /// Returns the number of fields in the schema.
     pub fn len(&self) -> usize {
         self.fields.len()
     }
 
+    /// Returns `true` if the schema has no fields.
     pub fn is_empty(&self) -> bool {
         self.fields.is_empty()
     }
@@ -58,7 +66,9 @@ impl Default for Schema {
 /// Cardinality indicates whether an attribute can have one or many values
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Cardinality {
+    /// The attribute holds a single value per entity.
     One,
+    /// The attribute holds multiple values per entity.
     Many,
 }
 
@@ -103,13 +113,19 @@ impl Cardinality {
 /// Field descriptor describes a type cardinality and fields requirement type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Field {
+    /// Human-readable description of the field.
     pub description: String,
+    /// Expected value type, or `None` if unconstrained.
     pub content_type: Option<Type>,
+    /// Whether the field is required or optional.
     pub requirement: Requirement,
+    /// Whether the field holds one or many values.
     pub cardinality: Cardinality,
 }
 
 impl Field {
+    /// Creates a new field with the given description, type, and requirement.
+    /// Cardinality defaults to [`Cardinality::One`].
     pub fn new(description: String, content_type: Option<Type>, requirement: Requirement) -> Self {
         Self {
             description,
@@ -119,18 +135,22 @@ impl Field {
         }
     }
 
+    /// Returns the field description.
     pub fn description(&self) -> &str {
         &self.description
     }
 
+    /// Returns the expected content type, if any.
     pub fn content_type(&self) -> Option<Type> {
         self.content_type
     }
 
+    /// Returns the field's requirement level.
     pub fn requirement(&self) -> &Requirement {
         &self.requirement
     }
 
+    /// Returns the field's cardinality.
     pub fn cardinality(&self) -> Cardinality {
         self.cardinality
     }
@@ -148,6 +168,7 @@ pub enum Requirement {
 }
 
 impl Requirement {
+    /// Creates a new unique choice group.
     pub fn new_group() -> Group {
         Group::new()
     }
@@ -165,10 +186,12 @@ impl Requirement {
         }
     }
 
+    /// Creates a required requirement with no choice group.
     pub fn required() -> Self {
         Requirement::Required(None)
     }
 
+    /// Creates an optional requirement.
     pub fn optional() -> Self {
         Requirement::Optional
     }
@@ -185,6 +208,7 @@ impl Default for Group {
 }
 
 impl Group {
+    /// Creates a new group with a unique auto-incremented identifier.
     pub fn new() -> Self {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static NEXT_ID: AtomicUsize = AtomicUsize::new(0);

@@ -9,6 +9,7 @@ pub use futures_util::{TryStreamExt, stream};
 pub use super::environment::Environment;
 pub use super::parameters::Parameters;
 
+/// Create a fresh evaluation context with an empty scope and a single empty answer
 pub fn new_context<S: Source>(store: S) -> EvaluationContext<S, impl Answers> {
     let answers = once(async move { Ok(Answer::new()) });
     EvaluationContext {

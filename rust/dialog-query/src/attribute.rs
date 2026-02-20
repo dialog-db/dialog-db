@@ -9,25 +9,38 @@ pub use crate::{Premise, Term};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use std::marker::PhantomData;
 
-/// A relation specific to the attribute module containing cardinality information
+/// A validated attribute–value pair with its cardinality, produced by
+/// [`AttributeSchema::resolve`]. Used inside [`Conception`](crate::predicate::concept::Conception)
+/// to represent the set of facts that make up a concept instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attribution {
+    /// The fully-qualified attribute selector.
     pub the: ArtifactsAttribute,
+    /// The resolved value for this attribute.
     pub is: Value,
+    /// Whether this attribute allows one or many values per entity.
     pub cardinality: Cardinality,
 }
 
+/// Static schema describing an attribute's identity, type, and cardinality.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttributeSchema<T: Scalar> {
+    /// The domain namespace this attribute belongs to (e.g. `"person"`).
     pub namespace: &'static str,
+    /// The attribute name within its namespace (e.g. `"name"`).
     pub name: &'static str,
+    /// Human-readable description of the attribute.
     pub description: &'static str,
+    /// Whether this attribute allows one or many values per entity.
     pub cardinality: Cardinality,
+    /// The expected value type, or `None` if any type is accepted.
     pub content_type: Option<Type>,
+    /// Phantom data to carry the Rust-level scalar type.
     pub marker: PhantomData<T>,
 }
 
 impl<T: Scalar> AttributeSchema<T> {
+    /// Creates a new schema with [`Cardinality::One`] and the given content type.
     pub fn new(
         namespace: &'static str,
         name: &'static str,
@@ -43,10 +56,14 @@ impl<T: Scalar> AttributeSchema<T> {
             marker: PhantomData,
         }
     }
+
+    /// Returns the fully-qualified attribute selector (`"namespace/name"`).
     pub fn the(&self) -> String {
         format!("{}/{}", self.namespace, self.name)
     }
 
+    /// Binds this attribute to an entity term, producing a [`Match`] that
+    /// can be used in queries.
     pub fn of<Of: Into<Term<Entity>>>(&self, term: Of) -> Match<T> {
         Match {
             attribute: self.clone(),
@@ -54,17 +71,15 @@ impl<T: Scalar> AttributeSchema<T> {
         }
     }
 
-    /// Get the data type for this attribute
-    ///
-    /// Returns the stored ValueDataType for this attribute.
-    /// Returns None if this attribute accepts any type.
+    /// Returns the expected value type for this attribute, or `None` if it
+    /// accepts any type.
     pub fn content_type(&self) -> Option<Type> {
         self.content_type
     }
 
-    /// Type checks that provided term matches cells content type. If term
+    /// Checks that the given term's type is compatible with this attribute's
+    /// content type. Returns the term unchanged on success.
     pub fn check<'a, U: Scalar>(&self, term: &'a Term<U>) -> Result<&'a Term<U>, TypeError> {
-        // First we type check the input to ensure it matches cell's content type
         match (self.content_type(), term.content_type()) {
             // if expected is any (has no type) it checks
             (None, _) => Ok(term),
@@ -77,11 +92,12 @@ impl<T: Scalar> AttributeSchema<T> {
         }
     }
 
+    /// Type-checks an optional term against this attribute. Returns `Ok(None)`
+    /// if the term is absent, or delegates to [`check`](Self::check) if present.
     pub fn conform<'a, U: Scalar>(
         &self,
         term: Option<&'a Term<U>>,
     ) -> Result<Option<&'a Term<U>>, TypeError> {
-        // We check that cell type matches term type.
         if let Some(term) = term {
             self.check(term)?;
         }
@@ -89,25 +105,26 @@ impl<T: Scalar> AttributeSchema<T> {
         Ok(term)
     }
 
+    /// Validates a concrete [`Value`] against this attribute's content type and
+    /// produces an [`Attribution`] — a validated (attribute, value, cardinality)
+    /// triple ready for storage.
     pub fn resolve(&self, value: Value) -> Result<Attribution, TypeError> {
-        // Check type if content_type is specified
         let type_matches = match self.content_type {
             Some(expected) => value.data_type() == expected,
-            None => true, // Any type is acceptable
+            None => true,
         };
 
         if type_matches {
-            let the_str = self.the();
-            let the_attr =
-                the_str
+            let the =
+                self.the()
                     .parse::<ArtifactsAttribute>()
                     .map_err(|_| TypeError::TypeMismatch {
                         expected: Type::Symbol,
-                        actual: Term::Constant(Value::String(the_str.clone())),
+                        actual: Term::Constant(Value::String(self.the().clone())),
                     })?;
 
             Ok(Attribution {
-                the: the_attr,
+                the,
                 is: value.clone(),
                 cardinality: self.cardinality,
             })
@@ -131,6 +148,8 @@ impl<T: Scalar> AttributeSchema<T> {
             .expect("Should succeed if we know attribute")
     }
 
+    /// Builds a [`FactApplication`] from named parameters, type-checking each
+    /// binding against this attribute's schema.
     pub fn apply(&self, parameters: Parameters) -> Result<FactApplication, SchemaError> {
         // Check that type of the `is` parameter matches the attribute's data type
         self.conform(parameters.get("is"))
@@ -340,13 +359,17 @@ impl<'de, T: Scalar> Deserialize<'de> for AttributeSchema<T> {
     }
 }
 
+/// A query pattern binding an [`AttributeSchema`] to an entity term.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Match<T: Scalar> {
+    /// The attribute schema this match targets.
     pub attribute: AttributeSchema<T>,
+    /// The entity term to match against.
     pub of: Term<Entity>,
 }
 
 impl<T: Scalar> Match<T> {
+    /// Creates a new match from raw attribute metadata and an entity term.
     pub fn new(
         namespace: &'static str,
         name: &'static str,
@@ -360,13 +383,16 @@ impl<T: Scalar> Match<T> {
         }
     }
 
+    /// Returns a clone of the entity term.
     pub fn of(&self) -> Term<Entity> {
         self.of.clone()
     }
+    /// Returns the fully-qualified attribute selector.
     pub fn the(&self) -> String {
         self.attribute.the()
     }
 
+    /// Constrains this match to a specific value, producing a [`FactApplication`].
     pub fn is<Is: Into<Term<T>>>(self, term: Is) -> FactApplication {
         Fact::new()
             .the(self.the())
@@ -374,43 +400,61 @@ impl<T: Scalar> Match<T> {
             .is(term.into().as_unknown())
             .into()
     }
+    /// Negates this match for a specific value, producing a [`Premise`].
     pub fn not<Is: Into<Term<T>>>(self, term: Is) -> Premise {
         Application::Fact(self.is(term)).not()
     }
 }
 
+/// Trait implemented by typed attribute definitions, providing schema metadata
+/// and conversion utilities for use in queries and concept definitions.
 pub trait Attribute: Sized {
+    /// The Rust scalar type of this attribute's values.
     type Type: Scalar;
 
-    // Associated types for Concept implementation
+    /// The match pattern type used when querying this attribute in a concept.
     type Match;
+    /// The concrete instance type when this attribute is part of a concept result.
     type Instance;
+    /// The term type used when building query patterns for this attribute.
     type Term;
 
+    /// The domain namespace (e.g. `"person"`).
     const NAMESPACE: &'static str;
+    /// The attribute name within its namespace (e.g. `"name"`).
     const NAME: &'static str;
+    /// Human-readable description of this attribute.
     const DESCRIPTION: &'static str;
+    /// Whether this attribute allows one or many values per entity.
     const CARDINALITY: Cardinality;
+    /// The full static schema for this attribute.
     const SCHEMA: AttributeSchema<Self::Type>;
+    /// The concept definition that this attribute belongs to.
     const CONCEPT: crate::predicate::concept::Concept;
 
+    /// Returns a reference to the inner value.
     fn value(&self) -> &Self::Type;
 
     /// Construct an attribute from its inner value
     fn new(value: Self::Type) -> Self;
 
+    /// Returns the namespace as an owned `String`.
     fn namespace() -> String {
         Self::NAMESPACE.into()
     }
+    /// Returns the attribute name as an owned `String`.
     fn name() -> String {
         Self::NAME.into()
     }
+    /// Returns the description as an owned `String`.
     fn description() -> String {
         Self::DESCRIPTION.into()
     }
+    /// Returns the cardinality of this attribute.
     fn cardinality() -> Cardinality {
         Self::CARDINALITY
     }
+    /// Returns the parsed attribute selector (`"namespace/name"`).
     fn selector() -> crate::artifact::Attribute {
         format!("{}/{}", Self::NAMESPACE, Self::NAME)
             .parse()
@@ -442,12 +486,13 @@ pub trait Attribute: Sized {
         }
     }
 
+    /// Returns the expected value type, or `None` if any type is accepted.
     fn content_type() -> Option<Type> {
         <Self::Type as IntoType>::TYPE
     }
 }
 
-/// Query builder for attribute queries
+/// Query builder for attribute queries, created via [`Attribute::of`].
 pub struct AttributeQueryBuilder<T: Scalar> {
     schema: &'static AttributeSchema<T>,
     entity: Term<Entity>,
@@ -455,6 +500,7 @@ pub struct AttributeQueryBuilder<T: Scalar> {
 }
 
 impl<T: Scalar> AttributeQueryBuilder<T> {
+    /// Constrains the attribute to a value term, producing a [`Match`].
     pub fn is<V: Into<Term<T>>>(self, _value: V) -> Match<T> {
         Match {
             attribute: self.schema.clone(),
@@ -466,8 +512,11 @@ impl<T: Scalar> AttributeQueryBuilder<T> {
 /// Query pattern for attributes - enables Match::<AttributeType> { of, is } syntax
 #[derive(Clone, Debug, PartialEq)]
 pub struct AttributeMatch<A: Attribute> {
+    /// The entity term to match against.
     pub of: Term<Entity>,
+    /// The value term to match against.
     pub is: Term<A::Type>,
+    /// Phantom data to carry the attribute type.
     pub content_type: PhantomData<A>,
 }
 

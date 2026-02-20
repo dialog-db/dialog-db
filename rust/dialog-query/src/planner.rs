@@ -15,9 +15,15 @@ use core::pin::Pin;
 /// select the best premise to execute next.
 pub enum Planner {
     /// Initial state with unprocessed premises.
-    Idle { premises: Vec<Premise> },
+    Idle {
+        /// Premises waiting to be analyzed
+        premises: Vec<Premise>,
+    },
     /// Processing state with cached candidates and current scope.
-    Active { candidates: Vec<Analysis> },
+    Active {
+        /// Analyzed candidates being evaluated for selection
+        candidates: Vec<Analysis>,
+    },
 }
 
 impl Planner {
@@ -285,6 +291,7 @@ impl Join {
         chain.evaluate(context)
     }
 
+    /// Execute this join plan as a query against the given store
     pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl crate::selection::Answers> {
         let store = store.clone();
         let context = new_context(store);
@@ -353,12 +360,17 @@ impl Chain {
     }
 }
 
+/// Union of alternative join plans whose results are merged
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Fork {
+    /// No alternatives - produces no results
     #[default]
     Empty,
+    /// Single alternative join
     Solo(Join),
+    /// Two alternative joins
     Duet(Join, Join),
+    /// Three or more alternative joins (recursive)
     Or(Box<Fork>, Join),
 }
 
@@ -377,6 +389,7 @@ impl Fork {
         }
     }
 
+    /// Evaluate all alternatives, merging their result streams
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
         self,
         context: EvaluationContext<S, M>,

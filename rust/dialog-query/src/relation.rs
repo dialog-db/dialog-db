@@ -24,6 +24,7 @@ pub struct Relation {
 }
 
 impl Relation {
+    /// Create a new relation from its components
     pub fn new(the: Attribute, of: Entity, is: Value) -> Self {
         Self { the, of, is }
     }

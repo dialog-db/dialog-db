@@ -46,28 +46,33 @@ impl Quarriable for Fact {
 }
 
 impl<T: Scalar + ConditionalSend> Fact<T> {
+    /// Create a new fact query builder
     pub fn select() -> PredicateFact {
         PredicateFact::new()
     }
 
+    /// Get the attribute of this fact
     pub fn the(&self) -> &Attribute {
         match self {
             Fact::Assertion { the, .. } => the,
             Fact::Retraction { the, .. } => the,
         }
     }
+    /// Get the entity of this fact
     pub fn of(&self) -> &Entity {
         match self {
             Fact::Assertion { of, .. } => of,
             Fact::Retraction { of, .. } => of,
         }
     }
+    /// Get the value of this fact
     pub fn is(&self) -> &T {
         match self {
             Fact::Assertion { is, .. } => is,
             Fact::Retraction { is, .. } => is,
         }
     }
+    /// Get the cause (provenance hash) of this fact
     pub fn cause(&self) -> &Cause {
         match self {
             Fact::Assertion { cause, .. } => cause,
@@ -77,11 +82,13 @@ impl<T: Scalar + ConditionalSend> Fact<T> {
 }
 
 impl<T: Scalar + ConditionalSend + ConditionalSync + Serialize> Fact<T> {
+    /// Serialize this fact to CBOR bytes
     pub async fn as_bytes(&self) -> Result<Vec<u8>, DialogArtifactsError> {
         let (_, bytes) = CborEncoder.encode(self).await?;
         Ok(bytes)
     }
 
+    /// Compute the Blake3 hash of this fact
     pub async fn hash(&self) -> Result<Blake3Hash, DialogArtifactsError> {
         let (hash, _) = CborEncoder.encode(self).await?;
         Ok(hash)

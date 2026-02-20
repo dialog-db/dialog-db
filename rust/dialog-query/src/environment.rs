@@ -13,10 +13,12 @@ pub struct Environment {
 }
 
 impl Environment {
+    /// Create a new empty environment
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Returns the number of bound variables
     pub fn size(&self) -> usize {
         self.variables.len()
     }
@@ -46,6 +48,7 @@ impl Environment {
         }
     }
 
+    /// Extends this environment with variables from the iterator, returning the delta
     pub fn extend(&mut self, other: impl IntoIterator<Item = Term<Value>>) -> Environment {
         let mut delta = HashSet::new();
 
@@ -64,10 +67,12 @@ impl Environment {
         Environment { variables: delta }
     }
 
+    /// Returns the set of new variables not already in this environment
     pub fn union(self, other: impl IntoIterator<Item = Term<Value>>) -> Environment {
         self.clone().extend(other)
     }
 
+    /// Returns variables in the iterator that are not in this environment
     pub fn intersection(self, other: impl IntoIterator<Item = Term<Value>>) -> Environment {
         let mut intersection = Self::new();
         for variable in other {
@@ -83,6 +88,7 @@ impl Environment {
         intersection
     }
 
+    /// Returns true if this environment shares any variables with another
     pub fn intersects(&self, other: &Environment) -> bool {
         !self.variables.is_disjoint(&other.variables)
     }
