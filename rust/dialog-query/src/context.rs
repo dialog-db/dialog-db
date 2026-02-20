@@ -1,0 +1,126 @@
+//! Query execution plans - traits and context for evaluation
+
+pub use crate::query::Source;
+pub use crate::{selection::Answer, selection::Answers, try_stream, Value};
+pub use dialog_common::ConditionalSend;
+pub use futures_util::stream::once;
+use std::collections::BTreeMap;
+
+pub use futures_util::{stream, TryStreamExt};
+
+pub use super::environment::Environment;
+pub use super::parameters::Parameters;
+
+pub fn new_context<S: Source>(store: S) -> EvaluationContext<S, impl Answers> {
+    let answers = once(async move { Ok(Answer::new()) });
+    EvaluationContext {
+        source: store,
+        selection: answers,
+        scope: Environment::new(),
+    }
+}
+
+/// A single result frame with variable bindings
+/// Equivalent to MatchFrame in TypeScript: Map<Variable, Scalar>
+pub type MatchFrame = BTreeMap<String, Value>;
+
+/// Evaluation context passed to plans during execution
+/// Based on TypeScript EvaluationContext in @query/src/api.ts
+pub struct EvaluationContext<S, M>
+where
+    S: Source,
+    M: Answers,
+{
+    /// Current selection of answers being processed (with provenance tracking)
+    pub selection: M,
+    /// Artifact store for querying facts (equivalent to source/Querier in TypeScript)
+    pub source: S,
+    /// Variables that are bound at this evaluation point
+    pub scope: Environment,
+}
+
+impl<S, M> EvaluationContext<S, M>
+where
+    S: Source,
+    M: Answers,
+{
+    /// Create a new evaluation context with given scope
+    pub fn single(store: S, selection: M, scope: Environment) -> Self {
+        Self {
+            source: store,
+            selection,
+            scope,
+        }
+    }
+
+    pub fn new(store: S) -> EvaluationContext<S, impl Answers> {
+        let answers = once(async move { Ok(Answer::new()) });
+
+        EvaluationContext {
+            source: store,
+            selection: answers,
+            scope: Environment::new(),
+        }
+    }
+
+    /// Create a new context with updated scope
+    pub fn with_scope(&self, scope: Environment) -> EvaluationContext<S, M>
+    where
+        M: Clone,
+    {
+        EvaluationContext {
+            source: self.source.clone(),
+            selection: self.selection.clone(),
+            scope,
+        }
+    }
+}
+
+/// Trait implemented by execution plans
+/// Following the familiar-query pattern: process selection of answers and return new answers
+pub trait EvaluationPlan: Clone + std::fmt::Debug + ConditionalSend {
+    /// Get the estimated cost of executing this plan
+    fn cost(&self) -> usize;
+    /// Set of variables that this plan will bind
+    fn provides(&self) -> &Environment;
+    /// Execute this plan with the given context and return result answers with provenance
+    /// This follows the familiar-query pattern where answers flow through the evaluation
+    fn evaluate<S: Source, M: Answers>(&self, context: EvaluationContext<S, M>) -> impl Answers;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artifact::Artifacts;
+    use crate::{Session, Term, Value};
+    use dialog_storage::MemoryStorageBackend;
+
+    #[tokio::test]
+    async fn test_fresh_context_has_empty_scope() {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await.unwrap();
+        let session = Session::open(artifacts);
+
+        let context = new_context(session);
+
+        // Fresh context should have empty scope
+        assert_eq!(context.scope.size(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_context_single_with_scope() {
+        let storage = MemoryStorageBackend::default();
+        let artifacts = Artifacts::anonymous(storage).await.unwrap();
+        let session = Session::open(artifacts);
+
+        let answers = once(async move { Ok(Answer::new()) });
+        let mut scope = Environment::new();
+        scope.add(&Term::<Value>::var("z"));
+
+        let context = EvaluationContext::single(session, answers, scope.clone());
+
+        // Context should have the provided scope
+        assert_eq!(context.scope.size(), 1);
+        assert!(context.scope.contains(&Term::<Value>::var("z")));
+    }
+}

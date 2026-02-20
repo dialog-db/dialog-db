@@ -7,6 +7,7 @@
 use std::fmt::Display;
 
 use base58::ToBase58;
+use dialog_storage::HashType;
 use serde::{Deserialize, Serialize};
 
 use crate::{make_reference, reference_type};

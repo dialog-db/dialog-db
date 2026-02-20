@@ -1,0 +1,57 @@
+[package]
+name = "dialog-query"
+version.workspace = true
+edition = "2021"
+authors.workspace = true
+description = "Query engine for Dialog-DB"
+license.workspace = true
+
+[dependencies]
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
+
+# Hashing
+blake3 = { workspace = true }
+
+# (removed async-trait since we're using sync traits for now)
+
+# Collections
+indexmap = "2.0"
+
+# Error handling
+thiserror = { workspace = true }
+
+# Dialog-DB dependencies
+dialog-artifacts = { workspace = true }
+dialog-common = { workspace = true }
+
+# Async utilities
+futures-util = { workspace = true }
+futures-core = { workspace = true }
+async-stream = { workspace = true }
+
+# Macro utilities
+paste = "1.0"
+dialog-query-macros = { workspace = true }
+
+# Tokio with platform-specific features
+# wasm32 only supports: sync, macros, io-util, rt, time
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+wasm-bindgen-futures = "0.4"
+
+
+[dev-dependencies]
+tokio-test = "0.4"
+dialog-storage = { workspace = true, features = ["helpers"] }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+futures-util = { workspace = true }
+
+[features]
+default = []

@@ -1,0 +1,143 @@
+//! Premise trait for rule conditions
+//!
+//! This module defines the premise system used in rule conditions. Premises represent
+//! patterns that can be matched against facts in the knowledge base during rule evaluation.
+//!
+//! Note: Premises are only used in rule conditions (the "when" part), not in conclusions.
+
+use async_stream::try_stream;
+
+pub use super::application::Application;
+use super::application::{FactApplication, FormulaApplication};
+pub use super::constraint::Constraint;
+pub use super::context::{new_context, EvaluationPlan};
+pub use super::negation::Negation;
+pub use crate::environment::Environment;
+pub use crate::error::{AnalyzerError, PlanError, QueryResult};
+pub use crate::{selection::Answers, EvaluationContext, Source};
+use std::fmt::Display;
+
+/// Represents a premise in a rule - a condition that must be satisfied.
+///
+/// Premises can be:
+/// - **Applications**: Query the knowledge base (facts, concepts, formulas)
+/// - **Constraints**: Express relationships between variables (equality, etc.)
+/// - **Exclusions**: Negated premises that filter out matches
+///
+/// TODO: Large enum variant - Constrain (320 bytes) is much larger than other variants.
+/// The Constraint type contains large Value types. Consider boxing Constraint to reduce
+/// memory usage when storing Apply/Exclude variants.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum Premise {
+    /// A positive premise that queries the knowledge base.
+    Apply(Application),
+    /// A constraint that relates variables (equality, comparison, etc.).
+    Constrain(Constraint),
+    /// A negated premise that excludes matches from the selection.
+    Exclude(Negation),
+}
+
+impl Premise {
+    /// Estimate the cost of this premise given the current environment.
+    /// Returns None if the premise cannot be executed without more constraints.
+    pub fn estimate(&self, env: &crate::Environment) -> Option<usize> {
+        match self {
+            Premise::Apply(application) => application.estimate(env),
+            Premise::Constrain(constraint) => constraint.estimate(env),
+            Premise::Exclude(negation) => negation.estimate(env),
+        }
+    }
+
+    pub fn parameters(&self) -> crate::Parameters {
+        match self {
+            Premise::Apply(application) => application.parameters(),
+            Premise::Constrain(constraint) => constraint.parameters(),
+            Premise::Exclude(negation) => negation.parameters(),
+        }
+    }
+
+    pub fn schema(&self) -> crate::Schema {
+        match self {
+            Premise::Apply(application) => application.schema(),
+            Premise::Constrain(constraint) => constraint.schema(),
+            Premise::Exclude(negation) => negation.schema(),
+        }
+    }
+
+    /// Analyze this premise in the given environment.
+    /// Returns either a viable plan (ready to execute) or a blocked plan (missing requirements).
+    pub fn analyze(&self, env: &crate::Environment) -> crate::analyzer::Analysis {
+        let mut analysis = crate::analyzer::Analysis::from(self.clone());
+        analysis.update(env);
+        analysis
+    }
+
+    /// Evaluate this premise with the given context
+    pub fn evaluate<S: Source, M: Answers>(
+        &self,
+        context: EvaluationContext<S, M>,
+    ) -> impl Answers {
+        let source = self.clone();
+        try_stream! {
+            match source {
+                Premise::Apply(application) => {
+                    for await each in application.evaluate(context) {
+                        yield each?;
+                    }
+                },
+                Premise::Constrain(constraint) => {
+                    for await each in constraint.evaluate(context) {
+                        yield each?;
+                    }
+                },
+                Premise::Exclude(negation) => {
+                    for await each in negation.evaluate(context) {
+                        yield each?;
+                    }
+                },
+            }
+        }
+    }
+
+    pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Answers> {
+        let store = store.clone();
+        let context = new_context(store);
+        let answers = self.evaluate(context);
+        Ok(answers)
+    }
+}
+
+impl Display for Premise {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Premise::Apply(application) => Display::fmt(&application, f),
+            Premise::Constrain(constraint) => Display::fmt(&constraint, f),
+            Premise::Exclude(negation) => Display::fmt(&negation, f),
+        }
+    }
+}
+
+impl From<Constraint> for Premise {
+    fn from(constraint: Constraint) -> Self {
+        Premise::Constrain(constraint)
+    }
+}
+
+impl From<FormulaApplication> for Premise {
+    fn from(application: FormulaApplication) -> Self {
+        Premise::Apply(Application::Formula(application))
+    }
+}
+
+impl From<FactApplication> for Premise {
+    fn from(selector: FactApplication) -> Self {
+        Premise::Apply(Application::Fact(selector))
+    }
+}
+
+impl From<&FactApplication> for Premise {
+    fn from(selector: &FactApplication) -> Self {
+        Premise::Apply(Application::Fact(selector.clone()))
+    }
+}

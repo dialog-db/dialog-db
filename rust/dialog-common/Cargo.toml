@@ -14,6 +14,8 @@ helpers = ["dep:anyhow", "dep:serde_json", "dep:dialog-macros", "dep:async-trait
 integration-tests = ["helpers"]
 # Enable web integration tests (implies integration-tests behavior)
 web-integration-tests = ["helpers"]
+# UCAN support (IPLD serialization for capabilities)
+ucan = ["dep:ipld-core"]
 
 [dependencies]
 blake3 = { workspace = true }
@@ -26,6 +28,7 @@ dialog-macros = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 futures-util = { workspace = true }
 thiserror = { workspace = true }
+ipld-core = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["rt", "sync"] }
@@ -33,6 +36,7 @@ tokio = { workspace = true, features = ["rt", "sync"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { workspace = true, features = ["sync"] }
 wasm-bindgen-futures = { workspace = true }
+getrandom = { workspace = true, features = ["js"] }
 web-sys = { workspace = true, features = ["console"] }
 
 [dev-dependencies]

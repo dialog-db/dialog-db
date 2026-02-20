@@ -8,12 +8,11 @@
 //! ```rust
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::str::FromStr;
-//! use dialog_storage::MemoryStorageBackend;
-//! use dialog_artifacts::{Entity, Attribute, Value, Artifacts, Artifact, ArtifactSelector, Instruction, ArtifactStore, ArtifactStoreMut};
+//! use dialog_artifacts::{Entity, Attribute, Value, Artifacts, Artifact, ArtifactSelector, Instruction, ArtifactStore, ArtifactStoreMut, MemoryStorageBackend};
 //! use futures_util::{StreamExt, stream};
 //!
 //! // Substitute with your storage backend of choice:
-//! let storage_backend = MemoryStorageBackend::default();
+//! let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
 //! let mut artifacts = Artifacts::anonymous(storage_backend).await?;
 //!
 //! // Create an artifact
@@ -41,9 +40,14 @@
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub mod web;
 
-mod artifacts;
+/// Core artifacts types and functionality for operating on artifacts
+pub mod artifacts;
 pub use artifacts::*;
 
+mod platform;
+/// Repository abstraction for dialog
+pub mod repository;
+pub use platform::*;
 mod reference;
 pub use reference::*;
 
@@ -54,7 +58,6 @@ mod state;
 pub use state::*;
 
 mod constants;
-pub use constants::*;
 
 mod key;
 pub use key::*;

@@ -751,12 +751,17 @@ dependencies = [
  "base58",
  "blake3",
  "csv-async",
+ "dialog-capability",
  "dialog-common",
+ "dialog-credentials",
  "dialog-prolly-tree",
+ "dialog-s3-credentials",
  "dialog-storage",
+ "dialog-varsig",
  "ed25519-dalek",
  "futures-util",
  "getrandom 0.2.16",
+ "js-sys",
  "leb128",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -764,7 +769,9 @@ dependencies = [
  "reqwest",
  "serde",
  "serde-big-array",
+ "serde_ipld_dagcbor",
  "serde_json",
+ "signature",
  "static_assertions",
  "tempfile",
  "thiserror 2.0.17",
@@ -773,6 +780,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
+ "web-sys",
 ]
 
 [[package]]
@@ -799,6 +807,8 @@ dependencies = [
  "blake3",
  "dialog-macros",
  "futures-util",
+ "getrandom 0.2.16",
+ "ipld-core",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -919,6 +929,39 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "wasm-bindgen-test",
+]
+
+[[package]]
+name = "dialog-query"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "blake3",
+ "dialog-artifacts",
+ "dialog-common",
+ "dialog-query-macros",
+ "dialog-storage",
+ "futures-core",
+ "futures-util",
+ "indexmap",
+ "paste",
+ "serde",
+ "serde_ipld_dagcbor",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-test",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
+name = "dialog-query-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

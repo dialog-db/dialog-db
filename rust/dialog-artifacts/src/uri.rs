@@ -12,15 +12,9 @@ use crate::{DialogArtifactsError, ENTITY_LENGTH, make_reference, mutable_slice};
 /// plain string URIs (which typically represent an [`Entity`]) and their other
 /// representations such as their byte representation when used as a component
 /// of an index key.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Uri(Url);
-
-impl std::hash::Hash for Uri {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.as_str().hash(state);
-    }
-}
 
 impl Uri {
     /// Generate a globally unique URI. The raw format will be an ed25519 DID
