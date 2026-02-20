@@ -134,6 +134,44 @@ where
 
 /// Describes an instance of a concept. It is expected that each concept is
 /// can be materialized from the selection::Answer.
+///
+/// The `#[derive(Concept)]` macro enforces that the `this` field has type
+/// `Entity` by generating an `Instance` impl that returns `Entity`. A
+/// missing `this` field is caught by the macro itself, while a wrong type
+/// produces a compile-time type mismatch.
+///
+/// ```compile_fail
+/// use dialog_query::{Concept, Entity};
+/// use dialog_macros::Attribute;
+///
+/// mod attrs {
+///     #[derive(dialog_macros::Attribute, Clone, PartialEq)]
+///     pub struct Name(pub String);
+/// }
+///
+/// /// Concept without a `this` field — should fail.
+/// #[derive(Concept, Debug, Clone)]
+/// pub struct BadConcept {
+///     pub name: attrs::Name,
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use dialog_query::{Concept, Entity};
+/// use dialog_macros::Attribute;
+///
+/// mod attrs {
+///     #[derive(dialog_macros::Attribute, Clone, PartialEq)]
+///     pub struct Name(pub String);
+/// }
+///
+/// /// Concept with wrong type for `this` — should fail.
+/// #[derive(Concept, Debug, Clone)]
+/// pub struct BadConcept {
+///     pub this: String,
+///     pub name: attrs::Name,
+/// }
+/// ```
 pub trait Instance: ConditionalSend {
     /// Each instance has a corresponding entity and this method
     /// returns a reference to it.
