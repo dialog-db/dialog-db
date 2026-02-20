@@ -132,13 +132,19 @@ where
     }
 }
 
-/// Describes an instance of a concept. It is expected that each concept is
-/// can be materialized from the selection::Answer.
+/// A materialized concept — a concrete record whose fields have been
+/// resolved from a query [`Answer`].
 ///
-/// The `#[derive(Concept)]` macro enforces that the `this` field has type
-/// `Entity` by generating an `Instance` impl that returns `Entity`. A
-/// missing `this` field is caught by the macro itself, while a wrong type
-/// produces a compile-time type mismatch.
+/// Every concept struct carries a `this: Entity` field that identifies the
+/// entity it describes. This trait surfaces that field, serving two purposes:
+///
+/// 1. **Compile-time enforcement** — the `#[derive(Concept)]` macro generates
+///    an `Instance` impl whose return type is `&Entity`. If the `this` field
+///    is missing the macro emits an error; if it has the wrong type the
+///    generated impl produces a type mismatch.
+/// 2. **Uniform entity access** — any code generic over `Instance` can
+///    retrieve the underlying entity without knowing the concrete concept
+///    type.
 ///
 /// ```compile_fail
 /// use dialog_query::{Concept, Entity};
@@ -175,7 +181,7 @@ where
 pub trait Instance: ConditionalSend {
     /// Each instance has a corresponding entity and this method
     /// returns a reference to it.
-    fn this(&self) -> Entity;
+    fn this(&self) -> &Entity;
 }
 
 #[cfg(test)]
@@ -353,8 +359,8 @@ mod tests {
 
     // Implement Instance for Person
     impl Instance for Person {
-        fn this(&self) -> Entity {
-            self.this.clone()
+        fn this(&self) -> &Entity {
+            &self.this
         }
     }
 
@@ -513,7 +519,7 @@ mod tests {
         };
 
         // Test Instance trait - should return the same entity
-        assert_eq!(person.this(), entity);
+        assert_eq!(person.this(), &entity);
     }
 
     #[dialog_common::test]
