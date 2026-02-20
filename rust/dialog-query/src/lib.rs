@@ -93,7 +93,7 @@ pub mod formulas {
     pub use crate::math::{Difference, Modulo, Product, Quotient, Sum};
 
     // String operation formulas
-    pub use crate::strings::{Concatenate, Length, Lowercase, Uppercase};
+    pub use crate::strings::{Concatenate, Length, Like, Lowercase, Uppercase};
 
     // Type conversion formulas
     pub use crate::conversions::{ParseNumber, ToString};

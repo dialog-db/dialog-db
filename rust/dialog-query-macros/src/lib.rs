@@ -896,6 +896,32 @@ pub fn derive_formula(input: TokenStream) -> TokenStream {
             }
         }
 
+        // Implement From<Match> for Premise - enables Match::<Formula> { ... } in rule premises
+        impl From<#match_name> for dialog_query::Premise {
+            fn from(source: #match_name) -> Self {
+                let app: dialog_query::application::FormulaApplication = source.into();
+                dialog_query::Premise::Apply(dialog_query::Application::Formula(app))
+            }
+        }
+
+        // Implement From<Match> for Application
+        impl From<#match_name> for dialog_query::Application {
+            fn from(source: #match_name) -> Self {
+                let app: dialog_query::application::FormulaApplication = source.into();
+                dialog_query::Application::Formula(app)
+            }
+        }
+
+        // Implement Not for Match - enables !Match::<Formula> { ... } for negation in rule premises
+        impl ::std::ops::Not for #match_name {
+            type Output = dialog_query::Premise;
+
+            fn not(self) -> Self::Output {
+                let application: dialog_query::Application = self.into();
+                dialog_query::Premise::Exclude(dialog_query::Negation(application))
+            }
+        }
+
         impl ::std::convert::TryFrom<&mut dialog_query::cursor::Cursor> for #input_name {
             type Error = dialog_query::error::FormulaEvaluationError;
 
