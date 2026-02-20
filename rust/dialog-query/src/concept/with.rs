@@ -91,8 +91,8 @@ impl<A: Attribute> crate::concept::Instance for With<A>
 where
     A: Clone + Send,
 {
-    fn this(&self) -> Entity {
-        self.this.clone()
+    fn this(&self) -> &Entity {
+        &self.this
     }
 }
 

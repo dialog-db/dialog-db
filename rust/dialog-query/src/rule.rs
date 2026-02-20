@@ -710,7 +710,7 @@ mod tests {
     }
 
     impl crate::concept::Instance for Person {
-        fn this(&self) -> crate::artifact::Entity {
+        fn this(&self) -> &crate::artifact::Entity {
             panic!("Instance trait implementation requires an entity field")
         }
     }

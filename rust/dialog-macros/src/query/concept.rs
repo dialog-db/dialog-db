@@ -508,8 +508,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         // Implement Instance trait for the concept struct
         impl dialog_query::concept::Instance for #struct_name {
-            fn this(&self) -> dialog_query::artifact::Entity {
-                self.this.clone()
+            fn this(&self) -> &dialog_query::artifact::Entity {
+                &self.this
             }
         }
 
