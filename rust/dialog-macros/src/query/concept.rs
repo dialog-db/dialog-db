@@ -80,7 +80,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, Type, parse_macro_input};
+use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 use super::helpers::{extract_doc_comments, to_snake_case};
 
@@ -114,20 +114,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
     };
 
-    // Check for required `this: Entity` field
-    let has_this_field = fields.iter().any(|field| {
-        if let Some(field_name) = &field.ident
-            && field_name == "this"
-        {
-            // Check if the type is Entity
-            if let Type::Path(type_path) = &field.ty
-                && let Some(last_segment) = type_path.path.segments.last()
-            {
-                return last_segment.ident == "Entity";
-            }
-        }
-        false
-    });
+    // Check for required `this` field.
+    // We only check that the field exists — the type is validated at compile time
+    // by the generated `Instance` impl which returns `Entity`. If the field's type
+    // isn't `Entity`, the user gets a type-mismatch error from the compiler.
+    let has_this_field = fields
+        .iter()
+        .any(|field| field.ident.as_ref().is_some_and(|name| name == "this"));
 
     if !has_this_field {
         return syn::Error::new_spanned(
