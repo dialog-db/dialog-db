@@ -20,19 +20,21 @@ use crate::premise::Premise;
 ///
 /// # Examples
 ///
-/// ```rust,ignore
+/// ```rs
 /// // Return a tuple of different Match types
 /// fn my_rule(emp: Match<Employee>) -> impl When {
 ///     (
-///         Match::<Stuff> { this: emp.this, ... },
-///         Match::<OtherStuff> { ... },
+///         Match::<Stuff> { this: emp.this, name: emp.name },
+///         Match::<OtherStuff> { this: emp.this, value: emp.value },
 ///     )
 /// }
 /// ```
 pub trait When {
+    /// Convert this collection into a set of premises
     fn into_premises(self) -> Premises;
 }
 
+/// An ordered collection of premises used in rule definitions
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Premises(Vec<Premise>);
 

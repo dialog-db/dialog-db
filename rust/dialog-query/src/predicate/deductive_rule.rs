@@ -30,9 +30,11 @@ impl DeductiveRule {
         uncompiled.compile()
     }
 
+    /// Returns the operator name identifying this rule's conclusion concept.
     pub fn operator(&self) -> String {
         self.conclusion.operator()
     }
+    /// Returns an iterator over the operand names of this rule's conclusion.
     pub fn operands(&self) -> impl Iterator<Item = &str> {
         self.conclusion.operands()
     }
@@ -56,6 +58,7 @@ pub struct UncompiledDeductiveRule {
 }
 
 impl UncompiledDeductiveRule {
+    /// Compiles the rule by planning premise execution order and validating bindings.
     pub fn compile(self) -> Result<DeductiveRule, CompileError> {
         // We attempt to plan the order of premises in a scope where none of the
         // rule parameters are bound in order to identify most optimal execution

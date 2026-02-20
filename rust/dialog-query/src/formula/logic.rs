@@ -19,6 +19,7 @@ pub struct And {
 }
 
 impl And {
+    /// Compute the logical AND of `left` and `right`
     pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![And {
             left: input.left,
@@ -41,6 +42,7 @@ pub struct Or {
 }
 
 impl Or {
+    /// Compute the logical OR of `left` and `right`
     pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![Or {
             left: input.left,
@@ -61,6 +63,7 @@ pub struct Not {
 }
 
 impl Not {
+    /// Compute the logical NOT of `value`
     pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![Not {
             value: input.value,

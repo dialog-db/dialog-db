@@ -36,6 +36,7 @@ pub use crate::artifact::{Attribute, Cause, Entity, Type, Value};
 /// assert_eq!(<u32 as IntoType>::TYPE, Some(Type::UnsignedInt));
 /// ```
 pub trait IntoType {
+    /// The corresponding runtime Type, or None for dynamically-typed Value
     const TYPE: Option<Type>;
 }
 
@@ -102,6 +103,7 @@ impl IntoType for Value {
     const TYPE: Option<Type> = None;
 }
 
+/// A concrete type that can be used as a term value with bidirectional Value conversion
 pub trait Scalar:
     IntoType + Clone + std::fmt::Debug + 'static + ConditionalSend + TryFrom<Value>
 {

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Parameters(HashMap<String, Term<Value>>);
 impl Parameters {
+    /// Create a new empty parameter set
     pub fn new() -> Self {
         Self::default()
     }

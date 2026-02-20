@@ -8,12 +8,15 @@ use crate::{Formula, Value, dsl::Input};
 /// ToString formula that converts any supported type to string
 #[derive(Debug, Clone, Formula)]
 pub struct ToString {
+    /// Value to convert
     pub value: Value,
+    /// Resulting string representation
     #[derived]
     pub is: String,
 }
 
 impl ToString {
+    /// Convert the input value to its string representation
     pub fn derive(input: ToStringInput) -> Vec<Self> {
         let string_repr = match &input.value {
             Value::String(s) => s.clone(),
@@ -45,6 +48,7 @@ pub struct ParseNumber {
 }
 
 impl ParseNumber {
+    /// Parse the text as a u32, returning empty on parse failure
     pub fn derive(input: Input<Self>) -> Vec<Self> {
         // Try to parse the string as a u32
         match input.text.trim().parse::<u32>() {

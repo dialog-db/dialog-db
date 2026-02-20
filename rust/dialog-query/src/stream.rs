@@ -6,6 +6,7 @@ use tokio::sync::mpsc::unbounded_channel;
 
 use crate::QueryError;
 
+/// A TryStream that is conditionally Send based on the target platform
 pub trait SendStream<T>:
     TryStream<Ok = T, Error = QueryError, Item = Result<T, QueryError>> + ConditionalSend
 {
@@ -35,6 +36,7 @@ where
 type PinnedSendStream<T> = std::pin::Pin<Box<dyn SendStream<T>>>;
 
 #[allow(clippy::type_complexity)]
+/// Split a stream into two independent streams that each receive a clone of every item
 pub fn fork_stream<S, T>(input: S) -> (PinnedSendStream<T>, PinnedSendStream<T>)
 where
     S: SendStream<T> + ConditionalSend + 'static,

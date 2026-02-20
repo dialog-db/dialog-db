@@ -48,6 +48,7 @@ impl Premise {
         }
     }
 
+    /// Returns the parameter bindings for this premise
     pub fn parameters(&self) -> crate::Parameters {
         match self {
             Premise::Apply(application) => application.parameters(),
@@ -56,6 +57,7 @@ impl Premise {
         }
     }
 
+    /// Returns the schema describing this premise's parameters
     pub fn schema(&self) -> crate::Schema {
         match self {
             Premise::Apply(application) => application.schema(),
@@ -99,6 +101,7 @@ impl Premise {
         }
     }
 
+    /// Execute this premise as a query against the given store
     pub fn query<S: Source>(&self, store: &S) -> QueryResult<impl Answers> {
         let store = store.clone();
         let context = new_context(store);

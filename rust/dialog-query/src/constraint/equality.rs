@@ -29,9 +29,11 @@ const EQUALITY_COST: usize = 1;
 ///    and raises a `ConstraintViolation` error.
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
+/// # use dialog_query::constraint::equality::Equality;
+/// # use dialog_query::Term;
 /// // x must equal y
-/// Constraint::Equality(Term::var("x"), Term::var("y"))
+/// let eq = Equality::new(Term::var("x"), Term::var("y"));
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Equality {

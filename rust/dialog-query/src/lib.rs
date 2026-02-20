@@ -12,38 +12,67 @@
 // Consider boxing error fields in the future to reduce Result sizes, but this would be
 // a breaking API change. For now, we allow this clippy warning.
 #![allow(clippy::result_large_err)]
+#![warn(missing_docs)]
 
 // Allow macro-generated code to reference this crate as `dialog_query::`
 extern crate self as dialog_query;
 
+/// Static analysis of rules and formulas for query planning.
 pub mod analyzer;
+/// Application of predicates within query evaluation.
 pub mod application;
+/// Re-exports from the dialog-artifacts crate.
 pub mod artifact;
+/// Attribute definitions and schema metadata.
 pub mod attribute;
 
+/// Claim trait for asserting and retracting facts.
 pub mod claim;
+/// Concept definitions for entity-centric pattern matching.
 pub mod concept;
+/// Constraint system for filtering and validating variable bindings.
 pub mod constraint;
+/// Query execution context for evaluation.
 pub mod context;
+/// Cursor for reading values during formula evaluation.
 pub mod cursor;
+/// DSL types for constructing type-safe queries.
 pub mod dsl;
+/// Variable binding environment used during query planning.
 pub mod environment;
+/// Error types for the query engine.
 pub mod error;
+/// Fact and scalar types for the knowledge base.
 pub mod fact;
+/// Built-in formulas for data transformations and computations.
 pub mod formula;
+/// Negation support for excluding matching results.
 pub mod negation;
+/// Named parameter bindings for rule and formula applications.
 pub mod parameters;
+/// Query planner that compiles premises into execution plans.
 pub mod planner;
+/// Predicate definitions including concepts, facts, and formulas.
 pub mod predicate;
+/// Premise trait for rule conditions and pattern matching.
 pub mod premise;
+/// Query trait and store abstractions for polymorphic querying.
 pub mod query;
+/// Entity-attribute-value relation triples.
 pub mod relation;
+/// Rule-based deduction system for deriving facts.
 pub mod rule;
+/// Schema system for describing parameter signatures.
 pub mod schema;
+/// Selection and answer types for query results.
 pub mod selection;
+/// Database sessions for querying and committing changes.
 pub mod session;
+/// Stream utilities for async query result iteration.
 pub mod stream;
+/// Term types for pattern matching with variables and constants.
 pub mod term;
+/// Type system utilities bridging Rust types to dialog-artifacts types.
 pub mod types;
 
 pub use application::Application;
@@ -74,7 +103,7 @@ pub use stream::*;
 pub use term::*;
 pub use types::IntoType;
 
-/// Re-export commonly used types
+/// Re-export commonly used types.
 pub mod prelude {
     pub use crate::artifact::{Type, Value};
     pub use crate::environment::Environment;

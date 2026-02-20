@@ -4,17 +4,27 @@ pub use crate::error::SchemaError;
 use crate::{Cardinality, Entity, Value};
 pub use crate::{Parameters, Term};
 
+/// Validated fact selector with typed terms for each component
 pub struct Selector {
+    /// Attribute term
     pub the: Term<Attribute>,
+    /// Entity term
     pub of: Term<Entity>,
+    /// Value term
     pub is: Term<Value>,
+    /// Cause term
     pub cause: Term<Cause>,
 }
 
+/// Builder for constructing fact queries with fluent API
 pub struct Fact {
+    /// Attribute constraint
     pub the: Term<Attribute>,
+    /// Entity constraint
     pub of: Term<Entity>,
+    /// Value constraint
     pub is: Term<Value>,
+    /// Cause constraint
     pub cause: Term<Cause>,
 }
 
@@ -94,10 +104,12 @@ impl Fact {
         Self::apply(params)
     }
 
+    /// Create a new fact selector (alias for `new`)
     pub fn select() -> Self {
         Self::new()
     }
 
+    /// Validate and convert raw parameters into a typed Selector
     pub fn conform(terms: Parameters) -> Result<Selector, SchemaError> {
         let the = match terms.get("the") {
             None => Err(SchemaError::OmittedRequirement {
@@ -204,6 +216,7 @@ impl Fact {
             })
         }
     }
+    /// Validate parameters and create a FactApplication
     pub fn apply(terms: Parameters) -> Result<FactApplication, SchemaError> {
         let Selector { the, of, is, cause } = Self::conform(terms)?;
 

@@ -12,6 +12,7 @@ pub use futures_util::stream::{Stream, StreamExt, TryStream};
 
 use crate::predicate::DeductiveRule;
 
+/// A stream of query results that can be collected or iterated
 pub trait Output<T: ConditionalSend>:
     Stream<Item = Result<T, QueryError>> + 'static + ConditionalSend
 {
@@ -52,15 +53,20 @@ pub trait Source: ArtifactStore + Clone + ConditionalSend + ConditionalSync + 's
     fn resolve_rules(&self, operator: &str) -> Vec<DeductiveRule>;
 }
 
+/// A query circuit that can be evaluated against a source with input answers
 pub trait Circuit: ConditionalSend + 'static {
+    /// Evaluate this circuit, producing a stream of answers
     fn evaluate<S: Source, M: selection::Answers>(
         &self,
         context: EvaluationContext<S, M>,
     ) -> impl selection::Answers;
 }
 
+/// A typed query that can produce concrete results from answers
 pub trait Query<T: ConditionalSend + 'static>: Circuit + Clone + ConditionalSend {
+    /// Convert an answer into a concrete result value
     fn realize(&self, input: selection::Answer) -> Result<T, QueryError>;
+    /// Execute this query against a source, returning a stream of typed results
     fn execute<S: Source>(&self, source: &S) -> impl Output<T>
     where
         Self: Sized,
@@ -86,6 +92,7 @@ pub trait Query<T: ConditionalSend + 'static>: Circuit + Clone + ConditionalSend
 //   let session = Session::open(artifacts);
 //   let results = concept.query(&session)?;
 
+/// A mutable store that can be used for writes
 pub trait Store: ArtifactStoreMut + Clone + ConditionalSend {}
 /// Blanket implementation - any type that satisfies the bounds automatically implements QueryStore
 impl<T> Store for T where T: ArtifactStoreMut + Clone + ConditionalSend {}

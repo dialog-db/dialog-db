@@ -3,13 +3,17 @@ use crate::{Formula, dsl::Input};
 /// Sum formula that adds two numbers
 #[derive(Debug, Clone, Formula)]
 pub struct Sum {
+    /// First operand
     pub of: u32,
+    /// Second operand
     pub with: u32,
+    /// Computed sum
     #[derived(cost = 5)]
     pub is: u32,
 }
 
 impl Sum {
+    /// Compute the sum of `of` and `with`
     pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![Sum {
             of: input.of,
@@ -32,6 +36,7 @@ pub struct Difference {
 }
 
 impl Difference {
+    /// Compute the difference of `of` minus `subtract`
     pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![Difference {
             of: input.of,
@@ -54,6 +59,7 @@ pub struct Product {
 }
 
 impl Product {
+    /// Compute the product of `of` times `times`
     pub fn derive(input: Input<Self>) -> Vec<Self> {
         vec![Product {
             of: input.of,
@@ -76,6 +82,7 @@ pub struct Quotient {
 }
 
 impl Quotient {
+    /// Compute the quotient of `of` divided by `by`, returning empty on division by zero
     pub fn derive(input: Input<Self>) -> Vec<Self> {
         if input.by == 0 {
             // Return empty Vec for division by zero - this will be filtered out
@@ -103,6 +110,7 @@ pub struct Modulo {
 }
 
 impl Modulo {
+    /// Compute `of` modulo `by`, returning empty on modulo by zero
     pub fn derive(input: Input<Self>) -> Vec<Self> {
         if input.by == 0 {
             // Return empty Vec for modulo by zero

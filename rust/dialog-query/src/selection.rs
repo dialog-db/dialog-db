@@ -8,6 +8,7 @@ use async_stream::try_stream;
 use dialog_common::ConditionalSend;
 use std::collections::HashMap;
 
+/// Re-exported stream traits for working with answer streams.
 pub use futures_util::stream::{Stream, TryStream};
 
 use crate::{Fact, InconsistencyError, QueryError, Term, types::Scalar};
@@ -25,6 +26,7 @@ pub trait Answers: Stream<Item = Result<Answer, QueryError>> + 'static + Conditi
         async move { futures_util::TryStreamExt::try_collect(self).await }
     }
 
+    /// Apply a flat-mapping operation over each answer, producing a new stream of answers.
     fn flat_map<M: AnswersFlatMapper>(self, mapper: M) -> impl Answers
     where
         Self: Sized,
@@ -38,6 +40,7 @@ pub trait Answers: Stream<Item = Result<Answer, QueryError>> + 'static + Conditi
         }
     }
 
+    /// Expand each answer into zero or more answers using an infallible expander.
     fn expand<M: AnswersExpand>(self, expander: M) -> impl Answers
     where
         Self: Sized,
@@ -51,6 +54,7 @@ pub trait Answers: Stream<Item = Result<Answer, QueryError>> + 'static + Conditi
         }
     }
 
+    /// Expand each answer into zero or more answers using a fallible expander.
     fn try_expand<M: AnswersTryExpand>(self, expander: M) -> impl Answers
     where
         Self: Sized,
@@ -67,15 +71,21 @@ pub trait Answers: Stream<Item = Result<Answer, QueryError>> + 'static + Conditi
 
 impl<S> Answers for S where S: Stream<Item = Result<Answer, QueryError>> + 'static + ConditionalSend {}
 
+/// Maps an answer into a stream of answers (flat-map operation).
 pub trait AnswersFlatMapper: ConditionalSend + 'static {
+    /// Produce a stream of answers from a single input answer.
     fn map(&self, item: Answer) -> impl Answers;
 }
 
+/// Expands an answer into multiple answers, potentially returning an error.
 pub trait AnswersTryExpand: ConditionalSend + 'static {
+    /// Attempt to expand a single answer into zero or more answers.
     fn try_expand(&self, item: Answer) -> Result<Vec<Answer>, QueryError>;
 }
 
+/// Expands an answer into multiple answers infallibly.
 pub trait AnswersExpand: ConditionalSend + 'static {
+    /// Expand a single answer into zero or more answers.
     fn expand(&self, item: Answer) -> Vec<Answer>;
 }
 
@@ -99,31 +109,44 @@ impl<S: Answers, F: (Fn(Answer) -> S) + ConditionalSend + 'static> AnswersFlatMa
     }
 }
 
+/// Identifies which component of a fact a factor was selected from.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Selector {
+    /// The attribute component of a fact.
     The,
+    /// The entity component of a fact.
     Of,
+    /// The value component of a fact.
     Is,
+    /// The cause (provenance hash) component of a fact.
     Cause,
 }
 
+/// Represents the origin of a value binding: selected from a fact, derived
+/// from a formula, or provided as a parameter.
 #[derive(Clone, Debug)]
 pub enum Factor {
+    /// A value selected directly from a matched fact.
     Selected {
+        /// Which fact component this value came from.
         selector: Selector,
+        /// The fact application that matched this fact.
         application: Arc<crate::application::FactApplication>,
+        /// The matched fact itself.
         fact: Arc<Fact>,
     },
-    /// Derived from a formula computation - tracks the input facts and formula used
+    /// Derived from a formula computation - tracks the input facts and formula used.
     Derived {
+        /// The computed value.
         value: Value,
-        /// The facts that were read to produce this derived value, keyed by parameter name
+        /// The facts that were read to produce this derived value, keyed by parameter name.
         from: HashMap<String, Factors>,
-        /// The formula application that produced this value
+        /// The formula application that produced this value.
         formula: Arc<crate::application::formula::FormulaApplication>,
     },
-
+    /// A value provided externally as a query parameter.
     Parameter {
+        /// The parameter value.
         value: Value,
     },
 }
@@ -328,24 +351,31 @@ pub struct Answer {
     facts: HashMap<FactApplication, Arc<Fact>>,
 }
 
+/// Evidence describing how a value was obtained, used when merging into an answer.
 pub enum Evidence<'a> {
-    /// Selected using fact selector
+    /// Selected using fact selector.
     Selected {
+        /// The fact application that produced this match.
         application: &'a FactApplication,
+        /// The matched fact.
         fact: &'a Fact,
     },
     /// Derived using formula application.
     Derived {
+        /// The term being bound.
         term: &'a Term<Value>,
+        /// The computed value.
         value: Box<Value>,
-        /// The facts that were read to produce this derived value, keyed by parameter name
+        /// The facts that were read to produce this derived value, keyed by parameter name.
         from: HashMap<String, Factors>,
-        /// The formula application that produced this value
+        /// The formula application that produced this value.
         formula: &'a crate::application::formula::FormulaApplication,
     },
-    /// Applied parameter
+    /// Applied parameter.
     Parameter {
+        /// The term being bound.
         term: &'a Term<Value>,
+        /// The parameter value.
         value: &'a Value,
     },
 }
@@ -441,6 +471,7 @@ impl Answer {
         ))
     }
 
+    /// Merge evidence into this answer, recording facts and binding variables.
     pub fn merge(&mut self, evidence: Evidence<'_>) -> Result<(), InconsistencyError> {
         match evidence {
             Evidence::Selected { application, fact } => {
@@ -505,6 +536,7 @@ impl Answer {
         }
     }
 
+    /// Look up the factors bound to a named variable term.
     pub fn lookup(&self, term: &Term<Value>) -> Option<&Factors> {
         match term {
             Term::Variable {

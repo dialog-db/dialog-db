@@ -10,7 +10,7 @@ use std::marker::PhantomData;
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rs
 /// // Assertion
 /// tr.assert(With {
 ///     this: alice,
@@ -31,7 +31,9 @@ use std::marker::PhantomData;
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct With<A: Attribute> {
+    /// The entity this attribute belongs to.
     pub this: Entity,
+    /// The attribute value associated with the entity.
     pub has: A,
 }
 
@@ -40,7 +42,9 @@ pub struct With<A: Attribute> {
 /// Use with the `Match` type alias to query for entities that have an attribute.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WithMatch<A: Attribute> {
+    /// Term matching the entity. Defaults to a variable named `"this"`.
     pub this: crate::Term<Entity>,
+    /// Term matching the attribute value. Defaults to a variable named `"has"`.
     pub has: crate::Term<A::Type>,
 }
 
@@ -60,10 +64,12 @@ pub struct WithTerms<A: Attribute> {
 }
 
 impl<A: Attribute> WithTerms<A> {
+    /// Returns a term variable for the entity, named `"this"`.
     pub fn this() -> crate::Term<Entity> {
         crate::Term::var("this")
     }
 
+    /// Returns a term variable for the attribute value, named `"has"`.
     pub fn has() -> crate::Term<A::Type> {
         crate::Term::var("has")
     }

@@ -1,5 +1,8 @@
+/// Concept application for querying entities that match a concept pattern
 pub mod concept;
+/// Fact application for direct fact selection from the knowledge base
 pub mod fact;
+/// Formula application for computed values
 pub mod formula;
 
 pub use crate::analyzer::AnalyzerError;
@@ -43,6 +46,7 @@ impl Application {
         }
     }
 
+    /// Evaluate this application against the given context, producing answers
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
         &self,
         context: EvaluationContext<S, M>,
@@ -69,6 +73,7 @@ impl Application {
         }
     }
 
+    /// Returns the parameter bindings for this application
     pub fn parameters(&self) -> crate::Parameters {
         match self {
             Application::Fact(application) => application.parameters(),
@@ -77,6 +82,7 @@ impl Application {
         }
     }
 
+    /// Returns the schema describing this application's parameters
     pub fn schema(&self) -> crate::Schema {
         match self {
             Application::Fact(application) => application.schema(),
@@ -90,6 +96,7 @@ impl Application {
         Premise::Exclude(Negation::not(self.clone()))
     }
 
+    /// Execute this application as a query against the given store
     pub fn query<S: Source>(&self, store: &S) -> impl crate::selection::Answers {
         let store = store.clone();
         let context = new_context(store);

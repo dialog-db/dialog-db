@@ -8,6 +8,7 @@ pub use crate::{Environment, Parameters, Requirement};
 use std::fmt::Display;
 use std::sync::Arc;
 
+/// Cost per parameter for formula evaluation
 pub const PARAM_COST: usize = 10;
 
 /// A formula bound to specific term mappings, usable as a premise in the
@@ -66,6 +67,7 @@ impl FormulaApplication {
         self.parameters.clone()
     }
 
+    /// Expand this formula with the given answer, mapping errors to QueryError
     pub fn expand(&self, frame: Answer) -> Result<Vec<Answer>, QueryError> {
         let compute = self.compute;
         let formula = Arc::new(self.clone());
@@ -93,6 +95,7 @@ impl FormulaApplication {
         }
     }
 
+    /// Evaluate this formula against the context, expanding each input answer
     pub fn evaluate<S: Source, M: crate::selection::Answers>(
         &self,
         context: EvaluationContext<S, M>,
