@@ -66,8 +66,8 @@
 //!
 //! // -- Conversions --
 //! // FullNameFormulaMatch → Parameters
-//! // TryFrom<&mut Cursor> for FullNameFormulaInput (reads input cells from cursor)
-//! // Output::write() for FullNameFormula (writes derived cells to cursor)
+//! // TryFrom<&mut Bindings> for FullNameFormulaInput (reads input cells from bindings)
+//! // Formula::write() for FullNameFormula (writes derived cells to bindings)
 //! ```
 
 use proc_macro::TokenStream;
@@ -226,15 +226,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    // Generate Output::write() statements — only derived fields are written
-    // back to the cursor after computation.
+    // Generate Formula::write() statements — only derived fields are written
+    // back to the bindings after computation.
     let write_statements: Vec<_> = derived_fields
         .iter()
         .map(|(name, _ty, _, _cost)| {
             let name_str = name.to_string();
             let name_lit = syn::LitStr::new(&name_str, proc_macro2::Span::call_site());
             quote! {
-                cursor.write(#name_lit, &self.#name.clone().into())?;
+                bindings.write(#name_lit, &self.#name.clone().into())?;
             }
         })
         .collect();
@@ -300,20 +300,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl ::std::convert::TryFrom<&mut dialog_query::cursor::Cursor> for #input_name {
+        impl ::std::convert::TryFrom<&mut dialog_query::predicate::formula::bindings::Bindings> for #input_name {
             type Error = dialog_query::error::FormulaEvaluationError;
 
-            fn try_from(cursor: &mut dialog_query::cursor::Cursor) -> ::std::result::Result<Self, Self::Error> {
+            fn try_from(bindings: &mut dialog_query::predicate::formula::bindings::Bindings) -> ::std::result::Result<Self, Self::Error> {
                 Ok(#input_name {
-                    #(#input_field_names: cursor.resolve(#input_field_name_lits)?.try_into()?),*
+                    #(#input_field_names: bindings.resolve(#input_field_name_lits)?.try_into()?),*
                 })
-            }
-        }
-
-        impl dialog_query::predicate::formula::Output for #struct_name {
-            fn write(&self, cursor: &mut dialog_query::cursor::Cursor) -> ::std::result::Result<(), dialog_query::error::FormulaEvaluationError> {
-                #(#write_statements)*
-                ::std::result::Result::Ok(())
             }
         }
 
@@ -339,6 +332,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
             fn derive(input: Self::Input) -> ::std::vec::Vec<Self> {
                 #struct_name::derive(input)
+            }
+
+            fn write(&self, bindings: &mut dialog_query::predicate::formula::bindings::Bindings) -> ::std::result::Result<(), dialog_query::error::FormulaEvaluationError> {
+                #(#write_statements)*
+                ::std::result::Result::Ok(())
             }
         }
     };

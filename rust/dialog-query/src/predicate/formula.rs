@@ -11,7 +11,7 @@
 //! - **[`Formula`] trait** - The core trait that all formulas must implement
 //! - **[`Compute`] trait** - Optional trait for formulas that compute outputs from inputs
 //! - **[`FormulaApplication`]** - Formula bound to term mappings, integrable with rules
-//! - **[`Cursor`](crate::cursor::Cursor)** - Provides read/write access during evaluation
+//! - **[`Bindings`](bindings::Bindings)** - Provides read/write access during evaluation
 //! - **[`Dependencies`](crate::deductive_rule::Dependencies)** - Declares parameter requirements
 //! - **Standard `TryFrom<Value>`** - Type conversion between Value and Rust types
 //!
@@ -29,7 +29,7 @@
 //!          │ For each input Match
 //!          ▼
 //! ┌─────────────────┐
-//! │     Cursor      │ Reads: ?x → 5, ?y → 3
+//! │     Bindings      │ Reads: ?x → 5, ?y → 3
 //! └────────┬────────┘
 //!          │
 //!          ▼
@@ -66,7 +66,7 @@
 //! 1. **Type Safety** - Formulas work with strongly typed inputs and outputs
 //! 2. **Integration** - Applications integrate seamlessly with the rule system
 //! 3. **Composability** - Formulas can be chained and combined in queries and rules
-//! 4. **Separation of Concerns** - Logic (Compute) is separate from I/O (Cursor)
+//! 4. **Separation of Concerns** - Logic (Compute) is separate from I/O (Bindings)
 //! 5. **Dependency Declaration** - Clear parameter requirements for planning
 //! 6. **Error Handling** - Clear error types for all failure modes
 //! 7. **Performance** - Zero-cost abstractions where possible
@@ -102,6 +102,9 @@
 //! }
 //! ```
 
+/// Bindings for reading/writing values during formula evaluation.
+pub mod bindings;
+
 use std::collections::HashMap;
 use std::fmt::Display;
 
@@ -110,12 +113,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::Schema;
 use crate::application::formula::FormulaApplication;
-use crate::cursor::Cursor;
 pub use crate::dsl::{Input, Quarriable};
 use crate::error::{FormulaEvaluationError, SchemaError, TypeError};
 use crate::selection::Answer;
 use crate::types::Scalar;
 use crate::{Parameters, Requirement};
+use bindings::Bindings;
 
 /// Core trait for implementing formulas in the query system
 ///
@@ -124,7 +127,7 @@ use crate::{Parameters, Requirement};
 ///
 /// # Type Parameters
 ///
-/// - `Input`: The input type that can be constructed from a [`Cursor`].
+/// - `Input`: The input type that can be constructed from a [`Bindings`].
 ///   This type should contain all the fields the formula needs to read.
 /// - `Match`: Currently unused, reserved for future macro generation that
 ///   will create match patterns for formula applications.
@@ -133,11 +136,11 @@ use crate::{Parameters, Requirement};
 ///
 /// To implement a formula:
 ///
-/// 1. Define an input type that implements `TryFrom<Cursor>`
+/// 1. Define an input type that implements `TryFrom<Bindings>`
 /// 2. Implement `name()` to return the formula's identifier
 /// 3. Implement `dependencies()` to declare parameter requirements
 /// 4. Implement `derive` to create output instances from input
-/// 5. Implement `write` to write computed values back to the cursor
+/// 5. Implement `write` to write computed values back to the bindings
 ///
 /// Most formulas should also implement the [`Compute`] trait to separate
 /// the computation logic from the I/O operations.
@@ -145,10 +148,10 @@ use crate::{Parameters, Requirement};
 /// # Example
 ///
 /// See the module-level documentation for a complete example.
-pub trait Formula: Quarriable + Output + Sized + Clone {
+pub trait Formula: Quarriable + Sized + Clone {
     /// The input type for this formula
     ///
-    /// This type must be constructible from a Cursor and should contain
+    /// This type must be constructible from a Bindings and should contain
     /// all the fields that the formula needs to read from the input.
     type Input: In;
 
@@ -181,17 +184,17 @@ pub trait Formula: Quarriable + Output + Sized + Clone {
     ///
     /// This method orchestrates the full formula evaluation:
     /// 1. Calls `derive` to compute outputs
-    /// 2. For each output, calls `write` to add values to cursor
+    /// 2. For each output, calls `write` to add values to bindings
     /// 3. Returns the Answer with Factor::Derived provenance
     ///
     /// This default implementation should work for most formulas.
-    fn compute(cursor: &mut Cursor) -> Result<Vec<Answer>, FormulaEvaluationError> {
+    fn compute(bindings: &mut Bindings) -> Result<Vec<Answer>, FormulaEvaluationError> {
         let mut answers = Vec::new();
-        let input: Self::Input = cursor.try_into()?;
+        let input: Self::Input = bindings.try_into()?;
         for output in Self::derive(input) {
-            let mut cursor = cursor.clone();
-            Self::write(&output, &mut cursor)?;
-            answers.push(cursor.source);
+            let mut bindings = bindings.clone();
+            output.write(&mut bindings)?;
+            answers.push(bindings.source);
         }
 
         Ok(answers)
@@ -200,6 +203,12 @@ pub trait Formula: Quarriable + Output + Sized + Clone {
     /// This method contains actual logic for deriving an output from provided
     /// inputs.
     fn derive(input: Self::Input) -> Vec<Self>;
+
+    /// Write this formula instance's output values to the bindings.
+    ///
+    /// This method is called for each output instance produced by `derive`
+    /// to write the computed values back to the bindings.
+    fn write(&self, bindings: &mut Bindings) -> Result<(), FormulaEvaluationError>;
 
     /// Create a formula application with term bindings
     ///
@@ -230,30 +239,14 @@ pub trait Formula: Quarriable + Output + Sized + Clone {
             cells,
             cost: Self::cost(),
             parameters: cells.conform(terms)?,
-            compute: |cursor| Self::compute(cursor),
+            compute: |bindings| Self::compute(bindings),
         })
     }
 }
 
-/// Trait alias for types that can be constructed from a [`Cursor`] as formula input.
-pub trait In: for<'a> TryFrom<&'a mut Cursor, Error = FormulaEvaluationError> {}
-impl<T: for<'a> TryFrom<&'a mut Cursor, Error = FormulaEvaluationError>> In for T {}
-
-/// Trait for formula types that can write their computed output to a [`Cursor`].
-pub trait Output {
-    /// Write this formula instance's output values to the cursor
-    ///
-    /// This method is called for each output instance produced by `derive`
-    /// to write the computed values back to the cursor.
-    ///
-    /// # Arguments
-    /// * `cursor` - The cursor to write output values to
-    ///
-    /// # Returns
-    /// * `Ok(())` - If all writes succeeded
-    /// * `Err(_)` - If writing fails (e.g., due to inconsistency)
-    fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError>;
-}
+/// Trait alias for types that can be constructed from a [`Bindings`] as formula input.
+pub trait In: for<'a> TryFrom<&'a mut Bindings, Error = FormulaEvaluationError> {}
+impl<T: for<'a> TryFrom<&'a mut Bindings, Error = FormulaEvaluationError>> In for T {}
 
 /// Trait for formula match patterns that can be converted into [`Parameters`].
 pub trait Match: Sized + Clone + Into<Parameters> {
@@ -268,7 +261,7 @@ impl<T: Match + Clone> From<T> for FormulaApplication {
             cells: T::Formula::cells(),
             cost: T::Formula::cost(),
             parameters: value.into(),
-            compute: |cursor| T::Formula::compute(cursor),
+            compute: |bindings| T::Formula::compute(bindings),
         }
     }
 }

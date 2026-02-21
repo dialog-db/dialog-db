@@ -230,8 +230,10 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 ///     pub is: Term<String>,
 /// }
 ///
-/// // Formula trait — describes the computation
-/// # trait Formula { type Input; type Match; fn operator() -> &'static str; fn cost() -> usize; fn derive(input: ConcatenateInput) -> Vec<Concatenate>; }
+/// // Formula trait — describes the computation and writes derived fields
+/// # struct Bindings;
+/// # struct FormulaEvaluationError;
+/// # trait Formula { type Input; type Match; fn operator() -> &'static str; fn cost() -> usize; fn derive(input: ConcatenateInput) -> Vec<Concatenate>; fn write(&self, bindings: &mut Bindings) -> Result<(), FormulaEvaluationError>; }
 /// impl Formula for Concatenate {
 ///     type Input = ConcatenateInput;
 ///     type Match = ConcatenateMatch;
@@ -241,15 +243,8 @@ pub fn derive_concept(input: TokenStream) -> TokenStream {
 ///     fn derive(input: ConcatenateInput) -> Vec<Concatenate> {
 ///         todo!() // delegates to user's Concatenate::derive
 ///     }
-/// }
-///
-/// // Output trait — writes derived fields to the cursor
-/// # struct Cursor;
-/// # struct FormulaEvaluationError;
-/// # trait Output { fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError>; }
-/// impl Output for Concatenate {
-///     fn write(&self, cursor: &mut Cursor) -> Result<(), FormulaEvaluationError> {
-///         // cursor.write("is", &self.is.clone().into())?;
+///     fn write(&self, bindings: &mut Bindings) -> Result<(), FormulaEvaluationError> {
+///         // bindings.write("is", &self.is.clone().into())?;
 ///         todo!()
 ///     }
 /// }
