@@ -24,6 +24,7 @@ web-integration-tests = ["dialog-common/web-integration-tests", "dialog-storage/
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-credentials = { workspace = true }
+dialog-effects = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-prolly-tree = { workspace = true }
 dialog-s3-credentials = { workspace = true }
