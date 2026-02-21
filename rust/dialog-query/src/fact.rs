@@ -1,7 +1,5 @@
 //! Fact and Claim types for the dialog-query system
 
-use std::hash::Hash;
-
 pub use super::predicate::fact::Fact as PredicateFact;
 pub use crate::Term;
 pub use crate::application::FactApplication;
@@ -10,8 +8,7 @@ pub use crate::dsl::Quarriable;
 pub use crate::error::SchemaError;
 pub use crate::query::Output;
 pub use crate::types::Scalar;
-use dialog_artifacts::{Blake3Hash, CborEncoder, DialogArtifactsError, Encoder};
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_common::ConditionalSend;
 use serde::{Deserialize, Serialize};
 
 /// A fact represents persisted data with a cause - can be an assertion or retraction
@@ -78,20 +75,6 @@ impl<T: Scalar + ConditionalSend> Fact<T> {
             Fact::Assertion { cause, .. } => cause,
             Fact::Retraction { cause, .. } => cause,
         }
-    }
-}
-
-impl<T: Scalar + ConditionalSend + ConditionalSync + Serialize> Fact<T> {
-    /// Serialize this fact to CBOR bytes
-    pub async fn as_bytes(&self) -> Result<Vec<u8>, DialogArtifactsError> {
-        let (_, bytes) = CborEncoder.encode(self).await?;
-        Ok(bytes)
-    }
-
-    /// Compute the Blake3 hash of this fact
-    pub async fn hash(&self) -> Result<Blake3Hash, DialogArtifactsError> {
-        let (hash, _) = CborEncoder.encode(self).await?;
-        Ok(hash)
     }
 }
 

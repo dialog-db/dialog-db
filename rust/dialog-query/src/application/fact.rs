@@ -16,9 +16,6 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::sync::OnceLock;
 
-/// Base cost unit for query cost estimation
-pub const BASE_COST: usize = 100;
-
 /// Cost of a segment read for Cardinality::One with 3/3 or 2/3 constraints.
 /// This is a direct lookup that reads from a single segment.
 pub const SEGMENT_READ_COST: usize = 100;
@@ -96,17 +93,6 @@ impl FactApplication {
 
             schema
         })
-    }
-
-    /// Create a copy with `Cardinality::Many`
-    pub fn many(&self) -> Self {
-        Self {
-            cardinality: Cardinality::Many,
-            the: self.the.clone(),
-            of: self.of.clone(),
-            is: self.is.clone(),
-            cause: self.cause.clone(),
-        }
     }
 
     /// Create a new fact application with the given terms and cardinality

@@ -5,7 +5,7 @@ use crate::{Cardinality, Entity, Value};
 pub use crate::{Parameters, Term};
 
 /// Validated fact selector with typed terms for each component
-pub struct Selector {
+struct Selector {
     /// Attribute term
     pub the: Term<Attribute>,
     /// Entity term
@@ -63,12 +63,6 @@ impl Fact {
         self
     }
 
-    /// Set the cause constraint
-    pub fn cause<C: Into<Term<Cause>>>(mut self, cause: C) -> Self {
-        self.cause = cause.into();
-        self
-    }
-
     /// Convert the builder into a FactApplication
     pub fn compile(self) -> Result<FactApplication, SchemaError> {
         let mut params = Parameters::new();
@@ -110,7 +104,7 @@ impl Fact {
     }
 
     /// Validate and convert raw parameters into a typed Selector
-    pub fn conform(terms: Parameters) -> Result<Selector, SchemaError> {
+    fn conform(terms: Parameters) -> Result<Selector, SchemaError> {
         let the = match terms.get("the") {
             None => Err(SchemaError::OmittedRequirement {
                 binding: "the".into(),
