@@ -371,10 +371,10 @@ impl From<InconsistencyError> for FormulaEvaluationError {
 // Formula macro we generate code like shown below
 //
 // ```rs
-// impl TryFrom<Cursor> for MyFormulaInput {
+// impl TryFrom<&mut Bindings> for MyFormulaInput {
 //     type Error = FormulaEvaluationError;
-//     fn try_from(cursor: Cursor) -> Result<Self, Self::Error> {
-//         cursor.resolve("field")?.try_into()?
+//     fn try_from(bindings: &mut Bindings) -> Result<Self, Self::Error> {
+//         bindings.resolve("field")?.try_into()?
 //     }
 // }
 // ```

@@ -1,7 +1,7 @@
 pub use super::Application;
-pub use crate::cursor::Cursor;
 pub use crate::error::{AnalyzerError, FormulaEvaluationError, PlanError, QueryError};
 use crate::predicate::formula::Cells;
+pub use crate::predicate::formula::bindings::Bindings;
 pub use crate::{Answer, Answers, EvaluationContext, Source, try_stream};
 
 pub use crate::{Environment, Parameters, Requirement};
@@ -27,7 +27,7 @@ pub struct FormulaApplication {
     pub cost: usize,
 
     /// Function pointer to the formula's computation logic
-    pub compute: fn(&mut Cursor) -> Result<Vec<Answer>, FormulaEvaluationError>,
+    pub compute: fn(&mut Bindings) -> Result<Vec<Answer>, FormulaEvaluationError>,
 }
 
 impl PartialEq for FormulaApplication {
@@ -44,10 +44,10 @@ impl PartialEq for FormulaApplication {
 impl FormulaApplication {
     /// Computes answers using this formula
     pub fn derive(&self, input: Answer) -> Result<Vec<Answer>, FormulaEvaluationError> {
-        // Create Arc from self for cursor - this is a cheap pointer clone, not cloning the whole struct
+        // Create Arc from self for bindings - this is a cheap pointer clone, not cloning the whole struct
         let formula = Arc::new(self.clone());
-        let mut cursor = Cursor::new(formula, input, self.parameters.clone());
-        (self.compute)(&mut cursor)
+        let mut bindings = Bindings::new(formula, input, self.parameters.clone());
+        (self.compute)(&mut bindings)
     }
 
     /// Estimate the cost of this formula given the current environment.
@@ -68,11 +68,11 @@ impl FormulaApplication {
     }
 
     /// Expand this formula with the given answer, mapping errors to QueryError
-    pub fn expand(&self, frame: Answer) -> Result<Vec<Answer>, QueryError> {
+    pub fn expand(&self, answer: Answer) -> Result<Vec<Answer>, QueryError> {
         let compute = self.compute;
         let formula = Arc::new(self.clone());
-        let mut cursor = Cursor::new(formula, frame, self.parameters.clone());
-        let expansion = compute(&mut cursor);
+        let mut bindings = Bindings::new(formula, answer, self.parameters.clone());
+        let expansion = compute(&mut bindings);
         // Map results and omit inconsistent answers
         match expansion {
             Ok(output) => Ok(output),

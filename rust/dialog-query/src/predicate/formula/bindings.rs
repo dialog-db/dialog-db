@@ -1,13 +1,13 @@
-//! Cursor for reading values during formula evaluation
+//! Bindings for reading and writing values during formula evaluation
 //!
-//! The `Cursor` type provides a controlled interface for formulas
+//! The `Bindings` type provides a controlled interface for formulas
 //! to read input values during evaluation. It maintains a mapping between
 //! formula parameter names and their corresponding terms in the evaluation context,
 //! and tracks which values were read for provenance tracking.
 //!
 //! # Overview
 //!
-//! A cursor consists of:
+//! Bindings consist of:
 //! - An `Answer` containing the current variable bindings and provenance
 //! - A `Parameters` mapping from parameter names to their term representations
 //! - Read tracking to record dependencies for Factor::Derived creation
@@ -15,7 +15,7 @@
 //! # Example
 //!
 //! ```rs
-//! use dialog_query::cursor::Cursor;
+//! use dialog_query::predicate::formula::bindings::Bindings;
 //! use dialog_query::{Term, Parameters};
 //! use dialog_query::selection::Answer;
 //!
@@ -25,8 +25,8 @@
 //! let source = Answer::new();
 //! // ... populate answer with factors
 //!
-//! let mut cursor = Cursor::new(formula, source, parameters);
-//! let x: u32 = cursor.read("x").unwrap();  // Reads from variable "input_x"
+//! let mut bindings = Bindings::new(formula, source, parameters);
+//! let x: u32 = bindings.read("x").unwrap();  // Reads from variable "input_x"
 //! ```
 
 use crate::artifact::TypeError;
@@ -35,15 +35,13 @@ use crate::selection::{Answer, Factors};
 use crate::{Parameters, Value};
 use std::sync::Arc;
 
-/// A cursor for reading and writing values during formula evaluation
+/// Parameter-to-value bindings for formula evaluation.
 ///
-/// The cursor provides a mapping layer between formula parameter names and
-/// the actual terms used in the evaluation context. It tracks all reads
+/// Provides a mapping layer between formula parameter names and
+/// the actual terms used in the evaluation context. Tracks all reads
 /// to enable proper provenance tracking for derived values.
-///
-/// Cursors are specific to formula evaluation and should not be used for other purposes.
 #[derive(Debug, Clone)]
-pub struct Cursor {
+pub struct Bindings {
     /// The current answer containing variable bindings and provenance
     ///
     /// NOTE: Public for compatibility with existing formula implementations.
@@ -59,14 +57,14 @@ pub struct Cursor {
     /// Tracks which parameters were read (for Factor::Derived provenance)
     reads: std::collections::HashMap<String, Factors>,
 
-    /// The formula application that is evaluating this cursor
+    /// The formula application these bindings belong to
     /// Used to create Factor::Derived with proper provenance
     /// Stored as Arc to avoid cloning the entire FormulaApplication
     formula: Arc<crate::application::formula::FormulaApplication>,
 }
 
-impl Cursor {
-    /// Create a new cursor for formula evaluation
+impl Bindings {
+    /// Create new bindings for formula evaluation
     ///
     /// # Arguments
     /// * `formula` - The formula application being evaluated (for provenance tracking)
@@ -85,7 +83,7 @@ impl Cursor {
         }
     }
 
-    /// Read a typed value from the cursor using a parameter name
+    /// Read a typed value from the bindings using a parameter name
     ///
     /// This method:
     /// 1. Looks up the parameter name in the terms mapping
@@ -160,7 +158,7 @@ impl Cursor {
         &self.reads
     }
 
-    /// Consume the cursor and return the source answer and reads
+    /// Consume the bindings and return the source answer and reads
     ///
     /// This is typically used after formula evaluation to access the
     /// provenance information for creating derived factors.
@@ -168,10 +166,7 @@ impl Cursor {
         (self.source, self.reads)
     }
 
-    // Compatibility methods for Match-based formulas
-    // These will be removed once formulas are updated to work with Answer
-
-    /// Write a value to the cursor
+    /// Write a value to the bindings
     ///
     /// Creates a Factor::Derived with proper provenance tracking from the formula
     /// and tracked reads. Fails if the parameter key is not in the terms mapping.
@@ -228,7 +223,7 @@ mod tests {
     use super::*;
     use crate::Term;
 
-    // Helper to create a test formula for cursor tests
+    // Helper to create a test formula for bindings tests
     fn test_formula() -> crate::application::formula::FormulaApplication {
         use std::sync::OnceLock;
         static EMPTY_CELLS: OnceLock<crate::predicate::formula::Cells> = OnceLock::new();
@@ -244,7 +239,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_cursor_read() {
+    fn test_bindings_read() {
         use crate::selection::Answer;
 
         let mut terms = Parameters::new();
@@ -256,27 +251,27 @@ mod tests {
 
         let source = match_data;
         let formula = test_formula();
-        let mut cursor = Cursor::new(Arc::new(formula.clone()), source, terms);
+        let mut bindings = Bindings::new(Arc::new(formula.clone()), source, terms);
 
         // Test reading
-        let value = cursor.read::<u32>("value").expect("Failed to read value");
+        let value = bindings.read::<u32>("value").expect("Failed to read value");
         assert_eq!(value, 42);
 
         // Verify read was tracked
-        assert_eq!(cursor.reads().len(), 1);
-        assert!(cursor.reads().contains_key("value"));
+        assert_eq!(bindings.reads().len(), 1);
+        assert!(bindings.reads().contains_key("value"));
     }
 
     #[dialog_common::test]
-    fn test_cursor_missing_parameter() {
+    fn test_bindings_missing_parameter() {
         use crate::selection::Answer;
 
         let terms = Parameters::new(); // Empty terms
         let source = Answer::new();
         let formula = test_formula();
-        let mut cursor = Cursor::new(Arc::new(formula.clone()), source, terms);
+        let mut bindings = Bindings::new(Arc::new(formula.clone()), source, terms);
 
-        let result = cursor.read::<u32>("missing");
+        let result = bindings.read::<u32>("missing");
         assert!(matches!(
             result,
             Err(FormulaEvaluationError::RequiredParameter { .. })
@@ -284,7 +279,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_cursor_unbound_variable() {
+    fn test_bindings_unbound_variable() {
         use crate::selection::Answer;
 
         let mut terms = Parameters::new();
@@ -292,9 +287,9 @@ mod tests {
 
         let source = Answer::new(); // No bindings
         let formula = test_formula();
-        let mut cursor = Cursor::new(Arc::new(formula.clone()), source, terms);
+        let mut bindings = Bindings::new(Arc::new(formula.clone()), source, terms);
 
-        let result = cursor.read::<u32>("value");
+        let result = bindings.read::<u32>("value");
         assert!(matches!(
             result,
             Err(FormulaEvaluationError::UnboundVariable { .. })
@@ -302,7 +297,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_cursor_read_tracks_provenance() {
+    fn test_bindings_read_tracks_provenance() {
         use crate::selection::Answer;
 
         let mut params = Parameters::new();
@@ -317,20 +312,20 @@ mod tests {
 
         let source = match_data;
         let formula = test_formula();
-        let mut cursor = Cursor::new(Arc::new(formula.clone()), source, params);
+        let mut bindings = Bindings::new(Arc::new(formula.clone()), source, params);
 
         // Initially no reads tracked
-        assert_eq!(cursor.reads().len(), 0);
+        assert_eq!(bindings.reads().len(), 0);
 
         // Read x
-        let _x = cursor.read::<u32>("x").expect("read should succeed");
-        assert_eq!(cursor.reads().len(), 1);
-        assert!(cursor.reads().contains_key("x"));
+        let _x = bindings.read::<u32>("x").expect("read should succeed");
+        assert_eq!(bindings.reads().len(), 1);
+        assert!(bindings.reads().contains_key("x"));
 
         // Read y
-        let _y = cursor.read::<u32>("y").expect("read should succeed");
-        assert_eq!(cursor.reads().len(), 2);
-        assert!(cursor.reads().contains_key("y"));
+        let _y = bindings.read::<u32>("y").expect("read should succeed");
+        assert_eq!(bindings.reads().len(), 2);
+        assert!(bindings.reads().contains_key("y"));
     }
 
     #[dialog_common::test]
@@ -373,38 +368,38 @@ mod tests {
 
     #[dialog_common::test]
     #[allow(deprecated)]
-    fn test_cursor_write_rejects_conflicting_value() {
+    fn test_bindings_write_rejects_conflicting_value() {
         use crate::selection::Answer;
 
         let mut terms = Parameters::new();
         terms.insert("value".to_string(), Term::var("test"));
 
-        // Create cursor with initial value
+        // Create bindings with initial value
         let source = Answer::new()
             .set(Term::var("test"), 42u32)
             .expect("Failed to create test match");
 
         let formula = test_formula();
-        let mut cursor = Cursor::new(Arc::new(formula.clone()), source, terms);
+        let mut bindings = Bindings::new(Arc::new(formula.clone()), source, terms);
 
         // Read the initial value to verify it's there
-        let value = cursor.read::<u32>("value").expect("Failed to read value");
+        let value = bindings.read::<u32>("value").expect("Failed to read value");
         assert_eq!(value, 42);
 
         // Try to write a conflicting value - this should fail
         let conflicting_value = Value::UnsignedInt(100);
-        let result = cursor.write("value", &conflicting_value);
+        let result = bindings.write("value", &conflicting_value);
 
         assert!(
             result.is_err(),
-            "Cursor.write() should reject conflicting value. \
+            "Bindings.write() should reject conflicting value. \
              Got Ok() but expected Err() when writing {} to variable already bound to {}",
             100,
             42
         );
 
         // Verify the original value is unchanged
-        let unchanged_value = cursor
+        let unchanged_value = bindings
             .read::<u32>("value")
             .expect("Failed to read value after conflict");
         assert_eq!(
@@ -414,7 +409,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_cursor_into_parts() {
+    fn test_bindings_into_parts() {
         use crate::selection::Answer;
 
         let mut params = Parameters::new();
@@ -429,14 +424,14 @@ mod tests {
 
         let source = match_data;
         let formula = test_formula();
-        let mut cursor = Cursor::new(Arc::new(formula.clone()), source, params);
+        let mut bindings = Bindings::new(Arc::new(formula.clone()), source, params);
 
         // Read some values to track reads
-        let _x = cursor.read::<u32>("x").expect("read should succeed");
-        let _y = cursor.read::<u32>("y").expect("read should succeed");
+        let _x = bindings.read::<u32>("x").expect("read should succeed");
+        let _y = bindings.read::<u32>("y").expect("read should succeed");
 
-        // Consume cursor and check parts
-        let (answer, reads) = cursor.into_parts();
+        // Consume bindings and check parts
+        let (answer, reads) = bindings.into_parts();
 
         // Verify we got the answer back
         assert_eq!(

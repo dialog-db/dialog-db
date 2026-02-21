@@ -16,4 +16,4 @@ pub mod formula;
 pub use concept::Concept;
 pub use deductive_rule::DeductiveRule;
 pub use fact::Fact;
-pub use formula::{Formula, Output};
+pub use formula::Formula;

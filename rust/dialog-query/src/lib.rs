@@ -34,8 +34,6 @@ pub mod concept;
 pub mod constraint;
 /// Query execution context for evaluation.
 pub mod context;
-/// Cursor for reading values during formula evaluation.
-pub mod cursor;
 /// DSL types for constructing type-safe queries.
 pub mod dsl;
 /// Variable binding environment used during query planning.
@@ -87,7 +85,7 @@ pub use error::{InconsistencyError, QueryError};
 pub use fact::Fact;
 pub use negation::Negation;
 pub use parameters::Parameters;
-pub use predicate::{DeductiveRule, Formula, Output};
+pub use predicate::{DeductiveRule, Formula};
 pub use premise::Premise;
 pub use query::{Source, Store};
 pub use relation::Relation;

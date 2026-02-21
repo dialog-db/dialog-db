@@ -184,13 +184,6 @@ mod tests {
         Ok(())
     }
 
-    // Removed test_cursor_read_write:
-    // This test was for the deprecated Cursor.write() method which relied on
-    // Match's copy-on-write semantics. With Answer, we intentionally don't
-    // support mutable updates - formulas should return new Answer instances
-    // instead of mutating cursors. The write() method is deprecated and will
-    // be removed in query-2 when formulas are updated to work with Answer.
-
     #[dialog_common::test]
     fn test_sum_formula_missing_input() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
