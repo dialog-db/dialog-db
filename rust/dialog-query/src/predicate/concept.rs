@@ -252,7 +252,7 @@ impl<'de> Deserialize<'de> for Concept {
 /// This is an intermediate representation that holds raw values for each attribute
 /// before they are validated against the concept's schema and converted into an Instance.
 #[derive(Debug, Clone)]
-pub struct Model {
+struct Model {
     /// The entity that this model represents
     pub this: Entity,
     /// Raw attribute values keyed by attribute name
@@ -423,7 +423,7 @@ impl Concept {
     /// # Errors
     /// * `SchemaError::MissingProperty` - If a required attribute is missing
     /// * `SchemaError::TypeError` - If an attribute value has the wrong type
-    pub fn conform(&self, model: Model) -> Result<Conception, SchemaError> {
+    fn conform(&self, model: Model) -> Result<Conception, SchemaError> {
         let mut relations = vec![];
         for (name, attribute) in self.attributes().iter() {
             if let Some(value) = model.attributes.get(name) {

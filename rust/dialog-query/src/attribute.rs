@@ -509,38 +509,6 @@ impl<T: Scalar> AttributeQueryBuilder<T> {
     }
 }
 
-/// Query pattern for attributes - enables Match::<AttributeType> { of, is } syntax
-#[derive(Clone, Debug, PartialEq)]
-pub struct AttributeMatch<A: Attribute> {
-    /// The entity term to match against.
-    pub of: Term<Entity>,
-    /// The value term to match against.
-    pub is: Term<A::Type>,
-    /// Phantom data to carry the attribute type.
-    pub content_type: PhantomData<A>,
-}
-
-impl<A: Attribute> AttributeMatch<A> {
-    /// Create a new attribute match pattern
-    pub fn new(of: Term<Entity>, is: Term<A::Type>) -> Self {
-        Self {
-            of,
-            is,
-            content_type: PhantomData,
-        }
-    }
-}
-
-impl<A: Attribute> Default for AttributeMatch<A> {
-    fn default() -> Self {
-        Self {
-            of: Term::var("of"),
-            is: Term::var("is"),
-            content_type: PhantomData,
-        }
-    }
-}
-
 pub use crate::concept::with::{With, WithMatch, WithTerms};
 
 #[cfg(test)]

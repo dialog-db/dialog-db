@@ -1,9 +1,9 @@
 use crate::error::CompileError;
 use crate::{
-    Environment, EvaluationContext, Parameters, Premise, Requirement, Schema, Source, Term, Value,
+    Environment, EvaluationContext, Parameters, Premise, Requirement, Schema, Source, Term,
 };
 use crate::{fact::Scalar, predicate::DeductiveRule};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::Display;
 use thiserror::Error;
 
@@ -108,81 +108,6 @@ impl Display for Required {
         }
 
         write!(f, "")
-    }
-}
-
-/// A map of variable names to their estimated binding costs.
-/// Represents variables that a premise would like bound but does not strictly require.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct Desired(HashMap<String, usize>);
-
-impl Desired {
-    /// Creates an empty desired-bindings map.
-    pub fn new() -> Self {
-        Self::default()
-    }
-    /// Returns the number of desired bindings.
-    pub fn count(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Returns `true` if the variable in `term` is in the desired set.
-    pub fn contains<T: Scalar>(&self, term: &Term<T>) -> bool {
-        match term {
-            Term::Variable {
-                name: Some(name), ..
-            } => self.0.contains_key(name),
-            _ => false,
-        }
-    }
-
-    /// Removes the variable from the desired set. Returns `true` if it was present.
-    pub fn remove<T: Scalar>(&mut self, term: &Term<T>) -> bool {
-        match term {
-            Term::Variable {
-                name: Some(name), ..
-            } => self.0.remove(name).and(Some(true)).unwrap_or(false),
-            _ => false,
-        }
-    }
-    /// Inserts the variable from `term` with the given cost. Panics if the term is unnamed.
-    pub fn insert<T: Scalar>(&mut self, term: &Term<T>, cost: usize) {
-        match term {
-            Term::Constant(_) => {}
-            Term::Variable { name, .. } => {
-                let dependency = name
-                    .clone()
-                    .expect(".desire must be passed a named variable");
-                self.0.insert(dependency, cost);
-            }
-        }
-    }
-
-    /// Returns the sum of all desired binding costs.
-    pub fn total(&self) -> usize {
-        self.0.values().sum()
-    }
-
-    /// Iterates over the desired variables as `Term::Variable` values.
-    pub fn iter(&self) -> impl Iterator<Item = Term<Value>> + '_ {
-        self.0.keys().map(|name| Term::var(name.clone()))
-    }
-
-    /// Iterates over `(term, cost)` pairs for each desired binding.
-    pub fn entries(&self) -> impl Iterator<Item = (Term<Value>, usize)> + '_ {
-        self.0
-            .iter()
-            .map(|(name, cost)| (Term::var(name.clone()), *cost))
-    }
-}
-
-impl From<Desired> for Environment {
-    fn from(desired: Desired) -> Self {
-        let mut scope = Environment::new();
-        for (name, _) in desired.0.into_iter() {
-            scope.add(&Term::<Value>::var(name));
-        }
-        scope
     }
 }
 
@@ -686,14 +611,14 @@ mod tests {
 #[cfg(test)]
 mod cost_model_tests {
     use crate::analyzer::Analysis;
-    use crate::application::fact::{BASE_COST, FactApplication};
+    use crate::application::fact::{FactApplication, SEGMENT_READ_COST};
     use crate::artifact::{Attribute, Entity};
     use crate::{Environment, Premise, Term, Value};
 
     // Test 1: Constants don't add to cost
     #[dialog_common::test]
     fn test_constants_do_not_add_cost() {
-        // All constants - should only have BASE_COST
+        // All constants - should only have SEGMENT_READ_COST
         let the_attr: Attribute = "user/name".parse().unwrap();
         let entity_val: Entity = Entity::new().unwrap();
 
@@ -709,9 +634,9 @@ mod cost_model_tests {
 
         assert_eq!(
             analysis.cost(),
-            BASE_COST,
-            "All constants should only cost BASE_COST ({}), got {}",
-            BASE_COST,
+            SEGMENT_READ_COST,
+            "All constants should only cost SEGMENT_READ_COST ({}), got {}",
+            SEGMENT_READ_COST,
             analysis.cost()
         );
     }

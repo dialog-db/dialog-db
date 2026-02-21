@@ -6,7 +6,7 @@
 //! The design is based on the TypeScript implementation in @query/src/plan/rule.js
 //! and follows the patterns described in the design document at notes/rules.md.
 
-pub use crate::dsl::{Instance, Match};
+pub use crate::dsl::Match;
 use crate::premise::Premise;
 
 /// Trait for types that can be converted into a When collection
