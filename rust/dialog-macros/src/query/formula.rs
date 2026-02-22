@@ -261,12 +261,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
         /// Static storage for formula cells
         static #cells_name: ::std::sync::OnceLock<dialog_query::predicate::formula::Cells> = ::std::sync::OnceLock::new();
 
-        impl dialog_query::dsl::Quarriable for #struct_name {
-            type Query = #match_name;
+        impl dialog_query::dsl::Predicate for #struct_name {
+            type Application = #match_name;
         }
 
-        impl dialog_query::predicate::formula::Match for #match_name {
-            type Formula = #struct_name;
+        impl dialog_query::predicate::formula::FormulaQuery for #match_name {
+            type Predicate = #struct_name;
         }
 
         impl ::std::convert::From<#match_name> for dialog_query::Parameters {
@@ -312,7 +312,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl dialog_query::predicate::formula::Formula for #struct_name {
             type Input = #input_name;
-            type Match = #match_name;
+            type Query = #match_name;
 
             fn operator() -> &'static str {
                 #operator_lit

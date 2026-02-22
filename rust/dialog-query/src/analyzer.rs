@@ -906,7 +906,7 @@ mod cost_model_tests {
     fn test_concept_equals_fact_cost_nothing_bound() {
         use crate::application::concept::ConceptApplication;
         use crate::application::fact::{CONCEPT_OVERHEAD, RANGE_SCAN_COST};
-        use crate::predicate::concept::Concept;
+        use crate::predicate::concept::ConceptDescriptor;
 
         // Create a FactApplication with constant attribute name
         let the_attr: Attribute = "user/name".parse().unwrap();
@@ -919,7 +919,7 @@ mod cost_model_tests {
         );
 
         // Create a ConceptApplication with single attribute
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: [(
                 "name",
@@ -959,7 +959,7 @@ mod cost_model_tests {
     fn test_concept_equals_fact_cost_value_bound() {
         use crate::application::concept::ConceptApplication;
         use crate::application::fact::{CONCEPT_OVERHEAD, SEGMENT_READ_COST};
-        use crate::predicate::concept::Concept;
+        use crate::predicate::concept::ConceptDescriptor;
 
         // Create a FactApplication with constant attribute name
         let the_attr: Attribute = "user/name".parse().unwrap();
@@ -972,7 +972,7 @@ mod cost_model_tests {
         );
 
         // Create a ConceptApplication with single attribute
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: [(
                 "name",
@@ -1005,7 +1005,7 @@ mod cost_model_tests {
     fn test_concept_equals_fact_cost_entity_bound() {
         use crate::application::concept::ConceptApplication;
         use crate::application::fact::{CONCEPT_OVERHEAD, SEGMENT_READ_COST};
-        use crate::predicate::concept::Concept;
+        use crate::predicate::concept::ConceptDescriptor;
 
         // Create a FactApplication with constant attribute name
         let the_attr: Attribute = "user/name".parse().unwrap();
@@ -1018,7 +1018,7 @@ mod cost_model_tests {
         );
 
         // Create a ConceptApplication with single attribute
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: [(
                 "name",
@@ -1051,7 +1051,7 @@ mod cost_model_tests {
     fn test_concept_equals_fact_cost_cardinality_many_nothing_bound() {
         use crate::application::concept::ConceptApplication;
         use crate::application::fact::{CONCEPT_OVERHEAD, INDEX_SCAN};
-        use crate::predicate::concept::Concept;
+        use crate::predicate::concept::ConceptDescriptor;
 
         // Create a FactApplication with Cardinality::Many
         let the_attr: Attribute = "user/tags".parse().unwrap();
@@ -1068,7 +1068,7 @@ mod cost_model_tests {
             crate::AttributeSchema::new("user", "tags", "User tags", crate::Type::String);
         concept_attr.cardinality = crate::Cardinality::Many;
 
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: [("tags", concept_attr)].into(),
         };
@@ -1096,7 +1096,7 @@ mod cost_model_tests {
     fn test_concept_equals_fact_cost_cardinality_many_value_bound() {
         use crate::application::concept::ConceptApplication;
         use crate::application::fact::{CONCEPT_OVERHEAD, RANGE_SCAN_COST};
-        use crate::predicate::concept::Concept;
+        use crate::predicate::concept::ConceptDescriptor;
 
         // Create a FactApplication with Cardinality::Many
         let the_attr: Attribute = "user/tags".parse().unwrap();
@@ -1113,7 +1113,7 @@ mod cost_model_tests {
             crate::AttributeSchema::new("user", "tags", "User tags", crate::Type::String);
         concept_attr.cardinality = crate::Cardinality::Many;
 
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: [("tags", concept_attr)].into(),
         };

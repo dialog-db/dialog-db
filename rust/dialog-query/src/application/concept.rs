@@ -3,7 +3,7 @@ use crate::DeductiveRule;
 use crate::attribute::AttributeSchema;
 use crate::context::new_context;
 use crate::planner::{Fork, Join};
-use crate::predicate::Concept;
+use crate::predicate::ConceptDescriptor;
 use crate::selection::{Answer, Evidence};
 use crate::{Environment, EvaluationContext, Parameters, Schema, Source, Term, Value, try_stream};
 use std::fmt::Display;
@@ -85,7 +85,7 @@ pub struct ConceptApplication {
     /// The term bindings for this concept application.
     pub terms: Parameters,
     /// The concept being applied.
-    pub concept: Concept,
+    pub concept: ConceptDescriptor,
 }
 
 impl ConceptApplication {
@@ -287,7 +287,7 @@ impl Display for ConceptApplication {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::predicate::Concept;
+    use crate::predicate::ConceptDescriptor;
     use crate::{AttributeSchema, Parameters, Term, Type, Value};
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
@@ -334,7 +334,7 @@ mod tests {
             .await?;
 
         // Create a person concept
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: vec![
                 (
@@ -422,7 +422,7 @@ mod tests {
             .await?;
 
         // Create a person concept
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: vec![
                 (
@@ -468,7 +468,7 @@ mod tests {
     fn test_concept_as_conclusion_operations() {
         use crate::predicate::concept::Attributes;
 
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: Attributes::from(vec![
                 (
@@ -494,7 +494,7 @@ mod tests {
     fn test_concept_creation() {
         use crate::predicate::concept::Attributes;
 
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: Attributes::from(vec![(
                 "name".to_string(),
@@ -515,7 +515,7 @@ mod tests {
     fn test_concept_application_analysis() {
         use crate::predicate::concept::Attributes;
 
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: Attributes::from(vec![
                 (
@@ -551,7 +551,7 @@ mod tests {
         use std::collections::HashSet;
 
         let rule = DeductiveRule {
-            conclusion: Concept::Dynamic {
+            conclusion: ConceptDescriptor::Dynamic {
                 description: String::new(),
                 attributes: [
                     (
@@ -577,10 +577,10 @@ mod tests {
 
     #[dialog_common::test]
     fn test_premise_construction() {
-        use crate::predicate::fact::Fact;
+        use crate::predicate::fact::FactSelector;
         use crate::{Application, Premise};
 
-        let fact = Fact::select()
+        let fact = FactSelector::select()
             .the("person/name")
             .of(Term::var("person"))
             .is(Value::String("Alice".to_string()));
@@ -602,7 +602,7 @@ mod tests {
 
         // Test AnalyzerError creation
         let rule = DeductiveRule {
-            conclusion: Concept::Dynamic {
+            conclusion: ConceptDescriptor::Dynamic {
                 description: String::new(),
                 attributes: Attributes::new(),
             },
@@ -642,10 +642,10 @@ mod tests {
     fn test_application_variants() {
         use crate::Application;
         use crate::predicate::concept::Attributes;
-        use crate::predicate::fact::Fact;
+        use crate::predicate::fact::FactSelector;
 
         // Test Select application
-        let fact = Fact::select().the("test/attr");
+        let fact = FactSelector::select().the("test/attr");
         let app = Application::Fact(fact.into());
 
         match app {
@@ -658,7 +658,7 @@ mod tests {
         // Test other variants exist
         let mut terms = Parameters::new();
         terms.insert("test".to_string(), Term::var("test_var"));
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: Attributes::new(),
         };
@@ -674,10 +674,10 @@ mod tests {
 
     #[dialog_common::test]
     fn test_negation_construction() {
-        use crate::predicate::fact::Fact;
+        use crate::predicate::fact::FactSelector;
         use crate::{Application, Negation};
 
-        let fact = Fact::select().the("test/attr");
+        let fact = FactSelector::select().the("test/attr");
         let app = Application::Fact(fact.into());
         let negation = Negation(app);
 
@@ -693,7 +693,7 @@ mod tests {
     #[dialog_common::test]
     async fn test_concept_application_respects_constant_entity_parameter() -> anyhow::Result<()> {
         use crate::application::concept::ConceptApplication;
-        use crate::predicate::concept::Concept;
+        use crate::predicate::concept::ConceptDescriptor;
         use crate::{Relation, Session, Term, Value};
         use dialog_artifacts::{Artifacts, Attribute, Entity};
         use dialog_storage::MemoryStorageBackend;
@@ -720,7 +720,7 @@ mod tests {
             ])
             .await?;
 
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: vec![(
                 "name",
@@ -763,7 +763,7 @@ mod tests {
     async fn test_concept_application_respects_constant_attribute_parameter() -> anyhow::Result<()>
     {
         use crate::application::concept::ConceptApplication;
-        use crate::predicate::concept::Concept;
+        use crate::predicate::concept::ConceptDescriptor;
         use crate::{Relation, Session, Term, Value};
         use dialog_artifacts::{Artifacts, Attribute, Entity};
         use dialog_storage::MemoryStorageBackend;
@@ -800,7 +800,7 @@ mod tests {
             ])
             .await?;
 
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: vec![
                 (
@@ -855,7 +855,7 @@ mod tests {
     async fn test_concept_application_respects_multiple_constant_parameters() -> anyhow::Result<()>
     {
         use crate::application::concept::ConceptApplication;
-        use crate::predicate::concept::Concept;
+        use crate::predicate::concept::ConceptDescriptor;
         use crate::{Relation, Session, Term, Value};
         use dialog_artifacts::{Artifacts, Attribute, Entity};
         use dialog_storage::MemoryStorageBackend;
@@ -892,7 +892,7 @@ mod tests {
             ])
             .await?;
 
-        let concept = Concept::Dynamic {
+        let concept = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: vec![
                 (

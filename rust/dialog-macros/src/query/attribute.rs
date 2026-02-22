@@ -248,7 +248,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         #namespace_static_decl
 
         // A Concept wraps the attribute schema so it can participate in queries
-        const #concept_const_name: dialog_query::predicate::concept::Concept = {
+        const #concept_const_name: dialog_query::predicate::concept::ConceptDescriptor = {
             const ATTRS: dialog_query::predicate::concept::Attributes =
                 dialog_query::predicate::concept::Attributes::Static(&[(
                     "has",
@@ -262,7 +262,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     },
                 )]);
 
-            dialog_query::predicate::concept::Concept::Static {
+            dialog_query::predicate::concept::ConceptDescriptor::Static {
                 description: #description_lit,
                 attributes: &ATTRS,
             }
@@ -287,7 +287,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 content_type: <#wrapped_type as dialog_query::types::IntoType>::TYPE,
                 marker: std::marker::PhantomData,
             };
-            const CONCEPT: dialog_query::predicate::concept::Concept = #concept_const_name;
+            const CONCEPT: dialog_query::predicate::concept::ConceptDescriptor = #concept_const_name;
 
             fn value(&self) -> &Self::Type {
                 &self.0

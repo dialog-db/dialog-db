@@ -2,7 +2,7 @@ pub use crate::analyzer::Plan;
 pub use crate::application::FactApplication;
 use crate::error::{CompileError, SchemaError};
 pub use crate::planner::Join;
-pub use crate::predicate::Concept;
+pub use crate::predicate::ConceptDescriptor;
 pub use crate::premise::Premise;
 pub use crate::{Application, Attribute, Cardinality, Parameters, Requirement, Value};
 use crate::{Term, Type};
@@ -13,7 +13,7 @@ use std::fmt::Display;
 pub struct DeductiveRule {
     /// Conclusion that this rule reaches if all premises hold. This is
     /// typically what datalog calls rule head.
-    pub conclusion: Concept,
+    pub conclusion: ConceptDescriptor,
     /// Premises that must hold for rule to reach it's conclusion. Typically
     /// datalog calls these rule body. These are guaranteed to be viable plans
     /// after compilation.
@@ -21,7 +21,10 @@ pub struct DeductiveRule {
 }
 impl DeductiveRule {
     /// Create a new uncompiled rule from a conclusion and premises
-    pub fn new(conclusion: Concept, premises: Vec<Premise>) -> Result<Self, CompileError> {
+    pub fn new(
+        conclusion: ConceptDescriptor,
+        premises: Vec<Premise>,
+    ) -> Result<Self, CompileError> {
         // Convert premises to an intermediate form, then compile
         let uncompiled = UncompiledDeductiveRule {
             conclusion,
@@ -53,7 +56,7 @@ impl DeductiveRule {
 
 /// Internal helper for rules before compilation
 pub struct UncompiledDeductiveRule {
-    conclusion: Concept,
+    conclusion: ConceptDescriptor,
     premises: Vec<Premise>,
 }
 
@@ -105,8 +108,8 @@ impl Display for DeductiveRule {
     }
 }
 
-impl From<&Concept> for DeductiveRule {
-    fn from(concept: &Concept) -> Self {
+impl From<&ConceptDescriptor> for DeductiveRule {
+    fn from(concept: &ConceptDescriptor) -> Self {
         use crate::artifact::Entity;
 
         let mut premises = Vec::new();
@@ -142,7 +145,7 @@ mod tests {
     #[dialog_common::test]
     fn test_rule_compiles_with_valid_premises() {
         use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
-        let conclusion = Concept::Dynamic {
+        let conclusion = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: vec![
                 (
@@ -182,7 +185,7 @@ mod tests {
     #[dialog_common::test]
     fn test_rule_fails_with_unconstrained_fact() {
         use crate::artifact::{Entity, Type};
-        let conclusion = Concept::Dynamic {
+        let conclusion = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: vec![
                 (
@@ -212,7 +215,7 @@ mod tests {
     #[dialog_common::test]
     fn test_rule_fails_with_unused_parameter() {
         use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
-        let conclusion = Concept::Dynamic {
+        let conclusion = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: vec![
                 (
@@ -246,7 +249,7 @@ mod tests {
     #[dialog_common::test]
     fn test_rule_fails_with_no_premises() {
         use crate::artifact::Type;
-        let conclusion = Concept::Dynamic {
+        let conclusion = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: vec![
                 (
@@ -266,7 +269,7 @@ mod tests {
     #[dialog_common::test]
     fn test_rule_compiles_with_chained_dependencies() {
         use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
-        let conclusion = Concept::Dynamic {
+        let conclusion = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: vec![
                 (
@@ -307,7 +310,7 @@ mod tests {
     #[dialog_common::test]
     fn test_rule_parameter_name_vs_variable_name() {
         use crate::artifact::{Attribute as ArtifactAttribute, Entity, Type};
-        let conclusion = Concept::Dynamic {
+        let conclusion = ConceptDescriptor::Dynamic {
             description: String::new(),
             attributes: vec![(
                 "key",

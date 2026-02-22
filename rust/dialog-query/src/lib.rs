@@ -80,7 +80,7 @@ pub use claim::Claim;
 pub use concept::{Concept, With, WithMatch, WithTerms};
 pub use context::EvaluationContext;
 pub use dialog_macros::{Attribute, Concept, Formula};
-pub use dsl::{Input, Match};
+pub use dsl::{Input, Match, Predicate, Query};
 pub use error::{InconsistencyError, QueryError};
 pub use fact::Fact;
 pub use negation::Negation;

@@ -6,7 +6,7 @@ use crate::application::ConceptApplication;
 
 #[cfg(test)]
 use crate::Relation;
-pub use crate::dsl::Quarriable;
+pub use crate::dsl::Predicate;
 pub use crate::predicate::concept::Attributes;
 use crate::query::{Output, Query, Source};
 use crate::selection::Answer;
@@ -28,20 +28,20 @@ use std::fmt::Debug;
 /// Note: IntoIterator is not a bound on this trait to allow attributes to
 /// implement Concept by delegating to their instance types (e.g., Title
 /// delegates to WithTitle). Instance types still implement IntoIterator.
-pub trait Concept: Quarriable + Clone + Debug {
+pub trait Concept: Predicate + Clone + Debug {
     /// The materialized form of this concept, produced by resolving a query.
-    type Instance: Instance;
+    type Proof: ConceptProof;
     /// Type representing a query of this concept. It is a set of terms
     /// corresponding to the set of attributes defined by this concept.
     /// It is used as premise of the rule.
-    type Match: Match<Concept = Self, Instance = Self::Instance>;
+    type Query: ConceptQuery<Predicate = Self, Proof = Self::Proof>;
 
     /// Typed term accessors for building queries (e.g. `PersonTerms::name()`).
     type Term;
 
     /// The static concept definition for this type.
     /// This is typically defined by the macro as a Concept::Static variant.
-    const CONCEPT: predicate::concept::Concept;
+    const CONCEPT: predicate::concept::ConceptDescriptor;
 
     /// Convenience method to query for all instances of this concept.
     ///
@@ -58,15 +58,15 @@ pub trait Concept: Quarriable + Clone + Debug {
     ///     .execute(&session)
     ///     .try_collect::<Vec<_>>().await?;
     /// ```
-    fn query<S: Source>(source: S) -> impl Output<Self::Instance>
+    fn query<S: Source>(source: S) -> impl Output<Self::Proof>
     where
-        ConceptApplication: From<Self::Match>,
+        ConceptApplication: From<Self::Query>,
     {
-        let pattern = Self::Match::default();
+        let pattern = Self::Query::default();
         let application: ConceptApplication = pattern.clone().into();
         application
             .query(source)
-            .map(move |input| Match::realize(&pattern, input?))
+            .map(move |input| ConceptQuery::realize(&pattern, input?))
     }
 
     /// Compute the blake3 hash of this concept's CBOR-encoded representation.
@@ -90,37 +90,37 @@ pub trait Concept: Quarriable + Clone + Debug {
     /// Returns `Some(hash)` if the URI has the format `concept:{valid_hex}`,
     /// or `None` if the URI is invalid.
     fn parse_uri(uri: &str) -> Option<blake3::Hash> {
-        predicate::concept::Concept::parse_uri(uri)
+        predicate::concept::ConceptDescriptor::parse_uri(uri)
     }
 }
 
 /// Concepts can be matched and this trait describes an abstract match for the
 /// concept. Each match should be translatable into a set of statements making
 /// it possible to spread it into a query.
-pub trait Match: Sized + Clone + ConditionalSend + Default + 'static {
-    /// The concept type this match pattern corresponds to.
-    type Concept: Concept;
-    /// Instance of the concept that this match can produce.
-    type Instance: Instance + ConditionalSend + Clone;
+pub trait ConceptQuery: Sized + Clone + ConditionalSend + Default + 'static {
+    /// The concept type this query corresponds to.
+    type Predicate: Concept;
+    /// Proof of the concept that this query can produce.
+    type Proof: ConceptProof + ConditionalSend + Clone;
 
     /// Reconstructs a concept instance from a query [`Answer`].
-    fn realize(&self, source: Answer) -> Result<Self::Instance, QueryError>;
+    fn realize(&self, source: Answer) -> Result<Self::Proof, QueryError>;
 
-    /// Returns the static concept descriptor for this match pattern.
-    fn to_concept(&self) -> predicate::Concept {
-        Self::Concept::CONCEPT
+    /// Returns the static concept descriptor for this query.
+    fn to_concept(&self) -> predicate::ConceptDescriptor {
+        Self::Predicate::CONCEPT
     }
 }
 
-/// Blanket implementation of [`Query`] for all concept match types.
+/// Blanket implementation of [`Query`] for all concept query types.
 ///
-/// Any type implementing [`Match`] that can be converted into a [`ConceptApplication`]
+/// Any type implementing [`ConceptQuery`] that can be converted into a [`ConceptApplication`]
 /// automatically gets query execution capabilities through the [`Query`] trait.
 /// This unifies the concept query path with the general query infrastructure.
-impl<M> Query<M::Instance> for M
+impl<M> Query<M::Proof> for M
 where
-    M: Match,
-    M::Instance: ConditionalSend + 'static,
+    M: ConceptQuery,
+    M::Proof: ConditionalSend + 'static,
     ConceptApplication: From<M>,
 {
     fn evaluate<S: Source, A: selection::Answers>(
@@ -131,15 +131,15 @@ where
         application.evaluate(context)
     }
 
-    fn realize(&self, input: selection::Answer) -> Result<M::Instance, QueryError> {
-        Match::realize(self, input)
+    fn realize(&self, input: selection::Answer) -> Result<M::Proof, QueryError> {
+        ConceptQuery::realize(self, input)
     }
 }
 
 // Blanket impl for &T -> Parameters that uses the generated From<T> impl
 impl<T> From<&T> for Parameters
 where
-    T: Match + Clone + Into<Parameters>,
+    T: ConceptQuery + Clone + Into<Parameters>,
 {
     fn from(source: &T) -> Self {
         source.clone().into()
@@ -192,7 +192,7 @@ where
 ///     pub name: attrs::Name,
 /// }
 /// ```
-pub trait Instance: ConditionalSend {
+pub trait ConceptProof: ConditionalSend {
     /// Each instance has a corresponding entity and this method
     /// returns a reference to it.
     fn this(&self) -> &Entity;
@@ -254,11 +254,11 @@ mod tests {
 
     // Implement Concept for Person
     impl Concept for Person {
-        type Instance = Person;
-        type Match = PersonMatch;
+        type Proof = Person;
+        type Query = PersonMatch;
         type Term = PersonTerms;
 
-        const CONCEPT: predicate::concept::Concept = {
+        const CONCEPT: predicate::concept::ConceptDescriptor = {
             use crate::artifact::{Type, Value};
             use crate::attribute::{AttributeSchema, Cardinality};
             use std::marker::PhantomData;
@@ -291,7 +291,7 @@ mod tests {
             const ATTRS: predicate::concept::Attributes =
                 predicate::concept::Attributes::Static(ATTRIBUTE_TUPLES);
 
-            predicate::concept::Concept::Static {
+            predicate::concept::ConceptDescriptor::Static {
                 description: "",
                 attributes: &ATTRS,
             }
@@ -353,8 +353,8 @@ mod tests {
         }
     }
 
-    impl Quarriable for Person {
-        type Query = PersonMatch;
+    impl Predicate for Person {
+        type Application = PersonMatch;
     }
 
     // Implement TryFrom<selection::Answer> for Person
@@ -372,7 +372,7 @@ mod tests {
     }
 
     // Implement Instance for Person
-    impl Instance for Person {
+    impl ConceptProof for Person {
         fn this(&self) -> &Entity {
             &self.this
         }
@@ -429,12 +429,12 @@ mod tests {
     }
 
     // Implement Match for PersonMatch
-    impl Match for PersonMatch {
-        type Concept = Person;
-        type Instance = Person;
+    impl ConceptQuery for PersonMatch {
+        type Predicate = Person;
+        type Proof = Person;
 
-        fn realize(&self, source: Answer) -> std::result::Result<Self::Instance, QueryError> {
-            Ok(Self::Instance {
+        fn realize(&self, source: Answer) -> std::result::Result<Self::Proof, QueryError> {
+            Ok(Self::Proof {
                 this: source.get(&self.this)?,
                 name: source.get(&self.name)?,
                 age: source.get(&self.age)?,

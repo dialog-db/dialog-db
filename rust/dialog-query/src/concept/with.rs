@@ -79,21 +79,21 @@ impl<A: Attribute> crate::concept::Concept for With<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
-    type Instance = With<A>;
-    type Match = WithMatch<A>;
+    type Proof = With<A>;
+    type Query = WithMatch<A>;
     type Term = WithTerms<A>;
 
-    const CONCEPT: crate::predicate::concept::Concept = A::CONCEPT;
+    const CONCEPT: crate::predicate::concept::ConceptDescriptor = A::CONCEPT;
 }
 
-impl<A: Attribute> crate::dsl::Quarriable for With<A>
+impl<A: Attribute> crate::dsl::Predicate for With<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
-    type Query = WithMatch<A>;
+    type Application = WithMatch<A>;
 }
 
-impl<A: Attribute> crate::concept::Instance for With<A>
+impl<A: Attribute> crate::concept::ConceptProof for With<A>
 where
     A: Clone + Send,
 {
@@ -145,17 +145,14 @@ where
     }
 }
 
-impl<A: Attribute> crate::concept::Match for WithMatch<A>
+impl<A: Attribute> crate::concept::ConceptQuery for WithMatch<A>
 where
     A: Clone + std::fmt::Debug + Send + 'static,
 {
-    type Concept = With<A>;
-    type Instance = With<A>;
+    type Predicate = With<A>;
+    type Proof = With<A>;
 
-    fn realize(
-        &self,
-        source: crate::selection::Answer,
-    ) -> Result<Self::Instance, crate::QueryError> {
+    fn realize(&self, source: crate::selection::Answer) -> Result<Self::Proof, crate::QueryError> {
         Ok(With {
             this: source.get(&self.this)?,
             has: A::new(source.get(&self.has)?),

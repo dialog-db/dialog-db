@@ -13,7 +13,7 @@ pub mod fact;
 /// Formula predicates for computed values.
 pub mod formula;
 
-pub use concept::Concept;
+pub use concept::ConceptDescriptor;
 pub use deductive_rule::DeductiveRule;
-pub use fact::{Fact, RelationDescriptor};
+pub use fact::{FactSelector, RelationDescriptor};
 pub use formula::Formula;
