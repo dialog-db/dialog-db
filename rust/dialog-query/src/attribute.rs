@@ -1,7 +1,7 @@
-use crate::application::FactApplication;
+use crate::application::RelationApplication;
 pub use crate::artifact::{Attribute as ArtifactsAttribute, Cause, Entity, Value};
 use crate::error::{SchemaError, TypeError};
-pub use crate::predicate::FactSelector;
+pub use crate::predicate::{FactSelector, RelationDescriptor};
 pub use crate::schema::Cardinality;
 pub use crate::types::{IntoType, Scalar, Type};
 use crate::{Application, Parameters};
@@ -148,9 +148,9 @@ impl<T: Scalar> AttributeSchema<T> {
             .expect("Should succeed if we know attribute")
     }
 
-    /// Builds a [`FactApplication`] from named parameters, type-checking each
+    /// Builds a [`RelationApplication`] from named parameters, type-checking each
     /// binding against this attribute's schema.
-    pub fn apply(&self, parameters: Parameters) -> Result<FactApplication, SchemaError> {
+    pub fn apply(&self, parameters: Parameters) -> Result<RelationApplication, SchemaError> {
         // Check that type of the `is` parameter matches the attribute's data type
         self.conform(parameters.get("is"))
             .map_err(|e| e.at("is".to_string()))?;
@@ -167,13 +167,6 @@ impl<T: Scalar> AttributeSchema<T> {
             });
         }
 
-        // Get the attribute term - parse the string name to an Attribute
-        let the = Term::Constant(
-            self.the()
-                .parse::<ArtifactsAttribute>()
-                .expect("Failed to parse attribute name"),
-        );
-
         // Get the entity term (this), converting from Term<Value>
         let of = parameters
             .get("this")
@@ -189,7 +182,14 @@ impl<T: Scalar> AttributeSchema<T> {
             .and_then(|t| t.clone().try_into().ok())
             .unwrap_or(Term::blank());
 
-        Ok(FactApplication::new(the, of, is, cause, self.cardinality))
+        Ok(RelationApplication::new(
+            Term::Constant(self.namespace.to_string()),
+            Term::Constant(self.name.to_string()),
+            of,
+            is,
+            cause,
+            Some(RelationDescriptor::new(self.content_type, self.cardinality)),
+        ))
     }
 
     /// Encode this attribute schema as CBOR for hashing
@@ -392,17 +392,23 @@ impl<T: Scalar> Match<T> {
         self.attribute.the()
     }
 
-    /// Constrains this match to a specific value, producing a [`FactApplication`].
-    pub fn is<Is: Into<Term<T>>>(self, term: Is) -> FactApplication {
-        FactSelector::new()
-            .the(self.the())
-            .of(self.of())
-            .is(term.into().as_unknown())
-            .into()
+    /// Constrains this match to a specific value, producing a [`RelationApplication`].
+    pub fn is<Is: Into<Term<T>>>(self, term: Is) -> RelationApplication {
+        RelationApplication::new(
+            Term::Constant(self.attribute.namespace.to_string()),
+            Term::Constant(self.attribute.name.to_string()),
+            self.of(),
+            term.into().as_unknown(),
+            Term::blank(),
+            Some(RelationDescriptor::new(
+                self.attribute.content_type,
+                self.attribute.cardinality,
+            )),
+        )
     }
     /// Negates this match for a specific value, producing a [`Premise`].
     pub fn not<Is: Into<Term<T>>>(self, term: Is) -> Premise {
-        Application::Fact(self.is(term)).not()
+        Application::Relation(self.is(term)).not()
     }
 }
 

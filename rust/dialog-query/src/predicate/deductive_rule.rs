@@ -110,31 +110,31 @@ impl Display for DeductiveRule {
 
 impl From<&ConceptDescriptor> for DeductiveRule {
     fn from(concept: &ConceptDescriptor) -> Self {
+        use crate::application::RelationApplication;
         use crate::artifact::Entity;
+        use crate::predicate::RelationDescriptor;
 
         let mut premises = Vec::new();
 
         let this = Term::<Entity>::var("this");
         for (name, attribute) in concept.attributes().iter() {
-            let attr_str = attribute.the();
-            let the = Term::Constant(
-                attr_str
-                    .parse::<crate::artifact::Attribute>()
-                    .expect("Failed to parse attribute name"),
-            );
             premises.push(
-                FactApplication::new(
-                    the,
+                RelationApplication::new(
+                    Term::Constant(attribute.namespace.to_string()),
+                    Term::Constant(attribute.name.to_string()),
                     this.clone(),
                     Term::var(name),
                     Term::var("cause"),
-                    attribute.cardinality,
+                    Some(RelationDescriptor::new(
+                        attribute.content_type,
+                        attribute.cardinality,
+                    )),
                 )
                 .into(),
             );
         }
 
-        DeductiveRule::new(concept.clone(), premises).expect("Conceupt should compile")
+        DeductiveRule::new(concept.clone(), premises).expect("Concept should compile")
     }
 }
 
@@ -210,6 +210,47 @@ mod tests {
             .into(),
         ];
         assert!(DeductiveRule::new(conclusion, premises).is_err());
+    }
+
+    #[dialog_common::test]
+    fn test_rule_fails_with_unconstrained_relation() {
+        use crate::application::RelationApplication;
+        use crate::artifact::{Entity, Type};
+
+        let conclusion = ConceptDescriptor::Dynamic {
+            description: String::new(),
+            attributes: vec![
+                (
+                    "key",
+                    crate::attribute::AttributeSchema::new("person", "key", "", Type::String),
+                ),
+                (
+                    "value",
+                    crate::attribute::AttributeSchema::new("person", "value", "", Type::String),
+                ),
+            ]
+            .into(),
+        };
+
+        // All terms are variables — no constants at all.
+        // The planner should reject this at install time.
+        let premises = vec![
+            RelationApplication::new(
+                Term::var("ns"),
+                Term::var("attr"),
+                Term::<Entity>::var("user"),
+                Term::var("value"),
+                Term::var("cause"),
+                None,
+            )
+            .into(),
+        ];
+
+        let result = DeductiveRule::new(conclusion, premises);
+        assert!(
+            result.is_err(),
+            "Rule with fully unconstrained relation premise should fail at install time"
+        );
     }
 
     #[dialog_common::test]

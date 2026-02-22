@@ -42,6 +42,17 @@ impl Predicate for Fact {
     type Application = FactSelector;
 }
 
+impl From<&Artifact> for Fact {
+    fn from(artifact: &Artifact) -> Self {
+        Fact::Assertion {
+            the: artifact.the.clone(),
+            of: artifact.of.clone(),
+            is: artifact.is.clone(),
+            cause: artifact.cause.clone().unwrap_or(Cause([0; 32])),
+        }
+    }
+}
+
 impl<T: Scalar + ConditionalSend> Fact<T> {
     /// Create a new fact query builder
     pub fn select() -> FactSelector {

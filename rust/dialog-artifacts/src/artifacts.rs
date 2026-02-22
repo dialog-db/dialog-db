@@ -337,6 +337,22 @@ where
             // We clone to "pin" the indexes at a version for the lifetime of the stream
             let index = index.read().await.clone();
 
+            // Choose the index that best matches the selector constraints.
+            //
+            // Priority: Entity (EAV) > Attribute (AEV) > Value (VAE)
+            //
+            // Entity-first is ideal when the entity is known — results are
+            // sorted E, A, V so all attributes for an entity are contiguous.
+            //
+            // Attribute-first is preferred over value-first because the AEV
+            // sort order groups results by (attribute, entity), which is the
+            // natural grouping for cardinality-one enforcement: we need to
+            // see all values for a given (attribute, entity) pair together to
+            // pick the winner. The VAE index scatters different values for the
+            // same (attribute, entity) across the scan, making it impossible
+            // to enforce cardinality without secondary lookups.
+            //
+            // Value-first is the fallback when only the value is known.
             if selector.entity().is_some() {
                 let start = <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
                 let end = <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
@@ -354,9 +370,9 @@ where
                         yield Artifact::try_from(datum)?;
                     }
                 }
-            } else if selector.value().is_some() {
-                let start = <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
-                let end = <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
+            } else if selector.attribute().is_some() {
+                let start = <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
+                let end = <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
 
                 let stream = index.stream_range(Range { start, end });
 
@@ -371,9 +387,9 @@ where
                         yield Artifact::try_from(datum)?;
                     }
                 }
-            } else if selector.attribute().is_some() {
-                let start = <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
-                let end = <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
+            } else if selector.value().is_some() {
+                let start = <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(&selector).into_key();
+                let end = <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(&selector).into_key();
 
                 let stream = index.stream_range(Range { start, end });
 

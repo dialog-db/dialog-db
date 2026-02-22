@@ -4,6 +4,8 @@ pub mod concept;
 pub mod fact;
 /// Formula application for computed values
 pub mod formula;
+/// Relation application for queries with separate namespace and name
+pub mod relation;
 
 pub use crate::analyzer::AnalyzerError;
 pub use crate::context::new_context;
@@ -15,6 +17,7 @@ use async_stream::try_stream;
 pub use concept::ConceptApplication;
 pub use fact::FactApplication;
 pub use formula::FormulaApplication;
+pub use relation::RelationApplication;
 pub use std::fmt::Display;
 
 /// Different types of applications that can query the knowledge base.
@@ -28,6 +31,8 @@ pub use std::fmt::Display;
 pub enum Application {
     /// Direct fact selection from the knowledge base
     Fact(FactApplication),
+    /// Relation query with separate namespace and name
+    Relation(RelationApplication),
     /// Concept realization - matching entities against concept patterns
     Concept(ConceptApplication),
     /// Application of a formula for computation
@@ -41,6 +46,7 @@ impl Application {
     pub fn estimate(&self, env: &crate::Environment) -> Option<usize> {
         match self {
             Application::Fact(application) => application.estimate(env),
+            Application::Relation(application) => application.estimate(env),
             Application::Concept(application) => application.estimate(env),
             Application::Formula(application) => application.estimate(env),
         }
@@ -55,6 +61,11 @@ impl Application {
         try_stream! {
             match source {
                 Application::Fact(application) => {
+                    for await item in application.evaluate(context) {
+                        yield item?;
+                    }
+                },
+                Application::Relation(application) => {
                     for await item in application.evaluate(context) {
                         yield item?;
                     }
@@ -77,6 +88,7 @@ impl Application {
     pub fn parameters(&self) -> crate::Parameters {
         match self {
             Application::Fact(application) => application.parameters(),
+            Application::Relation(application) => application.parameters(),
             Application::Concept(application) => application.parameters(),
             Application::Formula(application) => application.parameters(),
         }
@@ -86,6 +98,7 @@ impl Application {
     pub fn schema(&self) -> crate::Schema {
         match self {
             Application::Fact(application) => application.schema(),
+            Application::Relation(application) => application.schema(),
             Application::Concept(application) => application.schema(),
             Application::Formula(application) => application.schema(),
         }
@@ -126,6 +139,7 @@ impl Display for Application {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Application::Fact(application) => Display::fmt(application, f),
+            Application::Relation(application) => Display::fmt(application, f),
             Application::Concept(application) => Display::fmt(application, f),
             Application::Formula(application) => Display::fmt(application, f),
         }

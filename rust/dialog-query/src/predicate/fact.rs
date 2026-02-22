@@ -1,4 +1,5 @@
 pub use crate::application::fact::FactApplication;
+pub use crate::application::relation::RelationApplication;
 pub use crate::artifact::{Attribute, Cause};
 pub use crate::error::SchemaError;
 use crate::{Cardinality, Entity, Type, Value};
@@ -13,7 +14,7 @@ pub use crate::{Parameters, Term};
 ///
 /// This is the relation equivalent of [`super::concept::Concept`] (the concept
 /// descriptor) which describes a concept's fields and their types.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RelationDescriptor {
     /// The expected value type, or `None` if any type is accepted.
     pub content_type: Option<Type>,
@@ -104,10 +105,11 @@ impl FactSelector {
         self
     }
 
-    /// Convert the builder into a FactApplication
-    pub fn compile(self) -> Result<FactApplication, SchemaError> {
+    /// Convert the builder into a RelationApplication, validating that at
+    /// least one of `the`/`of`/`is` is constrained.
+    pub fn compile(self) -> Result<RelationApplication, SchemaError> {
         let mut params = Parameters::new();
-        // Convert typed terms to Term<Value> for Parameters
+
         let the_value = match self.the {
             Term::Variable { name, .. } => Term::Variable {
                 name,
@@ -122,7 +124,6 @@ impl FactSelector {
             },
             Term::Constant(entity) => Term::Constant(Value::Entity(entity)),
         };
-
         let cause_value = match self.cause {
             Term::Variable { name, .. } => Term::Variable {
                 name,
@@ -251,22 +252,25 @@ impl FactSelector {
             })
         }
     }
-    /// Validate parameters and create a FactApplication
-    pub fn apply(terms: Parameters) -> Result<FactApplication, SchemaError> {
+    /// Validate parameters and create a RelationApplication
+    pub fn apply(terms: Parameters) -> Result<RelationApplication, SchemaError> {
         let Selector { the, of, is, cause } = Self::conform(terms)?;
 
-        Ok(FactApplication::new(the, of, is, cause, Cardinality::One))
+        Ok(RelationApplication::from_attribute(
+            the, of, is, cause, None,
+        ))
     }
 }
 
-impl From<FactSelector> for FactApplication {
+impl From<FactSelector> for RelationApplication {
     fn from(fact: FactSelector) -> Self {
-        FactApplication::new(fact.the, fact.of, fact.is, fact.cause, Cardinality::One)
+        RelationApplication::from_attribute(fact.the, fact.of, fact.is, fact.cause, None)
     }
 }
 
 impl From<FactSelector> for crate::Premise {
     fn from(fact: FactSelector) -> Self {
-        crate::Premise::Apply(crate::Application::Fact(fact.into()))
+        let relation: RelationApplication = fact.into();
+        crate::Premise::Apply(crate::Application::Relation(relation))
     }
 }
