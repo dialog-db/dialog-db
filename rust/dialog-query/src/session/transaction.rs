@@ -25,8 +25,11 @@ pub enum TransactionError {
     Storage(#[from] DialogArtifactsError),
 }
 
-/// Changes organized by entity -> attribute -> operation
-pub type Changes = HashMap<Entity, HashMap<Attribute, Change>>;
+/// Changes organized by entity -> attribute -> operations.
+/// Each `(entity, attribute)` pair may have multiple changes — for example
+/// asserting several values on a `Cardinality::Many` attribute in one
+/// transaction.
+pub type Changes = HashMap<Entity, HashMap<Attribute, Vec<Change>>>;
 
 /// Type of change
 #[derive(Debug, Clone, PartialEq)]
@@ -37,10 +40,10 @@ pub enum Change {
     Retract(Value),
 }
 
-/// A transaction accumulates changes before committing them as instructions
+/// A transaction accumulates changes before committing them as instructions.
 ///
-/// This provides a simple way to batch operations before committing them.
-/// Mutations simply replace with the latest value for each entity-attribute pair.
+/// Multiple values can be asserted for the same `(entity, attribute)` pair
+/// within a single transaction — all are preserved as separate instructions.
 #[derive(Debug)]
 pub struct Transaction {
     /// Changes organized by entity -> attribute -> operation
@@ -67,19 +70,44 @@ impl Transaction {
         self
     }
 
-    /// Assert a relation (entity-attribute-value triple)
+    /// Assert a relation (entity-attribute-value triple).
+    /// Multiple assertions for the same `(entity, attribute)` accumulate.
     pub fn associate(&mut self, relation: Relation) -> &mut Self {
         self.insert(relation.the, relation.of, Change::Assert(relation.is))
     }
 
-    /// Retract a relation (entity-attribute-value triple)
+    /// Retract a relation (entity-attribute-value triple).
     pub fn dissociate(&mut self, relation: Relation) -> &mut Self {
         self.insert(relation.the, relation.of, Change::Retract(relation.is))
     }
 
-    /// Add a change operation - mutations simply replace with the latest value
+    /// Assert a relation with `Cardinality::One` semantics: if the same
+    /// `(entity, attribute)` pair was already asserted in this transaction,
+    /// the previous value is replaced.
+    pub fn associate_unique(&mut self, relation: Relation) -> &mut Self {
+        self.replace(relation.the, relation.of, Change::Assert(relation.is))
+    }
+
+    /// Add a change operation for an entity-attribute pair, accumulating with
+    /// any existing changes.
     fn insert(&mut self, the: Attribute, of: Entity, change: Change) -> &mut Self {
-        self.changes.entry(of).or_default().insert(the, change);
+        self.changes
+            .entry(of)
+            .or_default()
+            .entry(the)
+            .or_default()
+            .push(change);
+        self
+    }
+
+    /// Replace any existing changes for an entity-attribute pair with a single
+    /// new change. Used for `Cardinality::One` attributes where only the last
+    /// write should survive within a transaction.
+    fn replace(&mut self, the: Attribute, of: Entity, change: Change) -> &mut Self {
+        self.changes
+            .entry(of)
+            .or_default()
+            .insert(the, vec![change]);
         self
     }
 
@@ -103,22 +131,24 @@ impl Transaction {
         let mut instructions = Vec::new();
 
         for (entity, attributes) in self.changes {
-            for (attribute, operation) in attributes {
-                let instruction = match operation {
-                    Change::Assert(value) => Instruction::Assert(Artifact {
-                        the: attribute,
-                        of: entity.clone(),
-                        is: value,
-                        cause: None,
-                    }),
-                    Change::Retract(value) => Instruction::Retract(Artifact {
-                        the: attribute,
-                        of: entity.clone(),
-                        is: value,
-                        cause: None,
-                    }),
-                };
-                instructions.push(instruction);
+            for (attribute, operations) in attributes {
+                for operation in operations {
+                    let instruction = match operation {
+                        Change::Assert(value) => Instruction::Assert(Artifact {
+                            the: attribute.clone(),
+                            of: entity.clone(),
+                            is: value,
+                            cause: None,
+                        }),
+                        Change::Retract(value) => Instruction::Retract(Artifact {
+                            the: attribute.clone(),
+                            of: entity.clone(),
+                            is: value,
+                            cause: None,
+                        }),
+                    };
+                    instructions.push(instruction);
+                }
             }
         }
 
@@ -188,9 +218,11 @@ impl Stream for TransactionStream {
 /// Implement Edit for Transaction so transactions can be composed
 impl Edit for Transaction {
     fn merge(self, transaction: &mut Transaction) {
-        for (of, changes) in self.changes {
-            for (the, change) in changes {
-                transaction.insert(the, of.clone(), change);
+        for (of, attributes) in self.changes {
+            for (the, changes) in attributes {
+                for change in changes {
+                    transaction.insert(the.clone(), of.clone(), change);
+                }
             }
         }
     }
@@ -235,36 +267,102 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn test_transaction_mutation_replacement() -> anyhow::Result<()> {
+    fn test_transaction_accumulates_multiple_values() -> anyhow::Result<()> {
         let mut transaction = Transaction::new();
         let alice = Entity::new()?;
         let name_attr: Attribute = "user/name".parse()?;
-        let initial_value = Value::String("Alice".to_string());
-        let updated_value = Value::String("Alice Smith".to_string());
+        let first_value = Value::String("Alice".to_string());
+        let second_value = Value::String("Alice Smith".to_string());
 
-        // First operation
         transaction.associate(Relation {
             the: name_attr.clone(),
             of: alice.clone(),
-            is: initial_value.clone(),
+            is: first_value.clone(),
         });
 
-        // Second operation should replace the first
         transaction.associate(Relation {
             the: name_attr.clone(),
             of: alice.clone(),
-            is: updated_value.clone(),
+            is: second_value.clone(),
         });
 
-        // Should have only one instruction with the latest value
+        // Both values should be present as separate instructions
         let instructions = transaction.into_instructions();
-        assert_eq!(instructions.len(), 1);
+        assert_eq!(instructions.len(), 2);
+
+        let values: Vec<_> = instructions
+            .iter()
+            .map(|i| match i {
+                Instruction::Assert(a) => &a.is,
+                Instruction::Retract(a) => &a.is,
+            })
+            .collect();
+
+        assert!(values.contains(&&first_value));
+        assert!(values.contains(&&second_value));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    fn test_associate_unique_replaces_previous_value() -> anyhow::Result<()> {
+        let mut transaction = Transaction::new();
+        let alice = Entity::new()?;
+        let name_attr: Attribute = "user/name".parse()?;
+        let first_value = Value::String("Alice".to_string());
+        let second_value = Value::String("Alice Smith".to_string());
+
+        transaction.associate_unique(Relation {
+            the: name_attr.clone(),
+            of: alice.clone(),
+            is: first_value.clone(),
+        });
+
+        transaction.associate_unique(Relation {
+            the: name_attr.clone(),
+            of: alice.clone(),
+            is: second_value.clone(),
+        });
+
+        // Only the last value should survive
+        let instructions = transaction.into_instructions();
+        assert_eq!(
+            instructions.len(),
+            1,
+            "associate_unique should replace, not accumulate"
+        );
 
         if let Instruction::Assert(artifact) = &instructions[0] {
-            assert_eq!(artifact.is, updated_value);
+            assert_eq!(artifact.is, second_value);
         } else {
             panic!("Expected Assert instruction");
         }
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    fn test_associate_unique_does_not_affect_other_attributes() -> anyhow::Result<()> {
+        let mut transaction = Transaction::new();
+        let alice = Entity::new()?;
+        let name_attr: Attribute = "user/name".parse()?;
+        let age_attr: Attribute = "user/age".parse()?;
+
+        transaction.associate_unique(Relation {
+            the: name_attr.clone(),
+            of: alice.clone(),
+            is: Value::String("Alice".to_string()),
+        });
+
+        transaction.associate_unique(Relation {
+            the: age_attr.clone(),
+            of: alice.clone(),
+            is: Value::SignedInt(30),
+        });
+
+        // Two different attributes — both should be present
+        let instructions = transaction.into_instructions();
+        assert_eq!(instructions.len(), 2);
 
         Ok(())
     }

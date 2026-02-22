@@ -261,10 +261,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     dialog_query::term::Term::Constant(value) => dialog_query::term::Term::Constant(dialog_query::types::Scalar::as_value(value)),
                 };
 
-                dialog_query::predicate::fact::FactSelector::select()
-                    .the(<#field_type as dialog_query::Attribute>::selector().to_string())
-                    .of(terms.this.clone())
-                    .is(value_term)
+                dialog_query::application::relation::RelationApplication::new(
+                    dialog_query::term::Term::Constant(<#field_type as dialog_query::Attribute>::NAMESPACE.to_string()),
+                    dialog_query::term::Term::Constant(<#field_type as dialog_query::Attribute>::NAME.to_string()),
+                    terms.this.clone(),
+                    value_term,
+                    dialog_query::term::Term::blank(),
+                    Some(dialog_query::predicate::RelationDescriptor::new(
+                        <<#field_type as dialog_query::Attribute>::Type as dialog_query::types::IntoType>::TYPE,
+                        <#field_type as dialog_query::Attribute>::CARDINALITY,
+                    )),
+                )
             }
         });
 
