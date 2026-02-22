@@ -588,10 +588,10 @@ mod tests {
         let premise = Premise::from(fact);
 
         match premise {
-            Premise::Apply(Application::Fact(_)) => {
-                // Expected case
+            Premise::Apply(Application::Relation(_)) => {
+                // Expected case - FactSelector now produces RelationApplication
             }
-            _ => panic!("Expected Select application"),
+            _ => panic!("Expected Relation application"),
         }
     }
 
@@ -644,15 +644,16 @@ mod tests {
         use crate::predicate::concept::Attributes;
         use crate::predicate::fact::FactSelector;
 
-        // Test Select application
+        // Test Relation application (FactSelector now produces RelationApplication)
         let fact = FactSelector::select().the("test/attr");
-        let app = Application::Fact(fact.into());
+        let relation: crate::application::RelationApplication = fact.into();
+        let app = Application::Relation(relation);
 
         match app {
-            Application::Fact(_) => {
+            Application::Relation(_) => {
                 // Expected
             }
-            _ => panic!("Expected Select variant"),
+            _ => panic!("Expected Relation variant"),
         }
 
         // Test other variants exist
@@ -678,15 +679,16 @@ mod tests {
         use crate::{Application, Negation};
 
         let fact = FactSelector::select().the("test/attr");
-        let app = Application::Fact(fact.into());
+        let relation: crate::application::RelationApplication = fact.into();
+        let app = Application::Relation(relation);
         let negation = Negation(app);
 
         // Test that negation wraps the application
         match negation {
-            Negation(Application::Fact(_)) => {
+            Negation(Application::Relation(_)) => {
                 // Expected
             }
-            _ => panic!("Expected wrapped Select application"),
+            _ => panic!("Expected wrapped Relation application"),
         }
     }
 

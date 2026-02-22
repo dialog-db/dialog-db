@@ -108,7 +108,12 @@ where
 {
     fn assert(self, transaction: &mut Transaction) {
         use crate::types::Scalar;
-        Relation::new(A::selector(), self.this, self.has.value().as_value()).assert(transaction);
+        let relation = Relation::new(A::selector(), self.this, self.has.value().as_value());
+        if A::CARDINALITY == crate::Cardinality::One {
+            transaction.associate_unique(relation);
+        } else {
+            transaction.associate(relation);
+        }
     }
 
     fn retract(self, transaction: &mut Transaction) {

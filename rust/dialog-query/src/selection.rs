@@ -1,7 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use crate::{
-    application::FactApplication,
+    application::{FactApplication, RelationApplication},
     artifact::{Type, Value},
 };
 use async_stream::try_stream;
@@ -360,6 +360,13 @@ pub enum Evidence<'a> {
         /// The matched fact.
         fact: &'a Fact,
     },
+    /// Selected using relation application (namespace + name).
+    Relation {
+        /// The relation application that produced this match.
+        application: &'a RelationApplication,
+        /// The matched fact.
+        fact: &'a Fact,
+    },
     /// Derived using formula application.
     Derived {
         /// The term being bound.
@@ -471,6 +478,51 @@ impl Answer {
         ))
     }
 
+    /// Realize a fact from a RelationApplication.
+    /// Similar to `realize()` but works with relation applications that have
+    /// separate namespace and name terms.
+    pub fn realize_relation(
+        &self,
+        application: &RelationApplication,
+    ) -> Result<Fact, crate::error::QueryError> {
+        use crate::error::QueryError;
+
+        // Try to extract from a named variable conclusion first
+        if let crate::Term::Variable { name: Some(_), .. } = application.of()
+            && let Some(factors) = self.resolve_factors(&application.of().as_unknown())
+        {
+            return Ok(Fact::from(factors));
+        }
+
+        if let crate::Term::Variable { name: Some(_), .. } = application.is()
+            && let Some(factors) = self.resolve_factors(&application.is().as_unknown())
+        {
+            return Ok(Fact::from(factors));
+        }
+
+        // Build the FactApplication equivalent for lookup
+        let fact_app = FactApplication::new(
+            application.attribute(),
+            application.of().clone(),
+            application.is().clone(),
+            application.cause().clone(),
+            application.cardinality(),
+        );
+
+        if let Some(fact) = self.facts.get(&fact_app) {
+            return Ok(Fact::Assertion {
+                the: fact.the().clone(),
+                of: fact.of().clone(),
+                is: fact.is().clone(),
+                cause: fact.cause().clone(),
+            });
+        }
+
+        Err(QueryError::FactStore(
+            "Could not realize fact from answer - relation application not found".to_string(),
+        ))
+    }
+
     /// Merge evidence into this answer, recording facts and binding variables.
     pub fn merge(&mut self, evidence: Evidence<'_>) -> Result<(), InconsistencyError> {
         match evidence {
@@ -508,6 +560,74 @@ impl Answer {
                     &Factor::Selected {
                         selector: Selector::Cause,
                         application: application.clone(),
+                        fact,
+                    },
+                )?;
+
+                Ok(())
+            }
+            Evidence::Relation { application, fact } => {
+                let fact = Arc::new(fact.to_owned());
+
+                // Build a FactApplication from the relation for provenance recording
+                let fact_app = crate::application::FactApplication::new(
+                    application.attribute(),
+                    application.of().clone(),
+                    application.is().clone(),
+                    application.cause().clone(),
+                    application.cardinality(),
+                );
+                self.record(&fact_app, fact.clone())?;
+
+                let fact_app = Arc::new(fact_app);
+
+                // Bind namespace and name as string variables
+                self.assign(
+                    &application.namespace().as_unknown(),
+                    &Factor::Selected {
+                        selector: Selector::The,
+                        application: fact_app.clone(),
+                        fact: fact.clone(),
+                    },
+                )?;
+                self.assign(
+                    &application.name().as_unknown(),
+                    &Factor::Selected {
+                        selector: Selector::The,
+                        application: fact_app.clone(),
+                        fact: fact.clone(),
+                    },
+                )?;
+                // Also bind the combined attribute term
+                self.assign(
+                    &application.attribute().as_unknown(),
+                    &Factor::Selected {
+                        selector: Selector::The,
+                        application: fact_app.clone(),
+                        fact: fact.clone(),
+                    },
+                )?;
+                self.assign(
+                    &application.of().as_unknown(),
+                    &Factor::Selected {
+                        selector: Selector::Of,
+                        application: fact_app.clone(),
+                        fact: fact.clone(),
+                    },
+                )?;
+                self.assign(
+                    &application.is().as_unknown(),
+                    &Factor::Selected {
+                        selector: Selector::Is,
+                        application: fact_app.clone(),
+                        fact: fact.clone(),
+                    },
+                )?;
+                self.assign(
+                    &application.cause().as_unknown(),
+                    &Factor::Selected {
+                        selector: Selector::Cause,
+                        application: fact_app,
                         fact,
                     },
                 )?;
