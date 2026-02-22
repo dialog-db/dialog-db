@@ -7,7 +7,7 @@ pub use crate::artifact::{ArtifactSelector, Constrained};
 pub use crate::context::new_context;
 pub use crate::error::{AnalyzerError, QueryResult};
 pub use crate::query::Output;
-use crate::query::{Circuit, Query};
+use crate::query::Query;
 use crate::selection::{Answer, Answers, Evidence};
 use crate::{Entity, Field, Parameters, QueryError, Requirement, Schema, Term, Type, Value};
 use crate::{EvaluationContext, Source, try_stream};
@@ -267,14 +267,11 @@ impl FactApplication {
     }
 }
 
-impl Circuit for FactApplication {
+impl Query<Fact> for FactApplication {
     fn evaluate<S: Source, M: Answers>(&self, context: EvaluationContext<S, M>) -> impl Answers {
-        // Use the Answer-based implementation
         self.evaluate_with_provenance(context.source, context.selection)
     }
-}
 
-impl Query<Fact> for FactApplication {
     fn realize(&self, input: Answer) -> Result<Fact, QueryError> {
         input.realize(self)
     }

@@ -9,7 +9,7 @@ pub use crate::analyzer::AnalyzerError;
 pub use crate::context::new_context;
 pub use crate::error::{PlanError, QueryResult};
 pub use crate::premise::{Negation, Premise};
-pub use crate::query::Circuit;
+use crate::query::Query;
 pub use crate::{Environment, EvaluationContext, Source};
 use async_stream::try_stream;
 pub use concept::ConceptApplication;
