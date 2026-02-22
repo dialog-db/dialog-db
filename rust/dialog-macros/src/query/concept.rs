@@ -431,12 +431,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
 
-        // Add inherent query method so users don't need to import Match trait
+        // Add inherent query method so users don't need to import Query trait
         impl #match_name {
-            fn realize(&self, source: dialog_query::selection::Answer) -> std::result::Result<#struct_name, dialog_query::QueryError> {
-                dialog_query::concept::Match::realize(self, source)
-            }
-
             /// Query for instances matching this pattern
             pub fn query<S: dialog_query::query::Source>(
                 &self,
@@ -447,7 +443,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 let cloned = self.clone();
                 application
                     .query(source)
-                    .map(move |input| cloned.realize(input?))
+                    .map(move |input| dialog_query::concept::Match::realize(&cloned, input?))
             }
         }
 

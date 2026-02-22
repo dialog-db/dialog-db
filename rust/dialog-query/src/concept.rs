@@ -8,10 +8,9 @@ use crate::application::ConceptApplication;
 use crate::Relation;
 pub use crate::dsl::Quarriable;
 pub use crate::predicate::concept::Attributes;
-use crate::query::{Output, Source};
+use crate::query::{Output, Query, Source};
 use crate::selection::Answer;
-use crate::{Entity, Parameters};
-use crate::{QueryError, predicate};
+use crate::{Entity, EvaluationContext, Parameters, QueryError, predicate, selection};
 use dialog_common::ConditionalSend;
 use futures_util::StreamExt;
 use std::fmt::Debug;
@@ -46,8 +45,8 @@ pub trait Concept: Quarriable + Clone + Debug {
 
     /// Convenience method to query for all instances of this concept.
     ///
-    /// This creates a default Match pattern (all fields as variables) and queries it.
-    /// It's equivalent to calling `Match::<Self>::default().query(source)`.
+    /// This creates a default Match pattern (all fields as variables) and executes it.
+    /// It's equivalent to calling `Query::execute(&Match::<Self>::default(), &source)`.
     ///
     /// # Example
     ///
@@ -56,22 +55,18 @@ pub trait Concept: Quarriable + Clone + Debug {
     /// let employees = Employee::query(session).try_collect::<Vec<_>>().await?;
     ///
     /// let employees = Match::<Employee>::default()
-    ///     .query(session)
+    ///     .execute(&session)
     ///     .try_collect::<Vec<_>>().await?;
     /// ```
     fn query<S: Source>(source: S) -> impl Output<Self::Instance>
     where
         ConceptApplication: From<Self::Match>,
     {
-        // Create the default match pattern
         let pattern = Self::Match::default();
-
-        // Inline the query logic to avoid lifetime issues with the temporary
         let application: ConceptApplication = pattern.clone().into();
-        let cloned = pattern.clone();
         application
             .query(source)
-            .map(move |input| cloned.realize(input?))
+            .map(move |input| Match::realize(&pattern, input?))
     }
 
     /// Compute the blake3 hash of this concept's CBOR-encoded representation.
@@ -115,18 +110,29 @@ pub trait Match: Sized + Clone + ConditionalSend + Default + 'static {
     fn to_concept(&self) -> predicate::Concept {
         Self::Concept::CONCEPT
     }
+}
 
-    /// Executes this match pattern against the given source and streams
-    /// materialized instances.
-    fn query<S: Source>(&self, source: S) -> impl Output<Self::Instance>
-    where
-        ConceptApplication: From<Self>,
-    {
-        let application: ConceptApplication = self.to_owned().into();
-        let cloned = self.clone();
-        application
-            .query(source)
-            .map(move |input| cloned.realize(input?))
+/// Blanket implementation of [`Query`] for all concept match types.
+///
+/// Any type implementing [`Match`] that can be converted into a [`ConceptApplication`]
+/// automatically gets query execution capabilities through the [`Query`] trait.
+/// This unifies the concept query path with the general query infrastructure.
+impl<M> Query<M::Instance> for M
+where
+    M: Match,
+    M::Instance: ConditionalSend + 'static,
+    ConceptApplication: From<M>,
+{
+    fn evaluate<S: Source, A: selection::Answers>(
+        &self,
+        context: EvaluationContext<S, A>,
+    ) -> impl selection::Answers {
+        let application: ConceptApplication = self.clone().into();
+        application.evaluate(context)
+    }
+
+    fn realize(&self, input: selection::Answer) -> Result<M::Instance, QueryError> {
+        Match::realize(self, input)
     }
 }
 
